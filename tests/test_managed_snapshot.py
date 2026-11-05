@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -6,11 +7,13 @@ from brigade import managed
 from brigade import managed_snapshot
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
 EXPECTED_NAMES = {
     "agentpantry",
     "content-guard",
-    "graphtrail",
-    "miseledger",
+    "brigade-code-graph",
+    "brigade-evidence",
     "skillet",
     "token-glace",
 }
@@ -35,14 +38,22 @@ def test_bundled_snapshot_covers_first_class_sidecars():
     assert records_by_name["agentpantry"]["source"]["revision"] == ("9d904c3777f116c3a62d5ab2e7e20849d02c114a")
     assert records_by_name["token-glace"]["source"]["revision"] == ("efb7c8544014d1bdd0df436c741d9d0ef20a090e")
     assert records_by_name["skillet"]["source"]["revision"] == "1f871dd44be70b0e912f832d448436a4a0fcc7b3"
-    assert records_by_name["graphtrail"]["source"]["revision"] == ("e2c7868c8fe0471469f66e90b020845fb56a7ca6")
+    # The engine manifests live in this repository; the snapshot copies them verbatim.
+    for name, manifest_path in (
+        ("brigade-code-graph", "engines/code-graph/station.json"),
+        ("brigade-evidence", "engines/evidence-ledger/station.json"),
+    ):
+        source = records_by_name[name]["source"]
+        assert source["kind"] == "in-tree"
+        assert source["path"] == manifest_path
+        assert by_name[name] == json.loads((ROOT / manifest_path).read_text())
     assert by_name["skillet"]["tools"][0]["kind"] == "skill-roster"
     assert managed.resolve("skillet") is None
 
 
 def test_bundled_executable_contracts_drive_managed_catalog():
     contracts = managed_snapshot.executable_contracts()
-    assert set(contracts) == {"agentpantry", "graphtrail", "miseledger", "token-glace"}
+    assert set(contracts) == {"agentpantry", "brigade-code-graph", "brigade-evidence", "token-glace"}
 
     for name, contract in contracts.items():
         tool = managed.resolve(name)

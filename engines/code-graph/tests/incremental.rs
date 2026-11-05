@@ -507,7 +507,7 @@ fn first_graphtrail_index_in_git_repo_adds_root_gitignore_entry() {
     make_git_repo(root);
     write_file(root.join("app.py"), "def kept():\n    return 1\n");
 
-    let conn = open_graphtrail_graph(root);
+    let conn = open_legacy_graph(root);
     let summary = sync_repo(&conn, root).unwrap();
 
     assert!(!summary.unchanged);
@@ -524,7 +524,7 @@ fn second_graphtrail_sync_does_not_duplicate_gitignore_entry() {
     make_git_repo(root);
     write_file(root.join("app.py"), "def kept():\n    return 1\n");
 
-    let conn = open_graphtrail_graph(root);
+    let conn = open_legacy_graph(root);
     sync_repo(&conn, root).unwrap();
     sync_repo(&conn, root).unwrap();
 
@@ -542,7 +542,7 @@ fn first_graphtrail_index_respects_covering_gitignore_pattern() {
     write_file(root.join(".gitignore"), ".graphtrail*\n");
     write_file(root.join("app.py"), "def kept():\n    return 1\n");
 
-    let conn = open_graphtrail_graph(root);
+    let conn = open_legacy_graph(root);
     sync_repo(&conn, root).unwrap();
 
     assert_eq!(
@@ -557,7 +557,7 @@ fn first_graphtrail_index_in_non_git_root_does_not_write_gitignore() {
     let root = dir.path();
     write_file(root.join("app.py"), "def kept():\n    return 1\n");
 
-    let conn = open_graphtrail_graph(root);
+    let conn = open_legacy_graph(root);
     sync_repo(&conn, root).unwrap();
 
     assert!(!root.join(".gitignore").exists());
@@ -571,10 +571,65 @@ fn preexisting_graphtrail_dir_does_not_write_gitignore() {
     fs::create_dir(root.join(".graphtrail")).unwrap();
     write_file(root.join("app.py"), "def kept():\n    return 1\n");
 
-    let conn = open_graphtrail_graph(root);
+    let conn = open_legacy_graph(root);
     sync_repo(&conn, root).unwrap();
 
     assert!(!root.join(".gitignore").exists());
+}
+
+#[test]
+fn first_canonical_index_in_git_repo_adds_root_gitignore_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+
+    let conn = open_canonical_graph(root);
+    sync_repo(&conn, root).unwrap();
+    sync_repo(&conn, root).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(root.join(".gitignore")).unwrap(),
+        ".brigade/code-graph/\n"
+    );
+}
+
+#[test]
+fn first_canonical_index_respects_ignored_parent_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    write_file(root.join(".gitignore"), ".brigade/\n");
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+
+    let conn = open_canonical_graph(root);
+    sync_repo(&conn, root).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(root.join(".gitignore")).unwrap(),
+        ".brigade/\n"
+    );
+}
+
+#[test]
+fn walker_skips_both_index_directories_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+    write_file(root.join(".brigade/tool.py"), "def tool():\n    return 1\n");
+    write_file(
+        root.join(".brigade/code-graph/stray.py"),
+        "def stray():\n    return 1\n",
+    );
+    write_file(
+        root.join(".graphtrail/stray.py"),
+        "def old():\n    return 1\n",
+    );
+
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+
+    assert_eq!(indexed_paths(&conn), paths([".brigade/tool.py", "app.py"]));
 }
 
 #[test]
@@ -1248,7 +1303,13 @@ fn open_graph(root: &Path) -> Connection {
     conn
 }
 
-fn open_graphtrail_graph(root: &Path) -> Connection {
+fn open_canonical_graph(root: &Path) -> Connection {
+    let conn = open_db(&root.join(".brigade/code-graph/code-graph.db")).unwrap();
+    init_schema(&conn).unwrap();
+    conn
+}
+
+fn open_legacy_graph(root: &Path) -> Connection {
     let conn = open_db(&root.join(".graphtrail").join("graphtrail.db")).unwrap();
     init_schema(&conn).unwrap();
     conn

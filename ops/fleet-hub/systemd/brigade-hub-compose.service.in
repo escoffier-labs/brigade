@@ -1,0 +1,25 @@
+# Boot unit: starts the dogfood hub's compose project after the Docker service.
+# The daemon restores containers with a restart policy in no order the recipe
+# relies on, and a joiner started before the holder fails. `compose up -d`
+# starts the holder first, leaves running containers alone and starts any
+# joiner that failed. BindsTo plus WantedBy=docker.service run it again after
+# every Docker start, including a daemon restart.
+[Unit]
+Description=Brigade dogfood hub compose project
+# An operator's fence (the runbook's step 1 touches hub.fenced) survives a
+# reboot or daemon restart: the unit does not start the project while it exists.
+ConditionPathExists=!@PROJECT_DIR@/hub.fenced
+BindsTo=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=@COMPOSE_USER@
+WorkingDirectory=@PROJECT_DIR@
+ExecStart=@DOCKER@ compose --project-directory @PROJECT_DIR@ up -d --no-build
+TimeoutStartSec=300
+
+[Install]
+WantedBy=docker.service multi-user.target

@@ -67,7 +67,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     export_sub = p_export.add_subparsers(dest="evidence_export_command", metavar="<export-command>")
     export_sub.required = True
-    p_export_plan = export_sub.add_parser("plan", help="Plan brigade receipts export miseledger --new-only --import.")
+    p_export_plan = export_sub.add_parser("plan", help="Plan brigade receipts export evidence --new-only --import.")
     p_export_plan.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace for plan paths and --write."
     )

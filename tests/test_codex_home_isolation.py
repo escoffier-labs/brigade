@@ -17,7 +17,6 @@ def test_shared_fixtures_isolate_inherited_codex_home(tmp_path):
     probe.write_text(
         textwrap.dedent("""\
             import os
-            import sys
 
             from brigade.doctor_instruction_chain import check_codex_instruction_chain
 
@@ -32,10 +31,7 @@ def test_shared_fixtures_isolate_inherited_codex_home(tmp_path):
                 (tmp_path / "config.toml").write_text("project_doc_max_bytes = 0\\n")
                 monkeypatch.setenv("CODEX_HOME", str(tmp_path))
                 status, name, detail = check_codex_instruction_chain(tmp_path)
-                if sys.version_info < (3, 11):
-                    assert status == "MANUAL"
-                    assert "config_parser_unavailable" in detail
-                elif hasattr(os, "O_NONBLOCK"):
+                if hasattr(os, "O_NONBLOCK"):
                     assert status == "WARN"
                     assert "cap source user-base-config" in detail
                     assert "loading disabled" in detail

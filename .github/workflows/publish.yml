@@ -430,6 +430,21 @@ jobs:
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
         with:
           skip-existing: true
+
+  verify-version-check-endpoint:
+    # Runs beside published-artifact-acceptance: the endpoint can take minutes
+    # to report a new release, and acceptance only needs the PyPI upload.
+    needs: build-and-publish
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
       - name: Verify check.brigade.tools reports the published version
         env:
           EXPECTED_VERSION: ${{ github.ref_name }}

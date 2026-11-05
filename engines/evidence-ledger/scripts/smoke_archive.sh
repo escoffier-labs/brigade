@@ -15,42 +15,43 @@ export XDG_CONFIG_HOME="$TMP_HOME/.config"
 export XDG_DATA_HOME="$TMP_HOME/.local/share"
 export XDG_CACHE_HOME="$TMP_HOME/.cache"
 
-MISELEDGER="${MISELEDGER:-$ROOT/bin/miseledger}"
-if [ ! -x "$MISELEDGER" ]; then
-  (cd "$ROOT" && go build -o bin/miseledger ./cmd/miseledger)
+# EVIDENCE_BIN selects the entry point; CI runs this script with both names.
+EVIDENCE_BIN="${EVIDENCE_BIN:-$ROOT/bin/brigade-evidence}"
+if [ ! -x "$EVIDENCE_BIN" ]; then
+  (cd "$ROOT" && go build -o "$EVIDENCE_BIN" "./cmd/$(basename "$EVIDENCE_BIN")")
 fi
 SESSIONFIND="${SESSIONFIND:-$ROOT/bin/sessionfind}"
 if [ ! -x "$SESSIONFIND" ]; then
   (cd "$ROOT" && go build -o bin/sessionfind ./cmd/sessionfind)
 fi
 
-"$MISELEDGER" init >/dev/null
-"$MISELEDGER" doctor --mcp --json >"$TMP_WORK/doctor.json"
-"$MISELEDGER" import adapter "$ROOT/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json >"$TMP_WORK/import-discrawl.json"
-"$MISELEDGER" import codex "$ROOT/testdata/harnesses/codex-session.fixture.jsonl" --json >"$TMP_WORK/import-codex.json"
-"$MISELEDGER" import openclaw "$ROOT/testdata/harnesses/openclaw-session.fixture.jsonl" --json >"$TMP_WORK/import-openclaw.json"
-"$MISELEDGER" import claude "$ROOT/testdata/harnesses/claude-project.fixture.jsonl" --json >"$TMP_WORK/import-claude.json"
-"$MISELEDGER" import hermes "$ROOT/testdata/harnesses/session_hermes-demo.fixture.json" --json >"$TMP_WORK/import-hermes-snapshot.json"
-"$MISELEDGER" import hermes "$ROOT/testdata/harnesses/hermes-trajectory.fixture.jsonl" --json >"$TMP_WORK/import-hermes-trajectory.json"
-"$MISELEDGER" import grok "$ROOT/testdata/harnesses/grok-sessions.fixture" --json >"$TMP_WORK/import-grok.json"
-"$MISELEDGER" relations backfill --json >"$TMP_WORK/relations.json"
-"$MISELEDGER" stats --json >"$TMP_WORK/stats.json"
-"$MISELEDGER" compact --json >"$TMP_WORK/compact.json"
-"$MISELEDGER" doctor --archive --json >"$TMP_WORK/doctor-archive.json"
-"$MISELEDGER" prune imports --before 2000-01-01 --dry-run --json >"$TMP_WORK/prune-imports.json"
-"$MISELEDGER" prune scans --missing --dry-run --json >"$TMP_WORK/prune-scans.json"
-"$MISELEDGER" prune --policy default --dry-run --json >"$TMP_WORK/prune-policy.json"
-"$MISELEDGER" search "Hermes snapshots" --source hermes --json >"$TMP_WORK/search-hermes.json"
-"$MISELEDGER" search "fixture crawl contract" --source grok --json >"$TMP_WORK/search-grok.json"
+"$EVIDENCE_BIN" init >/dev/null
+"$EVIDENCE_BIN" doctor --mcp --json >"$TMP_WORK/doctor.json"
+"$EVIDENCE_BIN" import adapter "$ROOT/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json >"$TMP_WORK/import-discrawl.json"
+"$EVIDENCE_BIN" import codex "$ROOT/testdata/harnesses/codex-session.fixture.jsonl" --json >"$TMP_WORK/import-codex.json"
+"$EVIDENCE_BIN" import openclaw "$ROOT/testdata/harnesses/openclaw-session.fixture.jsonl" --json >"$TMP_WORK/import-openclaw.json"
+"$EVIDENCE_BIN" import claude "$ROOT/testdata/harnesses/claude-project.fixture.jsonl" --json >"$TMP_WORK/import-claude.json"
+"$EVIDENCE_BIN" import hermes "$ROOT/testdata/harnesses/session_hermes-demo.fixture.json" --json >"$TMP_WORK/import-hermes-snapshot.json"
+"$EVIDENCE_BIN" import hermes "$ROOT/testdata/harnesses/hermes-trajectory.fixture.jsonl" --json >"$TMP_WORK/import-hermes-trajectory.json"
+"$EVIDENCE_BIN" import grok "$ROOT/testdata/harnesses/grok-sessions.fixture" --json >"$TMP_WORK/import-grok.json"
+"$EVIDENCE_BIN" relations backfill --json >"$TMP_WORK/relations.json"
+"$EVIDENCE_BIN" stats --json >"$TMP_WORK/stats.json"
+"$EVIDENCE_BIN" compact --json >"$TMP_WORK/compact.json"
+"$EVIDENCE_BIN" doctor --archive --json >"$TMP_WORK/doctor-archive.json"
+"$EVIDENCE_BIN" prune imports --before 2000-01-01 --dry-run --json >"$TMP_WORK/prune-imports.json"
+"$EVIDENCE_BIN" prune scans --missing --dry-run --json >"$TMP_WORK/prune-scans.json"
+"$EVIDENCE_BIN" prune --policy default --dry-run --json >"$TMP_WORK/prune-policy.json"
+"$EVIDENCE_BIN" search "Hermes snapshots" --source hermes --json >"$TMP_WORK/search-hermes.json"
+"$EVIDENCE_BIN" search "fixture crawl contract" --source grok --json >"$TMP_WORK/search-grok.json"
 "$SESSIONFIND" search "exec_command" --source codex --json >"$TMP_WORK/sessionfind-codex.json"
-"$MISELEDGER" evidence "Hermes snapshots" --source hermes --json >"$TMP_WORK/evidence-hermes.json"
-"$MISELEDGER" explain "Hermes snapshots" --source hermes --json >"$TMP_WORK/explain-hermes.json"
+"$EVIDENCE_BIN" evidence "Hermes snapshots" --source hermes --json >"$TMP_WORK/evidence-hermes.json"
+"$EVIDENCE_BIN" explain "Hermes snapshots" --source hermes --json >"$TMP_WORK/explain-hermes.json"
 bundle_id="$(python3 - "$TMP_WORK/evidence-hermes.json" <<'PY'
 import json, sys
 print(json.load(open(sys.argv[1]))["id"])
 PY
 )"
-"$MISELEDGER" evidence show "$bundle_id" --json >"$TMP_WORK/evidence-show.json"
+"$EVIDENCE_BIN" evidence show "$bundle_id" --json >"$TMP_WORK/evidence-show.json"
 
 python3 - "$TMP_WORK" <<'PY'
 import json

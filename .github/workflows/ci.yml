@@ -258,6 +258,30 @@ jobs:
       - name: Test locked default features
         run: cargo test --locked
 
+  engine-rename-installer:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engines/code-graph
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - run: python -m pip install -e '.[dev]'
+      - name: Verify native installer transitions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/verify-engine-rename-installer
+
   evidence-ledger-test:
     needs: changes
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.evidence_ledger == 'true' }}
@@ -274,12 +298,23 @@ jobs:
       - run: go vet ./...
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
       - run: govulncheck ./...
-      - run: go build -o bin/miseledger ./cmd/miseledger
+      - name: Build both evidence entry points
+        run: |
+          for name in brigade-evidence miseledger; do
+            go build -o "bin/$name" "./cmd/$name"
+          done
       - run: go build -o bin/sessionfind ./cmd/sessionfind
       - run: scripts/check_release_workflow.sh
-      - run: scripts/smoke_archive.sh
-      - run: scripts/smoke_mcp.sh
-      - run: scripts/smoke_http.sh
+      # Each smoke runs under the canonical name and the legacy name, which
+      # stays supported through v0.32.
+      - name: Smoke both evidence entry points
+        run: |
+          for name in brigade-evidence miseledger; do
+            export EVIDENCE_BIN="$PWD/bin/$name"
+            scripts/smoke_archive.sh
+            scripts/smoke_mcp.sh
+            scripts/smoke_http.sh
+          done
 
   notify-build-and-test:
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
@@ -538,10 +573,10 @@ jobs:
       fail-fast: false
       matrix:
         # Pull requests run the Python 3.12 shards, which also carry coverage.
-        # Merge groups and pushes to main run every supported Python, so 3.10
-        # and 3.11 run on the combined change in the queue (and again on the
+        # Merge groups and pushes to main run every supported Python, so 3.11
+        # runs on the combined change in the queue (and again on the
         # push to main) rather than on every pull request push.
-        python: ${{ fromJSON(github.event_name == 'pull_request' && '["3.12"]' || '["3.10", "3.11", "3.12"]') }}
+        python: ${{ fromJSON(github.event_name == 'pull_request' && '["3.12"]' || '["3.11", "3.12"]') }}
         shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v7
@@ -566,13 +601,13 @@ jobs:
           python -m pip install -e ".[dev,grokbot]"
       - name: Pytest shard
         if: matrix.python != '3.12'
-        run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q
+        run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q -n 4 --dist=worksteal
       - name: Pytest shard with coverage
         if: matrix.python == '3.12'
         env:
           COVERAGE_CORE: sysmon
           COVERAGE_FILE: .coverage.${{ matrix.python }}.${{ matrix.shard }}
-        run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q --cov="$PWD/src/brigade" --cov-report=
+        run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q -n 4 --dist=worksteal --cov="$PWD/src/brigade" --cov-report=
       - name: Assert grokbot MCP tests run without skips
         if: matrix.python == '3.12' && matrix.shard == 0
         run: |
@@ -648,7 +683,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: ["3.10", "3.11", "3.12"]
+        python: ["3.11", "3.12"]
     steps:
       - name: Note Python shards deferred to the merge queue
         if: ${{ github.event_name == 'pull_request' && matrix.python != '3.12' }}
@@ -692,8 +727,10 @@ jobs:
       - cosign-integration
       - fleet-hub-container
       - component-manifest-provenance
+      - engine-rename-installer
       - content-guard
       - repo-metadata
+      - changelog-fragments
       - install-from-source
       - quickstart-smoke
       - windows-native-acceptance
@@ -715,8 +752,8 @@ jobs:
           # documentation-only runs may skip only the enumerated runtime jobs.
           mandatory = {
               "changes", "lint", "test", "test-shards", "coverage",
-              "cosign-integration", "fleet-hub-container", "component-manifest-provenance",
-              "content-guard", "repo-metadata", "install-from-source",
+              "cosign-integration", "fleet-hub-container", "component-manifest-provenance", "engine-rename-installer",
+              "content-guard", "repo-metadata", "changelog-fragments", "install-from-source",
               "quickstart-smoke", "windows-native-acceptance",
               "mesh-compatibility", "mesh-cross-version", "mesh-without-extra",
           }
@@ -734,7 +771,7 @@ jobs:
           docs_only = changes.get("result") == "success" and docs_flag == "true"
           docs_skips = {
               "lint", "test", "test-shards", "coverage", "cosign-integration",
-              "fleet-hub-container", "component-manifest-provenance", "install-from-source",
+              "fleet-hub-container", "component-manifest-provenance", "engine-rename-installer", "install-from-source",
               "quickstart-smoke", "windows-native-acceptance", "mesh-compatibility",
               "mesh-cross-version", "mesh-without-extra",
           }
@@ -885,6 +922,42 @@ jobs:
           BRIGADE_EXTRAS: "1"
       - name: Template Audit
         run: brigade security template-audit --target . --json
+
+  changelog-fragments:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      # Runs on docs-only diffs too: a CHANGELOG.md edit alone classifies as
+      # documentation, and it is exactly what the guard below rejects.
+      - name: Validate changelog fragments
+        run: python3 scripts/changelog_fragments.py check
+      - name: Reject CHANGELOG.md edits outside a release commit
+        if: ${{ github.event_name != 'push' }}
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # Compare with the base tip GitHub merged into, as the lint job does.
+            if [ "$(git rev-parse HEAD^2 2>/dev/null)" != "$PR_HEAD_SHA" ]; then
+              echo "::error::HEAD is not the pull request test merge"
+              exit 1
+            fi
+            base=$(git rev-parse HEAD^1)
+          else
+            base=$EVENT_BASE_SHA
+            if [ -z "$base" ]; then
+              echo "::error::merge group base SHA is missing"
+              exit 1
+            fi
+            git fetch --no-tags --depth=1 origin "$base"
+          fi
+          python3 scripts/changelog_fragments.py guard --base "$base"
 
   install-from-source:
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
@@ -1094,7 +1167,7 @@ jobs:
               def pytest_collectreport(self, report):
                   self.skipped |= report.skipped
           guard = NoNativeSkips()
-          result = pytest.main(["-q", "-ra", "-o", "addopts=", "tests/test_windows_job.py::TestNativeContainment", "tests/test_skills_state_windows.py", "tests/test_claude_hooks_state_containment.py", "tests/test_dirfd.py::test_fsync_directory_accepts_native_windows_directory_handles", "tests/test_fleet_claim_loss_cancellation.py::test_native_windows_claim_loss_stops_silent_worker"], plugins=[guard])
+          result = pytest.main(["-q", "-ra", "-o", "addopts=", "tests/test_windows_job.py::TestNativeContainment", "tests/test_skills_state_windows.py", "tests/test_claude_hooks_state_containment.py", "tests/test_dirfd.py::test_fsync_directory_accepts_native_windows_directory_handles", "tests/test_fleet_claim_loss_cancellation.py::test_native_windows_claim_loss_stops_silent_worker", "tests/test_nt_private_storage.py::TestNativePrivateStorage"], plugins=[guard])
           sys.exit(1 if guard.skipped else int(result))
           '@ | & $python -
           if ($LASTEXITCODE -ne 0) { throw "native containment failed or skipped" }
@@ -1113,10 +1186,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path engine-bin | Out-Null
           Push-Location engines/code-graph
-          cargo build --release --locked --bin graphtrail --bin graphtrail-mcp
-          if ($LASTEXITCODE -ne 0) { throw "graphtrail build failed" }
-          Copy-Item target/release/graphtrail.exe "$env:GITHUB_WORKSPACE/engine-bin/graphtrail.exe"
-          Copy-Item target/release/graphtrail-mcp.exe "$env:GITHUB_WORKSPACE/engine-bin/graphtrail-mcp.exe"
+          $codeGraphBins = @("graphtrail", "graphtrail-mcp", "brigade-code-graph", "brigade-code-graph-mcp")
+          cargo build --release --locked @($codeGraphBins | ForEach-Object { "--bin"; $_ })
+          if ($LASTEXITCODE -ne 0) { throw "code graph build failed" }
+          foreach ($bin in $codeGraphBins) {
+            Copy-Item "target/release/$bin.exe" "$env:GITHUB_WORKSPACE/engine-bin/$bin.exe"
+          }
           Pop-Location
           Push-Location engines/evidence-ledger
           $env:CGO_ENABLED = "0"
@@ -1124,6 +1199,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "miseledger build failed" }
           go build -trimpath -o "$env:GITHUB_WORKSPACE/engine-bin/sessionfind.exe" ./cmd/sessionfind
           if ($LASTEXITCODE -ne 0) { throw "sessionfind build failed" }
+          go build -trimpath -o "$env:GITHUB_WORKSPACE/engine-bin/brigade-evidence.exe" ./cmd/brigade-evidence
+          if ($LASTEXITCODE -ne 0) { throw "brigade-evidence build failed" }
           Pop-Location
       - name: Canonical and legacy evidence executable compatibility
         shell: pwsh

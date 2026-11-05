@@ -18,7 +18,7 @@ use crate::store::persist::{
     write_file_graph,
 };
 use crate::store::repo_policy::{
-    ensure_graphtrail_ignored, guard_unsafe_root, has_git_marker, write_branch_meta,
+    ensure_index_ignored, guard_unsafe_root, has_git_marker, write_branch_meta,
 };
 use crate::store::resolve::rebuild_edges;
 use crate::store::schema::{SchemaUpgrade, clear_parse_census_pending};
@@ -52,15 +52,26 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     guard_unsafe_root(&root)?;
     let _lock = acquire_sync_lock(conn)?;
-    let graph_dir_created = crate::store::db::take_created_graph_dir(&root.join(".graphtrail"));
+    // The first sync that created an index directory adds it to `.gitignore`; check both layouts
+    // so neither creation record lingers.
+    let created_index_dir = {
+        let canonical = crate::store::db::index_dir(&root);
+        let legacy = crate::store::db::legacy_index_dir(&root);
+        let legacy_created = crate::store::db::take_created_graph_dir(&legacy);
+        if crate::store::db::take_created_graph_dir(&canonical) {
+            Some(canonical)
+        } else {
+            legacy_created.then_some(legacy)
+        }
+    };
     let upgrade = crate::store::schema::upgrade_for_sync(conn)?;
     let force_full_reindex = force || upgrade == SchemaUpgrade::FullReindex;
 
     let entries = collect_sync_walk(&root, false)?.entries;
     let db_files = load_db_files(conn)?;
     let skipped = load_skipped(conn)?;
-    if graph_dir_created && db_files.is_empty() && has_git_marker(&root) {
-        ensure_graphtrail_ignored(&root)?;
+    if let Some(dir) = created_index_dir.filter(|_| db_files.is_empty() && has_git_marker(&root)) {
+        ensure_index_ignored(&root, &dir)?;
     }
 
     let on_disk: HashSet<&str> = entries.iter().map(|entry| entry.rel.as_str()).collect();

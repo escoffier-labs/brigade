@@ -1,6 +1,7 @@
 import json
 import os
 import signal
+import shlex
 import subprocess
 import sys
 import time
@@ -12,6 +13,7 @@ import pytest
 from brigade import aboyeur
 from brigade import agents
 from brigade import context_eval
+from brigade import component_manifest
 from brigade import evidence_brief
 from brigade import proc
 from brigade import provenance
@@ -42,16 +44,6 @@ def _roster():
 
 def _sidecar_revisions(run_dir: Path, sidecar: str) -> list[Path]:
     return sorted((run_dir / "revisions" / sidecar).glob("*.json"))
-
-
-def test_artifact_helper_imports_before_aboyeur_facade() -> None:
-    result = subprocess.run(
-        [sys.executable, "-c", "import brigade.aboyeur_artifacts"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
 
 
 def test_approval_handoff_selects_completed_requester_not_unrelated_workers(tmp_path):
@@ -855,7 +847,9 @@ def _stamp_default_untrusted(payload: dict | str) -> dict | str:
 
 
 def _write_fake_miseledger(tmp_path, payload: dict | str) -> Path:
-    script = tmp_path / "fake-miseledger.py"
+    legacy = next(key for key, value in component_manifest.COMPONENT_FAMILIES.items() if value == "brigade-evidence")
+    script = tmp_path / f"fake-{legacy}.py"
+    args_path = tmp_path / f"{legacy}-args.json"
     rendered = json.dumps(_stamp_default_untrusted(payload))
     script.write_text(
         f"""
@@ -863,19 +857,21 @@ import json
 import sys
 from pathlib import Path
 
-Path(sys.argv[-1]).write_text(json.dumps(sys.argv[1:-1]))
-payload = {rendered}
+Path({str(args_path)!r}).write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
+payload = json.loads({rendered!r})
 if isinstance(payload, str):
     print(payload)
 else:
     print(json.dumps(payload))
-"""
+""",
+        encoding="utf-8",
     )
-    script.chmod(0o755)
-    wrapper = tmp_path / "miseledger"
-    wrapper.write_text(
-        f'#!/bin/sh\nexec {os.environ.get("PYTHON", "python3")} {script} "$@" "{tmp_path / "miseledger-args.json"}"\n'
-    )
+    wrapper = tmp_path / (f"{legacy}.cmd" if os.name == "nt" else legacy)
+    if os.name == "nt":
+        launcher = f'@echo off\n"{sys.executable}" "{script}" %*\n'
+    else:
+        launcher = f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(script))} "$@"\n'
+    wrapper.write_text(launcher, encoding="utf-8")
     wrapper.chmod(0o755)
     return wrapper
 
@@ -902,7 +898,7 @@ def test_evidence_brief_renders_untrusted_header_result_lines_and_query(tmp_path
             ]
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(
         work,
@@ -948,7 +944,7 @@ def test_evidence_brief_mismatch_is_metadata_only_and_counts_omission(tmp_path, 
             "query": "integrity",
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(work, "check integrity mismatch handling")
 
@@ -962,7 +958,7 @@ def test_evidence_brief_mismatch_is_metadata_only_and_counts_omission(tmp_path, 
 
 
 def test_evidence_brief_missing_binary_is_not_attached(tmp_path, monkeypatch):
-    monkeypatch.delenv("MISELEDGER_BIN", raising=False)
+    monkeypatch.delenv("BRIGADE_EVIDENCE_BIN", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
 
     brief = evidence_brief.evidence_brief(tmp_path, "fix dispatch")
@@ -974,7 +970,7 @@ def test_evidence_brief_missing_binary_is_not_attached(tmp_path, monkeypatch):
 
 def test_evidence_brief_malformed_json_is_not_attached(tmp_path, monkeypatch):
     miseledger = _write_fake_miseledger(tmp_path, "{not-json")
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "fix dispatch")
 
@@ -1004,7 +1000,7 @@ def test_evidence_brief_byte_cap_is_enforced(tmp_path, monkeypatch):
         tmp_path,
         {"results": results},
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "fix dispatch")
 
@@ -1031,7 +1027,7 @@ def test_evidence_brief_renders_trust_source_and_selection_rule(tmp_path, monkey
             ],
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "fix dispatch bug")
 
@@ -1055,7 +1051,7 @@ def test_evidence_brief_renders_single_arm_declaration(tmp_path, monkeypatch):
             ],
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "add feature")
 
@@ -1082,7 +1078,7 @@ def test_evidence_brief_renders_multi_arm_and_retrieval_fields(tmp_path, monkeyp
             ],
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "refactor session handling")
 
@@ -1108,7 +1104,7 @@ def test_evidence_brief_renders_unavailable_arm(tmp_path, monkeypatch):
             ],
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "check memory")
 
@@ -1131,7 +1127,7 @@ def test_evidence_brief_renders_omitted_count_for_truncated_pool(tmp_path, monke
             ],
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "run evidence selection")
 
@@ -1290,7 +1286,7 @@ def test_evidence_brief_omits_unknown_and_quarantined(tmp_path, monkeypatch):
             ]
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "trust omit unknown")
 
@@ -1316,7 +1312,7 @@ def test_evidence_brief_wraps_untrusted_and_caps_two_items(tmp_path, monkeypatch
             }
         )
     miseledger = _write_fake_miseledger(tmp_path, {"results": results})
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "untrusted item cap")
 
@@ -1348,7 +1344,7 @@ def test_evidence_brief_untrusted_byte_cap_at_boundaries(tmp_path, monkeypatch):
                 }
             ]
         }
-        monkeypatch.setenv("MISELEDGER_BIN", str(_write_fake_miseledger(tmp_path, payload)))
+        monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(_write_fake_miseledger(tmp_path, payload)))
         return evidence_brief.evidence_brief(tmp_path, "untrusted byte cap")
 
     under = _run(under_body, "under-cap")
@@ -1380,7 +1376,7 @@ def test_evidence_brief_pending_injection_is_metadata_only(tmp_path, monkeypatch
             ]
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "pending injection")
 
@@ -1413,7 +1409,7 @@ def test_evidence_brief_injection_status_variants_are_metadata_only(tmp_path, mo
             ]
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "variant injection")
 
@@ -1752,12 +1748,12 @@ def test_run_dry_run_records_code_graph_delta_skip_without_graphtrail(monkeypatc
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
     monkeypatch.setattr(
-        aboyeur.graphtrail_delta,
+        aboyeur.code_graph_delta,
         "capture_before",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no graphtrail sync")),
     )
     monkeypatch.setattr(
-        aboyeur.graphtrail_delta,
+        aboyeur.code_graph_delta,
         "capture_after_and_diff",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no graphtrail sync")),
     )
@@ -2593,7 +2589,7 @@ def test_post_dispatch_escape_clears_worker_phase_owner(monkeypatch, tmp_path, e
         "dispatch",
         lambda *args, **kwargs: [aboyeur.WorkerResult(worker="coder", task="implement", text="done", ok=True)],
     )
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda *args, **kwargs: {})
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_before", lambda *args, **kwargs: {})
 
     def interrupt_after_dispatch(*args, **kwargs):  # noqa: ARG001
         receipt = json.loads((output_dir / "run.json").read_text())
@@ -2605,7 +2601,7 @@ def test_post_dispatch_escape_clears_worker_phase_owner(monkeypatch, tmp_path, e
             signal.raise_signal(signal.SIGTERM)
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", interrupt_after_dispatch)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_after_and_diff", interrupt_after_dispatch)
 
     expected_kind = "signal" if escape == "sigterm" else "keyboard-interrupt"
     expected_exception = SystemExit if escape == "sigterm" else KeyboardInterrupt
@@ -3549,12 +3545,12 @@ def test_read_only_mode_skips_code_graph_delta_without_graphtrail(monkeypatch, t
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
     monkeypatch.setattr(
-        aboyeur.graphtrail_delta,
+        aboyeur.code_graph_delta,
         "capture_before",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no graphtrail sync")),
     )
     monkeypatch.setattr(
-        aboyeur.graphtrail_delta,
+        aboyeur.code_graph_delta,
         "capture_after_and_diff",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no graphtrail sync")),
     )
@@ -4074,8 +4070,8 @@ def test_run_writes_code_graph_delta_to_artifacts_and_synthesis(monkeypatch, tmp
     _commit_all(run_cwd)
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", fake_capture_before)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_before", fake_capture_before)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_after_and_diff", fake_capture_after)
 
     assert run_aboyeur_guarded("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
 
@@ -4143,8 +4139,8 @@ def test_run_writes_context_eval_when_brief_and_delta_sidecar_overlap(monkeypatc
 
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda target, run_dir: before_payload)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_before", lambda target, run_dir: before_payload)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_after_and_diff", fake_capture_after)
 
     assert run_aboyeur_guarded("build feature", _roster(), cwd=tmp_path, output_dir=output_dir, code_graph=brief) == 0
 
@@ -4191,8 +4187,8 @@ def test_run_omits_context_eval_without_brief(monkeypatch, tmp_path):
 
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda target, run_dir: before_payload)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_before", lambda target, run_dir: before_payload)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_after_and_diff", fake_capture_after)
 
     assert (
         run_aboyeur_guarded(
@@ -4230,9 +4226,9 @@ def test_run_omits_context_eval_when_delta_failed(monkeypatch, tmp_path):
 
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda target, run_dir: before_payload)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_before", lambda target, run_dir: before_payload)
     monkeypatch.setattr(
-        aboyeur.graphtrail_delta,
+        aboyeur.code_graph_delta,
         "capture_after_and_diff",
         lambda target, run_dir, before: {"status": "sync_failed", "ok": False, "summary": "failed"},
     )
@@ -4269,8 +4265,8 @@ def test_run_omits_context_eval_when_delta_has_no_files(monkeypatch, tmp_path):
 
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda target, run_dir: before_payload)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_before", lambda target, run_dir: before_payload)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_after_and_diff", fake_capture_after)
 
     assert run_aboyeur_guarded("build feature", _roster(), cwd=tmp_path, output_dir=output_dir, code_graph=brief) == 0
 

@@ -1,7 +1,6 @@
 """Child coverage must survive the exact per-shard files uploaded by CI."""
 
 import ast
-import os
 from pathlib import Path
 import shlex
 import shutil
@@ -10,7 +9,18 @@ import sys
 
 from coverage import CoverageData
 
+from tests._coverage_env import isolated_coverage_env
+
 ROOT = Path(__file__).resolve().parents[1]
+# CI's shard command measures `--cov=$PWD/src/brigade`, which records every
+# source file, including those never imported. So the replayed shard and
+# `coverage report` analyze all of src/brigade (877 files, about 418k lines in
+# November 2026), not just what the two selected tests touch. The report step
+# is single-threaded CPU work: about 8 s on an idle 24-CPU host, 35 to 46 s with
+# 48 busy loops, and 51 to 52 s with 72. A 45 s bound therefore failed under
+# shard load with no hang (#2203). The bound scales with that measured cost and
+# still fails any step that never exits.
+CI_COVERAGE_STEP_TIMEOUT_SECONDS = 180
 
 
 def test_ci_coverage_reports_after_fixture_sources_are_removed(tmp_path):
@@ -27,7 +37,7 @@ def test_ci_coverage_reports_after_fixture_sources_are_removed(tmp_path):
     argv[argv.index("--shard-count") + 1] = "1"
     fixtures = tmp_path / "fixtures"
     shard = tmp_path / ".coverage.3.12.0"
-    environment = dict(os.environ, COVERAGE_FILE=str(shard))
+    environment = isolated_coverage_env(shard)
     result = subprocess.run(
         [
             *argv,
@@ -40,7 +50,7 @@ def test_ci_coverage_reports_after_fixture_sources_are_removed(tmp_path):
         env=environment,
         capture_output=True,
         text=True,
-        timeout=45,
+        timeout=CI_COVERAGE_STEP_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     uploaded = tmp_path / "uploaded"
@@ -49,7 +59,7 @@ def test_ci_coverage_reports_after_fixture_sources_are_removed(tmp_path):
     # The reporting job has the checkout and uploaded data, not pytest's fixtures.
     shutil.rmtree(fixtures)
     combined = tmp_path / ".coverage"
-    environment = dict(os.environ, COVERAGE_FILE=str(combined))
+    environment = isolated_coverage_env(combined)
     for arguments in (["combine", str(uploaded)], ["report"]):
         result = subprocess.run(
             [sys.executable, "-m", "coverage", *arguments],
@@ -57,7 +67,7 @@ def test_ci_coverage_reports_after_fixture_sources_are_removed(tmp_path):
             env=environment,
             capture_output=True,
             text=True,
-            timeout=45,
+            timeout=CI_COVERAGE_STEP_TIMEOUT_SECONDS,
         )
         assert result.returncode == 0, result.stdout + result.stderr
     data = CoverageData(basename=str(combined))
@@ -111,7 +121,7 @@ def test_nested_subprocess_coverage_survives_shard_upload_and_combine(tmp_path):
         other_lines = {4, 9} if case == 0 else {3, 8}
         for shard in range(2):
             data_file = run / f".coverage.3.12.{shard}"
-            env = dict(os.environ, COVERAGE_FILE=str(data_file), PYTHONPATH=str(tmp_path))
+            env = isolated_coverage_env(data_file, PYTHONPATH=str(tmp_path))
             result = subprocess.run(
                 [
                     sys.executable,
@@ -145,7 +155,7 @@ def test_nested_subprocess_coverage_survives_shard_upload_and_combine(tmp_path):
         result = subprocess.run(
             [sys.executable, "-m", "coverage", "combine", str(uploaded)],
             cwd=tmp_path,
-            env=dict(os.environ, COVERAGE_FILE=str(combined)),
+            env=isolated_coverage_env(combined),
             capture_output=True,
             text=True,
             timeout=45,

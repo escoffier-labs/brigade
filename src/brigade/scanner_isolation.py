@@ -78,7 +78,7 @@ def probe_isolation() -> IsolationStatus:
     if pid == 0:
         os.close(reader)
         try:
-            os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS)
+            os.unshare(getattr(os, "CLONE_NEWUSER", 0) | getattr(os, "CLONE_NEWNS", 0))
             os.write(writer, b"ok")
         except OSError as exc:
             os.write(writer, f"no:{exc.errno}".encode("ascii", "replace"))

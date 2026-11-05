@@ -80,7 +80,7 @@ impl Drop for SyncLock {
 fn lock_path(db_path: &Path) -> PathBuf {
     let mut file_name = db_path
         .file_name()
-        .map_or_else(|| "graphtrail.db".into(), |name| name.to_os_string());
+        .map_or_else(|| "code-graph.db".into(), |name| name.to_os_string());
     file_name.push(".lock");
     db_path.with_file_name(file_name)
 }

@@ -24,6 +24,8 @@ another repo's equivalents and the rest is repo-agnostic.
 
 from __future__ import annotations
 
+import tomllib
+
 import argparse
 import os
 import pathlib
@@ -33,7 +35,6 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from brigade import toml_compat  # noqa: E402
 
 # --- Per-repo configuration -------------------------------------------------
 # Source of truth for the version.
@@ -69,7 +70,7 @@ PLUGIN_LOCATIONS = [
 
 
 def _expected() -> str:
-    data = toml_compat.loads((ROOT / VERSION_FILE).read_text())
+    data = tomllib.loads((ROOT / VERSION_FILE).read_text())
     return data["project"]["version"]
 
 

@@ -118,10 +118,10 @@ def test_parser_inventory_and_missing_cli_agree_after_alias_normalization(monkey
     inventory_paths = _inventory_command_paths(COMMAND_INVENTORY.read_text(encoding="utf-8"))
 
     assert "brigade run cloud status" in parser_paths
-    assert "brigade run-cloud status" in parser_paths
+    assert "brigade run-cloud status" not in parser_paths
     assert "brigade harness fragments" in parser_paths
-    assert "brigade openclaw-fragments" in parser_paths
-    assert "brigade hermes-fragments" in parser_paths
+    assert "brigade openclaw-fragments" not in parser_paths
+    assert "brigade hermes-fragments" not in parser_paths
     assert "brigade run" in parser_paths
 
     parser_normalized = {roadmap_cmd._apply_command_alias(path) for path in parser_paths}
@@ -149,11 +149,13 @@ def test_deprecated_inventory_paths_are_machine_readable_and_parse():
 
     assert deprecated
     assert {item["path"] for item in deprecated} == set(inventory_paths)
-    assert all(item["path"].startswith("brigade run-cloud") for item in deprecated)
-    assert all(item["replacement"] == item["path"].replace("run-cloud", "run cloud", 1) for item in deprecated)
+    assert {path.split()[1] for path in inventory_paths} == {"receipts"}
+    # A deprecated path names the same replacement the alias table folds it into.
+    assert all(item["replacement"] == roadmap_cmd._apply_command_alias(item["path"]) for item in deprecated)
+    assert all(item["replacement"] != item["path"] for item in deprecated)
 
     parser = cli._build_parser()
-    for path in inventory_paths:
+    for path in [*inventory_paths, *(item["replacement"] for item in deprecated)]:
         with pytest.raises(SystemExit) as exc:
             parser.parse_args([*path.removeprefix("brigade ").split(), "--help"])
         assert exc.value.code == 0
@@ -173,28 +175,11 @@ def test_run_cloud_is_a_native_parser_branch():
     }
 
 
-def test_run_cloud_alias_prints_deprecation_notice(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(
-        "brigade.cloud_tracker.observe_providers", lambda target, **kwargs: ({}, {"branches": [], "prs": []}, False)
-    )
-    rc = cli.main(["run-cloud", "status", "--target", str(tmp_path), "--json"])
-    assert rc == 0
-    err = capsys.readouterr().err
-    assert "deprecated" in err
-    assert "brigade run cloud" in err
-
-
 def test_harness_fragments_writes_shared_backend(tmp_path):
     out = tmp_path / "frags"
     assert cli.main(["harness", "fragments", "--harness", "openclaw", "--out", str(out)]) == 0
     assert (out / "README.md").is_file()
     assert cli.main(["harness", "fragments", "--harness", "hermes", "--out", str(tmp_path / "hermes")]) == 0
-
-
-def test_fragment_aliases_still_dispatch(tmp_path, monkeypatch):
-    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
-    assert cli.main(["openclaw-fragments", "--out", str(tmp_path / "oc")]) == 0
-    assert cli.main(["hermes-fragments", "--out", str(tmp_path / "hm")]) == 0
 
 
 def main(argv: list[str] | None = None) -> int:

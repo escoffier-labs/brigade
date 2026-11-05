@@ -786,7 +786,10 @@ def _write_release_markdown(path: Path, receipt: dict[str, Any]) -> None:
 
 
 def _candidate_docs_touch(changed_files: list[str]) -> dict[str, bool]:
-    return {name: name in changed_files for name in ("README.md", "CHANGELOG.md", "ROADMAP.md")}
+    touched = {name: name in changed_files for name in ("README.md", "CHANGELOG.md", "ROADMAP.md")}
+    # A changelog fragment is the changelog edit for a pull request (#2231).
+    touched["CHANGELOG.md"] = touched["CHANGELOG.md"] or any(path.startswith("changelog.d/") for path in changed_files)
+    return touched
 
 
 def _release_safe_text(text: str) -> str:

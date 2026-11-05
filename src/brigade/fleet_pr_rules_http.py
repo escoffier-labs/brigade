@@ -13,12 +13,15 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs
 
 from . import fleet_hub, fleet_hub_policy, fleet_model_inventory
 from . import fleet_pr_rules_page as page
 from . import fleet_policy_page as policy_page
+
+if TYPE_CHECKING:
+    from .fleet_hub_routes import HubContext, RouteTable
 
 PLAIN = "text/plain; charset=utf-8"
 SAVED_NOTE = "Saved as revision {revision}. Rules are published for agents to read; nothing is enforced on GitHub."
@@ -143,4 +146,15 @@ def post_form(
         plan=plan,
         draft=submission,
         review=result.review,
+    )
+
+
+def register_routes(routes: RouteTable, hub: HubContext) -> None:
+    routes.add(
+        "GET", lambda request, _path, query: serve(request, hub.db_path, hub.token, query), paths=("/deck/pr-rules",)
+    )
+    routes.add(
+        "POST",
+        lambda request, _path, _query: post_form(request, hub.db_path, hub.token, hub.policy_inventory),
+        paths=("/deck/pr-rules",),
     )

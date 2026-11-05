@@ -427,8 +427,11 @@ def _inspect_component(
     env: Mapping[str, str],
 ) -> ComponentInspection:
     component = manifest.components[component_id]
-    managed_path = component_paths.managed_executable_path(roots.data_root, component_id)
-    path_binary = _path_binary(component.executable, managed_path, env)
+    installed_key = component_manifest.wire_id(installed_state.components, component_id) if installed_state else None
+    # A legacy manifest can install canonical paths. Old state still names old paths.
+    managed_id = installed_key or component_manifest.family_id(component_id)
+    managed_path = component_paths.managed_executable_path(roots.data_root, managed_id)
+    path_binary = _path_binary(component_manifest.family_id(component.executable), managed_path, env)
     asset: component_manifest.ComponentAsset | None = None
     asset_error: str | None = None
     if platform is not None:
@@ -451,7 +454,6 @@ def _inspect_component(
         file_inspection_error = str(exc)
         managed_exists = True
 
-    installed_key = component_manifest.wire_id(installed_state.components, component_id) if installed_state else None
     installed_record = installed_state.components.get(installed_key) if installed_state and installed_key else None
     status, detail = _diagnose_component(
         platform=platform,

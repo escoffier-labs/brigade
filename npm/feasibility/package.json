@@ -3,6 +3,7 @@
   "version": "0.30.0",
   "description": "Brigade CLI with a verified bundled Python wheel and managed runtime",
   "license": "MIT",
+  "homepage": "https://brigadestack.com",
   "engines": {
     "node": ">=22"
   },

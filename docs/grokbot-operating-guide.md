@@ -5,8 +5,7 @@ connector packs exist, how queue actors are authorized, how lifecycle commands
 behave, how a finding reaches the owner, and how to configure the Bot so
 results arrive through the relay instead of a cloud workspace. For listener
 installation and per-role setup commands, see
-[Grok Bot MCP listener](grokbot-mcp.md). For the n8n read and action catalog,
-see [n8n-operator](grokbot-n8n-operator.md).
+[Grok Bot MCP listener](grokbot-mcp.md).
 
 ## Overview
 
@@ -47,10 +46,7 @@ uses `brigade.grokbot.connector-instance.v1` and lives at
 | `implementation-worker` | queue-role | `127.0.0.1:8768` | none | same eight tools as `repository-scout` |
 | `cerebro-memory` | connector | `127.0.0.1:8770` | none | `cerebro_health`, `cerebro_proposal_status`, `cerebro_propose`, `cerebro_search`, `cerebro_show` |
 | `fleet-steward` | connector | `127.0.0.1:8771` | none | `execute_remediation`, `fleet_overview`, `host_status`, `incident_bundle`, `propose_remediation`, `service_health` |
-| `backup-steward` | connector | `127.0.0.1:8772` | none | `backup_execute_action`, `backup_operation_status`, `backup_overview`, `backup_propose_action`, `backup_restore_readiness`, `backup_target_status` |
 | `obsidian-operator` | connector | `127.0.0.1:8773` | `/mcp` | `obsidian_action_status`, `obsidian_capabilities`, `obsidian_execute_action`, `obsidian_propose_action`, `obsidian_read`, `obsidian_search` |
-| `wazuh-triage` | connector | `127.0.0.1:8774` | none | `wazuh_action_status`, `wazuh_alert_status`, `wazuh_classify`, `wazuh_incident_bundle`, `wazuh_ingest`, `wazuh_propose_remediation` |
-| `n8n-operator` | connector | `127.0.0.1:8775` | none | `n8n_action_status`, `n8n_execute_action`, `n8n_execution_bundle`, `n8n_overview`, `n8n_propose_action`, `n8n_workflow_status` |
 | `operations-relay` | connector | `127.0.0.1:8777` | none | `automation_finding_status`, `submit_automation_finding` |
 | `t3-dispatch` | connector | `127.0.0.1:8778` | none | `inbox_ack`, `inbox_list`, `inbox_reply`, `message_send`, `message_status`, `t3_answer`, `t3_approve`, `t3_capacity`, `t3_followup`, `t3_interrupt`, `t3_recent`, `t3_status`, `t3_submit`, `t3_wait` |
 
@@ -62,13 +58,10 @@ Each pack stores its own extra instance keys beyond the shared set (schema,
 pack id, pack version, bind, allowed hosts, allowed origins, public route, and
 the bearer reference):
 
-- `fleet-steward`, `backup-steward`, `wazuh-triage`: runtime, ledger,
+- `fleet-steward`: runtime, ledger,
   action-state, and approval-directory references.
-  What the Wazuh routine may do on its own, propose, or hand to a case is
-  set by the [Wazuh remediation policy](wazuh-remediation-policy.md).
 - `obsidian-operator`: those, plus staging directory, Excalidraw helper
   executable, upstream URL, and upstream key reference.
-- `n8n-operator`: runtime, action-state, and approval-directory references.
 - `cerebro-memory`: CLI executable and workdir references.
 - `operations-relay`: the owner workspace path only.
 

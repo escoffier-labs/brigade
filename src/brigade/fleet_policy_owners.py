@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 OWNER_FIELDS = ("label", "summary", "owns", "never", "intake", "contact", "match")
-MATCH_LIST_KEYS = ("nodes", "harnesses", "conductors", "session_harnesses", "adapters", "principals")
+MATCH_LIST_KEYS = ("nodes", "harnesses", "conductors", "session_harnesses", "adapters", "principals", "findings")
 MATCH_KEYS = (*MATCH_LIST_KEYS, "grokbot_jobs")
 
 
@@ -74,7 +74,13 @@ def _parse_match(raw: Any, where: str) -> dict[str, Any]:
     body = {} if raw is None else policy._mapping(raw, where)
     policy._reject_unknown(body, MATCH_KEYS, where)
     parsed: dict[str, Any] = {
-        key: policy._name_list(body.get(key), f"{where} field '{key}'") for key in MATCH_LIST_KEYS
+        key: policy._name_list(body.get(key), f"{where} field '{key}'")
+        for key in MATCH_LIST_KEYS
+        if key != "findings" or key in body
     }
+    if "findings" in parsed:
+        from .fleet_hub_findings import KIND_ALIASES
+
+        parsed["findings"] = sorted({KIND_ALIASES.get(kind, kind) for kind in parsed["findings"]})
     parsed["grokbot_jobs"] = policy._bool(body.get("grokbot_jobs"), f"{where} field 'grokbot_jobs'", default=False)
     return parsed

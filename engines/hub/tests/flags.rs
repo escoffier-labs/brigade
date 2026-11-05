@@ -1,0 +1,144 @@
+//! Startup failures must be refused before the Rust listener exists.
+use std::{net::Ipv4Addr, process::Command};
+fn hub(args: &[&str], environment: &[(&str, &str)]) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_brigade-hub"));
+    cmd.env_remove("BRIGADE_FLEET_TOKEN")
+        .env_remove("BRIGADE_FLEET_DECK_CONFIG");
+    cmd.args(args);
+    for (key, value) in environment {
+        cmd.env(key, value);
+    }
+    cmd.output().unwrap()
+}
+#[test]
+fn missing_host_and_token() {
+    assert_eq!(hub(&[], &[]).status.code(), Some(2));
+    let host = Ipv4Addr::LOCALHOST.to_string();
+    let out = hub(&["--host", &host], &[]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("no fleet hub token: set BRIGADE_FLEET_TOKEN or pass --token-file")
+    );
+}
+#[test]
+fn config_rejected_by_python_before_listening() {
+    let host = Ipv4Addr::LOCALHOST.to_string();
+    for (args, env, expected) in [
+        (
+            vec![
+                "--host",
+                host.as_str(),
+                "--deck-config",
+                "/missing/fake-deck.json",
+            ],
+            vec![("BRIGADE_FLEET_TOKEN", "fake-test-token")],
+            "deck",
+        ),
+        (
+            vec![
+                "--host",
+                host.as_str(),
+                "--token-file",
+                "/missing/fake-token",
+            ],
+            vec![],
+            "could not read token file",
+        ),
+        (
+            vec!["--host", host.as_str()],
+            vec![
+                ("BRIGADE_FLEET_TOKEN", "fake-test-token"),
+                ("BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED", "invalid"),
+            ],
+            "BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED",
+        ),
+    ] {
+        for external in [false, true] {
+            let mut args = args.clone();
+            let upstream = format!("http://{}:1", Ipv4Addr::LOCALHOST);
+            if external {
+                args.extend(["--upstream", upstream.as_str()]);
+            }
+            let out = hub(&args, &env);
+            assert_eq!(out.status.code(), Some(2));
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains(expected),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+fn invalid_upstream_key_is_refused_before_listening() {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    // Occupy the requested port: a missing startup validation fails at bind
+    // instead of leaving a panicking readiness task inside a live test server.
+    let port = listener.local_addr().unwrap().port().to_string();
+    for key in ["fake\nkey", "fake\rkey", "fake\u{7f}key"] {
+        let out = hub(
+            &[
+                "--host",
+                &Ipv4Addr::LOCALHOST.to_string(),
+                "--port",
+                &port,
+                "--upstream",
+                &upstream,
+            ],
+            &[
+                ("BRIGADE_HUB_UPSTREAM_KEY", key),
+                ("BRIGADE_FLEET_TOKEN", "fake-test-token"),
+            ],
+        );
+        assert_eq!(out.status.code(), Some(2));
+        let error = String::from_utf8_lossy(&out.stderr);
+        assert!(error.contains("invalid upstream key header"), "{error}");
+        assert!(!error.contains("listening on"), "{error}");
+        assert!(!error.contains(key), "must not print the key");
+    }
+}
+
+#[test]
+fn native_memory_needs_the_managed_upstream() {
+    let host = Ipv4Addr::LOCALHOST.to_string();
+    let upstream = format!("http://{}:1", Ipv4Addr::LOCALHOST);
+    let token = [("BRIGADE_FLEET_TOKEN", "fake-test-token")];
+    let out = hub(
+        &[
+            "--host",
+            &host,
+            "--upstream",
+            &upstream,
+            "--route-mode",
+            "memory=native",
+        ],
+        &token,
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        error.contains("memory=native requires the managed upstream"),
+        "{error}"
+    );
+    assert!(!error.contains("listening on"), "{error}");
+    // memory=proxy starts no memory writer, so it needs no maintenance owner.
+    let out = hub(
+        &[
+            "--host",
+            &host,
+            "--upstream",
+            &upstream,
+            "--route-mode",
+            "memory=proxy",
+            "--port",
+            "70000",
+        ],
+        &token,
+    );
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(error.contains("port must be 0-65535"), "{error}");
+}

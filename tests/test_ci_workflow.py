@@ -40,7 +40,7 @@ def test_ci_gate_accepts_confirmed_docs_skips_but_keeps_lightweight_checks_requi
     script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
     for event in ("pull_request", "merge_group", "push"):
         needs = {name: {"result": "skipped"} for name in names}
-        for name in ("changes", "content-guard", "repo-metadata"):
+        for name in ("changes", "content-guard", "repo-metadata", "changelog-fragments"):
             needs[name] = {"result": "success"}
         needs["changes"]["outputs"] = {"docs_only": "true"}
         if mutation in {"full", "unknown", "missing-classification"}:
@@ -117,7 +117,7 @@ def test_docs_classification_gates_every_runtime_job_without_implicit_success():
                     assert not _job_admitted(
                         text, name, docs=docs, cancelled=True, dependency=dependency, event=event
                     ), (name, event, docs, dependency)
-            if name in {"changes", "content-guard", "repo-metadata", "ci-gate"}:
+            if name in {"changes", "content-guard", "repo-metadata", "changelog-fragments", "ci-gate"}:
                 assert _job_admitted(text, name, docs="true", event=event)
                 continue
             assert not _job_admitted(text, name, docs="true", event=event), name
@@ -335,14 +335,18 @@ def test_ci_workflow_runs_embedded_engine_commands_from_engine_directories():
         "go vet ./...",
         "go install golang.org/x/vuln/cmd/govulncheck@v1.3.0",
         "govulncheck ./...",
-        "go build -o bin/miseledger ./cmd/miseledger",
+        'go build -o "bin/$name" "./cmd/$name"',
         "go build -o bin/sessionfind ./cmd/sessionfind",
         "scripts/check_release_workflow.sh",
+        'export EVIDENCE_BIN="$PWD/bin/$name"',
         "scripts/smoke_archive.sh",
         "scripts/smoke_mcp.sh",
         "scripts/smoke_http.sh",
     ):
         assert command in evidence_ledger
+    # Build and smoke both the canonical and the legacy evidence entry points.
+    loops = re.findall(r"for name in (.+); do", evidence_ledger)
+    assert loops == ["brigade-evidence miseledger"] * 2
 
 
 def test_ci_workflow_runs_notify_go_commands_from_notify_directory():
@@ -407,6 +411,23 @@ def test_ci_workflow_does_not_skip_docs_only_content_guard():
     # existing synthetic corpus. Both are load-bearing.
     assert "--strict" in text
     assert "--baseline .content-guard-baseline.json" in text
+
+
+def test_changelog_fragments_job_checks_fragments_and_guards_changelog_edits_on_every_diff():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = _workflow_job_section(text, "changelog-fragments")
+
+    # Always runs, including docs-only diffs: a lone CHANGELOG.md edit is classified as documentation.
+    assert "\n    if:" not in section
+    assert "\n    needs:" not in section
+    assert "python3 scripts/changelog_fragments.py check" in section
+    assert 'python3 scripts/changelog_fragments.py guard --base "$base"' in section
+    assert "fetch-depth: 2" in section
+    # The guard is skipped after merge, and the base is the test-merge parent, not pull_request.base.sha.
+    assert "if: ${{ github.event_name != 'push' }}" in section
+    assert "base=$(git rev-parse HEAD^1)" in section
+    assert 'if [ "$(git rev-parse HEAD^2 2>/dev/null)" != "$PR_HEAD_SHA" ]; then' in section
+    assert "github.event.merge_group.base_sha" in section
 
 
 def test_repo_metadata_command_inventory_failure_is_actionable_and_preserves_status():
@@ -633,9 +654,9 @@ def test_required_lint_allowlist_step_fails_closed_before_checking(tmp_path, bas
 
 
 # Pull requests run only the 3.12 shards. Merge groups and pushes to main run
-# every supported Python, so the queue still tests 3.10 and 3.11 before landing.
+# every supported Python, so the queue still tests 3.11 before landing.
 SHARD_PYTHON_AXIS = (
-    'python: ${{ fromJSON(github.event_name == \'pull_request\' && \'["3.12"]\' || \'["3.10", "3.11", "3.12"]\') }}'
+    "python: ${{ fromJSON(github.event_name == 'pull_request' && '[\"3.12\"]' || '[\"3.11\", \"3.12\"]') }}"
 )
 
 
@@ -651,12 +672,12 @@ def test_ci_workflow_limits_pull_request_shards_to_python312_only():
     assert match is not None, axis.group(1)
     pull_request, other_events = (json.loads(group) for group in match.groups())
     assert pull_request == ["3.12"]
-    assert other_events == ["3.10", "3.11", "3.12"]
+    assert other_events == ["3.11", "3.12"]
     # The shard name expands per leg, and the required test (X) names keep
     # the full matrix, so no check reports an unexpanded matrix expression.
     assert "matrix." not in re.search(r"^    if: (.+)$", shards, re.MULTILINE)[1]
     protected = _workflow_job_section(text, "test")
-    assert 'python: ["3.10", "3.11", "3.12"]' in protected
+    assert 'python: ["3.11", "3.12"]' in protected
     notice = _workflow_step_section(text, "test", "Note Python shards deferred to the merge queue")
     assert "if: ${{ github.event_name == 'pull_request' && matrix.python != '3.12' }}" in notice
     assert "::notice::" in notice
@@ -671,6 +692,8 @@ def test_ci_workflow_runs_four_shards_on_every_supported_python():
     assert "fail-fast: false" in shards
     assert "python scripts/ci_pytest_shard.py" in shards
     assert '--shard-index "${{ matrix.shard }}" --shard-count 4' in shards
+    # Each 4-vCPU shard runs its selection across four xdist workers.
+    assert shards.count("--shard-count 4 -- -q -n 4 --dist=worksteal") == 2
 
 
 def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks():
@@ -690,7 +713,7 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     assert "python -m coverage report --fail-under=78" in coverage
     assert "name: test (${{ matrix.python }})" in protected
     assert "needs: [changes, test-shards, coverage, cosign-integration, fleet-hub-container]" in protected
-    assert 'python: ["3.10", "3.11", "3.12"]' in protected
+    assert 'python: ["3.11", "3.12"]' in protected
     assert "if: ${{ !cancelled() && needs.changes.result == 'success'" in protected
     assert "CHANGES_RESULT: ${{ needs.changes.result }}" in protected
     assert "SHARDS_RESULT: ${{ needs.test-shards.result }}" in protected
@@ -712,15 +735,17 @@ def test_ci_workflow_shadow_gate_covers_required_jobs_and_their_dependencies():
     needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
     needs = set(re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE))
     # main's 20 required contexts, including the test/installer/quickstart
-    # matrix names, map to these nine jobs. Keep this snapshot independent
+    # matrix names, map to these jobs. Keep this snapshot independent
     # of the workflow so a rename cannot silently remove gate coverage.
     required_jobs = {
         "changes",
         "lint",
         "test",
         "component-manifest-provenance",
+        "engine-rename-installer",
         "content-guard",
         "repo-metadata",
+        "changelog-fragments",
         "install-from-source",
         "quickstart-smoke",
         "windows-native-acceptance",
@@ -1027,7 +1052,14 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "center readiness import-issues" not in text
     assert "$payload.ready" in text
     assert "$payload.blocking_issue_count" in text
-    assert "--db $dbPath sync $workRepo" in text
+    # A fresh repository is indexed without --db and must get the canonical index.
+    assert '$dbPath = Join-Path $workRepo ".brigade\\code-graph\\code-graph.db"' in text
+    assert "& $codeGraphExe sync $workRepo" in text
+    # Callers and MCP initialize run under each distinct entry point name.
+    assert "foreach ($callersExe in @(@($codeGraphExe, $" in text
+    assert "foreach ($mcpExe in @(@($codeGraphMcpExe, $" in text
+    assert text.count("| Select-Object -Unique)) {") >= 2
+    assert "& $callersExe --db $dbPath callers greet" in text
     assert "callers greet" in text
     assert 'if ($callersOutput -notmatch "call_greet")' in text
     assert "brigadewinacceptance" in text
@@ -1035,7 +1067,7 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "brigade work verify run (manual export)" in text
     assert "--capture brigade-work" in text
     assert "--no-reuse" in text
-    assert "brigade receipts export miseledger" in text
+    assert "brigade receipts export evidence" in text
     assert "import adapter" in text
     assert "brigade care install" in text
     assert "BrigadeCare-ingest-sweep" in text
@@ -1197,7 +1229,7 @@ def test_windows_native_acceptance_json_commands_keep_stderr_separate():
     assert "Invoke-ExternalCommand" in doctor
 
     import_section = text[
-        text.index('Write-Step "miseledger import adapter"') : text.index('Write-Step "miseledger search"')
+        text.index('Write-Step "evidence import adapter"') : text.index('Write-Step "miseledger search"')
     ]
     assert "2>&1" not in import_section
     assert "Invoke-ExternalCommand" in import_section
@@ -1425,7 +1457,10 @@ def test_windows_native_acceptance_source_mode_skips_only_bundled_unpublished_co
     # The agent-notify absolute-path smoke is gated on the computed required set
     # so source mode skips an unpublished agent-notify instead of invoking a
     # missing managed binary.
-    assert '$requiredIds = @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind") |' in main
+    assert (
+        '$requiredIds = @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind") |'
+        in main
+    )
     assert "Where-Object { $unpublishedIds -notcontains $_ }" in main
     assert 'if ($requiredIds -contains "agent-notify") {' in main
     agent_block = main[main.index('if ($requiredIds -contains "agent-notify") {') :]
@@ -1499,10 +1534,16 @@ def test_windows_native_acceptance_pypi_mode_never_skips_agent_notify():
     assert "Assert-ManagedComponentDigests -Manifest $releaseManifest -Report $report -ManagedBin $managedBin" in main
     digest_fn = _extract_powershell_function(script, "Assert-ManagedComponentDigests")
     assert '"agent-notify"' in digest_fn
-    assert '"graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"' in digest_fn
+    assert '"brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind"' in digest_fn
 
     release_fn = _extract_powershell_function(script, "Assert-ReleaseManifestAndAssets")
-    for component_id in ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"):
+    for component_id in (
+        "agent-notify",
+        "brigade-code-graph",
+        "brigade-code-graph-mcp",
+        "brigade-evidence",
+        "sessionfind",
+    ):
         assert component_id in release_fn
     assert (
         'foreach ($platform in @("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64"))'
@@ -1572,7 +1613,8 @@ def test_windows_native_acceptance_source_mode_requires_same_commit_engine_binar
     # engines. It must land *after* the component report; see
     # test_windows_native_acceptance_asserts_component_health_before_pinning_engines
     # for why the reverse order cannot work.
-    assert main.index("Install-SameCommitEngines") < main.index("$mcpResponse =")
+    assert main.index("Install-SameCommitEngines") < main.index("$mcpRequest =")
+    assert '$codeGraphMcpExe = Join-Path $EngineBinDir "brigade-code-graph-mcp.exe"' in main
 
 
 def test_windows_native_acceptance_asserts_component_health_before_pinning_engines():
@@ -1609,7 +1651,11 @@ def test_ci_windows_native_acceptance_builds_and_pins_same_commit_engines():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     section = _workflow_job_section(text, "windows-native-acceptance")
 
-    assert "cargo build --release --locked --bin graphtrail --bin graphtrail-mcp" in section
+    assert (
+        '$codeGraphBins = @("graphtrail", "graphtrail-mcp", "brigade-code-graph", "brigade-code-graph-mcp")' in section
+    )
+    assert 'cargo build --release --locked @($codeGraphBins | ForEach-Object { "--bin"; $_ })' in section
+    assert 'Copy-Item "target/release/$bin.exe" "$env:GITHUB_WORKSPACE/engine-bin/$bin.exe"' in section
     assert "./cmd/miseledger" in section
     assert "./cmd/sessionfind" in section
     assert "-EngineBinDir" in section
@@ -1633,6 +1679,7 @@ def test_native_windows_containment_is_required_and_rejects_selected_skips():
     assert 'assert os.name == "nt"' in probe
     assert '"tests/test_windows_job.py::TestNativeContainment"' in probe
     assert '"tests/test_skills_state_windows.py"' in probe
+    assert '"tests/test_nt_private_storage.py::TestNativePrivateStorage"' in probe
     assert '"tests/test_dirfd.py::test_fsync_directory_accepts_native_windows_directory_handles"' in probe
     assert "pytest_runtest_logreport" in probe and "pytest_collectreport" in probe
     assert "self.skipped |= report.skipped" in probe
@@ -1680,6 +1727,7 @@ EXISTING_CI_JOBS = {
     "cosign-integration": "cosign (${{ matrix.cosign }})",
     "content-guard": None,
     "repo-metadata": None,
+    "changelog-fragments": None,
     "install-from-source": None,
     "quickstart-smoke": "quickstart-smoke (${{ matrix.os }})",
     "windows-native-acceptance": "windows-native-acceptance",
@@ -1691,6 +1739,7 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
     jobs = text.split("jobs:\n", 1)[1]
     assert set(re.findall(r"^  ([a-z0-9-]+):$", jobs, re.MULTILINE)) == set(EXISTING_CI_JOBS) | {
         "trusted-runner-canary",
+        "engine-rename-installer",
         "ci-gate",
         "windows-affected-tests",
         "pr-tier-shadow",
@@ -1718,7 +1767,7 @@ def test_ci_migration_preserves_complete_matrices():
     for job, axis in (
         ("test-shards", SHARD_PYTHON_AXIS),
         ("test-shards", "shard: [0, 1, 2, 3]"),
-        ("test", 'python: ["3.10", "3.11", "3.12"]'),
+        ("test", 'python: ["3.11", "3.12"]'),
         ("cosign-integration", 'cosign: ["v2.6.5", "v3.1.3"]'),
         ("fleet-hub-container", "platform: [linux/amd64, linux/arm64]"),
         ("quickstart-smoke", "os: [ubuntu-latest, macos-latest, windows-latest]"),
@@ -2382,7 +2431,8 @@ def test_windows_release_asset_validation_runtime(tmp_path, case, engine):
 
     base, bodies, checksums = _release_fixture(additive=case != "legacy")
     if case == "partial":
-        del checksums["brigade-evidence-linux-amd64"]
+        # Drop one legacy alias: the pinned canonical set stays complete, so only the count check can catch it.
+        del checksums["miseledger-linux-amd64"]
     elif case == "corrupt":
         bodies["brigade-evidence-windows-amd64.exe"] = b"bad alias"
     elif case == "extra":
@@ -2455,7 +2505,9 @@ def test_windows_canonical_acceptance_runtime(tmp_path, engine, case):
     for component in manifest["components"].values():
         component["component_revision"] = "a" * 40
     if case in {"revision", "mixed"}:
-        manifest["components"]["graphtrail"]["component_revision"] = "invalid" if case == "revision" else "b" * 40
+        manifest["components"]["brigade-code-graph"]["component_revision"] = (
+            "invalid" if case == "revision" else "b" * 40
+        )
     for name, body in bodies.items():
         (tmp_path / name).write_bytes(body)
     (tmp_path / "component-manifest-v1.json").write_text(json.dumps(manifest))

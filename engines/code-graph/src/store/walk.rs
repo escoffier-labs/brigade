@@ -218,6 +218,9 @@ fn is_nested_repo(entry: &DirEntry) -> bool {
 }
 
 fn is_hardcoded_floor(entry: &DirEntry) -> bool {
+    if crate::store::db::is_index_dir(entry.path()) {
+        return true;
+    }
     let name = entry.file_name().to_string_lossy();
     matches!(
         name.as_ref(),

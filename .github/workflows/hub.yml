@@ -1,0 +1,82 @@
+name: Hub
+on:
+  push:
+    branches: [main]
+    paths: ['engines/hub/**', 'src/brigade/fleet_hub_server.py', 'tests/test_fleet_hub_server.py', 'src/brigade/fleet_hub*.py', 'registry/skills/verify-brigade/hub_contract*', 'registry/skills/verify-brigade/hub_readonly.py', 'registry/skills/verify-brigade/hub_audit.py', '.github/workflows/hub.yml']
+  pull_request:
+    paths: ['engines/hub/**', 'src/brigade/fleet_hub_server.py', 'tests/test_fleet_hub_server.py', 'src/brigade/fleet_hub*.py', 'registry/skills/verify-brigade/hub_contract*', 'registry/skills/verify-brigade/hub_readonly.py', 'registry/skills/verify-brigade/hub_audit.py', '.github/workflows/hub.yml']
+permissions:
+  contents: read
+jobs:
+  hub:
+    name: hub (Rust ${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain: [stable, '1.85.0']
+    defaults:
+      run:
+        working-directory: engines/hub
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e ../..
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engines/hub
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --locked --release
+      - name: Ops authentication and shadow housekeeping
+        run: python tests/ops.py
+      - name: Development load harness unit tests
+        run: python -m unittest discover -s bench -p 'test_*.py'
+      - name: Proxy transport integration
+        run: python tests/transport.py
+      - name: Lazy schema through managed front and restart
+        run: python tests/lazy_schema.py
+      - name: Front admission through HTTPS
+        run: python tests/admission.py
+      - name: V1 claim client failure modes
+        run: python tests/claims.py
+      - name: Credential body share memory peak
+        run: python tests/memory_peak.py
+      - name: Native registration wire parity and revocation
+        run: python tests/registration.py
+      - name: Memory route availability and restart
+        run: python tests/memory.py
+      - name: Native claims wire parity, fencing and contention
+        run: python tests/claims_native.py
+      - name: Frozen wire contract through managed front
+        working-directory: .
+        run: >-
+          python registry/skills/verify-brigade/control-brigade.py hub-contract
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode claims=native'
+          --clock-hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode claims=native --test-clock-file {clock_file}'
+      - name: Native registration and claims storage parity
+        working-directory: .
+        run: >-
+          python registry/skills/verify-brigade/control-brigade.py storage-parity
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode claims=native --test-clock-file {clock_file}'
+      - name: Read-only production profile audit through managed front
+        working-directory: .
+        run: >-
+          python registry/skills/verify-brigade/control-brigade.py hub-contract --profile prod-readonly
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode claims=native'
+      - name: Memory profile through managed front
+        working-directory: .
+        run: >-
+          python registry/skills/verify-brigade/control-brigade.py hub-contract --profile memory
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode memory=native'
+      - name: Memory profile on a hub without memory
+        working-directory: .
+        run: >-
+          python registry/skills/verify-brigade/control-brigade.py hub-contract --profile memory --memory-absent
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native'

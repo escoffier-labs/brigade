@@ -102,6 +102,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .fleet_hub_upstream import configure_connection
+
 from . import (
     fleet_command_deck,
     fleet_hub_events,
@@ -122,7 +124,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 47
+SCHEMA_VERSION = 50  # v50: claim recovery floor (fleet_hub_claims.recovery_floor), no DDL
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -740,10 +742,11 @@ def _apply_schema(
     ensure_ci_schema(conn)
     # v38 -> v39: MCP Events subscriptions, event outbox and delivery state.
     fleet_hub_events.ensure_schema(conn)
-    from . import fleet_hub_identity, fleet_hub_message_keys
+    from . import fleet_hub_findings, fleet_hub_identity, fleet_hub_message_keys
 
     fleet_hub_message_keys.ensure_schema(conn)
     fleet_hub_identity.ensure_schema(conn)
+    fleet_hub_findings.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -846,6 +849,7 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     db_path = Path(db_path).expanduser().resolve()
     conn = sqlite3.connect(f"{db_path.as_uri()}?mode=rw", timeout=10, uri=True)
     try:
+        configure_connection(conn)
         conn.execute("PRAGMA busy_timeout=5000")
         _refuse_newer_schema(conn, db_path)
     except BaseException:
@@ -933,6 +937,7 @@ def init_db(
     resolved = db_path.resolve()
     conn = sqlite3.connect(str(resolved), timeout=10)
     try:
+        configure_connection(conn)
         conn.execute(f"PRAGMA busy_timeout={_INIT_BUSY_TIMEOUT_MS}")
         with _migration_lock(resolved):
             _init_schema(conn, resolved, storage_policy=storage_policy, prune_messages=prune_messages)
@@ -1057,14 +1062,19 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
     return {"accepted": accepted, "duplicate": duplicate}
 
 
+def _v1_preference(payload: dict[str, Any]) -> dict[str, Any]:
+    """Frozen v1 wire spelling; storage and presentation use orchestrator."""
+    return {("chef" if key == "orchestrator" else key): value for key, value in payload.items()}
+
+
 def get_run_preference(conn: sqlite3.Connection) -> dict[str, Any]:
     """Return the one-row fleet run preference (see ``fleet_hub_preference``)."""
-    return fleet_hub_preference.get_run_preference(conn)
+    return _v1_preference(fleet_hub_preference.get_run_preference(conn))
 
 
 def set_run_preference(conn: sqlite3.Connection, raw: Any, *, updated_by: str | None = None) -> dict[str, Any]:
     """Replace the fleet run preference (see ``fleet_hub_preference``)."""
-    return fleet_hub_preference.set_run_preference(conn, raw, updated_by=updated_by)
+    return _v1_preference(fleet_hub_preference.set_run_preference(conn, raw, updated_by=updated_by))
 
 
 def get_run_preference_meta(conn: sqlite3.Connection) -> dict[str, str | None]:

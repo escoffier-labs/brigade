@@ -7,7 +7,7 @@ description: Use at the start of any work session and whenever you verify a chan
 
 Brigade Stack only earns its keep if real work flows through it. Installed and never used, it is dead weight: the daily brief is empty, the outcome ledger never fills, and `outcome rank` says "ranking: none". This skill is the loop that feeds it. Check what is pending, run your verification *through* Brigade Stack so it produces a signed receipt, record the outcome against the skill or card that did the work, export receipts so the next run gets an evidence brief, and hand off what you learned.
 
-**Core principle:** the model never grades its own work. Receipts record observed exit codes; ad hoc verify receipts provide audit evidence, while eligible manifest-backed receipts can score an artifact. Route verification through Brigade Stack, capture the outcome, and feed receipts forward via MiseLedger when installed. Check scoreability before claiming a result affects ranking.
+**Core principle:** the model never grades its own work. Receipts record observed exit codes; ad hoc verify receipts provide audit evidence, while eligible manifest-backed receipts can score an artifact. Route verification through Brigade Stack, capture the outcome, and feed receipts forward via brigade-evidence when installed. Check scoreability before claiming a result affects ranking.
 
 ## When this applies
 
@@ -55,14 +55,14 @@ Ad hoc `--command` and `--argv-json` receipts are audit-only evidence and cannot
 Do not invent a skill name you are not running just to have something to capture against.
 
 ### 4. Export receipts so the next run can reuse them (optional stations)
-When GraphTrail and MiseLedger are installed, close the receipts-to-context loop so the next run sees measured evidence, not only a handoff. `brigade work verify run --capture <skill>` auto-exports and imports pending receipts after capture (fail-open when `miseledger` is absent). For backlog catch-up or fleet repos, run manually:
+When brigade-code-graph and brigade-evidence are installed, close the receipts-to-context loop so the next run sees measured evidence, not only a handoff. `brigade work verify run --capture <skill>` auto-exports and imports pending receipts after capture (fail-open when `brigade-evidence` is absent). For backlog catch-up or fleet repos, run manually:
 ```bash
-brigade receipts export miseledger --target . --new-only --import   # fail-open if miseledger is absent
-# next brigade run attaches a capped evidence brief from MiseLedger automatically
+brigade receipts export miseledger --target . --new-only --import   # fail-open if brigade-evidence is absent
+# next brigade run attaches a capped evidence brief from brigade-evidence automatically
 # or fetch on demand:
 brigade work import context --from-miseledger "auth receipts" --target .
 ```
-GraphTrail is what makes the brief measurable: verify/run receipts carry `code_graph_delta`, and non-read-only runs record `context_eval.brief_hit_rate` (did the pre-run context name the files the run actually touched?). `brigade outcome rank` surfaces mean brief hit rate per skill as a quality signal (secondary sort; install/rollback still use exit-code signals only).
+brigade-code-graph is what makes the brief measurable: verify/run receipts carry `code_graph_delta`, and non-read-only runs record `context_eval.brief_hit_rate` (did the pre-run context name the files the run actually touched?). `brigade outcome rank` surfaces mean brief hit rate per skill as a quality signal (secondary sort; install/rollback still use exit-code signals only).
 
 One-glance loop health:
 ```bash
@@ -82,7 +82,7 @@ brigade outcome reconcile --target .       # dry-run; --apply promotes a proven 
 - Capture an outcome after every verify, naming the skill or card that did the work.
 - One verify, one capture. Never batch or invent outcomes - the receipt is the evidence.
 - Prefer run-receipt capture (`outcome capture --run-receipt latest`) when the worker run is what changed code; verify receipts often have no-op graph deltas.
-- Export receipts into MiseLedger when the evidence station is installed so the next run's context is measured, not guessed.
+- Export receipts into brigade-evidence when the evidence station is installed so the next run's context is measured, not guessed.
 - End-of-session handoffs stay mandatory; this skill adds the verify-and-capture-and-feed-forward half of the loop.
 
 ## Common mistakes
@@ -90,5 +90,7 @@ brigade outcome reconcile --target .       # dry-run; --apply promotes a proven 
 - Capturing against a skill you did not actually use, which poisons the ranking.
 - Skipping capture on failures loses audit evidence. Failures can affect artifact ranking only when the receipt meets the scoring and attribution requirements.
 - Treating Brigade Stack as install-and-forget. It is dormant until work flows through it; this skill is how the work flows.
-- Stopping at capture without export: receipts pile up locally and the next `brigade run` has no MiseLedger evidence brief to attach.
+- Stopping at capture without export: receipts pile up locally and the next `brigade run` has no brigade-evidence evidence brief to attach.
 - Putting shell operators in the verify command. `brigade work verify run` splits `--command` with `shlex` and runs it with `shell=False` in the `--target` directory, so `cd x && pytest`, pipes, and `&&` do NOT work. Set the working directory with `--target <dir>` and pass a single command, e.g. `--target ./pkg --command "pytest -q"`.
+
+The receipt export subcommand and context import flag retain their legacy spelling for compatibility through v0.32.

@@ -12,9 +12,10 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 
-from . import component_bins, managed_snapshot, proc
+from . import component_bins, component_manifest, engine_paths, managed_snapshot, proc
 from .doctor import OK, WARN, FAIL, MANUAL
 from .station import CheckResult, DoctorContext
 
@@ -416,7 +417,7 @@ def _agent_notify_install_command() -> List[str]:
 def _graphtrail_doctor(ctx: DoctorContext) -> List[CheckResult]:
     """Health-check GraphTrail for the target workspace (optional station)."""
     name = "graphtrail (code graph)"
-    binary = component_bins.resolve("graphtrail")
+    binary = component_bins.resolve("brigade-code-graph")
     if not binary:
         return [
             (
@@ -425,9 +426,12 @@ def _graphtrail_doctor(ctx: DoctorContext) -> List[CheckResult]:
                 "not installed; run `brigade setup` (direct Cargo install is one-release compatibility only)",
             )
         ]
-    db = ctx.target / ".graphtrail" / "graphtrail.db"
+    try:
+        db = engine_paths.code_graph_db(ctx.target).path
+    except ValueError as exc:
+        return [(WARN, name, str(exc))]
     if not db.is_file():
-        return [(WARN, name, "installed; run `graphtrail sync` to build .graphtrail/graphtrail.db")]
+        return [(WARN, name, f"installed; run `brigade code sync` to build {db}")]
     r = proc.run([binary, "doctor", "--json"], timeout=30.0)
     if r.code != 0:
         return [(WARN, name, f"doctor exit {r.code}; graph may need re-sync")]
@@ -472,7 +476,7 @@ def _plating_doctor(ctx: DoctorContext) -> List[CheckResult]:
 # are advisory: they never FAIL a workspace doctor run.
 def _miseledger_doctor(ctx: DoctorContext) -> List[CheckResult]:
     name = "miseledger (evidence archive)"
-    binary = component_bins.resolve("miseledger")
+    binary = component_bins.resolve("brigade-evidence")
     if not binary:
         return [(MANUAL, name, "not installed; run `brigade setup`")]
     r = proc.run([binary, "doctor", "--json"], timeout=120.0)
@@ -481,7 +485,8 @@ def _miseledger_doctor(ctx: DoctorContext) -> List[CheckResult]:
             (
                 WARN,
                 name,
-                "doctor check timed out after 120s (large archive, not an error); run `miseledger doctor` manually",
+                "doctor check timed out after 120s (large archive, not an error); "
+                f"run `{Path(binary).name} doctor` manually",
             )
         ]
     data = r.json()
@@ -634,9 +639,9 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         ),
     ),
     ManagedTool(
-        name="miseledger",
+        name="brigade-evidence",
         station="evidence",
-        command="miseledger",
+        command="brigade-evidence",
         summary="local-first evidence ledger: imports adapter JSONL, FTS search, evidence bundles",
         install_args=["brigade", "setup"],
         wire=_noop_wire,
@@ -644,32 +649,32 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         surfaces=(
             _surface(
                 "doctor-json",
-                ("miseledger", "doctor", "--json"),
+                ("brigade-evidence", "doctor", "--json"),
                 read_only=False,
                 timeout_seconds=120.0,
-                probe=("miseledger", "doctor", "--help"),
+                probe=("brigade-evidence", "doctor", "--help"),
                 probe_contains=("--json", "--mcp", "--archive"),
             ),
             _surface(
                 "brief-markdown",
-                ("miseledger", "evidence", "<task>", "--markdown", "--limit", "5"),
+                ("brigade-evidence", "evidence", "<task>", "--markdown", "--limit", "5"),
                 read_only=False,
                 timeout_seconds=10.0,
                 max_chars=4000,
-                probe=("miseledger", "evidence", "--help"),
+                probe=("brigade-evidence", "evidence", "--help"),
                 probe_contains=("--markdown", "--limit"),
             ),
-            _surface("verify-exit", ("miseledger", "version"), timeout_seconds=10.0),
+            _surface("verify-exit", ("brigade-evidence", "version"), timeout_seconds=10.0),
         ),
     ),
-    # GraphTrail closes the other half of the receipts-to-context loop: code-graph
+    # The code graph closes the other half of the receipts-to-context loop: code-graph
     # briefs and deltas on verify/run receipts. Install is the managed engine
     # binary from `brigade setup`; doctor is fail-open (MANUAL when absent) like
     # every other optional sidecar.
     ManagedTool(
-        name="graphtrail",
+        name="brigade-code-graph",
         station="search",
-        command="graphtrail",
+        command="brigade-code-graph",
         summary="local code-graph CLI: callers, callees, impact, context briefs, and structural diffs",
         install_args=["brigade", "setup"],
         wire=_noop_wire,
@@ -677,18 +682,18 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         surfaces=(
             _surface(
                 "brief-markdown",
-                ("graphtrail", "context", "<task>", "--markdown"),
+                ("brigade-code-graph", "context", "<task>", "--markdown"),
                 timeout_seconds=10.0,
                 max_chars=4000,
-                probe=("graphtrail", "context", "--help"),
+                probe=("brigade-code-graph", "context", "--help"),
                 probe_contains=("--markdown",),
             ),
-            _surface("verify-exit", ("graphtrail", "--version"), timeout_seconds=10.0),
+            _surface("verify-exit", ("brigade-code-graph", "--version"), timeout_seconds=10.0),
             _surface(
                 "doctor-json",
-                ("graphtrail", "doctor", "--json"),
+                ("brigade-code-graph", "doctor", "--json"),
                 timeout_seconds=30.0,
-                probe=("graphtrail", "doctor", "--help"),
+                probe=("brigade-code-graph", "doctor", "--help"),
                 probe_contains=("--json",),
             ),
         ),
@@ -748,7 +753,13 @@ def for_station(station: str) -> Tuple[ManagedTool, ...]:
 
 
 def resolve(name: str) -> Optional[ManagedTool]:
+    """Return the managed tool for a canonical or legacy id.
+
+    Legacy engine ids resolve as aliases of their canonical family through
+    v0.32 (docs/phase-engine-rename.md, R4).
+    """
+    canonical = component_manifest.family_id(name)
     for t in _TOOLS:
-        if t.name == name:
+        if t.name == canonical:
             return t
     return None

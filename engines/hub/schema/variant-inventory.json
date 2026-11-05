@@ -1,0 +1,3577 @@
+{
+  "claims": [
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "target",
+            "owner_node",
+            "owner_conductor",
+            "harness",
+            "role",
+            "job",
+            "session",
+            "holder_token",
+            "acquired_at",
+            "renewed_at",
+            "ttl_seconds",
+            "expires_at",
+            "lock_token",
+            "lock_acquired_at",
+            "lock_run_dir"
+          ],
+          "upgraded": [
+            "target",
+            "owner_node",
+            "owner_conductor",
+            "holder_token",
+            "acquired_at",
+            "renewed_at",
+            "ttl_seconds",
+            "expires_at",
+            "harness",
+            "role",
+            "job",
+            "session",
+            "lock_token",
+            "lock_acquired_at",
+            "lock_run_dir"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT )",
+          "upgraded": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL , harness TEXT, role TEXT, job TEXT, session TEXT, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT)"
+        }
+      },
+      "sources": [
+        "schema-02"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "target",
+            "owner_node",
+            "owner_conductor",
+            "harness",
+            "role",
+            "job",
+            "session",
+            "holder_token",
+            "acquired_at",
+            "renewed_at",
+            "ttl_seconds",
+            "expires_at",
+            "lock_token",
+            "lock_acquired_at",
+            "lock_run_dir"
+          ],
+          "upgraded": [
+            "target",
+            "owner_node",
+            "owner_conductor",
+            "holder_token",
+            "acquired_at",
+            "renewed_at",
+            "ttl_seconds",
+            "expires_at",
+            "lock_token",
+            "lock_acquired_at",
+            "lock_run_dir",
+            "harness",
+            "role",
+            "job",
+            "session"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT )",
+          "upgraded": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT , harness TEXT, role TEXT, job TEXT, session TEXT)"
+        }
+      },
+      "sources": [
+        "schema-03"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "target",
+            "owner_node",
+            "owner_conductor",
+            "harness",
+            "role",
+            "job",
+            "session",
+            "holder_token",
+            "acquired_at",
+            "renewed_at",
+            "ttl_seconds",
+            "expires_at",
+            "lock_token",
+            "lock_acquired_at",
+            "lock_run_dir"
+          ],
+          "upgraded": [
+            "target",
+            "owner_node",
+            "owner_conductor",
+            "holder_token",
+            "acquired_at",
+            "renewed_at",
+            "ttl_seconds",
+            "expires_at",
+            "harness",
+            "role",
+            "job",
+            "session",
+            "lock_token",
+            "lock_acquired_at",
+            "lock_run_dir"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT )",
+          "upgraded": "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, harness TEXT, role TEXT, job TEXT, session TEXT, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT)"
+        }
+      },
+      "sources": [
+        "test_v2_claim_rows_survive_the_lease_column_upgrade"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "target",
+            "owner_node",
+            "owner_conductor",
+            "harness",
+            "role",
+            "job",
+            "session",
+            "holder_token",
+            "acquired_at",
+            "renewed_at",
+            "ttl_seconds",
+            "expires_at",
+            "lock_token",
+            "lock_acquired_at",
+            "lock_run_dir"
+          ],
+          "upgraded": [
+            "target",
+            "owner_node",
+            "owner_conductor",
+            "holder_token",
+            "acquired_at",
+            "renewed_at",
+            "ttl_seconds",
+            "expires_at",
+            "lock_token",
+            "harness",
+            "role",
+            "job",
+            "session",
+            "lock_acquired_at",
+            "lock_run_dir"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT )",
+          "upgraded": "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, lock_acquired_at TEXT, lock_run_dir TEXT)"
+        }
+      },
+      "sources": [
+        "test_lease_column_upgrade_is_safe_under_concurrent_init"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "node_id",
+            "run_id",
+            "sequence",
+            "digest",
+            "repo",
+            "seat",
+            "harness",
+            "state",
+            "ts",
+            "exit_status",
+            "capability_fingerprint",
+            "repo_identity",
+            "context",
+            "received_at"
+          ],
+          "upgraded": [
+            "node_id",
+            "run_id",
+            "sequence",
+            "digest",
+            "repo",
+            "seat",
+            "harness",
+            "state",
+            "ts",
+            "exit_status",
+            "capability_fingerprint",
+            "repo_identity",
+            "received_at",
+            "context"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest) )",
+          "upgraded": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, received_at TEXT NOT NULL, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest) )"
+        }
+      },
+      "sources": [
+        "user-version-22",
+        "schema-14",
+        "schema-15",
+        "schema-18",
+        "schema-19",
+        "schema-21",
+        "schema-22",
+        "schema-23",
+        "schema-24",
+        "schema-25",
+        "schema-26",
+        "schema-30",
+        "schema-31",
+        "v0.27.0",
+        "events-context"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "node_id",
+            "run_id",
+            "sequence",
+            "digest",
+            "repo",
+            "seat",
+            "harness",
+            "state",
+            "ts",
+            "exit_status",
+            "capability_fingerprint",
+            "repo_identity",
+            "context",
+            "received_at"
+          ],
+          "upgraded": [
+            "node_id",
+            "run_id",
+            "sequence",
+            "digest",
+            "repo",
+            "seat",
+            "harness",
+            "state",
+            "ts",
+            "received_at",
+            "exit_status",
+            "capability_fingerprint",
+            "repo_identity",
+            "context"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest) )",
+          "upgraded": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, received_at TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest) )"
+        }
+      },
+      "sources": [
+        "schema-01",
+        "schema-02",
+        "schema-03"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "node_id",
+            "run_id",
+            "sequence",
+            "digest",
+            "repo",
+            "seat",
+            "harness",
+            "state",
+            "ts",
+            "exit_status",
+            "capability_fingerprint",
+            "repo_identity",
+            "context",
+            "received_at"
+          ],
+          "upgraded": [
+            "node_id",
+            "run_id",
+            "sequence",
+            "digest",
+            "repo",
+            "seat",
+            "harness",
+            "state",
+            "ts",
+            "exit_status",
+            "capability_fingerprint",
+            "received_at",
+            "repo_identity",
+            "context"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest) )",
+          "upgraded": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, received_at TEXT NOT NULL, repo_identity TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest) )"
+        }
+      },
+      "sources": [
+        "schema-04",
+        "schema-12",
+        "schema-13",
+        "test_fleet_claims"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "node_id",
+            "run_id",
+            "sequence",
+            "digest",
+            "repo",
+            "seat",
+            "harness",
+            "state",
+            "ts",
+            "exit_status",
+            "capability_fingerprint",
+            "repo_identity",
+            "context",
+            "received_at"
+          ],
+          "upgraded": [
+            "node_id",
+            "run_id",
+            "sequence",
+            "digest",
+            "repo",
+            "seat",
+            "harness",
+            "state",
+            "ts",
+            "received_at",
+            "repo_identity",
+            "exit_status",
+            "capability_fingerprint",
+            "context"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest) )",
+          "upgraded": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, received_at TEXT NOT NULL, repo_identity TEXT, exit_status INTEGER, capability_fingerprint TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest) )"
+        }
+      },
+      "sources": [
+        "test_fleet_deck_badges",
+        "test_fleet_command_deck"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "node_id",
+            "run_id",
+            "sequence",
+            "digest",
+            "repo",
+            "seat",
+            "harness",
+            "state",
+            "ts",
+            "exit_status",
+            "capability_fingerprint",
+            "repo_identity",
+            "context",
+            "received_at"
+          ],
+          "upgraded": [
+            "node_id",
+            "run_id",
+            "sequence",
+            "digest",
+            "repo",
+            "seat",
+            "harness",
+            "state",
+            "ts",
+            "received_at",
+            "exit_status",
+            "capability_fingerprint",
+            "repo_identity",
+            "context"
+          ]
+        },
+        "columns": {
+          "fresh": [
+            [
+              "capability_fingerprint",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "context",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "digest",
+              "TEXT",
+              1,
+              null,
+              4,
+              0
+            ],
+            [
+              "exit_status",
+              "INTEGER",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "harness",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "node_id",
+              "TEXT",
+              1,
+              null,
+              1,
+              0
+            ],
+            [
+              "received_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "repo",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "repo_identity",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "run_id",
+              "TEXT",
+              1,
+              null,
+              2,
+              0
+            ],
+            [
+              "seat",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "sequence",
+              "INTEGER",
+              1,
+              null,
+              3,
+              0
+            ],
+            [
+              "state",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "ts",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ]
+          ],
+          "upgraded": [
+            [
+              "capability_fingerprint",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "context",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "digest",
+              "TEXT",
+              0,
+              null,
+              4,
+              0
+            ],
+            [
+              "exit_status",
+              "INTEGER",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "harness",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "node_id",
+              "TEXT",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              "received_at",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "repo",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "repo_identity",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "run_id",
+              "TEXT",
+              0,
+              null,
+              2,
+              0
+            ],
+            [
+              "seat",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "sequence",
+              "INTEGER",
+              0,
+              null,
+              3,
+              0
+            ],
+            [
+              "state",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "ts",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ]
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest) )",
+          "upgraded": "CREATE TABLE events (node_id TEXT, run_id TEXT, sequence INTEGER, digest TEXT, repo TEXT, seat TEXT, harness TEXT, state TEXT, ts TEXT, received_at TEXT, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest))"
+        }
+      },
+      "sources": [
+        "test_fleet_cloud"
+      ]
+    }
+  ],
+  "fleet_events": [
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "seq",
+            "event_id",
+            "name",
+            "subject",
+            "producer",
+            "data",
+            "created_at"
+          ],
+          "upgraded": [
+            "seq",
+            "event_id",
+            "name",
+            "subject",
+            "data",
+            "created_at",
+            "producer"
+          ]
+        },
+        "columns": {
+          "fresh": [
+            [
+              "created_at",
+              "REAL",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "data",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "event_id",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "name",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "producer",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "seq",
+              "INTEGER",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              "subject",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ]
+          ],
+          "upgraded": [
+            [
+              "created_at",
+              "REAL",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "data",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "event_id",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "name",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "producer",
+              "TEXT",
+              1,
+              "''",
+              0,
+              0
+            ],
+            [
+              "seq",
+              "INTEGER",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              "subject",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ]
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE fleet_events ( seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, subject TEXT NOT NULL, producer TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL)",
+          "upgraded": "CREATE TABLE fleet_events ( seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, subject TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL, producer TEXT NOT NULL DEFAULT '')"
+        }
+      },
+      "sources": [
+        "test_fleet_events_schema_upgrade"
+      ]
+    }
+  ],
+  "fleet_finding_grants": [
+    {
+      "differences": {},
+      "sources": [
+        "fresh",
+        "user-version-22",
+        "user-version-34",
+        "schema-01",
+        "schema-02",
+        "schema-03",
+        "schema-04",
+        "schema-12",
+        "schema-13",
+        "schema-14",
+        "schema-15",
+        "schema-18",
+        "schema-19",
+        "schema-21",
+        "schema-22",
+        "schema-23",
+        "schema-24",
+        "schema-25",
+        "schema-26",
+        "schema-30",
+        "schema-31",
+        "schema-32",
+        "schema-34",
+        "schema-36",
+        "schema-37",
+        "schema-38",
+        "schema-39",
+        "schema-40",
+        "schema-42",
+        "schema-43",
+        "schema-44",
+        "schema-45",
+        "schema-46",
+        "schema-47",
+        "schema-48",
+        "v0.27.0",
+        "v0.28.0",
+        "v0.29.0",
+        "v0.30.0",
+        "model-policy-rebuild",
+        "test_fleet_hub_sealed",
+        "test_fleet_messages",
+        "test_fleet_message_grants",
+        "test_fleet_model_roster",
+        "test_fleet_claims",
+        "test_run_preference",
+        "test_fleet_deck_badges",
+        "test_fleet_command_deck",
+        "test_fleet_cloud",
+        "test_fleet_nodes",
+        "test_fleet_events_schema_upgrade",
+        "test_fleet_claim_generations",
+        "test_v2_claim_rows_survive_the_lease_column_upgrade",
+        "test_lease_column_upgrade_is_safe_under_concurrent_init",
+        "messages-sealed",
+        "sessions-cloud",
+        "sessions-provider",
+        "events-context",
+        "model-native",
+        "principals-v45",
+        "principal-enrollment",
+        "message-sealed-reply",
+        "paging-access",
+        "work-links-owner",
+        "work-import-owner",
+        "work-links-version",
+        "questions-late",
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_findings": [
+    {
+      "differences": {},
+      "sources": [
+        "fresh",
+        "user-version-22",
+        "user-version-34",
+        "schema-01",
+        "schema-02",
+        "schema-03",
+        "schema-04",
+        "schema-12",
+        "schema-13",
+        "schema-14",
+        "schema-15",
+        "schema-18",
+        "schema-19",
+        "schema-21",
+        "schema-22",
+        "schema-23",
+        "schema-24",
+        "schema-25",
+        "schema-26",
+        "schema-30",
+        "schema-31",
+        "schema-32",
+        "schema-34",
+        "schema-36",
+        "schema-37",
+        "schema-38",
+        "schema-39",
+        "schema-40",
+        "schema-42",
+        "schema-43",
+        "schema-44",
+        "schema-45",
+        "schema-46",
+        "schema-47",
+        "schema-48",
+        "v0.27.0",
+        "v0.28.0",
+        "v0.29.0",
+        "v0.30.0",
+        "model-policy-rebuild",
+        "test_fleet_hub_sealed",
+        "test_fleet_messages",
+        "test_fleet_message_grants",
+        "test_fleet_model_roster",
+        "test_fleet_claims",
+        "test_run_preference",
+        "test_fleet_deck_badges",
+        "test_fleet_command_deck",
+        "test_fleet_cloud",
+        "test_fleet_nodes",
+        "test_fleet_events_schema_upgrade",
+        "test_fleet_claim_generations",
+        "test_v2_claim_rows_survive_the_lease_column_upgrade",
+        "test_lease_column_upgrade_is_safe_under_concurrent_init",
+        "messages-sealed",
+        "sessions-cloud",
+        "sessions-provider",
+        "events-context",
+        "model-native",
+        "principals-v45",
+        "principal-enrollment",
+        "message-sealed-reply",
+        "paging-access",
+        "work-links-owner",
+        "work-import-owner",
+        "work-links-version",
+        "questions-late",
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_mcp_reports": [
+    {
+      "differences": {
+        "autoincrement": {
+          "fresh": null,
+          "upgraded": false
+        },
+        "checks": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "column_order": {
+          "fresh": null,
+          "upgraded": [
+            "node_id",
+            "observed_at",
+            "report",
+            "updated_at"
+          ]
+        },
+        "columns": {
+          "fresh": null,
+          "upgraded": [
+            [
+              "node_id",
+              "TEXT",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              "observed_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "report",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "updated_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ]
+          ]
+        },
+        "foreign_keys": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "indexes": {
+          "fresh": null,
+          "upgraded": {
+            "sqlite_autoindex_fleet_mcp_reports_1": {
+              "columns": [
+                [
+                  0,
+                  "node_id",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  null,
+                  0,
+                  "BINARY",
+                  0
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "sql": "",
+              "unique": 1
+            }
+          }
+        },
+        "sql": {
+          "fresh": null,
+          "upgraded": "CREATE TABLE fleet_mcp_reports (node_id TEXT PRIMARY KEY, observed_at TEXT NOT NULL, report TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        }
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_message_principals": [
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "principal_id",
+            "name",
+            "label",
+            "token_hash",
+            "created_at",
+            "revoked_at",
+            "enrollment_id",
+            "role",
+            "person",
+            "authorization_enrollment_epoch",
+            "grant_epoch"
+          ],
+          "upgraded": [
+            "principal_id",
+            "name",
+            "label",
+            "token_hash",
+            "created_at",
+            "revoked_at",
+            "enrollment_id",
+            "authorization_enrollment_epoch",
+            "grant_epoch",
+            "role",
+            "person"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE fleet_message_principals ( principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT , role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT)",
+          "upgraded": "CREATE TABLE fleet_message_principals ( principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT , authorization_enrollment_epoch TEXT, grant_epoch TEXT, role TEXT NOT NULL DEFAULT 'agent', person TEXT)"
+        }
+      },
+      "sources": [
+        "schema-46"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "principal_id",
+            "name",
+            "label",
+            "token_hash",
+            "created_at",
+            "revoked_at",
+            "enrollment_id",
+            "role",
+            "person",
+            "authorization_enrollment_epoch",
+            "grant_epoch"
+          ],
+          "upgraded": [
+            "principal_id",
+            "name",
+            "label",
+            "token_hash",
+            "created_at",
+            "revoked_at",
+            "role",
+            "person",
+            "authorization_enrollment_epoch",
+            "grant_epoch",
+            "enrollment_id"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE fleet_message_principals ( principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT , role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT)",
+          "upgraded": "CREATE TABLE fleet_message_principals ( principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT, enrollment_id TEXT)"
+        }
+      },
+      "sources": [
+        "principal-enrollment"
+      ]
+    }
+  ],
+  "fleet_messages": [
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "id",
+            "sender",
+            "recipient",
+            "subject",
+            "body",
+            "reference",
+            "priority",
+            "client_id",
+            "payload_hash",
+            "reply_to",
+            "created_at",
+            "received_at",
+            "acked_at",
+            "acked_by",
+            "sender_label",
+            "thread",
+            "kind",
+            "envelope",
+            "content_state",
+            "envelope_bytes",
+            "sealed_reply_to"
+          ],
+          "upgraded": [
+            "id",
+            "sender",
+            "recipient",
+            "subject",
+            "body",
+            "reference",
+            "priority",
+            "reply_to",
+            "created_at",
+            "acked_at",
+            "acked_by",
+            "client_id",
+            "payload_hash",
+            "received_at",
+            "sender_label",
+            "thread",
+            "kind",
+            "envelope",
+            "content_state",
+            "envelope_bytes",
+            "sealed_reply_to"
+          ]
+        },
+        "columns": {
+          "fresh": [
+            [
+              "acked_at",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "acked_by",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "body",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "client_id",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "content_state",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "created_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "envelope",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "envelope_bytes",
+              "INTEGER",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "id",
+              "INTEGER",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              "kind",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "payload_hash",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "priority",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "received_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "recipient",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "reference",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "reply_to",
+              "INTEGER",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "sealed_reply_to",
+              "INTEGER",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "sender",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "sender_label",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "subject",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "thread",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ]
+          ],
+          "upgraded": [
+            [
+              "acked_at",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "acked_by",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "body",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "client_id",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "content_state",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "created_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "envelope",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "envelope_bytes",
+              "INTEGER",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "id",
+              "INTEGER",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              "kind",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "payload_hash",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "priority",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "received_at",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "recipient",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "reference",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "reply_to",
+              "INTEGER",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "sealed_reply_to",
+              "INTEGER",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "sender",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "sender_label",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "subject",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "thread",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ]
+          ]
+        },
+        "foreign_keys": {
+          "fresh": [
+            [
+              0,
+              0,
+              "fleet_messages",
+              "reply_to",
+              "id",
+              "NO ACTION",
+              "NO ACTION",
+              "NONE"
+            ]
+          ],
+          "upgraded": []
+        },
+        "sql": {
+          "fresh": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT , sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)",
+          "upgraded": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, reply_to INTEGER, created_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT , client_id TEXT, payload_hash TEXT, received_at TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
+        }
+      },
+      "sources": [
+        "test_fleet_hub_sealed",
+        "test_fleet_messages"
+      ]
+    },
+    {
+      "differences": {
+        "sql": {
+          "fresh": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT , sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)",
+          "upgraded": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
+        }
+      },
+      "sources": [
+        "test_fleet_message_grants"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "id",
+            "sender",
+            "recipient",
+            "subject",
+            "body",
+            "reference",
+            "priority",
+            "client_id",
+            "payload_hash",
+            "reply_to",
+            "created_at",
+            "received_at",
+            "acked_at",
+            "acked_by",
+            "sender_label",
+            "thread",
+            "kind",
+            "envelope",
+            "content_state",
+            "envelope_bytes",
+            "sealed_reply_to"
+          ],
+          "upgraded": [
+            "id",
+            "sender",
+            "recipient",
+            "subject",
+            "body",
+            "reference",
+            "priority",
+            "client_id",
+            "payload_hash",
+            "reply_to",
+            "created_at",
+            "received_at",
+            "acked_at",
+            "acked_by",
+            "sender_label",
+            "thread",
+            "kind",
+            "sealed_reply_to",
+            "envelope",
+            "content_state",
+            "envelope_bytes"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT , sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)",
+          "upgraded": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT , sender_label TEXT, thread TEXT, kind TEXT, sealed_reply_to INTEGER, envelope TEXT, content_state TEXT, envelope_bytes INTEGER)"
+        }
+      },
+      "sources": [
+        "messages-sealed"
+      ]
+    }
+  ],
+  "fleet_model_inventory_aliases": [
+    {
+      "differences": {
+        "autoincrement": {
+          "fresh": null,
+          "upgraded": false
+        },
+        "checks": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "column_order": {
+          "fresh": null,
+          "upgraded": [
+            "provider",
+            "canonical_model",
+            "native_model",
+            "created_at"
+          ]
+        },
+        "columns": {
+          "fresh": null,
+          "upgraded": [
+            [
+              "canonical_model",
+              "TEXT",
+              1,
+              null,
+              2,
+              0
+            ],
+            [
+              "created_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "native_model",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "provider",
+              "TEXT",
+              1,
+              null,
+              1,
+              0
+            ]
+          ]
+        },
+        "foreign_keys": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "indexes": {
+          "fresh": null,
+          "upgraded": {
+            "sqlite_autoindex_fleet_model_inventory_aliases_1": {
+              "columns": [
+                [
+                  0,
+                  "provider",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  "canonical_model",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  2,
+                  null,
+                  0,
+                  "BINARY",
+                  0
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "sql": "",
+              "unique": 1
+            }
+          }
+        },
+        "sql": {
+          "fresh": null,
+          "upgraded": "CREATE TABLE fleet_model_inventory_aliases ( provider TEXT NOT NULL, canonical_model TEXT NOT NULL, native_model TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (provider, canonical_model) )"
+        }
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_model_inventory_observations": [
+    {
+      "differences": {
+        "autoincrement": {
+          "fresh": null,
+          "upgraded": false
+        },
+        "checks": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "column_order": {
+          "fresh": null,
+          "upgraded": [
+            "observation_id",
+            "source",
+            "provider",
+            "harness",
+            "account_id",
+            "scope",
+            "status",
+            "captured_at",
+            "expires_at",
+            "models_json",
+            "error_reason",
+            "evidence_type",
+            "created_at"
+          ]
+        },
+        "columns": {
+          "fresh": null,
+          "upgraded": [
+            [
+              "account_id",
+              "TEXT",
+              1,
+              "''",
+              0,
+              0
+            ],
+            [
+              "captured_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "created_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "error_reason",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "evidence_type",
+              "TEXT",
+              1,
+              "'cli_probe'",
+              0,
+              0
+            ],
+            [
+              "expires_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "harness",
+              "TEXT",
+              1,
+              "''",
+              0,
+              0
+            ],
+            [
+              "models_json",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "observation_id",
+              "TEXT",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              "provider",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "scope",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "source",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "status",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ]
+          ]
+        },
+        "foreign_keys": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "indexes": {
+          "fresh": null,
+          "upgraded": {
+            "idx_fmi_obs_coverage": {
+              "columns": [
+                [
+                  0,
+                  "provider",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  "harness",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  2,
+                  "account_id",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  3,
+                  "captured_at",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  4,
+                  null,
+                  0,
+                  "BINARY",
+                  0
+                ]
+              ],
+              "origin": "c",
+              "partial": 0,
+              "sql": "CREATE INDEX idx_fmi_obs_coverage ON fleet_model_inventory_observations ( provider, harness, account_id, captured_at )",
+              "unique": 0
+            },
+            "sqlite_autoindex_fleet_model_inventory_observations_1": {
+              "columns": [
+                [
+                  0,
+                  "observation_id",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  null,
+                  0,
+                  "BINARY",
+                  0
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "sql": "",
+              "unique": 1
+            }
+          }
+        },
+        "sql": {
+          "fresh": null,
+          "upgraded": "CREATE TABLE fleet_model_inventory_observations ( observation_id TEXT PRIMARY KEY, source TEXT NOT NULL, provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL DEFAULT 'cli_probe', created_at TEXT NOT NULL )"
+        }
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_model_inventory_projections": [
+    {
+      "differences": {
+        "autoincrement": {
+          "fresh": null,
+          "upgraded": false
+        },
+        "checks": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "column_order": {
+          "fresh": null,
+          "upgraded": [
+            "provider",
+            "harness",
+            "account_id",
+            "observation_id",
+            "source",
+            "scope",
+            "status",
+            "captured_at",
+            "expires_at",
+            "models_json",
+            "error_reason",
+            "evidence_type",
+            "updated_at"
+          ]
+        },
+        "columns": {
+          "fresh": null,
+          "upgraded": [
+            [
+              "account_id",
+              "TEXT",
+              1,
+              "''",
+              3,
+              0
+            ],
+            [
+              "captured_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "error_reason",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "evidence_type",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "expires_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "harness",
+              "TEXT",
+              1,
+              "''",
+              2,
+              0
+            ],
+            [
+              "models_json",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "observation_id",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "provider",
+              "TEXT",
+              1,
+              null,
+              1,
+              0
+            ],
+            [
+              "scope",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "source",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "status",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "updated_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ]
+          ]
+        },
+        "foreign_keys": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "indexes": {
+          "fresh": null,
+          "upgraded": {
+            "sqlite_autoindex_fleet_model_inventory_projections_1": {
+              "columns": [
+                [
+                  0,
+                  "provider",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  "harness",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  2,
+                  "account_id",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  3,
+                  null,
+                  0,
+                  "BINARY",
+                  0
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "sql": "",
+              "unique": 1
+            }
+          }
+        },
+        "sql": {
+          "fresh": null,
+          "upgraded": "CREATE TABLE fleet_model_inventory_projections ( provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', observation_id TEXT NOT NULL, source TEXT NOT NULL, scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (provider, harness, account_id) )"
+        }
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_policy_guard_model_consumer_defaults_delete": [
+    {
+      "differences": {
+        "ddl": "CREATE TRIGGER fleet_policy_guard_model_consumer_defaults_delete BEFORE DELETE ON model_consumer_defaults WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END"
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_policy_guard_model_consumer_defaults_insert": [
+    {
+      "differences": {
+        "ddl": "CREATE TRIGGER fleet_policy_guard_model_consumer_defaults_insert BEFORE INSERT ON model_consumer_defaults WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END"
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_policy_guard_model_consumer_defaults_update": [
+    {
+      "differences": {
+        "ddl": "CREATE TRIGGER fleet_policy_guard_model_consumer_defaults_update BEFORE UPDATE ON model_consumer_defaults WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END"
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_policy_guard_model_policy_delete": [
+    {
+      "differences": {
+        "ddl": "CREATE TRIGGER fleet_policy_guard_model_policy_delete BEFORE DELETE ON model_policy WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END"
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_policy_guard_model_policy_insert": [
+    {
+      "differences": {
+        "ddl": "CREATE TRIGGER fleet_policy_guard_model_policy_insert BEFORE INSERT ON model_policy WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END"
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_policy_guard_model_policy_update": [
+    {
+      "differences": {
+        "ddl": "CREATE TRIGGER fleet_policy_guard_model_policy_update BEFORE UPDATE ON model_policy WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END"
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_policy_guard_model_roster_meta_delete": [
+    {
+      "differences": {
+        "ddl": "CREATE TRIGGER fleet_policy_guard_model_roster_meta_delete BEFORE DELETE ON model_roster_meta WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END"
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_policy_guard_model_roster_meta_insert": [
+    {
+      "differences": {
+        "ddl": "CREATE TRIGGER fleet_policy_guard_model_roster_meta_insert BEFORE INSERT ON model_roster_meta WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END"
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_policy_guard_model_roster_meta_update": [
+    {
+      "differences": {
+        "ddl": "CREATE TRIGGER fleet_policy_guard_model_roster_meta_update BEFORE UPDATE ON model_roster_meta WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END"
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_policy_guard_run_preference_delete": [
+    {
+      "differences": {
+        "ddl": "CREATE TRIGGER fleet_policy_guard_run_preference_delete BEFORE DELETE ON run_preference WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END"
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_policy_guard_run_preference_insert": [
+    {
+      "differences": {
+        "ddl": "CREATE TRIGGER fleet_policy_guard_run_preference_insert BEFORE INSERT ON run_preference WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END"
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_policy_guard_run_preference_update": [
+    {
+      "differences": {
+        "ddl": "CREATE TRIGGER fleet_policy_guard_run_preference_update BEFORE UPDATE ON run_preference WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END"
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_policy_migration": [
+    {
+      "differences": {
+        "autoincrement": {
+          "fresh": null,
+          "upgraded": false
+        },
+        "checks": {
+          "fresh": null,
+          "upgraded": [
+            "activated IN (0, 1)",
+            "singleton = 1"
+          ]
+        },
+        "column_order": {
+          "fresh": null,
+          "upgraded": [
+            "singleton",
+            "activated",
+            "activated_at",
+            "activated_by",
+            "reason",
+            "preview_digest",
+            "policy_revision",
+            "roster_revision",
+            "preference_digest",
+            "candidate_digest"
+          ]
+        },
+        "columns": {
+          "fresh": null,
+          "upgraded": [
+            [
+              "activated",
+              "INTEGER",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "activated_at",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "activated_by",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "candidate_digest",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "policy_revision",
+              "INTEGER",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "preference_digest",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "preview_digest",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "reason",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "roster_revision",
+              "INTEGER",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "singleton",
+              "INTEGER",
+              0,
+              null,
+              1,
+              0
+            ]
+          ]
+        },
+        "foreign_keys": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "indexes": {
+          "fresh": null,
+          "upgraded": {}
+        },
+        "sql": {
+          "fresh": null,
+          "upgraded": "CREATE TABLE fleet_policy_migration ( singleton INTEGER PRIMARY KEY CHECK (singleton = 1), activated INTEGER NOT NULL CHECK (activated IN (0, 1)), activated_at TEXT, activated_by TEXT, reason TEXT, preview_digest TEXT NOT NULL, policy_revision INTEGER NOT NULL, roster_revision INTEGER NOT NULL, preference_digest TEXT, candidate_digest TEXT )"
+        }
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_project_boards": [
+    {
+      "differences": {
+        "autoincrement": {
+          "fresh": null,
+          "upgraded": false
+        },
+        "checks": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "column_order": {
+          "fresh": null,
+          "upgraded": [
+            "owner",
+            "number",
+            "observed_at",
+            "snapshot",
+            "updated_at"
+          ]
+        },
+        "columns": {
+          "fresh": null,
+          "upgraded": [
+            [
+              "number",
+              "INTEGER",
+              1,
+              null,
+              2,
+              0
+            ],
+            [
+              "observed_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "owner",
+              "TEXT",
+              1,
+              null,
+              1,
+              0
+            ],
+            [
+              "snapshot",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "updated_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ]
+          ]
+        },
+        "foreign_keys": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "indexes": {
+          "fresh": null,
+          "upgraded": {
+            "sqlite_autoindex_fleet_project_boards_1": {
+              "columns": [
+                [
+                  0,
+                  "owner",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  "number",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  2,
+                  null,
+                  0,
+                  "BINARY",
+                  0
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "sql": "",
+              "unique": 1
+            }
+          }
+        },
+        "sql": {
+          "fresh": null,
+          "upgraded": "CREATE TABLE fleet_project_boards (owner TEXT NOT NULL, number INTEGER NOT NULL, observed_at TEXT NOT NULL, snapshot TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (owner, number))"
+        }
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_questions": [
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "question_id",
+            "caller",
+            "generation",
+            "request_id",
+            "payload_hash",
+            "operator",
+            "question",
+            "message_id",
+            "created_at",
+            "deadline",
+            "status",
+            "answer",
+            "answer_id",
+            "source",
+            "answered_by",
+            "answered_at",
+            "late_answer_message_id",
+            "late_answered_at",
+            "operator_reply_after_desktop_message_id",
+            "operator_reply_after_desktop_at"
+          ],
+          "upgraded": [
+            "question_id",
+            "caller",
+            "generation",
+            "request_id",
+            "payload_hash",
+            "operator",
+            "question",
+            "message_id",
+            "created_at",
+            "deadline",
+            "status",
+            "answer",
+            "answer_id",
+            "source",
+            "answered_by",
+            "answered_at",
+            "operator_reply_after_desktop_at",
+            "operator_reply_after_desktop_message_id",
+            "late_answered_at",
+            "late_answer_message_id"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE fleet_questions ( question_id TEXT PRIMARY KEY, caller TEXT NOT NULL, generation TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, operator TEXT NOT NULL, question TEXT NOT NULL, message_id INTEGER NOT NULL, created_at TEXT NOT NULL, deadline TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answer TEXT, answer_id INTEGER, source TEXT, answered_by TEXT, answered_at TEXT, late_answer_message_id INTEGER, late_answered_at TEXT, operator_reply_after_desktop_message_id INTEGER, operator_reply_after_desktop_at TEXT, UNIQUE(caller,generation,request_id) )",
+          "upgraded": "CREATE TABLE fleet_questions ( question_id TEXT PRIMARY KEY, caller TEXT NOT NULL, generation TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, operator TEXT NOT NULL, question TEXT NOT NULL, message_id INTEGER NOT NULL, created_at TEXT NOT NULL, deadline TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answer TEXT, answer_id INTEGER, source TEXT, answered_by TEXT, answered_at TEXT, operator_reply_after_desktop_at TEXT, operator_reply_after_desktop_message_id INTEGER, late_answered_at TEXT, late_answer_message_id INTEGER, UNIQUE(caller,generation,request_id) )"
+        }
+      },
+      "sources": [
+        "questions-late"
+      ]
+    }
+  ],
+  "fleet_read_snapshots": [
+    {
+      "differences": {
+        "columns": {
+          "fresh": [
+            [
+              "caller",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "expires_at",
+              "REAL",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "last_access",
+              "REAL",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "payload",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "payload_bytes",
+              "INTEGER",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "query_hash",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "snapshot_id",
+              "TEXT",
+              0,
+              null,
+              1,
+              0
+            ]
+          ],
+          "upgraded": [
+            [
+              "caller",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "expires_at",
+              "REAL",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "last_access",
+              "REAL",
+              1,
+              "0",
+              0,
+              0
+            ],
+            [
+              "payload",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "payload_bytes",
+              "INTEGER",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "query_hash",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "snapshot_id",
+              "TEXT",
+              0,
+              null,
+              1,
+              0
+            ]
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE fleet_read_snapshots (snapshot_id TEXT PRIMARY KEY, caller TEXT NOT NULL, query_hash TEXT NOT NULL, expires_at REAL NOT NULL, payload TEXT NOT NULL, payload_bytes INTEGER NOT NULL, last_access REAL NOT NULL)",
+          "upgraded": "CREATE TABLE fleet_read_snapshots (snapshot_id TEXT PRIMARY KEY, caller TEXT NOT NULL, query_hash TEXT NOT NULL, expires_at REAL NOT NULL, payload TEXT NOT NULL, payload_bytes INTEGER NOT NULL, last_access REAL NOT NULL DEFAULT 0)"
+        }
+      },
+      "sources": [
+        "paging-access"
+      ]
+    }
+  ],
+  "fleet_skill_reports": [
+    {
+      "differences": {
+        "autoincrement": {
+          "fresh": null,
+          "upgraded": false
+        },
+        "checks": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "column_order": {
+          "fresh": null,
+          "upgraded": [
+            "node_id",
+            "observed_at",
+            "report",
+            "updated_at"
+          ]
+        },
+        "columns": {
+          "fresh": null,
+          "upgraded": [
+            [
+              "node_id",
+              "TEXT",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              "observed_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "report",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "updated_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ]
+          ]
+        },
+        "foreign_keys": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "indexes": {
+          "fresh": null,
+          "upgraded": {
+            "sqlite_autoindex_fleet_skill_reports_1": {
+              "columns": [
+                [
+                  0,
+                  "node_id",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  null,
+                  0,
+                  "BINARY",
+                  0
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "sql": "",
+              "unique": 1
+            }
+          }
+        },
+        "sql": {
+          "fresh": null,
+          "upgraded": "CREATE TABLE fleet_skill_reports (node_id TEXT PRIMARY KEY, observed_at TEXT NOT NULL, report TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        }
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_skill_review_drafts": [
+    {
+      "differences": {
+        "autoincrement": {
+          "fresh": null,
+          "upgraded": false
+        },
+        "checks": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "column_order": {
+          "fresh": null,
+          "upgraded": [
+            "draft_id",
+            "decisions",
+            "created_at",
+            "updated_at"
+          ]
+        },
+        "columns": {
+          "fresh": null,
+          "upgraded": [
+            [
+              "created_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "decisions",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "draft_id",
+              "TEXT",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              "updated_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ]
+          ]
+        },
+        "foreign_keys": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "indexes": {
+          "fresh": null,
+          "upgraded": {
+            "sqlite_autoindex_fleet_skill_review_drafts_1": {
+              "columns": [
+                [
+                  0,
+                  "draft_id",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  null,
+                  0,
+                  "BINARY",
+                  0
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "sql": "",
+              "unique": 1
+            }
+          }
+        },
+        "sql": {
+          "fresh": null,
+          "upgraded": "CREATE TABLE fleet_skill_review_drafts (draft_id TEXT PRIMARY KEY, decisions TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        }
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "fleet_skill_review_events": [
+    {
+      "differences": {
+        "autoincrement": {
+          "fresh": null,
+          "upgraded": true
+        },
+        "checks": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "column_order": {
+          "fresh": null,
+          "upgraded": [
+            "event_id",
+            "recorded_at",
+            "kind",
+            "summary"
+          ]
+        },
+        "columns": {
+          "fresh": null,
+          "upgraded": [
+            [
+              "event_id",
+              "INTEGER",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              "kind",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "recorded_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "summary",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ]
+          ]
+        },
+        "foreign_keys": {
+          "fresh": null,
+          "upgraded": []
+        },
+        "indexes": {
+          "fresh": null,
+          "upgraded": {}
+        },
+        "sql": {
+          "fresh": null,
+          "upgraded": "CREATE TABLE fleet_skill_review_events (event_id INTEGER PRIMARY KEY AUTOINCREMENT, recorded_at TEXT NOT NULL, kind TEXT NOT NULL, summary TEXT NOT NULL)"
+        }
+      },
+      "sources": [
+        "lazy"
+      ]
+    }
+  ],
+  "grokbot_jobs": [
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "job_id",
+            "role",
+            "repository",
+            "label",
+            "task_digest",
+            "idempotency_key_hash",
+            "state",
+            "item_revision",
+            "sequence",
+            "created_at",
+            "updated_at",
+            "queued_at",
+            "timeout_seconds",
+            "queue_ttl_seconds",
+            "artifact_kind",
+            "private_snapshot_id",
+            "claimed_at",
+            "lease_token_digest",
+            "lease_generation",
+            "lease_expires_at",
+            "cancel_requested_at",
+            "artifact_ref",
+            "artifact_digest",
+            "artifact_size",
+            "owner_node",
+            "claimant_node",
+            "claimant_worker",
+            "queue_id"
+          ],
+          "upgraded": [
+            "job_id",
+            "role",
+            "repository",
+            "label",
+            "task_digest",
+            "idempotency_key_hash",
+            "state",
+            "item_revision",
+            "sequence",
+            "created_at",
+            "updated_at",
+            "queued_at",
+            "timeout_seconds",
+            "artifact_kind",
+            "private_snapshot_id",
+            "claimed_at",
+            "lease_token_digest",
+            "lease_generation",
+            "lease_expires_at",
+            "cancel_requested_at",
+            "artifact_ref",
+            "artifact_digest",
+            "artifact_size",
+            "owner_node",
+            "claimant_node",
+            "claimant_worker",
+            "queue_id",
+            "queue_ttl_seconds"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE grokbot_jobs ( job_id TEXT NOT NULL PRIMARY KEY, role TEXT NOT NULL, repository TEXT NOT NULL, label TEXT NOT NULL, task_digest TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL, item_revision INTEGER NOT NULL, sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, queued_at TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, queue_ttl_seconds INTEGER, artifact_kind TEXT NOT NULL, private_snapshot_id TEXT, claimed_at TEXT, lease_token_digest TEXT, lease_generation INTEGER, lease_expires_at TEXT, cancel_requested_at TEXT, artifact_ref TEXT, artifact_digest TEXT, artifact_size INTEGER, owner_node TEXT, claimant_node TEXT, claimant_worker TEXT, queue_id TEXT )",
+          "upgraded": "CREATE TABLE grokbot_jobs ( job_id TEXT NOT NULL PRIMARY KEY, role TEXT NOT NULL, repository TEXT NOT NULL, label TEXT NOT NULL, task_digest TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL, item_revision INTEGER NOT NULL, sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, queued_at TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, artifact_kind TEXT NOT NULL, private_snapshot_id TEXT, claimed_at TEXT, lease_token_digest TEXT, lease_generation INTEGER, lease_expires_at TEXT, cancel_requested_at TEXT, artifact_ref TEXT, artifact_digest TEXT, artifact_size INTEGER, owner_node TEXT, claimant_node TEXT, claimant_worker TEXT, queue_id TEXT , queue_ttl_seconds INTEGER)"
+        }
+      },
+      "sources": [
+        "schema-12",
+        "schema-13",
+        "schema-14",
+        "schema-15"
+      ]
+    }
+  ],
+  "interactive_sessions": [
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "node_id",
+            "harness",
+            "session_id",
+            "repo_identity",
+            "identity_scope",
+            "repo_label",
+            "checkout_path",
+            "branch",
+            "dirty_paths_json",
+            "dirty_truncated",
+            "state",
+            "started_at",
+            "heartbeat_at",
+            "ended_at",
+            "ttl_seconds",
+            "expires_at",
+            "cloud_context_json",
+            "provider_link_json"
+          ],
+          "upgraded": [
+            "node_id",
+            "harness",
+            "session_id",
+            "repo_identity",
+            "identity_scope",
+            "repo_label",
+            "checkout_path",
+            "branch",
+            "dirty_paths_json",
+            "dirty_truncated",
+            "state",
+            "started_at",
+            "heartbeat_at",
+            "ended_at",
+            "ttl_seconds",
+            "expires_at",
+            "provider_link_json",
+            "cloud_context_json"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE interactive_sessions ( node_id TEXT NOT NULL, harness TEXT NOT NULL, session_id TEXT NOT NULL, repo_identity TEXT NOT NULL, identity_scope TEXT NOT NULL, repo_label TEXT NOT NULL, checkout_path TEXT NOT NULL, branch TEXT, dirty_paths_json TEXT NOT NULL, dirty_truncated INTEGER NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, ended_at TEXT, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, cloud_context_json TEXT, provider_link_json TEXT, PRIMARY KEY (node_id, harness, session_id, repo_identity) )",
+          "upgraded": "CREATE TABLE interactive_sessions ( node_id TEXT NOT NULL, harness TEXT NOT NULL, session_id TEXT NOT NULL, repo_identity TEXT NOT NULL, identity_scope TEXT NOT NULL, repo_label TEXT NOT NULL, checkout_path TEXT NOT NULL, branch TEXT, dirty_paths_json TEXT NOT NULL, dirty_truncated INTEGER NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, ended_at TEXT, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, provider_link_json TEXT, cloud_context_json TEXT, PRIMARY KEY (node_id, harness, session_id, repo_identity) )"
+        }
+      },
+      "sources": [
+        "sessions-cloud"
+      ]
+    }
+  ],
+  "model_policy": [
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "seat",
+            "provider",
+            "model",
+            "reasoning",
+            "enabled",
+            "limit_count",
+            "brigade_cli",
+            "brigade_model",
+            "t3_instance_id",
+            "t3_service_tier",
+            "t3_model",
+            "notes",
+            "updated_at"
+          ],
+          "upgraded": [
+            "seat",
+            "provider",
+            "model",
+            "reasoning",
+            "enabled",
+            "limit_count",
+            "brigade_cli",
+            "brigade_model",
+            "t3_instance_id",
+            "t3_service_tier",
+            "notes",
+            "updated_at",
+            "t3_model"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL )",
+          "upgraded": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL , t3_model TEXT NOT NULL DEFAULT '')"
+        }
+      },
+      "sources": [
+        "user-version-22",
+        "schema-21",
+        "schema-22",
+        "schema-23",
+        "schema-24",
+        "schema-25",
+        "schema-26",
+        "schema-30",
+        "schema-31",
+        "v0.27.0",
+        "test_fleet_deck_badges",
+        "model-native"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "seat",
+            "provider",
+            "model",
+            "reasoning",
+            "enabled",
+            "limit_count",
+            "brigade_cli",
+            "brigade_model",
+            "t3_instance_id",
+            "t3_service_tier",
+            "t3_model",
+            "notes",
+            "updated_at"
+          ],
+          "upgraded": [
+            "seat",
+            "provider",
+            "model",
+            "enabled",
+            "limit_count",
+            "notes",
+            "updated_at",
+            "reasoning",
+            "brigade_cli",
+            "brigade_model",
+            "t3_instance_id",
+            "t3_service_tier",
+            "t3_model"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL )",
+          "upgraded": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL , reasoning TEXT NOT NULL DEFAULT 'none', brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
+        }
+      },
+      "sources": [
+        "schema-12",
+        "schema-13",
+        "schema-14"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "seat",
+            "provider",
+            "model",
+            "reasoning",
+            "enabled",
+            "limit_count",
+            "brigade_cli",
+            "brigade_model",
+            "t3_instance_id",
+            "t3_service_tier",
+            "t3_model",
+            "notes",
+            "updated_at"
+          ],
+          "upgraded": [
+            "seat",
+            "provider",
+            "model",
+            "reasoning",
+            "enabled",
+            "limit_count",
+            "brigade_cli",
+            "t3_instance_id",
+            "t3_service_tier",
+            "notes",
+            "updated_at",
+            "brigade_model",
+            "t3_model"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL )",
+          "upgraded": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL , brigade_model TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
+        }
+      },
+      "sources": [
+        "schema-15",
+        "schema-18",
+        "schema-19"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "seat",
+            "provider",
+            "model",
+            "reasoning",
+            "enabled",
+            "limit_count",
+            "brigade_cli",
+            "brigade_model",
+            "t3_instance_id",
+            "t3_service_tier",
+            "t3_model",
+            "notes",
+            "updated_at"
+          ],
+          "upgraded": [
+            "seat",
+            "provider",
+            "model",
+            "enabled",
+            "limit_count",
+            "notes",
+            "updated_at",
+            "reasoning",
+            "brigade_cli",
+            "brigade_model",
+            "t3_instance_id",
+            "t3_service_tier",
+            "t3_model"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL )",
+          "upgraded": "CREATE TABLE \"model_policy\" (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
+        }
+      },
+      "sources": [
+        "model-policy-rebuild"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "seat",
+            "provider",
+            "model",
+            "reasoning",
+            "enabled",
+            "limit_count",
+            "brigade_cli",
+            "brigade_model",
+            "t3_instance_id",
+            "t3_service_tier",
+            "t3_model",
+            "notes",
+            "updated_at"
+          ],
+          "upgraded": [
+            "seat",
+            "provider",
+            "model",
+            "enabled",
+            "limit_count",
+            "notes",
+            "updated_at",
+            "reasoning",
+            "brigade_cli",
+            "brigade_model",
+            "t3_instance_id",
+            "t3_service_tier",
+            "t3_model"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL )",
+          "upgraded": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
+        }
+      },
+      "sources": [
+        "test_fleet_model_roster"
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "differences": {
+        "columns": {
+          "fresh": [
+            [
+              "created_at",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              "label",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "node_id",
+              "TEXT",
+              1,
+              null,
+              1,
+              0
+            ],
+            [
+              "revoked_at",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "token_sha256",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ]
+          ],
+          "upgraded": [
+            [
+              "created_at",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "label",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "node_id",
+              "TEXT",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              "revoked_at",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              "token_sha256",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ]
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE nodes ( node_id TEXT NOT NULL PRIMARY KEY, token_sha256 TEXT NOT NULL UNIQUE, label TEXT, created_at TEXT NOT NULL, revoked_at TEXT )",
+          "upgraded": "CREATE TABLE nodes (node_id TEXT PRIMARY KEY, token_sha256 TEXT UNIQUE, label TEXT, created_at TEXT, revoked_at TEXT)"
+        }
+      },
+      "sources": [
+        "test_fleet_model_roster",
+        "test_fleet_cloud"
+      ]
+    }
+  ],
+  "run_preference": [
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "id",
+            "impl",
+            "review",
+            "orchestrator",
+            "research",
+            "security",
+            "scout",
+            "notes",
+            "updated_at",
+            "updated_by"
+          ],
+          "upgraded": [
+            "id",
+            "impl",
+            "review",
+            "orchestrator",
+            "notes",
+            "updated_at",
+            "updated_by",
+            "research",
+            "security",
+            "scout"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE run_preference ( id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, orchestrator TEXT, research TEXT, security TEXT, scout TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT )",
+          "upgraded": "CREATE TABLE run_preference ( id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, orchestrator TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT , research TEXT, security TEXT, scout TEXT)"
+        }
+      },
+      "sources": [
+        "schema-13",
+        "schema-14",
+        "schema-15",
+        "schema-18"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "id",
+            "impl",
+            "review",
+            "orchestrator",
+            "research",
+            "security",
+            "scout",
+            "notes",
+            "updated_at",
+            "updated_by"
+          ],
+          "upgraded": [
+            "id",
+            "impl",
+            "review",
+            "orchestrator",
+            "notes",
+            "updated_at",
+            "updated_by",
+            "research",
+            "security",
+            "scout"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE run_preference ( id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, orchestrator TEXT, research TEXT, security TEXT, scout TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT )",
+          "upgraded": "CREATE TABLE run_preference (id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, orchestrator TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT, research TEXT, security TEXT, scout TEXT)"
+        }
+      },
+      "sources": [
+        "test_run_preference"
+      ]
+    }
+  ],
+  "work_links": [
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "link_id",
+            "work_id",
+            "link_type",
+            "external_key",
+            "display_ref",
+            "url",
+            "external_state",
+            "external_updated_at",
+            "source_policy",
+            "source_acceptance_json",
+            "synced_at",
+            "stale_at",
+            "adapter_id",
+            "owner_node",
+            "source_version"
+          ],
+          "upgraded": [
+            "link_id",
+            "work_id",
+            "link_type",
+            "external_key",
+            "display_ref",
+            "url",
+            "external_state",
+            "external_updated_at",
+            "source_policy",
+            "source_acceptance_json",
+            "synced_at",
+            "stale_at",
+            "source_version",
+            "adapter_id",
+            "owner_node"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE work_links ( link_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, link_type TEXT NOT NULL, external_key TEXT NOT NULL, display_ref TEXT, url TEXT, external_state TEXT, external_updated_at TEXT, source_policy TEXT NOT NULL, source_acceptance_json TEXT NOT NULL, synced_at TEXT NOT NULL, stale_at TEXT, adapter_id TEXT, owner_node TEXT, source_version TEXT, FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT, UNIQUE (link_type, external_key) )",
+          "upgraded": "CREATE TABLE work_links ( link_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, link_type TEXT NOT NULL, external_key TEXT NOT NULL, display_ref TEXT, url TEXT, external_state TEXT, external_updated_at TEXT, source_policy TEXT NOT NULL, source_acceptance_json TEXT NOT NULL, synced_at TEXT NOT NULL, stale_at TEXT, source_version TEXT, adapter_id TEXT, owner_node TEXT, FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT, UNIQUE (link_type, external_key) )"
+        }
+      },
+      "sources": [
+        "work-links-owner"
+      ]
+    }
+  ]
+}

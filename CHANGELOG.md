@@ -7,11 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add explicit opt-in Duet dispatch with seven fleet tools, repository and prompt bounds, and atomic open-request and daily-attempt limits in private state. Approval, answer and doctor relays remain unavailable; default discovery stays at 22 tools.
+
+- Answer a Dot-family `tools/call` with out-of-range or unsupported arguments (for example `inbox_list` with `limit` above 50) with a JSON-RPC `-32602` error that names the argument, instead of an opaque `request_denied`, and record the allowlisted argument summary in the call log.
+- Push up to three memory card hits into Dot and Duet `inbox_list` and `fleet_digest` responses as an optional `memory_hits` field: card path plus wrapped title and tags, no bodies, with the query derived from the item shown and logged only as an HMAC. Turn it off per connector with `"memory_push": false` in the runtime JSON.
+- Add diagnostic-only `memory reflect preflight` reports for retained candidates, with bound policy and snapshot hashes, supporting-proof checks and explicit holds for missing promotion authority. Automatic promotion remains disabled.
+- Guard can use an optional local `brigade-guard` PCRE2 JIT binary for large ASCII inputs, with Python regex fallback and unchanged policy decisions.
+
+- Add a `grokbot-memory` connector pack for Grok Bot on the Dot connector code. It registers only `memory_search`, `memory_card` and `handoff_write`, has its own runtime schema and Hub principal `agent:grokbot-memory`, and runs no inbox poll. See `docs/grokbot-memory-connector.md`.
+- Stop the content guard from blocking code-shaped hostname lookalikes: when the dotted value starts with a well-known JavaScript receiver (`args`, `process`, `this`, `options` and similar), an indented `key: value,` object member ending the line or a `delete`, `typeof`, `void` or `await` operand ending a statement is code. The `home-path` rule no longer matches a known tool config directory rendered directly under a sandbox home root with no username segment. Real hosts in YAML, shell and prose, and real user home paths including `.`-segment and hidden homes, stay detected.
+- Fence new key publication and sealed admission to an installed Hub identity, retaining per-signer sequence history, paired migration readback and exact retained retries. Older Hub binaries must not rewrite identity metadata after history exists: inconsistent signer state refuses new mesh writes and requires operator recovery from a consistent backup without discarding signer history.
+- Allow writing and frontend task roles to use explicit Hub policy seat fallbacks and optional host-local instructions files, with bounded reads and fail-closed dispatch.
+- Add a UTF mode to the optional `brigade-guard` engine for Hub scanning (PCRE2 UTF and UCP, character and byte offsets, linked PCRE2 and Unicode versions in the response). Twelve default rules that differ from Python `re` on Unicode text are listed with reasons in `brigade.guard.utf_parity`; the local guard still sends only ASCII to the engine, and ASCII responses are byte-identical.
+- Stop the Fleet Hub's 8-connection per-source handler cap from capping the whole fleet behind a local HTTPS front. On a loopback bind, a loopback peer such as Tailscale Serve is exempt and bounded by the 32-handler global cap, of which long-poll message waiters hold at most 8. Other peers, including loopback peers of a non-loopback bind, keep the 8-connection cap (#2229).
+
+- Add `brigade work import bd` to mirror a Beads (`bd`) project's issues and dependency edges into the task ledger, keyed by bd id, so `work ready` and `work claim` honor bd blockers. It runs only `bd version --json` and `bd export`, pins the bd 1.3.x export schema, and fails closed on anything else. Add `brigade work export bd-outcomes` to write closeout receipts and PR links per bd issue id as JSONL. The `--from-bd-jsonl` inbox import now uses the same version pin (#2209).
+- Point package homepages to https://brigadestack.com for the next release, retaining documentation links on brigade.tools.
+- Add the verify-brigade `storage-parity` drive for the Fleet Hub: one scripted sequence on a stepped clock, every table dumped and compared exactly with a checked-in golden (timestamp shape and offset, id mapping, recomputed digests, sealed tombstones past the 7-day lifetime), with defaults, events-outbox, migrated-fixture and mixed-engine runs.
+
 - Use `brigade components list|discover|verify` as the catalog command. Keep `stations` as a supported alias hidden from root help, with unchanged `station.json` manifests, schemas and JSON keys.
 
 - Keep reflection duplicate groups intact after reviewed claim anchoring, while preserving literal suffixes in excluded Markdown and original source hashes.
 - Add the bundled `fleet-hub-upgrade` skill: a generic Hub-first upgrade checklist covering the node-to-Hub payload and `SCHEMA_VERSION` pre-flight diff, snapshot-and-switch Hub deploy with rollback, and node verification (#2167).
 
+- Add a read-only `grokbot-memory` connector pack for Grok Bot on the Dot connector code. It registers only `memory_search` and `memory_card`, has its own runtime schema and Hub principal `agent:grokbot-memory`, and runs no inbox poll. Its results carry `content_trust: "untrusted"`, and a prompt-load scan (guard default rules, invisible and bidi characters, instruction-override heuristics) replaces any hit with `{card_id, blocked: <rule id>}`. Dot and Duet `memory_search` matches and `memory_card` results now carry `content_trust: "untrusted"` too. See `docs/grokbot-memory-connector.md`.
 - Refuse memory proposals whose retained source cards point `superseded_by` at a source deleted by a duplicate merge, including during live review and apply validation.
 - Removed Jules cloud provider
 - Count a T3 thread and its precisely linked Claude or Codex presence once in Fleet session lists and machine totals. Publish presence from the session root and stop renewing legacy tool-attributed checkout records. Clear stale provider links after completed lookups while retaining them when lookups are unavailable.
@@ -27,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add an opt-in telemetry heartbeat for proven-open local Claude Code and interactive Codex sessions, reusing their last published presence while the owning process lives. Repeatable `--worktrees-of` discovery selects wired worktrees with presence sidecars, newest first, within the shared target cap and work budget.
 
 - Prevent run archive import/export from modifying their own inputs when paths overlap, and retain existing archives when a forced export fails validation or promotion.
+- Evidence query commands accept leading engine flags, and code graph commands and search aliases preserve literal `--target` arguments after `--` without changing the selected repository.
 - Use linked list and detail panes for roster, policy, and machines, including selection without JavaScript.
 - Classify writing and frontend tasks locally and, with a configured Fleet Hub, route them through effective policy roles without seat fallback. Preserve explicit worker selection and ordinary standalone routing, and retain categorical task evidence through health refusal.
 
@@ -35,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fleet Hub capacity views count live interactive agent sessions per machine, and a machine with running sessions but no managed jobs reads `working` instead of `idle`.
 
 - Dot policy reads report unavailable required sources, and Fleet digests distinguish partial data from complete results.
+
+- Fleet Hub HTTP routes register through a route table (`fleet_hub_routes`): each route module adds its own methods, exact paths and prefixes, an exact path wins over the longest matching prefix, and a second claim on one route is refused. The bearer JSON API moves to `fleet_hub_api_http`. Responses are unchanged.
+
+- Runbook cancellation cleans up owned process groups without hanging on blocked captures, and binary pin checks resolve each step's first command token while accepting equal-content path changes.
 
 - Dogfood config round-trips Windows paths while retaining legacy unquoted values.
 - Native component readers accept Brigade Code Graph and Evidence identities alongside legacy names, preserve recorded asset coordinates for rollback, and reject duplicate families or conflicting binary overrides.
@@ -81,6 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Store sealed Hub messages with retry lookup, post-ack content purge, storage quotas, and optional required sealing (#2045).
 - Pre-push history scans exclude commits verified already published on the actual destination for existing branches as well as new branches, and reject stale or unverifiable destination evidence.
 
+- Add internal Windows handle-relative owner-only storage primitives with protected DACL creation and verification, not yet used by any command. Model-roster LKG and audit replay remain fail-closed pending lock fencing, publication ordering, and native qualification. (Refs #1739)
 - Patrol detects suspected mass environment faults before repairs and reports failure for unforced apply passes, including escalation-only passes (#1975).
 - Grok can opt into Hub messaging to configured aliases while T3 tools remain available independently.
 - Serve public mesh key history, live directory keys, and admin-supplied signed Hub identities and manifests without a crypto backend.
@@ -229,9 +254,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude hooks retain the latest skill attribution across stale concurrent state saves, preserve deliberate capture changes, and carry the retained artifact into verification guidance and receipts (#1924).
 - Reviewed memory proposals preserve Markdown structures when anchoring claims, including list-contained quotations, code and headings. Exact duplicate comparison retains literal anchor tokens in excluded blocks.
 - Reviewed memory consolidation derives each card's final cutoff from accepted evidence and preserves its existing cutoff across operation order.
+- Run readers honor verified durable outcomes, including reopened histories, and inventories skip unreadable historical records while retaining diagnostics and hard runs-root access errors.
 
 - Add project-only Codex instruction diagnosis under `brigade bug diagnose --component instructions`, with body-free modeled selection, explicit finding export and local report preparation.
 
+- Add an inactive transactional model for external Worklore leases, with owner fencing and conflict checks. No external registration route is enabled.
 
 - Skill proposals preserve behavioral contracts and reject changed packages or baselines. Fleet skill review binds explicit copies and mutation commands to exact reviewed package identities.
 - Paired skill trials can plan, replay and validate five receipt-backed scenarios in disposable targets. Replay results remain offline and cannot promote a skill. Live execution requires a tool adapter that is not implemented yet.
@@ -240,6 +267,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Unscoped Worklore histories omit external ownership events before pagination, while preserving legacy event fields and cursors.
 
+- Keep external Worklore scopes reserved across later legacy events, and refuse expiry cleanup of unsupported ownership histories.
 
 ## [0.30.0] - 2026-10-20
 

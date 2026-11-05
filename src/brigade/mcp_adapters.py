@@ -20,6 +20,8 @@ or ``{"literal": "..."}`` (the user's explicit choice, which doctor flags).
 
 from __future__ import annotations
 
+import tomllib
+
 import copy
 import json
 import re
@@ -27,7 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import toml_compat as tomllib
+
+from . import toml_format
 from .tools_cmd import HIGH_RISK_COMMAND_PATTERNS, UNSAFE_FIELD_PATTERN
 
 TRANSPORTS = ("stdio", "http", "sse")
@@ -503,13 +506,13 @@ def _codex_render_table(name: str, server_dict: dict[str, Any]) -> str:
     for field_name in ("command", "url", "type"):
         value = server_dict.get(field_name)
         if isinstance(value, str) and value:
-            out.append(f"{field_name} = {tomllib.format_toml_value(value)}\n")
+            out.append(f"{field_name} = {toml_format.format_toml_value(value)}\n")
     args = server_dict.get("args")
     if isinstance(args, list) and args:
         out.append(f"args = {_format_inline_list([str(a) for a in args])}\n")
     timeout = server_dict.get("timeout")
     if isinstance(timeout, (int, float)):
-        out.append(f"timeout = {tomllib.format_toml_value(timeout)}\n")
+        out.append(f"timeout = {toml_format.format_toml_value(timeout)}\n")
     env = server_dict.get("env")
     if isinstance(env, dict) and env:
         out.append(f"env = {_format_inline_table({str(k): str(v) for k, v in env.items()})}\n")

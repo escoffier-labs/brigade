@@ -11,19 +11,13 @@ The repo wiring lives under `.brigade/` and is intentionally gitignored. It stor
 Use the internal dogfood profile when a repo should participate in the local production loop:
 
 ```bash
-brigade operator init --profile internal-dogfood --target .
+brigade operator quickstart --target .
 brigade operator sync-tools --target .
 brigade operator doctor --profile internal-dogfood --target .
 brigade operator status --profile internal-dogfood --target .
 ```
 
-For Brigade's own repo, public release readiness can be waived when the goal is internal production rather than publishing:
-
-```bash
-brigade operator init --profile internal-dogfood --target . --waive-public-release
-```
-
-That waiver is local evidence only. It does not publish, tag, push, mutate remotes, or change the public release gate.
+The internal-dogfood lifecycle initialization and release waiver remain internal APIs. Quickstart uses the local-operator profile and does not expose those options.
 
 ## Daily Agent Loop
 
@@ -97,4 +91,4 @@ It does not:
 - publish, push, tag, or mutate remotes
 - make other repos participate automatically
 
-Other repos need their own `brigade operator init --profile internal-dogfood --target <repo>` or need to be tracked through the repo-fleet commands.
+Other repos need their own `brigade operator quickstart --target <repo>` or need to be tracked through the repo-fleet commands.

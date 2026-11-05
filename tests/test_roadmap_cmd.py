@@ -167,7 +167,7 @@ def test_commands_from_text_requires_brigade_as_first_token():
     assert "brigade directory and outside the workspace" not in commands
 
 
-def test_apply_command_alias_rewrites_run_cloud_and_fragments():
+def test_apply_command_alias_normalizes_historical_cloud_and_fragments():
     assert roadmap_cmd._apply_command_alias("brigade run-cloud status") == "brigade run cloud status"
     assert roadmap_cmd._apply_command_alias("brigade openclaw-fragments") == "brigade harness fragments"
     assert roadmap_cmd._apply_command_alias("brigade hermes-fragments") == "brigade harness fragments"

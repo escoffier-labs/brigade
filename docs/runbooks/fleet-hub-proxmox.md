@@ -8,7 +8,7 @@ The Tailscale Serve URL is printed by `tailscale serve status`. Use its HTTPS ta
 
 - Proxmox VE 9.x host
 - Debian 12 or Debian 13 CT template
-- 1 vCPU, 512 MB RAM, 4 GB root disk
+- 1 vCPU, 512 MB RAM, 256 MB swap, 8 GB root disk (the values the running hub container uses, recorded 2026-11-03)
 - Unprivileged CT with nesting disabled
 - Tailscale inside the CT, hostname `brigade-hub`
 - Brigade bound to `127.0.0.1:3774`, behind Tailscale Serve HTTPS
@@ -42,8 +42,8 @@ pct create <CTID> <TEMPLATE_STORAGE>:vztmpl/<DEBIAN_TEMPLATE>.tar.zst \
   --ostype debian \
   --cores 1 \
   --memory 512 \
-  --swap 512 \
-  --rootfs <ROOT_STORAGE>:4 \
+  --swap 256 \
+  --rootfs <ROOT_STORAGE>:8 \
   --unprivileged 1 \
   --features nesting=0 \
   --net0 name=eth0,bridge=<PROXMOX_BRIDGE>,ip=<CT_IPV4/CIDR>,gw=<GATEWAY_IPV4>,type=veth \
@@ -56,6 +56,15 @@ pct enter <CTID>
 ```
 
 The CT must have outbound access to the Tailscale package repository and the tailnet. Do not enable nesting for this service.
+
+The 8 GB root disk leaves room for the hub file, the memory file and local
+`brigade fleet backup` copies above the hub's 1 GiB disk-pressure threshold.
+An earlier revision of this runbook created the CT with 512 MB of swap and a
+4 GB root disk, and the running container was later changed to the values
+above. To check an existing CT, run `pct config <CTID>` on the Proxmox host and
+read `swap` and `rootfs`. To bring an older CT in line, run
+`pct set <CTID> --swap 256` and `pct resize <CTID> rootfs 8G`. The resize
+cannot be undone, so take a container backup first.
 
 Tailscale normally needs `/dev/net/tun`. Check from inside the CT:
 
@@ -193,6 +202,8 @@ tailscale serve status
 
 Tailscale Serve provides the HTTPS MagicDNS origin `https://<HUB_TAILNET_FQDN>` and proxies it to the local service. The startup log should name `127.0.0.1:3774` and `/var/lib/brigade/fleet-hub.db`. Keep the Serve proxy on this same CT; do not forward to the Tailscale interface or another host.
 
+Every request reaches the hub from Tailscale Serve on `127.0.0.1`, so the hub cannot tell clients apart by address. With a loopback bind, the hub treats a loopback peer as that front: the front is exempt from the 8-connection per-source cap and is bounded by the 32-handler global cap instead. Long-poll message waiters hold at most 8 of those handlers, so sends, claims and event reports keep at least 24. Brigade releases without #2229 apply the per-source cap to the front, so the ninth concurrent request from the whole fleet is closed without a response and clients treat the hub as unreachable and spool. Run no untrusted process on this CT: anything that can reach the loopback port shares the front's exemption.
+
 ## 6. Verify health and authenticated status
 
 Health does not require the bearer token:
@@ -248,6 +259,34 @@ unset smoke_token
 ```
 
 The response from `/events` reports `accepted: 1` for the first post. Reposting the same body reports it as a duplicate, which confirms the idempotency key. Posting the same event with the admin token instead answers HTTP 403 on a hub without `--allow-admin-writes`, which confirms that node tokens are required.
+
+### Read-only drive probe
+
+The hub contract drive enrolls nodes, sends messages and takes claims, so its
+default profile never runs against production. The only drive run allowed
+against the production hub is `--profile prod-readonly`. It runs a fixed list
+of operations that an authorizer audit proves write nothing, refuses any other
+case before its first request, and never enrolls. Run it on the hub host
+against the loopback port, because the drive refuses non-loopback URLs.
+
+Enroll a probe principal once, with no send grants, and keep its token in a
+private file next to a node token:
+
+```bash
+set -euo pipefail
+umask 077
+brigade fleet msg principals add hub-probe --json | jq -j '.principal.token' > hub-probe.token
+BRIGADE_HUB_PROBE_PRINCIPAL_TOKEN="$(cat hub-probe.token)" \
+BRIGADE_HUB_PROBE_NODE_TOKEN="$(cat <node token file>)" \
+  python registry/skills/verify-brigade/control-brigade.py hub-contract \
+  --profile prod-readonly --hub-url "http://<loopback>:<port>"
+```
+
+Exit 0 means every listed operation answered as the contract expects. Exit 3
+lists the mismatches. Before running a newer checkout's profile against
+production, run its audit (`hub-contract --profile prod-readonly` without
+`--hub-url`) on a throwaway hub from the same code. Never point any other
+drive profile, `storage-parity`, or `--audit-mutation` at production.
 
 ## 7. Enroll and configure each Brigade client
 
@@ -413,7 +452,7 @@ Example service unit that binds loopback and trusts the proxy header:
 ExecStart=/usr/local/bin/brigade fleet serve --host 127.0.0.1 --port 3774 --db /var/lib/brigade/fleet-hub.db --trust-tailscale-identity
 ```
 
-Pair this with a Tailscale Serve rule on the same host that forwards `https://<HUB_TAILNET_FQDN>` (or a funnel you control) to `http://127.0.0.1:3774`. Do not configure a Serve rule that points at a routable or remote backend address; the whole point is that the proxy is the only thing that can legitimately present the header, and it must speak to the hub over loopback.
+Pair this with a Tailscale Serve rule on the same host that forwards `https://<HUB_TAILNET_FQDN>`  to `http://127.0.0.1:3774`. Public fronts, including funnels, are unsupported until a verified `--trust-forwarded-for` mode ships. Do not configure a Serve rule that points at a routable or remote backend address. Only the proxy can present the header. It must speak to the hub over loopback.
 
 ## Migration from the shared token
 
@@ -429,6 +468,16 @@ A fleet deployed before per-node credentials has one token in `/etc/brigade/flee
 ## 8. Back up the SQLite database
 
 Use SQLite's online backup command. Do not copy only the main database file while the service is running, because WAL data may not have been checkpointed into it.
+
+A Brigade install that includes `brigade fleet backup` can use it in place of
+the `sqlite3` script below. It runs `integrity_check` on every copy, keeps 48
+hourly and 14 daily copies, and refuses a copy that would leave the volume
+under its free-space floor:
+`brigade fleet backup --db /var/lib/brigade/fleet-hub.db --dest /var/backups/brigade --min-free-gib 2`.
+Run `--plan` first to see the file size and how many hourly copies fit. Any
+restore from a copy older than the last write is lossy. Use
+`brigade fleet restore` as [Restore from a copy](fleet-hub-dogfood.md#restore-from-a-copy)
+describes, never a plain file copy.
 
 Create `/usr/local/sbin/brigade-fleet-backup`:
 

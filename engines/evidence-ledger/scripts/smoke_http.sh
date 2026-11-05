@@ -11,16 +11,17 @@ export XDG_CONFIG_HOME="$TMP_HOME/.config"
 export XDG_DATA_HOME="$TMP_HOME/.local/share"
 export XDG_CACHE_HOME="$TMP_HOME/.cache"
 
-MISELEDGER="${MISELEDGER:-$ROOT/bin/miseledger}"
-if [ ! -x "$MISELEDGER" ]; then
-  (cd "$ROOT" && go build -o bin/miseledger ./cmd/miseledger)
+# EVIDENCE_BIN selects the entry point; CI runs this script with both names.
+EVIDENCE_BIN="${EVIDENCE_BIN:-$ROOT/bin/brigade-evidence}"
+if [ ! -x "$EVIDENCE_BIN" ]; then
+  (cd "$ROOT" && go build -o "$EVIDENCE_BIN" "./cmd/$(basename "$EVIDENCE_BIN")")
 fi
 
-"$MISELEDGER" init >/dev/null
-"$MISELEDGER" import adapter "$ROOT/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json >/dev/null
+"$EVIDENCE_BIN" init >/dev/null
+"$EVIDENCE_BIN" import adapter "$ROOT/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json >/dev/null
 
 addr="127.0.0.1:18765"
-"$MISELEDGER" serve --addr "$addr" >"$TMP_WORK/server.log" 2>"$TMP_WORK/server.err" &
+"$EVIDENCE_BIN" serve --addr "$addr" >"$TMP_WORK/server.log" 2>"$TMP_WORK/server.err" &
 server_pid="$!"
 sleep 1
 

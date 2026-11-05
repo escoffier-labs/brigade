@@ -1,3 +1,11 @@
+---
+status: active
+proof: drive
+surfaces: work verify run
+drive: work-verify
+last-drive: 2026-11-03 31d5c549d
+---
+
 # work verification receipts
 
 `brigade work verify run` is how a result counts. It executes the commands you
@@ -17,7 +25,7 @@ outcome ledger and the `brigade work brief` loop is downstream of this.
   atomically: pass and failure both land in the outcome ledger, no separate
   `brigade outcome capture` step.
 - `--timeout <s>` per command; `--no-reuse` to defeat the identical-tree
-  passing-receipt reuse.
+  passing-receipt reuse. The helper drives neither.
 - Readers: `brigade work verify runs --limit N --json` and
   `brigade work verify show <run-id|latest> --json`.
 
@@ -61,7 +69,8 @@ ls "$TARGET/.brigade/work/verify-runs/"
 ```
 
 Observed on a fresh target: `run_id 20260901-024652-work-verify-757d99`,
-`status completed`.
+`status completed`. Driven again on main `31d5c549d`: `status completed`,
+helper exit 0, and the same `outcome_capture` pair.
 
 To prove a *failing* verification is recorded too (it must be - failures are
 the signal the outcome ledger needs):
@@ -71,7 +80,7 @@ $C work-verify --target "$TARGET" --command "false" --capture verify-brigade
 ```
 
 Observed: helper exit 3, `"status": "failed"`, and a receipt written anyway at
-`20260901-024903-work-verify-ae8f0f`.
+`20260901-024903-work-verify-ae8f0f`. Same result on main `31d5c549d`.
 
 ## Gotchas
 
@@ -97,7 +106,7 @@ Observed: helper exit 3, `"status": "failed"`, and a receipt written anyway at
   slots for the Git common directory, or the slots under
   `BRIGADE_VERIFY_LOCK_PATH` when that override is set. Do not retry it with a bigger timeout; run
   `./scripts/verify-focused` or wait.
-- The receipt captures a code-graph delta by shelling out to the `graphtrail`
+- The receipt captures a code-graph delta by shelling out to the `brigade-code-graph`
   binary. On a host without it, `code_graph_delta` comes back
   `{"ok": false, "status": "unavailable", ...}` and the run still completes -
   do not read a missing binary as a failed verification.

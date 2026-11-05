@@ -121,7 +121,7 @@ _CLAUDE_DISALLOWED_READ_ONLY = "Task,Agent,Bash,Edit,Write,NotebookEdit,WebSearc
 
 # Read-only argv for these CLIs is a harness plan mode: every file-write tool is
 # hidden, but the harness still offers its own plan-file affordance and the model
-# reaches for it. #518: the chef's plan-file write failed for exactly that reason,
+# reaches for it. #518: the orchestrator's plan-file write failed for exactly that reason,
 # user-level hooks fired on the failed write, and the hook rebuttal replaced the
 # plan JSON in the seat's final message. Prompts for these seats must say so.
 _PLAN_MODE_CLIS = frozenset({"claude", "cursor", "grok"})

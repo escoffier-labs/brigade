@@ -83,7 +83,7 @@ def test_crontab_entry_rejection_leaves_target_unchanged(tmp_path, monkeypatch, 
 
 
 def test_patrol_windows_plan(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(runbook_cmd.shutil, "which", lambda command: sys.executable)
+    monkeypatch.setattr(runbook_cmd, "_resolve_step_argv0", lambda command, cwd: sys.executable)
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("must not mutate the scheduler"))
     assert care_cmd.install(target=tmp_path, backend="schtasks", entry_ids=["run-patrol"], json_output=True) == 3
     payload = json.loads(capsys.readouterr().out)

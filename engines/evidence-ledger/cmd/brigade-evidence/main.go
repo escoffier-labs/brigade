@@ -3,9 +3,9 @@ package main
 import (
 	"os"
 
-	"github.com/escoffier-labs/miseledger/internal/app"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/app"
 )
 
 func main() {
-	os.Exit(app.Run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(app.Main(os.Args, os.Stdout, os.Stderr))
 }

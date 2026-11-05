@@ -27,6 +27,20 @@ export GIT_NO_REPLACE_OBJECTS=1
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+# Safety rails (#2233): `brigade work rails off` skips both scans below
+# without touching guard policies or baselines; `brigade work rails on`
+# restores them. Only exit 3 means off. Any other result, including an older
+# Brigade without the command, keeps the scans on.
+if command -v brigade >/dev/null 2>&1; then
+  rails_rc=0
+  brigade work rails check --target "$REPO_ROOT" >/dev/null 2>&1 || rails_rc=$?
+  if [[ "$rails_rc" -eq 3 ]]; then
+    cat >/dev/null
+    echo "pre-push: safety rails are off for this repo; content guard and history scans skipped" >&2
+    exit 0
+  fi
+fi
+
 # Git invokes pre-push as: pre-push <remote-name> <url>. The URL is the
 # destination actually being pushed to; it is the only source of truth for
 # what the remote currently advertises. Local remote-tracking refs

@@ -627,12 +627,12 @@ def _finish_direct_worker_resume_receipt(
     worker: str,
     worker_results: list,
 ) -> int:
-    """Terminalize a resumed ``--worker`` result without chef synthesis labels.
+    """Terminalize a resumed ``--worker`` result without orchestrator synthesis labels.
 
     A failed direct worker is still the user-visible result: write ``final.txt``,
     type ``failure_phase`` from the worker (or ``dispatch``/``inference``), and
     attribute the seat to the worker. Reusing ``_finish_resume_receipt`` would
-    mislabel this as a chef synthesis failure. Timeout and interrupt map to
+    mislabel this as a orchestrator synthesis failure. Timeout and interrupt map to
     ``timeout`` / ``canceled`` the same way the orchestrator finish path does.
     """
     now = datetime.now(timezone.utc).isoformat()
@@ -1099,8 +1099,8 @@ def _resume_locked(
     direct_worker = isinstance(run_meta.get("worker"), str) and bool(run_meta.get("worker"))
     if direct_worker:
         # A finished direct worker is already the user-visible result. Do not
-        # spawn a write-capable chef just to re-speak it, and do not reclassify
-        # a completed worker when a later chef seat would have dropped sandbox.
+        # spawn a write-capable orchestrator just to re-speak it, and do not reclassify
+        # a completed worker when a later orchestrator seat would have dropped sandbox.
         direct_result = (
             worker_results[0]
             if worker_results

@@ -68,7 +68,7 @@ dependencies, or external state. An audit receipt is not required CI evidence.
 
 CI-only jobs still cover work that is slower, platform-oriented, or depends on
 extra checkout/install context: `content-guard`, `repo-metadata`,
-`install-from-source`, `quickstart-smoke`, and `windows-native-acceptance`.
+`changelog-fragments`, `install-from-source`, `quickstart-smoke`, and `windows-native-acceptance`.
 The local `./scripts/verify` gate is the full coverage gate. Do not treat it
 as a replacement for those CI-only release and public-repo checks.
 
@@ -109,6 +109,10 @@ Format: trigger, then the rule, then what to do instead.
 - Adding a runtime dependency, or a new top-level harness, depth, or include:
   needs a conversation first. Open an issue per `CONTRIBUTING.md` instead of
   landing it directly.
+- A change has a user-visible effect: never edit `CHANGELOG.md`; the
+  `changelog-fragments` CI job rejects it outside a release commit. Add
+  `changelog.d/<pr-number-or-slug>.md` holding `- ` bullets (see
+  `changelog.d/README.md`) and run `python3 scripts/changelog_fragments.py check`.
 - Bumping the version: update `pyproject.toml`, `src/brigade/__init__.py`, and
   every template `_brigade_version` field together. `./scripts/verify` checks
   the sync.
@@ -181,3 +185,11 @@ Pinned during environment setup to **bd 1.1.2**
 `steveyegge/beads` → `gastownhall/beads` release assets. Beads is young and
 schema-mobile — if `bd` commands fail after an upstream release, re-check the
 installed pin before assuming a Brigade bug.
+
+Session-scratch rule: treat bd as planning scratch. Nothing tracked only in bd
+counts as done until it appears as a PR, a Brigade receipt, or a hub record.
+`brigade work import bd` mirrors bd issues and edges into the task ledger and
+`brigade work export bd-outcomes` writes results back as a file. Brigade runs
+only `bd version --json` and `bd export` and never writes bd storage. It
+supports bd 1.3.x, so it refuses the 1.1.2 pin above. See
+[docs/beads-with-brigade.md](docs/beads-with-brigade.md).

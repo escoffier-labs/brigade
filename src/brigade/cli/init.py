@@ -74,6 +74,12 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Repo depth: also install the full kit (rules/, hooks/pre-push, INSTALL_FOR_AGENTS.md). "
         "Workspace depth always installs it.",
     )
+    p_init.add_argument(
+        "--yolo",
+        action="store_true",
+        help="Keep shared context (brief, recall, Fleet Hub, handoffs on request) without verification "
+        "enforcement. Switch back with `brigade work mode set enforced`.",
+    )
     p_init.set_defaults(func=dispatch)
 
 
@@ -140,6 +146,7 @@ def dispatch(args) -> int:
             use_git_exclude=getattr(args, "git_exclude", False),
             update_gitignore=getattr(args, "update_gitignore", True),
             wire_skills=getattr(args, "wire_skills", True),
+            work_mode="yolo" if getattr(args, "yolo", False) else None,
         )
 
     # New v0.3.0 path: --depth/--harnesses build a Selection directly.
@@ -184,6 +191,7 @@ def dispatch(args) -> int:
             use_git_exclude=getattr(args, "git_exclude", False),
             update_gitignore=getattr(args, "update_gitignore", True),
             wire_skills=getattr(args, "wire_skills", True),
+            work_mode="yolo" if getattr(args, "yolo", False) else None,
         )
 
     # No selection flags: interactive prompt.
@@ -205,4 +213,5 @@ def dispatch(args) -> int:
         use_git_exclude=getattr(args, "git_exclude", False),
         update_gitignore=getattr(args, "update_gitignore", True),
         wire_skills=getattr(args, "wire_skills", True),
+        work_mode="yolo" if getattr(args, "yolo", False) else None,
     )

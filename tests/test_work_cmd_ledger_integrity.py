@@ -16,7 +16,7 @@ from brigade import dogfood_cmd
 from brigade import work_cmd
 from brigade.work_cmd import edges as edges_mod
 
-from tests.work_cmd_test_helpers import _init_git_repo, _plan_task_id
+from tests.work_cmd_test_helpers import add_dependency_edge, _init_git_repo, _plan_task_id
 from tests.test_work_cmd_work_graph_hardening import _write_raw_ledger
 
 
@@ -126,7 +126,7 @@ def test_work_run_task_id_refuses_blocked_dependency(tmp_path, monkeypatch, caps
     blocker = _add(tmp_path, "Blocker remains open")
     blocked = _add(tmp_path, "Blocked work")
     assert (
-        work_cmd.task_edge_add(
+        add_dependency_edge(
             target=tmp_path,
             edge_type="blocks",
             source=blocker["id"],
@@ -147,7 +147,7 @@ def test_work_run_task_id_refuses_blocked_dependency(tmp_path, monkeypatch, caps
     assert "completed_at" not in stored
 
 
-@pytest.mark.parametrize("start_path", ["claim", "task_claim", "run"])
+@pytest.mark.parametrize("start_path", ["claim", "run"])
 def test_deleted_dependency_refuses_start_and_survives_mutation(tmp_path, monkeypatch, capsys, start_path):
     """#1857: deleting a blocker must not authorize a claim or explicit run."""
     _init_git_repo(tmp_path)
@@ -156,8 +156,7 @@ def test_deleted_dependency_refuses_start_and_survives_mutation(tmp_path, monkey
     blocker = _add(tmp_path, "Dependency removed by partial restore")
     dependent = _add(tmp_path, "Dependent must stay pending")
     assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=blocker["id"], target_id=dependent["id"])
-        == 0
+        add_dependency_edge(target=tmp_path, edge_type="blocks", source=blocker["id"], target_id=dependent["id"]) == 0
     )
     ledger = json.loads(_tasks_path(tmp_path).read_text())
     original_edges = ledger["edges"]
@@ -171,8 +170,6 @@ def test_deleted_dependency_refuses_start_and_survives_mutation(tmp_path, monkey
 
     if start_path == "run":
         rc = work_cmd.run(None, target=tmp_path, task_id=dependent["id"], handoff=False)
-    elif start_path == "task_claim":
-        rc = work_cmd.task_claim(target=tmp_path, task_id=dependent["id"], actor="ops")
     else:
         rc = work_cmd.claim(target=tmp_path, task_id=dependent["id"], actor="ops")
     assert rc != 0

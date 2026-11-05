@@ -123,20 +123,22 @@ def run(target: Path, *, json_output: bool = False) -> int:
         )
 
     update = update_notify.available_update()
+    from .work_mode import summary as work_summary
+
+    work = work_summary(ctx.target) if ctx.selection is not None else None
 
     if json_output:
-        print(
-            json.dumps(
-                {"target": str(ctx.target), "stations": rows, "update": update},
-                indent=2,
-                sort_keys=True,
-            )
-        )
+        status_payload: dict[str, object] = {"target": str(ctx.target), "stations": rows, "update": update}
+        if work is not None:
+            status_payload["work"] = work
+        print(json.dumps(status_payload, indent=2, sort_keys=True))
         return 0
 
     print(f"brigade status: {ctx.target}")
     if isinstance(update, dict):
         print(f'update_available: {update.get("latest")} (installed {update.get("installed")}); run "brigade update"')
+    if work is not None:
+        print(f"work mode: {work['mode']}; safety rails: {work['rails']}")
     width = max((len(s.name) for s in all_stations()), default=8)
     for row in rows:
         print(

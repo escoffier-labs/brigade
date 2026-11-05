@@ -181,7 +181,7 @@ fn dot_escape(value: &str) -> String {
 }
 
 fn file_dot(nodes: &[FileNode], edges: &[FileEdge]) -> String {
-    let mut text = String::from("digraph graphtrail {\n  rankdir=LR;\n  node [shape=box];\n");
+    let mut text = String::from("digraph code_graph {\n  rankdir=LR;\n  node [shape=box];\n");
     for node in nodes {
         let _ = writeln!(
             text,
@@ -205,7 +205,7 @@ fn file_dot(nodes: &[FileNode], edges: &[FileEdge]) -> String {
 }
 
 fn symbol_dot(nodes: &[SymbolNode], edges: &[SymbolEdge]) -> String {
-    let mut text = String::from("digraph graphtrail {\n  rankdir=LR;\n");
+    let mut text = String::from("digraph code_graph {\n  rankdir=LR;\n");
     for node in nodes {
         let _ = writeln!(
             text,

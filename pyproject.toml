@@ -7,7 +7,7 @@ name = "brigade-cli"
 version = "0.31.0"
 description = "Run coding agents anywhere and keep one record of the work, with MCP servers, tools, skills, and memory in sync across your harnesses."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Solomon Neas", email = "me@solomonneas.dev" }] # content-guard: allow email
 keywords = ["agents", "ai-agents", "agent-memory", "agent-handoffs", "ai-memory", "mcp", "mcp-config", "mcp-sync", "model-context-protocol", "openclaw", "claude-code", "codex", "opencode", "grok", "hermes", "memory", "bootstrap", "brigade", "brigade-cli", "operator", "local-first", "guardrails", "agents-md", "code-graph", "evidence-ledger", "mcp-server", "agent-skills"]
@@ -15,7 +15,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Operating System :: Microsoft :: Windows",
@@ -27,12 +26,12 @@ dependencies = []
 [project.optional-dependencies]
 mesh = ["cryptography>=50.0.2,<52"]
 # Keep pytest below 9.2 until forwarded-module monkeypatch cleanup is compatible (#2091).
-dev = ["cryptography>=50.0.2,<52", "pytest>=9.1.1,<9.2", "pytest-cov>=7.1.0", "pytest-xdist>=3.6", "ruff>=0.17.1", "mypy>=2.4.0"]
-grokbot = ["mcp>=2.3.0,<3", "pyjwt[crypto]>=2"]
+dev = ["cryptography>=50.0.2,<52", "pytest>=9.1.1,<9.2", "pytest-cov>=7.1.0", "pytest-xdist>=3.8.0", "ruff>=0.17.1", "mypy>=2.4.0"]
+grokbot = ["mcp>=2.3.0,<3", "pyjwt[crypto]>=2.15.1"]
 research = ["playwright>=1.64.0"]
 
 [project.urls]
-Homepage = "https://brigade.tools"
+Homepage = "https://brigadestack.com"
 Documentation = "https://brigade.tools/docs"
 Compare = "https://brigade.tools/compare/sync-mcp-servers-across-coding-agents"
 Handoffs = "https://brigade.tools/compare/memory-handoffs-across-coding-agents"
@@ -76,6 +75,7 @@ markers = [
 patch = ["subprocess"]
 
 [tool.ruff]
+target-version = "py311"
 line-length = 120
 src = ["src", "tests"]
 extend-exclude = ["engines", "*.md"]
@@ -89,6 +89,7 @@ force-exclude = true
 select = ["B", "E4", "E7", "E9", "F"]
 
 [tool.mypy]
+python_version = "3.11"
 # The package ships py.typed, so the annotations are validated in CI.
 # Lenient baseline: new modules are checked from day one; the legacy
 # modules below predate the gate and are ratcheted in over time. To

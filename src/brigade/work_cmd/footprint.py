@@ -1,15 +1,13 @@
-"""Three-phase task footprint metadata (files, symbol_ids, snapshot_hash).
+"""Task footprint metadata (files, symbol_ids, snapshot_hash).
 
-Schema follows the #770 spike's validated shape. The same object is rewritten
-with increasing accuracy:
+New tasks receive a ``predicted`` footprint from ``brigade code impact`` when the
+binary and index are available, otherwise an empty degraded prediction.
+Completion writes a ``reconciled`` footprint from the verify receipt's
+``code_graph_delta`` / ``graphtrail_delta`` field.
 
-1. ``predicted`` at filing — GraphTrail ``impact`` of named symbols when the
-   binary and index are present; otherwise an empty predicted footprint
-   (fail-open degrade).
-2. ``refined`` at claim — plan-named concrete files.
-3. ``reconciled`` at completion — join of the verify receipt's
-   ``code_graph_delta`` / ``graphtrail_delta`` field (what was actually
-   touched).
+The ``refined`` phase and its normalizer remain compatible with persisted
+plan-named footprints. The removed task-claim command was its only writer.
+``work claim`` does not refine footprints.
 
 GraphTrail stays a read-only oracle; footprints live only on the task ledger.
 """
@@ -22,7 +20,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .. import component_bins, proc
+from .. import component_bins, engine_paths, proc
 
 PHASE_PREDICTED = "predicted"
 PHASE_REFINED = "refined"
@@ -144,10 +142,13 @@ def predict_footprint(
     target = target.expanduser().resolve()
     seed_symbols = _unique_strings(symbols)
     seed_files = _unique_strings(files)
-    binary = component_bins.resolve("graphtrail")
-    db_path = target / ".graphtrail" / "graphtrail.db"
+    binary = component_bins.resolve("brigade-code-graph")
     if binary is None:
         return empty_predicted(reason="graphtrail binary not found")
+    try:
+        db_path = engine_paths.code_graph_db(target).path
+    except ValueError as exc:
+        return empty_predicted(reason=str(exc))
     if not db_path.is_file():
         return empty_predicted(reason="graphtrail index not found")
     if not seed_symbols and not seed_files:
@@ -256,6 +257,7 @@ def receipt_graph_delta(receipt: dict[str, Any] | None) -> dict[str, Any] | None
     """Return the verify receipt's graphtrail delta field (canonical or alias)."""
     if not isinstance(receipt, dict):
         return None
+    # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
     for key in ("code_graph_delta", "graphtrail_delta"):
         value = receipt.get(key)
         if isinstance(value, dict):

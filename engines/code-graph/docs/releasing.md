@@ -1,10 +1,10 @@
-# Releasing GraphTrail
+# Releasing brigade-code-graph
 
-GraphTrail ships as an engine in Brigade's unified release. The root `.github/workflows/publish.yml` builds `graphtrail` and `graphtrail-mcp` from `engines/code-graph`, includes them in the release assets and verified engine manifest, and publishes the Brigade package. The nested workflow in this engine directory is a historical standalone workflow and does not run as a Brigade workflow.
+brigade-code-graph ships as an engine in Brigade's unified release. The root `.github/workflows/publish.yml` builds `brigade-code-graph` and `brigade-code-graph-mcp` from `engines/code-graph`, includes them in the release assets and verified engine manifest, and publishes the Brigade package. The nested workflow in this engine directory is a historical standalone workflow and does not run as a Brigade workflow.
 
 ## One-time setup
 
-Use Brigade's root release configuration. The standalone GraphTrail repository is archived, and crates.io is frozen at 0.4.0 with no further releases, per the [compatibility policy](../../../docs/phase-4a-compatibility-and-archive.md#graphtrail-cratesio-policy).
+Use Brigade's root release configuration. The standalone brigade-code-graph repository is archived, and crates.io is frozen at 0.4.0 with no further releases, per the [compatibility policy](../../../docs/phase-4a-compatibility-and-archive.md#brigade-code-graph-cratesio-policy).
 
 ## Publish a tag
 

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import html
 import hashlib
 import json
@@ -32,7 +34,6 @@ from .. import (
     research_cmd,
     roadmap_cmd,
     security_cmd,
-    toml_compat,
     tools_cmd,
     work_cmd,
 )
@@ -612,9 +613,9 @@ def _report_retention(target: Path, override: int | None = None) -> int:
     daily_toml = target / ".brigade" / "daily.toml"
     if daily_toml.is_file():
         try:
-            data = toml_compat.loads(daily_toml.read_text())
-        except toml_compat.TOMLDecodeError as exc:
-            raise toml_compat.TOMLDecodeError(f"malformed {daily_toml}: {exc}") from exc
+            data = tomllib.loads(daily_toml.read_text())
+        except tomllib.TOMLDecodeError as exc:
+            raise tomllib.TOMLDecodeError(f"malformed {daily_toml}: {exc}") from exc
         except OSError:
             return DEFAULT_REPORT_RETENTION
         if isinstance(data, dict):

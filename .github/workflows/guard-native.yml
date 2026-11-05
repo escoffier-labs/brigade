@@ -1,0 +1,81 @@
+name: Native guard
+on:
+  pull_request:
+    paths:
+      - 'engines/brigade-guard/**'
+      - '.cargo/**'
+      - 'src/brigade/guard/**'
+      - 'tests/guard/**'
+      - 'tests/test_*guard*'
+      - 'scripts/verify*guard*'
+      - 'scripts/benchmark-guard*'
+      - '.github/workflows/guard-native.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'engines/brigade-guard/**'
+      - '.cargo/**'
+      - 'src/brigade/guard/**'
+      - 'scripts/benchmark-guard*'
+      - '.github/workflows/guard-native.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engines/brigade-guard
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install Brigade
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -e .
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - name: Check Rust 1.85
+        run: TMPDIR=$(mktemp -d -p /tmp) brigade work verify run --target . --argv-json '["cargo","check","--locked","--all-features","--manifest-path","engines/brigade-guard/Cargo.toml"]' --capture brigade-work
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engines/brigade-guard
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install development tools
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -e '.[dev]'
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - name: Rust checks and release build
+        run: TMPDIR=$(mktemp -d -p /tmp) brigade work verify run --target . --argv-json '["./scripts/verify-rust-guard"]' --capture brigade-work
+      - name: Python parity both ways and all guard tests with native enabled
+        run: TMPDIR=$(mktemp -d -p /tmp) brigade work verify run --target . --argv-json '["./scripts/verify-guard-native"]' --timeout 1800 --capture brigade-work
+      # Smoke only: proves the benchmark builds and runs on tiny inputs and
+      # that the three backends agree. The cap catches a hang. No timing
+      # threshold gates the job, because shared runners are too noisy for one.
+      - name: Benchmark smoke
+        timeout-minutes: 3
+        run: TMPDIR=$(mktemp -d -p /tmp) brigade work verify run --target . --argv-json '["python","scripts/benchmark-guard-native.py","--smoke","--output","guard-bench/guard-native-smoke.jsonl"]' --timeout 150 --capture brigade-work
+      - name: Upload benchmark numbers
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: guard-native-benchmark-smoke
+          path: guard-bench/guard-native-smoke.jsonl
+          if-no-files-found: warn
+          retention-days: 30

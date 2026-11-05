@@ -175,6 +175,9 @@ def test_stdio_client_enforces_deadline_and_output_cap(tmp_path: Path, monkeypat
         assert timed.value.code in {"timeout", "unavailable"}
     finally:
         client.close()
+    # The client fixes its deadline at construction. Restore the shipped deadline so a
+    # slow child start cannot time out before it writes past the output cap.
+    monkeypatch.setattr("brigade.grokbot_obsidian.excalidraw_client.DEADLINE_SECONDS", DEADLINE_SECONDS)
     noisy = _script(
         tmp_path / "noisy.py",
         "#!/usr/bin/env python3\nimport sys\nsys.stdout.write('x' * 300000)\nsys.stdout.flush()\nsys.stdin.read()\n",

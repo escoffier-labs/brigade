@@ -488,6 +488,11 @@ function Invoke-ExternalCommand {
         $StderrRoot = [System.IO.Path]::GetTempPath()
     }
     $stderrFile = Join-Path $StderrRoot ("brigade-accept-stderr-{0}.txt" -f [guid]::NewGuid().ToString("N"))
+    # PowerShell 5.1 turns each redirected native stderr line into an error
+    # record, and the script-wide 'Stop' makes the first one terminate. The
+    # exit code is the failure contract here, and stderr is only diagnostics,
+    # so a warning or deprecation line must not fail a command that exited 0.
+    $ErrorActionPreference = 'Continue'
     try {
         $stdout = & $Command 2> $stderrFile
         $exitCode = $LASTEXITCODE
@@ -712,7 +717,7 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
         if ($checksums.ContainsKey($Matches[2])) { throw "duplicate checksums.txt asset: $($Matches[2])" }
         $checksums[$Matches[2]] = $Matches[1]
     }
-    $legacyIds = @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+    $legacyIds = @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
     $platforms = @("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
     if (@($manifest.components.PSObject.Properties).Count -ne 5) { throw "release manifest must contain exactly five components" }
     foreach ($property in $manifest.components.PSObject.Properties) {
@@ -738,17 +743,17 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
             $expected[$name] = $asset.sha256
         }
     }
-    $canonical = @{}
-    foreach ($componentId in @("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")) {
+    $aliases = @{}
+    foreach ($componentId in @("graphtrail", "graphtrail-mcp", "miseledger")) {
         foreach ($platform in $platforms) {
             $name = "$componentId-$platform"
             if ($platform -eq "windows-amd64") { $name += ".exe" }
-            $canonical[$name] = $true
+            $aliases[$name] = $true
         }
     }
     if ($checksums.Count -eq 41) {
-        foreach ($name in $canonical.Keys) {
-            if (-not $checksums.ContainsKey($name)) { throw "release checksums must contain exactly the complete canonical matrix" }
+        foreach ($name in $aliases.Keys) {
+            if (-not $checksums.ContainsKey($name)) { throw "release checksums must contain exactly the complete legacy alias matrix" }
             $expected[$name] = $checksums[$name]
         }
     }
@@ -833,7 +838,7 @@ function Invoke-VerifiedCanonicalSmoke {
     $manifestPath = [IO.Path]::GetFullPath((Join-Path $ReleaseDirectory "component-manifest-v1.json"))
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $revision = $null
-    foreach ($id in @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
+    foreach ($id in @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")) {
         $current = $manifest.components.$id.component_revision
         if ($current -isnot [string] -or $current -cnotmatch '\A[0-9a-f]{40}\z' -or ($revision -and $revision -cne $current)) {
             throw "primary manifest must contain one valid source commit for all components"
@@ -865,7 +870,7 @@ function Assert-ManagedComponentDigests {
         $Report,
         [string]$ManagedBin
     )
-    foreach ($componentId in @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
+    foreach ($componentId in @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")) {
         $path = Get-ManagedExecutablePath -Report $Report -ComponentId $componentId -ManagedBin $ManagedBin
         $expected = $Manifest.components.$componentId.assets."windows-amd64".sha256
         if ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant() -ne $expected) {
@@ -987,7 +992,8 @@ function Get-ManagedExecutablePath {
         [string]$ComponentId,
         [string]$ManagedBin
     )
-    $item = $Report.components | Where-Object { $_.component_id -eq $ComponentId } | Select-Object -First 1
+    $familyAliases = @{ "brigade-code-graph" = "graphtrail"; "brigade-code-graph-mcp" = "graphtrail-mcp"; "brigade-evidence" = "miseledger" }
+    $item = $Report.components | Where-Object { $_.component_id -eq $ComponentId -or $_.component_id -eq $familyAliases[$ComponentId] } | Select-Object -First 1
     if (-not $item) {
         throw "missing component $ComponentId in report"
     }
@@ -1137,29 +1143,99 @@ try {
     if ($InstallMode -eq "pypi") {
         Assert-ManagedComponentDigests -Manifest $releaseManifest -Report $report -ManagedBin $managedBin
     }
-    $requiredIds = @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind") |
+    Write-Step "verified compatibility copies"
+    $compatibilityNames = @{ "graphtrail" = "brigade-code-graph"; "graphtrail-mcp" = "brigade-code-graph-mcp"; "miseledger" = "brigade-evidence" }
+    foreach ($legacy in $compatibilityNames.Keys) {
+        $canonical = Get-ManagedExecutablePath -Report $report -ComponentId $compatibilityNames[$legacy] -ManagedBin $managedBin
+        $shim = Join-Path $managedBin ($legacy + ".exe")
+        if (-not (Test-Path -LiteralPath $shim -PathType Leaf)) { throw "missing compatibility copy: $legacy" }
+        if ((Get-FileHash -LiteralPath $shim -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $canonical -Algorithm SHA256).Hash) {
+            throw "compatibility copy digest mismatch: $legacy"
+        }
+    }
+    $requiredIds = @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind") |
         Where-Object { $unpublishedIds -notcontains $_ }
     if ($InstallMode -eq "source") {
         # Setup installed the released engines and the report above proved they
         # match the manifest. Replace them with binaries built from this commit
         # so the smoke steps below exercise the engines that ship with this
         # checkout instead of the previous release's.
-        $pinIds = @("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind") |
+        $pinIds = @("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind") |
             Where-Object { $unpublishedIds -notcontains $_ }
         Write-Step "pin same-commit engines"
         Install-SameCommitEngines -EngineBinDir $EngineBinDir -ManagedBin $managedBin -ComponentIds $pinIds
     }
-    $graphtrailExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail" -ManagedBin $managedBin
-    $graphtrailMcpExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail-mcp" -ManagedBin $managedBin
-    $miseledgerExe = Get-ManagedExecutablePath -Report $report -ComponentId "miseledger" -ManagedBin $managedBin
+    $graphtrailExe = Get-ManagedExecutablePath -Report $report -ComponentId "brigade-code-graph" -ManagedBin $managedBin
+    $graphtrailMcpExe = Get-ManagedExecutablePath -Report $report -ComponentId "brigade-code-graph-mcp" -ManagedBin $managedBin
+    $miseledgerExe = Get-ManagedExecutablePath -Report $report -ComponentId "brigade-evidence" -ManagedBin $managedBin
+    # The managed bin holds only the legacy evidence name until setup installs
+    # canonical executables. A source install also runs the same-commit
+    # canonical build against the same archive, so both names stay covered.
+    $evidenceExe = $miseledgerExe
+    if ($InstallMode -eq "source") {
+        $evidenceExe = Join-Path $EngineBinDir "brigade-evidence.exe"
+        if (-not (Test-Path -LiteralPath $evidenceExe -PathType Leaf)) {
+            throw "same-commit engine missing: $evidenceExe"
+        }
+    }
     $sessionfindExe = Get-ManagedExecutablePath -Report $report -ComponentId "sessionfind" -ManagedBin $managedBin
 
     if ($InstallMode -eq "pypi") {
         Invoke-VerifiedCanonicalSmoke -Version $BrigadeVersion -ReleaseDirectory (Join-Path $acceptRoot "release-assets") -GhExe $ghExe
     }
 
-    $mcpResponse = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | & $graphtrailMcpExe
-    if ($LASTEXITCODE -ne 0 -or $mcpResponse -notmatch '"jsonrpc"') { throw "graphtrail-mcp absolute-path smoke failed" }
+    # The managed bin holds only the legacy code graph names until setup
+    # installs canonical executables. A source install also runs the
+    # same-commit canonical builds against the same index, so both names stay
+    # covered.
+    $codeGraphExe = $graphtrailExe
+    $codeGraphMcpExe = $graphtrailMcpExe
+    if ($InstallMode -eq "source") {
+        $codeGraphExe = Join-Path $EngineBinDir "brigade-code-graph.exe"
+        $codeGraphMcpExe = Join-Path $EngineBinDir "brigade-code-graph-mcp.exe"
+        foreach ($exe in @($codeGraphExe, $codeGraphMcpExe)) {
+            if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+                throw "same-commit engine missing: $exe"
+            }
+        }
+    }
+
+    $mcpRequest = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+    foreach ($mcpExe in @(@($codeGraphMcpExe, $graphtrailMcpExe) | Select-Object -Unique)) {
+        $mcpName = [IO.Path]::GetFileNameWithoutExtension($mcpExe)
+        # Feed the request from a file so stdin holds exactly one UTF-8 line, with no
+        # BOM and no PowerShell pipe encoding in between.
+        $mcpIn = Join-Path $acceptRoot "$mcpName-initialize.json"
+        $mcpOut = Join-Path $acceptRoot "$mcpName-initialize.out"
+        $mcpErr = Join-Path $acceptRoot "$mcpName-initialize.err"
+        [IO.File]::WriteAllText($mcpIn, $mcpRequest + "`n", (New-Object System.Text.UTF8Encoding($false)))
+        $mcpProc = Start-Process -FilePath $mcpExe -RedirectStandardInput $mcpIn -RedirectStandardOutput $mcpOut `
+            -RedirectStandardError $mcpErr -NoNewWindow -Wait -PassThru
+        if ($mcpProc.ExitCode -ne 0) {
+            $mcpStderr = Get-BoundedStderr -Path $mcpErr
+            throw "$mcpName absolute-path smoke failed (exit $($mcpProc.ExitCode)): $mcpStderr"
+        }
+        $mcpText = ([IO.File]::ReadAllText($mcpOut)).Trim()
+        if ($mcpText -notmatch '"jsonrpc"') {
+            throw "$mcpName absolute-path smoke returned no JSON-RPC response: $mcpText"
+        }
+        # Each entry point reports its own server name.
+        $expectedName = "brigade-code-graph"
+        # Read the initialize reply by id rather than assuming it is the first line.
+        $serverName = $null
+        foreach ($line in ($mcpText -split "`r?`n")) {
+            $trimmed = $line.Trim()
+            if (-not $trimmed.StartsWith("{")) { continue }
+            try { $message = $trimmed | ConvertFrom-Json } catch { continue }
+            if ($message.id -eq 1 -and $null -ne $message.result) {
+                $serverName = $message.result.serverInfo.name
+                break
+            }
+        }
+        if ($serverName -ne $expectedName) {
+            throw "$mcpName serverInfo.name is '$serverName', expected '$expectedName'; output: $mcpText"
+        }
+    }
     & $sessionfindExe --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "sessionfind absolute-path smoke failed" }
     if ($requiredIds -contains "agent-notify") {
@@ -1333,19 +1409,30 @@ finally:
         & brigade memory care import-issues --target $workRepo
         if ($LASTEXITCODE -ne 0) { throw "memory care import-issues failed" }
 
-        $dbPath = Join-Path $workRepo ".graphtrail\graphtrail.db"
-        Write-Step "graphtrail sync"
-        & $graphtrailExe --db $dbPath sync $workRepo
-        if ($LASTEXITCODE -ne 0) { throw "graphtrail sync failed" }
+        # No --db: a fresh repository gets the canonical index. A released
+        # engine older than the rename still writes the legacy one.
+        $dbPath = Join-Path $workRepo ".brigade\code-graph\code-graph.db"
+        Write-Step "code graph sync"
+        Invoke-ExternalCommand -StderrRoot $acceptRoot -Command {
+            & $codeGraphExe sync $workRepo
+        } -FailureMessage "code graph sync failed" | Out-Null
+        if ($InstallMode -ne "source" -and -not (Test-Path $dbPath)) {
+            $dbPath = Join-Path $workRepo ".graphtrail\graphtrail.db"
+        }
         if (-not (Test-Path $dbPath)) {
-            throw "graphtrail database missing at $dbPath"
+            throw "code graph database missing at $dbPath"
         }
 
-        Write-Step "graphtrail callers query"
-        $callersOutput = & $graphtrailExe --db $dbPath callers greet 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) { throw "graphtrail callers greet failed" }
-        if ($callersOutput -notmatch "call_greet") {
-            throw "graphtrail callers greet missing call_greet edge: $callersOutput"
+        # A source install queries the one index under both names.
+        foreach ($callersExe in @(@($codeGraphExe, $graphtrailExe) | Select-Object -Unique)) {
+            $callersName = [IO.Path]::GetFileNameWithoutExtension($callersExe)
+            Write-Step "$callersName callers query"
+            $callersOutput = Invoke-ExternalCommand -StderrRoot $acceptRoot -Command {
+                & $callersExe --db $dbPath callers greet
+            } -FailureMessage "$callersName callers greet failed" | Out-String
+            if ($callersOutput -notmatch "call_greet") {
+                throw "$callersName callers greet missing call_greet edge: $callersOutput"
+            }
         }
 
         $acceptanceMarker = "brigadewinacceptance$([guid]::NewGuid().ToString('N').Substring(0, 8))"
@@ -1362,22 +1449,35 @@ finally:
         if ($LASTEXITCODE -ne 0) { throw "manual export verify run failed" }
 
         $exportPath = Join-Path $acceptRoot "receipts.jsonl"
-        Write-Step "receipts export miseledger"
-        & brigade receipts export miseledger --target $workRepo --out $exportPath --new-only
+        Write-Step "receipts export evidence"
+        & brigade receipts export evidence --target $workRepo --out $exportPath --new-only
         if ($LASTEXITCODE -ne 0) { throw "receipts export failed" }
         if (-not (Test-Path $exportPath)) {
             throw "export file missing: $exportPath"
         }
 
-        Write-Step "miseledger import adapter"
+        Write-Step "evidence entry point banners"
+        foreach ($exe in @(@($evidenceExe, $miseledgerExe) | Select-Object -Unique)) {
+            $banner = Invoke-ExternalCommand -StderrRoot $acceptRoot -Command {
+                & $exe version
+            } -FailureMessage "evidence version failed for $exe"
+            $expected = [IO.Path]::GetFileNameWithoutExtension($exe) + " "
+            if (-not ([string]($banner | Select-Object -First 1)).StartsWith($expected, [StringComparison]::Ordinal)) {
+                throw "evidence banner for $exe does not start with '$expected': $banner"
+            }
+        }
+
+        # A source install imports under the canonical name and reads back
+        # under the legacy name, which proves both share one archive.
+        Write-Step "evidence import adapter"
         $importStdout = Invoke-ExternalCommand -StderrRoot $acceptRoot -Command {
-            & $miseledgerExe import adapter $exportPath --source brigade --json
-        } -FailureMessage "miseledger import failed"
+            & $evidenceExe import adapter $exportPath --source brigade --json
+        } -FailureMessage "evidence import failed"
         $importPayload = ($importStdout | Out-String).Trim() | ConvertFrom-Json
         $inserted = [int]$importPayload.inserted_items
         $alreadyKnown = [int]$importPayload.already_known
         if (($inserted + $alreadyKnown) -lt 1) {
-            throw "miseledger import did not ingest receipts: inserted_items=$inserted already_known=$alreadyKnown"
+            throw "evidence import did not ingest receipts: inserted_items=$inserted already_known=$alreadyKnown"
         }
 
         Write-Step "miseledger imported item ids"

@@ -1067,6 +1067,7 @@ def candidate_artifacts(tmp_path, candidate_source):
                 "url": "git+https://github.com/escoffier-labs/brigade.git",
                 "directory": "npm/feasibility",
             },
+            "homepage": "https://brigadestack.com",
             "license": "MIT OR Apache-2.0",
             "os": [system],
             "cpu": [cpu],

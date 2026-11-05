@@ -9,7 +9,7 @@ from pathlib import Path
 def register(sub: argparse._SubParsersAction) -> None:
     p_search = sub.add_parser(
         "search",
-        help="Inspect and plan GraphTrail + code-search station health.",
+        help="Inspect and plan code graph + code-search station health.",
     )
     search_sub = p_search.add_subparsers(dest="search_command", metavar="<search-command>")
     search_sub.required = True

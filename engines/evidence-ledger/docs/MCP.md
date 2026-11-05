@@ -1,12 +1,12 @@
 # MCP
 
-MiseLedger exposes a local stdio MCP server so agents can query the archive without knowing source-specific schemas.
+brigade-evidence exposes a local stdio MCP server so agents can query the archive without knowing source-specific schemas.
 
 ```bash
-miseledger mcp
+brigade-evidence mcp
 ```
 
-The server does not make network calls. It queries the local MiseLedger SQLite archive and returns eligible imported content as untrusted evidence. Queries may migrate the archive, record integrity-mismatch events, and cache evidence bundles.
+The server does not make network calls. It queries the local brigade-evidence SQLite archive and returns eligible imported content as untrusted evidence. Queries may migrate the archive, record integrity-mismatch events, and cache evidence bundles.
 
 ## Transport
 
@@ -15,14 +15,14 @@ The server speaks JSON-RPC 2.0 over stdio and accepts both framings clients use:
 - **Newline-delimited JSON** (the MCP stdio spec): one JSON message per line. This is what Claude Desktop, the MCP Inspector, Glama, and most clients send, and it is the default.
 - **LSP-style `Content-Length` headers**: also accepted for compatibility.
 
-MiseLedger detects the framing from the first message and replies in the same framing, so no client configuration is needed.
+brigade-evidence detects the framing from the first message and replies in the same framing, so no client configuration is needed.
 
 ## Install Check
 
 Run:
 
 ```bash
-miseledger doctor --mcp --json
+brigade-evidence doctor --mcp --json
 ```
 
 This validates MCP initialization and tool registration. It does not search the archive or print transcript content.
@@ -33,7 +33,7 @@ For an end-to-end fixture smoke:
 scripts/smoke_mcp.sh
 ```
 
-The smoke imports public fixtures into a temporary home, starts `miseledger mcp`, initializes the protocol, lists tools, and creates an evidence bundle.
+The smoke imports public fixtures into a temporary home, starts `brigade-evidence mcp`, initializes the protocol, lists tools, and creates an evidence bundle.
 
 ## Client Configuration
 
@@ -43,7 +43,7 @@ Most local MCP clients can use a command entry like this:
 {
   "mcpServers": {
     "miseledger": {
-      "command": "miseledger",
+      "command": "brigade-evidence",
       "args": ["mcp"]
     }
   }
@@ -53,7 +53,7 @@ Most local MCP clients can use a command entry like this:
 If the client does not inherit your shell `PATH`, use the full path:
 
 ```bash
-which miseledger
+which brigade-evidence
 ```
 
 Then configure, replacing `/ABSOLUTE_ACCOUNT_HOME` with your account's actual absolute home directory:
@@ -62,7 +62,7 @@ Then configure, replacing `/ABSOLUTE_ACCOUNT_HOME` with your account's actual ab
 {
   "mcpServers": {
     "miseledger": {
-      "command": "/ABSOLUTE_ACCOUNT_HOME/.local/bin/miseledger",
+      "command": "/ABSOLUTE_ACCOUNT_HOME/.local/bin/brigade-evidence",
       "args": ["mcp"]
     }
   }
@@ -73,7 +73,7 @@ Then configure, replacing `/ABSOLUTE_ACCOUNT_HOME` with your account's actual ab
 
 `search_evidence`
 
-Search the local archive through MiseLedger FTS.
+Search the local archive through brigade-evidence FTS.
 
 Input:
 

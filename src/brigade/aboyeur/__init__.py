@@ -57,7 +57,7 @@ _SHARED_IMPORT_NAMES = (
     "context_eval",
     "evidence_brief_mod",
     "fleet_client",
-    "graphtrail_delta",
+    "code_graph_delta",
     "causal_receipt",
     "localio",
     "message_envelope",

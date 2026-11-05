@@ -26,7 +26,7 @@ from .. import context_eval
 from .. import evidence_brief as evidence_brief_mod
 from .. import fleet_client
 from .. import fleet_session_bootstrap
-from .. import graphtrail_delta
+from .. import code_graph_delta
 from .. import causal_receipt
 from .. import localio
 from .. import message_envelope
@@ -41,6 +41,7 @@ from .. import run_projector
 from .. import run_shadow
 from .. import seat_health
 from .. import seat_health_policy
+from .. import task_roles
 from .. import verification_contract
 from ..result_integrity import validate_final_output
 from ..run_receipts import (
@@ -291,15 +292,18 @@ def resolve_orchestrator_health_routing(
                     f"using declared fallback {selected}"
                 )
             else:
-                fallback = roster.agents[selected]
-                requested_agent = roster.agents[requested]
-                effective_agents[requested] = replace(
-                    fallback,
-                    name=requested,
-                    role=requested_agent.role,
-                    purpose=requested_agent.purpose,
-                    fallback=(),
-                )
+                if not direct_worker:
+                    # Planned assignments retain role keys; direct workers use
+                    # the declared fallback identity for admission and leasing.
+                    fallback = roster.agents[selected]
+                    requested_agent = roster.agents[requested]
+                    effective_agents[requested] = replace(
+                        fallback,
+                        name=requested,
+                        role=requested_agent.role,
+                        purpose=requested_agent.purpose,
+                        fallback=(),
+                    )
                 warnings.append(
                     f"warning: seat {requested} is unhealthy [{typed_cause}]; using declared fallback {selected}"
                 )
@@ -815,7 +819,7 @@ def run(
         if route_enabled
         else None
     )
-    code_graph_delta = prompts._initial_code_graph_delta(
+    graph_delta = prompts._initial_code_graph_delta(
         code_graph_enabled=code_graph_enabled,
         dry_run=dry_run,
         read_only=read_only,
@@ -826,9 +830,9 @@ def run(
         output_dir.mkdir(parents=True, exist_ok=True)
         if pre_run_snapshot_payload is not None:
             run_io._write_json(output_dir / "pre-run-snapshot.json", pre_run_snapshot_payload)
-        if code_graph_delta is None and cwd is not None:
-            code_graph_delta_before = graphtrail_delta.capture_before(cwd, output_dir)
-            code_graph_delta = code_graph_delta_before
+        if graph_delta is None and cwd is not None:
+            code_graph_delta_before = code_graph_delta.capture_before(cwd, output_dir)
+            graph_delta = code_graph_delta_before
         run_io._write_json(output_dir / "roster.json", _roster_with_admission(roster, model_policy.receipt))
         run_io._write_json(
             output_dir / "run.json",
@@ -847,7 +851,7 @@ def run(
                 brief_set=brief_set,
                 codex_transport=transport_for_payload,
                 route=route,
-                code_graph_delta=code_graph_delta,
+                code_graph_delta=graph_delta,
                 worker=worker,
             ),
         )
@@ -893,6 +897,8 @@ def run(
                         ),
                         file=sys.stderr,
                     )
+                    roster = task_roles.retarget_worker_evidence(roster, requested=worker, effective=effective)
+                    worker = effective
                 break
         if routing.receipt is not None:
             routing_receipt = dict(routing.receipt)
@@ -960,7 +966,7 @@ def run(
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
                     route=route,
-                    code_graph_delta=code_graph_delta,
+                    code_graph_delta=graph_delta,
                     worker=worker,
                 ),
             )
@@ -1003,7 +1009,7 @@ def run(
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
                     route=route,
-                    code_graph_delta=code_graph_delta,
+                    code_graph_delta=graph_delta,
                     worker=worker,
                 ),
             )
@@ -1072,7 +1078,7 @@ def run(
                         route=route,
                         control_socket=control_socket,
                         control_transport=control_transport,
-                        code_graph_delta=code_graph_delta,
+                        code_graph_delta=graph_delta,
                         worker=worker,
                     ),
                 )
@@ -1199,7 +1205,7 @@ def run(
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
                     route=route,
-                    code_graph_delta=code_graph_delta,
+                    code_graph_delta=graph_delta,
                     worker=worker,
                 ),
             )
@@ -1240,7 +1246,7 @@ def run(
                 route=route,
                 control_socket=control_socket,
                 control_transport=control_transport,
-                code_graph_delta=code_graph_delta,
+                code_graph_delta=graph_delta,
                 worker=worker,
             ),
         )
@@ -1352,7 +1358,7 @@ def run(
                     route=route,
                     control_socket=control_socket,
                     control_transport=control_transport,
-                    code_graph_delta=code_graph_delta,
+                    code_graph_delta=graph_delta,
                     worker=worker,
                 ),
             )
@@ -1552,13 +1558,14 @@ def run(
     active_seat = active_seats[0] if len(active_seats) == 1 else None
     worker_prompt_builder = partial(
         planning._worker_prompt,
+        instructions=roster.worker_instructions,
         skill_policy=skill_policy,
         run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
         to_seat=roster.orchestrator,
     )
     try:
         # Worker-only: the orchestrator's own attempt keeps its local capacity and
-        # is never delegated, so a chef can never recurse into a T3 delegate.
+        # is never delegated, so a orchestrator can never recurse into a T3 delegate.
         remote_transport = _worker_remote_transport(
             cwd=cwd,
             run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
@@ -1702,11 +1709,11 @@ def run(
     if output_dir is not None:
         artifacts.record_result_processing(output_dir)
     if output_dir is not None and code_graph_delta_before is not None and cwd is not None:
-        code_graph_delta = graphtrail_delta.capture_after_and_diff(cwd, output_dir, code_graph_delta_before)
-    context_eval_payload = prompts._context_eval_for_run(code_graph, code_graph_delta)
+        graph_delta = code_graph_delta.capture_after_and_diff(cwd, output_dir, code_graph_delta_before)
+    context_eval_payload = prompts._context_eval_for_run(code_graph, graph_delta)
     ground_truth = prompts.build_ground_truth(cwd, started_at, pre_run_snapshot=pre_run_snapshot)
-    if code_graph_delta is not None:
-        ground_truth["code_graph_delta"] = code_graph_delta
+    if graph_delta is not None:
+        ground_truth["code_graph_delta"] = graph_delta
     if context_eval_payload is not None:
         ground_truth["context_eval"] = context_eval_payload
     suspected_noop = prompts._suspected_noop(
@@ -1778,7 +1785,7 @@ def run(
                     route=route,
                     control_socket=control_socket,
                     control_transport=control_transport,
-                    code_graph_delta=code_graph_delta,
+                    code_graph_delta=graph_delta,
                     worker=worker,
                 ),
             )
@@ -1868,7 +1875,7 @@ def run(
         "brief_set": brief_set,
         "codex_transport": transport_for_payload,
         "route": route,
-        "code_graph_delta": code_graph_delta,
+        "code_graph_delta": graph_delta,
         "context_eval_payload": context_eval_payload,
         "suspected_noop": suspected_noop,
         "worker": worker,

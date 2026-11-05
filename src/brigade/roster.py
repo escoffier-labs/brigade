@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import fnmatch
 import json
 import re
 import statistics
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, Protocol
 
 from . import agents as agent_adapters
-from . import toml_compat
+
 
 SANDBOX_CHOICES = ("read-only", "workspace-write", "danger-full-access")
 CODEX_TRANSPORT_CHOICES = ("exec", "app-server")
@@ -82,6 +84,9 @@ class Roster:
     # Run-local admission evidence, carried on the effective roster so that
     # subsequent run.json rewrites cannot discard a routing decision.
     seat_routing: tuple[dict[str, object], ...] = ()
+
+    task_role_instructions: dict[str, str] = field(default_factory=dict)
+    worker_instructions: str = field(default="", repr=False)
 
     def find_role(self, role: str) -> Agent | None:
         return next((a for a in self.agents.values() if a.role == role), None)
@@ -392,9 +397,22 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None, text:
     if text is None and not path.exists():
         raise FileNotFoundError(f"roster not found: {path}")
 
-    data = toml_compat.loads(text if text is not None else path.read_text())
+    data = tomllib.loads(text if text is not None else path.read_text())
     if not isinstance(data, dict):
         raise ValueError("roster must be a TOML table")
+
+    raw_roles = data.get("task_roles", {})
+    if not isinstance(raw_roles, dict):
+        raise ValueError("task_roles must be a table")
+    role_instructions = {}
+    for role, config in raw_roles.items():
+        if role not in {"writing", "frontend"} or not isinstance(config, dict):
+            raise ValueError("task_roles supports writing and frontend tables only")
+        if "instructions_file" in config:
+            configured = Path(_as_str(config["instructions_file"], f"task_roles.{role}.instructions_file"))
+            configured = configured.expanduser()
+            # Detached children run from another cwd, so anchor relative paths to the roster file.
+            role_instructions[role] = str(configured if configured.is_absolute() else path.parent / configured)
 
     orchestrator = _as_str(data.get("orchestrator"), "orchestrator")
     raw_agents = data.get("agents")
@@ -625,6 +643,7 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None, text:
     return Roster(
         orchestrator=orchestrator,
         agents=parsed_agents,
+        task_role_instructions=role_instructions,
         max_workers=max_workers,
         allow_models=allow_models,
         timeout_seconds=timeout_seconds,

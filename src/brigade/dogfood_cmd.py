@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import ast
 import json
 import re
@@ -11,7 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import localio, run_budget, runguard, toml_compat
+from . import localio, run_budget, runguard
+from . import toml_format
 from . import agents
 from . import runs_cmd
 from .roster import Agent, Roster
@@ -45,10 +48,10 @@ class DogfoodConfig:
 
 def _dogfood_roster(timeout_seconds: float, agent_cli: str = DEFAULT_AGENT_CLI) -> Roster:
     return Roster(
-        orchestrator="chef",
+        orchestrator="orchestrator",
         agents={
-            "chef": Agent(
-                "chef",
+            "orchestrator": Agent(
+                "orchestrator",
                 agent_cli,
                 "Plan one small read-only review task and synthesize a concise final answer.",
                 timeout_seconds=timeout_seconds,
@@ -88,8 +91,8 @@ def _parse_toml_value(raw: str) -> object:
 def _read_toml_object(path: Path) -> dict[str, object]:
     text = path.read_text()
     try:
-        return toml_compat.loads(text)
-    except toml_compat.TOMLDecodeError:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
         # Older dogfood configs also accepted unquoted strings and Python values.
         pass
     data: dict[str, object] = {}
@@ -464,7 +467,7 @@ def init(
         "native_read_only_sandbox": native_read_only_sandbox,
         "timeout_seconds": timeout_seconds,
     }
-    body = "\n".join(f"{key} = {toml_compat.format_toml_value(value)}" for key, value in payload.items()) + "\n"
+    body = "\n".join(f"{key} = {toml_format.format_toml_value(value)}" for key, value in payload.items()) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
     print(f"wrote {path}")

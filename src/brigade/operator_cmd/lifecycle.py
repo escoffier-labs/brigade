@@ -8,7 +8,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from .. import center_cmd, doctor as core_doctor, handoff_cmd, security_cmd, skills_cmd, tools_cmd
+from .. import center_cmd, doctor as core_doctor, engine_paths, handoff_cmd, security_cmd, skills_cmd, tools_cmd
 from ..install import install_selection
 from ..selection import KNOWN_HARNESSES, WRITER_INBOXES, Selection, resolve_owner
 from ..work_cmd.scanner_platform import (
@@ -998,7 +998,8 @@ def _checkup_graph(*, target: Path, json_output: bool = False) -> int:
 
     station = search_cmd.status_payload(target)
     tools = station.get("tools") if isinstance(station.get("tools"), dict) else {}
-    graphtrail = tools.get("graphtrail") if isinstance(tools.get("graphtrail"), dict) else {}
+    graphtrail = tools.get(search_cmd.CODE_GRAPH_TOOL)
+    graphtrail = graphtrail if isinstance(graphtrail, dict) else {}
     latest = verification._latest_verify_receipt(target)
     delta = latest.get("code_graph_delta") if isinstance(latest, dict) else None
     delta = delta if isinstance(delta, dict) else {}
@@ -1019,12 +1020,6 @@ def _checkup_graph(*, target: Path, json_output: bool = False) -> int:
             else f"GraphTrail evidence has {issue_count} issue(s)"
         ),
         "issue_count": issue_count,
-        "graphtrail": {
-            "installed": graphtrail.get("installed"),
-            "db_present": graphtrail.get("db_present"),
-            "health": graphtrail.get("health"),
-            "summary": graphtrail.get("summary"),
-        },
         "latest_receipt": latest.get("run_id") if isinstance(latest, dict) else None,
         "code_graph_delta": delta or None,
         "next_command": (
@@ -1034,6 +1029,13 @@ def _checkup_graph(*, target: Path, json_output: bool = False) -> int:
         )
         if not ready
         else None,
+    }
+    # Canonical and legacy keys carry equal values through v0.32 (docs/phase-engine-rename.md, R4).
+    payload["code_graph"] = payload["graphtrail"] = {
+        "installed": graphtrail.get("installed"),
+        "db_present": graphtrail.get("db_present"),
+        "health": graphtrail.get("health"),
+        "summary": graphtrail.get("summary"),
     }
     _print_checkup_surface(payload, json_output=json_output)
     return 0 if ready else 1
@@ -1067,21 +1069,22 @@ def _checkup_ledger(*, target: Path, json_output: bool = False) -> int:
             else f"MiseLedger import health has {issue_count} issue(s)"
         ),
         "issue_count": issue_count,
-        "miseledger": {
-            "installed": station.get("installed"),
-            "health": station.get("health"),
-            "summary": station.get("summary"),
-            "export_cursor_present": station.get("export_cursor_present"),
-        },
         "work_receipt_count": len(receipts),
         "pending_work_receipt_count": len(pending_hashes),
         "next_command": (
             "brigade evidence doctor --target ."
             if not station_ready
-            else "brigade receipts export miseledger --target . --new-only --import"
+            else "brigade receipts export evidence --target . --new-only --import"
         )
         if not ready
         else None,
+    }
+    # Canonical and legacy keys carry equal values through v0.32 (docs/phase-engine-rename.md, R4).
+    payload["evidence"] = payload["miseledger"] = {
+        "installed": station.get("installed"),
+        "health": station.get("health"),
+        "summary": station.get("summary"),
+        "export_cursor_present": station.get("export_cursor_present"),
     }
     _print_checkup_surface(payload, json_output=json_output)
     return 0 if ready else 1
@@ -1156,18 +1159,22 @@ def _loop_stations_payload(target: Path) -> dict[str, Any]:
     from .. import context_cmd, evidence_brief
 
     graph_bin = context_cmd._graphtrail_bin()
-    graph_db = target / ".graphtrail" / "graphtrail.db"
-    if graph_bin and graph_db.is_file():
+    try:
+        graph_db: Path | None = engine_paths.code_graph_db(target).path
+        graph_db_error = None
+    except ValueError as exc:
+        graph_db, graph_db_error = None, str(exc)
+    if graph_bin and graph_db is not None and graph_db.is_file():
         graph = {
             "ok": True,
             "status": "ok",
-            "detail": "graphtrail on PATH and .graphtrail/graphtrail.db present",
+            "detail": f"graphtrail on PATH and {graph_db} present",
         }
     elif graph_bin:
         graph = {
             "ok": False,
             "status": "missing-db",
-            "detail": "graphtrail on PATH; run `graphtrail sync` to build .graphtrail/graphtrail.db",
+            "detail": graph_db_error or f"graphtrail on PATH; run `graphtrail sync` to build {graph_db}",
         }
     else:
         graph = {

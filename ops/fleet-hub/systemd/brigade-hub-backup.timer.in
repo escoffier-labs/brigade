@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly Brigade dogfood hub fleet backup
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+Unit=brigade-hub-backup.service
+
+[Install]
+WantedBy=timers.target

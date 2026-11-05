@@ -97,7 +97,7 @@ ROLE_LABELS: dict[str, str] = {
     "research": "Researcher",
     "scout": "Scout",
     "security": "Security reviewer",
-    "chef": "Orchestrator",
+    "orchestrator": "Orchestrator",
     "admission_default": "Admission fallback seat (legacy)",
 }
 # The omitted-seat admission fallback. It is a role name in its own right and
@@ -539,7 +539,7 @@ def load_view(
 ) -> PolicyView:
     """Project the current policy. Inventory is the injected snapshot or the SQL store."""
     current = fleet_hub_policy.current_policy(conn)
-    document = current["document"]
+    document = fleet_policy.canonical_role_document(current["document"])
     snapshot = adapt_inventory(inventory) if inventory is not None else load_server_inventory(conn, document=document)
     report = fleet_policy.validate_inventory(document, _inventory_mapping(document, snapshot))
     inventory_rows = {row["seat"]: row for row in report["seats"]}
@@ -753,6 +753,8 @@ def _retired_assignment_errors(
     conn: sqlite3.Connection, current: Mapping[str, Any], proposed: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
     """Keep historical leaves, but refuse a retired seat newly assigned to any role."""
+    current = fleet_policy.canonical_role_document(current)
+    proposed = fleet_policy.canonical_role_document(proposed)
     retired_rows = fleet_hub_model_roster.raw_retired_rows(conn)
     errors: list[dict[str, Any]] = []
     scopes = [("defaults", "", current["defaults"], proposed["defaults"], None)]

@@ -5,7 +5,8 @@ preference carries seat *names* only; ``run_preference.parse_preference``
 rejects secret or path material before anything reaches the table.
 
 v19 adds the ``research``, ``security``, and ``scout`` role columns used by
-the hub roster page; the migration is additive.
+the hub roster page; the migration is additive. Schema v48 renames ``chef``
+to ``orchestrator`` without changing stored seat names.
 """
 
 import sqlite3
@@ -20,7 +21,7 @@ CREATE TABLE IF NOT EXISTS run_preference (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     impl TEXT,
     review TEXT,
-    chef TEXT,
+    orchestrator TEXT,
     research TEXT,
     security TEXT,
     scout TEXT,
@@ -34,8 +35,11 @@ _FIELDS = run_preference.ALLOWED_FIELDS
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create the run_preference table (v12 -> v13) and add the v19 role columns."""
+    """Create the preference table, add v19 columns, and rename the v48 role."""
     conn.execute(_RUN_PREFERENCE_SCHEMA)
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(run_preference)")}
+    if "chef" in columns and "orchestrator" not in columns:
+        conn.execute("ALTER TABLE run_preference RENAME COLUMN chef TO orchestrator")
     present = {str(row[1]) for row in conn.execute("PRAGMA table_info(run_preference)").fetchall()}
     for column in _V19_COLUMNS:
         if column not in present:

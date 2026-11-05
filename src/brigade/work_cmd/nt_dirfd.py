@@ -632,6 +632,7 @@ def _nt_create(
     disposition: int,
     options: int,
     attributes: int,
+    security_descriptor: Any = None,
 ) -> Any:
     validate_component(name)
     unicode_name, buffer = api.make_unicode(name)
@@ -640,7 +641,7 @@ def _nt_create(
     obj.RootDirectory = _handle_from_fd(parent)
     obj.ObjectName = ctypes.pointer(unicode_name)
     obj.Attributes = _OBJ_CASE_INSENSITIVE
-    obj.SecurityDescriptor = None
+    obj.SecurityDescriptor = security_descriptor
     obj.SecurityQualityOfService = None
     handle = ctypes.c_void_p()
     iosb = api.IO_STATUS_BLOCK()

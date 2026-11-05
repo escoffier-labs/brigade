@@ -15,17 +15,23 @@ Access application to this listener.
 
 ## What Duet can and cannot do
 
-Duet does its work on its own cloud compute. The profile has no dispatch: no
-tool can start, follow up, answer, approve or interrupt work on operator
-machines, and no runtime key turns that on. These ten tools are absent from
-tool discovery, not merely refused at call time:
+Duet defaults to its own cloud compute. Without dispatch keys, the listener
+builds no fleet client and registers the same 22 tools below. Dispatch is an
+explicit owner opt-in. With dispatch enabled it adds exactly seven tools:
 
-`fleet_submit`, `fleet_followup`, `fleet_answer`, `fleet_approve`,
-`fleet_interrupt`, `fleet_capacity`, `fleet_doctor`, `fleet_status`,
-`fleet_wait`, `fleet_recent`.
+| Tool | Purpose |
+|---|---|
+| `fleet_submit` | Start one bounded task in an isolated fleet worktree. |
+| `fleet_status` | Read a Duet-owned request's state. |
+| `fleet_wait` | Wait at most 60 seconds for a Duet-owned request. |
+| `fleet_recent` | Read Duet's local operation journal. |
+| `fleet_capacity` | Inspect fleet capacity and repository aliases. |
+| `fleet_followup` | Start a bounded additional turn on a Duet-owned request. |
+| `fleet_interrupt` | Interrupt a Duet-owned request. |
 
-A call to one of them by name is rejected as an unknown tool. The listener
-builds no fleet client for this profile.
+`fleet_approve`, `fleet_answer`, `fleet_doctor` and `fleet_report_session`
+are always absent. Calls to absent tools are rejected as unknown tools.
+`duet_capabilities` reports the active tool inventory, dispatch state and limits.
 
 The 22 registered tools:
 
@@ -53,6 +59,11 @@ The 22 registered tools:
 | `fleet_cloud` | List cloud tasks. | No |
 | `fleet_hub_policy` | Read Hub policy. | No |
 | `fleet_digest` | Read the fleet digest. | No |
+
+`memory_search` forwards each match's `score` from `brigade memory search --json`. Since #2196 it is a
+BM25 relevance score: a non-negative float rounded to 4 decimals, where higher ranks first. It used to
+be a small integer. Scores compare only within one result list, never across workspaces or queries.
+Equal scores are ordered by card path.
 
 Shared tools keep Dot's wire schemas and annotations. Tool descriptions are
 reworded for Duet's operating rules. `duet_capabilities` tells Duet not to
@@ -95,10 +106,62 @@ is rejected by the duet pack, and the reverse.
 | `digest_pr_repo` | string | Repository for digest PR queries, formatted `owner/repo`. |
 | `notify_command` | string array | Optional notification argv for watch alerts. |
 | `skills_deny` | string array | Optional. Up to 256 skill ids hidden from `skill_search` and `skill_get`. |
+| `memory_push` | boolean | Optional, default `true`. `false` stops `inbox_list` and `fleet_digest` from carrying `memory_hits` (see the Dot guide). |
 
-There is no `dispatch_enabled`, `events_enabled`, `callback_hosts`,
-`paths.fleet_config`, `paths.bin.t3_fleet` or `owner_authorization`. Those keys
-are rejected.
+`events_enabled` and `callback_hosts` remain rejected. To enable dispatch,
+add these fields to the runtime JSON, adding the path members to the existing
+`paths` and `paths.bin` objects:
+
+```json
+{
+  "dispatch_enabled": true,
+  "owner_authorization": {
+    "version": "1",
+    "text": "Owner-authorized bounded work on the configured repositories."
+  },
+  "dispatch_limits": {
+    "repositories": ["example-project"],
+    "max_open": 3,
+    "daily_limit": 20,
+    "prompt_max_bytes": 32768
+  },
+  "paths": {
+    "fleet_config": "/srv/duet/fleet.toml",
+    "bin": {"t3_fleet": "/usr/local/bin/t3-fleet"}
+  }
+}
+```
+
+Merge this fragment into the complete runtime. Dispatch requires
+both paths and owner authorization. Use a dedicated fleet config and client
+identity for Duet, never Dot's config or credentials. Fleet submits are labeled
+`duet`. The startup isolation check also rejects a fleet config shared with Dot.
+Omit all dispatch fields to retain the default. `dispatch_enabled: false` is
+also accepted without dispatch paths, authorization or limits.
+
+`dispatch_limits` is optional when enabled. Defaults are 3 open requests,
+20 attempts per UTC day and 32768 UTF-8 bytes per prompt. `repositories` is an
+optional list of fleet repository aliases. Omission allows configured aliases,
+and an empty list denies all. `max_open` accepts 1 through 20, `daily_limit`
+1 through 200, and `prompt_max_bytes` 1 through 32768. Prompt bounds include
+appended owner authorization and apply to followups too, including read-only
+calls. Read-only calls still count toward admission limits.
+
+Submit and followup admission reserve slots and daily attempts atomically in
+Duet's private SQLite state before fleet IO. Followups on a finished request
+must reacquire an open slot. Definite fleet refusals release the slot but consume
+the attempt. Unknown outcomes or a crash retain the reservation: inspect
+`fleet_recent` and ask the operator to reconcile before retrying. Status and
+wait release slots only after a confirmed terminal state. Interrupt alone does
+not release a slot. No automatic expiry can reopen capacity for unknown work.
+Only requests created through this Duet state can be read or controlled.
+Typed refusals include `repository_not_allowed`, `open_limit`, `daily_limit`,
+`prompt_too_large`, `unknown_request` and `request_busy`.
+
+Duet gets no completion notice in its inbox. Those notices are sent with the
+node credential, which a Duet listener never holds, so Duet tracks no requests
+for completion and follows its work with `fleet_status`, `fleet_wait` and
+`fleet_recent`.
 
 Dot's runtime also accepts an optional `messaging_enabled`. When Dot omits it,
 `message_send` follows `dispatch_enabled` as before.
@@ -108,9 +171,9 @@ Dot's runtime also accepts an optional `messaging_enabled`. When Dot omits it,
 Install the MCP SDK with `pip install brigade-cli[grokbot]`, plus `uvicorn` and
 `PyJWT[crypto]`. Before setup, prepare:
 
-- a Cloudflare Access application for the Duet host, separate from Dot's;
-- a Hub agent credential enrolled for `agent:duet`, in its own token file;
-- a private state directory that no other pack uses;
+- a Cloudflare Access application for the Duet host, separate from Dot's.
+- a Hub agent credential enrolled for `agent:duet`, in its own token file.
+- a private state directory that no other pack uses.
 - the runtime file described above.
 
 ```bash
@@ -138,7 +201,7 @@ The listener runs the same check at startup and refuses to serve with
 `not_isolated_from_dot` when it fails. Doctor ends by checking that unauthenticated MCP is rejected.
 
 Canary checks that anonymous `POST /mcp` returns 401, that discovery metadata
-names Duet's resource, and that the registered tools are exactly the 22 above.
+names Duet's resource, and that the registered tools match the runtime: 22 by default, 29 with dispatch.
 
 The watch units are `brigade-duet-watch.service` and
 `brigade-duet-watch.timer`, rendered by
@@ -180,8 +243,11 @@ account's behalf. Treat every tool argument as possibly injected by that
 content, including search queries, handoff text, message bodies, recipients
 and skill names.
 
-- Dispatch tools are not registered, so an injected instruction cannot start
-  work on operator machines however it is worded.
+- Dispatch tools are absent by default. Opting in permits injected content to
+  attempt bounded work on operator machines. Repository, open-request, daily
+  attempt and prompt limits reduce exposure. They do not establish prompt trust.
+  Approval, answer and doctor tools remain absent in every configuration.
+  Do not enable dispatch for content whose authority you cannot evaluate.
 - `message_send` reaches only the aliases in `hub.recipients`. It shares the
   `messaging_enabled` switch and 20-message hourly budget with `inbox_reply`.
 - Duet has its own Hub principal and inbox. `inbox_ack` and `inbox_reply` act
@@ -192,7 +258,7 @@ and skill names.
 - `handoff_write` goes through the handoff linter and lands under
   `.claude/memory-handoffs` with a `-duet-` filename, so ingested knowledge is
   attributable and reviewable.
-- `skills_deny` keeps private skills out of search and reads; a denied skill
+- `skills_deny` keeps private skills out of search and reads. a denied skill
   looks the same as a missing one.
 - Separate state, token, audience and resource mean a compromised Duet session
   or token cannot read Dot's history or act as Dot.
@@ -218,3 +284,10 @@ manager, then remove the connector in claude.ai and revoke the Access
 application's sessions. Preview `brigade run cloud grokbot pack remove --id duet
 --target <workspace>`, then repeat with `--apply`. To keep reads but stop
 sends, set `messaging_enabled` to `false` and restart the listener.
+
+To disable dispatch while keeping reads and messaging, remove `dispatch_enabled`,
+`owner_authorization`, `dispatch_limits`, `paths.fleet_config` and
+`paths.bin.t3_fleet`, then restart the listener. This removes all seven dispatch
+tools and builds no fleet client. Running tasks continue. the operator must
+interrupt them separately if needed. Retain Duet's SQLite state for audit and
+admission accounting if dispatch is enabled again.

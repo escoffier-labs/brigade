@@ -1,0 +1,15 @@
+# /etc/nut/upsmon.conf, mode 0640 root:nut.
+MONITOR workstation@localhost 1 upsmon <UPSMON_PASSWORD> primary
+MINSUPPLIES 1
+# A clean shutdown lets systemd stop Docker, which stops each container
+# within its grace period, so the hub logs "brigade fleet hub stopped cleanly".
+SHUTDOWNCMD "/sbin/shutdown -h +0"
+# Leave POWERDOWNFLAG unset for the simulated low-battery test: with it set,
+# the shutdown hook tells the UPS to cut its output. Set it after the test if
+# the UPS should power off at the end of a real outage.
+# POWERDOWNFLAG /etc/killpower
+FINALDELAY 5
+NOTIFYFLAG ONBATT SYSLOG+WALL
+NOTIFYFLAG LOWBATT SYSLOG+WALL
+NOTIFYFLAG FSD SYSLOG+WALL
+NOTIFYFLAG SHUTDOWN SYSLOG+WALL

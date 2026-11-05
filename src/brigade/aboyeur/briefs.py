@@ -24,8 +24,9 @@ from uuid import uuid4
 from .. import agents
 from .. import codex_appserver
 from .. import context_eval
+from .. import engine_paths
 from .. import evidence_brief as evidence_brief_mod
-from .. import graphtrail_delta
+from .. import code_graph_delta
 from .. import causal_receipt
 from .. import localio
 from .. import message_envelope
@@ -255,11 +256,19 @@ def _graphtrail_bin() -> str | None:
     return context_cmd._graphtrail_bin()
 
 
+def _code_graph_index(cwd: Path) -> Path | None:
+    try:
+        db_path = engine_paths.code_graph_db(cwd).path
+    except ValueError:
+        return None
+    return db_path if db_path.is_file() else None
+
+
 def code_graph_brief(cwd: Path | None, task: str) -> CodeGraphBrief:
     if cwd is None:
         return CodeGraphBrief(attached=False)
-    db_path = cwd / ".graphtrail" / "graphtrail.db"
-    if not db_path.is_file():
+    db_path = _code_graph_index(cwd)
+    if db_path is None:
         return CodeGraphBrief(attached=False)
     binary = _graphtrail_bin()
     if binary is None:
@@ -468,9 +477,9 @@ def _pending_drift_entries() -> list[dict[str, object]]:
 def drift_impact_brief(cwd: Path | None) -> DriftImpactBrief:
     if cwd is None:
         return DriftImpactBrief(attached=False)
-    db_path = cwd / ".graphtrail" / "graphtrail.db"
+    db_path = _code_graph_index(cwd)
     binary = _graphtrail_bin()
-    if not db_path.is_file() or binary is None:
+    if db_path is None or binary is None:
         return DriftImpactBrief(attached=False)
     pending = _pending_drift_entries()
     if not pending:

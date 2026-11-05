@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import code_cmd, doctor as doctor_mod, evidence_cmd, search_cmd
+from brigade import code_cmd, doctor as doctor_mod, evidence_cmd, evidence_runtime, search_cmd
 from brigade.station import DoctorContext
 
 
@@ -100,7 +100,7 @@ def test_evidence_status_ok_with_status_json(monkeypatch, tmp_path):
     assert payload["installed"] is True
     assert payload["health"] == "ok"
     assert "items=12" in payload["summary"]
-    assert any("receipts export miseledger" in cmd for cmd in payload["next_commands"])
+    assert any("receipts export evidence" in cmd for cmd in payload["next_commands"])
 
 
 def test_evidence_summary_status_skips_doctor(monkeypatch, tmp_path):
@@ -253,14 +253,14 @@ def test_crawl_plan_prints_memory_when_namespace_is_declared(tmp_path):
 def test_crawl_plan_printed_commands_exec_on_bundled_engine(tmp_path, monkeypatch):
     """Each printed argv must run on the in-tree engine at engines/evidence-ledger/bin/."""
     binary = _bundled_miseledger()
-    monkeypatch.setenv("MISELEDGER_BIN", str(binary))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(binary))
     monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(binary))
     workspace = tmp_path / "ws"
     workspace.mkdir()
     payload = evidence_cmd.crawl_plan_payload(target=workspace)
     assert all(cmd[1:3] != ["crawl", "memory"] for cmd in payload["commands"])
     env = _isolated_miseledger_env(tmp_path / "home")
-    env["MISELEDGER_BIN"] = str(binary)
+    env["BRIGADE_EVIDENCE_BIN"] = str(binary)
     _exec_printed_commands(payload["commands"], env)
 
 
@@ -275,6 +275,35 @@ def test_crawl_plan_memory_command_execs_when_namespace_declared(tmp_path, monke
     assert [str(binary), "crawl", "memory", str(workspace.resolve())] in payload["commands"]
     env = _isolated_miseledger_env(tmp_path / "home")
     _exec_printed_commands(payload["commands"], env)
+
+
+def test_both_engine_entry_points_meet_the_version_floor(tmp_path):
+    """Either banner parses, and the preflight floor passes on the real engines."""
+    go = shutil.which("go")
+    if go is None:
+        pytest.skip("go toolchain missing; cannot build the evidence entry points")
+    for name in evidence_runtime.component_manifest.family_names("brigade-evidence"):
+        binary = tmp_path / "bin" / name
+        built = subprocess.run(
+            [go, "build", "-o", str(binary), f"./cmd/{name}"],
+            cwd=_ENGINE_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert built.returncode == 0, built.stderr
+        home = tmp_path / f"home-{name}"
+        env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
+        for variable, leaf in (("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache")):
+            env[variable] = str(home / leaf)
+        _exec_printed_commands([[str(binary), "init"]], env)
+        banner = subprocess.run([str(binary), "version"], capture_output=True, text=True, env=env, check=False)
+        program, version = banner.stdout.split()
+        assert program == name
+        probe = evidence_runtime.probe_memory_projection(str(binary), env=env)
+        compat = evidence_runtime.check_memory_projection_preflight(probe)
+        assert probe.version == version
+        assert compat.state in {"ok", "warn"}, compat.detail
 
 
 def test_issue_1024_mutation_memory_on_clean_workspace_fails_on_bundled_engine(tmp_path):
@@ -314,7 +343,7 @@ def test_crawl_plan_write_creates_files(tmp_path):
 def test_export_plan_points_at_receipts_export(tmp_path):
     payload = evidence_cmd.export_plan_payload(target=tmp_path)
     commands = [" ".join(cmd) for cmd in payload["commands"]]
-    assert any("receipts export miseledger" in cmd for cmd in commands)
+    assert any("receipts export evidence" in cmd for cmd in commands)
     assert payload["export_cursor_present"] is False
 
 

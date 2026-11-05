@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._child_publish import PUBLISH_SOURCE, wait_for_text
+
 from brigade import cli, managed, stations_cmd
 
 
@@ -433,10 +435,11 @@ def test_timeout_kills_descendant_holding_pipe_and_sanitizes_payload(tmp_path, m
         tmp_path / "bin",
         "station-helper",
         f"""
+{PUBLISH_SOURCE}
 import pathlib, subprocess, sys
 child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
 stat_fields = pathlib.Path(f'/proc/{{child.pid}}/stat').read_text().rsplit(')', 1)[1].split()
-pathlib.Path({str(pid_file)!r}).write_text(f'{{child.pid}} {{stat_fields[19]}}')
+publish({str(pid_file)!r}, f'{{child.pid}} {{stat_fields[19]}}')
 print('sensitive child output', flush=True)
 raise SystemExit(0)
 """,
@@ -463,7 +466,9 @@ raise SystemExit(0)
     serialized = json.dumps(payload)
     assert "sensitive child output" not in serialized
     assert set(["exit_code", "duration_ms", "stdout_bytes", "stderr_bytes", "total_bytes"]) <= set(result)
-    child_pid_text, original_start_time = pid_file.read_text().split()
+    published = wait_for_text(pid_file, timeout=5)
+    assert published is not None, "station child did not publish its PID"
+    child_pid_text, original_start_time = published.split()
     child_pid = int(child_pid_text)
     stat_path = Path(f"/proc/{child_pid}/stat")
     status_path = Path(f"/proc/{child_pid}/status")

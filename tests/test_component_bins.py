@@ -252,16 +252,17 @@ def test_each_family_honors_canonical_override_and_path_for_legacy_request(tmp_p
         assert component_bins.resolve(old, env=env) == str(binary)
 
 
-def test_family_resolution_preserves_path_directory_order_and_requested_name_ties(tmp_path):
+def test_family_resolution_preserves_path_directory_order_and_prefers_canonical_ties(tmp_path):
     legacy = _write_executable(tmp_path / "earlier" / "miseledger")
     canonical = _write_executable(tmp_path / "later" / "brigade-evidence")
     env = _env(tmp_path, PATH=os.pathsep.join((str(legacy.parent), str(canonical.parent))))
     for requested in ("miseledger", "brigade-evidence"):
         _assert_path_match(component_bins.resolve(requested, env=env), legacy)
 
+    # Within one directory the canonical name wins whatever was requested (R4).
     colocated = _write_executable(legacy.parent / "brigade-evidence")
-    _assert_path_match(component_bins.resolve("miseledger", env=env), legacy)
-    _assert_path_match(component_bins.resolve("brigade-evidence", env=env), colocated)
+    for requested in ("miseledger", "brigade-evidence"):
+        _assert_path_match(component_bins.resolve(requested, env=env), colocated)
 
 
 def test_nonrenamed_components_keep_empty_overrides_unset(tmp_path, monkeypatch):

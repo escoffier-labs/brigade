@@ -53,3 +53,22 @@ def test_repeat_diagnostics_reject_bad_pairs_and_do_not_count_empty_results(tmp_
     assert stats["repeat_results"] == stats["repeat_query_results"] == 0
     empty = memory_cmd.search_recall_status(tmp_path / "missing")
     assert empty["compared_pairs"] == empty["repeat_queries"] == empty["repeat_results"] == 0
+
+
+def test_repeat_diagnostics_compare_hashed_recall_events(tmp_path: Path):
+    # Recall events carry only a keyed digest. Equal digests are a repeat query;
+    # a text event next to a digest event still compares results, never queries.
+    entries = [
+        {"ts": "2026-08-09T12:00:00Z", "query_hmac": "d1", "query_source": "prompt", "card_ids": ["a"]},
+        {"ts": "2026-08-09T12:00:10Z", "query_hmac": "d1", "query_source": "prompt", "card_ids": ["a"]},
+        {"ts": "2026-08-09T12:00:20Z", "query": "d1", "card_ids": ["a"]},
+        {"ts": "2026-08-09T12:00:30Z", "query_hmac": "d2", "query_source": "prompt", "card_ids": ["b"]},
+    ]
+    path = tmp_path / memory_cmd.SEARCH_LOG_REL
+    path.parent.mkdir(parents=True)
+    path.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+    stats = memory_cmd.search_recall_status(tmp_path)
+    assert stats["compared_pairs"] == 3
+    assert stats["repeat_queries"] == 1
+    assert stats["repeat_results"] == 2
+    assert stats["repeat_query_results"] == 1

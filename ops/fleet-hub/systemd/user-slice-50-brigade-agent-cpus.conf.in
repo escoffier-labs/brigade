@@ -1,0 +1,5 @@
+# Install as /etc/systemd/system/user.slice.d/50-brigade-agent-cpus.conf.
+# Agent work runs in user sessions, an optional agent account's included, so
+# user.slice gives up the hub's and the embedder's cores.
+[Slice]
+AllowedCPUs=@AGENT_CPUS@

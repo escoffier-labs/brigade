@@ -1,0 +1,5 @@
+# Install as /etc/systemd/system/<unit>.service.d/50-brigade-agent-cpus.conf
+# for each system service that runs agent or model work (the host model
+# server, the production embedder, the agent session servers).
+[Service]
+AllowedCPUs=@AGENT_CPUS@

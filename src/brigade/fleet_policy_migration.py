@@ -672,7 +672,7 @@ def projected_consumer_defaults(conn: sqlite3.Connection) -> dict[str, str | Non
 
 
 def projected_run_preference(conn: sqlite3.Connection) -> dict[str, Any]:
-    document = fleet_hub_policy.current_policy(conn)["document"]
+    document = fleet_policy.canonical_role_document(fleet_hub_policy.current_policy(conn)["document"])
     roles = (document.get("defaults") or {}).get("roles") or {}
     payload: dict[str, Any] = {field: None for field in run_preference.ALLOWED_FIELDS}
     for field in run_preference.ROLE_FIELDS:

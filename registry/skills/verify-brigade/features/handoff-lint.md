@@ -1,4 +1,19 @@
+---
+status: paused
+proof: drive
+surfaces: handoff lint
+drive: handoff-lint
+last-drive: 2026-11-03 31d5c549d
+reason: the handoff format may change with hub memory v2, so the observed error strings below may move
+unpause: pending: hub memory v2 lands and its handoff format is final
+---
+
 # Handoff inbox lint
+
+> **Paused.** The handoff format may change with hub memory v2, and the
+> error strings this page asserts on would move with it. The header says what unpauses it. The observations
+> below were last checked on main `31d5c549d`; do not cite them as current
+> proof until the status is `active` again.
 
 Memory Handoffs are how durable knowledge leaves a session. `brigade handoff
 lint` is the gate that keeps a handoff parseable by the ingester instead of

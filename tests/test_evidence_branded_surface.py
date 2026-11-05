@@ -31,6 +31,86 @@ def _patch_engine(monkeypatch, *, run_calls: list | None = None):
 # --- show / explain / stats passthroughs ------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("verb", "arguments"),
+    [
+        ("stats", ["--json"]),
+        ("show", ["--json", "18ae49710e71"]),
+        ("explain", ["--json", "needle"]),
+        ("explain", ["--limit", "2", "--json", "needle"]),
+        ("show", ["--json", "--", "--help"]),
+        ("explain", ["--json", "--", "-h"]),
+    ],
+)
+def test_evidence_query_verbs_forward_leading_engine_flags(monkeypatch, capsys, verb, arguments):
+    calls: list[dict] = []
+    _patch_engine(monkeypatch, run_calls=calls)
+
+    assert cli.main(["evidence", verb, *arguments]) == 0
+
+    assert calls == [{"args": ["/fake/miseledger", verb, *arguments], "timeout": 30.0, "kwargs": {}}]
+    assert capsys.readouterr().out == '{"ok": true}\n'
+
+
+def test_evidence_stats_json_preserves_engine_failure_output(monkeypatch, capsys):
+    _patch_engine(monkeypatch)
+    monkeypatch.setattr(proc, "run", lambda *a, **k: proc.Result(5, '{"partial": true}\n', "engine-error\n"))
+
+    assert cli.main(["evidence", "stats", "--json"]) == 5
+
+    captured = capsys.readouterr()
+    assert captured.out == '{"partial": true}\n'
+    assert captured.err == "engine-error\n"
+
+
+@pytest.mark.parametrize("verb", ("show", "explain", "stats"))
+@pytest.mark.parametrize("flag", ("-h", "--help"))
+@pytest.mark.parametrize("prefix", ([], ["--json"]))
+def test_evidence_query_help_does_not_start_engine(monkeypatch, capsys, verb, flag, prefix):
+    calls: list[dict] = []
+    _patch_engine(monkeypatch, run_calls=calls)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["evidence", verb, *prefix, flag])
+
+    assert exc.value.code == 0
+    assert calls == []
+    assert f"usage: brigade evidence {verb}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--json", "--forensic-content", "18ae49710e71"],
+        ["--json", "18ae49710e71", "--forensic-content"],
+        ["--json", "--", "--forensic-content"],
+        ["--forensic-content", "--json", "--", "18ae49710e71"],
+        ["--forensic-content", "--json", "--", "--forensic-content"],
+        ["--forensic-content", "--", "18ae49710e71"],
+        ["--forensic-content", "--", "--forensic-content"],
+    ],
+)
+def test_evidence_show_keeps_forensic_flag_in_opaque_arguments(monkeypatch, capsys, arguments):
+    calls: list[dict] = []
+    _patch_engine(monkeypatch, run_calls=calls)
+
+    assert cli.main(["evidence", "show", *arguments]) == 0
+
+    assert calls[0]["args"] == ["/fake/miseledger", "show", *arguments]
+    expected_stdout = '{"ok": true}\n' if "--json" in arguments else "engine-stdout\n"
+    assert capsys.readouterr().out == expected_stdout
+
+
+def test_evidence_show_forensic_prefix_accepts_leading_engine_flags(monkeypatch, capsys):
+    calls: list[dict] = []
+    _patch_engine(monkeypatch, run_calls=calls)
+
+    assert cli.main(["evidence", "show", "--forensic-content", "--json", "18ae49710e71"]) == 0
+
+    assert calls[0]["args"] == ["/fake/miseledger", "show", "--json", "18ae49710e71", "--forensic-content"]
+    assert capsys.readouterr().out == '{"ok": true}\n'
+
+
 def test_evidence_show_forwards_forensic_content_flag(monkeypatch, capsys):
     calls: list[dict] = []
     _patch_engine(monkeypatch, run_calls=calls)

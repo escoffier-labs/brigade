@@ -13,15 +13,11 @@ from brigade import aboyeur, cli, isolated_exec, proc, run_checkpoint, run_journ
 from brigade import roster as roster_mod
 from brigade import runguard
 from brigade.cli import run as run_cli
+from tests._child_publish import PUBLISH_SOURCE, process_is_running, wait_for_text
 from tests._posix import requires_process_groups
 
 
-def _pid_is_running(pid: int) -> bool:
-    try:
-        state = Path(f"/proc/{pid}/stat").read_text().split()[2]
-    except (FileNotFoundError, IndexError, OSError):
-        return False
-    return state != "Z"
+_pid_is_running = process_is_running
 
 
 def _expected_detach_mode() -> str:
@@ -340,11 +336,12 @@ def test_run_detach_startup_escape_kills_child_group_before_terminal_receipt(
         f'Path({str(output_dir / "run.json")!r}).write_text(\'{{"status": "overwritten"}}\\n\')'
     )
     child_code = (
-        "import os,subprocess,sys,time; from pathlib import Path; "
-        f"child=subprocess.Popen([sys.executable, '-c', {overwrite_code!r}]); "
-        f"Path({str(child_pid_path)!r}).write_text(str(os.getpid())); "
-        f"Path({str(descendant_pid_path)!r}).write_text(str(child.pid)); "
-        "time.sleep(60)"
+        "import os,subprocess,sys,time\n"
+        + PUBLISH_SOURCE
+        + f"child=subprocess.Popen([sys.executable, '-c', {overwrite_code!r}])\n"
+        + f"publish({str(child_pid_path)!r}, str(os.getpid()))\n"
+        + f"publish({str(descendant_pid_path)!r}, str(child.pid))\n"
+        + "time.sleep(60)\n"
     )
     spawned = []
     real_popen = subprocess.Popen
@@ -355,13 +352,10 @@ def test_run_detach_startup_escape_kills_child_group_before_terminal_receipt(
         return process
 
     def interrupt_poll(*args, **kwargs):  # noqa: ARG001
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
-            if child_pid_path.is_file() and descendant_pid_path.is_file():
-                break
-            time.sleep(0.01)
-        else:
-            pytest.fail("detached child did not start")
+        # Published by rename, so non-empty text means the pid is complete.
+        for pid_path in (child_pid_path, descendant_pid_path):
+            if wait_for_text(pid_path, timeout=3) is None:
+                pytest.fail("detached child did not start")
         if escape == "keyboard":
             raise KeyboardInterrupt
         if escape == "sigterm":
@@ -391,8 +385,8 @@ def test_run_detach_startup_escape_kills_child_group_before_terminal_receipt(
         receipt = json.loads((output_dir / "run.json").read_text())
         assert receipt["status"] == expected_status
         assert receipt["failure"]["kind"] == expected_kind
-        assert not _pid_is_running(int(child_pid_path.read_text()))
-        assert not _pid_is_running(int(descendant_pid_path.read_text()))
+        assert not _pid_is_running(int(child_pid_path.read_text().strip()))
+        assert not _pid_is_running(int(descendant_pid_path.read_text().strip()))
     finally:
         for process in spawned:
             if process.poll() is None:
@@ -791,6 +785,7 @@ aboyeur.record_run_termination(
 """
 
 _SURVIVOR_PARENT = """
+import os
 import sys
 import time
 from pathlib import Path
@@ -800,8 +795,17 @@ from brigade import proc
 output_dir = Path(sys.argv[1])
 child_script = sys.argv[2]
 child, mode = proc.spawn_detached([sys.executable, child_script, str(output_dir)])
-(output_dir / "detach-mode").write_text(mode)
-(output_dir / "child.pid").write_text(str(child.pid))
+
+
+def publish(name, text):
+    # Rename into place so the test never reads a created-but-empty file.
+    tmp = output_dir / (name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, output_dir / name)
+
+
+publish("detach-mode", mode)
+publish("child.pid", str(child.pid))
 time.sleep(300)
 """
 
@@ -837,8 +841,12 @@ def test_spawn_detached_child_survives_parent_session_exit(tmp_path):
                 raise AssertionError(f"parent exited early: {parent.stderr.read().decode()}")
             time.sleep(0.05)
         assert (output_dir / "child-alive").exists(), "detached child never started"
-        child_pid = int((output_dir / "child.pid").read_text())
-        assert (output_dir / "detach-mode").read_text() == proc.DETACH_MODE_POSIX_SESSION
+        # The parent publishes these after spawn_detached returns, which can
+        # be after the child's own child-alive marker: wait for the content.
+        child_pid_text = wait_for_text(output_dir / "child.pid", timeout=30)
+        assert child_pid_text is not None, "parent never published the child pid"
+        child_pid = int(child_pid_text)
+        assert wait_for_text(output_dir / "detach-mode", timeout=30) == proc.DETACH_MODE_POSIX_SESSION
         assert os.getpgid(child_pid) != os.getpgid(parent.pid)
 
         # Tear down the parent's session the way an SSH disconnect does.
@@ -848,7 +856,11 @@ def test_spawn_detached_child_survives_parent_session_exit(tmp_path):
 
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            payload = json.loads((output_dir / "run.json").read_text())
+            try:
+                payload = json.loads((output_dir / "run.json").read_text())
+            except ValueError:
+                # The child rewrites run.json in place; a read can land mid-write.
+                payload = {}
             if payload.get("finished_at"):
                 break
             time.sleep(0.05)

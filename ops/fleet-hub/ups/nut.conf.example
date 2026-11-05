@@ -1,0 +1,2 @@
+# /etc/nut/nut.conf: one machine, one UPS on USB.
+MODE=standalone

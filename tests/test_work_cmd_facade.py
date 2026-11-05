@@ -138,7 +138,6 @@ EXPECTED_FACADE_SYMBOLS = (
     "task_add",
     "task_done",
     "task_plan",
-    "task_show",
     "tasks",
     "verify_plan",
     "verify_run",

@@ -1,0 +1,339 @@
+use super::*;
+use rusqlite::{Connection, ErrorCode, OpenFlags};
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    path::Path,
+};
+
+pub(crate) fn open(path: &Path) -> rusqlite::Result<Connection> {
+    open_file(path, false)
+}
+/// `create` is for files Rust owns (the memory file). The hub file is never created here.
+pub(crate) fn open_file(path: &Path, create: bool) -> rusqlite::Result<Connection> {
+    // Match Python: relocated parent directories are allowed, file symlinks are not.
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = std::fs::canonicalize(parent)
+        .map_err(|_| rusqlite::Error::InvalidPath(path.to_path_buf()))?;
+    let filename = path
+        .file_name()
+        .ok_or_else(|| rusqlite::Error::InvalidPath(path.to_path_buf()))?;
+    let resolved = parent.join(filename);
+    let path = resolved.as_path();
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        match std::fs::symlink_metadata(Path::new(&name)) {
+            Ok(info) if !info.file_type().is_file() => {
+                return Err(rusqlite::Error::InvalidPath(name.into()));
+            }
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(rusqlite::Error::InvalidPath(name.into()));
+            }
+            _ => {}
+        }
+    }
+    let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    if create {
+        flags |= OpenFlags::SQLITE_OPEN_CREATE;
+    }
+    #[cfg(test)]
+    let vfs = super::powercut::writer_vfs();
+    #[cfg(not(test))]
+    let vfs: Option<&str> = None;
+    let db = match vfs {
+        Some(vfs) => crate::schema::audit::open_with_vfs(path, flags, Some(vfs)),
+        None => crate::schema::audit::open(path, flags),
+    }
+    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+    db.busy_timeout(Duration::ZERO)?;
+    #[cfg(test)]
+    let (level_sql, expected) = super::powercut::synchronous();
+    #[cfg(not(test))]
+    let (level_sql, expected) = ("FULL", 2);
+    db.execute_batch(&format!("PRAGMA journal_mode=WAL; PRAGMA synchronous={level_sql}; PRAGMA foreign_keys=ON; PRAGMA wal_autocheckpoint=0;"))?;
+    let level: i64 = db.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
+    if level != expected {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    db.set_prepared_statement_cache_capacity(128);
+    Ok(db)
+}
+pub(super) fn database_directory(db: &Connection) -> std::io::Result<PathBuf> {
+    let path = db
+        .path()
+        .ok_or_else(|| std::io::Error::other("missing database path"))?;
+    let resolved = std::fs::canonicalize(path)?;
+    Ok(resolved
+        .parent()
+        .expect("database has a parent")
+        .to_path_buf())
+}
+pub(crate) fn sync_directory(db: &Connection) -> std::io::Result<()> {
+    let parent = database_directory(db)?;
+    #[cfg(test)]
+    if super::powercut::skip_directory_sync() {
+        return Ok(());
+    }
+    flush_directory(&parent)?;
+    #[cfg(test)]
+    super::powercut::directory_synced(&parent)?;
+    Ok(())
+}
+#[cfg(not(windows))]
+fn flush_directory(parent: &Path) -> std::io::Result<()> {
+    std::fs::File::open(parent)?.sync_all()
+}
+#[cfg(windows)]
+fn flush_directory(parent: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    // A directory handle needs backup semantics. Like Python's fsync_directory,
+    // a refused directory flush (ERROR_INVALID_FUNCTION or ERROR_ACCESS_DENIED)
+    // is best effort, since NTFS journals the directory entry itself.
+    let flushed = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(parent)
+        .and_then(|directory| directory.sync_all());
+    match flushed {
+        Err(error) if matches!(error.raw_os_error(), Some(1 | 5)) => Ok(()),
+        other => other,
+    }
+}
+pub(crate) struct Tx<'a>(pub(crate) &'a Connection);
+impl ReadTx for Tx<'_> {
+    fn query(&self, sql: &str, params: &[Value]) -> rusqlite::Result<Vec<Vec<Value>>> {
+        let mut stmt = self.0.prepare_cached(sql)?;
+        let count = stmt.column_count();
+        stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            (0..count).map(|i| row.get(i)).collect()
+        })?
+        .collect()
+    }
+}
+impl WriteTx for Tx<'_> {
+    fn execute(&self, sql: &str, params: &[Value]) -> rusqlite::Result<usize> {
+        self.0
+            .prepare_cached(sql)?
+            .execute(rusqlite::params_from_iter(params))
+    }
+}
+fn answer(mut e: Envelope, result: Answer) {
+    if let Some(reply) = e.reply.take() {
+        let _ = reply.send(result);
+    }
+}
+pub(crate) fn begin(db: &Connection, deadline: Instant) -> rusqlite::Result<()> {
+    let mut pause = Duration::from_millis(1);
+    loop {
+        match db.execute_batch("BEGIN IMMEDIATE") {
+            Ok(()) => return Ok(()),
+            Err(e)
+                if e.sqlite_error_code() == Some(ErrorCode::DatabaseBusy)
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(pause.min(deadline.saturating_duration_since(Instant::now())));
+                pause = (pause * 2).min(Duration::from_millis(50));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+fn apply(db: &Connection, e: &Envelope) -> Answer {
+    if Instant::now() >= e.budget.deadline {
+        return Err(Failure::timeout(e.budget.durable));
+    }
+    if db.execute_batch("SAVEPOINT command").is_err() {
+        return Err(Failure::storage("storage-error"));
+    }
+    let deadline = e.budget.deadline;
+    let _ = db.progress_handler(1000, Some(move || Instant::now() >= deadline));
+    let result = catch_unwind(AssertUnwindSafe(|| e.command.apply(&Tx(db))));
+    let _ = db.progress_handler(0, None::<fn() -> bool>);
+    if db.is_autocommit() {
+        return Err(if Instant::now() >= deadline {
+            Failure::timeout(e.budget.durable)
+        } else {
+            Failure::storage("storage-error")
+        });
+    }
+    let result = match result {
+        Ok(Ok(value)) if Instant::now() < deadline => Ok((value, true)),
+        Ok(Err(ApplyError::Refused(value))) if Instant::now() < deadline => Ok((value, false)),
+        Ok(Ok(_) | Err(ApplyError::Refused(_))) => Err(Failure::timeout(e.budget.durable)),
+        Ok(Err(ApplyError::Sqlite(error)))
+            if error.sqlite_error_code() == Some(ErrorCode::OperationInterrupted) =>
+        {
+            Err(Failure::timeout(e.budget.durable))
+        }
+        Ok(Err(ApplyError::Rejected(failure))) => Err(failure),
+        _ => Err(Failure::storage("command-failed")),
+    };
+    let finish = if matches!(result, Ok((_, true))) {
+        "RELEASE command"
+    } else {
+        "ROLLBACK TO command; RELEASE command"
+    };
+    if db.execute_batch(finish).is_err() {
+        let _ = db.execute_batch("ROLLBACK");
+        return Err(Failure::storage("storage-error"));
+    }
+    result.map(|(value, _)| value)
+}
+
+pub(super) fn run(
+    mut db: Connection,
+    mut receiver: mpsc::Receiver<Envelope>,
+    config: Config,
+    arbiter: Arc<Arbiter>,
+    stats: Arc<WriterStats>,
+) {
+    let mut pending = None;
+    let mut directory_synced = false;
+    let mut version = crate::schema::DataVersion::new(&db).ok();
+    while let Some(first) = pending.take().or_else(|| receiver.blocking_recv()) {
+        let dequeued = Instant::now();
+        let lock_deadline = (Instant::now() + config.begin_wait.min(Duration::from_secs(5)))
+            .min(first.budget.deadline);
+        let Some(turn) = arbiter.acquire(Lane::Hub, lock_deadline) else {
+            stats.lock_wait(dequeued.elapsed());
+            let durable = first.budget.durable;
+            answer(first, Err(Failure::timeout(durable)));
+            continue;
+        };
+        let began = begin(&db, lock_deadline);
+        stats.lock_wait(dequeued.elapsed());
+        if let Err(error) = began {
+            let failure = if error.sqlite_error_code() == Some(ErrorCode::DatabaseBusy) {
+                Failure::timeout(first.budget.durable)
+            } else {
+                Failure::storage("storage-error")
+            };
+            answer(first, Err(failure));
+            continue;
+        }
+        if !directory_synced {
+            if sync_directory(&db).is_err() {
+                let _ = db.execute_batch("ROLLBACK");
+                answer(first, Err(Failure::storage("storage-error")));
+                continue;
+            }
+            directory_synced = true;
+        }
+        let mut external_change = version
+            .as_mut()
+            .map(|v| v.changed(&db).unwrap_or(true))
+            .unwrap_or(true);
+        let started = Instant::now();
+        let mut batch: Vec<(Envelope, Answer)> = Vec::new();
+        let (mut events, mut bytes) = (0, 0);
+        let mut next = Some(first);
+        let mut replayed = false;
+        let mut broken = false;
+        let mut aborted = false;
+        while let Some(e) = next.take() {
+            if !batch.is_empty()
+                && (batch.len() >= 256
+                    || events + e.budget.events > 4096
+                    || bytes + e.budget.bytes > 8 * 1024 * 1024
+                    || started.elapsed() >= Duration::from_millis(50))
+            {
+                pending = Some(e);
+                break;
+            }
+            events += e.budget.events;
+            bytes += e.budget.bytes;
+            let result = apply(&db, &e);
+            if db.is_autocommit() {
+                aborted = true;
+                answer(e, result);
+                if replayed || begin(&db, lock_deadline).is_err() {
+                    broken = true;
+                    break;
+                }
+                replayed = true;
+                external_change |= version
+                    .as_mut()
+                    .map(|v| v.changed(&db).unwrap_or(true))
+                    .unwrap_or(true);
+                for (earlier, result) in &mut batch {
+                    if result.is_ok() {
+                        *result = apply(&db, earlier);
+                    }
+                    if db.is_autocommit() {
+                        broken = true;
+                        break;
+                    }
+                }
+                if broken {
+                    break;
+                }
+            } else {
+                batch.push((e, result));
+            }
+            next = receiver.try_recv().ok();
+        }
+        let applied = started.elapsed();
+        let commit_started = Instant::now();
+        let committed = !broken && db.execute_batch("COMMIT").is_ok();
+        stats.batch(
+            batch.len(),
+            applied,
+            (!broken).then(|| commit_started.elapsed()),
+            aborted || !committed,
+        );
+        if !committed {
+            let _ = db.execute_batch("ROLLBACK");
+            for (e, _) in batch {
+                answer(e, Err(Failure::storage("commit-failed")));
+            }
+            drop(db);
+            match open(&config.path).and_then(|db| {
+                let check: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+                if check != "ok" {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                Ok(db)
+            }) {
+                Ok(reopened) => {
+                    db = reopened;
+                    directory_synced = false;
+                    version = crate::schema::DataVersion::new(&db).ok();
+                }
+                Err(_) => {
+                    receiver.close();
+                    if let Some(e) = pending.take() {
+                        answer(e, Err(Failure::storage("storage-error")));
+                    }
+                    while let Some(e) = receiver.blocking_recv() {
+                        answer(e, Err(Failure::storage("storage-error")));
+                    }
+                    return;
+                }
+            }
+        } else {
+            drop(turn);
+            for (mut e, result) in batch {
+                let successful = result.is_ok();
+                if let Some(reply) = e.reply.take() {
+                    let _ = reply.send(result);
+                }
+                if successful {
+                    let _ =
+                        catch_unwind(AssertUnwindSafe(|| e.command.post_commit(external_change)));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn test_apply(db: &Connection, e: &Envelope) -> Answer {
+    apply(db, e)
+}

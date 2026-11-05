@@ -1,12 +1,17 @@
 """Resolve executables for the native components ``brigade setup`` manages.
 
-Every consumer of a managed engine (GraphTrail, MiseLedger, sessionfind) goes
+Every consumer of a managed engine (code graph, evidence, sessionfind) goes
 through :func:`resolve` so one resolution order applies everywhere:
 
-1. an explicit env override (``GRAPHTRAIL_BIN``, ``MISELEDGER_BIN``, ...);
+1. an explicit env override (``BRIGADE_CODE_GRAPH_BIN``, ``BRIGADE_EVIDENCE_BIN``,
+   ...; the legacy variable names are read too and conflicting values refused);
 2. the managed install recorded in ``installed.json`` under the user data root;
-3. ``PATH``;
+3. ``PATH``, where each directory is searched for the canonical executable name
+   before the legacy one (docs/phase-engine-rename.md, R4);
 4. a legacy standalone location kept for machines mid-migration.
+
+Legacy environment overrides print one stderr deprecation notice per spelling
+per process. Canonical resolution stays silent.
 
 Config generators use the same resolver so emitted configs (Cursor MCP
 servers, station wiring) carry the managed absolute path instead of a bare
@@ -20,7 +25,7 @@ import shutil
 from collections.abc import Mapping
 from pathlib import Path
 
-from . import component_manifest, component_paths, component_state
+from . import component_manifest, component_paths, component_state, engine_deprecation
 
 # Engine name -> env var override honored before any other resolution step.
 ENV_OVERRIDES = {
@@ -96,6 +101,8 @@ def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
     environment = env if env is not None else os.environ
     search_path = environment.get("PATH")
     names = component_manifest.family_names(name)
+    for alias in names[1:]:
+        engine_deprecation.environment(ENV_OVERRIDES[alias], ENV_OVERRIDES[names[0]], environment)
     overrides = _override_values(names, environment)
     if overrides:
         if len(set(overrides)) != 1 or not overrides[0].strip():
@@ -113,10 +120,11 @@ def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
         if found:
             return found
     else:
+        # ``family_names`` lists the canonical name first, so a directory that
+        # holds both executables yields the canonical one whatever was requested.
         path_value = search_path if search_path is not None else os.environ.get("PATH", os.defpath)
-        candidates = (name, *(alias for alias in names if alias != name))
         for directory in path_value.split(os.pathsep) if path_value else ():
-            for alias in candidates:
+            for alias in names:
                 found = shutil.which(alias, path=directory or os.curdir)
                 if found:
                     return found
@@ -147,3 +155,21 @@ def resolve_argv(argv: tuple[str, ...] | list[str]) -> list[str]:
         if _override_values(component_manifest.family_names(head), os.environ):
             raise ValueError(f"invalid or conflicting explicit executable override for {head!r}")
     return list(argv)
+
+
+def canonical_command(command: str | None) -> str | None:
+    """Project bare engine commands to a resolved engine path, preserving anything unresolved.
+
+    When Brigade cannot resolve the engine, the original command is kept: the
+    server may find it through its own PATH, and a bare canonical name could
+    point at nothing there.
+    """
+    if command not in component_manifest.ACCEPTED_COMPONENT_IDS:
+        return command
+    assert command is not None
+    canonical = component_manifest.family_id(command)
+    if canonical not in component_manifest.COMPONENT_FAMILIES.values():
+        return command
+    # resolve_argv keeps the explicit-override validation; an unresolved engine keeps the original command.
+    resolved = resolve_argv([canonical])[0]
+    return resolved if resolved != canonical else command

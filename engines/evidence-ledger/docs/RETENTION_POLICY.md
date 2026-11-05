@@ -1,14 +1,14 @@
 # Retention Policy
 
-MiseLedger can prune item-level evidence through an explicit policy pass:
+brigade-evidence can prune item-level evidence through an explicit policy pass:
 
 ```bash
-miseledger prune --policy default --dry-run --json
-miseledger prune --policy default --apply --export exports/pruned-2026-07-06.jsonl.gz --json
-miseledger prune policy --policy retention.json --dry-run --json
+brigade-evidence prune --policy default --dry-run --json
+brigade-evidence prune --policy default --apply --export exports/pruned-2026-07-06.jsonl.gz --json
+brigade-evidence prune policy --policy retention.json --dry-run --json
 ```
 
-Dry run is the default. A destructive run must include both `--apply` and `--export <path>`. Matched records are written to compressed adapter JSONL before any rows are deleted, so the slice can be restored later with `miseledger import adapter <file>`.
+Dry run is the default. A destructive run must include both `--apply` and `--export <path>`. Matched records are written to compressed adapter JSONL before any rows are deleted, so the slice can be restored later with `brigade-evidence import adapter <file>`.
 
 > **Note:** The operator sequence for fully reclaiming space is `prune policy --apply --export <path>` for chatter, then `migrate codex-arguments --apply` to truncate old tool arguments, then `compact`.
 
@@ -23,7 +23,7 @@ The default policy targets old operational noise:
 Messages, decisions, notes, issues, pull requests, and `memory_card` projection
 items are not matched by the default policy. Generic retention must never prune
 canonical memory-card items; memory projection cleanup uses source-local rebuild
-(`miseledger crawl memory <workspace> --rebuild`) instead.
+(`brigade-evidence crawl memory <workspace> --rebuild`) instead.
 
 ## Custom Policy
 
@@ -57,7 +57,7 @@ Fields:
 
 Policy pruning deletes only matched items and dependent rows. It does not remove sources, collections, actors, imports, import warnings, or source scan manifests.
 
-For each matched item, MiseLedger:
+For each matched item, brigade-evidence:
 
 - exports the original adapter JSON line to gzip-compressed JSONL.
 - deletes item tags, item metadata, events, artifacts, and FTS rows.
@@ -71,7 +71,7 @@ Keeping scan manifests prevents routine re-crawls from resurrecting intentionall
 ## Restoring A Slice
 
 ```bash
-miseledger import adapter exports/pruned-2026-07-06.jsonl.gz --json
+brigade-evidence import adapter exports/pruned-2026-07-06.jsonl.gz --json
 ```
 
 Restored rows use the same adapter identity rules as any other import. If the original source files are still present, keep the scan manifests intact so normal crawls do not re-add pruned rows by accident.

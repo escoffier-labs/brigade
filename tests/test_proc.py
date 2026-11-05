@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from brigade import proc
+from tests._child_publish import PUBLISH_SOURCE, process_is_running, process_state, wait_for_text
 
 
 class _RecordingBytesIO(io.BytesIO):
@@ -148,20 +149,37 @@ def test_registered_process_terminates_before_unregister_on_base_exception(monke
 
 def _real_child_command(ready_path: Path) -> list[str]:
     code = (
-        "import os,time; from pathlib import Path; "
-        "os.close(0); os.close(1); os.close(2); "
-        f"Path({str(ready_path)!r}).write_text('ready'); "
-        "time.sleep(60)"
+        "import os,time\n"
+        + PUBLISH_SOURCE
+        + "os.close(0); os.close(1); os.close(2)\n"
+        + f"publish({str(ready_path)!r}, 'ready')\n"
+        + "time.sleep(60)\n"
     )
     return [sys.executable, "-c", code]
 
 
 def _wait_for_child_ready(ready_path: Path) -> None:
-    deadline = time.monotonic() + 15
-    while not ready_path.is_file() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert ready_path.is_file(), "child readiness timed out"
-    assert ready_path.read_text() == "ready"
+    # The child publishes through a rename, and the wait is for non-empty
+    # content, so an existing-but-unwritten file can never be read as ready.
+    assert wait_for_text(ready_path, timeout=15) == "ready", "child readiness timed out"
+
+
+def _gate_collection_on_child_ready(monkeypatch, ready_path: Path) -> None:
+    """Start proc's timeout clock only after the child has flushed its output.
+
+    The deadline begins in ``_collect_process_output``. Without this gate a
+    loaded runner can spend the whole short timeout starting the interpreter,
+    so the timeout fires before the child writes and the capture is empty.
+    The child must flush its partial output before it publishes ``ready_path``.
+    """
+
+    real_collect = proc._collect_process_output
+
+    def gated_collect(process, **kwargs):
+        _wait_for_child_ready(ready_path)
+        return real_collect(process, **kwargs)
+
+    monkeypatch.setattr(proc, "_collect_process_output", gated_collect)
 
 
 def _fallback_reap(process, stop_child, child_job=None) -> None:
@@ -585,13 +603,18 @@ def test_windows_registry_targets_tree_after_group_leader_exits(monkeypatch):
     assert calls[0][0] == ["taskkill", "/PID", "4242", "/T", "/F"]
 
 
-def test_registered_timeout_never_uses_unbounded_output_drain():
+def test_registered_timeout_never_uses_unbounded_output_drain(monkeypatch, tmp_path):
+    ready_path = tmp_path / "child-ready"
+    _gate_collection_on_child_ready(monkeypatch, ready_path)
+    code = (
+        "import sys,time\n"
+        + PUBLISH_SOURCE
+        + "sys.stdout.write('partial output'); sys.stdout.flush()\n"
+        + f"publish({str(ready_path)!r}, 'ready')\n"
+        + "time.sleep(5)\n"
+    )
     result = proc.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys,time; sys.stdout.write('partial output'); sys.stdout.flush(); time.sleep(5)",
-        ],
+        [sys.executable, "-c", code],
         timeout=0.2,
         process_registry=proc.ProcessRegistry(terminate_grace=0.05, kill_grace=0.05),
     )
@@ -607,10 +630,11 @@ def test_registered_timeout_never_uses_unbounded_output_drain():
 def test_registered_timeout_kills_descendant_after_group_leader_exits(tmp_path, startup_delay):
     descendant_pid_path = tmp_path / "descendant.pid"
     descendant_code = (
-        "import os,time; from pathlib import Path; "
-        f"time.sleep({startup_delay!r}); "
-        f"Path({str(descendant_pid_path)!r}).write_text(str(os.getpid())); "
-        "time.sleep(60)"
+        "import os,time\n"
+        + PUBLISH_SOURCE
+        + f"time.sleep({startup_delay!r})\n"
+        + f"publish({str(descendant_pid_path)!r}, str(os.getpid()))\n"
+        + "time.sleep(60)\n"
     )
     parent_code = f"import subprocess,sys; subprocess.Popen([sys.executable, '-c', {descendant_code!r}])"
     result_holder = {}
@@ -620,10 +644,7 @@ def test_registered_timeout_kills_descendant_after_group_leader_exits(tmp_path, 
             super().register(process)
             # Establish the exited-leader/live-descendant fixture before the
             # collector's unchanged 0.2-second timeout starts.
-            ready_deadline = time.monotonic() + 2
-            while not descendant_pid_path.is_file() and time.monotonic() < ready_deadline:
-                time.sleep(0.01)
-            assert descendant_pid_path.is_file()
+            assert wait_for_text(descendant_pid_path, timeout=2) is not None
             assert process.wait(timeout=2) == 0
 
     def invoke():
@@ -635,11 +656,9 @@ def test_registered_timeout_kills_descendant_after_group_leader_exits(tmp_path, 
 
     runner = threading.Thread(target=invoke, daemon=True)
     runner.start()
-    deadline = time.monotonic() + 2
-    while not descendant_pid_path.is_file() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert descendant_pid_path.is_file()
-    descendant_pid = int(descendant_pid_path.read_text())
+    descendant_pid_text = wait_for_text(descendant_pid_path, timeout=2)
+    assert descendant_pid_text is not None, "descendant never published its pid"
+    descendant_pid = int(descendant_pid_text)
     runner.join(timeout=1)
     returned_without_external_cleanup = not runner.is_alive()
     if runner.is_alive():
@@ -652,17 +671,12 @@ def test_registered_timeout_kills_descendant_after_group_leader_exits(tmp_path, 
     assert returned_without_external_cleanup
     assert result_holder["result"].code == 124
 
-    def descendant_is_running() -> bool:
-        try:
-            state = Path(f"/proc/{descendant_pid}/stat").read_text().split()[2]
-        except (FileNotFoundError, IndexError, OSError):
-            return False
-        return state != "Z"
-
     deadline = time.monotonic() + 1
-    while descendant_is_running() and time.monotonic() < deadline:
+    while process_is_running(descendant_pid) and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert not descendant_is_running(), "descendant retained the timed-out process group's output pipes"
+    assert not process_is_running(descendant_pid), (
+        f"descendant retained the timed-out process group's output pipes (state {process_state(descendant_pid)!r})"
+    )
 
 
 def test_windows_registry_taskkill_timeout_is_bounded_and_falls_back(monkeypatch):
@@ -812,20 +826,18 @@ def test_run_classifies_launch_errors_without_absolute_paths(monkeypatch, launch
     assert "/private/bin/worker" not in result.stderr
 
 
-def test_run_preserves_partial_output_on_timeout():
-    result = proc.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import sys,time; "
-                "sys.stdout.write('partial stdout\\n'); sys.stdout.flush(); "
-                "sys.stderr.write('partial stderr\\n'); sys.stderr.flush(); "
-                "time.sleep(5)"
-            ),
-        ],
-        timeout=0.3,
+def test_run_preserves_partial_output_on_timeout(monkeypatch, tmp_path):
+    ready_path = tmp_path / "child-ready"
+    _gate_collection_on_child_ready(monkeypatch, ready_path)
+    code = (
+        "import sys,time\n"
+        + PUBLISH_SOURCE
+        + "sys.stdout.write('partial stdout\\n'); sys.stdout.flush()\n"
+        + "sys.stderr.write('partial stderr\\n'); sys.stderr.flush()\n"
+        + f"publish({str(ready_path)!r}, 'ready')\n"
+        + "time.sleep(5)\n"
     )
+    result = proc.run([sys.executable, "-c", code], timeout=0.3)
 
     assert result.code == 124
     assert result.stdout == "partial stdout\n"

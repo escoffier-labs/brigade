@@ -408,7 +408,9 @@ def test_verify_slot_wait_acquires_after_release_or_expires(tmp_path, wait, expe
             assert not log.exists()
             if expected == 0:
                 assert child.poll() is None
-            fcntl.flock(slot, fcntl.LOCK_UN)
+                fcntl.flock(slot, fcntl.LOCK_UN)
+            # The expiry case keeps the slot held until the child exits: on a slow
+            # runner the child may not reach the lock before a fixed sleep ends.
             _, stderr = child.communicate(timeout=15)
             assert child.returncode == expected, stderr
         finally:

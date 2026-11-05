@@ -1,6 +1,7 @@
 //! Storage layer: schema, connection lifecycle, and the sync write path.
 
 pub mod db;
+pub mod env;
 mod explain;
 pub mod lock;
 pub mod meta;
@@ -12,7 +13,10 @@ mod skipped;
 pub mod sync;
 mod walk;
 
-pub use db::{db_path, open_db, open_default, open_default_read_only, open_read_only};
+pub use db::{
+    DbSource, ResolvedDb, db_path, open_db, open_default, open_default_read_only, open_read_only,
+    repo_root_for_db, resolve_db, resolve_repo_db,
+};
 pub use explain::{ExplainRow, explain_calls};
 pub(crate) use repo_policy::{current_git_branch, current_git_head, guard_unsafe_root};
 pub(crate) use resolve::{RESOLVER_VERSION, resolved_call_site_ids};

@@ -21,12 +21,14 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 from . import fleet_hub_enrollment as enrollment
 from . import (
-    fleet_claim_display,
     fleet_admin_stats_http,
-    fleet_skills_http,
-    fleet_pr_rules_http,
+    fleet_claim_display,
+    fleet_hub_api_http,
+    fleet_hub_routes,
     fleet_mcp_inventory_http,
+    fleet_pr_rules_http,
     fleet_project_board_http,
+    fleet_skills_http,
 )
 from . import (
     fleet_command_deck,
@@ -40,7 +42,6 @@ from . import (
     worklore_http,
 )
 from . import fleet_hub as _hub
-from . import fleet_hub_model_roster
 from . import fleet_hub_policy_api
 from . import fleet_hub_roster_page
 from . import fleet_hub_status
@@ -56,7 +57,7 @@ from . import fleet_admin_explorer, fleet_policy_page
 from . import fleet_repo_policy_page
 from . import fleet_work_page
 from . import ui_theme
-from .fleet_hub_claims import ClaimFenceError, ClaimTargetError, status as claim_fencing_status
+from .fleet_hub_claims import ClaimFenceError, ClaimTargetError
 from .worklore_validate import WorkloreValidationError
 from .fleet_hub import (
     DASHBOARD_COOKIE,
@@ -194,6 +195,71 @@ def lookup_node_token(*args: Any, **kwargs: Any) -> Any:
     return _hub.lookup_node_token(*args, **kwargs)
 
 
+def _route_modules() -> tuple[Any, ...]:
+    """Modules that add routes through ``register_routes(routes, hub)``.
+
+    The CI, action and audit modules stay function-level imports, as they were
+    before the seam, so importing this module does not load them.
+    """
+    from . import fleet_action_http, fleet_ci_http, fleet_hub_audit_http, fleet_hub_findings_http
+
+    return (
+        fleet_hub_audit_http,
+        fleet_hub_findings_http,
+        fleet_ci_http,
+        fleet_action_http,
+        fleet_admin_stats_http,
+        fleet_skills_http,
+        fleet_pr_rules_http,
+        fleet_mcp_inventory_http,
+        fleet_project_board_http,
+        fleet_hub_api_http,
+    )
+
+
+def _register_handler_routes(routes: fleet_hub_routes.RouteTable) -> None:
+    """Routes served by ``_Handler`` methods: dashboard, deck pages, enrollment, worklore."""
+    routes.add("GET", lambda request, _path, query: request._serve_enrollment(query), paths=("/enroll",))
+    routes.add("POST", lambda request, _path, query: request._post_enrollment(query), paths=("/enroll",))
+    routes.add("GET", lambda request, path, query: request._dashboard_api(path, query), paths=("/dashboard/sessions",))
+    routes.add(
+        "POST",
+        lambda request, path, query: request._dashboard_api(path, query),
+        paths=("/dashboard/enrollment", "/dashboard/sessions"),
+    )
+    routes.add("GET", lambda request, path, _query: request._serve_asset(path), paths=tuple(_ASSET_ROUTES))
+    routes.add("GET", lambda request, _path, _query: request._serve_mesh_identity(), paths=("/mesh/identity",))
+    routes.add(
+        "GET",
+        lambda request, _path, _query: request._send_json(200, {"ok": True, "service": "brigade-fleet-hub"}),
+        paths=("/health",),
+    )
+    routes.add("GET", lambda request, _path, query: request._serve_roster(query), paths=("/deck/roster",))
+    routes.add("POST", lambda request, _path, _query: request._post_roster(), paths=("/deck/roster",))
+    routes.add("GET", lambda request, _path, query: request._serve_policy_page(query), paths=("/deck/policy",))
+    routes.add("POST", lambda request, _path, _query: request._post_policy_page(), paths=("/deck/policy",))
+    routes.add(
+        "GET", lambda request, path, query: request._serve_observed_work(path, query), prefixes=("/deck/observed/",)
+    )
+    routes.add("GET", lambda request, _path, query: request._serve_work(query), paths=("/deck/work",))
+    routes.add("GET", lambda request, _path, query: request._serve_owners_page(query), paths=("/deck/owners",))
+    # The deck catch-all: exact deck routes and longer prefixes above win over ``/deck/``.
+    routes.add(
+        "GET",
+        lambda request, path, query: request._serve_deck(path, query),
+        paths=("/", "/deck", "/deck/repos"),
+        prefixes=("/deck/",),
+    )
+    routes.add("GET", lambda request, path, query: request._serve_dashboard(path, query), prefixes=(_DASHBOARD_PREFIX,))
+    routes.add("POST", lambda request, path, _query: request._post_api(path), paths=fleet_hub_api_http.POST_PATHS)
+
+    def worklore(request: Any, _path: str, _query: str) -> None:
+        request._handle_worklore()
+
+    routes.add("GET", worklore, paths=("/work",), prefixes=("/work/",))
+    routes.add(("POST", "PATCH", "DELETE"), worklore, prefixes=("/work/",))
+
+
 def make_handler(
     token: str,
     db_path: Path,
@@ -223,14 +289,34 @@ def make_handler(
     """
     frozen_deck = deck_config if deck_config is not None else fleet_command_deck.DeckConfig()
     storage_policy = storage_policy or fleet_hub_sealed.StoragePolicy()
+    hub = fleet_hub_routes.HubContext(
+        token=token,
+        db_path=Path(db_path),
+        allow_admin_writes=allow_admin_writes,
+        deck=frozen_deck,
+        storage_policy=storage_policy,
+        policy_inventory=policy_inventory,
+        open_db=lambda path: open_db(path),
+    )
+    routes = fleet_hub_routes.RouteTable()
+    for module in _route_modules():
+        module.register_routes(routes, hub)
+    _register_handler_routes(routes)
 
     class _Handler(RejectedUploadMixin):
+        # Read by tests and the route inventory; dispatch uses the closure.
+        route_table = routes
         message_storage_policy = storage_policy
         server_version = "brigade-fleet-hub/1"
         sys_version = ""
         # Idle-socket guard: a peer that connects and never sends a request
         # line cannot pin a handler thread forever (pre-auth).
         timeout = 30
+
+        def parse_request(self) -> bool:
+            from .fleet_hub_upstream import authorize
+
+            return super().parse_request() and authorize(self)
 
         def log_message(self, fmt: str, *log_args: Any) -> None:  # quiet by default
             pass
@@ -1472,327 +1558,56 @@ def make_handler(
                 return
             self._render_roster(status=422, editable=True, error=result.message, submission=submission)
 
-        def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
-            path, _, query = self.path.partition("?")
-            if self._refuse_token_query(query):
-                return
-            if path == "/audit":
-                from .fleet_hub_audit_http import serve_get
+        def _read_api_body(self) -> Any:
+            """A JSON API body under the hub limit, read from this module at call time."""
+            return self._read_json_body(MAX_BODY_BYTES)
 
-                serve_get(self, query, Path(db_path), open_db=open_db)
-                return
-            if path in ("/deck/ci", "/ci", "/ci/work"):
-                from .fleet_ci_http import route
-
-                route(self, Path(db_path), method="GET")
-                return
-            if path.startswith("/deck/actions/"):
-                from . import fleet_action_http
-
-                fleet_action_http.route(self, Path(db_path), token)
-                return
-            if path == "/enroll":
-                self._serve_enrollment(query)
-                return
-            if path == "/dashboard/sessions":
-                self._dashboard_api(path, query)
-                return
-            if path in _ASSET_ROUTES:
-                self._serve_asset(path)
-                return
-            if path == "/mesh/identity":
-                try:
-                    conn = open_db(Path(db_path))
-                    try:
-                        value = fleet_hub_identity.identity(conn)
-                    finally:
-                        conn.close()
-                    self._send_json(
-                        200 if value is not None else 404,
-                        value if value is not None else {"error": "identity not found"},
-                    )
-                except (FleetHubError, sqlite3.Error) as exc:
-                    self._send_json(500, {"error": f"hub database error: {exc}"})
-                return
-            if path == "/health":
-                self._send_json(200, {"ok": True, "service": "brigade-fleet-hub"})
-                return
-            if path == "/deck/roster":
-                self._serve_roster(query)
-                return
-            if path == "/deck/policy":
-                self._serve_policy_page(query)
-                return
-            if path.startswith("/deck/observed/"):
-                self._serve_observed_work(path, query)
-                return
-            if path == "/deck/work":
-                self._serve_work(query)
-                return
-            if path == "/deck/stats":
-                fleet_admin_stats_http.serve(self, Path(db_path), query)
-                return
-            if path == "/deck/owners":
-                self._serve_owners_page(query)
-                return
-            if path in ("/deck/skills", "/deck/skills/plan"):
-                fleet_skills_http.serve(self, Path(db_path), token, path, query)
-                return
-            if path == "/deck/pr-rules":
-                fleet_pr_rules_http.serve(self, Path(db_path), token, query)
-                return
-            if path == "/deck/mcp":
-                fleet_mcp_inventory_http.serve(self, Path(db_path), query)
-                return
-            if path == "/" or path in ("/deck", "/deck/repos") or path.startswith("/deck/"):
-                self._serve_deck(path, query)
-                return
-            if path.startswith(_DASHBOARD_PREFIX):
-                self._serve_dashboard(path, query)
-                return
-            if path in (
-                "/status",
-                "/claims",
-                "/nodes",
-                "/cloud",
-                "/models",
-                "/preference",
-                "/sessions",
-                "/owners",
-                "/policy",
-                "/policy/status",
-                "/policy/inventory",
-            ):
-                if self._bearer() is None:
-                    if path in {"/policy", "/policy/status", "/policy/inventory"}:
-                        self._send_json(401, {"error": {"code": "auth-failed", "message": "unauthorized"}})
-                    else:
-                        self._send_json(401, {"error": "unauthorized"})
-                    return
-                include_all = parse_qs(query).get("all", [""])[0].lower() in ("1", "true", "yes")
-                try:
-                    conn = open_db(Path(db_path))
-                except FleetHubUnsupportedSchema:
-                    self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
-                    return
-                except (FleetHubError, sqlite3.Error) as exc:
-                    self._send_json(500, {"error": f"hub database error: {exc}"})
-                    return
-                payload: dict[str, Any]
-                try:
-                    caller = self._caller(conn)
-                    if caller is None:
-                        return
-                    is_admin, _node = caller
-                    presented = self._bearer()
-                    if path == "/nodes":
-                        if not is_admin:
-                            self._send_json(403, {"error": "the admin token is required to manage nodes"})
-                            return
-                        payload = {"nodes": list_nodes(conn)}
-                    elif path == "/status":
-                        payload = {
-                            "claim_fencing": claim_fencing_status(conn),
-                            "runs": latest_status(
-                                conn,
-                                include_all=include_all,
-                                stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
-                            ),
-                        }
-                    elif path == "/cloud":
-                        if parse_qs(query).get("view", [""])[0] == "capabilities":
-                            # Fixed-size preflight, independent of leases and provider policy rows.
-                            payload = {"schema": "brigade.fleet_cloud.v1"}
-                        else:
-                            payload = cloud_snapshot(
-                                conn, frozen_deck, include_all=include_all, include_grokbot=is_admin
-                            )
-                    elif path == "/models":
-                        payload = fleet_hub_model_roster.project_roster(
-                            conn,
-                            audience_node_id=None if is_admin else _node,
-                            raw_node_bearer=None if is_admin else presented,
-                        )
-                    elif path == "/preference":
-                        pref = get_run_preference(conn)
-                        payload = {"preference": {key: value for key, value in pref.items() if value is not None}}
-                    elif path == "/sessions":
-                        payload = {"sessions": list_sessions(conn, include_all=include_all)}
-                    elif path == "/owners":
-                        conn.execute("PRAGMA query_only=ON")
-                        view = fleet_owners.load_view(conn, now_epoch=_hub._now_epoch(), include_grokbot=is_admin)
-                        payload = fleet_owners.view_payload(view)
-                    elif path == "/policy/status":
-                        payload = fleet_hub_policy_api.read_status(conn)
-                    elif path == "/policy/inventory":
-                        fleet_model_inventory.ensure_schema(conn)
-                        payload = fleet_hub_policy_api.read_inventory(conn)
-                    elif path == "/policy":
-                        params = parse_qs(query)
-                        history = params.get("history", [""])[0].lower() in ("1", "true", "yes")
-                        limit_raw = params.get("limit", ["50"])[0]
-                        try:
-                            limit = int(limit_raw)
-                        except ValueError:
-                            self._send_json(
-                                400,
-                                fleet_hub_policy_api.FleetPolicyApiError(
-                                    "invalid-request", "limit must be an integer"
-                                ).payload(),
-                            )
-                            return
-                        payload = fleet_hub_policy_api.read_policy(conn, history=history, limit=limit)
-                    else:
-                        payload = {"claims": fleet_claim_display.list_display_claims(conn, include_all=include_all)}
-                except ClaimFenceError as exc:
-                    self._send_json(503, {"error": str(exc), "reason": exc.reason})
-                    return
-                except sqlite3.Error as exc:
-                    self._send_json(500, {"error": f"hub database error: {exc}"})
-                    return
-                finally:
-                    conn.close()
-                self._send_json(200, payload)
-                return
-            if self._handle_worklore():
-                return
-            self._send_json(404, {"error": "not found"})
-
-        def do_PUT(self) -> None:  # noqa: N802 - stdlib handler API
-            path = self.path.partition("?")[0]
-            if path != "/preference":
-                self._send_json(404, {"error": "not found"})
-                return
-            if self._bearer() is None:
-                self._send_json(401, {"error": "unauthorized"})
-                return
+        def _serve_mesh_identity(self) -> None:
             try:
                 conn = open_db(Path(db_path))
-            except FleetHubUnsupportedSchema:
-                self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
-                return
+                try:
+                    value = fleet_hub_identity.identity(conn)
+                finally:
+                    conn.close()
+                self._send_json(
+                    200 if value is not None else 404,
+                    value if value is not None else {"error": "identity not found"},
+                )
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_json(500, {"error": f"hub database error: {exc}"})
-                return
-            try:
-                caller = self._caller(conn)
-                if caller is None:
-                    return
-                is_admin, _node = caller
-                if not is_admin:
-                    self._send_json(403, {"error": "the admin token is required to set run preference"})
-                    return
-                parsed = self._read_json_body(MAX_BODY_BYTES)
-                if parsed is None:
-                    return
-                body = parsed.get("preference") if isinstance(parsed, dict) and "preference" in parsed else parsed
-                stored = set_run_preference(conn, body, updated_by="admin")
-                payload = {"preference": {key: value for key, value in stored.items() if value is not None}}
-            except FleetHubError as exc:
-                self._send_json(400, {"error": str(exc)})
-                return
-            except sqlite3.Error as exc:
-                self._send_json(500, {"error": f"hub database error: {exc}"})
-                return
-            finally:
-                conn.close()
-            self._send_json(200, payload)
 
-        def do_PATCH(self) -> None:  # noqa: N802 - stdlib handler API
-            path = self.path.partition("?")[0]
-            if not path.startswith("/work/"):
-                self._send_json(404, {"error": "not found"})
+        def _route(self, method: str, *, refuse_token_query: bool) -> None:
+            path, _, query = self.path.partition("?")
+            if refuse_token_query and self._refuse_token_query(query):
                 return
-            self._handle_worklore()
+            if not routes.dispatch(self, method, path, query):
+                self._send_json(404, {"error": "not found"})
 
-        def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
-            path = self.path.partition("?")[0]
-            if not path.startswith("/work/"):
-                self._send_json(404, {"error": "not found"})
-                return
-            self._handle_worklore()
+        def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+            self._route("GET", refuse_token_query=True)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
-            path, _, query = self.path.partition("?")
-            if self._refuse_token_query(query):
-                return
-            if path in ("/ci", "/ci/refresh"):
-                from .fleet_ci_http import route
+            self._route("POST", refuse_token_query=True)
 
-                route(self, Path(db_path), method="POST")
-                return
-            if path.startswith("/deck/actions/") or path == "/actions":
-                from . import fleet_action_http
+        def do_PUT(self) -> None:  # noqa: N802 - stdlib handler API
+            self._route("PUT", refuse_token_query=False)
 
-                fleet_action_http.route(self, Path(db_path), token)
-                return
-            if path == "/enroll":
-                self._post_enrollment(query)
-                return
-            if path in ("/dashboard/enrollment", "/dashboard/sessions"):
-                self._dashboard_api(path, query)
-                return
-            if path == "/deck/roster":
-                self._post_roster()
-                return
-            if path == "/deck/policy":
-                self._post_policy_page()
-                return
-            if path == "/deck/pr-rules":
-                fleet_pr_rules_http.post_form(self, Path(db_path), token, policy_inventory)
-                return
-            if path == "/deck/skills":
-                fleet_skills_http.post_form(self, Path(db_path), token)
-                return
-            if path == "/skills/report":
-                fleet_skills_http.post_report(self, Path(db_path), query)
-                return
-            if path == "/mcp/report":
-                fleet_mcp_inventory_http.post_report(self, Path(db_path), query)
-                return
-            if path == "/projects/board":
-                fleet_project_board_http.post_snapshot(self, Path(db_path), query)
-                return
-            if path == "/stats":
-                fleet_admin_stats_http.post(self, Path(db_path), query)
-                return
-            if path.startswith("/work/"):
-                self._handle_worklore()
-                return
-            if path not in (
-                "/events",
-                "/claims",
-                "/nodes",
-                "/cloud",
-                "/models",
-                "/grokbot",
-                "/sessions",
-                "/policy",
-                "/messages",
-                "/message-principals",
-                "/mesh/identity",
-                "/mesh/statements",
-            ):
-                self._send_json(404, {"error": "not found"})
-                return
-            if self._bearer() is None:
-                if path == "/policy":
-                    self._send_json(401, {"error": {"code": "auth-failed", "message": "unauthorized"}})
-                else:
-                    self._send_json(401, {"error": "unauthorized"})
+        def do_PATCH(self) -> None:  # noqa: N802 - stdlib handler API
+            self._route("PATCH", refuse_token_query=False)
+
+        def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
+            self._route("DELETE", refuse_token_query=False)
+
+        def _post_api(self, path: str) -> None:
+            if fleet_hub_api_http.refuse_missing_bearer(self, path):
                 return
             # The database is opened before the body is read: a node token
             # is resolved against it, and an unauthenticated peer must not
             # get the hub to read its (up to 8 MiB) body first. This is a
             # non-migrating connection (#1161): the schema was created once
             # at server startup.
-            try:
-                conn = open_db(Path(db_path))
-            except FleetHubUnsupportedSchema:
-                self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
-                return
-            except (FleetHubError, sqlite3.Error) as exc:
-                self._send_json(500, {"error": f"hub database error: {exc}"})
+            conn = fleet_hub_api_http.open_conn(self, hub)
+            if conn is None:
                 return
             body_payload: dict[str, Any]
             try:
@@ -1800,132 +1615,17 @@ def make_handler(
                 if caller is None:
                     return
                 is_admin, caller_node = caller
-                if path in ("/mesh/identity", "/mesh/statements"):
-                    if not is_admin:
-                        self._send_json(403, {"error": "the admin token is required for mesh uploads"})
-                        return
-                elif path == "/nodes":
-                    if not is_admin:
-                        self._send_json(403, {"error": "the admin token is required to manage nodes"})
-                        return
-                elif path == "/message-principals":
-                    if not is_admin:
-                        self._send_json(403, {"error": "the admin token is required to enroll message principals"})
-                        return
-                elif path == "/policy" and is_admin and not allow_admin_writes:
-                    # Document writes stay admin. Resolve/prepare/ack need a node token.
-                    pass
-                elif path in ("/events", "/claims", "/sessions", "/messages") and is_admin and not allow_admin_writes:
-                    self._send_json(
-                        403,
-                        {
-                            "error": "the admin token may not post events or claims: enroll this node with "
-                            "'brigade fleet nodes add' and configure its node token, or start the hub with "
-                            "--allow-admin-writes"
-                        },
-                    )
+                if not fleet_hub_api_http.admit_post(self, hub, path, is_admin=is_admin):
                     return
-                parsed = self._read_json_body(MAX_BODY_BYTES)
+                parsed = self._read_api_body()
                 if parsed is None:
                     return
-                if path == "/mesh/identity":
-                    status, body_payload = (
-                        200,
-                        fleet_hub_identity.upload_identity(conn, parsed, storage_policy=storage_policy),
-                    )
-                elif path == "/mesh/statements":
-                    status, body_payload = 200, fleet_hub_identity.upload_statement(conn, parsed)
-                elif path == "/events":
-                    status, body_payload = 200, dict(store_events(conn, parsed, caller_node=caller_node))
-                elif path == "/claims":
-                    status, body_payload = handle_claim(conn, parsed, caller_node=caller_node)
-                elif path == "/sessions":
-                    status, body_payload = handle_session(conn, parsed, caller_node=caller_node)
-                elif path == "/messages":
-                    status, body_payload = fleet_hub_messages.handle(
-                        conn,
-                        parsed,
-                        caller=caller_node,
-                        open_conn=lambda: open_db(Path(db_path)),
-                        source_ip=self.client_address[0],
-                        storage_policy=storage_policy,
-                        authenticated_generation=_hub.hash_node_token(self._bearer() or ""),
-                    )
-                elif path == "/message-principals":
-                    status, body_payload = fleet_hub_messages.handle_principal_admin(conn, parsed)
-                elif path == "/cloud":
-                    if (
-                        is_admin
-                        and not allow_admin_writes
-                        and (not isinstance(parsed, dict) or parsed.get("action") != "policy")
-                    ):
-                        self._send_json(
-                            403,
-                            {
-                                "error": "the admin token may not admit, bind, renew, or release cloud leases: enroll this "
-                                "node with 'brigade fleet nodes add' and configure its node token, or start the hub with "
-                                "--allow-admin-writes"
-                            },
-                        )
-                        return
-                    status, body_payload = handle_cloud(conn, parsed, caller_node=caller_node, config=frozen_deck)
-                elif path == "/models":
-                    status, body_payload = handle_model_policy(conn, parsed, caller_node=caller_node)
-                elif path == "/policy":
-                    if not isinstance(parsed, dict):
-                        self._send_json(
-                            400, {"error": {"code": "invalid-request", "message": "body is not valid JSON"}}
-                        )
-                        return
-                    action = parsed.get("action")
-                    if action in fleet_hub_policy_api.ADMIN_ACTIONS and not is_admin:
-                        self._send_json(
-                            403,
-                            {
-                                "error": {
-                                    "code": "auth-failed",
-                                    "message": "the admin token is required for policy document writes",
-                                }
-                            },
-                        )
-                        return
-                    if action in fleet_hub_policy_api.NODE_ACTIONS and is_admin and not allow_admin_writes:
-                        self._send_json(
-                            403,
-                            {
-                                "error": {
-                                    "code": "auth-failed",
-                                    "message": "the admin token may not resolve or prepare policy: enroll this node with "
-                                    "'brigade fleet nodes add' and configure its node token, or start the hub with "
-                                    "--allow-admin-writes",
-                                }
-                            },
-                        )
-                        return
-                    status, body_payload = fleet_hub_policy_api.handle_policy(
-                        conn, parsed, caller_node=caller_node, is_admin=is_admin
-                    )
-                elif path == "/grokbot":
-                    if (
-                        is_admin
-                        and not allow_admin_writes
-                        and (
-                            not isinstance(parsed, dict)
-                            or parsed.get("action") not in {"list", "status", "report-metadata", "enroll-actor"}
-                        )
-                    ):
-                        self._send_json(
-                            403,
-                            {
-                                "error": "the admin token may not mutate the Grok Bot queue: enroll this "
-                                "node with 'brigade fleet nodes add' and configure its node token, or start the hub with "
-                                "--allow-admin-writes"
-                            },
-                        )
-                        return
-                    status, body_payload = handle_grokbot(conn, parsed, caller_node=caller_node, config=frozen_deck)
-                else:
-                    status, body_payload = handle_node_request(conn, parsed)
+                result = fleet_hub_api_http.post(
+                    self, conn, hub, path, parsed, is_admin=is_admin, caller_node=caller_node
+                )
+                if result is None:
+                    return
+                status, body_payload = result
             except FleetHubUnsupportedSchema:
                 self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
                 return

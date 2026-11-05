@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/escoffier-labs/miseledger/internal/sources/memory"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/memory"
 )
 
 // MemorySourceKind is the native source kind for canonical Markdown memory cards.
@@ -492,7 +492,9 @@ var memoryScanAfterObserveHook func(tx *sql.Tx) error
 // namespace collection has been detached aside for rebuild.
 var MemoryRebuildTestHookAfterDetach func() error
 
+// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 const memoryBackupPrefix = "__miseledger_memory_backup__:"
+// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 const memoryItemBackupPrefix = "__miseledger_item_backup__:"
 
 func backupCollectionExternalID(namespace string) string {

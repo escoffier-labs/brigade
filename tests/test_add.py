@@ -45,7 +45,7 @@ def test_add_accepts_managed_tool_name(monkeypatch, tmp_target, capsys):
     rc = add_mod.run(target=tmp_target, station="graphtrail")
     out = capsys.readouterr().out
     assert rc == 0
-    assert "graphtrail" in out
+    assert "brigade-code-graph" in out
     assert ["brigade", "setup"] in calls
 
 

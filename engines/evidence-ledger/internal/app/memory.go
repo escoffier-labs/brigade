@@ -5,10 +5,10 @@ import (
 	"io"
 	"path/filepath"
 
-	"github.com/escoffier-labs/miseledger/internal/archive"
-	"github.com/escoffier-labs/miseledger/internal/ingest"
-	"github.com/escoffier-labs/miseledger/internal/sources"
-	"github.com/escoffier-labs/miseledger/internal/sources/memory"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/archive"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/ingest"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/memory"
 )
 
 func cmdCrawlMemory(args []string, out, errw io.Writer) int {

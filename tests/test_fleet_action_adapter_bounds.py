@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._child_publish import PUBLISH_SOURCE, wait_for_text
+
 from brigade import fleet_action_adapters as adapters
 from brigade.fleet_action_auth import ActionError
 
@@ -51,15 +53,17 @@ def test_stream_overflow_stops_indefinite_writer_and_reaps_child(tmp_path, monke
     monkeypatch.setattr(adapters, "MAX_OUTPUT", 8192)
     path = executable(
         tmp_path,
-        "import os, pathlib\n"
-        "pathlib.Path(__file__).with_suffix('.pid').write_text(str(os.getpid()))\n"
+        PUBLISH_SOURCE + "import os, pathlib\n"
+        "publish(str(pathlib.Path(__file__).with_suffix('.pid')), str(os.getpid()))\n"
         f"while True: os.write({stream}, b'private-output' * 1024)\n",
     )
     started = time.monotonic()
     with pytest.raises(ActionError, match="^transport-acceptance-unknown$"):
         adapters.invoke(path, ["private-argument"], timeout=2)
     assert time.monotonic() - started < 1.5
-    pid = int(path.with_suffix(".pid").read_text())
+    published = wait_for_text(path.with_suffix(".pid"), timeout=5)
+    assert published is not None
+    pid = int(published)
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
     # No provider stdout/stderr artifacts are left in the invocation directory.
@@ -73,18 +77,20 @@ def test_cleanup_stops_signal_ignoring_descendant_holding_pipes(tmp_path, monkey
     monkeypatch.setattr(adapters, "MAX_OUTPUT", 8192)
     path = executable(
         tmp_path,
-        "import os, pathlib, signal, time\n"
+        PUBLISH_SOURCE + "import os, pathlib, signal, time\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         "child = os.fork()\n"
         "if child:\n"
-        "    pathlib.Path(__file__).with_suffix('.child').write_text(str(child))\n"
+        "    publish(str(pathlib.Path(__file__).with_suffix('.child')), str(child))\n"
         "    os._exit(0)\n"
         + ("while True: os.write(2, b'private-output' * 1024)\n" if failure == "overflow" else "time.sleep(30)\n"),
     )
     try:
         with pytest.raises(ActionError, match="^transport-acceptance-unknown$"):
             adapters.invoke(path, ["private-argument"], timeout=0.5)
-        pid = int(path.with_suffix(".child").read_text())
+        published = wait_for_text(path.with_suffix(".child"), timeout=5)
+        assert published is not None
+        pid = int(published)
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline:
             stat = Path(f"/proc/{pid}/stat")
@@ -95,9 +101,10 @@ def test_cleanup_stops_signal_ignoring_descendant_holding_pipes(tmp_path, monkey
             pytest.fail("provider descendant is still running")
     finally:
         child_file = path.with_suffix(".child")
-        if child_file.exists():
+        published = wait_for_text(child_file, timeout=1)
+        if published is not None:
             try:
-                os.kill(int(child_file.read_text()), signal.SIGKILL)
+                os.kill(int(published), signal.SIGKILL)
             except ProcessLookupError:
                 pass
 

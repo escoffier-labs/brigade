@@ -6,6 +6,7 @@ from time import monotonic
 
 import pytest
 
+from tests._coverage_sidecar_guard import pytest_configure, pytest_runtestloop  # noqa: F401  (hooks: quarantine and attribute bad coverage sidecars)
 from tests._home import set_home
 from tests.support import PRIVATE_DIRECTORY_MODE
 
@@ -301,7 +302,7 @@ def _no_managed_tools_on_path(monkeypatch, request, _isolation_temp_root):
     differently on a wired dev host than on CI, and can even execute real
     engine binaries against real archives. This fixture pins the bare-host
     condition while keeping the two sandboxed channels tests legitimately use:
-    an explicit env override (GRAPHTRAIL_BIN, MISELEDGER_BIN, ...) resolves
+    an explicit env override (BRIGADE_CODE_GRAPH_BIN, BRIGADE_EVIDENCE_BIN, ...) resolves
     with full semantics, and a test-modified PATH resolves via plain
     ``shutil.which``. Tests that need a specific binary re-patch
     ``component_bins.resolve`` in their own body.
@@ -311,12 +312,17 @@ def _no_managed_tools_on_path(monkeypatch, request, _isolation_temp_root):
     `tests/test_component_bins.py` tests the real resolution order. Those
     modules opt out.
     """
-    if request.module.__name__.rsplit(".", 1)[-1] in {"test_proc", "test_agent_write_probes", "test_component_bins"}:
+    if request.module.__name__.rsplit(".", 1)[-1] in {
+        "test_proc",
+        "test_agent_write_probes",
+        "test_component_bins",
+        "test_engine_rename_installer",
+    }:
         return
     import os
     import shutil
 
-    from brigade import component_bins, managed
+    from brigade import component_bins, component_manifest, managed
 
     # Point the managed-component data root at a temp dir so nothing in the
     # suite (component_bins.managed_path, doctor's components check) reads the
@@ -327,7 +333,7 @@ def _no_managed_tools_on_path(monkeypatch, request, _isolation_temp_root):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
     monkeypatch.setenv("LOCALAPPDATA", str(data_root))
 
-    # A developer shell may export engine overrides (GRAPHTRAIL_BIN, ...);
+    # A developer shell may export engine overrides (BRIGADE_CODE_GRAPH_BIN, ...);
     # clear them so the override channel only fires when a test sets it.
     for env_var in component_bins.ENV_OVERRIDES.values():
         monkeypatch.delenv(env_var, raising=False)
@@ -338,7 +344,11 @@ def _no_managed_tools_on_path(monkeypatch, request, _isolation_temp_root):
 
     def bare_host_resolve(name, *, env=None):
         environment = env if env is not None else os.environ
-        if environment.get(component_bins.ENV_OVERRIDES.get(name, "")):
+        # Callers ask for canonical names; a test may still seed the legacy
+        # override or a legacy-named binary, so match the whole family the
+        # way the real resolver does (canonical name first).
+        names = component_manifest.family_names(name)
+        if any(environment.get(component_bins.ENV_OVERRIDES.get(alias, "")) for alias in names):
             return real_resolve(name, env=env)
         current_path = os.environ.get("PATH", "")
         if current_path != baseline_path:
@@ -348,7 +358,10 @@ def _no_managed_tools_on_path(monkeypatch, request, _isolation_temp_root):
             test_path = os.pathsep.join(
                 entry for entry in current_path.split(os.pathsep) if entry and entry not in baseline_entries
             )
-            return shutil.which(name, path=test_path) if test_path else None
+            for alias in names if test_path else ():
+                found = shutil.which(alias, path=test_path)
+                if found:
+                    return found
         return None
 
     monkeypatch.setattr(component_bins, "resolve", bare_host_resolve)

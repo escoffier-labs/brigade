@@ -139,8 +139,8 @@ def test_harness_install_cursor_user_scope_requires_projection_only_for_gui_proj
 def test_harness_native_cursor_cli_surface_keeps_existing_install_path(monkeypatch) -> None:
     calls: list[dict] = []
 
-    def native_install(*, write: bool, json_output: bool) -> int:
-        calls.append({"write": write, "json_output": json_output})
+    def native_install(*, write: bool, json_output: bool, rename_legacy_servers: bool) -> int:
+        calls.append({"write": write, "json_output": json_output, "rename_legacy_servers": rename_legacy_servers})
         return 31
 
     monkeypatch.setattr("brigade.selection.shutil.which", lambda command: f"/fixture-bin/{command}")
@@ -149,7 +149,7 @@ def test_harness_native_cursor_cli_surface_keeps_existing_install_path(monkeypat
     rc = cli.main(["harness", "install", "cursor", "--scope", "user", "--surface", "cursor-cli", "--write"])
 
     assert rc == 31
-    assert calls == [{"write": True, "json_output": False}]
+    assert calls == [{"write": True, "json_output": False, "rename_legacy_servers": False}]
 
 
 def test_harness_blocked_cursor_cli_surface_refuses_without_projection_only(monkeypatch, capsys) -> None:
@@ -166,14 +166,14 @@ def test_harness_blocked_cursor_cli_surface_refuses_without_projection_only(monk
 def test_harness_install_cursor_user_scope_keeps_legacy_behavior_without_surface(monkeypatch) -> None:
     calls: list[dict] = []
 
-    def legacy_install(*, write: bool, json_output: bool) -> int:
-        calls.append({"write": write, "json_output": json_output})
+    def legacy_install(*, write: bool, json_output: bool, rename_legacy_servers: bool) -> int:
+        calls.append({"write": write, "json_output": json_output, "rename_legacy_servers": rename_legacy_servers})
         return 23
 
     monkeypatch.setattr("brigade.cursor_user_cmd.install", legacy_install)
 
     assert cli.main(["harness", "install", "cursor", "--scope", "user", "--write", "--json"]) == 23
-    assert calls == [{"write": True, "json_output": True}]
+    assert calls == [{"write": True, "json_output": True, "rename_legacy_servers": False}]
 
 
 def test_harness_explicit_surface_projection_only_delegates_to_user_installer_without_repo_write(
@@ -181,8 +181,8 @@ def test_harness_explicit_surface_projection_only_delegates_to_user_installer_wi
 ) -> None:
     calls: list[dict] = []
 
-    def user_install(*, write: bool, json_output: bool) -> int:
-        calls.append({"write": write, "json_output": json_output})
+    def user_install(*, write: bool, json_output: bool, rename_legacy_servers: bool) -> int:
+        calls.append({"write": write, "json_output": json_output, "rename_legacy_servers": rename_legacy_servers})
         return 29
 
     monkeypatch.chdir(tmp_path)
@@ -205,7 +205,7 @@ def test_harness_explicit_surface_projection_only_delegates_to_user_installer_wi
     )
 
     assert rc == 29
-    assert calls == [{"write": True, "json_output": True}]
+    assert calls == [{"write": True, "json_output": True, "rename_legacy_servers": False}]
     assert list(tmp_path.iterdir()) == []
 
 

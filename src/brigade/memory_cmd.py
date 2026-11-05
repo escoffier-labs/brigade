@@ -9,12 +9,14 @@ import os
 import re
 import shutil
 import sys
+import tomllib
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
-from . import mcp_server, runbook_cmd, toml_compat as tomllib, work_cmd
+from . import engine_paths, memory_bm25
 from .budgets import MEMORY_CARD_BUDGET_BYTES
 from .install import apply_gitignore
 from .selection import Selection
@@ -264,6 +266,8 @@ def _write_memory_care_runbooks(target: Path) -> int:
     Writes into a sibling temp directory first so pin-resolution failures do
     not leave a partial runbook tree behind.
     """
+    from . import runbook_cmd
+
     template_dir = template_root() / "memory-care" / "runbooks"
     dest_dir = _memory_care_runbooks_dir(target)
     temp_dir = dest_dir.parent / f".{dest_dir.name}.init-tmp"
@@ -460,27 +464,35 @@ def _evidence_refs(meta: dict[str, Any]) -> list[str]:
     return [rendered] if rendered else []
 
 
+# A frozen locator scheme: stored cards and receipts carry it, so the text never changes.
+EVIDENCE_LOCATOR_PREFIX = "miseledger://evidence/"
+
+
 def _miseledger_evidence_id(ref: str) -> str | None:
-    if ref.startswith("miseledger://evidence/"):
-        return ref.removeprefix("miseledger://evidence/").strip()
+    # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
+    if ref.startswith(EVIDENCE_LOCATOR_PREFIX):
+        # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
+        return ref.removeprefix(EVIDENCE_LOCATOR_PREFIX).strip()
     if ref.startswith("miseledger:"):
         return ref.removeprefix("miseledger:").strip()
     return None
 
 
-def _miseledger_evidence_path(bundle_id: str) -> Path | None:
+def _evidence_bundle_path(bundle_id: str) -> Path | None:
     if not re.fullmatch(r"[A-Za-z0-9._-]+", bundle_id):
         return None
-    cache_home = Path.home() / ".cache"
-    if raw := os.environ.get("XDG_CACHE_HOME"):
-        cache_home = Path(raw)
-    return cache_home / "miseledger" / "evidence" / f"{bundle_id}.json"
+    # The engine writes bundles to <cache>/evidence in whichever layout it resolved
+    # (docs/phase-engine-rename.md, "Resolution rule"); engine_paths mirrors that choice.
+    environment = dict(os.environ)
+    if not environment.get("HOME"):
+        environment["HOME"] = str(Path.home())
+    return engine_paths.evidence_dirs(env=environment).cache_dir / "evidence" / f"{bundle_id}.json"
 
 
 def _tracked_evidence_ref_missing(target: Path, ref: str) -> str | None:
     bundle_id = _miseledger_evidence_id(ref)
     if bundle_id is not None:
-        path = _miseledger_evidence_path(bundle_id)
+        path = _evidence_bundle_path(bundle_id)
         if path is None:
             return f"invalid MiseLedger evidence id: {ref}"
         return None if path.is_file() else f"missing MiseLedger evidence bundle: {ref}"
@@ -1581,6 +1593,8 @@ def import_issues(*, target: Path, json_output: bool = False, dry_run: bool = Fa
     except ValueError as exc:
         print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
         return 2
+    from . import work_cmd
+
     return work_cmd.import_memory_care(
         target=target, queue=_queue_path(target, config), dry_run=dry_run, json_output=json_output
     )
@@ -1812,21 +1826,32 @@ def _record_search_log(
     """Append one search event; fail-open so logging never breaks search."""
     if not _should_log_search(query):
         return
-    path = _search_log_path(target)
     entry = {
         "ts": ts or _utc_iso(),
         "query": _normalize_search_query(query),
         "card_ids": _search_log_card_ids(matches if isinstance(matches, list) else []),
         "card_aliases": _search_log_aliases(matches if isinstance(matches, list) else []),
     }
+    _append_search_log_entry(target, entry)
+
+
+def _append_search_log_entry(target: Path, entry: dict[str, Any]) -> None:
+    """Append one entry to the capped rolling log; fail-open on I/O errors."""
+    from .inbox_lock import held_file_lock
+
+    path = _search_log_path(target)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        existing = _read_jsonl_dicts(path)
-        existing.append(entry)
-        if len(existing) > SEARCH_LOG_MAX_ENTRIES:
-            existing = existing[-SEARCH_LOG_MAX_ENTRIES:]
-        rendered = "".join(json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n" for item in existing)
-        _write_text_atomic(path, rendered)
+        # Concurrent recalls and searches would otherwise drop each other's
+        # entries. A busy lock past the deadline raises a TimeoutError (an
+        # OSError), so logging still fails open.
+        with held_file_lock(path.with_suffix(".lock"), deadline_seconds=1.0):
+            existing = _read_jsonl_dicts(path)
+            existing.append(entry)
+            if len(existing) > SEARCH_LOG_MAX_ENTRIES:
+                existing = existing[-SEARCH_LOG_MAX_ENTRIES:]
+            rendered = "".join(json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n" for item in existing)
+            _write_text_atomic(path, rendered)
     except OSError:
         return
 
@@ -1851,39 +1876,31 @@ def _card_search_fields(path: Path, target: Path) -> dict[str, Any]:
     }
 
 
+def search_card_fields(
+    target: Path, config: MemoryCareConfig | None = None, *, keep: Callable[[Path], bool] | None = None
+) -> list[dict[str, Any]]:
+    """Searchable fields for every card under a resolved ``target``; ``keep`` filters paths before any read."""
+    if config is None:
+        config = load_config(target) or MemoryCareConfig()
+    paths = [path for path in _iter_cards(target, config) if keep is None or keep(path)]
+    return [fields for path in paths if (fields := _card_search_fields(path, target))]
+
+
+def card_search_match(fields: dict[str, Any], score: float) -> dict[str, Any]:
+    """One search result, in the shape every card search caller returns."""
+    keys = ("card_id", "card_aliases", "title", "tags", "summary")
+    return {"path": fields["rel"], **{key: fields[key] for key in keys}, "score": score}
+
+
 def search_cards_payload(
     target: Path, query: str, *, limit: int = 20, config: MemoryCareConfig | None = None
 ) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    if config is None:
-        config = load_config(target) or MemoryCareConfig()
-    terms = [term for term in query.lower().split() if term]
-    matches: list[dict[str, Any]] = []
-    for path in _iter_cards(target, config):
-        fields = _card_search_fields(path, target)
-        if not fields:
-            continue
-        heading = f"{fields['title']} {' '.join(fields['tags'])} {fields['summary']}".lower()
-        body = fields["body"].lower()
-        score = 0
-        for term in terms:
-            if term in heading:
-                score += 3
-            elif term in body:
-                score += 1
-        if not terms or score == 0:
-            continue
-        matches.append(
-            {
-                "path": fields["rel"],
-                "card_id": fields["card_id"],
-                "card_aliases": fields["card_aliases"],
-                "title": fields["title"],
-                "tags": fields["tags"],
-                "summary": fields["summary"],
-                "score": score,
-            }
-        )
+    # BM25 over one field per card, rebuilt per call (no cache, no index file).
+    # Scores are floats rounded to 4 decimals; ties break by path.
+    cards = search_card_fields(target, config)
+    ranked = memory_bm25.rank([memory_bm25.card_text(fields) for fields in cards], query)
+    matches = [card_search_match(cards[index], score) for index, score in ranked]
     matches.sort(key=lambda item: (-item["score"], item["path"]))
     return {
         "target": str(target),
@@ -1907,7 +1924,7 @@ def search(*, target: Path, query: str, limit: int = 20, json_output: bool = Fal
         return 0
     print(f"memory search: {payload['query']} ({payload['match_count']} match(es))")
     for match in payload["matches"]:
-        print(f"- {match['path']}  [{match['score']}]  {match['title']}")
+        print(f"- {match['path']}  [{match['score']:.2f}]  {match['title']}")
     return 0
 
 
@@ -1934,7 +1951,7 @@ def serve_mcp(
     inbox: str = "codex",
     json_output: bool = False,
 ) -> int:
-    from . import memory_mcp_core
+    from . import mcp_server, memory_mcp_core
 
     if target is not None and not target.expanduser().is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)

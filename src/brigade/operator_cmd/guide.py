@@ -31,7 +31,7 @@ def guide_payload(*, profile: str = "internal-dogfood") -> dict[str, Any]:
             "brigade daily plan --target .",
         ],
         "safe_run_command": "brigade daily run --target .",
-        "onboarding_command": f"brigade operator init --profile {profile} --target .",
+        "onboarding_command": "brigade operator quickstart --target .",
         "tool_sync_command": "brigade operator sync-tools --target .",
         "handoff_expectations": [
             "Write a Memory Handoff when Brigade usage, setup, readiness waivers, or repo workflow changes.",
@@ -42,7 +42,7 @@ def guide_payload(*, profile: str = "internal-dogfood") -> dict[str, Any]:
             "Brigade does not run automatically.",
             "Brigade does not start daemons. Templates may include an inactive hooks/pre-push file, but Brigade never activates hooks (git config core.hooksPath stays your call).",
             "Brigade does not send notifications unless a separate hook is explicitly configured.",
-            "Brigade does not ingest handoffs into canonical memory from operator init/status.",
+            "Brigade does not ingest handoffs into canonical memory from operator quickstart/status.",
             "Brigade does not publish, push, tag, or mutate remotes.",
         ],
     }
@@ -180,19 +180,3 @@ def plan_payload(
             "Does not publish, push, tag, or mutate remotes.",
         ],
     }
-
-
-def plan(*, target: Path, profile: str = "local-operator", json_output: bool = False) -> int:
-    try:
-        payload = plan_payload(target, profile=profile)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"operator bootstrap plan: {payload['target']}")
-    print(f"profile: {payload['profile']}")
-    for row in payload["steps"]:
-        print(f"[{row['action']}] {row['id']}: {row['path']}")
-    return 0

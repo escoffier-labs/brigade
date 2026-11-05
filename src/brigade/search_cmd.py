@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import component_bins, proc
+from . import component_bins, engine_paths, proc
 from . import station_health as health
 
 
@@ -27,6 +27,11 @@ DOCS = {
     },
 }
 
+# Tool keys in JSON output: the canonical key and the legacy key carry the same
+# row through v0.32, then the legacy key is dropped (docs/phase-engine-rename.md, R4).
+CODE_GRAPH_TOOL = "brigade-code-graph"
+LEGACY_CODE_GRAPH_TOOL = "graphtrail"
+
 BOUNDARIES = [
     "GraphTrail and code-search stay process-boundary binaries.",
     "Explicit `brigade code sync|context|impact` commands execute GraphTrail across a process boundary; `brigade search sync|context|impact` are compatibility aliases.",
@@ -39,18 +44,25 @@ BOUNDARIES = [
 
 def status_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    graphtrail_bin = component_bins.resolve("graphtrail")
+    graphtrail_bin = component_bins.resolve("brigade-code-graph")
     api_bin = proc.which("code-search-api")
     mcp_bin = proc.which("code-search-mcp")
-    db = target / ".graphtrail" / "graphtrail.db"
+    try:
+        db = engine_paths.code_graph_db(target).path
+        db_error = None
+    except ValueError as exc:
+        db, db_error = engine_paths.code_graph_db_paths(target)[0], str(exc)
+    db_present = db_error is None and db.is_file()
 
+    code_graph_row: dict[str, Any] = {
+        "installed": graphtrail_bin is not None,
+        "binary": graphtrail_bin,
+        "db_present": db_present,
+        "db_path": str(db),
+    }
     tools: dict[str, Any] = {
-        "graphtrail": {
-            "installed": graphtrail_bin is not None,
-            "binary": graphtrail_bin,
-            "db_present": db.is_file(),
-            "db_path": str(db),
-        },
+        CODE_GRAPH_TOOL: code_graph_row,
+        LEGACY_CODE_GRAPH_TOOL: code_graph_row,
         "code-search-api": {
             "installed": api_bin is not None,
             "binary": api_bin,
@@ -83,7 +95,7 @@ def status_payload(target: Path) -> dict[str, Any]:
         tools=tools,
         pipeline=[
             "graphtrail sync",
-            ".graphtrail/graphtrail.db",
+            str(engine_paths.CODE_GRAPH_DB),
             "graphtrail context / receipt code_graph_delta",
             "optional code-search-api serve + code-search-api/mcp bridge",
         ],
@@ -97,13 +109,15 @@ def status_payload(target: Path) -> dict[str, Any]:
     graph_summary = "graphtrail not installed"
     graph_doctor: dict[str, Any] | None = None
     if graphtrail_bin:
-        if not db.is_file():
+        if not db_present:
             graph_health = "unwired"
-            graph_summary = "graphtrail installed; run `graphtrail sync` to build .graphtrail/graphtrail.db"
+            graph_summary = (
+                db_error or f"{Path(graphtrail_bin).name} installed; run `{graphtrail_bin} sync` to build {db}"
+            )
             graph_doctor = health.run_json([graphtrail_bin, "doctor", "--json"], timeout=30.0)
         else:
             graph_doctor = health.run_json([graphtrail_bin, "doctor", "--json"], timeout=30.0)
-            tools["graphtrail"]["doctor"] = graph_doctor
+            code_graph_row["doctor"] = graph_doctor
             exit_code = int(graph_doctor.get("exit_code") or 0)
             if exit_code == 124:
                 graph_health = "timeout"
@@ -114,9 +128,9 @@ def status_payload(target: Path) -> dict[str, Any]:
             else:
                 graph_health = "ok"
                 graph_summary = f"graphtrail db present at {db}"
-        tools["graphtrail"]["health"] = graph_health
-        tools["graphtrail"]["summary"] = graph_summary
-        tools["graphtrail"]["doctor"] = graph_doctor
+        code_graph_row["health"] = graph_health
+        code_graph_row["summary"] = graph_summary
+        code_graph_row["doctor"] = graph_doctor
 
     # code-search-api health (HTTP probe via managed doctor adapter)
     api_health = "missing"
@@ -144,7 +158,7 @@ def status_payload(target: Path) -> dict[str, Any]:
 
     # Aggregate health: worst of present tools
     levels = []
-    for key in ("graphtrail", "code-search-api", "code-search-mcp"):
+    for key in (CODE_GRAPH_TOOL, "code-search-api", "code-search-mcp"):
         if tools[key].get("installed"):
             levels.append(tools[key].get("health") or "incomplete")
     rank = {"fail": 5, "timeout": 4, "incomplete": 3, "unwired": 2, "warn": 1, "ok": 0, "missing": 0}
@@ -168,7 +182,7 @@ def status_payload(target: Path) -> dict[str, Any]:
     if overall in ("fail", "unwired", "incomplete", "timeout"):
         payload["next_commands"] = [
             "brigade search sync plan",
-            f"{graphtrail_bin or 'graphtrail'} sync",
+            f"{graphtrail_bin or 'brigade code'} sync",
             "brigade search doctor",
         ]
     elif not graphtrail_bin:
@@ -185,7 +199,7 @@ def status(*, target: Path, json_output: bool = False) -> int:
     print(f"health: {payload.get('health') or 'unknown'} (advisory; never fails workspace doctor)")
     tools = payload.get("tools") or {}
     for name, row in tools.items():
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or name == LEGACY_CODE_GRAPH_TOOL:
             continue
         marker = "installed" if row.get("installed") else "missing"
         print(f"- {name}: {marker}" + (f" ({row.get('summary')})" if row.get("summary") else ""))
@@ -205,7 +219,7 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
         print(f"health: {payload.get('health') or 'unknown'}")
         tools = payload.get("tools") or {}
         for name, row in tools.items():
-            if isinstance(row, dict) and row.get("installed"):
+            if isinstance(row, dict) and row.get("installed") and name != LEGACY_CODE_GRAPH_TOOL:
                 print(f"- {name}: {row.get('health') or '?'} - {row.get('summary') or ''}")
         health.print_next(payload)
         print("note: search checks are advisory for workspace doctor; this command exits 1 on fail/incomplete/timeout")
@@ -214,8 +228,9 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
 
 def sync_plan_payload(*, target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    graphtrail_bin = component_bins.resolve("graphtrail")
-    graphtrail_cmd = graphtrail_bin or "graphtrail"
+    graphtrail_bin = component_bins.resolve("brigade-code-graph")
+    # Pre-setup fallback stays the legacy name until R5 installs canonical executables.
+    graphtrail_cmd = graphtrail_bin or LEGACY_CODE_GRAPH_TOOL
     return {
         "target": str(target),
         "station": "search",
@@ -223,7 +238,8 @@ def sync_plan_payload(*, target: Path) -> dict[str, Any]:
         "title": "search sync plan",
         "created_at": health.now_iso(),
         "installed": {
-            "graphtrail": graphtrail_bin is not None,
+            CODE_GRAPH_TOOL: graphtrail_bin is not None,
+            LEGACY_CODE_GRAPH_TOOL: graphtrail_bin is not None,
             "code-search-api": proc.which("code-search-api") is not None,
             "code-search-mcp": proc.which("code-search-mcp") is not None,
         },
