@@ -28,6 +28,7 @@ jobs:
       evidence_ledger: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.evidence_ledger }}
       notify: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.notify }}
       fleet_hub_container: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.fleet_hub_container }}
+      hub: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.hub }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -157,6 +158,21 @@ jobs:
               - '.dockerignore'
               - 'ops/fleet-hub/**'
               - 'tests/fleet_hub_container_smoke.py'
+              - '.github/workflows/ci.yml'
+            hub:
+              - 'engines/hub/**'
+              - 'src/brigade/fleet_hub_server.py'
+              - 'tests/test_fleet_hub_server.py'
+              - 'src/brigade/fleet_hub*.py'
+              - 'registry/skills/verify-brigade/hub_contract*'
+              - 'registry/skills/verify-brigade/hub_readonly.py'
+              - 'registry/skills/verify-brigade/hub_audit.py'
+              - 'src/brigade/memory_bm25.py'
+              - 'src/brigade/memory_cmd.py'
+              - 'src/brigade/memory_hub_*.py'
+              - 'src/brigade/memory_retrieval_eval/**'
+              - 'evals/memory-retrieval/**'
+              - '.github/workflows/hub.yml'
               - '.github/workflows/ci.yml'
 
   code-graph-msrv:
@@ -650,6 +666,15 @@ jobs:
       - name: Build and exercise the container image
         run: python tests/fleet_hub_container_smoke.py --platform "${{ matrix.platform }}"
 
+  hub-rust:
+    # Rust hub suite (stable and MSRV 1.85.0) lives in hub.yml. Calling it here
+    # puts it under ci-gate and the merge queue.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.hub == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/hub.yml
+
   coverage:
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.test-shards.result == 'success' }}
     needs: [changes, test-shards]
@@ -726,6 +751,7 @@ jobs:
       - coverage
       - cosign-integration
       - fleet-hub-container
+      - hub-rust
       - component-manifest-provenance
       - engine-rename-installer
       - content-guard
@@ -752,7 +778,7 @@ jobs:
           # documentation-only runs may skip only the enumerated runtime jobs.
           mandatory = {
               "changes", "lint", "test", "test-shards", "coverage",
-              "cosign-integration", "fleet-hub-container", "component-manifest-provenance", "engine-rename-installer",
+              "cosign-integration", "fleet-hub-container", "hub-rust", "component-manifest-provenance", "engine-rename-installer",
               "content-guard", "repo-metadata", "changelog-fragments", "install-from-source",
               "quickstart-smoke", "windows-native-acceptance",
               "mesh-compatibility", "mesh-cross-version", "mesh-without-extra",
@@ -771,13 +797,18 @@ jobs:
           docs_only = changes.get("result") == "success" and docs_flag == "true"
           docs_skips = {
               "lint", "test", "test-shards", "coverage", "cosign-integration",
-              "fleet-hub-container", "component-manifest-provenance", "engine-rename-installer", "install-from-source",
+              "fleet-hub-container", "hub-rust", "component-manifest-provenance", "engine-rename-installer", "install-from-source",
               "quickstart-smoke", "windows-native-acceptance", "mesh-compatibility",
               "mesh-cross-version", "mesh-without-extra",
           }
           container_skip_allowed = (
               changes.get("result") == "success"
               and changes.get("outputs", {}).get("fleet_hub_container") == "false"
+              and os.environ["EVENT_NAME"] != "merge_group"
+          )
+          hub_skip_allowed = (
+              changes.get("result") == "success"
+              and changes.get("outputs", {}).get("hub") == "false"
               and os.environ["EVENT_NAME"] != "merge_group"
           )
           mesh_jobs = {"mesh-compatibility", "mesh-cross-version", "mesh-without-extra"}
@@ -791,6 +822,8 @@ jobs:
               if docs_only and name in docs_skips and result == "skipped":
                   continue
               if name == "fleet-hub-container" and result == "skipped" and container_skip_allowed:
+                  continue
+              if name == "hub-rust" and result == "skipped" and hub_skip_allowed:
                   continue
               if name in mesh_jobs and result == "skipped" and mesh_skip_allowed:
                   continue
