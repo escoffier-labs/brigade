@@ -17,6 +17,7 @@ import threading
 from datetime import timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 from . import fleet_command_deck, fleet_hub_events, fleet_hub_sealed
 
@@ -232,7 +233,7 @@ def run(
     return 0
 
 
-def _hold_stop_signals() -> dict[int, object]:
+def _hold_stop_signals() -> dict[int, Any]:
     """Ignore SIGTERM and SIGINT while the shutdown runs; return the handlers to restore.
 
     One stop can arrive twice, for example a terminal's Ctrl-C to the whole
