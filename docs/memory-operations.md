@@ -152,27 +152,44 @@ dependency. This release performs only the explicit full-width ASCII fold.
 
 All of this state is per host, in `.brigade/memory/hub/`: a 0700 directory with 0600 files and a `*` ignore marker, so Git skips all of it. The shared `.brigade/memory/` keeps its own mode.
 
-The v4 bundle bounds retryable address spans at 256 characters for the local
-part and the domain span before the final dot, with a 63-character TLD. Reserved domains allow 127 labels
-of at most 63 characters. Longer uninterrupted local parts or domains no
-longer match that address rule. Dotted local parts can still match a suffix
-that starts within 256 characters of `@`.
+The v5 bundle bounds retryable address spans at 256 characters for the local
+part and the domain span before the final dot, with a 63-character TLD. Reserved
+domains allow 127 labels of at most 63 characters. Longer uninterrupted local
+parts or domains no longer match that address rule. Dotted local parts can
+still match a suffix that starts within 256 characters of `@`.
 
 Whitespace and cue gaps allow 256 characters per span. The optional slash
 in a system tag permits two adjacent spans, so its combined gap can reach
 512 characters. Directive scan copies collapse whitespace before matching.
-Bearer and assigned token bodies allow 4096 characters. Provider token
-suffixes allow 8192 characters. JWT segment bodies allow 4096 after their
-fixed prefixes.
-PEM bodies allow 8192 characters, and
-PEM type labels allow 64. Candidates beyond these bounds no longer match
-that complete rule, though another rule or a shorter suffix can still flag
-them. SSH suffixes stop at 4096 characters and local port strings at 256 digits.
-The base64 heuristic searches for a blob starting within the first 256
-characters of a line, reads up to 4096 blob characters, and searches for a
-decode cue within 4096 characters per line across the existing four-line
-window. Blobs or cues outside that window no longer trigger this heuristic.
+Bearer and quoted assigned tokens hit at 4097 characters even without a
+closing delimiter. JWT segments hit at 4097 characters after their fixed
+prefixes. Provider suffixes hit at 8193, including oversized AWS-shaped values.
+Ordinary AWS credentials retain their fixed-length boundary checks. Unquoted assignments retain their safe-code
+exclusions. Short unquoted values need a digit within the first 4096 characters,
+and longer token runs also hit the ceiling without a digit.
+A PEM private-key header alone blocks, independent of body size or an END line.
+The shared guard policy engine extends detected token spans through the full
+token run and PEM spans through the END line or end of input. This applies to
+Python and native matching, including the pre-push content guard and evidence
+redaction. It prevents bounded prefix matches from leaving secret tails.
+Custom rules retain their configured spans.
+
+SSH suffixes still match their first 4096 characters and local port strings
+allow 256 digits. The base64 heuristic accepts a bounded prefix of a longer
+blob. It searches for a blob starting within the first 256 characters of a
+line and a decode cue within 4096 characters per line across a four-line window.
+Cues outside that window remain documented heuristic misses.
 The shared untrusted-context directive rules use the same gap bounds.
+For `a@b.co:\x1fx`, Python flags the warn-level email rule while the hub is less strict and scans clean, because their ASCII whitespace classes differ.
+
+Python skips impossible address rules with necessary domain/prefix checks and
+indexes assignment digits once before trying bounded candidates. Parity tests
+compare these filters with the same rules running without filters.
+The corpus test asserts each subprocess-reported scan time below 2 seconds,
+with a separate 60-second process timeout for startup and runner stalls.
+On Linux the worst local 512 KiB case fell from 2.29 seconds to 0.28 seconds
+across all six placements and ASCII/full-width forms. These are local scan
+measurements, excluding interpreter startup. Windows speed is not measured here.
 
 ## Evidence projection and identity audit
 

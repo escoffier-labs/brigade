@@ -1,5 +1,5 @@
 {
-  "version": "brigade-memory-scan.v4",
+  "version": "brigade-memory-scan.v5",
   "injections": [
     {
       "id": "classic-injection",
@@ -137,31 +137,31 @@
     },
     {
       "id": "jwt-token",
-      "pattern": "\\beyJ[A-Za-z0-9_-]{8,4096}\\.[A-Za-z0-9_-]{8,4096}\\.[A-Za-z0-9_-]{8,4096}\\b",
+      "pattern": "\\beyJ(?:[A-Za-z0-9_-]{4097}|[A-Za-z0-9_-]{8,4096}\\.(?:[A-Za-z0-9_-]{4097}|[A-Za-z0-9_-]{8,4096}\\.(?:[A-Za-z0-9_-]{4097}|[A-Za-z0-9_-]{8,4096}\\b)))",
       "flags": 0,
       "action": "block"
     },
     {
       "id": "bearer-token",
-      "pattern": "\\bBearer\\s{1,256}[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,4094}[A-Za-z0-9_~+/=-])(?![A-Za-z0-9_~+/=-])",
+      "pattern": "\\bBearer\\s{1,256}(?:[A-Za-z0-9._~+/=-]{4097}|[A-Za-z0-9_~+/=-][A-Za-z0-9._~+/=-]{18,4094}[A-Za-z0-9_~+/=-](?![A-Za-z0-9_~+/=-]))",
       "flags": 2,
       "action": "block"
     },
     {
       "id": "api-key-assignment",
-      "pattern": "\\b(?:api[_-]?key|token|secret)\\s{0,256}[:=]\\s{0,256}(?!(?:process\\.env|os\\.environ|os\\.getenv|config\\.|cfg\\.|settings\\.|env\\.|\\$\\{|\\$\\(|null\\b|None\\b|undefined\\b|''|\\\"\\\"))(?:['\\\"][A-Za-z0-9._~+/=-]{20,4096}['\\\"]|(?!(?:[A-Za-z_$][A-Za-z0-9_$]*\\.)+[A-Za-z_$][A-Za-z0-9_$]*(?![A-Za-z0-9._~+/=-]))(?=[A-Za-z._~+/=-]{0,4095}[0-9])[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,4094}[A-Za-z0-9_~+/=-]))",
+      "pattern": "\\b(?:api[_-]?key|token|secret)\\s{0,256}[:=]\\s{0,256}(?!(?:process\\.env|os\\.environ|os\\.getenv|config\\.|cfg\\.|settings\\.|env\\.|\\$\\{|\\$\\(|null\\b|None\\b|undefined\\b|''|\\\"\\\"))(?:['\\\"](?:[A-Za-z0-9._~+/=-]{4097}|[A-Za-z0-9._~+/=-]{20,4096}['\\\"])|(?!(?:[A-Za-z_$][A-Za-z0-9_$]*\\.)+[A-Za-z_$][A-Za-z0-9_$]*(?![A-Za-z0-9._~+/=-]))(?:[A-Za-z0-9._~+/=-]{4097}|(?=[A-Za-z._~+/=-]{0,4095}[0-9])[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,4094}[A-Za-z0-9_~+/=-])))",
       "flags": 2,
       "action": "block"
     },
     {
       "id": "bare-token-prefix",
-      "pattern": "\\b(?:(?:github_pat_[A-Za-z0-9_]{20,8192}|gh[pousr]_[A-Za-z0-9]{20,8192}|xox[baprs]-[A-Za-z0-9-]{8,8192}|sk-(?:live|test|proj|ant)-[A-Za-z0-9_-]{8,8192}|AKIA[A-Z0-9]{16}|(?-i:ASIA[A-Z0-9]{16}))\\b|(?-i:(?:AIza[A-Za-z0-9_-]{30,8192}|glpat-[A-Za-z0-9_-]{16,8192})(?![A-Za-z0-9_-])))",
+      "pattern": "\\b(?:github_pat_(?:[A-Za-z0-9_]{8193}|[A-Za-z0-9_]{20,8192}\\b)|gh[pousr]_(?:[A-Za-z0-9]{8193}|[A-Za-z0-9]{20,8192}\\b)|xox[baprs]-(?:[A-Za-z0-9-]{8193}|[A-Za-z0-9-]{8,8192}\\b)|sk-(?:live|test|proj|ant)-(?:[A-Za-z0-9_-]{8193}|[A-Za-z0-9_-]{8,8192}\\b)|AKIA(?:[A-Z0-9]{8193}|[A-Z0-9]{16}\\b)|(?-i:ASIA(?:[A-Z0-9]{8193}|[A-Z0-9]{16}\\b))|(?-i:AIza(?:[A-Za-z0-9_-]{8193}|[A-Za-z0-9_-]{30,8192}(?![A-Za-z0-9_-]))|glpat-(?:[A-Za-z0-9_-]{8193}|[A-Za-z0-9_-]{16,8192}(?![A-Za-z0-9_-]))))",
       "flags": 2,
       "action": "block"
     },
     {
       "id": "private-key-block",
-      "pattern": "-----BEGIN [A-Z ]{0,64}PRIVATE KEY-----[\\s\\S]{0,8192}?-----END [A-Z ]{0,64}PRIVATE KEY-----",
+      "pattern": "-----BEGIN [A-Z ]{0,64}PRIVATE KEY-----",
       "flags": 0,
       "action": "block"
     },

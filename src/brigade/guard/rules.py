@@ -5,8 +5,9 @@ import re
 from .types import Rule
 
 # Bound retryable spans shared by the memory scanners. Address local parts
-# permit 256 characters, token bodies 4096, provider suffixes 8192 and PEM bodies 8192. Longer uninterrupted
-# candidates need another rule or human review. Delimited paths stay streaming.
+# permit 256 characters. Token bodies hit at 4097 and provider suffixes at
+# 8193, while a PEM header alone blocks. Guard span expansion masks tails.
+# Delimited paths stay streaming.
 DEFAULT_RULES: tuple[Rule, ...] = (
     # Example-pattern rules placed BEFORE general patterns so they claim
     # their spans first (engine uses first-match-wins via _overlaps).
@@ -189,14 +190,14 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         # eyJ. A dedicated rule keeps recall when api-key-assignment skips
         # dotted identifier chains (JWT segments would otherwise look like a
         # three-segment chain).
-        pattern=r"\beyJ[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,4096}\b",
+        pattern=r"\beyJ(?:[A-Za-z0-9_-]{4097}|[A-Za-z0-9_-]{8,4096}\.(?:[A-Za-z0-9_-]{4097}|[A-Za-z0-9_-]{8,4096}\.(?:[A-Za-z0-9_-]{4097}|[A-Za-z0-9_-]{8,4096}\b)))",
         replacement="[redacted-jwt]",
         description="JSON Web Token.",
     ),
     Rule(
         id="bearer-token",
         category="secret",
-        pattern=r"\bBearer\s{1,256}[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,4094}[A-Za-z0-9_~+/=-])(?![A-Za-z0-9_~+/=-])",
+        pattern=r"\bBearer\s{1,256}(?:[A-Za-z0-9._~+/=-]{4097}|[A-Za-z0-9_~+/=-][A-Za-z0-9._~+/=-]{18,4094}[A-Za-z0-9_~+/=-](?![A-Za-z0-9_~+/=-]))",
         replacement="Bearer [redacted-secret]",
         description="Bearer token.",
         flags=re.IGNORECASE,
@@ -214,18 +215,18 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         # Unquoted values must contain a digit and must not be a dotted
         # identifier chain (apiKeys.anthropicApiKey) or a bare camelCase
         # identifier (daemonConfigPrimaryToken): those are code passing a
-        # variable, not a hardcoded secret. Quoted 20 through 4096 character literals always
-        # match.
+        # variable, not a hardcoded secret. Quoted literals match at 20
+        # characters. Either form also hits its 4097-character ceiling.
         pattern=(
             r"\b(?:api[_-]?key|token|secret)\s{0,256}[:=]\s{0,256}"
             r"(?!(?:process\.env|os\.environ|os\.getenv|config\.|cfg\.|settings\.|env\.|\$\{|\$\(|null\b|None\b|undefined\b|''|\"\"))"
             r"(?:"
-            r"['\"][A-Za-z0-9._~+/=-]{20,4096}['\"]"
+            r"['\"](?:[A-Za-z0-9._~+/=-]{4097}|[A-Za-z0-9._~+/=-]{20,4096}['\"])"
             r"|"
             r"(?!(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+[A-Za-z_$][A-Za-z0-9_$]*(?![A-Za-z0-9._~+/=-]))"
-            r"(?=[A-Za-z._~+/=-]{0,4095}[0-9])"
+            r"(?:[A-Za-z0-9._~+/=-]{4097}|(?=[A-Za-z._~+/=-]{0,4095}[0-9])"
             r"[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,4094}[A-Za-z0-9_~+/=-])"
-            r")"
+            r"))"
         ),
         replacement="[redacted-secret]",
         description="Likely API key, token, or secret assignment.",
@@ -238,10 +239,13 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         # Google and GitLab bodies can end in a hyphen; a trailing word
         # boundary would truncate that character or miss a minimum-length key.
         pattern=(
-            r"\b(?:(?:github_pat_[A-Za-z0-9_]{20,8192}|gh[pousr]_[A-Za-z0-9]{20,8192}"
-            r"|xox[baprs]-[A-Za-z0-9-]{8,8192}|sk-(?:live|test|proj|ant)-[A-Za-z0-9_-]{8,8192}"
-            r"|AKIA[A-Z0-9]{16}|(?-i:ASIA[A-Z0-9]{16}))\b"
-            r"|(?-i:(?:AIza[A-Za-z0-9_-]{30,8192}|glpat-[A-Za-z0-9_-]{16,8192})(?![A-Za-z0-9_-])))"
+            r"\b(?:github_pat_(?:[A-Za-z0-9_]{8193}|[A-Za-z0-9_]{20,8192}\b)"
+            r"|gh[pousr]_(?:[A-Za-z0-9]{8193}|[A-Za-z0-9]{20,8192}\b)"
+            r"|xox[baprs]-(?:[A-Za-z0-9-]{8193}|[A-Za-z0-9-]{8,8192}\b)"
+            r"|sk-(?:live|test|proj|ant)-(?:[A-Za-z0-9_-]{8193}|[A-Za-z0-9_-]{8,8192}\b)"
+            r"|AKIA(?:[A-Z0-9]{8193}|[A-Z0-9]{16}\b)|(?-i:ASIA(?:[A-Z0-9]{8193}|[A-Z0-9]{16}\b))"
+            r"|(?-i:AIza(?:[A-Za-z0-9_-]{8193}|[A-Za-z0-9_-]{30,8192}(?![A-Za-z0-9_-]))"
+            r"|glpat-(?:[A-Za-z0-9_-]{8193}|[A-Za-z0-9_-]{16,8192}(?![A-Za-z0-9_-]))))"
         ),
         replacement="[redacted-secret]",
         description="Credential with a well-known provider token prefix.",
@@ -250,7 +254,7 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     Rule(
         id="private-key-block",
         category="secret",
-        pattern=r"-----BEGIN [A-Z ]{0,64}PRIVATE KEY-----[\s\S]{0,8192}?-----END [A-Z ]{0,64}PRIVATE KEY-----",
+        pattern=r"-----BEGIN [A-Z ]{0,64}PRIVATE KEY-----",
         replacement="[redacted-private-key]",
         description="PEM private key block.",
     ),

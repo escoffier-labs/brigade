@@ -331,9 +331,10 @@ def test_s18_round4_adversarial_rule_corpus(name, size, position):
         [sys.executable, str(Path(__file__).parent / "memory_scan_adversarial.py"), name, str(size), position],
         capture_output=True,
         text=True,
-        timeout=5,
+        timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert float(result.stdout.split()[3]) < 2.0, result.stdout
 
 
 def test_s18_round4_exact_reviewer_inputs():
@@ -346,9 +347,10 @@ def test_s18_round4_exact_reviewer_inputs():
             [sys.executable, str(Path(__file__).parent / "memory_scan_adversarial.py"), name, "0"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=60,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+        assert float(result.stdout.split()[3]) < 2.0, result.stdout
 
 
 def test_s18_round4_ascii_skip_requires_reviewed_patterns():
@@ -361,7 +363,6 @@ def test_s18_round4_ascii_skip_requires_reviewed_patterns():
             "ssh-private-target",
             r"(?::\S{1,4096})?",
         ): "Optional suffix cannot determine whether the required address matches.",
-        ("private-key-block", r"[\s\S]{0,8192}?"): "The union matches every character in both modes.",
     }
     for item in scan._BUNDLE["injections"] + scan._BUNDLE["rules"]:
         pattern = item["pattern"]
@@ -370,7 +371,7 @@ def test_s18_round4_ascii_skip_requires_reviewed_patterns():
                 assert reason
                 assert pattern.count(reviewed) == 1
                 pattern = pattern.replace(reviewed, "")
-        assert not re.search(r"\\[SWD]|\[\^\\s", pattern), (item["id"], pattern)
+        assert not re.search(r"\\[SWDB]|\[\^\\[swd]", pattern), (item["id"], pattern)
 
 
 @pytest.mark.parametrize("text,rule", [("a@b.co:\x1fx", "email"), ("Bearer " + "a" * 10 + "\x1f" + "a" * 10, None)])
@@ -431,13 +432,25 @@ def test_s18_round4_detection_bounds(rule, text):
     from brigade import memory_content_scan as scan
 
     item = next(item for item in scan._BUNDLE["injections"] + scan._BUNDLE["rules"] if item["id"] == rule)
-    assert re.fullmatch(item["pattern"], text, item["flags"]) is None
+    # Secret ceilings and an optional SSH suffix still hit. Cue gaps and
+    # non-secret address/port bounds remain deliberate heuristic misses.
+    detected = (
+        rule in {"jwt-token", "bare-token-prefix"}
+        or (rule == "private-key-block" and not text.startswith("-----BEGIN " + "X" * 65))
+        or (rule == "bearer-token" and text.startswith("Bearer ") and not text.startswith("Bearer  "))
+        or (rule == "api-key-assignment" and text.startswith(("token=1", 'token="')))
+        or (rule == "ssh-private-target" and text.startswith("a@"))
+        or (rule == "us-phone" and text.startswith("phone"))
+    )
+    assert bool(re.search(item["pattern"], text, item["flags"])) is detected
+    if detected:
+        assert blocked_rule([text]) is not None
 
 
 def test_s18_round4_bundle_version():
     from brigade import memory_content_scan as scan
 
-    assert scan._BUNDLE["version"] == "brigade-memory-scan.v4"
+    assert scan._BUNDLE["version"] == "brigade-memory-scan.v5"
 
 
 def test_s18_round4_base64_decode_window_is_bounded():
@@ -447,3 +460,58 @@ def test_s18_round4_base64_decode_window_is_bounded():
     item = next(item for item in scan._BUNDLE["injections"] if item["id"] == "base64-decode-chain")
     text = "a" * 80 + "\n" + "!" * 4097 + " decode"
     assert re.search(item["pattern"], text, item["flags"]) is None
+
+
+@pytest.mark.parametrize(
+    "name", list(json.loads((Path(__file__).parent / "fixtures/memory-scan-overbound.json").read_text()))
+)
+def test_s18_round5_overbound_secrets_block(name):
+    case = json.loads((Path(__file__).parent / "fixtures/memory-scan-overbound.json").read_text())[name]
+    text = "".join(case["prefix_parts"]) + case["unit"] * case["repeat"] + "".join(case["suffix_parts"])
+    assert blocked_rule([text]) is not None, name
+
+
+@pytest.mark.parametrize(
+    "name", list(json.loads((Path(__file__).parent / "fixtures/memory-scan-adversarial.json").read_text()))
+)
+def test_s18_round5_prefilter_parity_corpus(name, monkeypatch):
+    from brigade import memory_content_scan as scan
+    from memory_scan_adversarial import vectors
+
+    # Compare the same v5 rules with and without the necessary-condition
+    # filters, including both Unicode and ASCII modes and all six positions.
+    texts = [text for _, text in vectors(name, 512 * 1024)]
+    expected = [scan.blocked_rule([text]) for text in texts]
+    monkeypatch.setattr(scan, "_rule_possible", lambda name, text: True)
+    monkeypatch.setattr(scan, "_assignment_search", lambda pattern, text: bool(pattern.search(text)))
+    assert [scan.blocked_rule([text]) for text in texts] == expected
+
+
+@pytest.mark.parametrize("value", ["a" * 20, "a" * 5000, "a1" * 10, "a=" * 10 + "1", "İ" * 20, "ſ1" * 10])
+@pytest.mark.parametrize("quote", ["", "'", '"'])
+def test_s18_round5_assignment_prefilter_parity(value, quote, monkeypatch):
+    from brigade import memory_content_scan as scan
+
+    text = "token: " + quote + value + quote
+    expected = scan.blocked_rule([text])
+    monkeypatch.setattr(scan, "_rule_possible", lambda name, text: True)
+    monkeypatch.setattr(scan, "_assignment_search", lambda pattern, text: bool(pattern.search(text)))
+    assert scan.blocked_rule([text]) == expected
+
+
+def test_s18_round5_long_base64_blob_still_flags():
+    assert blocked_rule(["decode " + "a" * 5000]) == "base64-decode-chain"
+
+
+@pytest.mark.parametrize("prefix,suffix", [("é", ""), ("", "é"), ("İ", "ſ")])
+@pytest.mark.parametrize(
+    "value", ["a" + "@b.co", "a@example.com", "a@" + ".".join(("172", "2٢", "0", "1")), 'token="' + "a" * 20 + '"']
+)
+def test_s18_round5_prefilters_preserve_ascii_boundaries(prefix, suffix, value, monkeypatch):
+    from brigade import memory_content_scan as scan
+
+    text = prefix + value + suffix
+    expected = scan.blocked_rule([text])
+    monkeypatch.setattr(scan, "_rule_possible", lambda name, text: True)
+    monkeypatch.setattr(scan, "_assignment_search", lambda pattern, text: bool(pattern.search(text)))
+    assert scan.blocked_rule([text]) == expected

@@ -90,9 +90,9 @@
     "unit": "a-",
     "literal": ".",
     "expected": {
-      "before": null,
-      "after": null,
-      "isolated": null
+      "before": "jwt-token",
+      "after": "jwt-token",
+      "isolated": "jwt-token"
     }
   },
   "bearer-token": {
@@ -102,9 +102,9 @@
     "unit": "a",
     "literal": "!",
     "expected": {
-      "before": null,
-      "after": null,
-      "isolated": null
+      "before": "bearer-token",
+      "after": "bearer-token",
+      "isolated": "bearer-token"
     }
   },
   "api-key-assignment": {
@@ -126,9 +126,9 @@
     "unit": "a",
     "literal": "!",
     "expected": {
-      "before": null,
-      "after": null,
-      "isolated": null
+      "before": "bare-token-prefix",
+      "after": "bare-token-prefix",
+      "isolated": "bare-token-prefix"
     }
   },
   "private-key-block": {
@@ -139,9 +139,9 @@
     "unit": "a ",
     "literal": "-----END XPRIVATE KEY----!",
     "expected": {
-      "before": null,
-      "after": null,
-      "isolated": null
+      "before": "private-key-block",
+      "after": "private-key-block",
+      "isolated": "private-key-block"
     }
   },
   "fake-system-block": {
@@ -187,21 +187,21 @@
     "unit": "eyJ-",
     "literal": ".",
     "expected": {
-      "before": null,
-      "after": null,
-      "isolated": null
+      "before": "jwt-token",
+      "after": "jwt-token",
+      "isolated": "jwt-token"
     }
   },
   "pem-restarts": {
     "prefix_parts": [
       ""
     ],
-    "unit": "-----BEGIN PRIVATE KEY----- ",
+    "unit": "-----BEGIN PRIVATE KEY----- ", "_content_guard": "content-guard: allow private-key-block",
     "literal": "-----END XPRIVATE KEY----!",
     "expected": {
-      "before": null,
-      "after": null,
-      "isolated": null
+      "before": "private-key-block",
+      "after": "private-key-block",
+      "isolated": "private-key-block"
     }
   },
   "assignment-restarts": {
@@ -211,9 +211,9 @@
     "unit": "a.token=",
     "literal": "9!",
     "expected": {
-      "before": null,
+      "before": "api-key-assignment",
       "after": "api-key-assignment",
-      "isolated": null
+      "isolated": "api-key-assignment"
     }
   },
   "provider-restarts": {
@@ -259,9 +259,9 @@
     "unit": "a-",
     "literal": ".",
     "expected": {
-      "before": null,
-      "after": null,
-      "isolated": null
+      "before": "jwt-token",
+      "after": "jwt-token",
+      "isolated": "jwt-token"
     }
   },
   "pem-type": {
@@ -283,9 +283,9 @@
     "unit": "a.",
     "literal": "\"",
     "expected": {
-      "before": null,
-      "after": null,
-      "isolated": null
+      "before": "api-key-assignment",
+      "after": "api-key-assignment",
+      "isolated": "api-key-assignment"
     }
   }
 }

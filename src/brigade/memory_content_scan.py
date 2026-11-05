@@ -7,6 +7,7 @@ Hub scanning deliberately uses raw matches without repository context exceptions
 from __future__ import annotations
 
 import json
+import bisect
 import re
 from importlib.resources import files
 from typing import Iterable
@@ -99,6 +100,53 @@ def _scan_copies(text: str) -> tuple[str, str, str]:
     return lines, injection_lines, normalized
 
 
+# Necessary conditions only. These linear searches have no failing suffix on
+# their token runs. They avoid retrying a bounded local-part or digit search
+# at every dotted word in a 512 KiB source card. IGNORECASE includes Python's
+# extra Unicode case folds, so the filter is also a superset of ASCII mode.
+_EMAIL_DOMAIN = re.compile(r"@[A-Z0-9.-]{1,256}\.[A-Z]{2,63}", re.IGNORECASE)
+_RESERVED_DOMAIN = re.compile(r"(?:example\.(?:com|org|net)|test|invalid|localhost|local)", re.IGNORECASE)
+_SSH_HOST = re.compile(r"@(?:10\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.|127\.)")
+_ASSIGNMENT_START = re.compile(r"\b(?:api[_-]?key|token|secret)\s{0,256}[:=]\s{0,256}", re.IGNORECASE)
+_ASSIGNMENT_START_ASCII = re.compile(_ASSIGNMENT_START.pattern, re.IGNORECASE | re.ASCII)
+_DIGIT = re.compile(r"[0-9]")
+_TOKEN_RUN = re.compile(r"[A-Z0-9._~+/=-]+", re.IGNORECASE)
+
+
+def _assignment_search(pattern: re.Pattern[str], text: str) -> bool:
+    # Short unquoted matches need an ASCII digit within 4096 characters.
+    # Saturated runs and quoted values bypass that requirement. Index both
+    # once instead of walking 4096 characters at every assignment start.
+    digits = [match.start() for match in _DIGIT.finditer(text)]
+    long_runs = [(run.start(), run.end()) for run in _TOKEN_RUN.finditer(text) if run.end() - run.start() >= 4097]
+    run_index = 0
+    prefixes = _ASSIGNMENT_START_ASCII if pattern.flags & re.ASCII else _ASSIGNMENT_START
+    for prefix in prefixes.finditer(text):
+        value = prefix.end()
+        if value == len(text):
+            continue
+        while run_index < len(long_runs) and long_runs[run_index][1] < value:
+            run_index += 1
+        saturated = run_index < len(long_runs) and long_runs[run_index][0] <= value <= long_runs[run_index][1] - 4097
+        if text[value] not in "\"'" and not saturated:
+            digit = bisect.bisect_left(digits, value)
+            if digit == len(digits) or digits[digit] - value > 4095:
+                continue
+        if pattern.match(text, prefix.start()):
+            return True
+    return False
+
+
+def _rule_possible(name: str, text: str) -> bool:
+    if name == "email":
+        return _EMAIL_DOMAIN.search(text) is not None
+    if name == "example-email-reserved":
+        return "@" in text and _RESERVED_DOMAIN.search(text) is not None
+    if name == "ssh-private-target":
+        return _SSH_HOST.search(text) is not None
+    return True
+
+
 def blocked_rule(texts: Iterable[str]) -> str | None:
     """Return an id only. Every finding withholds prompt text, including warnings."""
     # Scan each field independently too: a leading BOM exemption belongs to one
@@ -117,15 +165,18 @@ def blocked_rule(texts: Iterable[str]) -> str | None:
         # need the ASCII pass. Bundle tests require review of inverse classes.
         copies = tuple(dict.fromkeys((text, lines)))
         extra_copies = tuple(copy for copy in dict.fromkeys((injection_lines, normalized)) if copy not in copies)
-        # These rules require a literal @. Without it, dotted near-matches
-        # otherwise restart an unanchored local-part search at every label.
+        possible: dict[tuple[str, str], bool] = {}
         for name, _action, pattern in _RULES:
-            if name in ("email", "example-email-reserved", "ssh-private-target") and not any(
-                "@" in copy for copy in copies
-            ):
-                continue
-            if any(pattern.search(copy) for copy in copies if not (pattern.flags & re.ASCII and copy.isascii())):
-                return name
+            for copy in copies:
+                if pattern.flags & re.ASCII and copy.isascii():
+                    continue
+                key = (name, copy)
+                if key not in possible:
+                    possible[key] = _rule_possible(name, copy)
+                if possible[key] and (
+                    _assignment_search(pattern, copy) if name == "api-key-assignment" else pattern.search(copy)
+                ):
+                    return name
         for name, _action, pattern in _INJECTIONS:
             if any(pattern.search(copy) for copy in extra_copies if not (pattern.flags & re.ASCII and copy.isascii())):
                 return name

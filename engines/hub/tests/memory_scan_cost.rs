@@ -249,3 +249,32 @@ fn s18_round4_adversarial_rule_corpus() {
         }
     }
 }
+
+#[test]
+fn s18_round5_overbound_secrets_block() {
+    let scanner = scan::bundled();
+    let cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/memory-scan-overbound.json"
+    ))
+    .unwrap();
+    for (name, case) in cases.as_object().unwrap() {
+        let parts = |key: &str| -> String {
+            case[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p.as_str().unwrap())
+                .collect()
+        };
+        let text = format!(
+            "{}{}{}",
+            parts("prefix_parts"),
+            case["unit"]
+                .as_str()
+                .unwrap()
+                .repeat(case["repeat"].as_u64().unwrap() as usize),
+            parts("suffix_parts")
+        );
+        assert_eq!(scanner.scan(&text).state(), "blocked", "{name}");
+    }
+}

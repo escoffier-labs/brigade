@@ -7,6 +7,7 @@ from typing import NamedTuple
 from .detectors.opf import run_opf
 from .native import rule_spans
 from .policy import Policy
+from .rules import DEFAULT_RULES
 from .types import Finding, GuardResult, Rule, ScanOptions, TextEdit
 
 # The token class includes `/` because findings are displayed as
@@ -57,9 +58,15 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
     rules = list(active_policy.all_rules())
     for rule, spans in zip(rules, rule_spans(text, rules), strict=True):
         is_root_path = rule.id == "root-path" and not any(rule is custom for custom in active_policy.custom_rules)
+        expanded_end = 0
         for start, end in spans:
+            if start < expanded_end:
+                continue
             if start == end:
                 continue
+            if any(rule is default for default in DEFAULT_RULES):
+                end = _secret_end(text, rule.id, start, end)
+                expanded_end = end
             if rule.id == "email" and active_policy.allows_agent_coauthor_email(
                 text[start:end], _line_at(text, start, end)
             ):
@@ -235,6 +242,54 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
 
     findings.sort(key=lambda item: (item.line, item.column, item.rule_id))
     return GuardResult(text=text, redacted_text=redacted, findings=findings)
+
+
+_TOKEN_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~+/=-İıſK")
+_PEM_END = re.compile(r"-----END [A-Z ]{0,64}PRIVATE KEY-----")
+
+
+def _secret_end(text: str, rule_id: str, start: int, end: int) -> int:
+    """Expand bounded detection spans in both Python and native guard paths.
+
+    Each rule walks disjoint tails once. The native process returns raw regex
+    spans, then this shared policy engine expands them before overlap, allows,
+    findings and edits. Custom rules keep their caller-defined match spans.
+    """
+    if rule_id == "private-key-block":
+        closing = _PEM_END.search(text, end)
+        return closing.end() if closing else len(text)
+    if rule_id == "bare-token-prefix":
+        # Ordinary provider endpoints already delimit the complete token.
+        # Only saturation spans need expansion, using that provider's class.
+        if end - start < 8193:
+            return end
+        prefix = text[start : start + 11]
+        chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        if prefix.startswith(("AIza", "glpat-")):
+            chars += "_-"
+        elif prefix.startswith("ASIA"):
+            chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        else:
+            chars += "İıſK"
+            if prefix.lower().startswith("github_pat_"):
+                chars += "_"
+            elif prefix.lower().startswith("sk-"):
+                chars += "_-"
+            elif prefix.lower().startswith("xox"):
+                chars += "-"
+        while end < len(text) and text[end] in chars:
+            end += 1
+        return end
+    if rule_id in {"jwt-token", "bearer-token", "api-key-assignment"}:
+        # A complete quoted assignment already includes its closing quote.
+        if rule_id == "api-key-assignment" and text[end - 1] in "\"'":
+            return end
+        original_end = end
+        while end < len(text) and text[end] in _TOKEN_CHARS:
+            end += 1
+        while end > original_end and text[end - 1] == ".":
+            end -= 1
+    return end
 
 
 def redact_text(text: str, policy: Policy | None = None, options: ScanOptions | None = None) -> str:
