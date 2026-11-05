@@ -370,6 +370,97 @@ def test_hub_contract_operator_recipient_needs_a_running_hub(tmp_path):
     assert "--operator-recipient applies to --hub-url" in payload["error"]
 
 
+def test_hub_contract_claim_floor_needs_a_running_hub(tmp_path):
+    root = tmp_path / "state"
+    code, payload = control("hub-contract", "--claim-floor", "4294967297", root=root)
+    assert code == 1, payload
+    assert "--claim-floor applies to --hub-url" in payload["error"]
+
+
+def _claim_fencing(tmp_path, *, raise_floor: bool, claim_floor: int | None = None) -> tuple[int, list[dict]]:
+    """Run the claim-fencing drive on an in-process hub, optionally after a restore raised its floor.
+
+    Returns the hub's floor and the drive's mismatches. `claim_floor` is what the
+    drive is told; by default it is the hub's real floor.
+    """
+    import threading
+
+    from brigade import fleet_hub, fleet_hub_claims
+
+    hub_contract = _load_hub_contract()
+    db = tmp_path / "hub.db"
+    conn = fleet_hub.init_db(db)
+    try:
+        floor = 0
+        if raise_floor:
+            # The advance a restore uses (fleet_hub_backup), so generations pass 2**32.
+            conn.execute("BEGIN IMMEDIATE")
+            floor = fleet_hub_claims.write_recovery_floor(
+                conn, 0, advance=2**32, restored_at="2026-01-01T00:00:00+00:00", copy_sha256="0" * 64
+            )
+            conn.commit()
+        tokens = {node: fleet_hub.add_node(conn, node)[1] for node in ("contract-a-floor", "contract-b-floor")}
+    finally:
+        conn.close()
+    admin = "contract-admin-token-floor"
+    server = fleet_hub.make_server("127.0.0.1", 0, db, admin)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        hub = hub_contract.Hub(url=f"http://127.0.0.1:{server.server_address[1]}", admin_token=admin, mode="external")
+        d = hub_contract.Drive(hub)
+        ctx = hub_contract.Ctx(
+            tag="floor",
+            admin=admin,
+            node_a="contract-a-floor",
+            node_b="contract-b-floor",
+            a=tokens["contract-a-floor"],
+            b=tokens["contract-b-floor"],
+            principal_id="",
+            principal_token="",
+            m1=None,
+            m2=None,
+            c1="",
+            claim_floor=floor if claim_floor is None else claim_floor,
+        )
+        hub_contract.drive_claim_fencing(d, ctx)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+    return floor, d.mismatches
+
+
+def test_claim_fencing_holds_on_a_fresh_hub_with_no_floor(tmp_path):
+    floor, mismatches = _claim_fencing(tmp_path, raise_floor=False)
+    assert floor == 0
+    assert mismatches == []
+
+
+def test_claim_fencing_holds_on_a_restored_hub_given_its_floor(tmp_path):
+    floor, mismatches = _claim_fencing(tmp_path, raise_floor=True)
+    assert floor == 2**32
+    assert mismatches == []
+
+
+def test_claim_fencing_reports_a_restored_hub_when_the_floor_is_not_passed(tmp_path):
+    # Without the floor the drive expects a fresh hub's generation 1, so a healthy
+    # restored hub, which allocates floor + 1, is reported. This is the gap the
+    # restore drive had before it passed --claim-floor.
+    floor, mismatches = _claim_fencing(tmp_path, raise_floor=True, claim_floor=0)
+    assert mismatches, "a restored hub must not pass a drive that ignores its floor"
+    first = [m for m in mismatches if m["case"] == "claims acquire starts at generation 1"]
+    assert [(m.get("path"), m.get("observed")) for m in first] == [("$.claim.generation", floor + 1)], first
+
+
+def test_hub_contract_refuses_a_claim_floor_out_of_range():
+    hub_contract = _load_hub_contract()
+    hub = hub_contract.Hub(url="http://127.0.0.1:9", admin_token="x", mode="external")
+    for floor in (-1, hub_contract.MAX_CLAIM_FLOOR + 1, True):
+        with pytest.raises(hub_contract.ContractError, match="claim floor"):
+            hub_contract.run_contract(hub, claim_floor=floor)
+
+
 def test_hub_contract_refuses_a_malformed_operator_recipient(tmp_path):
     hub_contract = _load_hub_contract()
     for raw in ("contract-operator", "agent:", "agent:Upper", "agent:has space", "agent:" + "x" * 64):

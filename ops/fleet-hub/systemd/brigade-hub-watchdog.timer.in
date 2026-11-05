@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Brigade dogfood hub watchdog every 10 seconds
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=brigade-hub-watchdog.service
+
+[Install]
+WantedBy=timers.target

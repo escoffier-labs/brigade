@@ -8,7 +8,7 @@ The Tailscale Serve URL is printed by `tailscale serve status`. Use its HTTPS ta
 
 - Proxmox VE 9.x host
 - Debian 12 or Debian 13 CT template
-- 1 vCPU, 512 MB RAM, 4 GB root disk
+- 1 vCPU, 512 MB RAM, 256 MB swap, 8 GB root disk (the values the running hub container uses, recorded 2026-11-03)
 - Unprivileged CT with nesting disabled
 - Tailscale inside the CT, hostname `brigade-hub`
 - Brigade bound to `127.0.0.1:3774`, behind Tailscale Serve HTTPS
@@ -42,8 +42,8 @@ pct create <CTID> <TEMPLATE_STORAGE>:vztmpl/<DEBIAN_TEMPLATE>.tar.zst \
   --ostype debian \
   --cores 1 \
   --memory 512 \
-  --swap 512 \
-  --rootfs <ROOT_STORAGE>:4 \
+  --swap 256 \
+  --rootfs <ROOT_STORAGE>:8 \
   --unprivileged 1 \
   --features nesting=0 \
   --net0 name=eth0,bridge=<PROXMOX_BRIDGE>,ip=<CT_IPV4/CIDR>,gw=<GATEWAY_IPV4>,type=veth \
@@ -56,6 +56,15 @@ pct enter <CTID>
 ```
 
 The CT must have outbound access to the Tailscale package repository and the tailnet. Do not enable nesting for this service.
+
+The 8 GB root disk leaves room for the hub file, the memory file and local
+`brigade fleet backup` copies above the hub's 1 GiB disk-pressure threshold.
+An earlier revision of this runbook created the CT with 512 MB of swap and a
+4 GB root disk, and the running container was later changed to the values
+above. To check an existing CT, run `pct config <CTID>` on the Proxmox host and
+read `swap` and `rootfs`. To bring an older CT in line, run
+`pct set <CTID> --swap 256` and `pct resize <CTID> rootfs 8G`. The resize
+cannot be undone, so take a container backup first.
 
 Tailscale normally needs `/dev/net/tun`. Check from inside the CT:
 
@@ -459,6 +468,16 @@ A fleet deployed before per-node credentials has one token in `/etc/brigade/flee
 ## 8. Back up the SQLite database
 
 Use SQLite's online backup command. Do not copy only the main database file while the service is running, because WAL data may not have been checkpointed into it.
+
+A Brigade install that includes `brigade fleet backup` can use it in place of
+the `sqlite3` script below. It runs `integrity_check` on every copy, keeps 48
+hourly and 14 daily copies, and refuses a copy that would leave the volume
+under its free-space floor:
+`brigade fleet backup --db /var/lib/brigade/fleet-hub.db --dest /var/backups/brigade --min-free-gib 2`.
+Run `--plan` first to see the file size and how many hourly copies fit. Any
+restore from a copy older than the last write is lossy. Use
+`brigade fleet restore` as [Restore from a copy](fleet-hub-dogfood.md#restore-from-a-copy)
+describes, never a plain file copy.
 
 Create `/usr/local/sbin/brigade-fleet-backup`:
 

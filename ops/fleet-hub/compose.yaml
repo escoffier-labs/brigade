@@ -1,32 +1,212 @@
+# Brigade Fleet Hub, Docker Compose recipe (holder namespace layout).
+#
+# No service publishes a port. The holder (`netns`) owns one network
+# namespace, and the hub and the private network's HTTPS front join it, so the
+# hub binds loopback and its peer is the front. The embedder runs only under
+# the `gpu` profile that `bin/hub-setup.py init` writes, on an internal network
+# shared only with the holder. Run setup before the first `docker compose up`:
+# it writes `.env`, `config/hub.toml` and the secrets this file names.
+# Runbook: docs/runbooks/fleet-hub-dogfood.md. Never run `docker compose down -v`.
+
+name: ${COMPOSE_PROJECT_NAME:-brigade-hub}
+
+x-hardening: &hardening
+  init: true
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+
 services:
+  netns:
+    <<: *hardening
+    image: ${BRIGADE_HUB_IMAGE:-localhost/brigade-fleet-hub:dogfood}
+    # Only a pause process. It never exits, has no health check and holds no
+    # data, so the daemon has no reason to restart it and the namespace stays.
+    entrypoint: ["python", "-c", "import signal; signal.pause()"]
+    command: []
+    healthcheck:
+      disable: true
+    cap_drop: [ALL]
+    read_only: true
+    mem_limit: 64m
+    oom_score_adj: -1000
+    cgroup_parent: ${BRIGADE_HUB_SLICE:-brigade-hub.slice}
+    networks:
+      - default
+      - embed
+
   hub:
+    <<: *hardening
     build:
       context: ../..
       dockerfile: ops/fleet-hub/Containerfile
       args:
-        BRIGADE_REF: e6009f6969dc6e45db2ab93790aa3e407c791409
-    image: localhost/brigade-fleet-hub:0.28.0-e6009f6
-    restart: unless-stopped
-    init: true
-    # Every client arrives from the bridge gateway, one source capped at 8
-    # concurrent connections. See docs/runbooks/fleet-hub-containers.md.
-    ports:
-      - "127.0.0.1:3774:3774"
+        BRIGADE_REF: ${BRIGADE_REF:-e6009f6969dc6e45db2ab93790aa3e407c791409}
+        BRIGADE_SHA256: ${BRIGADE_SHA256:-68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168}
+    image: ${BRIGADE_HUB_IMAGE:-localhost/brigade-fleet-hub:dogfood}
+    network_mode: "service:netns"
+    depends_on:
+      - netns
+    command:
+      - --host
+      - 127.0.0.1
+      - --port
+      - "3774"
+      - --db
+      - /var/lib/brigade/fleet-hub.db
+      - --token-file
+      - /run/secrets/admin_token
+      - --trust-forwarded-proto
+    environment:
+      BRIGADE_FLEET_FINDINGS_KEY_FILE: /run/secrets/findings_key
     secrets:
-      - source: admin_token
-        target: admin_token
+      - admin_token
+      - findings_key
     volumes:
       - brigade-state:/var/lib/brigade
+      # Read by the planned Rust hub (S10, S15). Today's Python hub ignores it.
+      - ./config/hub.toml:/etc/brigade/hub.toml:ro
+    cap_drop: [ALL]
+    # Covers the hub's drain, its final checkpoint and the upstream's
+    # shutdown. The Docker daemon's own shutdown timeout must be at least this.
+    stop_grace_period: 40s
+    oom_score_adj: -900
+    cgroup_parent: ${BRIGADE_HUB_SLICE:-brigade-hub.slice}
+    # Status only: Docker never restarts an unhealthy container. The host
+    # watchdog timer (systemd/brigade-hub-watchdog.timer) acts on failures.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3774/health', timeout=2).read()"]
       interval: 30s
       timeout: 3s
       retries: 3
-      start_period: 5s
+      start_period: 10s
+
+  front:
+    <<: *hardening
+    image: ${BRIGADE_FRONT_IMAGE:-tailscale/tailscale:v1.88.4@sha256:360e10ad95ad03950f66df03e0dab66287f9f89076ee4012d50bc6adceafcdf3}
+    network_mode: "service:netns"
+    depends_on:
+      - netns
+      - hub
+    # The wrapper exits after 3 checks that find only loopback, or 3 checks in
+    # which the hub port refuses connections, so the restart policy starts the
+    # front again in the holder's current namespace.
+    entrypoint: ["/bin/sh", "/brigade/front-wrapper.sh"]
+    environment:
+      TS_HOSTNAME: ${BRIGADE_FRONT_HOSTNAME:-brigade-hub-dogfood}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true"
+      TS_ACCEPT_DNS: "false"
+      TS_AUTH_ONCE: "true"
+      # SSH stays off: a remote shell into the front would sit in the hub's namespace.
+      TS_EXTRA_ARGS: --ssh=false
+      TS_SERVE_CONFIG: /brigade/serve.json
+      BRIGADE_FRONT_AUTHKEY_FILE: /run/secrets/front_authkey
+    secrets:
+      - front_authkey
+    volumes:
+      - front-state:/var/lib/tailscale
+      - ./front:/brigade:ro
+    cap_drop: [ALL]
+    mem_limit: 256m
+    oom_score_adj: -500
+    cgroup_parent: ${BRIGADE_HUB_SLICE:-brigade-hub.slice}
+
+  embedder:
+    <<: *hardening
+    profiles: [gpu]
+    image: ${BRIGADE_EMBED_IMAGE:-ollama/ollama:0.18.0@sha256:e23e6499890325d31f3454cdc83f7a613a2423c8a9e167bbafea0b0e3c27d7c6}
+    environment:
+      # Reachable only on the internal network; no port is published.
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_KEEP_ALIVE: "-1"
+      OLLAMA_NOPRUNE: "1"
+      OLLAMA_MODELS: /models
+    volumes:
+      - models:/models
+    networks:
+      - embed
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    oom_score_adj: -800
+    cgroup_parent: ${BRIGADE_EMBED_SLICE:-brigade-embed.slice}
+
+  # One-shot model download into the models volume. The embedder sits only on
+  # the internal network and cannot reach a registry, so this runs on the
+  # default network, with no GPU and no published port:
+  # `docker compose --profile model-pull run --rm model-pull`.
+  model-pull:
+    profiles: [model-pull]
+    image: ${BRIGADE_EMBED_IMAGE:-ollama/ollama:0.18.0@sha256:e23e6499890325d31f3454cdc83f7a613a2423c8a9e167bbafea0b0e3c27d7c6}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - ollama serve >/dev/null 2>&1 & server=$$!; sleep 3; ollama pull "$$BRIGADE_EMBED_MODEL"; status=$$?; kill "$$server"; exit "$$status"
+    environment:
+      OLLAMA_HOST: 127.0.0.1:11434
+      OLLAMA_MODELS: /models
+      BRIGADE_EMBED_MODEL: ${BRIGADE_EMBED_MODEL:-qwen3-embedding:8b}
+    volumes:
+      - models:/models
+    networks:
+      - default
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+  # One-shot copy job: `docker compose --profile backup run --rm backup`,
+  # started hourly by systemd/brigade-hub-backup.timer. Root inside the
+  # container with three capabilities: it reads the hub's files, SQLite gives
+  # any -wal or -shm file it creates the database file's owner, and the copies
+  # are handed to the compose account in the 0700 backup directory.
+  backup:
+    profiles: [backup]
+    image: ${BRIGADE_HUB_IMAGE:-localhost/brigade-fleet-hub:dogfood}
+    network_mode: none
+    user: "0:0"
+    entrypoint: ["brigade", "fleet", "backup"]
+    command:
+      - --db
+      - /var/lib/brigade/fleet-hub.db
+      - --dest
+      - /backups
+      - --owner
+      - ${BRIGADE_BACKUP_OWNER:?run bin/hub-setup.py init first}
+      - --keep-hourly
+      - ${BRIGADE_BACKUP_KEEP_HOURLY:-48}
+      - --min-free-gib
+      - ${BRIGADE_BACKUP_MIN_FREE_GIB:-20}
+      - --json
+    volumes:
+      - brigade-state:/var/lib/brigade
+      - ${BRIGADE_BACKUP_DIR:?run bin/hub-setup.py init first}:/backups
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      disable: true
+    restart: "no"
+    cgroup_parent: ${BRIGADE_HUB_SLICE:-brigade-hub.slice}
+
+networks:
+  default: {}
+  embed:
+    internal: true
 
 secrets:
   admin_token:
     file: ./secrets/admin-token.txt
+  findings_key:
+    file: ./secrets/findings-key
+  front_authkey:
+    file: ./secrets/front-authkey
 
 volumes:
   brigade-state:
+  front-state:
+  models:

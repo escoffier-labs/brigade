@@ -1,0 +1,5 @@
+# Written per host by bin/hub-setup.py; never committed.
+.env
+config/
+compose.override.yaml
+secrets/
