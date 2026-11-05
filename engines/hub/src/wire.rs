@@ -93,11 +93,15 @@ pub fn py_float(f: f64) -> String {
 /// acceptance clock, the file value is rounded to microseconds the way the
 /// pure-Python datetime the Python upstream runs under does it.
 pub fn epoch(clock: Option<&str>) -> f64 {
+    epoch_us(clock) as f64 / 1e6
+}
+/// `epoch` in whole microseconds, the resolution `datetime` keeps.
+pub fn epoch_us(clock: Option<&str>) -> i64 {
     let file = clock
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| s.trim().parse::<f64>().ok())
         .filter(|v| v.is_finite() && *v >= 0.0 && *v < 253402300799.0);
-    let micros = match file {
+    match file {
         Some(v) => {
             let (seconds, micros) = split(v);
             seconds * 1_000_000 + micros
@@ -108,8 +112,7 @@ pub fn epoch(clock: Option<&str>) -> f64 {
                 .unwrap();
             d.as_secs() as i64 * 1_000_000 + i64::from(d.subsec_micros())
         }
-    };
-    micros as f64 / 1e6
+    }
 }
 /// `datetime.fromtimestamp`: modf, then round the fraction half to even.
 fn split(v: f64) -> (i64, i64) {
@@ -128,6 +131,23 @@ fn split(v: f64) -> (i64, i64) {
 /// `datetime.fromtimestamp(v, timezone.utc).isoformat()`.
 pub fn iso(v: f64) -> String {
     let (seconds, micros) = split(v);
+    iso_parts(seconds, micros)
+}
+/// `isoformat()` of a UTC datetime held as microseconds since the epoch.
+pub fn iso_us(us: i64) -> String {
+    iso_parts(us.div_euclid(1_000_000), us.rem_euclid(1_000_000))
+}
+/// Days since 1970-01-01 for a proleptic Gregorian date (Hinnant's days_from_civil).
+pub fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+fn iso_parts(seconds: i64, micros: i64) -> String {
     let days = seconds.div_euclid(86400);
     let rest = seconds.rem_euclid(86400);
     // Howard Hinnant's civil_from_days.
@@ -182,6 +202,9 @@ mod tests {
         assert_eq!(iso(951782400.5), "2000-02-29T00:00:00.500000+00:00");
         assert_eq!(iso(1767225600.0 + 900.0), "2026-01-01T00:15:00+00:00");
         assert_eq!(iso(4102444799.999999), "2099-12-31T23:59:59.999999+00:00");
+        assert_eq!(iso_us(-1), "1969-12-31T23:59:59.999999+00:00");
+        assert_eq!(days_from_civil(2000, 2, 29) * 86400, 951782400);
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
     }
     #[test]
     fn python_float_repr() {

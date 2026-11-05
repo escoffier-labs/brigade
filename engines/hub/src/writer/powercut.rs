@@ -813,13 +813,20 @@ const CLAIM_SCHEDULE: [(&str, &str, i64); 4] = [
 ];
 /// One claim command through the real worker, committed on its own.
 fn run_claim(path: &std::path::Path, action: &str, holder: &str) -> Option<serde_json::Value> {
+    run_command(path, Box::new(claim(action, holder)))
+}
+/// One command through the real worker, committed on its own.
+fn run_command(
+    path: &std::path::Path,
+    command: Box<dyn super::Command>,
+) -> Option<serde_json::Value> {
     use super::*;
     let arbiter = std::sync::Arc::new(Arbiter::default());
     let (sender, receiver) = mpsc::channel(1);
     let (reply, result) = oneshot::channel();
     sender
         .try_send(Envelope {
-            command: Box::new(claim(action, holder)),
+            command,
             budget: Budget {
                 events: 1,
                 bytes: 100,
@@ -941,5 +948,170 @@ fn claim_writes_short_schedule() {
         partial += usize::from(acknowledged < 3);
     }
     assert!(partial > 0, "the schedule must cut inside the claim writes");
+    std::fs::remove_dir_all(template.parent().unwrap()).unwrap();
+}
+
+// S8: native message writes through the real worker, cut across the short
+// schedule's storage operations. An acknowledged send survives with its id,
+// an acknowledged ack stays acknowledged, and recovery never hands out an id
+// a client was already told about.
+const PEER_KEY: &str = "cut-peer-token-digest";
+fn message_template() -> PathBuf {
+    let path = claim_template();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute(
+        "INSERT INTO nodes(node_id,token_sha256,label,created_at,revoked_at) VALUES('cut-peer',?1,NULL,'2026-01-01T00:00:00+00:00',NULL)",
+        [PEER_KEY],
+    )
+    .unwrap();
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    drop(db);
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    path
+}
+fn message(caller: &str, key: &str, raw: serde_json::Value) -> Box<dyn super::Command> {
+    use crate::messages::{Policy, Seeds, Write, wake};
+    Box::new(Write {
+        caller: caller.into(),
+        key: key.into(),
+        raw: raw.as_object().unwrap().clone(),
+        policy: Policy::default(),
+        clock: None,
+        seeds: Seeds {
+            client_id: "0".repeat(32),
+            event: "1".repeat(32),
+            question: ["2".repeat(32), "3".repeat(32)],
+        },
+        events: false,
+        operator: String::new(),
+        wake: std::sync::Arc::new(wake::Wake::new(wake::Limits::for_connections(16))),
+        notified: Default::default(),
+    })
+}
+fn send(client_id: &str) -> Box<dyn super::Command> {
+    message(
+        "cut-node",
+        CUT_KEY,
+        serde_json::json!({"action": "send", "to": "cut-peer", "subject": "s", "body": client_id, "client_id": client_id}),
+    )
+}
+/// `(acknowledged sends as (id, client_id), acknowledged ack)` for one cut.
+fn message_cut(template: &std::path::Path, cut: usize) -> (usize, usize, bool) {
+    let path = super::tests::fixture();
+    std::fs::copy(template, &path).unwrap();
+    seed(&path, false);
+    DISK.with(|d| {
+        let mut d = d.borrow_mut();
+        d.writer = true;
+        d.cut = cut;
+        d.active = Some(8);
+        d.phase = 8;
+    });
+    let body = |answer: serde_json::Value| -> serde_json::Value {
+        serde_json::from_str(answer["body"].as_str().unwrap()).unwrap()
+    };
+    let mut sent: Vec<(i64, String)> = Vec::new();
+    let mut acked = false;
+    for client_id in ["m1", "m1", "m2"] {
+        let Some(answer) = run_command(&path, send(client_id)) else {
+            break;
+        };
+        assert_eq!(answer["status"], 201, "{answer}");
+        let id = body(answer)["message"]["id"].as_i64().unwrap();
+        // A retry answers the accepted row, never a second id.
+        if let Some((first, _)) = sent.iter().find(|(_, c)| c == client_id) {
+            assert_eq!(*first, id);
+        }
+        sent.push((id, client_id.into()));
+    }
+    if sent.len() == 3 {
+        let ack = message(
+            "cut-peer",
+            PEER_KEY,
+            serde_json::json!({"action": "ack", "id": sent[0].0}),
+        );
+        if let Some(answer) = run_command(&path, ack) {
+            assert_eq!(answer["status"], 200, "{answer}");
+            acked = true;
+        }
+    }
+    let count = DISK.with(|d| {
+        let mut d = d.borrow_mut();
+        d.crashed = true;
+        d.writer = false;
+        d.count
+    });
+    restore();
+    DISK.with(|d| *d.borrow_mut() = Disk::default());
+    let db = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    for (id, client_id) in &sent {
+        let stored: String = db
+            .query_row(
+                "SELECT client_id FROM fleet_messages WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| panic!("cut {cut}: acknowledged message {id} was lost"));
+        assert_eq!(&stored, client_id);
+    }
+    if acked {
+        let at: Option<String> = db
+            .query_row(
+                "SELECT acked_at FROM fleet_messages WHERE id=?1",
+                [sent[0].0],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(at.is_some(), "cut {cut}: an acknowledged ack was lost");
+    }
+    drop(db);
+    // Recovery issues a fresh id above every acknowledged one.
+    let fresh = run_command(&path, send("m3")).expect("recovered writer answers");
+    let id = body(fresh)["message"]["id"].as_i64().unwrap();
+    assert!(sent.iter().all(|(acknowledged, _)| id > *acknowledged));
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    let distinct = sent
+        .iter()
+        .map(|(id, _)| *id)
+        .collect::<std::collections::BTreeSet<_>>();
+    (count, distinct.len(), acked)
+}
+#[test]
+fn message_writes_short_schedule() {
+    let _lock = VFS_LOCK.lock().unwrap();
+    let _vfs = unsafe { Registration::new() };
+    let template = message_template();
+    let (operations, sends, acked) = message_cut(&template, 0);
+    assert_eq!(
+        (sends, acked),
+        (2, true),
+        "uncut schedule acknowledges every command"
+    );
+    let mut cuts = vec![
+        1,
+        2,
+        operations / 4,
+        operations / 2,
+        operations - 1,
+        operations,
+    ];
+    cuts.sort();
+    cuts.dedup();
+    let mut partial = 0;
+    for cut in cuts {
+        let (_, sends, acked) = message_cut(&template, cut);
+        partial += usize::from(sends < 2 || !acked);
+    }
+    assert!(
+        partial > 0,
+        "the schedule must cut inside the message writes"
+    );
     std::fs::remove_dir_all(template.parent().unwrap()).unwrap();
 }

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "registry/skills/verify-brigade"))
 import hub_contract as hc  # noqa: E402 - repository-local drive helper
 
-BINARY = ROOT / "engines/hub/target/debug/brigade-hub"
+BINARY = Path(os.environ.get("BRIGADE_HUB_BINARY", ROOT / "engines/hub/target/debug/brigade-hub"))
 START = 1767225600
 # Rows the parity run compares. Times come from the shared clock file, so they match.
 STORAGE = {

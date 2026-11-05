@@ -54,22 +54,24 @@ jobs:
         run: python tests/memory.py
       - name: Native claims wire parity, fencing and contention
         run: python tests/claims_native.py
+      - name: Native messages byte parity and long polls
+        run: python tests/messages_native.py
       - name: Frozen wire contract through managed front
         working-directory: .
         run: >-
           python registry/skills/verify-brigade/control-brigade.py hub-contract
-          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode claims=native'
-          --clock-hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode claims=native --test-clock-file {clock_file}'
-      - name: Native registration and claims storage parity
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode claims=native --route-mode messages=native'
+          --clock-hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode claims=native --route-mode messages=native --test-clock-file {clock_file}'
+      - name: Native registration, claims and messages storage parity
         working-directory: .
         run: >-
           python registry/skills/verify-brigade/control-brigade.py storage-parity
-          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode claims=native --test-clock-file {clock_file}'
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode claims=native --route-mode messages=native --test-clock-file {clock_file}'
       - name: Read-only production profile audit through managed front
         working-directory: .
         run: >-
           python registry/skills/verify-brigade/control-brigade.py hub-contract --profile prod-readonly
-          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode claims=native'
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode claims=native --route-mode messages=native'
       - name: Memory profile through managed front
         working-directory: .
         run: >-

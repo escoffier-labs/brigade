@@ -293,6 +293,17 @@ that takes and releases the write lock, or a `helper` process that does the
 same through its own connection, to `GET /owners`, `GET /status` or
 `POST /messages count`.
 
+With messages native (S8), the Rust front answers `count`, `identity` and
+`keys_get` itself. Its connections log through the same audit file: an
+authorizer when a statement is prepared, and a statement trace that records
+every `BEGIN IMMEDIATE`, `BEGIN EXCLUSIVE`, `INSERT`, `UPDATE`, `DELETE` and
+`REPLACE` each time one runs, cached writer statements included. Under the
+audit the native families read the fixture clock from `HUB_AUDIT_CLOCK`, and
+the native retention sweep stays paused. The positive control that was
+`list` is now `ack`, because a native `list` is a projection that never
+writes, while `ack` runs the retention writes on both hubs. A
+`POST /messages count` mutation reaches only a Python-served `count`.
+
 With `--hub-url` it probes a running hub using a node token from
 `BRIGADE_HUB_PROBE_NODE_TOKEN` and the token of an operator-enrolled probe
 principal with no send grants from `BRIGADE_HUB_PROBE_PRINCIPAL_TOKEN`
@@ -324,7 +335,13 @@ digest change and all four controls writing. Each of the seven mutation kinds
   rows per read (`PURGE_BATCH_SIZE`). The lifecycle sequence keeps two
   eligible rows, so a hub that projects every eligible row (the Rust plan)
   passes the same cases. A backlog above 32 is a recorded difference, tested
-  on Rust alone in S8.
+  on Rust alone in S8. Under `messages=native`, a `list`, `sent` or
+  `sent_lookup` body that serde_json reads differently from `json.loads` (an
+  integer `-0`, `NaN`, `Infinity`, `1e400`, a lone surrogate escape) is still
+  answered by Python, with its 32-row purge, so with a backlog above 32 such a
+  read can return ciphertext past 7 days. A `list` with `wait_ms` in such a
+  body also waits on Python's long poll, which a native send does not wake, so
+  the send reaches it at the poll's deadline.
 - **Refusals the sweep does not reach.** Quota refusals (1,000 unread
   messages, 1,000 sends a day, sealed storage), refusals behind non-default
   flags (`--require-sealed`, storage limits, `--allow-admin-writes`),

@@ -23,7 +23,7 @@ impl Modes {
             };
             let native = matches!(
                 family,
-                "health" | "metrics" | "registration" | "claims" | "memory"
+                "health" | "metrics" | "registration" | "claims" | "messages" | "memory"
             );
             // Only health has a shadow comparator and housekeeping audit so far.
             let shadow = family == "health";
@@ -106,6 +106,13 @@ mod tests {
         assert_eq!(Modes::default().get("registration"), Mode::Proxy);
         assert!(Modes::parse(&["registration=shadow".into()]).is_err());
         assert!(Modes::parse(&["heartbeat=native".into()]).is_err());
+    }
+    #[test]
+    fn messages_accept_native_and_proxy_but_not_shadow() {
+        let modes = Modes::parse(&["messages=native".into()]).unwrap();
+        assert_eq!(modes.get("messages"), Mode::Native);
+        assert_eq!(Modes::default().get("messages"), Mode::Proxy);
+        assert!(Modes::parse(&["messages=shadow".into()]).is_err());
     }
     #[test]
     fn claims_accept_native_and_proxy_but_not_shadow() {
