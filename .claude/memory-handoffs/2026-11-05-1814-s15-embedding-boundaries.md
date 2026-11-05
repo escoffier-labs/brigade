@@ -26,6 +26,7 @@ S15 uses two review slices, with transport in S15a and jobs plus retrieval in S1
 - commands run: executable scripts through `brigade work verify run --argv-json` with external cargo targets
 - measurement receipt: `20261105-230702-work-verify-c4ae7e`
 - S15a PR: https://github.com/escoffier-labs/brigade/pull/2314
+- S15b PR: https://github.com/escoffier-labs/brigade/pull/2316
 
 ## Recommended memory action
 
