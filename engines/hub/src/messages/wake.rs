@@ -181,6 +181,48 @@ impl Drop for FirstRead {
         self.0.reading.fetch_sub(1, Ordering::SeqCst);
     }
 }
+/// The watcher's position: the highest message id it has notified for, and
+/// the `data_version` it last read rows at.
+struct Watch {
+    last: i64,
+    seen: Option<i64>,
+}
+impl Watch {
+    /// One watcher pass. `sample` reads `(data_version, MAX(id))`, `watched`
+    /// counts waiters and first reads, and `query` lists each recipient's
+    /// newest id above `last`.
+    fn tick(
+        &mut self,
+        wake: &Wake,
+        sample: impl FnOnce() -> (Option<i64>, i64),
+        watched: impl FnOnce() -> usize,
+        query: impl FnOnce(i64) -> rusqlite::Result<Vec<(String, i64)>>,
+    ) {
+        // Sample first, then check for watchers. A poll that starts its
+        // first read after the check reads after these samples, so every
+        // row absorbed here is visible to that read. A poll that started
+        // before the check keeps this tick on the busy path below.
+        let (now, top) = sample();
+        if watched() == 0 {
+            self.last = top;
+            self.seen = now;
+            return;
+        }
+        if now == self.seen {
+            return;
+        }
+        // A failed query keeps the old `seen`, so the next tick reads the
+        // same rows again instead of treating them as already notified.
+        let Ok(rows) = query(self.last) else {
+            return;
+        };
+        self.seen = now;
+        for (recipient, id) in rows {
+            self.last = self.last.max(id);
+            wake.notify(&recipient);
+        }
+    }
+}
 /// The safety net for messages another process commits: while anyone waits
 /// or is in a first read, sample `data_version` every 250 ms and bump the
 /// recipients of new rows.
@@ -207,38 +249,25 @@ fn watch_every(path: &Path, wake: Arc<Wake>, interval: Duration) -> Result<(), S
     std::thread::Builder::new()
         .name("hub-message-watch".into())
         .spawn(move || {
-            let mut last = max_id(&db);
-            let mut seen = version(&db);
+            let mut watch = Watch {
+                last: max_id(&db),
+                seen: version(&db),
+            };
             loop {
                 std::thread::sleep(interval);
                 wake.ticks.fetch_add(1, Ordering::SeqCst);
-                // Sample first, then check for watchers. A poll that starts its
-                // first read after the check reads after these samples, so every
-                // row absorbed here is visible to that read. A poll that started
-                // before the check keeps this tick on the busy path below.
-                let (now, top) = (version(&db), max_id(&db));
-                if wake.watched() == 0 {
-                    last = top;
-                    seen = now;
-                    continue;
-                }
-                if now == seen {
-                    continue;
-                }
-                seen = now;
-                let Ok(mut statement) = db.prepare_cached(
-                    "SELECT recipient,MAX(id) FROM fleet_messages WHERE id>? GROUP BY recipient",
-                ) else {
-                    continue;
-                };
-                let rows: Vec<(String, i64)> = statement
-                    .query_map([last], |r| Ok((r.get(0)?, r.get(1)?)))
-                    .and_then(|rows| rows.collect())
-                    .unwrap_or_default();
-                for (recipient, id) in rows {
-                    last = last.max(id);
-                    wake.notify(&recipient);
-                }
+                watch.tick(
+                    &wake,
+                    || (version(&db), max_id(&db)),
+                    || wake.watched(),
+                    |last| {
+                        let mut statement = db.prepare_cached(
+                            "SELECT recipient,MAX(id) FROM fleet_messages WHERE id>? GROUP BY recipient",
+                        )?;
+                        let rows = statement.query_map([last], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                        rows.collect()
+                    },
+                );
             }
         })
         .map_err(|e| e.to_string())?;
@@ -313,6 +342,88 @@ mod tests {
             started.elapsed()
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn a_failed_watcher_query_keeps_the_rows_for_the_next_tick() {
+        let wake = Arc::new(Wake::new(Limits::for_connections(16)));
+        let _waiter = wake.register("node-b", None).unwrap();
+        let mut watch = Watch {
+            last: 0,
+            seen: Some(1),
+        };
+        // Another process committed row 1; the watcher's query fails once,
+        // for example with SQLITE_BUSY while the `-shm` is rebuilt.
+        watch.tick(
+            &wake,
+            || (Some(2), 1),
+            || wake.watched(),
+            |_| Err(rusqlite::Error::InvalidQuery),
+        );
+        assert_eq!(wake.epoch("node-b"), 0);
+        // The next tick sees the same data_version and must still read the row.
+        watch.tick(
+            &wake,
+            || (Some(2), 1),
+            || wake.watched(),
+            |last| {
+                assert_eq!(last, 0);
+                Ok(vec![("node-b".into(), 1)])
+            },
+        );
+        assert_eq!(wake.epoch("node-b"), 1, "the wake was lost");
+    }
+    #[test]
+    fn a_tick_samples_before_it_checks_for_watchers() {
+        // The interleaving the order guards against: between the tick's two
+        // first steps, a poll starts its first read (empty snapshot) and then
+        // another process commits row 1 for that poll's recipient. Whichever
+        // step runs first triggers the race, so a tick that checks watchers
+        // before it samples absorbs row 1 and the poll's wake is lost.
+        let wake = Arc::new(Wake::new(Limits::for_connections(16)));
+        let db = Mutex::new((Some(1_i64), 0_i64));
+        let first_read = Mutex::new(None);
+        let raced = std::sync::atomic::AtomicBool::new(false);
+        let race = || {
+            if !raced.swap(true, Ordering::SeqCst) {
+                *first_read.lock().unwrap() = Some(wake.first_read());
+                *db.lock().unwrap() = (Some(2), 1);
+            }
+        };
+        let mut watch = Watch {
+            last: 0,
+            seen: Some(1),
+        };
+        watch.tick(
+            &wake,
+            || {
+                let sample = *db.lock().unwrap();
+                race();
+                sample
+            },
+            || {
+                let watched = wake.watched();
+                race();
+                watched
+            },
+            |_| Ok(vec![]),
+        );
+        // The poll registers and drops its first-read guard.
+        let mark = wake.epoch("node-b");
+        let _waiter = wake.register("node-b", None).unwrap();
+        drop(first_read.lock().unwrap().take());
+        watch.tick(
+            &wake,
+            || *db.lock().unwrap(),
+            || wake.watched(),
+            |last| {
+                Ok(if last < 1 {
+                    vec![("node-b".into(), 1)]
+                } else {
+                    vec![]
+                })
+            },
+        );
+        assert_ne!(wake.epoch("node-b"), mark, "the watcher absorbed row 1");
     }
     #[tokio::test]
     async fn caps_hold_per_principal_and_per_source_but_not_for_the_front() {
