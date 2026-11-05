@@ -992,7 +992,7 @@ def test_plan_uses_consumer_launch_bindings_not_seat_native_inference(monkeypatc
     assert payload["binding"]["instance_id"] == "cursor"
 
 
-def _accept_route(conn, *, consumer="t3-fleet", brigade_model=None, launch_overrides=None):
+def _accept_route(conn, *, consumer="t3-fleet", brigade_model=None, launch_overrides=None, work_id=None):
     from brigade import fleet_hub_routing
 
     _activate(conn)
@@ -1028,6 +1028,7 @@ def _accept_route(conn, *, consumer="t3-fleet", brigade_model=None, launch_overr
             "repo_identity": REPO,
             "origin": "worker-linux-1",
             "workload": "general",
+            **({"work_id": work_id} if work_id else {}),
         },
         caller_node=NODE_A,
         is_admin=False,
@@ -1097,6 +1098,65 @@ def test_reservation_accept_scopes_overrides_and_retains_base_identity(conn, sel
         assert result["state"] == "accepted"
         assert result["reservation_id"] == body["reservation_id"]
     assert not conn.in_transaction
+
+
+def _ready_work(**overrides):
+    item = {
+        "status": "ready",
+        "burn_eligible": True,
+        "execution_mode": "agent",
+        "effective_acceptance": ["done"],
+        "attempt_count": 0,
+        "blocker": None,
+        "review_after": None,
+        "spend_by": None,
+        "source_policies": [],
+    }
+    return {**item, **overrides}
+
+
+@pytest.mark.parametrize("change", ["blocked", "not-ready", "deleted"])
+def test_reservation_accept_rechecks_bound_work_eligibility(conn, change):
+    from brigade import fleet_hub_routing
+
+    item = {"value": _ready_work()}
+    fleet_hub_routing.set_work_item_lookup(lambda _conn, _work_id: item["value"])
+    try:
+        body = _accept_route(conn, work_id="wl-bound")
+        item["value"] = {
+            "blocked": _ready_work(blocker="waiting on review"),
+            "not-ready": _ready_work(status="blocked"),
+            "deleted": None,
+        }[change]
+        policy = fleet_hub_policy.current_policy(conn)
+        before = _accept_state(conn)
+        with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError, match="no longer eligible"):
+            fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+        assert _accept_state(conn) == before
+        assert not conn.in_transaction
+        assert fleet_hub_policy.current_policy(conn)["revision"] == policy["revision"]
+        assert not conn.execute("SELECT accepted FROM fleet_reservations").fetchone()[0]
+    finally:
+        fleet_hub_routing.set_work_item_lookup(None)
+
+
+def test_reservation_accept_replay_survives_work_leaving_ready(conn):
+    from brigade import fleet_hub_routing
+
+    item = {"value": _ready_work()}
+    fleet_hub_routing.set_work_item_lookup(lambda _conn, _work_id: item["value"])
+    try:
+        body = _accept_route(conn, work_id="wl-bound")
+        _, accepted = fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+        assert accepted["state"] == "accepted"
+        # The accepting run claims the item, so it is no longer ready. An exact retry still succeeds.
+        item["value"] = _ready_work(status="in_progress")
+        before = _accept_state(conn)
+        _, replay = fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+        assert replay == accepted
+        assert _accept_state(conn) == before
+    finally:
+        fleet_hub_routing.set_work_item_lookup(None)
 
 
 def test_reservation_accept_replays_without_renewal_and_preserves_lifecycle(conn):

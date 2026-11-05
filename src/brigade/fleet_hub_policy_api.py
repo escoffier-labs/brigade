@@ -899,6 +899,15 @@ def _accept_reservation(conn: Any, body: Mapping[str, Any], caller_node: str) ->
     ):
         raise _error("retired", "the selected model is retired")
     if not row["accepted"]:
+        # Routing checked the bound work item once. It can be held, blocked or deleted before the
+        # target accepts without changing the policy revision, so reload it inside this transaction.
+        # An accepted replay skips this: the accepting run legitimately moves the item out of ready.
+        work_id = decision.get("_work_id")
+        if work_id:
+            verdict = fleet_hub_routing.evaluate_work_item(fleet_hub_routing._lookup_work(conn, work_id))
+            if not verdict["ok"]:
+                held = verdict.get("detail") or verdict["reason"]
+                raise _error("invalid-request", f"the bound work item is no longer eligible: {held}")
         fleet_hub_routing.claim_dispatch_intent(conn, parsed, caller_node)
     return {**fleet_hub_routing._reservation_payload(row), "state": "accepted"}
 
