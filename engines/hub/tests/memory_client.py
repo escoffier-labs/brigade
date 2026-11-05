@@ -73,7 +73,7 @@ class Client(unittest.TestCase):
         (root / "memory" / "cards").mkdir(parents=True)
         (root / ".brigade").mkdir()
         (root / ".brigade" / "memory-care.toml").write_text(
-            f'[hub]\nmode = "{mode}"\nscope = "{SCOPE}"\n', encoding="utf-8"
+            f'[hub]\nmode = "{mode}"\nscope = "{SCOPE}"\nread_scopes = ["fleet", "{SCOPE}"]\n', encoding="utf-8"
         )
         for card, text in cards.items():
             (root / "memory" / "cards" / f"{card}.md").write_text(text, encoding="utf-8")
@@ -125,7 +125,7 @@ class Client(unittest.TestCase):
             hubc.CALL_TIMEOUT_SECONDS = saved
             os.kill(self.hub.process.pid, signal.SIGCONT)
         self.assertEqual([s["card_id"] for s in report["spooled"]], ["fig"], report)
-        [entry] = store.spool_entries(target)
+        [entry] = store.spool_entries(target, hubc.hub_identity(self.hub.url))
         # Replay the spooled put once by hand, as a crash after commit would leave it.
         fields = ("scope", "card_id", "base_revision", "base_epoch", "text", "origin", "client_event_id")
         body = {k: entry[k] for k in fields if k in entry}
@@ -177,6 +177,29 @@ class Client(unittest.TestCase):
             for path in root.rglob("*"):
                 if path.is_file():
                     self.assertNotIn(SENTINEL.encode(), path.read_bytes(), path)
+
+    def test_status_names_the_principal_and_the_readable_scopes(self):
+        body = self.client().call("status", scopes=["fleet", SCOPE, "principal:someone-else"])
+        self.assertEqual((body["principal"], body["credential"]), ("memory-client-it", "node"))
+        self.assertEqual(body["readable_scopes"], sorted(["fleet", SCOPE]))
+        self.assertNotIn(self.node_token, json.dumps(body))
+        target = self.workspace("principal", "read")
+        settings = hubc.load_settings(target)
+        sync.pull(target, hubc.client_for(settings), settings)
+        self.assertEqual(store.replica(target).meta["principal"], "memory-client-it")
+
+    def test_the_admin_token_is_never_used_for_memory(self):
+        target = self.workspace("admin-only", "read", lime="# Lime\nlocal lime\n")
+        saved = os.environ.pop("BRIGADE_FLEET_NODE_TOKEN")
+        os.environ["BRIGADE_FLEET_TOKEN"] = self.hub.admin_token
+        try:
+            settings = hubc.load_settings(target)
+            got = hub_search.search_payload(target, "lime", settings=settings)
+        finally:
+            os.environ["BRIGADE_FLEET_NODE_TOKEN"] = saved
+            os.environ.pop("BRIGADE_FLEET_TOKEN", None)
+        self.assertEqual(settings.token, "")
+        self.assertEqual(got["retrieval"]["reason"], "no-node-credential", got)
 
     def test_zz_search_answers_locally_when_the_hub_stops(self):
         # Runs last: it stops the shared hub.

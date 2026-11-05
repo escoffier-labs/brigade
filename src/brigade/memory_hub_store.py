@@ -1,23 +1,33 @@
-"""Per-host hub memory state under `.brigade/memory/` (S14).
+"""Per-host hub memory state under `.brigade/memory/hub/` (S14).
 
-- `hub-replica/`: the heads this credential can read, the `seq` watermark and
-  the `log_epoch` they were pulled under. A rebuild after an epoch change goes
-  into `hub-replica.building/` and is swapped in when the pull finishes; the
-  old replica is removed first, so nothing ever answers from it again.
-- `hub-spool/`: writes the hub has not acknowledged, one file per entry named
-  by its time-ordered `client_event_id`, so name order is send order.
-- `hub-proposals/`: spooled writes the hub can no longer take as they are
-  (a base mismatch, an epoch change, an expired id, a refusal). They wait for
-  review and are never resent on their own.
-- `hub-published.json`: the revision and epoch each published card was last
+- `replica/`: the heads this host may answer from when the hub is away, the
+  `seq` watermark, the `log_epoch` and the principal they were pulled under,
+  and the read scopes they cover. A rebuild goes into `replica.building/` and
+  is swapped in when the pull finishes; the old replica is removed first, so
+  nothing ever answers from it again.
+- `spool/<hub>/`: writes the hub has not acknowledged, one file per entry
+  named by its time-ordered `client_event_id`, so name order is send order.
+  Each hub has its own directory, so entries for one hub never block or count
+  against another.
+- `proposals/`: spooled writes the hub can no longer take as they are (a base
+  mismatch, an epoch change, an expired id, a refusal). They wait for review
+  and are never resent on their own.
+- `published.json`: the revision and epoch each published card was last
   written at, which the next `push` names as its base.
+- `lock`: held by `push`, `pull` and proposal changes, so two runs never
+  interleave.
 
-Directories are 0700 and files 0600, written through a temporary file and an
-atomic replace. Symlinks are refused. All of it is ignored by Git.
+`hub/` is this module's own directory: 0700, owned by this user, with files
+0600 written through a temporary file and an atomic replace. Symlinks are
+refused. The shared `.brigade/memory/` around it keeps its own mode. A `*`
+ignore marker inside `hub/` keeps all of it, temporary and discarded copies
+included, out of Git.
 """
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import os
 import secrets
@@ -26,13 +36,17 @@ import stat
 from pathlib import Path
 from typing import Any, Iterator
 
-ROOT_REL = ".brigade/memory"
-REPLICA = "hub-replica"
-BUILDING = "hub-replica.building"
-SPOOL = "hub-spool"
-PROPOSALS = "hub-proposals"
-PUBLISHED = "hub-published.json"
+PARENT_REL = ".brigade/memory"
+ROOT_REL = ".brigade/memory/hub"
+REPLICA = "replica"
+BUILDING = "replica.building"
+SPOOL = "spool"
+PROPOSALS = "proposals"
+PUBLISHED = "published.json"
+LOCK = "lock"
+IGNORE_MARKER = "*\n"
 SPOOL_CAP = 10_000
+LOCK_DEADLINE_SECONDS = 30.0
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 
@@ -46,37 +60,53 @@ def root(target: Path) -> Path:
 
 
 def private_dir(path: Path) -> Path:
-    """Create `path` (and missing parents) 0700; refuse a symlink anywhere at the leaf."""
+    """Create `path` and its missing parents 0700; refuse a symlink or another owner.
+
+    Callers create `hub/` with `ensure_root` first, so this never creates or
+    changes the shared `.brigade/memory/` around it.
+    """
     if path.is_symlink():
         raise StoreError(f"{path} is a symlink")
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not path.parent.exists():
+        private_dir(path.parent)
+    path.mkdir(mode=0o700, exist_ok=True)
     info = os.lstat(path)
     if not stat.S_ISDIR(info.st_mode):
         raise StoreError(f"{path} is not a directory")
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise StoreError(f"{path} has another owner")
-    os.chmod(path, 0o700)
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        os.chmod(path, 0o700)
     return path
 
 
 def _ignore_dir(target: Path) -> None:
     """Keep hub state out of Git even when Brigade's .gitignore block was skipped."""
     marker = root(target) / ".gitignore"
-    lines = [f"/{REPLICA}/", f"/{BUILDING}/", f"/{SPOOL}/", f"/{PROPOSALS}/", f"/{PUBLISHED}"]
-    try:
-        existing = marker.read_text(encoding="utf-8").splitlines() if marker.exists() else []
-    except OSError:
-        return
-    missing = [line for line in lines if line not in existing]
-    if missing:
-        with open(marker, "a", encoding="utf-8") as handle:
-            handle.write("".join(f"{line}\n" for line in missing))
+    if marker.is_symlink():
+        raise StoreError(f"{marker} is a symlink")
+    if read_private(marker) != IGNORE_MARKER:
+        write_private(marker, IGNORE_MARKER)
 
 
 def ensure_root(target: Path) -> Path:
+    parent = target / PARENT_REL
+    if parent.is_symlink():
+        raise StoreError(f"{parent} is a symlink")
+    parent.mkdir(parents=True, exist_ok=True)
     base = private_dir(root(target))
     _ignore_dir(target)
     return base
+
+
+@contextlib.contextmanager
+def locked(target: Path, *, deadline_seconds: float = LOCK_DEADLINE_SECONDS) -> Iterator[None]:
+    """Hold this workspace's hub state lock: one push, pull or proposal change at a time."""
+    from .inbox_lock import held_file_lock
+
+    ensure_root(target)
+    with held_file_lock(root(target) / LOCK, deadline_seconds=deadline_seconds):
+        yield
 
 
 def write_private(path: Path, data: str) -> None:
@@ -120,11 +150,20 @@ def read_json(path: Path) -> Any:
         raise StoreError(f"{path} is not valid JSON") from exc
 
 
+def _dumps(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, ensure_ascii=False)
+
+
 def write_json(path: Path, value: Any) -> None:
-    write_private(path, json.dumps(value, sort_keys=True, ensure_ascii=False) + "\n")
+    write_private(path, _dumps(value) + "\n")
 
 
 # --- replica ------------------------------------------------------------------
+
+
+def head_size(key: str, head: dict[str, Any]) -> int:
+    """Bytes `head` adds to `heads.json`, which is what `replica_max_mb` caps."""
+    return len(_dumps({key: head}).encode("utf-8"))
 
 
 class Replica:
@@ -145,19 +184,51 @@ class Replica:
     def exists(self) -> bool:
         return bool(self.meta)
 
+    @property
+    def missing(self) -> dict[str, dict[str, Any]]:
+        """Cards left out for the cap: `{key: {scope, card_id, revision, size}}`, fetched once space frees."""
+        value = self.meta.get("missing")
+        if not isinstance(value, dict):
+            value = self.meta["missing"] = {}
+        return value
+
     def watermark(self, hub: str) -> int | None:
         if self.meta.get("hub") != hub or not isinstance(self.meta.get("seq"), int):
             return None
         return int(self.meta["seq"])
 
+    def belongs_to(self, hub: str, principal: object) -> bool:
+        """Pulled from `hub` as `principal`, the identity the hub reported for this credential."""
+        return (
+            self.watermark(hub) is not None
+            and isinstance(principal, str)
+            and bool(principal)
+            and self.meta.get("principal") == principal
+        )
+
+    def readable_heads(self, read_scopes: tuple[str, ...] | list[str]) -> dict[str, dict[str, Any]]:
+        """Heads in scopes both configured now and readable when the replica was pulled."""
+        allowed = set(read_scopes) & set(self.meta.get("read_scopes") or [])
+        return {key: head for key, head in self.heads.items() if head.get("scope") in allowed}
+
+    def retain_scopes(self, scopes: set[str]) -> int:
+        """Drop heads and cap entries outside `scopes`. Returns how many heads went."""
+        doomed = [key for key, head in self.heads.items() if head.get("scope") not in scopes]
+        for key in doomed:
+            del self.heads[key]
+        for key in [k for k, item in self.missing.items() if item.get("scope") not in scopes]:
+            del self.missing[key]
+        return len(doomed)
+
     def bytes(self) -> int:
-        return sum(len(str(head.get("text", "")).encode("utf-8")) for head in self.heads.values())
+        return sum(head_size(key, head) for key, head in self.heads.items())
 
     def save(self) -> None:
         private_dir(self.directory)
         write_json(self.directory / "heads.json", self.heads)
         self.meta["cards"] = len(self.heads)
         self.meta["bytes"] = self.bytes()
+        self.meta["full"] = bool(self.missing)
         write_json(self.directory / "meta.json", self.meta)
 
 
@@ -174,24 +245,35 @@ def has_watermark(target: Path, hub: str) -> bool:
     return False
 
 
-def discard_replica(target: Path) -> None:
-    """Remove the live replica so no read uses heads from an old epoch."""
-    live = root(target) / REPLICA
-    if live.exists():
-        doomed = root(target) / f".{REPLICA}.discard.{secrets.token_hex(4)}"
-        os.replace(live, doomed)
+def _discard(target: Path, name: str) -> None:
+    directory = root(target) / name
+    if directory.exists():
+        doomed = root(target) / f".{name}.discard.{secrets.token_hex(4)}"
+        os.replace(directory, doomed)
         shutil.rmtree(doomed, ignore_errors=True)
 
 
-def start_building(target: Path, *, hub: str, log_epoch: str) -> Replica:
+def discard_replica(target: Path) -> None:
+    """Remove the live replica so no read uses heads from an old epoch or another principal."""
+    _discard(target, REPLICA)
+
+
+def discard_building(target: Path) -> None:
+    _discard(target, BUILDING)
+
+
+def start_building(target: Path, *, hub: str, log_epoch: str, principal: str) -> Replica:
     ensure_root(target)
-    building = root(target) / BUILDING
-    current = Replica(building)
-    if current.meta.get("hub") == hub and current.meta.get("log_epoch") == log_epoch:
-        return current  # resume an interrupted rebuild under the same epoch
-    shutil.rmtree(building, ignore_errors=True)
-    fresh = Replica(building)
-    fresh.meta = {"hub": hub, "log_epoch": log_epoch, "seq": 0}
+    current = building(target)
+    if (
+        current.meta.get("hub") == hub
+        and current.meta.get("log_epoch") == log_epoch
+        and current.meta.get("principal") == principal
+    ):
+        return current  # resume an interrupted rebuild under the same epoch and principal
+    discard_building(target)
+    fresh = building(target)
+    fresh.meta = {"hub": hub, "log_epoch": log_epoch, "principal": principal, "seq": 0, "read_scopes": []}
     fresh.save()
     return fresh
 
@@ -209,38 +291,50 @@ def building(target: Path) -> Replica:
 # --- spool ----------------------------------------------------------------------
 
 
-def _spool_dir(target: Path) -> Path:
-    return root(target) / SPOOL
+def _hub_dir_name(hub: str) -> str:
+    # A file name for the hub identity, which is a URL (no credential in it).
+    return hashlib.sha256(hub.encode("utf-8")).hexdigest()[:16]
 
 
-def spool_entries(target: Path) -> list[dict[str, Any]]:
-    directory = _spool_dir(target)
-    if not directory.is_dir():
-        return []
+def _spool_dir(target: Path, hub: str) -> Path:
+    return root(target) / SPOOL / _hub_dir_name(hub)
+
+
+def _spool_dirs(target: Path, hub: str | None) -> list[Path]:
+    if hub is not None:
+        directory = _spool_dir(target, hub)
+        return [directory] if directory.is_dir() else []
+    base = root(target) / SPOOL
+    return sorted(path for path in base.iterdir() if path.is_dir()) if base.is_dir() else []
+
+
+def spool_entries(target: Path, hub: str) -> list[dict[str, Any]]:
+    """`hub`'s spooled writes, oldest first."""
     entries = []
-    for path in sorted(directory.glob("*.json")):
-        value = read_json(path)
-        if isinstance(value, dict):
-            entries.append(value)
+    for directory in _spool_dirs(target, hub):
+        for path in sorted(directory.glob("*.json")):
+            value = read_json(path)
+            if isinstance(value, dict) and value.get("hub") == hub:
+                entries.append(value)
     return entries
 
 
-def spool_count(target: Path) -> int:
-    directory = _spool_dir(target)
-    return len(list(directory.glob("*.json"))) if directory.is_dir() else 0
+def spool_count(target: Path, hub: str | None = None) -> int:
+    """Spooled writes for `hub`, or for every hub when None."""
+    return sum(len(list(directory.glob("*.json"))) for directory in _spool_dirs(target, hub))
 
 
 def spool_append(target: Path, entry: dict[str, Any]) -> bool:
-    """Spool one write. False when the spool is at its cap and the write stays local."""
+    """Spool one write. False when its hub's spool is at the cap and the write stays local. Hold `locked`."""
     ensure_root(target)
-    if spool_count(target) >= SPOOL_CAP:
+    if spool_count(target, entry["hub"]) >= SPOOL_CAP:
         return False
-    write_json(_spool_dir(target) / f"{entry['client_event_id']}.json", entry)
+    write_json(_spool_dir(target, entry["hub"]) / f"{entry['client_event_id']}.json", entry)
     return True
 
 
-def spool_remove(target: Path, client_event_id: str) -> None:
-    (_spool_dir(target) / f"{client_event_id}.json").unlink(missing_ok=True)
+def spool_remove(target: Path, hub: str, client_event_id: str) -> None:
+    (_spool_dir(target, hub) / f"{client_event_id}.json").unlink(missing_ok=True)
 
 
 # --- proposals --------------------------------------------------------------------
@@ -261,23 +355,46 @@ def propose(target: Path, entry: dict[str, Any], *, reason: str, hub_reply: dict
     return proposal_id
 
 
-def proposals(target: Path) -> Iterator[dict[str, Any]]:
+def proposals(target: Path, hub: str | None = None) -> Iterator[dict[str, Any]]:
+    """Open proposals, for `hub` only when given."""
     directory = root(target) / PROPOSALS
     if not directory.is_dir():
         return
     for path in sorted(directory.glob("*.json")):
         value = read_json(path)
-        if isinstance(value, dict):
+        if isinstance(value, dict) and (hub is None or (value.get("entry") or {}).get("hub") == hub):
             yield value
 
 
-def pending_cards(target: Path) -> set[tuple[str, str]]:
-    """Cards with a spooled write or an open conflict: push leaves them alone."""
-    keys = {(str(e.get("scope")), str(e.get("card_id"))) for e in spool_entries(target)}
-    for record in proposals(target):
+def _proposal_path(target: Path, proposal_id: str) -> Path | None:
+    if not (proposal_id.startswith("hub-") and proposal_id[4:].isalnum()):
+        return None
+    return root(target) / PROPOSALS / f"{proposal_id}.json"
+
+
+def drop_proposal(target: Path, proposal_id: str) -> dict[str, Any] | None:
+    """Remove one proposal and return it; None when there is no such proposal. Hold `locked`."""
+    path = _proposal_path(target, proposal_id)
+    record = read_json(path) if path is not None else None
+    if path is None or not isinstance(record, dict):
+        return None
+    path.unlink(missing_ok=True)
+    return record
+
+
+def proposal_cards(target: Path, hub: str) -> dict[tuple[str, str], list[str]]:
+    """`(scope, card_id)` to the ids of `hub`'s open proposals on it."""
+    cards: dict[tuple[str, str], list[str]] = {}
+    for record in proposals(target, hub):
         entry = record.get("entry") or {}
-        keys.add((str(entry.get("scope")), str(entry.get("card_id"))))
-    return keys
+        cards.setdefault((str(entry.get("scope")), str(entry.get("card_id"))), []).append(str(record["proposal_id"]))
+    return cards
+
+
+def pending_cards(target: Path, hub: str) -> set[tuple[str, str]]:
+    """Cards with a spooled write or an open conflict on `hub`: push leaves them alone."""
+    keys = {(str(e.get("scope")), str(e.get("card_id"))) for e in spool_entries(target, hub)}
+    return keys | set(proposal_cards(target, hub))
 
 
 # --- published state ----------------------------------------------------------------

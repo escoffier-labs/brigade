@@ -3,13 +3,16 @@
 A workspace opts in through a `[hub]` table in `.brigade/memory-care.toml`:
 
     [hub]
-    mode = "read"          # off (default), read or sync
-    scope = "repo:me/app"  # where `sync` publishes; fleet, repo:<id> or principal:<id>
-    replica_max_mb = 50
+    mode = "read"                       # off (default), read or sync
+    scope = "repo:me/app"               # where `sync` publishes; fleet, repo:<id> or principal:<id>
+    read_scopes = ["repo:me/app"]       # what search, card reads and the replica may use; default [scope]
+    replica_max_mb = 50                 # cap on the replica's heads.json
 
-The hub URL and credential come from the fleet settings (`[fleet] hub_url`,
-the node token, then the admin token), as `brigade fleet` reads them. Tokens
-are sent as a bearer header and never logged, printed or stored.
+The hub URL comes from the fleet settings (`[fleet] hub_url`) and the
+credential is this machine's node token, as `brigade fleet` reads it. The
+shared admin token is never used for memory: without a node token the hub
+client is unavailable. Tokens are sent as a bearer header and never logged,
+printed or stored.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import json
 import re
 import secrets
 import time
+import threading
 import tomllib
 import urllib.error
 import urllib.parse
@@ -32,6 +36,9 @@ CONFIG_REL = ".brigade/memory-care.toml"
 SEARCH_BUDGET_SECONDS = 0.8
 CALL_TIMEOUT_SECONDS = 10.0
 DEFAULT_REPLICA_MAX_MB = 50
+READ_SCOPES_MAX = 64
+# Answers that say "not now" rather than "no": they spool and use the replica.
+_UNAVAILABLE_STATUSES = {408, 429}
 CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _CARD_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 _EVENT_ID = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}")
@@ -42,7 +49,7 @@ class HubConfigError(ValueError):
 
 
 class HubUnavailable(Exception):
-    """The hub did not serve memory: transport failure, timeout, 503 or 404."""
+    """The hub did not serve memory: transport failure, timeout, 3xx, 404, 408, 429 or 503."""
 
     def __init__(self, reason: str, *, status: int | None = None) -> None:
         super().__init__(reason)
@@ -60,11 +67,17 @@ class HubRefusal(Exception):
         self.error = str(body.get("error") or "")
         super().__init__(f"{status} {self.code or 'refused'}: {self.error}")
 
+    @property
+    def denies_access(self) -> bool:
+        """401 or 403: the hub refused this credential, so nothing it served before may stand in."""
+        return self.status in (401, 403)
+
 
 @dataclass(frozen=True)
 class HubSettings:
     mode: str = "off"
     scope: str | None = None
+    read_scopes: tuple[str, ...] = ()
     replica_max_bytes: int = DEFAULT_REPLICA_MAX_MB * 1024 * 1024
     hub_url: str = ""
     token: str = ""
@@ -90,11 +103,20 @@ def valid_card_id(card_id: object) -> bool:
     return isinstance(card_id, str) and _CARD_ID.fullmatch(card_id) is not None
 
 
-def read_hub_table(target: Path) -> dict[str, Any]:
-    path = target / CONFIG_REL
+def read_config_text(target: Path) -> str | None:
+    """The memory-care config text; None when absent. Raises OSError or UnicodeDecodeError as is."""
     try:
-        raw = path.read_text(encoding="utf-8")
+        return (target / CONFIG_REL).read_text(encoding="utf-8")
     except FileNotFoundError:
+        return None
+
+
+def read_hub_table(target: Path) -> dict[str, Any]:
+    try:
+        raw = read_config_text(target)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise HubConfigError(f"invalid memory-care config: {exc}") from exc
+    if raw is None:
         return {}
     try:
         data = tomllib.loads(raw)
@@ -114,9 +136,21 @@ def hub_mode(target: Path) -> str:
     return str(mode)
 
 
+def _read_scopes(table: dict[str, Any], scope: str | None) -> tuple[str, ...]:
+    raw = table.get("read_scopes")
+    if raw is None:
+        return (scope,) if scope else ()
+    if not isinstance(raw, list) or not 1 <= len(raw) <= READ_SCOPES_MAX or not all(valid_scope(item) for item in raw):
+        raise HubConfigError(
+            f"[hub] read_scopes must be a list of 1 to {READ_SCOPES_MAX} scopes: fleet, repo:<identity> or principal:<id>"
+        )
+    return tuple(dict.fromkeys(raw))
+
+
 def load_settings(target: Path, *, fleet: dict[str, str] | None = None) -> HubSettings:
+    """Settings for `target`. `fleet` stands in for the fleet settings: `hub_url` and `node_token`."""
     table = read_hub_table(target)
-    unknown = sorted(set(table) - {"mode", "scope", "replica_max_mb"})
+    unknown = sorted(set(table) - {"mode", "scope", "read_scopes", "replica_max_mb"})
     if unknown:
         raise HubConfigError(f"[hub] has unknown keys: {', '.join(unknown)}")
     mode = hub_mode(target)
@@ -125,21 +159,27 @@ def load_settings(target: Path, *, fleet: dict[str, str] | None = None) -> HubSe
         raise HubConfigError("[hub] scope must be fleet, repo:<identity> or principal:<id>")
     if mode == "sync" and scope is None:
         raise HubConfigError('[hub] mode = "sync" needs a scope to publish into')
+    read_scopes = _read_scopes(table, scope)
+    if mode != "off" and not read_scopes:
+        raise HubConfigError(f'[hub] mode = "{mode}" needs a scope or read_scopes to read from')
     max_mb = table.get("replica_max_mb", DEFAULT_REPLICA_MAX_MB)
     if not isinstance(max_mb, int) or isinstance(max_mb, bool) or max_mb < 1:
         raise HubConfigError("[hub] replica_max_mb must be a positive integer")
     if mode == "off":
-        return HubSettings(mode=mode, scope=scope, replica_max_bytes=max_mb * 1024 * 1024)
+        return HubSettings(mode=mode, scope=scope, read_scopes=read_scopes, replica_max_bytes=max_mb * 1024 * 1024)
     if fleet is None:
         from . import fleet_client
 
-        fleet = dict(fleet_client.load_fleet_config())
+        # The node token only: memory never falls back to the shared admin token,
+        # which can read every scope.
+        fleet = dict(fleet_client.load_fleet_settings())
     return HubSettings(
         mode=mode,
         scope=scope,
+        read_scopes=read_scopes,
         replica_max_bytes=max_mb * 1024 * 1024,
         hub_url=str(fleet.get("hub_url") or "").rstrip("/"),
-        token=str(fleet.get("token") or ""),
+        token=str(fleet.get("node_token") or ""),
     )
 
 
@@ -150,10 +190,24 @@ def hub_identity(hub_url: str) -> str:
     return f"{parts.scheme.lower()}://{(parts.hostname or '').lower()}:{port}{parts.path.rstrip('/')}"
 
 
+_LAST_EVENT = [0]
+_LAST_EVENT_LOCK = threading.Lock()
+
+
 def event_id(ms: int | None = None) -> str:
-    """A time-ordered id: 48 bits of Unix milliseconds, 80 random bits, Crockford base32."""
-    stamp = int(time.time() * 1000) if ms is None else ms
-    value = (stamp << 80) | secrets.randbits(80)
+    """A time-ordered id: 48 bits of Unix milliseconds, 80 random bits, Crockford base32.
+
+    Ids minted by this process without an explicit `ms` strictly increase, even
+    within one millisecond: the next one adds one to the previous random part.
+    """
+    if ms is not None:
+        value = (ms << 80) | secrets.randbits(80)
+    else:
+        with _LAST_EVENT_LOCK:
+            value = (int(time.time() * 1000) << 80) | secrets.randbits(80)
+            if value <= _LAST_EVENT[0]:
+                value = _LAST_EVENT[0] + 1
+            _LAST_EVENT[0] = value
     return "".join(CROCKFORD[(value >> (5 * i)) & 31] for i in reversed(range(26)))
 
 
@@ -218,7 +272,7 @@ class MemoryHubClient:
         if not hub_url:
             raise HubUnavailable("no-hub-configured")
         if not token:
-            raise HubUnavailable("no-credential")
+            raise HubUnavailable("no-node-credential")
         if transport is None:
             from . import fleet_client
 
@@ -247,6 +301,10 @@ class MemoryHubClient:
         payload = payload if isinstance(payload, dict) else {}
         if 200 <= status < 300:
             return payload
+        if 300 <= status < 400 or status in _UNAVAILABLE_STATUSES:
+            # A redirect is never followed with the credential, and 408 or 429
+            # come from the hub or a proxy in front of it: try again later.
+            raise HubUnavailable(f"http-{status}", status=status)
         if status == 404 and not payload.get("code"):
             raise HubUnavailable("no-hub-memory", status=404)
         if status == 503 and not payload.get("code"):

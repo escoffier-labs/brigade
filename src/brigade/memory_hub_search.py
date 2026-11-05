@@ -1,11 +1,16 @@
 """Search fusion and fallback for hub memory (S14).
 
-In `read` and `sync` modes, `memory search` asks the hub (800 ms budget) and
-fuses its list with the local BM25 list by reciprocal rank fusion, keyed by
-`(card_id, content_hash)`. When the hub is unreachable, times out, or answers
-404 or 503, the answer comes from local cards and the replica and says it
-degraded. While a replica rebuild is in progress there is no replica, so the
-fallback is local cards only. `off` mode never reaches this module.
+In `read` and `sync` modes, `memory search` asks the hub (800 ms budget) for
+matches in the configured read scopes only, and fuses its list with the local
+BM25 list by reciprocal rank fusion. One entry stands for one
+`(scope, card_id, content_hash)`; a local card, which has no scope, joins the
+hub entry with its bytes. When the hub is unreachable, times out, or answers
+3xx, 404, 408, 429 or 503, the answer comes from local cards and the replica
+and says it degraded. A refusal (401, 403 or any other coded answer) never
+falls back to the replica: the hub has just said no, so the answer is local
+cards only and the warning says why. While a replica rebuild is in progress
+there is no replica, so the fallback is local cards only. `off` mode never
+reaches this module.
 
 The query goes to the hub over the authenticated transport and nowhere else:
 nothing here writes it to disk. The caller's search log keeps the #2196 rules.
@@ -24,25 +29,43 @@ from . import memory_hub_store as store
 
 RRF_K = 60
 WIDE = 200
-HUB_LIMIT = 20
+HUB_LIMIT_MAX = 20  # the hub's `search` limit
 _SOURCE_ORDER = {"hub": 0, "local": 1, "replica": 2}
 
 
 def enabled(target: Path) -> bool:
-    """Whether `memory search` should route here. Config errors route here too, to be reported."""
+    """Whether `memory search` should route here.
+
+    A config that cannot be read or parsed stays on the local path, which
+    reports it exactly as before. A readable config with a bad `[hub]` table
+    routes here, to be reported.
+    """
+    import tomllib
+
+    target = target.expanduser().resolve()
     try:
-        return hubc.hub_mode(target.expanduser().resolve()) != "off"
+        raw = hubc.read_config_text(target)
+        if raw is None:
+            return False
+        tomllib.loads(raw)
+    except (OSError, ValueError):
+        return False
+    try:
+        return hubc.hub_mode(target) != "off"
     except hubc.HubConfigError:
         return True
 
 
-def _replica_matches(target: Path, query: str, hub: str) -> list[dict[str, Any]]:
+def _replica_matches(
+    target: Path, query: str, hub: str, settings: hubc.HubSettings
+) -> tuple[list[dict[str, Any]], bool]:
+    """Matches from replica heads in the read scopes, and whether the replica is incomplete."""
     from . import memory_cmd
 
     replica = store.replica(target)
-    if replica.watermark(hub) is None:
-        return []
-    heads = list(replica.heads.values())
+    if replica.watermark(hub) is None or not replica.meta.get("principal"):
+        return [], False
+    heads = list(replica.readable_heads(settings.read_scopes).values())
     fields = []
     for head in heads:
         text = str(head.get("text", ""))
@@ -72,7 +95,7 @@ def _replica_matches(target: Path, query: str, hub: str) -> list[dict[str, Any]]
         )
         matches.append(match)
     matches.sort(key=lambda item: (-item["score"], item["path"]))
-    return matches[:WIDE]
+    return matches[:WIDE], bool(replica.missing)
 
 
 def _local_matches(target: Path, query: str) -> tuple[list[dict[str, Any]], int]:
@@ -88,21 +111,43 @@ def _local_matches(target: Path, query: str) -> tuple[list[dict[str, Any]], int]
     return matches, int(payload["match_count"])
 
 
-def fuse(lists: dict[str, list[dict[str, Any]]], limit: int) -> list[dict[str, Any]]:
-    """RRF over the named lists, one entry per `(card_id, content_hash)`."""
-    fused: dict[tuple[str, str], dict[str, Any]] = {}
+def fuse(lists: dict[str, list[dict[str, Any]]], limit: int, *, home_scope: str | None = None) -> list[dict[str, Any]]:
+    """RRF over the named lists, one entry per `(scope, card_id, content_hash)`.
+
+    Hub and replica matches carry a scope; the same bytes in two scopes stay
+    two entries. A local match has none and joins an entry with its card id
+    and bytes, preferring `home_scope` (where this workspace publishes).
+    """
+    entries: list[dict[str, Any]] = []
+    by_content: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
+    def find(match: dict[str, Any], content: tuple[str, str]) -> dict[str, Any] | None:
+        candidates = by_content.get(content, [])
+        scope = match.get("scope")
+        if scope:
+            exact = [e for e in candidates if e.get("scope") == scope]
+            pool = exact or [e for e in candidates if not e.get("scope")]
+        else:
+            pool = [e for e in candidates if e.get("scope") == home_scope] or candidates
+        return pool[0] if pool else None
+
     for source in sorted(lists, key=_SOURCE_ORDER.__getitem__):
         for rank, match in enumerate(lists[source], start=1):
-            key = (str(match.get("card_id")), str(match.get("content_hash") or f"{source}:{match.get('path')}"))
-            entry = fused.get(key)
+            content = (str(match.get("card_id")), str(match.get("content_hash") or f"{source}:{match.get('path')}"))
+            entry = find(match, content)
             if entry is None:
-                entry = fused[key] = {**match, "source": source, "ranks": {}, "rrf": 0.0, "best": (rank, source)}
+                entry = {**match, "source": source, "ranks": {}, "rrf": 0.0, "best": (rank, source)}
+                entries.append(entry)
+                by_content.setdefault(content, []).append(entry)
             entry["ranks"][source] = rank
             entry["rrf"] += 1.0 / (RRF_K + rank)
+            scope = entry.get("scope") or match.get("scope")
             if (rank, _SOURCE_ORDER[source]) < (entry["best"][0], _SOURCE_ORDER[entry["best"][1]]):
                 entry["best"] = (rank, source)
                 entry.update({k: v for k, v in match.items() if k != "ranks"}, source=source)
-    ordered = sorted(fused.values(), key=lambda m: (-m["rrf"], _SOURCE_ORDER[m["source"]], str(m.get("path"))))
+            if scope:
+                entry["scope"] = scope
+    ordered = sorted(entries, key=lambda m: (-m["rrf"], _SOURCE_ORDER[m["source"]], str(m.get("path"))))
     out = []
     for entry in ordered[:limit]:
         entry.pop("best", None)
@@ -126,6 +171,9 @@ def search_payload(
     lists: dict[str, list[dict[str, Any]]] = {"local": local}
     retrieval: dict[str, Any] = {"hub": "ok", "degraded": False}
     hub = ""
+    hub_limit = min(limit, HUB_LIMIT_MAX)
+    hub_match_count: int | None = None
+    notes: list[str] = []
     try:
         client = hubc.client_for(settings, transport=transport)
         hub = client.identity
@@ -133,44 +181,64 @@ def search_payload(
             "search",
             timeout=hubc.SEARCH_BUDGET_SECONDS,
             query=query,
-            limit=HUB_LIMIT,
+            limit=hub_limit,
             query_source=query_source,
+            scopes=list(settings.read_scopes),
         )
         lists["hub"] = [
             {**m, "path": m.get("path") or f"cards/{m.get('card_id')}.md"}
             for m in body.get("matches") or []
-            if isinstance(m, dict)
+            if isinstance(m, dict) and m.get("scope") in settings.read_scopes
         ]
         hub_retrieval = hubc.obj(body.get("retrieval"))
         retrieval["effective"] = hub_retrieval.get("mode")
         retrieval["stale"] = hub_retrieval.get("stale")
-    except (hubc.HubUnavailable, hubc.HubRefusal, hubc.HubConfigError) as exc:
-        reason = (
-            exc.reason
-            if isinstance(exc, hubc.HubUnavailable)
-            else (exc.code or f"http-{exc.status}")
-            if isinstance(exc, hubc.HubRefusal)
-            else "hub-config-invalid"
-        )
-        retrieval.update(hub="unavailable", degraded=True, reason=reason)
+        if isinstance(body.get("match_count"), int):
+            hub_match_count = int(body["match_count"])
+        if limit > HUB_LIMIT_MAX:
+            retrieval["hub_limit"] = HUB_LIMIT_MAX
+            notes.append(
+                f"the hub returns at most {HUB_LIMIT_MAX} matches per search; --limit {limit} was capped there"
+            )
+    except hubc.HubUnavailable as exc:
+        # Not now, rather than no: the replica may stand in.
+        retrieval.update(hub="unavailable", degraded=True, reason=exc.reason)
         if hub:
-            replica = _replica_matches(target, query, hub)
+            replica, incomplete = _replica_matches(target, query, hub, settings)
             if replica:
                 lists["replica"] = replica
+            if incomplete:
+                retrieval["replica_incomplete"] = True
         retrieval["fallback"] = sorted(lists)
-    matches = fuse(lists, limit)
+    except hubc.HubRefusal as exc:
+        # The hub refused this credential or request: answer from local cards only.
+        retrieval.update(hub="refused", degraded=True, reason=exc.code or f"http-{exc.status}", status=exc.status)
+        retrieval["fallback"] = sorted(lists)
+    except hubc.HubConfigError:
+        retrieval.update(hub="unavailable", degraded=True, reason="hub-config-invalid")
+        retrieval["fallback"] = sorted(lists)
+    matches = fuse(lists, limit, home_scope=settings.scope)
     payload: dict[str, Any] = {
         "target": str(target),
         "query": query,
         "mode": settings.mode,
-        "match_count": len(fuse(lists, 10**9)),
+        "match_count": len(fuse(lists, 10**9, home_scope=settings.scope)),
         "matches": matches,
         "retrieval": retrieval,
     }
+    if hub_match_count is not None:
+        payload["hub_match_count"] = hub_match_count
     if retrieval["degraded"]:
-        payload["warning"] = (
-            f"hub search unavailable ({retrieval['reason']}); answered from {' and '.join(retrieval['fallback'])}"
+        verb = "refused" if retrieval["hub"] == "refused" else "unavailable"
+        status = f"{retrieval['status']} " if retrieval["hub"] == "refused" else ""
+        warning = (
+            f"hub search {verb} ({status}{retrieval['reason']}); answered from {' and '.join(retrieval['fallback'])}"
         )
+        if retrieval.get("replica_incomplete"):
+            warning += "; the replica is incomplete (it reached its size cap)"
+        notes.insert(0, warning)
+    if notes:
+        payload["warning"] = "; ".join(notes)
     return payload
 
 
@@ -183,11 +251,15 @@ def search(*, target: Path, query: str, limit: int = 20, json_output: bool = Fal
     except (hubc.HubConfigError, ValueError) as exc:
         print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
         return 2
+    except OSError as exc:
+        print(f"error: hub memory state under .brigade/memory/hub is unusable: {exc}", file=sys.stderr)
+        return 2
     memory_cmd._record_search_log(target.expanduser().resolve(), query=query, matches=payload["matches"])
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
-    print(f"memory search: {payload['query']} ({payload['match_count']} match(es))")
+    hub_count = f", hub reports {payload['hub_match_count']}" if "hub_match_count" in payload else ""
+    print(f"memory search: {payload['query']} ({payload['match_count']} match(es){hub_count})")
     if "warning" in payload:
         print(f"warning: {payload['warning']}")
     for match in payload["matches"]:

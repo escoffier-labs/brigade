@@ -34,28 +34,35 @@ A workspace can read hub memory on a Rust hub that serves `POST /memory`. The mo
 
 ```toml
 [hub]
-mode = "read"          # off (the default), read or sync
-scope = "repo:me/app"  # sync publishes here: fleet, repo:<identity> or principal:<id>
-replica_max_mb = 50
+mode = "read"                  # off (the default), read or sync
+scope = "repo:me/app"          # sync publishes here: fleet, repo:<identity> or principal:<id>
+read_scopes = ["repo:me/app"]  # the only scopes search, card reads and the replica use (default [scope])
+replica_max_mb = 50            # cap on the replica's heads.json
 ```
 
-The hub URL and credential come from the fleet settings that `brigade fleet` reads: `[fleet] hub_url`, then the node token, then the admin token. The token is sent as a bearer header and is never printed or stored.
+`read` and `sync` need `scope` or `read_scopes`. Every hub search and card read names the read scopes, so a credential that can read more, such as one with a `principal:` grant, still answers only from them. Dot and Duet read through the same commands and get the same limit.
+
+The hub URL comes from `[fleet] hub_url` and the credential is this machine's node token (`BRIGADE_FLEET_NODE_TOKEN` or `[fleet] node_token_file`). Hub memory never uses the shared admin token: with only an admin token configured, the hub client reports `no-node-credential` and sends nothing. The token is sent as a bearer header and is never printed or stored.
 
 ```bash
 brigade memory hub status --target . --json
 brigade memory hub pull --target . && brigade memory hub push --target . --yes
+brigade memory hub proposals list --target .
 ```
 
-`memory hub import --scope <scope> <card.md>...` sends one `import` call per card and needs the hub's import grant. `memory hub card <card_id>` prints one hub card's text. Every hub refusal is reported with its `code`, for example `memory_grant_missing`.
+`memory hub import --scope <scope> <card.md>...` sends one `import` call per card and needs the hub's import grant. `memory hub card <card_id>` prints one hub card's text from the read scopes. When the id is in more than one of them it answers `memory_card_ambiguous`, and `--scope` picks one. Dot and Duet `memory_card` take the same optional `scope`, as a search match reports it. Every hub refusal is reported with its `code`, for example `memory_grant_missing`.
 
-- `off`: `memory search` behaves exactly as before and never contacts the hub.
-- `read`: `memory search` asks the hub within 800 ms and fuses its matches with local ones by reciprocal rank fusion. A match found in both places appears once. Each match says where it came from (`source`: `hub`, `local` or `replica`). If the hub is unreachable, times out, or answers 404 or 503, the answer comes from local cards and the replica and carries a warning with the reason.
-- `sync`: as `read`, and `memory hub push` publishes changed local cards into the configured scope. The first push into a scope prints how many cards it would publish and needs `--yes`. Cards marked `visibility: private` are never published or imported.
-- `pull` follows the hub log into `.brigade/memory/hub-replica/`. When the hub's `log_epoch` changes (a restore), the old replica is deleted first and rebuilt from empty, so search never answers from it.
-- Writes the hub cannot take right now wait in `.brigade/memory/hub-spool/` and are resent with the same `client_event_id`, so a replay never appends twice. A 404 from a hub this workspace has pulled from spools too. The spool holds at most 10,000 entries.
-- A spooled write that conflicts with a newer hub revision, was read under an older `log_epoch`, is older than 28 days, or that the hub refuses, becomes a local proposal in `.brigade/memory/hub-proposals/`. `memory hub status` lists them. They are never resent on their own.
+- `off`: `memory search` behaves exactly as before and never contacts the hub. A config that cannot be read or is not UTF-8 gives the same error and exit status as before.
+- `read`: `memory search` asks the hub within 800 ms and fuses its matches with local ones by reciprocal rank fusion. The same bytes under one card id in one scope appear once, and a local card joins the hub entry with its bytes. Each match says where it came from (`source`: `hub`, `local` or `replica`). The hub returns at most 20 matches, so a larger `--limit` is capped there with a warning, and `hub_match_count` reports how many the hub found.
+- If the hub is unreachable, times out, or answers a redirect, 404, 408, 429 or 503, the answer comes from local cards and the replica and carries a warning with the reason. If the hub refuses (401, 403 or another coded answer), the answer comes from local cards only and the warning names the refusal. The replica never stands in for a hub that said no.
+- `sync`: as `read`, and `memory hub push` publishes changed local cards into `scope`. The first push into a scope prints how many cards it would publish and needs `--yes`. Cards marked `visibility: private` are never published or imported. A credential that can write but not read still pushes, and the hub checks each write's base epoch itself.
+- `pull` follows the hub log into the replica. The replica belongs to the principal the hub's `status` names for this credential, and covers only read scopes that principal could read at that pull. A changed `log_epoch` (a restore) or a different principal discards it and rebuilds from empty, so search never answers from it. A scope that is no longer readable, for example after a revoked grant, is dropped from the replica at the next pull. A replica is only checked against the hub when the hub answers, so after changing the credential, run `pull` before relying on fallback answers.
+- `replica_max_mb` caps the size of the replica's `heads.json`. Cards left out for the cap stay listed and are fetched by a later pull once space frees, and a fallback answer says when the replica is incomplete.
+- Writes the hub cannot take right now (unreachable, 401, a redirect, 408, 429 or 503) wait in the spool and are resent with the same `client_event_id`, so a replay never appends twice. A 404 from a hub this workspace has pulled from spools too. Each hub has its own spool of at most 10,000 entries, and entries for one hub never block cards on another.
+- A spooled write that conflicts with a newer hub revision, was read under an older `log_epoch`, is older than 28 days, or that the hub refuses, becomes a local proposal. Its card is skipped until the proposal is resolved or dropped. `memory hub proposals list` shows them. A proposal resolves on its own when the local card takes exactly the hub head's text. `memory hub proposals drop <id>` drops one after review: when the replica holds the card's hub head, that head becomes the base and the next push writes the local text on top of it, so pull first.
+- `push`, `pull` and proposal changes take a lock on the workspace's hub state, so two runs never interleave.
 
-All of this state is per host, 0700 directories and 0600 files, and ignored by Git. Dot and Duet `memory_search` and `memory_card` follow the same mode.
+All of this state is per host, in `.brigade/memory/hub/`: a 0700 directory with 0600 files and a `*` ignore marker, so Git skips all of it. The shared `.brigade/memory/` keeps its own mode.
 
 ## Evidence projection and identity audit
 

@@ -78,22 +78,32 @@ class MemoryTools:
             next="Read a card with memory_card(name=<path basename without .md>).",
         )
         if isinstance(value.get("retrieval"), dict):
+            payload["next"] = (
+                "Read a card with memory_card(name=<path basename without .md>); "
+                "for a hub or replica match, also pass scope=<its scope>."
+            )
             payload["retrieval"] = value["retrieval"]
             if isinstance(value.get("warning"), str):
                 payload["warning"] = value["warning"]
         return payload
 
-    def _hub_card(self, name: str, offset: int) -> dict[str, Any] | None:
-        """A card only hub memory holds, read through `brigade memory hub card` (S14)."""
+    def _hub_card(self, name: str, offset: int, scope: str | None = None) -> dict[str, Any] | None:
+        """A card only hub memory holds, read through `brigade memory hub card` (S14).
+
+        The CLI reads only the workspace's `[hub]` read scopes; `scope`, as a
+        search match reports it, picks one when the id is in more than one.
+        """
         from ..memory_hub_client import HubConfigError, hub_mode
 
         try:
             if hub_mode(self.workspace) == "off":
                 return None
-        except HubConfigError:
+        except (HubConfigError, ValueError, OSError):
             return None
+        scoped = ["--scope", scope] if scope else []
         value, error = self._brigade_json(
-            ["memory", "hub", "card", "--target", str(self.workspace), "--all", "--json", "--", name], timeout=30
+            ["memory", "hub", "card", "--target", str(self.workspace), "--all", "--json", *scoped, "--", name],
+            timeout=30,
         )
         card = value.get("card") if isinstance(value, dict) and value.get("ok") is True else None
         if error or not isinstance(card, dict) or not isinstance(card.get("text"), str):
@@ -119,7 +129,10 @@ class MemoryTools:
             content_trust="untrusted",
         )
 
-    def memory_card(self, name: str, offset: int = 0) -> dict[str, Any]:
+    def memory_card(self, name: str, offset: int = 0, scope: str | None = None) -> dict[str, Any]:
+        if scope is not None:
+            # A hub match's scope: read that hub card, never a local file of the same name.
+            return self._hub_card(name, offset, scope) or {"error": "card_not_found", "name": name}
         directory = descriptor = None
         try:
             directory = trusted_directory(self.cards, allow_group_write=True, code="memory_unavailable")

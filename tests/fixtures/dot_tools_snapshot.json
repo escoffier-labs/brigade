@@ -1004,7 +1004,7 @@
       "annotations": {
         "readOnlyHint": true
       },
-      "description": "Read one canonical memory card by name (memory/cards/<name>.md) in 30000-char chunks; follow next_offset. Returns sha256 for update-card handoffs.",
+      "description": "Read one canonical memory card by name (memory/cards/<name>.md) in 30000-char chunks; follow next_offset. Returns sha256 for update-card handoffs. For a hub match from memory_search, pass its scope.",
       "inputSchema": {
         "properties": {
           "name": {
@@ -1022,6 +1022,18 @@
             ],
             "default": null,
             "title": "Offset"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Scope"
           }
         },
         "required": [
