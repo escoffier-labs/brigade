@@ -18,6 +18,26 @@ HOST = str(ipaddress.IPv4Address(2130706433))
 BINARY = Path(__file__).resolve().parents[1] / "target" / "debug" / "brigade-hub"
 if not BINARY.exists():
     BINARY = BINARY.parents[1] / "release" / "brigade-hub"
+BINARY = Path(os.environ.get("BRIGADE_HUB_BINARY", BINARY))
+REAL_PYTHON = os.environ.get("BRIGADE_HUB_PYTHON", "python3")
+
+# Stands in for `python -m brigade fleet serve` and never announces a port, so
+# the front stays in its upstream wait. Every other interpreter call (the
+# limits re-exec, path resolution, the key) goes to the real Python.
+STALLED_UPSTREAM = """
+import os, signal, sys, time
+from pathlib import Path
+state, mode = Path(sys.argv[1]), sys.argv[2]
+with open("/proc/self/status", encoding="utf-8") as status:
+    blocked = next(line.split()[1] for line in status if line.startswith("SigBlk:"))
+(state / "mask").write_text(blocked, encoding="utf-8")
+def stop(*_):
+    (state / "term").write_text("1", encoding="utf-8")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop if mode == "graceful" else signal.SIG_IGN)
+(state / "pid").write_text(str(os.getpid()), encoding="utf-8")
+time.sleep(60)
+"""
 
 
 def free_port():
@@ -417,6 +437,107 @@ class Transport(unittest.TestCase):
             finally:
                 stop.set()
                 worker.join(5)
+
+    def stop_during_upstream_startup(self, mode):
+        """SIGTERM the front while its managed upstream has not announced a port."""
+        with tempfile.TemporaryDirectory() as work, tempfile.TemporaryFile() as log:
+            state = Path(work)
+            fake = state / "python"
+            fake.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "-m" ] && [ "$2" = "brigade" ]; then\n'
+                f'  exec "{REAL_PYTHON}" -c \'{STALLED_UPSTREAM}\' "{state}" {mode}\n'
+                "fi\n"
+                f'exec "{REAL_PYTHON}" "$@"\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            env = dict(os.environ, BRIGADE_FLEET_TOKEN="fake-admin-token", BRIGADE_HUB_PYTHON=str(fake))
+            command = [str(BINARY), "--host", HOST, "--port", str(free_port()), "--db", f"{work}/hub.db"]
+            child = subprocess.Popen(command, env=env, stdout=log, stderr=log)
+            try:
+                for _ in range(500):
+                    if (state / "pid").exists() or child.poll() is not None:
+                        break
+                    time.sleep(0.02)
+                self.assertIsNone(child.poll(), "front exited before its upstream started")
+                upstream = int((state / "pid").read_text(encoding="utf-8"))
+                started = time.monotonic()
+                child.send_signal(signal.SIGTERM)
+                code = child.wait(20)
+                elapsed = time.monotonic() - started
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+            log.seek(0)
+            output = log.read().decode()
+            # Reaped by the front, not orphaned: no such process remains.
+            with self.assertRaises(ProcessLookupError):
+                os.kill(upstream, 0)
+            # The front's stop-signal block never reaches the child.
+            self.assertEqual(int((state / "mask").read_text(encoding="utf-8"), 16), 0)
+            # Non-zero, and an exit, not death by the signal's default action.
+            self.assertEqual(code, 2, output)
+            self.assertIn("stop signal during startup", output)
+            return elapsed, output, (state / "term").exists()
+
+    @unittest.skipUnless(Path("/proc").exists(), "the stalled upstream reads procfs")
+    def test_sigterm_during_upstream_startup_stops_the_child_gracefully(self):
+        elapsed, output, termed = self.stop_during_upstream_startup("graceful")
+        self.assertTrue(termed, "the upstream got SIGTERM, not SIGKILL")
+        self.assertIn("managed upstream stopped cleanly after SIGTERM", output)
+        self.assertLess(elapsed, 5)
+
+    @unittest.skipUnless(Path("/proc").exists(), "the stalled upstream reads procfs")
+    def test_sigterm_during_upstream_startup_kills_a_child_that_ignores_it(self):
+        elapsed, output, _ = self.stop_during_upstream_startup("ignore")
+        self.assertIn("managed upstream still running 10 s after SIGTERM; killing it", output)
+        self.assertGreaterEqual(elapsed, 9)
+        self.assertLess(elapsed, 15)
+
+    def test_sigterm_right_after_launch_exits_without_serving(self):
+        # Lands in the limits re-exec or an early startup step, while the
+        # signals are blocked or before the accept loop exists.
+        with tempfile.TemporaryDirectory() as work, tempfile.TemporaryFile() as log:
+            env = dict(os.environ, BRIGADE_FLEET_TOKEN="fake-admin-token")
+            command = [str(BINARY), "--host", HOST, "--port", str(free_port()), "--db", f"{work}/hub.db"]
+            child = subprocess.Popen(command, env=env, stdout=log, stderr=log)
+            time.sleep(0.1)
+            child.send_signal(signal.SIGTERM)
+            try:
+                code = child.wait(20)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+            log.seek(0)
+            output = log.read().decode()
+            self.assertEqual(code, 2, output)
+            self.assertIn("stop signal during startup", output)
+
+    def test_managed_sigterm_stops_the_upstream_with_sigterm_and_exits_zero(self):
+        with tempfile.TemporaryDirectory() as work, tempfile.TemporaryFile() as log:
+            env = dict(os.environ, BRIGADE_FLEET_TOKEN="fake-admin-token")
+            port = free_port()
+            command = [str(BINARY), "--host", HOST, "--port", str(port), "--db", f"{work}/hub.db"]
+            child = subprocess.Popen(command, env=env, stdout=log, stderr=log)
+            try:
+                for _ in range(300):
+                    with contextlib.suppress(OSError):
+                        if request(port, "/health")[0] == 200:
+                            break
+                    time.sleep(0.05)
+                child.send_signal(signal.SIGTERM)
+                code = child.wait(DRAIN_SECONDS + 15)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+            log.seek(0)
+            output = log.read().decode()
+            self.assertEqual(code, 0, output)
+            self.assertIn("managed upstream stopped cleanly after SIGTERM", output)
 
     def test_low_descriptor_limit_refuses_startup(self):
         def low_limit():

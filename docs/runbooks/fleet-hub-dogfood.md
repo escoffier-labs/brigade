@@ -218,8 +218,13 @@ backfill covers every live card, then `hybrid`. BM25 answers in the meantime.
   container by itself.
 - `stop_grace_period: 40s` covers the hub's shutdown. The Docker stop timeout
   drop-in and `"shutdown-timeout": 45` keep a host shutdown from cutting it
-  short. On SIGTERM `brigade-hub` stops accepting, drains for at most 25 s
-  and stops the Python hub. When it exits 0, the recipe's entrypoint
+  short. On SIGTERM `brigade-hub` stops accepting and drains for at most
+  25 s. Then it sends the Python hub SIGTERM, so the Python hub's own
+  shutdown runs, and waits up to 10 s for it. A Python hub still running then
+  gets SIGKILL. `brigade-hub` logs which of these happened and exits 0 only
+  when the Python hub exited 0 after its SIGTERM. A stop that comes while the
+  hub is still starting ends the Python hub the same way, and `brigade-hub`
+  exits 2. When it exits 0 after a stop, the recipe's entrypoint
   (`hub/entry.py`) logs `brigade fleet hub stopped cleanly`, which the restart
   and UPS checks look for. It logs `brigade fleet hub listening on` once
   `/health` answers.

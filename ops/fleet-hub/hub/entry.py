@@ -10,8 +10,12 @@ checks read from the container log, which the Python hub wrote before the Rust
 front took the port:
 
 - the listening line, once `/health` answers on the front's own port;
-- the clean-exit line, when `brigade-hub` exits 0 after a stop signal, that is
-  after its drain of at most 25 s and the upstream's stop.
+- the clean-exit line, when `brigade-hub` exits 0 after a stop signal.
+  `brigade-hub` exits 0 only when both hubs shut down cleanly: its drain of at
+  most 25 s ended, and the Python upstream, sent SIGTERM after it, ran its own
+  shutdown and exited 0 within 10 s. An upstream it had to kill, an upstream
+  that exited non-zero, or a stop that came during startup makes it exit 2,
+  and its log says which.
 
 Any other exit passes through unchanged, so the restart policy sees a crash as
 a crash. Stdlib only.
@@ -65,19 +69,33 @@ def main(argv: list[str]) -> int:
     host = option(argv, "--host", "127.0.0.1")
     port = option(argv, "--port", "3774")
     db = option(argv, "--db", "~/.brigade/fleet-hub.db")
-    child = subprocess.Popen([HUB, *argv])
+    child: subprocess.Popen[bytes] | None = None
+    pending: int | None = None
     stopping = False
 
-    def forward(signum: int, _frame: object) -> None:
-        nonlocal stopping
-        stopping = True
+    def send(signum: int) -> None:
+        if child is None:
+            return
         try:
             child.send_signal(signum)
         except ProcessLookupError:
             pass
 
+    def forward(signum: int, _frame: object) -> None:
+        # Installed before the child exists, so a stop during the spawn is
+        # kept and forwarded below instead of killing this wrapper.
+        nonlocal stopping, pending
+        stopping = True
+        if child is None:
+            pending = signum
+        else:
+            send(signum)
+
     signal.signal(signal.SIGTERM, forward)
     signal.signal(signal.SIGINT, forward)
+    child = subprocess.Popen([HUB, *argv])
+    if pending is not None:
+        send(pending)
     url = f"http://{'[' + host + ']' if ':' in host else host}:{port}/health"
     while child.poll() is None and not stopping:
         if healthy(url):

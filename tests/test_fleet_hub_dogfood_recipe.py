@@ -992,6 +992,38 @@ def test_entry_passes_a_failure_through_without_the_clean_exit_line(tmp_path, mo
     assert checks.HUB_STOPPED not in out
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_entry_forwards_a_stop_that_lands_while_the_child_is_spawning(monkeypatch, capsys):
+    import signal
+
+    sent = []
+
+    class Child:
+        def __init__(self, argv):
+            # The stop lands mid-spawn: the handler runs before `child` is bound.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        def send_signal(self, signum):
+            sent.append(signum)
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
+    monkeypatch.setattr(entry.subprocess, "Popen", Child)
+    try:
+        code = entry.main(["--host", "127.0.0.1", "--port", "1"])
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    assert sent == [signal.SIGTERM]
+    assert code == 0
+    assert capsys.readouterr().out.strip() == checks.HUB_STOPPED
+
+
 def test_entry_reads_the_hub_flags_and_maps_signal_deaths():
     argv = ["--host", "::1", "--port=3999", "--route-mode", "memory=native", "--route-mode=claims=proxy"]
     assert entry.option(argv, "--host", "x") == "::1"

@@ -79,7 +79,8 @@ services:
       - ./config/hub.toml:/etc/brigade/hub.toml:ro
       - ./hub:/brigade:ro
     cap_drop: [ALL]
-    # Covers brigade-hub's drain of at most 25 s and the upstream's shutdown.
+    # Covers brigade-hub's drain of at most 25 s and then up to 10 s for the
+    # Python upstream's own shutdown after its SIGTERM.
     # The Docker daemon's own shutdown timeout must be at least this.
     stop_grace_period: 40s
     oom_score_adj: -900
