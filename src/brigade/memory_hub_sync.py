@@ -249,7 +249,16 @@ def _follow(
                 continue  # refused earlier in this page
             report["applied"] += 1
             used = _apply(
-                client, replica, settings, key, event, epoch=epoch, used=used, readable=readable, report=report
+                client,
+                replica,
+                settings,
+                key,
+                event,
+                epoch=epoch,
+                used=used,
+                readable=readable,
+                report=report,
+                save=save,
             )
         next_seq = page.get("next_seq")
         if not isinstance(next_seq, int) or next_seq <= after:
@@ -260,7 +269,7 @@ def _follow(
         if pages % SAVE_EVERY_PAGES == 0:
             # Bounded progress for a long rebuild; the full write happens once at the end.
             save()
-    _refill(client, replica, settings, epoch=epoch, used=used, readable=readable, report=report)
+    _refill(client, replica, settings, epoch=epoch, used=used, readable=readable, report=report, save=save)
 
 
 def _apply(
@@ -274,13 +283,16 @@ def _apply(
     used: int,
     readable: set[str],
     report: dict[str, Any],
+    save: Callable[[], None],
 ) -> int:
     """Replace the head at `key` with the card `event` names. Returns the replica's bytes in use.
 
     A `card` read the hub refuses for the scope's grant takes the scope out
     of `readable`, which `_pull` saves as the replica's read scopes, and drops
     every head and cap entry the replica holds in it, so nothing pulled from
-    that scope before the refusal is served or marked readable.
+    that scope before the refusal is served or marked readable. The narrowed
+    replica is saved at once, so fallback search stops serving the scope even
+    if a later request in this pull fails.
     """
     replica.missing.pop(key, None)
     previous = replica.heads.pop(key, None)
@@ -294,6 +306,7 @@ def _apply(
         readable.discard(exc.scope)
         replica.retain_scopes(readable)
         replica.meta["read_scopes"] = sorted(set(replica.meta.get("read_scopes") or []) & readable)
+        save()
         report["warnings"].append(
             f"the hub refused {exc.scope} during the pull; its replicated cards were dropped and it is not readable"
         )
@@ -331,6 +344,7 @@ def _refill(
     used: int,
     readable: set[str],
     report: dict[str, Any],
+    save: Callable[[], None],
 ) -> None:
     """Fetch cards left out for the cap whose recorded size now fits."""
     for key, item in sorted(replica.missing.items()):
@@ -343,7 +357,9 @@ def _refill(
         if not (isinstance(event["scope"], str) and isinstance(event["card_id"], str)):
             replica.missing.pop(key, None)
             continue
-        used = _apply(client, replica, settings, key, event, epoch=epoch, used=used, readable=readable, report=report)
+        used = _apply(
+            client, replica, settings, key, event, epoch=epoch, used=used, readable=readable, report=report, save=save
+        )
 
 
 # --- push ----------------------------------------------------------------------------
@@ -351,14 +367,14 @@ def _refill(
 
 VISIBILITY_PRIVATE = "visibility-private"
 VISIBILITY_UNRECOGNIZED = "visibility-unrecognized"
-_VISIBILITY_LINE = re.compile(r"^\s*visibility\s*:(.*)$", re.IGNORECASE)
+_VISIBILITY_LINE = re.compile(r"""^\s*(['"]?)visibility\1\s*:(.*)$""", re.IGNORECASE)
 
 
 def withheld(text: str) -> str | None:
     """Why a card's text must never reach the hub, or None when it is public. Fails closed.
 
     A leading U+FEFF is ignored. Every `visibility:` line in the frontmatter
-    counts, whatever its case, and the first word of its value decides: no
+    counts, whatever its case and whether or not the key is quoted, and the first word of its value decides: no
     such line or `public` publishes, `private` is `visibility-private`, and
     anything else, an empty value included, is `visibility-unrecognized`. A
     `visibility:` line in a leading block that does not parse as frontmatter
@@ -381,7 +397,7 @@ def withheld(text: str) -> str | None:
     else:
         end = next((index for index, line in enumerate(lines[start:]) if not line.strip()), None)
         block, parsed = lines[start : start + end if end is not None else None], False
-    values = [match.group(1) for match in map(_VISIBILITY_LINE.match, block) if match]
+    values = [match.group(2) for match in map(_VISIBILITY_LINE.match, block) if match]
     if not values:
         return None
     if not parsed:

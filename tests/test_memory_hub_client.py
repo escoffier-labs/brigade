@@ -1995,8 +1995,22 @@ WITHHELD = [
     ("---\nvisibility: private\n# P\nsecret\n", "visibility-unrecognized"),
     ("--- \nvisibility: private\n---\n# P\nsecret\n", "visibility-unrecognized"),
     ("visibility: private\n\n# P\nsecret\n", "visibility-unrecognized"),
+    ('---\n"visibility": private\n---\n# P\nsecret\n', "visibility-private"),
+    ("---\n'visibility': private\n---\n# P\nsecret\n", "visibility-private"),
 ]
-WITHHELD_IDS = ["bom", "inline-comment", "crlf", "unknown", "empty", "mixed", "unclosed", "bad-fence", "no-fence"]
+WITHHELD_IDS = [
+    "bom",
+    "inline-comment",
+    "crlf",
+    "unknown",
+    "empty",
+    "mixed",
+    "unclosed",
+    "bad-fence",
+    "no-fence",
+    "double-quoted-key",
+    "single-quoted-key",
+]
 
 
 @pytest.mark.parametrize(("text", "reason"), WITHHELD, ids=WITHHELD_IDS)
@@ -2091,6 +2105,31 @@ def test_a_scope_refused_during_a_pull_is_not_kept_or_marked_readable(hub, tmp_p
     assert _card_ids(replica) == {"f1"}
     assert replica.meta["read_scopes"] == ["fleet"]
     assert any("repo:test/app" in w for w in report["warnings"])
+
+
+def test_a_scope_refused_mid_pull_is_saved_before_a_later_failure(hub, tmp_path):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "a1", "the app card before revocation")
+    _put(hub, "fleet", "f1", "a fleet card")
+    sync.pull(target, client(hub), settings(target))
+    assert _card_ids(store.replica(target)) == {"a1", "f1"}
+    _put_on(hub, "a1", "the app card after revocation")
+    original = hub.do_card
+
+    def revoke_then_go_down(body):
+        if body.get("scope") == "repo:test/app":
+            hub.mode = "down"  # every later request in this pull fails
+            return 403, {"error": "no read grant", "code": "memory_grant_missing"}
+        return original(body)
+
+    hub.do_card = revoke_then_go_down
+    with pytest.raises(hubc.HubUnavailable):
+        sync.pull(target, client(hub), settings(target))
+    replica = store.replica(target)
+    assert _card_ids(replica) == {"f1"}
+    assert "repo:test/app" not in replica.meta["read_scopes"]
+    matches, _ = hub_search._replica_matches(target, "revocation", client(hub).identity, settings(target))
+    assert matches == []
 
 
 def test_push_adopts_a_replica_head_only_under_the_hubs_current_epoch(hub, tmp_path):
