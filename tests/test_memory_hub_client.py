@@ -180,6 +180,21 @@ class FakeHub:
         self.idempotency[cid] = (digest, reply)
         return reply
 
+    def do_retire(self, body):
+        """Compare-and-set on the head revision, as engines/hub/src/memory/ops.rs; the retired head keeps its text."""
+        if body.get("base_epoch") != self.epoch:
+            return 409, {"error": "epoch", "code": "memory_epoch_changed", "log_epoch": self.epoch}
+        head = self.cards.get((body["scope"], body["card_id"]))
+        if head is None:
+            return 404, {"error": "card not found", "code": "memory_card_not_found"}
+        if head["revision"] != body.get("base_revision"):
+            reply = {"error": "stale", "code": "memory_base_mismatch"}
+            reply.update(current_revision=head["revision"], current_hash=head["hash"])
+            return 409, reply
+        return 200, self._commit(
+            "card.retire", body["scope"], body["card_id"], head["text"], "retired", body["client_event_id"]
+        )
+
     def do_import(self, body):
         return self.import_reply
 
@@ -1920,3 +1935,192 @@ def test_keep_hub_refuses_a_private_card(hub, tmp_path, capsys):
     assert card.read_text(encoding="utf-8") == private
     assert [p["proposal_id"] for p in store.proposals(target)] == [proposal_id]
     assert not store.dropped_dir(target).exists()
+
+
+# --- review round: replay, visibility, retired bases, refused scopes, adoption ---------------
+
+LEAKED = "TOKEN=PLACEHOLDER-NOT-A-KEY"
+
+
+def test_a_spooled_write_replays_the_card_as_it_is_now(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", one="# One\nfirst\n")
+    card = target / "memory" / "cards" / "one.md"
+    sync.push(target, client(hub), settings(target), yes=True)
+    hub.mode = "down"
+    card.write_text(f"# One\n{LEAKED}\n", encoding="utf-8")
+    assert [s["card_id"] for s in sync.push(target, client(hub), settings(target))["spooled"]] == ["one"]
+    # The user removes the line while the hub is still down.
+    card.write_text("# One\nredacted\n", encoding="utf-8")
+    hub.mode = "up"
+    report = sync.push(target, client(hub), settings(target))
+    assert all(LEAKED not in put["text"] for put in hub.puts())
+    # The current text goes out in this same push, on the spooled write's base, under a new id.
+    assert [p["card_id"] for p in report["published"]] == ["one"] and report["proposals"] == []
+    assert not [s for s in report["skipped"] if s["reason"] == "pending"]
+    assert hub.puts()[-1]["base_revision"] == 1 and hub.puts()[-1]["base_epoch"] == hub.epoch
+    assert hub.cards[("repo:test/app", "one")]["text"] == "# One\nredacted\n"
+    assert store.spool_count(target) == 0
+    assert sync.push(target, client(hub), settings(target))["published"] == []
+    assert len(hub.puts()) == 2
+
+
+def test_a_spooled_write_that_already_committed_turns_the_current_text_into_a_proposal(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", one="# One\nfirst\n")
+    card = target / "memory" / "cards" / "one.md"
+    sync.push(target, client(hub), settings(target), yes=True)
+    card.write_text(f"# One\n{LEAKED}\n", encoding="utf-8")
+    # The hub commits the put, then the answer is lost: the write stays spooled.
+    hub.drop_reply_once = True
+    report = sync.push(target, client(hub), settings(target))
+    assert report["published"] == [] and store.spool_count(target) == 1
+    card.write_text("# One\nredacted\n", encoding="utf-8")
+    report = sync.push(target, client(hub), settings(target))
+    # The old put is never sent again; the current text meets the committed head and waits for review.
+    assert [put["text"] for put in hub.puts()] == ["# One\nfirst\n", f"# One\n{LEAKED}\n", "# One\nredacted\n"]
+    assert [p["reason"] for p in report["proposals"]] == ["memory_base_mismatch"]
+    (proposal,) = list(store.proposals(target))
+    assert proposal["entry"]["text"] == "# One\nredacted\n"
+    assert store.spool_count(target) == 0
+    # A write that reached the hub cannot be taken back.
+    assert hub.cards[("repo:test/app", "one")]["text"] == f"# One\n{LEAKED}\n"
+
+
+WITHHELD = [
+    ("\ufeff---\nvisibility: private\n---\n# P\nsecret\n", "visibility-private"),
+    ("---\nvisibility: private  # keep local\n---\n# P\nsecret\n", "visibility-private"),
+    ("---\r\nvisibility: private\r\n---\r\n# P\r\nsecret\r\n", "visibility-private"),
+    ("---\nvisibility: team-only\n---\n# P\nsecret\n", "visibility-unrecognized"),
+    ("---\nvisibility:\n---\n# P\nsecret\n", "visibility-unrecognized"),
+    ("---\nvisibility: public\nVisibility: private\n---\n# P\nsecret\n", "visibility-private"),
+    ("---\nvisibility: private\n# P\nsecret\n", "visibility-unrecognized"),
+    ("--- \nvisibility: private\n---\n# P\nsecret\n", "visibility-unrecognized"),
+    ("visibility: private\n\n# P\nsecret\n", "visibility-unrecognized"),
+]
+WITHHELD_IDS = ["bom", "inline-comment", "crlf", "unknown", "empty", "mixed", "unclosed", "bad-fence", "no-fence"]
+
+
+@pytest.mark.parametrize(("text", "reason"), WITHHELD, ids=WITHHELD_IDS)
+def test_push_withholds_a_card_whose_visibility_is_not_plainly_public(hub, tmp_path, text, reason):
+    target = workspace(tmp_path, mode="sync", one="# One\npublic\n")
+    (target / "memory" / "cards" / "p.md").write_bytes(text.encode("utf-8"))
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert [p["card_id"] for p in report["published"]] == ["one"]
+    assert {"path": "memory/cards/p.md", "reason": reason} in report["skipped"]
+    assert all("secret" not in put["text"] for put in hub.puts())
+
+
+def test_a_public_visibility_with_a_comment_still_publishes(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", one="\ufeff---\nvisibility: public  # shared\n---\n# One\nshared\n")
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert [p["card_id"] for p in report["published"]] == ["one"]
+
+
+@pytest.mark.parametrize(("text", "reason"), WITHHELD, ids=WITHHELD_IDS)
+def test_a_spooled_write_is_withheld_once_its_visibility_is_not_plainly_public(hub, tmp_path, text, reason):
+    target = workspace(tmp_path, mode="sync", p="# P\nsecret\n")
+    hub.mode = "down"
+    assert [s["card_id"] for s in sync.push(target, client(hub), settings(target), yes=True)["spooled"]] == ["p"]
+    (target / "memory" / "cards" / "p.md").write_bytes(text.encode("utf-8"))
+    hub.mode = "up"
+    report = sync.push(target, client(hub), settings(target))
+    assert hub.puts() == [] and report["published"] == []
+    expected = "card-now-private" if reason == "visibility-private" else "card-visibility-unrecognized"
+    assert [(p["card_id"], p["reason"]) for p in report["proposals"]] == [("p", expected)]
+    assert store.spool_count(target) == 0
+
+
+@pytest.mark.parametrize(("text", "reason"), WITHHELD, ids=WITHHELD_IDS)
+def test_import_withholds_a_card_whose_visibility_is_not_plainly_public(hub, tmp_path, text, reason):
+    target = workspace(tmp_path, mode="sync")
+    path = target / "memory" / "cards" / "p.md"
+    path.write_bytes(text.encode("utf-8"))
+    report = sync.import_cards(target, client(hub), scope="repo:test/app", paths=[path])
+    assert [(r["status"], r["reason"]) for r in report["results"]] == [("skipped", reason)]
+    assert [c for c in hub.calls if c["action"] == "import"] == []
+
+
+def _retire(hub: FakeHub, card_id: str, scope: str = "repo:test/app") -> None:
+    """Another writer retires an existing card."""
+    client(hub).call(
+        "retire",
+        scope=scope,
+        card_id=card_id,
+        base_revision=hub.cards[(scope, card_id)]["revision"],
+        base_epoch=hub.epoch,
+        reason="obsolete",
+        client_event_id=hubc.event_id(),
+    )
+
+
+def test_keep_local_after_another_writer_retired_the_card_publishes_it(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="sync", one="# One\nfirst\n")
+    sync.push(target, client(hub), settings(target), yes=True)
+    _retire(hub, "one")
+    retired = hub.cards[("repo:test/app", "one")]["revision"]
+    (target / "memory" / "cards" / "one.md").write_text("# One\nmine\n", encoding="utf-8")
+    [proposal] = sync.push(target, client(hub), settings(target))["proposals"]
+    assert proposal["reason"] == "memory_base_mismatch"
+    sync.pull(target, client(hub), settings(target))
+    assert store.Replica.key("repo:test/app", "one") not in store.replica(target).heads
+    argv = ["memory", "hub", "proposals", "drop", "--target", str(target), "--json", "--keep-local"]
+    code, out, err = run([*argv, proposal["proposal_id"]], capsys)
+    assert code == 0, err
+    assert json.loads(out)["rebased_on"] == retired
+    report = sync.push(target, client(hub), settings(target))
+    assert [p["card_id"] for p in report["published"]] == ["one"] and report["proposals"] == []
+    assert hub.puts()[-1]["base_revision"] == retired
+    head = hub.cards[("repo:test/app", "one")]
+    assert (head["state"], head["text"]) == ("live", "# One\nmine\n")
+
+
+def test_a_scope_refused_during_a_pull_is_not_kept_or_marked_readable(hub, tmp_path):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "a1", "first card in the app scope")
+    _put(hub, "repo:test/app", "a2", "second card in the app scope")
+    _put(hub, "fleet", "f1", "a fleet card")
+    original = hub.do_card
+
+    def revoked_after_the_first_app_card(body):
+        if body.get("scope") == "repo:test/app" and body["card_id"] == "a2":
+            return 403, {"error": "no read grant", "code": "memory_grant_missing"}
+        return original(body)
+
+    hub.do_card = revoked_after_the_first_app_card
+    report = sync.pull(target, client(hub), settings(target))
+    replica = store.replica(target)
+    assert _card_ids(replica) == {"f1"}
+    assert replica.meta["read_scopes"] == ["fleet"]
+    assert any("repo:test/app" in w for w in report["warnings"])
+
+
+def test_push_adopts_a_replica_head_only_under_the_hubs_current_epoch(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync")
+    _put(hub, "repo:test/app", "x", "# X\nshared\n")
+    sync.pull(target, client(hub), settings(target))
+    (target / "memory" / "cards" / "x.md").write_text("# X\nshared\n", encoding="utf-8")
+    hub.restore(hub.snapshot())  # the same data under a new log_epoch; no pull follows
+    before = len(hub.puts())
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert report["adopted"] == [] and len(hub.puts()) == before and report["proposals"] == []
+    assert {"path": "memory/cards/x.md", "reason": "replica-stale"} in report["skipped"]
+    sync.pull(target, client(hub), settings(target))
+    assert sync.push(target, client(hub), settings(target), yes=True)["adopted"] == ["x"]
+    (target / "memory" / "cards" / "x.md").write_text("# X\nedited\n", encoding="utf-8")
+    report = sync.push(target, client(hub), settings(target))
+    assert [p["card_id"] for p in report["published"]] == ["x"] and report["proposals"] == []
+
+
+def test_import_names_a_replica_base_only_under_the_hubs_current_epoch(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", x="# X\nimported\n")
+    revision = _put(hub, "repo:test/app", "x", "# X\nshared\n")["event"]["revision"]
+    sync.pull(target, client(hub), settings(target))
+    path = target / "memory" / "cards" / "x.md"
+
+    def last_import() -> dict:
+        return [c for c in hub.calls if c["action"] == "import"][-1]
+
+    sync.import_cards(target, client(hub), scope="repo:test/app", paths=[path])
+    assert (last_import()["base_revision"], last_import()["base_epoch"]) == (revision, hub.epoch)
+    hub.restore(hub.snapshot())
+    sync.import_cards(target, client(hub), scope="repo:test/app", paths=[path])
+    assert last_import()["base_revision"] is None and "base_epoch" not in last_import()
