@@ -37,6 +37,12 @@ def calls(state: Path, dest: Path, rest: list[str]) -> list[tuple[Path, list[str
     ]
 
 
+def status(argv: list[str]) -> int:
+    # A call killed by signal N reports -N; exit as a shell would, 128 + N.
+    returncode = subprocess.run(argv, check=False).returncode
+    return 128 - returncode if returncode < 0 else returncode
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         description="Back up the hub file and the memory file, one call each.", allow_abbrev=False
@@ -47,9 +53,9 @@ def main(argv: list[str]) -> int:
     if any(item == "--db" or item.startswith("--db=") for item in rest):
         parser.error("the wrapper names the files; pass no --db")
     (_, hub_call), (memory_source, memory_call) = calls(args.state_dir, args.dest, rest)
-    hub = subprocess.run(hub_call, check=False).returncode
+    hub = status(hub_call)
     if memory_source.exists():
-        memory = subprocess.run(memory_call, check=False).returncode
+        memory = status(memory_call)
     else:
         print(f"memory backup skipped: {memory_source} does not exist", file=sys.stderr, flush=True)
         memory = 0

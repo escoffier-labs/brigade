@@ -76,12 +76,15 @@ The Brigade image must install a reviewed commit that includes
 `BRIGADE_FLEET_FINDINGS_KEY_FILE`, which landed with S31, and the Rust hub's
 native memory route (#2283). The image builds both the Python package and
 `brigade-hub` from that one commit. The default `BRIGADE_REF` in
-`compose.yaml` has all of them. To build a newer reviewed commit, pass it and
-its source archive digest to setup:
+`compose.yaml` has all of them. To build a newer reviewed commit, pass it,
+its source archive digest and the version in its `pyproject.toml` (the image's
+version label) to setup:
 
 ```bash
 ref=<MERGED_COMMIT_SHA>
 curl -fsSL "https://github.com/escoffier-labs/brigade/archive/${ref}.tar.gz" | sha256sum
+curl -fsSL "https://github.com/escoffier-labs/brigade/archive/${ref}.tar.gz" \
+  | tar -xzO "brigade-${ref}/pyproject.toml" | grep -m1 '^version'
 ```
 
 ## Set up
@@ -92,6 +95,7 @@ Run setup as the compose account, from the repository checkout:
 cd ops/fleet-hub
 bin/hub-setup.py init \
   --brigade-ref <MERGED_COMMIT_SHA> --brigade-sha256 <ARCHIVE_SHA256> \
+  --brigade-version <VERSION_IN_ITS_PYPROJECT> \
   --front-hostname <FRONT_NODE_NAME> \
   --backup-dir "$HOME/brigade-hub-backups"
 ```
@@ -223,8 +227,11 @@ backfill covers every live card, then `hybrid`. BM25 answers in the meantime.
   shutdown runs, and waits up to 10 s for it. A Python hub still running then
   gets SIGKILL. `brigade-hub` logs which of these happened and exits 0 only
   when the Python hub exited 0 after its SIGTERM. A stop that comes while the
-  hub is still starting ends the Python hub the same way, and `brigade-hub`
-  exits 2. When it exits 0 after a stop, the recipe's entrypoint
+  hub is still starting also sends the Python hub SIGTERM, but the Python hub
+  may not have installed its handler yet. It then ends by that SIGTERM's
+  default action, without its own shutdown, and `brigade-hub` exits 2. The
+  Python hub runs in its own process group, so a Ctrl-C or a signal to the
+  whole group reaches only `brigade-hub`, which stops it once. When it exits 0 after a stop, the recipe's entrypoint
   (`hub/entry.py`) logs `brigade fleet hub stopped cleanly`, which the restart
   and UPS checks look for. It logs `brigade fleet hub listening on` once
   `/health` answers.

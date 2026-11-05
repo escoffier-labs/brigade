@@ -195,10 +195,19 @@ def test_secrets_are_private_and_never_overwritten(project, tmp_path):
     assert {name: (folder / name).read_bytes() for name in setup.SECRET_FILES} == first
 
 
-def test_brigade_ref_needs_its_archive_digest(project, tmp_path):
-    assert _init(project, tmp_path, "--brigade-ref", "0" * 40) == 1
-    assert _init(project, tmp_path, "--brigade-ref", "0" * 40, "--brigade-sha256", "f" * 64) == 0
-    assert _env(project)["BRIGADE_REF"] == "0" * 40
+def test_brigade_ref_needs_its_archive_digest_and_version(project, tmp_path):
+    ref, digest = ("--brigade-ref", "0" * 40), ("--brigade-sha256", "f" * 64)
+    assert _init(project, tmp_path, *ref) == 1
+    assert _init(project, tmp_path, *ref, *digest) == 1
+    assert _init(project, tmp_path, *ref, *digest, "--brigade-version", "0.32.0\nX=1") == 1
+    assert _init(project, tmp_path, *digest, "--brigade-version", "0.32.0") == 1
+    assert not (project / ".env").exists()
+    assert _init(project, tmp_path, *ref, *digest, "--brigade-version", "0.32.0") == 0
+    env = _env(project)
+    assert (env["BRIGADE_REF"], env["BRIGADE_SHA256"], env["BRIGADE_VERSION"]) == ("0" * 40, "f" * 64, "0.32.0")
+    # Compose reads all three, so the image label follows the ref.
+    compose = (RECIPE / "compose.yaml").read_text(encoding="utf-8")
+    assert all(f"${{{name}:-" in compose for name in ("BRIGADE_REF", "BRIGADE_SHA256", "BRIGADE_VERSION"))
 
 
 # ------------------------------------------------------------------ switching
@@ -937,6 +946,32 @@ def test_backup_job_still_copies_memory_when_the_hub_copy_fails(tmp_path):
     assert len(checks.completed_copies(tmp_path / "copies" / "memory")) == 1
 
 
+def test_memory_file_probe_asks_the_hub_container(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def run(argv, **_):
+        calls.append(argv)
+        if argv[:2] == ["docker", "exec"]:
+            return SimpleNamespace(stdout="True\n", stderr="", returncode=0)
+        return SimpleNamespace(stdout="hub-cid\n", stderr="", returncode=0)
+
+    monkeypatch.setattr(checks, "run", run)
+    assert checks.memory_file_present() is True
+    assert calls[-1] == ["docker", "exec", "hub-cid", "python", "-c", checks.MEMORY_FILE_PRESENT]
+    assert '"/var/lib/brigade/fleet-hub-memory.db"' in checks.MEMORY_FILE_PRESENT
+    monkeypatch.setattr(checks, "container_id", lambda *_a, **_k: "")
+    assert checks.memory_file_present() is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_backup_job_reports_a_signal_death_as_a_shell_would():
+    killed = [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"]
+    assert backup_job.status(killed) == 137
+    assert backup_job.status([sys.executable, "-c", "raise SystemExit(3)"]) == 3
+
+
 def test_backup_job_refuses_a_db_argument():
     with pytest.raises(SystemExit):
         backup_job.main(["--db", "/elsewhere.db"])
@@ -955,11 +990,14 @@ def test_backups_check_reads_hub_and_memory_copies_apart(tmp_path, monkeypatch):
     include = tmp_path / "include.txt"
     include.write_text(f"{folder}\n", encoding="utf-8")
     namespace = argparse.Namespace(backup_dir=str(folder), last=3, include_file=str(include), refusal=False)
-    checks.check_backups(namespace, result)
-    # No memory copy is reported, never failed.
-    assert result.status == "pass", result.items
-    memory = next(item for item in result.items if item["name"] == "memory copies")
-    assert memory["status"] == "INFO"
+    # No memory copy passes only while the memory file is absent from the volume.
+    for present, expected, status in ((False, "INFO", "pass"), (True, "FAIL", "fail"), (None, "PENDING", "pending")):
+        monkeypatch.setattr(checks, "memory_file_present", lambda present=present: present)
+        result = checks.Result("backups")
+        checks.check_backups(namespace, result)
+        assert result.status == status, result.items
+        memory = next(item for item in result.items if item["name"] == "memory copies")
+        assert memory["status"] == expected
     # The refusal run names no --db: the job picks both files.
     source = (RECIPE / "checks" / "s31_checks.py").read_text(encoding="utf-8")
     refusal = source[source.index("if args.refusal:") :]
@@ -1121,6 +1159,52 @@ def test_entry_forwards_a_stop_that_lands_while_the_child_is_spawning(monkeypatc
     assert sent == [signal.SIGTERM]
     assert code == 0
     assert capsys.readouterr().out.strip() == checks.HUB_STOPPED
+
+
+MASK_HUB = """
+import signal, sys, time
+from pathlib import Path
+with open("/proc/self/status", encoding="utf-8") as status:
+    blocked = next(line.split()[1] for line in status if line.startswith("SigBlk:"))
+Path(sys.argv[-1]).write_text(blocked, encoding="utf-8")
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+# As brigade-hub does once its handlers exist: a held stop arrives now.
+signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM, signal.SIGINT})
+time.sleep(20)
+sys.exit(4)
+"""
+
+
+@pytest.mark.skipif(not Path("/proc/self/status").exists(), reason="reads the child's signal mask from procfs")
+def test_entry_starts_the_hub_with_stop_signals_blocked_so_a_pending_stop_waits(tmp_path, monkeypatch, capsys):
+    import signal
+
+    fake = tmp_path / "brigade-hub"
+    fake.write_text(f"#!{sys.executable}\n{MASK_HUB}", encoding="utf-8")
+    fake.chmod(0o755)
+    real = subprocess.Popen
+
+    def popen(argv):
+        # The stop lands during the spawn; it is held, then forwarded.
+        os.kill(os.getpid(), signal.SIGTERM)
+        return real(argv)
+
+    previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    monkeypatch.setattr(entry, "HUB", str(fake))
+    monkeypatch.setattr(entry.subprocess, "Popen", popen)
+    try:
+        code = entry.main(["--host", "127.0.0.1", "--port", "1", str(tmp_path / "mask")])
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    blocked = int((tmp_path / "mask").read_text(encoding="utf-8"), 16)
+    assert blocked & (1 << (signal.SIGTERM - 1)) and blocked & (1 << (signal.SIGINT - 1))
+    # The forwarded stop reached the hub's handler, not its default action.
+    assert code == 0
+    assert capsys.readouterr().out.strip() == checks.HUB_STOPPED
+    # This process's own mask is back as it was.
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == mask
 
 
 def test_entry_reads_the_hub_flags_and_maps_signal_deaths():

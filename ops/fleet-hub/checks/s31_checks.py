@@ -848,6 +848,19 @@ def check_memory(args: argparse.Namespace, result: Result) -> None:
     result.ok(report.get("memory_file") is True, "fleet-hub-memory.db sits beside fleet-hub.db on the state volume")
 
 
+MEMORY_FILE_PRESENT = 'import os; print(os.path.isfile("/var/lib/brigade/fleet-hub-memory.db"))'
+
+
+def memory_file_present() -> bool | None:
+    """Whether fleet-hub-memory.db is on the hub's state volume; None when the hub is not running to ask."""
+    hub = container_id("hub")
+    if not hub:
+        return None
+    done = run(["docker", "exec", hub, "python", "-c", MEMORY_FILE_PRESENT])
+    answer = done.stdout.strip()
+    return {"True": True, "False": False}.get(answer) if done.returncode == 0 else None
+
+
 def verify_copy(copy: Path) -> dict[str, Any]:
     manifest = json.loads((copy / "manifest.json").read_text(encoding="utf-8"))
     files = {}
@@ -875,8 +888,9 @@ def check_backups(args: argparse.Namespace, result: Result) -> None:
 
     The job copies fleet-hub.db into the backup directory and, in a separate
     call, fleet-hub-memory.db into its `memory` subdirectory, so the hub
-    file's copies are checked on their own and a missing memory file fails
-    nothing here.
+    file's copies are checked on their own. No memory copies fail the check
+    only while the memory file exists on the state volume: then the memory
+    call has failed on every run. An absent memory file fails nothing here.
     """
     folder = Path(args.backup_dir or env_file().get("BRIGADE_BACKUP_DIR", "")).expanduser()
     info = folder.stat()
@@ -894,7 +908,19 @@ def check_backups(args: argparse.Namespace, result: Result) -> None:
         )
     memory_copies = completed_copies(folder / "memory")
     if not memory_copies:
-        result.add("INFO", "memory copies", "none: the memory file was absent at every run, or no run has happened")
+        present = memory_file_present()
+        if present is None:
+            result.add(
+                "PENDING", "memory copies", "none, and the hub is not running to say whether the memory file exists"
+            )
+        elif present:
+            result.add(
+                "FAIL",
+                "memory copies",
+                "none, but fleet-hub-memory.db exists on the state volume: the memory call fails on every run",
+            )
+        else:
+            result.add("INFO", "memory copies", "none: the memory file is absent from the state volume")
     for copy in memory_copies[-args.last :]:
         files = verify_copy(copy)
         result.ok(

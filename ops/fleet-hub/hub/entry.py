@@ -93,7 +93,15 @@ def main(argv: list[str]) -> int:
 
     signal.signal(signal.SIGTERM, forward)
     signal.signal(signal.SIGINT, forward)
-    child = subprocess.Popen([HUB, *argv])
+    # The child starts with both blocked (the mask survives fork and exec)
+    # and `brigade-hub` unblocks them once its handlers exist, so neither a
+    # stop forwarded right after the spawn nor one sent to the process group
+    # meets its pre-main default action.
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
+    try:
+        child = subprocess.Popen([HUB, *argv])
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
     if pending is not None:
         send(pending)
     url = f"http://{'[' + host + ']' if ':' in host else host}:{port}/health"
