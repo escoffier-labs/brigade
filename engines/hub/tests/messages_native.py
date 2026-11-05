@@ -574,17 +574,30 @@ class Messages(unittest.TestCase):
                 # with 7 MiB bodies release theirs once parsed, so a third 7 MiB
                 # body from the same credential is read, not refused 503.
                 pad = "x" * (7 * 1024 * 1024)
-                threads = [
-                    threading.Thread(
-                        target=poll, args=(name, b, {"action": "list", "wait_ms": 8000, "pad": pad})
+                # The waiters run until the send below wakes them. Their wait is
+                # the server maximum, well past the probe deadline, so a slow
+                # runner cannot time the first one out before the second parks.
+                def start_waiter(name):
+                    results.pop(name, None)
+                    thread = threading.Thread(
+                        target=poll, args=(name, b, {"action": "list", "wait_ms": 20_000, "pad": pad})
                     )
-                    for name in ("p1", "p2")
-                ]
-                for thread in threads:
                     thread.start()
-                deadline = time.monotonic() + 10
+                    return thread
+
+                threads = {name: start_waiter(name) for name in ("p1", "p2")}
+                deadline = time.monotonic() + 12
                 parked = False
                 while time.monotonic() < deadline and not parked:
+                    # A probe holds one of the two waiter slots while it runs. A
+                    # padded waiter that registers meanwhile is refused 429 and
+                    # returns at once, so start it again. A probe is refused only
+                    # when two real waiters hold both slots, which is the proof
+                    # that both are parked.
+                    for name, thread in threads.items():
+                        if not thread.is_alive():
+                            self.assertEqual(results[name][0].status, 429, name)
+                            threads[name] = start_waiter(name)
                     probe = send(hub, "POST", "/messages", b, {"action": "list", "wait_ms": 1})
                     parked = probe.status == 429
                     time.sleep(0.05)
@@ -595,12 +608,13 @@ class Messages(unittest.TestCase):
                 )
                 body = {"action": "send", "to": "node-b", "subject": "s", "body": "b", "client_id": "pad"}
                 self.assertEqual(send(hub, "POST", "/messages", a, body).status, 201)
-                for thread in threads:
+                for thread in threads.values():
                     thread.join()
                 for name in ("p1", "p2"):
                     response, waited = results[name]
                     self.assertEqual([m["client_id"] for m in json.loads(response.body)["messages"]], ["pad"], name)
-                    self.assertLess(waited, 7, name)
+                    # Woken by the send, not by running out the 20 s wait.
+                    self.assertLess(waited, 19, name)
             finally:
                 hc.stop_hub(hub)
 
