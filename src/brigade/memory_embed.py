@@ -68,7 +68,12 @@ def local_embed(config: dict, texts: list[str], token: str) -> list[list[float]]
         raise ValueError("embed-worker requires an allowlisted loopback endpoint")
     if url.scheme not in {"http", "https"} or config["shape"] not in {"api/embed", "v1/embeddings"}:
         raise ValueError("invalid embedding transport")
-    if not texts or len(texts) > 4 or sum(len(t.encode()) for t in texts) > 32768 or blocked_rule(texts):
+    if (
+        not texts
+        or len(texts) > 4
+        or sum(len(t.encode()) for t in texts) > 32768
+        or blocked_rule(texts, blocking_only=True)
+    ):
         raise ValueError("embedding payload refused")
     payload = json.dumps({"model": config["name"], "input": texts}).encode()
     connection_type = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection

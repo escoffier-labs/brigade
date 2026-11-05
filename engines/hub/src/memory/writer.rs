@@ -55,6 +55,7 @@ pub struct Config {
     pub hook: Option<Hook>,
     /// The lexical index this writer publishes after each committed batch.
     pub index: Option<Arc<index::Index>>,
+    pub dense: Option<Arc<super::dense::Index>>,
 }
 impl Config {
     pub fn new(memory: PathBuf, hub: PathBuf, admin_digest: String) -> Self {
@@ -72,6 +73,7 @@ impl Config {
             apply_budget: Duration::from_millis(10),
             hook: None,
             index: None,
+            dense: None,
         }
     }
 }
@@ -103,9 +105,12 @@ pub enum Job {
         reply: oneshot::Sender<Answer>,
     },
     /// Bounded retention, run on this writer and never under the hub lock.
-    Sweep { now_ms: i64 },
+    Sweep {
+        now_ms: i64,
+    },
     /// A background index build finished; this writer replays its tail.
     Rebuilt(Box<index::Rebuilt>),
+    DenseRebuilt(Box<super::dense::Rebuilt>),
 }
 
 /// The only handle on the memory writer's hub connection.
@@ -194,6 +199,9 @@ impl Writer {
         let (sender, receiver) = mpsc::channel(config.capacity);
         if let Some(index) = &config.index {
             index.attach(sender.downgrade());
+        }
+        if let Some(dense) = &config.dense {
+            dense.attach(sender.downgrade());
         }
         let metrics = Arc::new(Mutex::new(Metrics::default()));
         let m = metrics.clone();
@@ -330,13 +338,15 @@ pub(crate) fn run(
     let mut writes: VecDeque<Pending> = VecDeque::new();
     let mut sweeps: VecDeque<i64> = VecDeque::new();
     let mut rebuilt: Vec<Box<index::Rebuilt>> = Vec::new();
+    let mut dense_rebuilt: Vec<Box<super::dense::Rebuilt>> = Vec::new();
     let mut directory_synced = false;
     // Index publication runs on this thread after step 5, never under a lock.
     let mut publisher = config.index.as_ref().and_then(|i| i.publisher());
     let accept = |job: Job,
                   writes: &mut VecDeque<Pending>,
                   sweeps: &mut VecDeque<i64>,
-                  rebuilt: &mut Vec<Box<index::Rebuilt>>| match job {
+                  rebuilt: &mut Vec<Box<index::Rebuilt>>,
+                  dense_rebuilt: &mut Vec<Box<super::dense::Rebuilt>>| match job {
         Job::Write {
             command,
             deadline,
@@ -352,6 +362,7 @@ pub(crate) fn run(
             }
         }
         Job::Rebuilt(r) => rebuilt.push(r),
+        Job::DenseRebuilt(r) => dense_rebuilt.push(r),
     };
     loop {
         // Take from the channel only what the next batch can use, so overload
@@ -360,11 +371,22 @@ pub(crate) fn run(
             let Ok(job) = receiver.try_recv() else {
                 break;
             };
-            accept(job, &mut writes, &mut sweeps, &mut rebuilt);
+            accept(
+                job,
+                &mut writes,
+                &mut sweeps,
+                &mut rebuilt,
+                &mut dense_rebuilt,
+            );
         }
         for r in rebuilt.drain(..) {
             if let Some(p) = publisher.as_mut() {
                 p.installed(*r, &db);
+            }
+        }
+        for rebuilt in dense_rebuilt.drain(..) {
+            if let Some(dense) = &config.dense {
+                dense.installed(*rebuilt, &db);
             }
         }
         {
@@ -385,7 +407,13 @@ pub(crate) fn run(
             }
             match receiver.blocking_recv() {
                 Some(job) => {
-                    accept(job, &mut writes, &mut sweeps, &mut rebuilt);
+                    accept(
+                        job,
+                        &mut writes,
+                        &mut sweeps,
+                        &mut rebuilt,
+                        &mut dense_rebuilt,
+                    );
                     continue;
                 }
                 None => return,
@@ -525,6 +553,9 @@ pub(crate) fn run(
             }
         }
         if committed {
+            if let Some(dense) = &config.dense {
+                dense.after_commit(&db);
+            }
             for (p, result) in results {
                 answer(p, result);
             }

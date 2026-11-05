@@ -221,7 +221,7 @@ async fn scan_pending_digest_lease_expiry_and_principal_are_enforced() {
 fn dense_segments_preserve_retained_snapshots_and_score_with_scope_mask() {
     let db = rusqlite::Connection::open_in_memory().unwrap();
     schema::migrate(&db, 1_800_000_000_000).unwrap();
-    let index = dense::Index::default();
+    let index = Arc::new(dense::Index::default());
     let bytes: Vec<_> = [1.0f32, 0.0].iter().flat_map(|f| f.to_le_bytes()).collect();
     for (i, hash) in ["one", "two"].iter().enumerate() {
         db.execute(
@@ -236,7 +236,7 @@ fn dense_segments_preserve_retained_snapshots_and_score_with_scope_mask() {
     db.execute("DELETE FROM memory_vectors WHERE content_hash='one'", [])
         .unwrap();
     let next = index.refresh(&db, "id", 2).unwrap();
-    assert_eq!(next.rows, 1);
+    assert_eq!(next.hashes().len(), 1);
     assert_eq!(retained.rows, 2);
     assert_eq!(
         retained
@@ -264,6 +264,7 @@ fn dense_rebuild_peak_memory() {
         dimensions: dims,
         segments: parts,
         rows,
+        ..dense::Matrix::default()
     };
     let start = std::time::Instant::now();
     let new = old.compact();
@@ -494,4 +495,64 @@ async fn stopped_endpoint_during_initial_backfill_is_degraded_and_findable() {
         h.store.as_ref().unwrap().retrieval_status()["state"],
         "degraded"
     );
+}
+
+#[tokio::test]
+async fn dense_writer_replays_tail_after_background_watermark_without_blocking_writes() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = setup(&mut h);
+    h.put(ADMIN_TOKEN, "fleet", "one", None, "apple").await;
+    fill(&h, &id).await;
+    let dense = h.store.as_ref().unwrap().dense.clone();
+    let gate = dense.pause_next();
+    h.put(ADMIN_TOKEN, "fleet", "two", None, "pear").await;
+    fill(&h, &id).await;
+    gate.started.wait();
+    struct Release(Arc<dense::Gate>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release.wait();
+        }
+    }
+    let release = Release(gate);
+    let retained = dense.current(&id).unwrap();
+    // The compactor is paused. Both the card and its vector still commit.
+    h.put(ADMIN_TOKEN, "fleet", "three", None, "banana").await;
+    fill(&h, &id).await;
+    drop(release);
+    dense.wait_rebuild().await;
+    let installed = dense.current(&id).unwrap();
+    assert_eq!(installed.hashes().len(), 3);
+    assert_eq!(retained.hashes().len(), 2);
+    assert_eq!(
+        installed.indexed_seq,
+        h.store.as_ref().unwrap().index.current().indexed_seq
+    );
+    assert_eq!(installed.segments[0].hashes.len(), 2);
+    assert_eq!(installed.segments.len(), 2);
+}
+
+#[tokio::test]
+async fn dropping_embedder_during_rebuild_cannot_resurrect_its_matrix() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = setup(&mut h);
+    h.put(ADMIN_TOKEN, "fleet", "one", None, "apple").await;
+    fill(&h, &id).await;
+    let dense = h.store.as_ref().unwrap().dense.clone();
+    let gate = dense.pause_next();
+    h.put(ADMIN_TOKEN, "fleet", "two", None, "pear").await;
+    fill(&h, &id).await;
+    gate.started.wait();
+    struct Release(Arc<dense::Gate>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release.wait();
+        }
+    }
+    let release = Release(gate);
+    let dropped = command(&h, json!({"action": "reindex", "drop": id})).await;
+    drop(release);
+    dense.wait_rebuild().await;
+    assert_eq!(dropped.status, 200);
+    assert!(dense.current(&id).unwrap().hashes().is_empty());
 }

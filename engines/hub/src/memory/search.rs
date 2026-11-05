@@ -1,8 +1,7 @@
-//! `search` (S13b): BM25 over the caller's visible corpus, answered from one
-//! published index snapshot. Steps 1 to 3 and 8 of the retrieval pipeline:
-//! normalize the query, take live cards in the readable scopes, score them as
-//! `memory_bm25.py` does and return the page. Dense retrieval, fusion,
-//! lineage collapsing and automation demotion belong to later slices.
+//! Search over one lexical snapshot and an optional immutable dense matrix.
+//! Queries authorize visible scopes, fuse lexical and dense ranks with RRF,
+//! and apply the S18 prompt-load boundary. Lineage collapse and source
+//! demotion follow in S17.
 use super::{
     Credential, Reply, auth,
     index::{Snapshot, TOP},

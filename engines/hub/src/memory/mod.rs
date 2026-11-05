@@ -6,7 +6,8 @@
 //! scorer and tokenizer copied from Python in [`text`].
 //!
 //! Writes and prompt loads use the versioned guard scanner (S18).
-//! Proposals and decisions (S19a) and embedding (S15) follow in later slices.
+//! Embedding and dense retrieval use the S18 scan gate (S15).
+//! Proposals and decisions follow in S19a.
 pub mod auth;
 pub mod dense;
 pub mod embedder;
@@ -110,6 +111,7 @@ impl Drop for Store {
         if let Some(task) = self.embedding_task.lock().unwrap().take() {
             task.abort();
         }
+        self.dense.stop();
         self.index.stop();
     }
 }
@@ -162,6 +164,7 @@ impl Store {
         }
         let readers =
             ReaderPool::open_unchecked(&options.memory, MEMORY_THREADS, MEMORY_QUEUE, READ_LIMIT)?;
+        let dense = Arc::new(dense::Index::default());
         let mut config = writer::Config::new(
             options.memory.clone(),
             options.hub,
@@ -170,6 +173,7 @@ impl Store {
         config.hook = options.hook;
         config.scanner = options.scanner.clone();
         config.index = Some(index.clone());
+        config.dense = Some(dense.clone());
         let writer = writer::Writer::start(config, db, options.arbiter.clone())
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -183,7 +187,7 @@ impl Store {
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
             index,
             retrieval: None,
-            dense: Arc::default(),
+            dense,
             coverage: std::sync::RwLock::new((0, 0)),
             embedding_task: std::sync::Mutex::new(None),
             pull_embeddings: false,
@@ -198,7 +202,7 @@ impl Store {
                     task.abort();
                 }
                 self.retrieval = None;
-                self.dense = Arc::default();
+                self.dense.configure(None);
                 if config.get("embedder").is_some() {
                     eprintln!("INFO memory.embedder unused in lexical mode");
                 }
@@ -210,6 +214,12 @@ impl Store {
                 )?)
             }
             _ => return Err("memory.retrieval must be lexical or hybrid".into()),
+        }
+        if let Some(runtime) = &self.retrieval {
+            self.dense.configure(Some((
+                runtime.config.id.key(),
+                runtime.config.id.dimensions,
+            )));
         }
         *self.coverage.write().unwrap() = (
             0,

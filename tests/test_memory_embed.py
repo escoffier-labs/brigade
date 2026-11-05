@@ -109,3 +109,14 @@ def test_worker_token_permissions_and_cli_registration(tmp_path):
     with pytest.raises(SystemExit) as exc:
         main(["memory", "embed-worker", "--help"])
     assert exc.value.code == 0
+
+
+def test_worker_passes_s18_warning_but_prompt_scan_still_withholds_it(endpoint):
+    from brigade.memory_content_scan import blocked_rule
+
+    config, seen = endpoint
+    warned = "a\u200db"
+    assert blocked_rule([warned]) == "zero-width-joiner"
+    assert blocked_rule([warned], blocking_only=True) is None
+    assert embed.local_embed(config, [warned], "fake-token") == [[0.6, 0.8]]
+    assert seen[0]["input"] == [warned]

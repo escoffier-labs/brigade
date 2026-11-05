@@ -160,8 +160,8 @@ def _rule_possible(name: str, text: str) -> bool:
     return True
 
 
-def blocked_rule(texts: Iterable[str]) -> str | None:
-    """Return an id only. Every finding withholds prompt text, including warnings."""
+def blocked_rule(texts: Iterable[str], *, blocking_only: bool = False) -> str | None:
+    """Return an id only. Prompts withhold warnings. Embedding may pass warnings."""
     # Scan each field independently too: a leading BOM exemption belongs to one
     # field, and concatenation must not hide a field's role directive at line start.
     values = [value for value in texts if isinstance(value, str)]
@@ -180,7 +180,9 @@ def blocked_rule(texts: Iterable[str]) -> str | None:
         extra_copies = tuple(copy for copy in dict.fromkeys((injection_lines, normalized)) if copy not in copies)
         literal_copies = {copy: _BUNDLE_LITERAL.search(copy) is not None for copy in copies}
         possible: dict[tuple[str, str], bool] = {}
-        for name, _action, pattern in _RULES:
+        for name, action, pattern in _RULES:
+            if blocking_only and action != "block":
+                continue
             for copy in copies:
                 if name != "us-phone" and not literal_copies[copy]:
                     continue
@@ -193,9 +195,11 @@ def blocked_rule(texts: Iterable[str]) -> str | None:
                     _assignment_search(pattern, copy) if name == "api-key-assignment" else pattern.search(copy)
                 ):
                     return name
-        for name, _action, pattern in _INJECTIONS:
+        for name, action, pattern in _INJECTIONS:
+            if blocking_only and action != "block":
+                continue
             if any(pattern.search(copy) for copy in extra_copies if not (pattern.flags & re.ASCII and copy.isascii())):
                 return name
-        if joiner:
+        if joiner and not blocking_only:
             return JOINER_RULE
     return None

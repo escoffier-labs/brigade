@@ -80,11 +80,14 @@ Derived tables migrate the memory file from schema 1 to schema 2. The hub
 keeps vectors under a fingerprint of model name, reported digest, dimensions,
 normalizer version and query prefix version. Bump the prefix version when
 changing the prefix. Vectors use little-endian float32. Immutable append
-segments share older rows with retained snapshots. Compaction copies rows
-into a new main segment after deltas exceed 10% of the first segment. Work
-runs on reader-pool threads outside the writer locks. A later refresh picks
-up writes committed during that read snapshot. A query whose live head has
-no matching vector continues using BM25.
+segments share older rows with retained snapshots. Compaction captures an immutable snapshot and its watermark after deltas
+exceed 10% of the first segment. A bounded background compactor builds the new
+main matrix outside the writer locks. It returns the result to the memory
+writer, which replays committed vector additions and removals before atomic
+publication. Metadata records which rows still have vectors, so deletion
+never copies the whole matrix on the writer. A mode switch or drop
+invalidates a pending build. A query whose live head has no matching vector
+continues using BM25.
 
 Normalizing document text uses title, summary and body. Unrelated frontmatter
 and card aliases do not enter the payload. The stored scan receipt must be
@@ -131,7 +134,7 @@ backend supports allowlisted private HTTP and HTTPS endpoints.
 ## Measurements
 
 At 20,000 synthetic rows, a matrix rebuild with its old snapshot retained
-recorded 171,508 KiB peak RSS at 1,024 dimensions and 651,560 KiB at 4,096
+recorded 175,848 KiB peak RSS at 1,024 dimensions and 655,908 KiB at 4,096
 dimensions. These are isolated matrix-process measurements, including test
 runtime overhead, without a lexical index, SQLite corpus or embedding model.
 The larger rebuild exceeds the reference 512 MiB allotment. Production
