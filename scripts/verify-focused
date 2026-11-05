@@ -1,6 +1,6 @@
 #!/bin/bash
 # Bounded development slices: named tests only, without coverage or full-gate slots.
-# Use scripts/verify for PRs, releases, and verification-infrastructure changes.
+# Use during development and before PRs; required CI supplies final full coverage.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

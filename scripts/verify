@@ -1,11 +1,11 @@
 #!/bin/bash
-# Full local coverage gate for pull requests, merges, releases, and
-# verification-infrastructure changes. CI keeps a separate workflow.
+# Optional local full gate for CI reproduction, broad offline validation,
+# or an explicit operator request. Required CI supplies final suite/coverage gates.
 # ruff lint, ruff format, mypy, version sync, pytest with coverage.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-if [ -z "${BRIGADE_VERIFY_LOCK_HELD:-}" ]; then
+if [ "${BRIGADE_VERIFY_LOCK_HELD:-}" != "$$" ]; then
   if [ -n "${BRIGADE_VERIFY_LOCK_PYTHON:-}" ]; then
     lock_python=$BRIGADE_VERIFY_LOCK_PYTHON
   else
@@ -24,4 +24,4 @@ PY=${PY:-.venv/bin}
 "$PY/python" scripts/version_sync.py --check
 "$PY/python" scripts/managed_snapshot.py --check
 "$PY/python" scripts/template_profile_snapshot.py --check
-"$PY/python" scripts/verify_parallel.py
+exec "$PY/python" scripts/verify_parallel.py "$@"
