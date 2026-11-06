@@ -3,7 +3,6 @@
 from tests.dot_support import requires_local_state
 
 import json
-import time
 from unittest.mock import patch
 
 from brigade.dot.memory_tools import MemoryTools
@@ -190,8 +189,26 @@ class TestRemoteProfiles(Scan):
                 }
 
     @requires_local_state
-    def test_scan_cost_for_twenty_results_stays_far_inside_the_search_budget(self):
-        # memory_search has an 800 ms budget. The scan sees only each match's short fields.
+    def test_a_private_or_injection_path_or_scope_refuses_the_match(self):
+        self.search_reply(
+            self.match("clean-card"),
+            self.match("mail-path", path=f"memory/cards/{PRIVATE_EMAIL}.md"),
+            self.match("hub-scope", scope="repo:relay/" + PRIVATE_IP),
+            retrieval={"mode": "lexical"},
+        )
+        for profile in REMOTE:
+            payload = self.memory(profile).memory_search("release")
+            clean, path_hit, scope_hit = payload["matches"]
+            assert clean["content_trust"] == "untrusted" and clean["path"] == "memory/cards/clean-card.md"
+            assert path_hit == {"card_id": "mail-path", **_expected("email", PRIVATE_CODE)}
+            assert scope_hit == {"card_id": "hub-scope", **_expected("private-ipv4", PRIVATE_CODE)}
+            serialized = json.dumps(payload)
+            assert PRIVATE_EMAIL not in serialized and PRIVATE_IP not in serialized
+
+    @requires_local_state
+    def test_twenty_results_are_each_scanned(self):
+        # Latency is measured in the PR (about 1 to 3.4 ms per result against an 800 ms budget).
+        # This test checks behavior only, so a loaded runner cannot fail it.
         summary = "Release process and rollout notes. " * 20
         self.search_reply(
             *[
@@ -200,14 +217,10 @@ class TestRemoteProfiles(Scan):
             ]
         )
         for profile in REMOTE:
-            memory = self.memory(profile)
-            best = min(_elapsed(memory) for _ in range(3))
-            assert best < 0.4, f"{profile.pack_id} scan of 20 results took {best:.3f}s"
-
-
-def _elapsed(memory):
-    start = time.perf_counter()
-    payload = memory.memory_search("release", limit=20)
-    elapsed = time.perf_counter() - start
-    assert len(payload["matches"]) == 20
-    return elapsed
+            matches = self.memory(profile).memory_search("release", limit=20)["matches"]
+            assert len(matches) == 20
+            for index, match in enumerate(matches):
+                if index % 2:
+                    assert match["content_trust"] == "untrusted"
+                else:
+                    assert match == {"card_id": f"card-{index}", **_expected("private-ipv4", PRIVATE_CODE)}

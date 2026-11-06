@@ -67,7 +67,8 @@ class MemoryTools:
                 continue
             item = {key: match.get(key) for key in keys}
             if self.profile.prompt_load_scan:
-                refusal = egress_refusal(_card_texts(item))
+                # The returned path and hub scope are scanned too: a file name or scope can carry the text.
+                refusal = egress_refusal([*_card_texts(item), *_location_texts(item)])
                 if refusal:
                     matches.append(_refused_match(item, refusal))
                     continue
@@ -331,6 +332,11 @@ def _card_texts(item: dict[str, Any]) -> list[str]:
         if isinstance(values, list):
             texts.extend(values)
     return [text for text in texts if isinstance(text, str)]
+
+
+def _location_texts(item: dict[str, Any]) -> list[str]:
+    # Where a search match lives: returned beside the card fields, so it is scanned with them.
+    return [value for value in (item.get("path"), item.get("scope")) if isinstance(value, str)]
 
 
 def _blocked_card_id(item: dict[str, Any]) -> str | None:
