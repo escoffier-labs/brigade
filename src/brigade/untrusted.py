@@ -16,22 +16,39 @@ import secrets
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
+# Parts of the exfil-tration order patterns below. Hub memory (bundle v6) and
+# every `scan_untrusted` and injection-lint caller share them.
+_URGENCY = "please|now|then|first|next|also|just|immediately|quietly|silently|secretly|carefully|kindly"
+_MARKUP = r'(?:[-*#>"(<!`_]\s{0,8}){0,4}'
+_EXFIL_ORDER = r"(?:(?:start|begin|keep|continue|resume)\s{1,8}exfil" + r"trating|exfil" + r"trate)\b"
+
 _INJECTION_PATTERNS = (
     "ig" + "nore (all )?(previous|prior) instructions",
     "do " + "not (tell|reveal)",
     "hidden " + "instruction",
     "send (all )?(sec" + "rets|tok" + "ens)",
     # The verb alone also names an attack in threat-intel prose ("data was
-    # exfil-trated") and in policy text ("Don't exfil-trate private data").
-    # Match it only as an order: at the start of a line or sentence, after an
-    # optional bullet and urgency word, addressed to the agent, or with a
-    # destination to send to.
-    r"(?:^|[.!?;:]\s{0,8})(?:[-*>]\s{0,8})?"
-    r"(?:(?:please|now|then|first|next|also|and|immediately|quietly|silently|secretly),?\s{1,8})?"
-    r"exfil" + r"trate\b",
-    r"\b(?:you (?:must|should|will|need to|are to)|(?:your|the) (?:task|job|goal|mission) is to|i want you to)"
-    r"\s{1,8}exfil" + r"trate\b",
-    r"\bexfil" + r"trate\b[^\n]{0,128}?\bto\s{1,8}(?:https?://|[a-z0-9._-]{1,64}@"
+    # exfil-trated", "attackers exfil-trate data via DNS") and in policy text
+    # ("Don't exfil-trate private data"). Match it only as an order: at the
+    # start of a line or sentence (after up to four markdown or quote marks
+    # and two urgency words), after a short address or an if/when clause and
+    # a comma ("Assistant, ...", "If you are an AI agent, ..."), addressed to
+    # the agent, or with a destination to send to. A verb list in prose
+    # ("steal session cookies, exfil-trate data") has a longer clause before
+    # its comma and stays clean.
+    r"(?:^|[.!?;:]\s{0,8})" + _MARKUP + r"(?:"
+    r"(?:if|when|once|after|before|while|as soon as)\b[^\n,.;:!?]{0,80},\s{0,8}"
+    + _MARKUP
+    + r"|[\w'-]{1,32}(?:\s{1,8}[\w'-]{1,32}){0,2},\s{0,8}"
+    + _MARKUP
+    + r")?"
+    r"(?:(?:" + _URGENCY + r"|and),?\s{1,8}){0,2}" + _EXFIL_ORDER,
+    r"\b(?:you\s{1,8}(?:must|should|will|need\s{1,8}to|have\s{1,8}to|are\s{1,8}to)"
+    r"|(?:your|the)\s{1,8}(?:(?:now|next|first|real|only)\s{1,8})?(?:task|job|goal|mission)\s{1,8}is\s{1,8}to"
+    r"|(?:want|need)\s{1,8}you\s{1,8}to|kindly|go\s{1,8}ahead\s{1,8}and|it.?s\s{1,8}(?:now\s{1,8})?time\s{1,8}to)"
+    r"(?:\s{1,8}(?:" + _URGENCY + r"),?){0,2}\s{1,8}" + _EXFIL_ORDER,
+    r"\bexfil" + r"trat(?:e|ing)\b[^\n]{0,128}?\bto\s{1,8}(?:https?://|[a-z0-9._-]{1,64}@"
+    r"|(?:[a-z0-9-]{1,63}\.){1,8}[a-z]{2,24}\b"
     r"|(?:my|our|this|that|the attacker'?s?) (?:server|endpoint|webhook|url|bucket|inbox)\b)",
     "disable " + "safety",
     "bypass " + "safety",

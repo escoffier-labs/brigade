@@ -94,9 +94,15 @@ def test_s18_review_invisible_policy(code):
     assert blocked_rule(["text" + chr(code)]) == ("combining-grapheme-joiner" if code == 0x34F else expected)
 
 
-@pytest.mark.parametrize("text", ["☀\ufe0f", "😀\ufe00", "\ufeffordinary text"])
+@pytest.mark.parametrize("text", ["☀\ufe0f", "😀\ufe0e", "\ufeffordinary text"])
 def test_s18_review_selector_and_bom_exemptions(text):
     assert blocked_rule([text]) is None
+
+
+@pytest.mark.parametrize("code", range(0xFE00, 0xFE0E))
+def test_only_presentation_selectors_follow_an_emoji_base(code):
+    assert blocked_rule(["😀" + chr(code)]) == "invisible-character"
+    assert blocked_rule(["→" + chr(code)]) == "invisible-character"
 
 
 @pytest.mark.parametrize("code", [0xAD, 0x34F, 0x180E, 0x200C, 0xFE0F, 0xE0100, 0x2065, 0xFFF0])

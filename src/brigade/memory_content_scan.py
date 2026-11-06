@@ -17,7 +17,8 @@ INVISIBLE_RULE = "invisible-character"
 JOINER_RULE = "zero-width-joiner"
 # U+034F and U+200C arrive in pasted text and carry no payload of their own.
 # The scan copies already remove them, so they cannot split a rule match.
-# Stored bytes keep them, so they stay on the operator's machines (private).
+# Stored bytes keep them, so they scan private. Prompt recall renders without
+# them (memory_hooks and the native prompt_hit).
 GRAPHEME_JOINER_RULE = "combining-grapheme-joiner"
 NON_JOINER_RULE = "zero-width-non-joiner"
 _PRIVATE_CHARACTERS = {"\u034f": GRAPHEME_JOINER_RULE, "\u200c": NON_JOINER_RULE}
@@ -93,8 +94,12 @@ def _emoji_base(char: str) -> bool:
 
 
 def _selector_exempt(text: str, index: int) -> bool:
-    """A variation selector right after an emoji base, or a keycap's U+FE0F."""
-    if not index:
+    """U+FE0E or U+FE0F right after an emoji base, or a keycap's U+FE0F.
+
+    U+FE00 to U+FE0D never pick a text or emoji presentation, so after a base
+    they would hide data after every visible symbol. They block.
+    """
+    if not index or text[index] not in "\ufe0e\ufe0f":
         return False
     previous = text[index - 1]
     if _emoji_base(previous):
@@ -278,7 +283,7 @@ def scan_verdict(texts: Iterable[str]) -> tuple[str, tuple[str, ...]]:
 
 
 def egress_refusal(texts: Iterable[str]) -> dict[str, str] | None:
-    """The placeholder fields for text that must not leave the operator's machines.
+    """The placeholder fields for text that must not reach a connector audience.
 
     None means the text may leave. A refusal names one rule id and never the
     text. A refusal for the private class alone carries ``PRIVATE_CODE``.

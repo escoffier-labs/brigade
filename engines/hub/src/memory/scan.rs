@@ -10,8 +10,9 @@ pub enum Scan {
     },
     /// Stored as `private`: the operator's own infrastructure and contact
     /// details. Accepted, searchable, raised by import and loaded into local
-    /// prompts. Refused on every path that leaves the operator's machines,
-    /// with [`PRIVATE_CODE`] when nothing worse was found (S18 amendment).
+    /// prompts, whose harness providers are inside the boundary. Refused on
+    /// every path to a connector audience, with [`PRIVATE_CODE`] when nothing
+    /// worse was found (S18 amendment).
     Private {
         ruleset: String,
         rules: Vec<String>,
@@ -126,9 +127,9 @@ pub fn bundled() -> std::sync::Arc<dyn Scanner> {
 
 /// The single prompt-load boundary for native memory surfaces. Callers pass
 /// only the exact fields they intend to inject. No text survives a finding.
-/// `egress` is true when the hit leaves the operator's machines (a connector
+/// `egress` is true when the hit goes to a connector audience (a connector
 /// push). Private text then gets a placeholder with [`PRIVATE_CODE`]. A local
-/// prompt load keeps it.
+/// prompt load keeps it, minus U+034F and U+200C.
 pub fn prompt_hit(
     scanner: &dyn Scanner,
     card_id: &str,
@@ -163,7 +164,27 @@ pub fn prompt_hit(
         Some(rule) => {
             serde_json::json!({"card_id": card_id, "blocked": rule, "code": PRIVATE_CODE})
         }
-        None => hit,
+        None => {
+            let mut hit = hit;
+            strip_render(&mut hit);
+            hit
+        }
+    }
+}
+
+/// U+034F and U+200C scan private, so their text loads into local prompts.
+/// Stored bytes and content hashes keep them. The rendered hit drops them, so
+/// a mix of the two cannot carry hidden bits into a model's prompt.
+pub const RENDER_STRIPPED: [char; 2] = ['\u{34f}', '\u{200c}'];
+
+fn strip_render(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(s) if s.contains(&RENDER_STRIPPED[..]) => {
+            s.retain(|c| !RENDER_STRIPPED.contains(&c));
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_render),
+        serde_json::Value::Object(map) => map.values_mut().for_each(strip_render),
+        _ => {}
     }
 }
 
@@ -225,9 +246,11 @@ mod native {
             0x2600..=0x27BF | 0x2934..=0x2935 | 0x2B00..=0x2BFF | 0x3030 | 0x303D |
             0x3297 | 0x3299 | 0x1F000..=0x1F2FF | 0x1F300..=0x1FAFF)
     }
-    /// A variation selector right after an emoji base, or a keycap's U+FE0F.
+    /// U+FE0E or U+FE0F right after an emoji base, or a keycap's U+FE0F.
+    /// U+FE00 to U+FE0D pick no presentation and would hide data after
+    /// every visible symbol, so they block.
     fn selector_exempt(previous: Option<char>, c: char, next: Option<char>) -> bool {
-        previous.is_some_and(emoji_base)
+        (matches!(c, '\u{fe0e}' | '\u{fe0f}') && previous.is_some_and(emoji_base))
             || (c == '\u{fe0f}'
                 && previous.is_some_and(|p| matches!(p, '#' | '*' | '0'..='9'))
                 && next == Some('\u{20e3}'))

@@ -59,7 +59,14 @@ def query_from_cwd(cwd: Path, *, memory_root: Path | None = None) -> str:
     return " ".join(terms) if terms else GENERIC_WORKSPACE_QUERY
 
 
+# U+034F and U+200C scan private (memory_content_scan), so their cards load
+# into local prompts. Stored bytes keep them. A rendered recall line drops
+# them, so a mix of the two cannot carry hidden bits into the prompt.
+_RENDER_STRIPPED = dict.fromkeys(map(ord, "\u034f\u200c"))
+
+
 def _single_line(text: str) -> str:
+    text = text.translate(_RENDER_STRIPPED)
     return " ".join("".join(char if char.isprintable() else " " for char in text).split())
 
 

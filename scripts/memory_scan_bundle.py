@@ -14,8 +14,9 @@ DEST = Path(__file__).resolve().parents[1] / "src/brigade/guard/memory-rules.jso
 VERSION = "brigade-memory-scan.v6"
 
 # Hub memory only (S18 amendment, D24). These guard rules describe the
-# operator's own infrastructure and identity. Memory stores and uses such text
-# on the operator's machines and refuses it on every path that leaves them.
+# operator's own infrastructure and identity. Memory stores such text and loads
+# it into the operator's local harness prompts, and refuses it on every path to
+# a connector audience (Grok Bot, relays, public scopes, remote embedders).
 # The publication guard keeps each rule's own severity in guard/rules.py.
 PRIVATE_RULES = frozenset(
     {

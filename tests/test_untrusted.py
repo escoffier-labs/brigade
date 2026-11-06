@@ -1,4 +1,7 @@
 # tests/test_untrusted.py
+import json
+from pathlib import Path
+
 import pytest
 from brigade import untrusted, untrusted_cmd
 
@@ -63,6 +66,32 @@ def test_scan_flags_injection_phrases():
     assert sig.flagged is True
     assert sig.count >= 1
     assert sig.markers
+
+
+# Hub memory and `scan_untrusted` share the classic-injection pattern. These
+# fixture cases cover the exfil-tration orders and the threat-intel prose
+# that must stay clean, for every PROMPT_INJECTION_RE caller.
+_EXFIL_CASES = {
+    name: case
+    for name, case in json.loads(
+        (Path(__file__).parent / "fixtures" / "memory-scan-private.json").read_text(encoding="utf-8")
+    ).items()
+    if case["rules"] == ["classic-injection"] or name.startswith(("threat-intel-", "policy-"))
+}
+
+
+@pytest.mark.parametrize("name", sorted(_EXFIL_CASES))
+def test_scan_untrusted_matches_the_memory_exfil_cases(name):
+    case = _EXFIL_CASES[name]
+    text = "".join(case["parts"])
+    expected = case["verdict"] == "flagged"
+    assert bool(untrusted.PROMPT_INJECTION_RE.search(text)) is expected
+    rules = {hit.rule for hit in untrusted.scan_handoff_injection_heuristics(text)}
+    assert ("classic-injection" in rules) is expected
+    # The lint keeps its own benign markers: a line naming an "example"
+    # domain reports at info severity, as it did before bundle v6.
+    if "example" not in text:
+        assert untrusted.scan_untrusted(text).flagged is expected
 
 
 @pytest.mark.parametrize(

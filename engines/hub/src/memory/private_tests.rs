@@ -269,6 +269,59 @@ async fn private_cards_load_into_local_prompts_and_never_push() {
     assert_eq!(ids, ["clean"]);
 }
 
+/// U+034F and U+200C stay in the stored bytes and hash, and never reach a
+/// rendered prompt hit.
+#[cfg(feature = "memory-scan")]
+#[tokio::test]
+async fn private_joiners_are_stripped_from_rendered_prompt_hits() {
+    let h = Hub::with(scan::bundled(), None);
+    let text = "---\ntitle: release\u{34f} check\u{200c}list\ndescription: steps\u{200c}\u{34f}\u{200c} here\n---\nrelease checklist body\n";
+    let r = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"import","scope":"fleet","card_id":"joiners","text":text,"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{:?}", r.body);
+    assert_eq!(
+        scan_state(&h, "joiners"),
+        ("private".into(), "private".into())
+    );
+    let prompt = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"search","query":"release checklist","query_source":"prompt","min_seq":1}),
+        )
+        .await;
+    let hit = &prompt.body["matches"][0];
+    assert_eq!(hit["card_id"], "joiners", "{:?}", prompt.body);
+    assert_eq!(hit["title"], "release checklist");
+    assert_eq!(hit["summary"], "steps here");
+    let rendered = hit.to_string();
+    assert!(!rendered.contains(&scan::RENDER_STRIPPED[..]), "{rendered}");
+    // The stored revision and its hash still hold both characters.
+    let c = Connection::open(h.memory()).unwrap();
+    let (hash, bytes): (String, Vec<u8>) = c
+        .query_row(
+            "SELECT c.content_hash, b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.card_id='joiners'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(bytes, text.as_bytes());
+    assert_eq!(hit["content_hash"], hash.as_str());
+    let explicit = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"search","query":"release checklist","min_seq":1}),
+        )
+        .await;
+    assert_eq!(
+        explicit.body["matches"][0]["title"],
+        "release\u{34f} check\u{200c}list"
+    );
+}
+
 fn v1_file(path: &std::path::Path) -> Connection {
     let c = Connection::open(path).unwrap();
     let v1 = schema::ddl()
@@ -293,6 +346,27 @@ fn v1_file(path: &std::path::Path) -> Connection {
     ))
     .unwrap();
     c
+}
+
+/// A hub that read version 1 before another process migrated the file skips
+/// the rebuild once it holds the write lock. A step still pending applies.
+#[test]
+fn a_step_another_process_applied_is_skipped() {
+    let dir = std::env::temp_dir().join(format!("s18-step-{}", super::ids::mint(0)));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("memory.db");
+    let late = v1_file(&path);
+    let first = Connection::open(&path).unwrap();
+    schema::migrate(&first, 0).unwrap();
+    // The SQL would fail if it ran, so success proves the step was skipped.
+    schema::step(&late, "SELECT no_such_function()", 2).unwrap();
+    assert!(schema::step(&late, "SELECT no_such_function()", 3).is_err());
+    let version: i64 = late
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+    drop((late, first));
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]

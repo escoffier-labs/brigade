@@ -1587,8 +1587,17 @@ fn s18_review_invisible_policy_and_ignorable_stripping() {
             failures.push(format!("U+{code:X} hid injection"));
         }
     }
-    for text in ["☀\u{fe0f}", "😀\u{fe00}", "\u{feff}ordinary text"] {
+    for text in ["☀\u{fe0f}", "😀\u{fe0e}", "\u{feff}ordinary text"] {
         assert!(matches!(scanner.scan(text), Scan::Clean { .. }), "{text:?}");
+    }
+    // Only U+FE0E and U+FE0F pick a presentation. The rest block after a base.
+    for base in ['😀', '→'] {
+        for code in 0xFE00..=0xFE0D {
+            let text = format!("{base}{}", char::from_u32(code).unwrap());
+            if !matches!(scanner.scan(&text), Scan::Blocked { .. }) {
+                failures.push(format!("{base} U+{code:X} did not block"));
+            }
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

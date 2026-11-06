@@ -229,11 +229,20 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     Ok(())
 }
 
-fn step(c: &Connection, sql: &str, version: i64) -> rusqlite::Result<()> {
+/// Apply one migration step unless another process already recorded it.
+/// The version is read again under the write lock: two hubs opening the same
+/// older file at once rebuild it once.
+pub(super) fn step(c: &Connection, sql: &str, version: i64) -> rusqlite::Result<()> {
     c.execute_batch("BEGIN IMMEDIATE")?;
     let applied = c
-        .execute_batch(sql)
-        .and_then(|()| c.pragma_update(None, "user_version", version))
+        .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+        .and_then(|current| {
+            if current >= version {
+                return Ok(());
+            }
+            c.execute_batch(sql)
+                .and_then(|()| c.pragma_update(None, "user_version", version))
+        })
         .and_then(|()| c.execute_batch("COMMIT"));
     if applied.is_err() {
         let _ = c.execute_batch("ROLLBACK");
