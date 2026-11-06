@@ -5,7 +5,7 @@ use base64::Engine;
 use serde_json::json;
 use std::sync::Arc;
 
-fn setup(h: &mut Hub) -> String {
+pub(super) fn setup(h: &mut Hub) -> String {
     setup_at(h, "http://127.0.0.1:1/api/embed")
 }
 fn setup_at(h: &mut Hub, endpoint: &str) -> String {
@@ -50,7 +50,7 @@ async fn command(h: &Hub, raw: Json) -> Reply {
     raw["client_event_id"] = json!(h.id());
     h.call(ADMIN_TOKEN, raw).await
 }
-fn encoded(v: &[f32]) -> String {
+pub(super) fn encoded(v: &[f32]) -> String {
     base64::engine::general_purpose::STANDARD
         .encode(v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<_>>())
 }

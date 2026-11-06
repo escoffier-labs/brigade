@@ -3,7 +3,9 @@
 //! that opens only to a grant naming it.
 use super::Reply;
 use super::auth::RIGHTS;
-use super::scan::Scan;
+use super::embedding::LEASE_MS;
+use super::embedding_tests::{encoded, setup};
+use super::scan::{self, Scan};
 use super::tests::{ADMIN_TOKEN, AGENT_TOKEN, Fixed, Hub, NODE_TOKEN, code};
 use serde_json::{Value as Json, json};
 use std::sync::Arc;
@@ -296,4 +298,91 @@ async fn the_admin_needs_no_grant_and_grants_name_one_collection() {
     }
     let named = grant(&h, "node-1", VAULT, json!(["read"])).await;
     assert_eq!(named.body["grant"]["scope"], VAULT, "{named:?}");
+}
+
+/// One embed lease once every earlier lease has expired, so each call sees
+/// every job that is still waiting. Returns the reply and its sorted hashes.
+async fn lease(h: &Hub, token: &str, embedder: &str) -> (Reply, Vec<String>) {
+    h.set_clock(h.now() + LEASE_MS + 1);
+    let reply = h
+        .call(
+            token,
+            json!({"action":"embed_lease","embedder_id":embedder,"max":4,"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{reply:?}");
+    let mut hashes: Vec<String> = reply.body["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["content_hash"].as_str().unwrap().to_string())
+        .collect();
+    hashes.sort();
+    (reply, hashes)
+}
+
+#[tokio::test]
+async fn embed_leases_skip_a_collection_until_a_grant_names_it() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let embedder = setup(&mut h);
+    let vault_text = "vault rotation body";
+    let mut hashes = Vec::new();
+    for (scope, card, text) in [
+        (VAULT, "vault-note", vault_text),
+        ("repo:example/one", "repo-note", "repo rotation body"),
+    ] {
+        let put = h.put(ADMIN_TOKEN, scope, card, None, text).await;
+        assert_eq!(put.status, 201, "{put:?}");
+        hashes.push(
+            put.body["event"]["content_hash"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let (vault, repo) = (hashes[0].clone(), hashes[1].clone());
+    // `*` and `repo:*` with `embed` lease the repository card, never the
+    // collection's, for a node and a message principal alike.
+    for principal in ["node-1", "agent:dot"] {
+        for pattern in ["*", "repo:*"] {
+            let g = grant(&h, principal, pattern, json!(["embed"])).await;
+            assert_eq!(g.status, 200, "{g:?}");
+        }
+    }
+    for token in [NODE_TOKEN, AGENT_TOKEN] {
+        let (reply, leased) = lease(&h, token, &embedder).await;
+        assert_eq!(leased, vec![repo.clone()], "{token}");
+        assert!(!reply.body.to_string().contains(vault_text), "{token}");
+    }
+    // An embed grant naming the collection opens it to that principal only.
+    let named = grant(&h, "node-1", VAULT, json!(["embed"])).await;
+    assert_eq!(named.status, 200, "{named:?}");
+    let (_, agent) = lease(&h, AGENT_TOKEN, &embedder).await;
+    assert_eq!(agent, vec![repo.clone()]);
+    let (reply, leased) = lease(&h, NODE_TOKEN, &embedder).await;
+    let mut both = vec![vault.clone(), repo];
+    both.sort();
+    assert_eq!(leased, both);
+    // The lease holder completes the collection card's vector.
+    let vectors: Vec<_> = leased
+        .iter()
+        .map(|hash| json!({"content_hash": hash, "vector": encoded(&[1.0, 0.0])}))
+        .collect();
+    let submit = h
+        .call(
+            NODE_TOKEN,
+            json!({"action":"embed_submit","lease_id":reply.body["lease_id"],
+                   "model_digest":"fake-digest","vectors":vectors,"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(submit.status, 200, "{submit:?}");
+    let stored: i64 = rusqlite::Connection::open(h.memory())
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM memory_vectors WHERE content_hash=?1",
+            [&vault],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, 1);
 }
