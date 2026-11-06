@@ -634,6 +634,23 @@ def test_a_read_only_credential_cannot_plan_without_the_scope_read_grant(hub, tm
     assert code == 2 and "needs a read grant on repo:test/app" in err and hub.imports() == []
 
 
+def test_a_collection_scope_plans_and_imports_only_with_a_grant_naming_it(hub, tmp_path, capsys):
+    vault = make_vault(tmp_path / "vault", VAULT)
+    collection = "collection:vault/cerebro"
+    target = workspace(tmp_path / "ws", mode="sync")
+    base = ["memory", "hub", "import", "--target", str(target), "--json", "--yes"]
+    for grants in (None, {"*", "fleet"}):  # a node's defaults, then a wildcard grant
+        hub.grants["node-1"] = grants
+        code, _, err = run([*base, "--scope", collection, str(vault)], capsys)
+        assert code == 2 and f"needs a read grant on {collection}" in err and hub.imports() == []
+    hub.grants["node-1"] = {collection}
+    code, out, _ = run([*base, "--scope", collection, str(vault)], capsys)
+    assert code == 0 and len(hub.live(collection)) == 3, out
+    assert {c["scope"] for c in hub.imports()} == {collection}
+    code, _, err = run([*base, "--scope", "collection:*", str(vault)], capsys)
+    assert code == 2 and "import needs --scope" in err
+
+
 def test_refusals_are_reported_per_note_and_the_run_continues(hub, tmp_path, capsys):
     vault = make_vault(tmp_path / "vault", {"a.md": "# A\n", "b.md": "# B\n", "c.md": "# C\n"})
     retry = {"error": "scan unavailable", "code": "memory_scan_unavailable", "retryable": True}

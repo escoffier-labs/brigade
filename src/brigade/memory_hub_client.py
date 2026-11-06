@@ -4,7 +4,7 @@ A workspace opts in through a `[hub]` table in `.brigade/memory-care.toml`:
 
     [hub]
     mode = "read"                       # off (default), read or sync
-    scope = "repo:me/app"               # where `sync` publishes; fleet, repo:<id> or principal:<id>
+    scope = "repo:me/app"               # where `sync` publishes; fleet, repo:<id>, collection:<name> or principal:<id>
     read_scopes = ["repo:me/app"]       # what search, card reads and the replica may use; default [scope]
     replica_max_mb = 50                 # cap on the replica's heads.json
 
@@ -145,11 +145,16 @@ def refuse_admin(status_body: dict[str, Any]) -> dict[str, Any]:
 
 
 def valid_scope(scope: object) -> bool:
+    """`fleet`, `repo:<identity>`, `collection:<name>` or `principal:<id>`, as the hub accepts them.
+
+    A collection name follows the repository identity rule. Node tokens get no
+    default access to a collection: only a grant naming it opens it.
+    """
     if not isinstance(scope, str):
         return False
     if scope == "fleet":
         return True
-    for prefix in ("repo:", "principal:"):
+    for prefix in ("repo:", "collection:", "principal:"):
         if scope.startswith(prefix):
             rest = scope[len(prefix) :]
             return 0 < len(rest) <= 200 and all(33 <= ord(c) <= 126 and c not in '*"\\' for c in rest)
@@ -199,7 +204,8 @@ def _read_scopes(table: dict[str, Any], scope: str | None) -> tuple[str, ...]:
         return (scope,) if scope else ()
     if not isinstance(raw, list) or not 1 <= len(raw) <= READ_SCOPES_MAX or not all(valid_scope(item) for item in raw):
         raise HubConfigError(
-            f"[hub] read_scopes must be a list of 1 to {READ_SCOPES_MAX} scopes: fleet, repo:<identity> or principal:<id>"
+            f"[hub] read_scopes must be a list of 1 to {READ_SCOPES_MAX} scopes: "
+            "fleet, repo:<identity>, collection:<name> or principal:<id>"
         )
     return tuple(dict.fromkeys(raw))
 
@@ -370,7 +376,7 @@ def load_settings(target: Path, *, fleet: dict[str, str] | None = None) -> HubSe
     mode = hub_mode(target)
     scope = table.get("scope")
     if scope is not None and not valid_scope(scope):
-        raise HubConfigError("[hub] scope must be fleet, repo:<identity> or principal:<id>")
+        raise HubConfigError("[hub] scope must be fleet, repo:<identity>, collection:<name> or principal:<id>")
     if mode == "sync" and scope is None:
         raise HubConfigError('[hub] mode = "sync" needs a scope to publish into')
     read_scopes = _read_scopes(table, scope)

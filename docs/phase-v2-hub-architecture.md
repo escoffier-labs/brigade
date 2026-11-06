@@ -1583,6 +1583,9 @@ writes the `fleet` scope and the `repo:` scopes, because nodes are operator
 machines. A message principal (a cloud agent) has no memory grant until the
 admin adds one with the `grant` action, and the S23 and S26 runbooks add the
 grants Dot, Duet and Grok Bot need. The admin token holds every grant.
+A `collection:<name>` scope (#2329) holds an imported note collection, such
+as an Obsidian vault. It is no node's default, the `*` and `repo:*` grants
+never match it, and only a grant on the exact scope opens it.
 
 ### Event schema
 
@@ -1595,7 +1598,7 @@ grants Dot, Duet and Grok Bot need. The admin token holds every grant.
 | `client_event_id` | text | required on every write action. See [Idempotency](#idempotency) |
 | `kind` | enum | `card.put`, `card.retire`, `card.trust`, `card.import`, `evidence.attach`, `handoff.submit`, `proposal.open`, `proposal.decide`, `proposal.apply`, `proposal.rollback`, `grant.change`, `recall.capture` |
 | `principal` | text | taken from the credential, never from the body |
-| `scope` | text | `fleet`, `repo:<repo_identity>`, or `principal:<name>` (visible to that principal and the admin only). Part of card identity |
+| `scope` | text | `fleet`, `repo:<repo_identity>`, `collection:<name>` (visible only through a grant naming it), or `principal:<name>` (visible to that principal and the admin only). Part of card identity |
 | `card_id` | text | `[a-z0-9][a-z0-9._-]{0,127}`, from the card's front matter `id` or its file stem |
 | `revision` | integer or null | the card's new revision (equal to `seq`) for events that change a head |
 | `base_revision` | integer or null | compare-and-set precondition. Null creates a card. A revival names the retirement's revision |

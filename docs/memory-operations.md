@@ -35,12 +35,35 @@ A workspace can read hub memory on a Rust hub that serves `POST /memory`. The mo
 ```toml
 [hub]
 mode = "read"                  # off (the default), read or sync
-scope = "repo:me/app"          # sync publishes here: fleet, repo:<identity> or principal:<id>
+scope = "repo:me/app"          # sync publishes here: fleet, repo:<identity>, collection:<name> or principal:<id>
 read_scopes = ["repo:me/app"]  # the only scopes search, card reads and the replica use (default [scope])
 replica_max_mb = 50            # cap on the replica's heads.json
 ```
 
 `read` and `sync` need `scope` or `read_scopes`. Every hub search and card read names the read scopes, so a credential that can read more, such as one with a `principal:` grant, still answers only from them. Dot and Duet read through the same commands and get the same limit.
+
+### Scopes and default access
+
+A hub scope is part of a card's identity. There are four forms:
+
+| Scope | Holds | Node token default | Matched by `*` | Matched by `repo:*` |
+|---|---|---|---|---|
+| `fleet` | cards every agent reads | read and write | yes | no |
+| `repo:<identity>` | one repository's cards | read and write | yes | yes |
+| `collection:<name>` | an imported note collection, such as an Obsidian vault | none | no | no |
+| `principal:<id>` | one principal's private cards | read and write on its own only | no | no |
+
+A collection name follows the repository identity rule: 1 to 200 printable ASCII characters with no space, `*`, `"` or `\`, so `collection:vault/cerebro` is valid and `collection:*` is not. A message principal (a cloud agent) gets no default on any scope. The admin token reads and writes every scope.
+
+Only a grant naming the exact collection scope opens it, for the rights that grant lists (`read`, `write`, `import`, `embed` and the rest). Neither the node defaults nor a `*` or `repo:*` grant reach it, so enrolling another node never exposes an imported collection. Until a grant names it, a collection's cards are left out of that credential's search results, its `log` page and the `readable_scopes` that `status` reports, and a `card`, `put` or `import` naming the scope is refused with 403 `memory_grant_missing`. A pull-mode embed worker needs an `embed` grant naming the collection, or the collection's cards are never leased to it.
+
+Grants are set with the hub's admin-only `grant` action on `POST /memory`. A grant replaces the rights the principal held on that scope, and an empty `rights` list removes the grant. For example, to let one node read and import the vault:
+
+```json
+{"action": "grant", "principal": "node-1", "scope": "collection:vault/cerebro", "rights": ["import", "read"], "client_event_id": "<26-character time-ordered id>"}
+```
+
+A workspace that reads the collection lists it in `read_scopes`, and `memory hub import --scope collection:vault/cerebro` imports into it once the credential holds `read` and `import` there.
 
 By default the hub URL comes from `[fleet] hub_url` and the credential is this machine's node token (`BRIGADE_FLEET_NODE_TOKEN` or `[fleet] node_token_file`). Memory can use a different hub than fleet coordination. That choice is per user, in `~/.brigade/fleet.toml` (the file `[fleet]` lives in, or `$BRIGADE_HOME/fleet.toml` when `BRIGADE_HOME` is set), never in the workspace:
 

@@ -53,6 +53,7 @@ class FakeHub:
         self.drop_reply_once = False
         # Credentials: token to principal, and what each principal may read.
         # None means a node's defaults: fleet, every repo: scope and its own principal: scope.
+        # As on the hub, neither the defaults nor a "*" grant open a collection: scope.
         self.principals = {NODE_CREDENTIAL: "node-1", OTHER_CREDENTIAL: "node-2", ADMIN_CREDENTIAL: "hub:admin"}
         self.grants: dict[str, set[str] | None] = {"node-1": None, "node-2": None, "hub:admin": {"*"}}
         self.who = ""
@@ -94,7 +95,8 @@ class FakeHub:
         grants = self.grants.get(self.who)
         if grants is None:
             return scope == "fleet" or scope.startswith("repo:") or scope == f"principal:{self.who}"
-        return "*" in grants or scope in grants
+        wildcard = "*" in grants and (self.who == "hub:admin" or not scope.startswith("collection:"))
+        return wildcard or scope in grants
 
     def reads_anything(self) -> bool:
         grants = self.grants.get(self.who)
@@ -353,6 +355,24 @@ def test_config_errors_are_specific(tmp_path):
         hubc.load_settings(target, fleet={})
     (target / ".brigade" / "memory-care.toml").write_text('[hub]\nmode = "read"\nscope = "nowhere"\n', encoding="utf-8")
     with pytest.raises(hubc.HubConfigError, match="scope must be"):
+        hubc.load_settings(target, fleet={})
+
+
+def test_collection_scopes_validate_like_repo_scopes(tmp_path):
+    collection = "collection:vault/cerebro"
+    assert hubc.valid_scope(collection) and hubc.valid_scope("collection:" + "n" * 200)
+    for bad in ("collection:", "collection:*", "collection:a b", 'collection:q"', "collection:b\\s", "collection"):
+        assert not hubc.valid_scope(bad), bad
+    assert not hubc.valid_scope("collection:" + "n" * 201)
+    target = workspace(tmp_path, mode="off", scope=collection, read_scopes=(collection, "fleet"))
+    loaded = hubc.load_settings(target, fleet={})
+    assert (loaded.scope, loaded.read_scopes) == (collection, (collection, "fleet"))
+    config = target / ".brigade" / "memory-care.toml"
+    config.write_text('[hub]\nmode = "read"\nscope = "collection:*"\n', encoding="utf-8")
+    with pytest.raises(hubc.HubConfigError, match="collection:<name>"):
+        hubc.load_settings(target, fleet={})
+    config.write_text('[hub]\nmode = "read"\nread_scopes = ["collection:"]\n', encoding="utf-8")
+    with pytest.raises(hubc.HubConfigError, match="read_scopes"):
         hubc.load_settings(target, fleet={})
 
 

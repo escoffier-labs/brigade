@@ -112,7 +112,7 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
                     Some(s) => scopes.push(s.to_string()),
                     None => {
                         return Err(invalid(
-                            "scopes must name fleet, repo:<identity> or principal:<id>",
+                            "scopes must name fleet, repo:<identity>, collection:<name> or principal:<id>",
                         ));
                     }
                 }
