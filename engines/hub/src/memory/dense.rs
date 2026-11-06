@@ -132,7 +132,7 @@ pub struct Index {
     completed: tokio::sync::Notify,
     #[cfg(test)]
     gate: Mutex<Option<Arc<Gate>>>,
-    /// Test only: the next refresh sleeps this long before it reads.
+    /// Test only: the next first load sleeps this long before it scans.
     #[cfg(test)]
     load_delay: Mutex<Option<Duration>>,
 }
@@ -304,29 +304,60 @@ impl Index {
         }
         Ok(next)
     }
+    /// The first load of one embedder. It scans every vector row, so it runs
+    /// without `publication`: the writer's commit path takes that lock, and a
+    /// retry must not park every write and reply for the length of the scan.
+    /// Only the install holds it, after the epoch check and the tail replay.
+    fn load_first(
+        self: &Arc<Self>,
+        db: &Connection,
+        id: &str,
+        dimensions: usize,
+    ) -> rusqlite::Result<Arc<Matrix>> {
+        let epoch = self.epoch.load(Ordering::SeqCst);
+        let heads = Self::heads(db)?;
+        #[cfg(test)]
+        if let Some(delay) = self.load_delay.lock().unwrap().take() {
+            std::thread::sleep(delay);
+        }
+        let base = Self::load(db, id, dimensions, heads)?;
+        let _publication = self.publication.lock().unwrap();
+        if let Some(installed) = self.current(id) {
+            return Ok(installed);
+        }
+        if self.epoch.load(Ordering::SeqCst) != epoch {
+            // A mode switch or drop ran during the scan. Fail so the caller
+            // retries against the current configuration.
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let next = Arc::new(Self::delta(db, id, &base)?);
+        self.matrices
+            .write()
+            .unwrap()
+            .insert(id.into(), next.clone());
+        if next.needs_rebuild() {
+            self.rebuild(id, next.clone());
+        }
+        Ok(next)
+    }
     pub fn refresh(
         self: &Arc<Self>,
         db: &Connection,
         id: &str,
         dimensions: usize,
     ) -> rusqlite::Result<Arc<Matrix>> {
-        #[cfg(test)]
-        if let Some(delay) = self.load_delay.lock().unwrap().take() {
-            std::thread::sleep(delay);
-        }
-        let _publication = self.publication.lock().unwrap();
-        let current = self.current(id);
         // The first load installs a matrix even when it holds no row, so
         // "no matrix" always means "no load has succeeded yet".
-        let first = current.is_none();
-        let old = current.unwrap_or_else(|| {
-            Arc::new(Matrix {
-                dimensions,
-                ..Matrix::default()
-            })
-        });
+        if self.current(id).is_none() {
+            return self.load_first(db, id, dimensions);
+        }
+        let _publication = self.publication.lock().unwrap();
+        let Some(old) = self.current(id) else {
+            // Dropped between the check and the lock. The next load installs.
+            return Err(rusqlite::Error::InvalidQuery);
+        };
         let next = Self::delta(db, id, &old)?;
-        if !first && next.log_seq == old.log_seq && next.indexed_seq == old.indexed_seq {
+        if next.log_seq == old.log_seq && next.indexed_seq == old.indexed_seq {
             if old.needs_rebuild() {
                 self.rebuild(id, old.clone());
             }
@@ -343,10 +374,14 @@ impl Index {
         Ok(next)
     }
     /// Called by the memory writer only after releasing both write locks.
+    /// With no matrix installed it does nothing: the first load belongs to
+    /// `start_retrieval` and the scheduler's retry, never to the writer thread.
     pub fn after_commit(self: &Arc<Self>, db: &Connection) {
         let active = self.active.read().unwrap().clone();
         if let Some((id, dimensions)) = active {
-            let _ = self.refresh(db, &id, dimensions);
+            if self.current(&id).is_some() {
+                let _ = self.refresh(db, &id, dimensions);
+            }
         }
     }
     fn rebuild(self: &Arc<Self>, id: &str, captured: Arc<Matrix>) {

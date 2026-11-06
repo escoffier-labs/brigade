@@ -351,6 +351,8 @@ async fn poison_document_is_retried_alone_then_parked_without_stalling_the_backf
     h.store.as_mut().unwrap().retrieval =
         Some(embedder::Runtime::new(config, scan::bundled()).unwrap());
     h.store.as_mut().unwrap().pull_embeddings = false;
+    // Startup loads the matrix before any write, as `start_retrieval` does.
+    h.store.as_ref().unwrap().load_dense().await;
     for (card, text) in [
         ("a", "apple notes"),
         ("b", "poison pill"),
@@ -531,6 +533,8 @@ async fn lease_that_parks_the_last_job_refreshes_coverage_without_a_later_write(
     let rules = Arc::new(Rules(std::sync::atomic::AtomicBool::new(false)));
     h.open(rules.clone(), None);
     let id = setup(&mut h);
+    // Startup loads the matrix before any write, as `start_retrieval` does.
+    h.store.as_ref().unwrap().load_dense().await;
     h.put(ADMIN_TOKEN, "fleet", "later", None, "changed rules later")
         .await;
     let before = h.store.as_ref().unwrap().retrieval_status();
@@ -557,6 +561,8 @@ async fn lease_that_parks_the_last_job_refreshes_coverage_without_a_later_write(
 async fn a_corpus_parked_by_embedding_failures_is_degraded_and_searches_lexically() {
     let mut h = Hub::with(scan::bundled(), None);
     let id = setup(&mut h);
+    // Startup loads the matrix before any write, as `start_retrieval` does.
+    h.store.as_ref().unwrap().load_dense().await;
     h.put(ADMIN_TOKEN, "fleet", "one", None, "searchable apple")
         .await;
     h.put(ADMIN_TOKEN, "fleet", "two", None, "searchable pear")
@@ -933,6 +939,8 @@ async fn scheduler_and_hybrid_use_real_http_and_respect_read_grants() {
     h.store.as_mut().unwrap().retrieval =
         Some(embedder::Runtime::new(config, scan::bundled()).unwrap());
     h.store.as_mut().unwrap().pull_embeddings = false;
+    // Startup loads the matrix before any write, as `start_retrieval` does.
+    h.store.as_ref().unwrap().load_dense().await;
     h.put(ADMIN_TOKEN, "fleet", "one", None, "apple fruit")
         .await;
     h.put(ADMIN_TOKEN, "repo:hidden/r", "two", None, "secret banana")
@@ -1345,4 +1353,60 @@ async fn status_is_not_hybrid_while_no_matrix_was_ever_installed() {
     let status = store.retrieval_status();
     assert_eq!(status["effective"], "hybrid", "{status}");
     assert_eq!(status["state"], "ok", "{status}");
+}
+
+#[tokio::test]
+async fn a_slow_dense_retry_does_not_stall_a_write_or_its_reply() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = restarted_with_one_vector(&mut h).await;
+    let store = h.store.as_ref().unwrap();
+    assert!(store.dense.current(&id).is_none());
+    let slow = std::time::Duration::from_millis(2500);
+    store.dense.delay_next_load(slow);
+    let started = std::time::Instant::now();
+    let write = async {
+        // Let the retry begin its scan before the write commits.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let reply = h
+            .put(ADMIN_TOKEN, "fleet", "two", None, "written during a retry")
+            .await;
+        (reply, started.elapsed())
+    };
+    let (loaded, (reply, waited)) = tokio::join!(store.load_dense(), write);
+    assert!(loaded);
+    assert_eq!(reply.status, 201, "{reply:?}");
+    assert!(
+        waited < slow / 2,
+        "the write waited {waited:?} behind a {slow:?} load"
+    );
+    // The commit that ran during the scan is replayed once the matrix exists.
+    assert_eq!(store.dense.current(&id).unwrap().rows, 1);
+}
+
+#[tokio::test]
+async fn an_empty_matrix_never_sends_query_text_to_the_endpoint() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = setup(&mut h);
+    let store = h.store.as_ref().unwrap();
+    // The endpoint is `127.0.0.1:1`, which refuses every connection.
+    assert!(store.load_dense().await);
+    assert_eq!(store.dense.current(&id).unwrap().rows, 0);
+    for _ in 0..2 {
+        let search = h
+            .call(ADMIN_TOKEN, json!({"action": "search", "query": "apple"}))
+            .await;
+        assert_eq!(search.status, 200, "{search:?}");
+        assert_ne!(
+            search.body["retrieval"]["reason"], "embedder-unavailable",
+            "{search:?}"
+        );
+        assert_ne!(
+            search.body["retrieval"]["degraded"],
+            json!(true),
+            "{search:?}"
+        );
+    }
+    let status = store.retrieval_status();
+    assert_ne!(status["state"], "degraded", "{status}");
+    assert_ne!(status["reason"], "embedder-unavailable", "{status}");
 }

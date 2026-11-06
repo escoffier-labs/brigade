@@ -1092,6 +1092,12 @@ impl Store {
             if !self.coverage.read().unwrap().complete() {
                 return reply;
             }
+            // An empty corpus has nothing to rank. Sending the query text to
+            // the endpoint would cost a call, and a down endpoint would flip
+            // an empty hub to degraded.
+            if matrix.rows == 0 {
+                return reply;
+            }
             match runtime.query(&query).await {
                 Err(error) => {
                     reply.body["retrieval"]["mode"] = json!("lexical-fallback");

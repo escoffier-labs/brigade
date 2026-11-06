@@ -122,6 +122,13 @@ and `truncated` keep their lexical meaning. A failed embedding leaves the lexica
 available. Changing back to lexical and restarting leaves vectors on disk,
 and loads none of them.
 
+Status reports `dense-not-loaded` only before `start_retrieval` returns. After
+that, a matrix is installed or the load failed, so production status shows
+`dense-load-failed` when the load fails. A retry loads the matrix without
+holding the lock the writer needs, so a slow retry does not delay writes. An
+empty matrix answers searches from BM25 alone and never sends query text to the
+endpoint.
+
 Derived tables migrate the memory file from schema 1 to schema 2. Triggers
 on `memory_vectors` append to `memory_vector_log`, and the dense index
 replays only the log rows after its watermark. A commit that touches no
