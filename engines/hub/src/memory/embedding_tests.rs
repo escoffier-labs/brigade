@@ -1483,12 +1483,14 @@ async fn a_matrix_whose_rows_are_all_collected_reports_lexical_and_skips_the_end
     fill(&h, &id).await;
     let store = h.store.as_ref().unwrap();
     assert!(store.retrieval_status()["effective"] == "hybrid");
-    // Retiring the only card collects its vector. The matrix keeps the dead row.
+    // Retiring the only card collects its vector. The matrix keeps the dead row
+    // until a rebuild compacts it.
     let retire = command(&h, json!({"action": "retire", "scope": "fleet", "card_id": "one", "base_revision": rev(&put), "base_epoch": h.epoch().await})).await;
     assert_eq!(retire.status, 200, "{retire:?}");
     store.refresh_dense().await.unwrap();
-    let matrix = store.dense.current(&id).unwrap();
-    assert!(matrix.rows > 0 && !matrix.has_live_rows());
+    // A background compaction may already have emptied the matrix. Either
+    // form has no live row.
+    assert!(!store.dense.current(&id).unwrap().has_live_rows());
     let status = store.retrieval_status();
     assert_eq!(status["effective"], "lexical", "{status}");
     assert_eq!(status["state"], "ok", "{status}");
