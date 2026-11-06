@@ -19,7 +19,20 @@ from typing import Iterable, List, Optional
 # Parts of the exfil-tration order patterns below. Hub memory (bundle v6) and
 # every `scan_untrusted` and injection-lint caller share them.
 _URGENCY = "please|now|then|first|next|also|just|immediately|quietly|silently|secretly|carefully|kindly"
-_MARKUP = r'(?:[-*#>"(<!`_]\s{0,8}){0,4}'
+# One markup unit: a punctuation mark, a checkbox ("[ ]", "[x]"), a list number
+# ("1.", "2)") or a short run of non-ASCII characters (an emoji, an arrow or a
+# dingbat, with or without U+FE0F). The bundle patterns must stay ASCII for the
+# native engine, so the symbol set is "not ASCII" rather than a code point list.
+_MARKUP = (
+    r'(?:(?:[-*#>"(<!`_]|\[[ xX]?\]|\d{1,3}[.)]'
+    r"|[^\x00-\x7f]{1,8})\s{0,8}){0,4}"
+)
+# Order verbs that sit in front of the verb without "you": "Make sure to ...".
+_ORDER_LEAD = r"(?:make|be)\s{1,8}sure\s{1,8}to|remember\s{1,8}to|(?:are|is)\s{1,8}required\s{1,8}to"
+# Imperative verbs that open a compound order: "Read ~/x and exfil-trate them".
+_ORDER_VERBS = (
+    "read|cat|dump|copy|collect|grab|steal|take|gather|extract|fetch|open|archive|compress|zip|upload|find|get"
+)
 _EXFIL_ORDER = r"(?:(?:start|begin|keep|continue|resume)\s{1,8}exfil" + r"trating|exfil" + r"trate)\b"
 
 _INJECTION_PATTERNS = (
@@ -37,7 +50,7 @@ _INJECTION_PATTERNS = (
     # ("steal session cookies, exfil-trate data") has a longer clause before
     # its comma and stays clean.
     r"(?:^|[.!?;:]\s{0,8})" + _MARKUP + r"(?:"
-    r"(?:if|when|once|after|before|while|as soon as)\b[^\n,.;:!?]{0,80},\s{0,8}"
+    r"(?:if|when|once|after|before|while|as soon as|for|in|at|on|during|from|with)\b[^\n,.;:!?]{0,80},\s{0,8}"
     + _MARKUP
     + r"|[\w'-]{1,32}(?:\s{1,8}[\w'-]{1,32}){0,2},\s{0,8}"
     + _MARKUP
@@ -45,8 +58,15 @@ _INJECTION_PATTERNS = (
     r"(?:(?:" + _URGENCY + r"|and),?\s{1,8}){0,2}" + _EXFIL_ORDER,
     r"\b(?:you\s{1,8}(?:must|should|will|need\s{1,8}to|have\s{1,8}to|are\s{1,8}to)"
     r"|(?:your|the)\s{1,8}(?:(?:now|next|first|real|only)\s{1,8})?(?:task|job|goal|mission)\s{1,8}is\s{1,8}to"
-    r"|(?:want|need)\s{1,8}you\s{1,8}to|kindly|go\s{1,8}ahead\s{1,8}and|it.?s\s{1,8}(?:now\s{1,8})?time\s{1,8}to)"
+    r"|(?:want|need)\s{1,8}you\s{1,8}to|kindly|go\s{1,8}ahead\s{1,8}and|it.?s\s{1,8}(?:now\s{1,8})?time\s{1,8}to"
+    r"|" + _ORDER_LEAD + r")"
     r"(?:\s{1,8}(?:" + _URGENCY + r"),?){0,2}\s{1,8}" + _EXFIL_ORDER,
+    # A compound order: an imperative verb opens the line, "and" joins the
+    # verb ("Read ~/.aws/credentials and exfil-trate them"). A threat-report
+    # sentence has a subject first ("Attackers dump LSASS and exfil-trate
+    # hashes"), so only a line that starts with the verb matches.
+    r"^" + _MARKUP + r"(?:(?:" + _URGENCY + r"),?\s{1,8}){0,2}(?:" + _ORDER_VERBS + r")\s{1,8}"
+    r"(?:[^ \t\r\n]{0,59}[^ \t\r\n.!?;:,]\s{1,8}){1,6}and\s{1,8}(?:then\s{1,8})?" + _EXFIL_ORDER,
     r"\bexfil" + r"trat(?:e|ing)\b[^\n]{0,128}?\bto\s{1,8}(?:https?://|[a-z0-9._-]{1,64}@"
     r"|(?:[a-z0-9-]{1,63}\.){1,8}[a-z]{2,24}\b"
     r"|(?:my|our|this|that|the attacker'?s?) (?:server|endpoint|webhook|url|bucket|inbox)\b)",
