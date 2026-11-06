@@ -169,6 +169,75 @@ def test_worker_retries_a_refused_batch_alone_and_reports_the_bad_document(endpo
     assert failed["failures"] == [{"content_hash": "1".zfill(64), "reason": "embedder-rejected", "alone": True}]
 
 
+def test_worker_wrong_row_count_is_a_document_refusal_not_transient(monkeypatch, endpoint):
+    config, _ = endpoint
+    calls = []
+
+    def short_reply(cfg, texts, token):
+        calls.append(len(texts))
+        raise embed.DocumentRefused("invalid vector count", "vector-invalid")
+
+    monkeypatch.setattr(embed, "local_embed", short_reply)
+    client = Client(texts=("apple notes", "pear notes"))
+    assert embed.step(client, config, "fake-token") == (2, 0, False)
+    # The batch, then each document alone, each reported as tried alone.
+    assert calls == [2, 1, 1]
+    failed = dict(client.calls)["embed_failed"]
+    assert failed["failures"] == [
+        {"content_hash": f"{n:064x}", "reason": "vector-invalid", "alone": True} for n in range(2)
+    ]
+    assert "vector-invalid" not in embed.TRANSIENT_REASONS
+
+
+def test_worker_exchange_refuses_a_reply_with_the_wrong_row_count(endpoint):
+    config, _ = endpoint
+
+    class Response:
+        status = 200
+
+        def __init__(self, body):
+            self.body = body
+
+        def getheader(self, _name):
+            return None
+
+        def read1(self, _n):
+            body, self.body = self.body, b""
+            return body
+
+    class Conn:
+        sock = None
+
+        def __init__(self, body):
+            self.body = body
+
+        def connect(self):
+            self.sock = type("Sock", (), {"settimeout": lambda *_: None})()
+
+        def request(self, *_):
+            pass
+
+        def getresponse(self):
+            return Response(self.body)
+
+    for shape, body in (
+        ("api/embed", {"model_digest": "digest", "embeddings": [[3.0, 4.0]] * 2}),
+        ("v1/embeddings", {"model_digest": "digest", "data": [{"index": 0, "embedding": [3.0, 4.0]}]}),
+    ):
+        conn = Conn(json.dumps(body).encode())
+        with pytest.raises(embed.DocumentRefused) as exc:
+            embed._exchange(
+                conn,
+                "/",
+                b"{}",
+                "fake-token",
+                {**config, "shape": shape},
+                1 if shape == "api/embed" else 2,
+                lambda: 5.0,
+            )
+        assert exc.value.reason == "vector-invalid"
+
+
 def test_worker_endpoint_fault_releases_the_lease_without_a_document_reason(endpoint):
     config, seen = endpoint
     stopped = {**config, "endpoint": "http://127.0.0.1:1/api/embed", "allowlist": ["http://127.0.0.1:1/api/embed"]}

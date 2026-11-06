@@ -635,14 +635,14 @@ impl Runtime {
     }
     #[cfg(test)]
     pub fn reset_backoff(&self) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.lock();
         s.retry_at = Instant::now();
         s.quiet_until = Instant::now();
     }
     /// Whether a document request could start now. The scheduler checks
     /// this before it leases, so no lease waits out a backoff.
     pub fn documents_ready(&self) -> bool {
-        let s = self.state.lock().unwrap();
+        let s = self.lock();
         let now = Instant::now();
         !(s.document || s.probe || s.queries > 0 || now < s.quiet_until || now < s.retry_at)
     }

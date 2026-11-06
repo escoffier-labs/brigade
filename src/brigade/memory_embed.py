@@ -178,15 +178,18 @@ def _exchange(conn: Any, path: str, payload: bytes, token: str, config: dict, co
     header = response.getheader("x-model-digest")
     if digest != config["model_digest"] or (header is not None and header != digest):
         raise EndpointError("digest-mismatch", "digest-mismatch")
+    # A reply whose rows do not match the inputs one for one is refused as
+    # vector-invalid, as the hub does. That reason is not transient, so a
+    # document that keeps getting such replies backs off and parks.
     if config["shape"] == "api/embed":
         rows = data["embeddings"]
     else:
         indexed = data["data"]
         if sorted(r["index"] for r in indexed) != list(range(count)):
-            raise EndpointError("invalid vector order")
+            raise DocumentRefused("invalid vector order", "vector-invalid")
         rows = [r["embedding"] for r in sorted(indexed, key=lambda r: r["index"])]
     if len(rows) != count:
-        raise EndpointError("invalid vector count")
+        raise DocumentRefused("invalid vector count", "vector-invalid")
     result = []
     for row in rows:
         if len(row) != config["dimensions"] or not all(isinstance(x, (int, float)) and math.isfinite(x) for x in row):
