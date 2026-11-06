@@ -188,9 +188,10 @@ print(small, large, large / small, flush=True)
     small, large, ratio = map(float, result.stdout.split())
     assert large < 20, result.stdout
     # An 8x input step is about 8x when linear and about 64x when quadratic.
-    # The sorted span sweep measures about 8x locally, and the pre-memo engine
-    # measured 49x. 16 leaves 2x headroom for shared-runner noise.
-    assert ratio < 16, result.stdout
+    # 24 sits near their geometric midpoint, so shared-runner noise (16.9 seen
+    # on CI) passes while the pre-memo engine (49x) still fails. The sorted
+    # span sweep measures about 8x locally.
+    assert ratio < 24, result.stdout
 
 
 @pytest.mark.parametrize("action", ["allow", "warn", "block"])

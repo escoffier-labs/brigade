@@ -1419,8 +1419,9 @@ class _SpanSet:
 
     One detector rule emits spans in ascending order and ``expanded_end`` keeps
     them disjoint, so starts and ends both ascend and ``bisect`` finds the
-    overlapping run directly. A span that arrives out of order or overlapping
-    clears ``ordered`` and queries scan every span, as the pairwise check did.
+    overlapping run directly. A span that arrives out of order, overlapping or
+    inverted (``end < start``) clears ``ordered`` and queries scan every span,
+    as the pairwise check did.
     """
 
     __slots__ = ("starts", "ends", "tags", "ordered")
@@ -1435,7 +1436,7 @@ class _SpanSet:
         return bool(self.starts)
 
     def add(self, start: int, end: int, tag: str) -> None:
-        if self.ordered and self.ends and start < self.ends[-1]:
+        if self.ordered and (end < start or (self.ends and start < self.ends[-1])):
             self.ordered = False
         self.starts.append(start)
         self.ends.append(end)

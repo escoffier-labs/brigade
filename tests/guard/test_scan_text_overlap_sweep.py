@@ -11,8 +11,8 @@ import pytest
 
 from brigade.guard import engine
 from brigade.guard.engine import _SpanSet, _apply_edits, scan_text
-from brigade.guard.policy import load_policy
-from brigade.guard.types import TextEdit
+from brigade.guard.policy import Policy, load_policy
+from brigade.guard.types import Rule, TextEdit
 
 _REPO = Path(__file__).resolve().parents[2]
 _CATEGORIES = ["secret", "pii", "infrastructure", "tooling"]
@@ -57,19 +57,23 @@ def _reference_apply_edits(text, edits):
     return result
 
 
-def _random_spans(rng: random.Random, ordered: bool) -> list[tuple[int, int]]:
-    if ordered:
-        spans, cursor = [], rng.randint(0, 10)
-        while cursor < 220:
+_SPAN_MODES = ["ordered", "random", "sorted-then-random"]
+
+
+def _random_spans(rng: random.Random, mode: str) -> list[tuple[int, int]]:
+    """Spans that stay sorted and disjoint, arrive in any order, or do the first then the second."""
+    spans: list[tuple[int, int]] = []
+    if mode != "random":
+        cursor = rng.randint(0, 10)
+        while cursor < 400:
             start = cursor + rng.randint(0, 12)
             end = start + rng.randint(1, 25)
             spans.append((start, end))
             cursor = end + rng.randint(0, 3)
-        return spans
-    spans = []
-    for _ in range(rng.randint(5, 40)):
-        start = rng.randint(0, 220)
-        spans.append((start, start + rng.randint(1, 30)))
+    if mode != "ordered":
+        for _ in range(rng.randint(5, 40) if mode == "random" else rng.randint(1, 6)):
+            start = rng.randint(0, 400)
+            spans.append((start, start + rng.randint(1, 30)))
     return spans
 
 
@@ -85,7 +89,7 @@ def test_sweep_matches_pairwise_check_on_random_span_streams():
             snapshot = rng.random() < 0.2  # The private-key rule ignores its own earlier spans.
             claimed = _SpanSet()
             sets = tuple(occupied) if snapshot else (*occupied, claimed)
-            for start, end in _random_spans(rng, ordered=rng.random() < 0.7):
+            for start, end in _random_spans(rng, rng.choice(_SPAN_MODES)):
                 got = (
                     engine._precedence_blocks(start, end, category, is_root_path, sets, roots),
                     engine._root_blocks(start, end, category, roots),
@@ -107,7 +111,7 @@ def test_sweep_matches_pairwise_check_on_random_span_streams():
                 occupied.append(claimed)
                 seen["unordered_sets"] += not claimed.ordered
         for probe in range(60):
-            start = rng.randint(0, 200)
+            start = rng.randint(0, 400)
             end = start + rng.randint(0, 40)
             expected = any(
                 root_start <= start and end <= root_end
@@ -117,6 +121,26 @@ def test_sweep_matches_pairwise_check_on_random_span_streams():
             seen["enclosed"] += expected
     # The stream must exercise both outcomes, the ordered fast path and the fallback.
     assert all(seen.values()), seen
+
+
+def test_inverted_span_clears_the_ordered_fast_path():
+    rng = random.Random(7)
+    for first_inverted in (True, False):
+        spans = _SpanSet()
+        if not first_inverted:
+            spans.add(5, 10, "a")
+            assert spans.ordered
+        spans.add(20, 15, "b")
+        assert not spans.ordered
+        spans.add(30, 40, "c")
+        entries = list(zip(spans.starts, spans.ends, spans.tags, strict=True))
+        for _ in range(200):
+            start = rng.randint(0, 45)
+            end = start + rng.randint(0, 15)
+            assert list(spans.overlapping(start, end)) == [
+                entry for entry in entries if start < entry[1] and end > entry[0]
+            ]
+            assert spans.encloses(start, end) == any(s <= start and end <= e for s, e, _ in entries)
 
 
 def _reference_engine(monkeypatch):
@@ -167,10 +191,17 @@ def _snippets() -> list[str]:
         "-----BEGIN " + "PRIVATE KEY-----\n",
         "local" + "host:8080",
         "api_key = " + "k" * 24,
+        "/opt/fixture-tool/bin",
+        "KEYBLOCK-abc123",
         "plain words",
         "\n",
         " ",
     ]
+
+
+# Custom rules reuse built-in ids but are not the built-in rules, so the engine treats them as ordinary detectors.
+_CUSTOM_ROOT = Rule("root-path", "infrastructure", r"/opt/[A-Za-z0-9_./-]+", "[redacted-path]")
+_CUSTOM_PEM = Rule("private-key-block", "secret", r"KEYBLOCK-[A-Za-z0-9]+", "[redacted-key]")
 
 
 def _random_documents() -> list[str]:
@@ -182,10 +213,13 @@ def _random_documents() -> list[str]:
     return documents
 
 
-@pytest.mark.parametrize("policy_name", [None, "public-repo", "pr-draft"])
+@pytest.mark.parametrize("policy_name", [None, "public-repo", "pr-draft", "custom-root-and-key"])
 def test_scan_text_output_is_identical_to_the_pairwise_check(policy_name, monkeypatch):
     monkeypatch.setenv("BRIGADE_GUARD_BACKEND", "python")
-    policy = load_policy(_REPO / f"src/brigade/guard/policies/{policy_name}.json") if policy_name else None
+    if policy_name == "custom-root-and-key":
+        policy = Policy(custom_rules=[_CUSTOM_ROOT, _CUSTOM_PEM])
+    else:
+        policy = load_policy(_REPO / f"src/brigade/guard/policies/{policy_name}.json") if policy_name else None
     documents = _guard_corpora() + _random_documents()
     swept = [scan_text(text, policy=policy) for text in documents]
     assert sum(len(result.findings) for result in swept) > 200
@@ -193,6 +227,9 @@ def test_scan_text_output_is_identical_to_the_pairwise_check(policy_name, monkey
         _reference_engine(patched)
         pairwise = [scan_text(text, policy=policy) for text in documents]
     assert swept == pairwise
+    if policy_name == "custom-root-and-key":
+        custom_ids = {finding.rule_id for result in swept for finding in result.findings}
+        assert {"root-path", "private-key-block"} <= custom_ids
 
 
 def test_apply_edits_join_matches_per_edit_rebuild():
@@ -201,7 +238,7 @@ def test_apply_edits_join_matches_per_edit_rebuild():
     joined = rebuilt = 0
     for _ in range(400):
         edits = []
-        for start, end in _random_spans(rng, ordered=rng.random() < 0.6):
+        for start, end in _random_spans(rng, rng.choice(_SPAN_MODES)):
             end = min(end, len(text)) if rng.random() < 0.9 else start  # Some zero-width edits.
             edits.append(TextEdit(min(start, len(text)), end, rng.choice(["[x]", "", "<longer-replacement>"])))
         rng.shuffle(edits)
