@@ -128,22 +128,28 @@ pub fn valid_principal(s: &str) -> bool {
         && b.iter()
             .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(c))
 }
-/// `fleet`, `repo:<identity>` or `principal:<principal id>`.
+/// `fleet`, `repo:<identity>`, `collection:<name>` or `principal:<principal id>`.
+/// A collection name follows the repository identity rule, so neither form
+/// can spell a wildcard.
 pub fn valid_scope(s: &str) -> bool {
     if s == "fleet" {
         return true;
     }
-    if let Some(identity) = s.strip_prefix("repo:") {
-        return !identity.is_empty()
-            && identity.len() <= 200
-            && identity
+    if let Some(name) = s
+        .strip_prefix("repo:")
+        .or_else(|| s.strip_prefix("collection:"))
+    {
+        return !name.is_empty()
+            && name.len() <= 200
+            && name
                 .bytes()
                 .all(|c| c.is_ascii_graphic() && !b"*\"\\".contains(&c));
     }
     s.strip_prefix("principal:").is_some_and(valid_principal)
 }
 /// A grant names a scope, `repo:*` or `*`. `*` covers `fleet` and repository
-/// scopes, never another principal's private scope.
+/// scopes, never a `collection:` scope or another principal's private scope.
+/// A collection opens only to a grant on its exact scope.
 pub fn valid_grant_scope(s: &str) -> bool {
     s == "*" || s == "repo:*" || valid_scope(s)
 }
@@ -300,6 +306,21 @@ mod tests {
         assert!(valid_scope("principal:agent:dot") && valid_scope("principal:node-1"));
         assert!(!valid_scope("repo:*") && valid_grant_scope("repo:*"));
         assert!(!valid_scope("principal:unknown") && !valid_scope("other"));
+        // A collection name follows the repository identity rule.
+        assert!(valid_scope("collection:vault/cerebro") && valid_grant_scope("collection:notes"));
+        for bad in [
+            "collection:",
+            "collection:*",
+            "collection:a*b",
+            "collection:has space",
+            "collection:quote\"",
+            "collection:back\\slash",
+            "collection",
+        ] {
+            assert!(!valid_scope(bad) && !valid_grant_scope(bad), "{bad}");
+        }
+        assert!(valid_scope(&format!("collection:{}", "n".repeat(200))));
+        assert!(!valid_scope(&format!("collection:{}", "n".repeat(201))));
         assert_eq!(
             canonical(&serde_json::json!({"b":1,"a":[{"d":2,"c":"x"}]})),
             r#"{"a":[{"c":"x","d":2}],"b":1}"#

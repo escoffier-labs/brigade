@@ -149,7 +149,7 @@ def card_name(value: Any) -> str:
 
 
 def memory_scope(value: Any) -> str:
-    """A hub memory scope, as a search match reports it: fleet, repo:<identity> or principal:<id>."""
+    """A hub memory scope, as a search match reports it: fleet, repo:<identity>, collection:<name> or principal:<id>."""
     from ..memory_hub_client import valid_scope
 
     require(valid_scope(value))

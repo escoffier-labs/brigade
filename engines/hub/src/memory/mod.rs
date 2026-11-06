@@ -25,6 +25,8 @@ pub mod text;
 pub mod writer;
 
 #[cfg(test)]
+mod collection_tests;
+#[cfg(test)]
 mod embedder_tests;
 #[cfg(test)]
 mod lexical_tests;
@@ -847,7 +849,7 @@ impl Store {
             match (scope, card_id) {
                 (Some(s), Some(c)) => Ok((s.into(), c.into())),
                 (None, _) => Err(invalid(
-                    "scope must be fleet, repo:<identity> or principal:<id>",
+                    "scope must be fleet, repo:<identity>, collection:<name> or principal:<id>",
                 )),
                 _ => Err(invalid("card_id must match [a-z0-9][a-z0-9._-]{0,127}")),
             }
@@ -1264,7 +1266,7 @@ fn reads<T: ReadTx + ?Sized>(
                     for item in items {
                         let Some(scope) = item.as_str().filter(|s| ids::valid_scope(s)) else {
                             return Ok(invalid(
-                                "scopes must name fleet, repo:<identity> or principal:<id>",
+                                "scopes must name fleet, repo:<identity>, collection:<name> or principal:<id>",
                             ));
                         };
                         if readable.scope(scope)? {
@@ -1387,7 +1389,7 @@ fn reads<T: ReadTx + ?Sized>(
                     Some(s) => Some(s.to_string()),
                     None => {
                         return Ok(invalid(
-                            "scope must be fleet, repo:<identity> or principal:<id>",
+                            "scope must be fleet, repo:<identity>, collection:<name> or principal:<id>",
                         ));
                     }
                 },

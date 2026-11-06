@@ -105,8 +105,9 @@ pub fn still_valid<T: ReadTx + ?Sized>(
 
 fn defaults(credential: &Credential, scope: &str) -> &'static [&'static str] {
     // Enrolled nodes are operator machines: they read and write the fleet and
-    // repository scopes and their own private scope. A message principal holds
-    // only what the admin grants.
+    // repository scopes and their own private scope. A `collection:` scope is
+    // no one's default: an imported collection opens only to a grant naming
+    // it. A message principal holds only what the admin grants.
     match credential {
         Credential::Node { id, .. }
             if scope == "fleet"
@@ -139,9 +140,11 @@ fn grant_rows<T: ReadTx + ?Sized>(tx: &T, principal: &str) -> rusqlite::Result<G
         })
         .collect())
 }
-/// Whether a grant pattern covers a scope. `*` and `repo:*` never cover a
-/// private `principal:` scope; that needs a grant on the exact scope, and
-/// grants are only accepted on the holder's own private scope.
+/// Whether a grant pattern covers a scope. The wildcards cover only scopes a
+/// node already reads by default: `repo:*` the repository scopes, `*` those
+/// and `fleet`. Neither covers a private `principal:` scope or a `collection:`
+/// scope. Each of those needs a grant on the exact scope, and a `principal:`
+/// grant is only accepted on the holder's own private scope.
 fn covers(pattern: &str, scope: &str) -> bool {
     pattern == scope
         || (pattern == "repo:*" && scope.starts_with("repo:"))
@@ -287,5 +290,80 @@ mod tests {
                 "{scope}"
             );
         }
+    }
+
+    fn grants(rows: &str) -> Counting {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(&format!(
+            "CREATE TABLE memory_grants(principal TEXT, scope TEXT, rights TEXT);{rows}"
+        ))
+        .unwrap();
+        Counting {
+            db,
+            grant_reads: Cell::new(0),
+        }
+    }
+
+    #[test]
+    fn collection_scopes_open_only_to_a_grant_that_names_them() {
+        let node = Credential::Node {
+            id: "node-1".into(),
+            digest: "n".into(),
+        };
+        let agent = Credential::Principal {
+            id: "agent:dot".into(),
+            digest: "d".into(),
+        };
+        let all = RIGHTS.join(",");
+        let vault = "collection:vault/cerebro";
+        let right = |tx: &Counting, who: &Credential, scope: &str, r: &str| {
+            has_right(tx, who, Some(scope), r).unwrap()
+        };
+        let reads = |tx: &Counting, who: &Credential, scope: &str| {
+            let cached = Readable::new(tx, who).scope(scope).unwrap();
+            assert_eq!(cached, right(tx, who, scope, "read"), "{scope}");
+            cached
+        };
+
+        // No grant rows: a node keeps its fleet and repository defaults and
+        // gets nothing on a collection.
+        let none = grants("");
+        assert!(right(&none, &node, "fleet", "write") && reads(&none, &node, "repo:x"));
+        for r in RIGHTS {
+            assert!(!right(&none, &node, vault, r), "{r}");
+            assert!(!right(&none, &agent, vault, r), "{r}");
+        }
+        assert!(!reads(&none, &node, vault) && !reads(&none, &agent, vault));
+
+        // Wildcard grants carrying every right still never match a collection.
+        let wild = grants(&format!(
+            "INSERT INTO memory_grants VALUES
+               ('node-1','*','{all}'),('node-1','repo:*','{all}'),
+               ('agent:dot','*','{all}'),('agent:dot','repo:*','{all}');"
+        ));
+        for who in [&node, &agent] {
+            assert!(right(&wild, who, "repo:x", "import") && right(&wild, who, "fleet", "embed"));
+            for r in RIGHTS {
+                assert!(!right(&wild, who, vault, r), "{r}");
+            }
+            assert!(!reads(&wild, who, vault));
+        }
+
+        // A grant naming the collection opens exactly its rights, on exactly it.
+        let named = grants(&format!(
+            "INSERT INTO memory_grants VALUES
+               ('node-1','{vault}','import,read'),('agent:dot','{vault}','read');"
+        ));
+        assert!(reads(&named, &node, vault) && right(&named, &node, vault, "import"));
+        assert!(!right(&named, &node, vault, "write") && !right(&named, &node, vault, "embed"));
+        assert!(reads(&named, &agent, vault) && !right(&named, &agent, vault, "import"));
+        assert!(!reads(&named, &node, "collection:other"));
+        assert!(!reads(&named, &agent, "collection:vault"));
+
+        // The admin token needs no grant.
+        for r in RIGHTS {
+            assert!(right(&none, &Credential::Admin, vault, r), "{r}");
+        }
+        assert!(reads(&none, &Credential::Admin, vault));
     }
 }
