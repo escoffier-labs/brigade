@@ -163,7 +163,7 @@ def valid_card_id(card_id: object) -> bool:
 def read_config_text(target: Path) -> str | None:
     """The memory-care config text; None when absent. Raises OSError or UnicodeDecodeError as is."""
     try:
-        return (target / CONFIG_REL).read_text(encoding="utf-8")
+        return (target / CONFIG_REL).read_text(encoding="utf-8-sig")
     except FileNotFoundError:
         return None
 
