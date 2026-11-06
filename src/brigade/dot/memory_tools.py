@@ -14,7 +14,7 @@ from .contracts import MAX_CARD_FILE_BYTES, DotError, require
 from .hub_tools import BRIGADE_TIMEOUT, MAX_SMALL_CAPTURE
 from .process import CommandRunner, child_environment, child_path, parse_json_bytes
 from .profile import DOT, ConnectorProfile
-from .prompt_scan import blocked_rule
+from .prompt_scan import egress_refusal
 from .runtime_config import Runtime
 from .safe_state import private_directory, trusted_directory, redact_credentials
 from .state import utc_now
@@ -67,9 +67,9 @@ class MemoryTools:
                 continue
             item = {key: match.get(key) for key in keys}
             if self.profile.prompt_load_scan:
-                rule = blocked_rule(_card_texts(item))
-                if rule:
-                    matches.append({"card_id": _blocked_card_id(item), "blocked": rule})
+                refusal = egress_refusal(_card_texts(item))
+                if refusal:
+                    matches.append({"card_id": _blocked_card_id(item), **refusal})
                     continue
             item["content_trust"] = "untrusted"
             matches.append(item)
@@ -119,9 +119,9 @@ class MemoryTools:
         text = card["text"]
         if self.profile.prompt_load_scan:
             # The whole card is scanned, as for a local card.
-            rule = blocked_rule([text])
-            if rule:
-                return {"card_id": name, "blocked": rule}
+            refusal = egress_refusal([text])
+            if refusal:
+                return {"card_id": name, **refusal}
         chunk = text[offset : offset + CARD_CHUNK_CHARS]
         following = offset + len(chunk)
         source = value.get("source") if value.get("source") in {"hub", "replica"} else "hub"
@@ -173,9 +173,9 @@ class MemoryTools:
             return {"error": "card_unavailable", "name": name}
         if self.profile.prompt_load_scan:
             # The whole card is scanned, so no chunk boundary can split a hit.
-            rule = blocked_rule([text])
-            if rule:
-                return {"card_id": name, "blocked": rule}
+            refusal = egress_refusal([text])
+            if refusal:
+                return {"card_id": name, **refusal}
         chunk = text[offset : offset + CARD_CHUNK_CHARS]
         following = offset + len(chunk)
         return dict(

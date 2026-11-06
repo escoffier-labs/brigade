@@ -1526,7 +1526,6 @@ async fn s18_review_scan_copy_parity_refuses_imports() {
             "ｎｅｗ\u{3000}ｓｙｓｔｅｍ ｐｒｏｍｐｔ".to_string(),
             "role-override",
         ),
-        ("é10.0.0.1".to_string(), "private-ipv4"),
     ];
     for boundary in [
         "\r", "\r\n", "\n", "\u{b}", "\u{c}", "\u{1c}", "\u{1d}", "\u{1e}", "\u{85}", "\u{2028}",
@@ -1561,9 +1560,9 @@ async fn s18_review_scan_copy_parity_refuses_imports() {
 fn s18_review_invisible_policy_and_ignorable_stripping() {
     let scanner = scan::bundled();
     let mut failures = Vec::new();
+    // U+034F is private since v6 (private_tests covers it).
     for code in [
-        0xAD, 0x34F, 0x180E, 0xFFF9, 0xFFFA, 0xFFFB, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x200E,
-        0x200F, 0x61C,
+        0xAD, 0x180E, 0xFFF9, 0xFFFA, 0xFFFB, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x200E, 0x200F, 0x61C,
     ]
     .into_iter()
     .chain(0xFE00..=0xFE0F)
@@ -1606,16 +1605,19 @@ fn s18_review_empty_rule_list_withholds_prompt() {
             rules: vec![],
         },
     ] {
-        let hit = scan::prompt_hit(
-            &Fixed(result),
-            "review",
-            json!({"text":"must not reach prompt"}),
-            &["text"],
-        );
-        assert_eq!(
-            hit,
-            json!({"card_id":"review", "blocked":"memory_scan_flagged"})
-        );
+        for egress in [false, true] {
+            let hit = scan::prompt_hit(
+                &Fixed(result.clone()),
+                "review",
+                json!({"text":"must not reach prompt"}),
+                &["text"],
+                egress,
+            );
+            assert_eq!(
+                hit,
+                json!({"card_id":"review", "blocked":"memory_scan_flagged"})
+            );
+        }
     }
 }
 

@@ -8,6 +8,14 @@ pub enum Scan {
     Clean {
         ruleset: String,
     },
+    /// Stored as `private`: the operator's own infrastructure and contact
+    /// details. Accepted, searchable, raised by import and loaded into local
+    /// prompts. Refused on every path that leaves the operator's machines,
+    /// with [`PRIVATE_CODE`] when nothing worse was found (S18 amendment).
+    Private {
+        ruleset: String,
+        rules: Vec<String>,
+    },
     /// Stored as `flagged`, never pushed, never raised.
     Flagged {
         ruleset: String,
@@ -25,6 +33,7 @@ impl Scan {
             Scan::Unavailable => "pending",
             Scan::Failed => "failed",
             Scan::Clean { .. } => "clean",
+            Scan::Private { .. } => "private",
             Scan::Flagged { .. } => "flagged",
             Scan::Blocked { .. } => "blocked",
         }
@@ -34,21 +43,48 @@ impl Scan {
             Scan::Unavailable => "unavailable",
             Scan::Failed => "failed",
             Scan::Clean { ruleset }
+            | Scan::Private { ruleset, .. }
             | Scan::Flagged { ruleset, .. }
             | Scan::Blocked { ruleset, .. } => ruleset,
         }
     }
     pub fn rules(&self) -> &[String] {
         match self {
-            Scan::Flagged { rules, .. } | Scan::Blocked { rules, .. } => rules,
+            Scan::Private { rules, .. }
+            | Scan::Flagged { rules, .. }
+            | Scan::Blocked { rules, .. } => rules,
             _ => &[],
         }
     }
-    /// Only a clean scan under a known rule set may raise trust.
+    /// Only a clean or private scan under a known rule set may raise trust.
+    /// Private text stays on the operator's machines, which hold the store.
     pub fn permits_raise(&self) -> bool {
-        matches!(self, Scan::Clean { .. })
+        matches!(self, Scan::Clean { .. } | Scan::Private { .. })
+    }
+    /// Why this text must not leave the operator's machines, as
+    /// `(code, rule id)`, or `None` when it may. Every egress path (connector
+    /// relays, pushes, a non-loopback embedder) refuses on `Some`.
+    pub fn egress_refusal(&self) -> Option<(&'static str, &str)> {
+        match self {
+            Scan::Clean { .. } => None,
+            Scan::Unavailable => Some(("memory_scan_unavailable", "memory_scan_unavailable")),
+            Scan::Failed => Some(("memory_scan_failed", "memory_scan_failed")),
+            Scan::Private { rules, .. } => Some((
+                PRIVATE_CODE,
+                rules
+                    .first()
+                    .map_or("memory_content_private", String::as_str),
+            )),
+            Scan::Flagged { rules, .. } | Scan::Blocked { rules, .. } => Some((
+                "memory_content_blocked",
+                rules.first().map_or("memory_scan_flagged", String::as_str),
+            )),
+        }
     }
 }
+/// The refusal code when only the private class keeps text on the
+/// operator's machines. Never `memory_content_blocked`.
+pub const PRIVATE_CODE: &str = "memory_content_private";
 /// Runs inside the authorized memory transaction on the exact stored bytes.
 pub trait Scanner: Send + Sync + 'static {
     fn scan(&self, normalized: &str) -> Scan;
@@ -90,37 +126,45 @@ pub fn bundled() -> std::sync::Arc<dyn Scanner> {
 
 /// The single prompt-load boundary for native memory surfaces. Callers pass
 /// only the exact fields they intend to inject. No text survives a finding.
+/// `egress` is true when the hit leaves the operator's machines (a connector
+/// push). Private text then gets a placeholder with [`PRIVATE_CODE`]. A local
+/// prompt load keeps it.
 pub fn prompt_hit(
     scanner: &dyn Scanner,
     card_id: &str,
     hit: serde_json::Value,
     fields: &[&str],
+    egress: bool,
 ) -> serde_json::Value {
     let joined = fields
         .iter()
         .map(|s| s.strip_prefix('\u{feff}').unwrap_or(s))
         .collect::<Vec<_>>()
         .join("\n");
+    // A worse finding in any field wins over a private one in an earlier field.
+    let mut private = None;
     for text in fields
         .iter()
         .copied()
         .chain(std::iter::once(joined.as_str()))
     {
         let result = scanner.scan(text);
-        let rule = match &result {
-            Scan::Unavailable => Some("memory_scan_unavailable"),
-            Scan::Failed => Some("memory_scan_failed"),
-            Scan::Blocked { rules, .. } | Scan::Flagged { rules, .. } => rules
-                .first()
-                .map(String::as_str)
-                .or(Some("memory_scan_flagged")),
-            Scan::Clean { .. } => None,
-        };
-        if let Some(rule) = rule {
-            return serde_json::json!({"card_id": card_id, "blocked": rule});
+        match result.egress_refusal() {
+            None => {}
+            Some((PRIVATE_CODE, rule)) => {
+                if egress && private.is_none() {
+                    private = Some(rule.to_string());
+                }
+            }
+            Some((_, rule)) => return serde_json::json!({"card_id": card_id, "blocked": rule}),
         }
     }
-    hit
+    match private {
+        Some(rule) => {
+            serde_json::json!({"card_id": card_id, "blocked": rule, "code": PRIVATE_CODE})
+        }
+        None => hit,
+    }
 }
 
 #[cfg(feature = "memory-scan")]
@@ -129,9 +173,15 @@ mod native {
     use brigade_guard::Regex;
     use serde_json::Value;
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Class {
+        Block,
+        Warn,
+        Private,
+    }
     struct Rule {
         id: String,
-        block: bool,
+        class: Class,
         utf: Regex,
         ascii: Regex,
     }
@@ -150,9 +200,16 @@ mod native {
             .map(|v| {
                 let pattern = format!("(*LIMIT_MATCH={MATCH_LIMIT}){}", v["pattern"].as_str()?);
                 let flags = v["flags"].as_u64()? as u32;
+                // An unknown action fails the whole bundle closed.
+                let class = match v["action"].as_str()? {
+                    "block" => Class::Block,
+                    "warn" => Class::Warn,
+                    "private" => Class::Private,
+                    _ => return None,
+                };
                 Some(Rule {
                     id: v["id"].as_str()?.into(),
-                    block: v["action"].as_str()? == "block",
+                    class,
                     utf: brigade_guard::compile(&pattern, flags, true).ok()?,
                     // Run byte-class matching as well on exact UTF-8 bytes. A hit
                     // in either mode counts, including the S18a divergent rules.
@@ -161,8 +218,19 @@ mod native {
             })
             .collect()
     }
+    // Extended_Pictographic blocks that take U+FE0F, shared with Python.
     fn emoji_base(c: char) -> bool {
-        matches!(c as u32, 0x2600 | 0x2764 | 0x1F680 | 0x1F600..=0x1F64F)
+        matches!(c as u32, 0xA9 | 0xAE | 0x203C | 0x2049 | 0x2122 | 0x2139 |
+            0x2190..=0x21FF | 0x2300..=0x23FF | 0x24C2 | 0x25A0..=0x25FF |
+            0x2600..=0x27BF | 0x2934..=0x2935 | 0x2B00..=0x2BFF | 0x3030 | 0x303D |
+            0x3297 | 0x3299 | 0x1F000..=0x1F2FF | 0x1F300..=0x1FAFF)
+    }
+    /// A variation selector right after an emoji base, or a keycap's U+FE0F.
+    fn selector_exempt(previous: Option<char>, c: char, next: Option<char>) -> bool {
+        previous.is_some_and(emoji_base)
+            || (c == '\u{fe0f}'
+                && previous.is_some_and(|p| matches!(p, '#' | '*' | '0'..='9'))
+                && next == Some('\u{20e3}'))
     }
     // Unicode 16 Default_Ignorable_Code_Point, shared with Python.
     fn ignorable(c: char) -> bool {
@@ -228,22 +296,32 @@ mod native {
         fn inspect(&self, text: &str) -> Scan {
             let mut blocks = Vec::new();
             let mut warnings = Vec::new();
+            let mut privates = Vec::new();
             let mut previous = None;
-            for (index, c) in text.chars().enumerate() {
+            let mut chars = text.chars().enumerate().peekable();
+            while let Some((index, c)) = chars.next() {
+                let next = chars.peek().map(|(_, n)| *n);
                 let rule = match c as u32 {
                     0x61C | 0x200E | 0x200F | 0x202A..=0x202E | 0x2066..=0x2069 => {
-                        Some(("bidi-control", true))
+                        Some(("bidi-control", Class::Block))
                     }
                     0xFEFF if index == 0 => None,
-                    0x200C | 0x200D => Some(("zero-width-joiner", false)),
-                    0xFE00..=0xFE0F if previous.is_some_and(emoji_base) => None,
-                    0xFFF9..=0xFFFB => Some(("invisible-character", true)),
-                    _ if ignorable(c) => Some(("invisible-character", true)),
+                    0x200D => Some(("zero-width-joiner", Class::Warn)),
+                    // Pasted-text joiners. Scan copies drop them, stored bytes keep them.
+                    0x200C => Some(("zero-width-non-joiner", Class::Private)),
+                    0x34F => Some(("combining-grapheme-joiner", Class::Private)),
+                    0xFE00..=0xFE0F if selector_exempt(previous, c, next) => None,
+                    0xFFF9..=0xFFFB => Some(("invisible-character", Class::Block)),
+                    _ if ignorable(c) => Some(("invisible-character", Class::Block)),
                     _ => None,
                 };
                 previous = Some(c);
-                if let Some((id, block)) = rule {
-                    let ids = if block { &mut blocks } else { &mut warnings };
+                if let Some((id, class)) = rule {
+                    let ids = match class {
+                        Class::Block => &mut blocks,
+                        Class::Warn => &mut warnings,
+                        Class::Private => &mut privates,
+                    };
                     if !ids.iter().any(|s| s == id) {
                         ids.push(id.to_string());
                     }
@@ -267,10 +345,10 @@ mod native {
                         }
                     }
                     if matched {
-                        let ids = if rule.block {
-                            &mut blocks
-                        } else {
-                            &mut warnings
+                        let ids = match rule.class {
+                            Class::Block => &mut blocks,
+                            Class::Warn => &mut warnings,
+                            Class::Private => &mut privates,
                         };
                         if !ids.contains(&rule.id) {
                             ids.push(rule.id.clone());
@@ -280,6 +358,7 @@ mod native {
             }
             if !blocks.is_empty() {
                 blocks.extend(warnings);
+                blocks.extend(privates);
                 Scan::Blocked {
                     ruleset: self.version.clone(),
                     rules: blocks,
@@ -287,9 +366,15 @@ mod native {
             } else if failed {
                 Scan::Failed
             } else if !warnings.is_empty() {
+                warnings.extend(privates);
                 Scan::Flagged {
                     ruleset: self.version.clone(),
                     rules: warnings,
+                }
+            } else if !privates.is_empty() {
+                Scan::Private {
+                    ruleset: self.version.clone(),
+                    rules: privates,
                 }
             } else {
                 Scan::Clean {
@@ -320,7 +405,7 @@ mod native {
             guard.injections.clear();
             guard.rules = vec![Rule {
                 id: "test-limit".into(),
-                block: false,
+                class: Class::Warn,
                 utf,
                 ascii,
             }];

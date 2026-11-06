@@ -23,6 +23,8 @@ mod lexical_tests;
 #[cfg(test)]
 mod powercut;
 #[cfg(test)]
+mod private_tests;
+#[cfg(test)]
 mod tests;
 
 use crate::{

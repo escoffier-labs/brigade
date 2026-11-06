@@ -20,7 +20,7 @@ _ADVERSARIAL_SCAN_SECONDS = 4.0 if sys.platform == "win32" else 2.0
 def test_s18_prompt_load_withholds_warnings_and_new_role_overrides():
     assert blocked_rule(["e\u0301 and a leading BOM", "\ufeffordinary text"]) is None
     for text, rule in [
-        ("join\u200cer", "zero-width-joiner"),
+        ("join\u200cer", "zero-width-non-joiner"),
         ("join\u200der", "zero-width-joiner"),
         ("person@example.com", "example-email-reserved"),
         ("new system prompt", "role-override"),
@@ -29,8 +29,14 @@ def test_s18_prompt_load_withholds_warnings_and_new_role_overrides():
 
     bundle = json.loads(files("brigade.guard").joinpath("memory-rules.json").read_text(encoding="utf-8"))
     policy = Policy()
+    private = runpy.run_path(str(Path(__file__).parents[1] / "scripts/memory_scan_bundle.py"))["PRIVATE_RULES"]
     assert bundle["rules"] == [
-        {"id": rule.id, "pattern": rule.pattern, "flags": int(rule.flags), "action": policy.action_for(rule)}
+        {
+            "id": rule.id,
+            "pattern": rule.pattern,
+            "flags": int(rule.flags),
+            "action": "private" if rule.id in private else policy.action_for(rule),
+        }
         for rule in policy.all_rules()
     ]
     assert bundle["injections"][: len(_LINE_RULES)] == [
@@ -84,9 +90,8 @@ def test_s18_review_scan_copy_parity(text, rule):
     ],
 )
 def test_s18_review_invisible_policy(code):
-    assert blocked_rule(["text" + chr(code)]) == (
-        "bidi-control" if code in (0x200E, 0x200F, 0x61C) else "invisible-character"
-    )
+    expected = "bidi-control" if code in (0x200E, 0x200F, 0x61C) else "invisible-character"
+    assert blocked_rule(["text" + chr(code)]) == ("combining-grapheme-joiner" if code == 0x34F else expected)
 
 
 @pytest.mark.parametrize("text", ["☀\ufe0f", "😀\ufe00", "\ufeffordinary text"])
@@ -196,7 +201,6 @@ def _legacy_blocked_rule(texts):
         rule = scan.invisible_rule(text)
         if rule:
             return rule
-        joiner = "\u200c" in text or "\u200d" in text
         lines, injection_lines, normalized = scan._scan_copies(text)
         for name, _action, pattern in scan._RULES:
             if pattern.search(text) or pattern.search(lines):
@@ -204,8 +208,11 @@ def _legacy_blocked_rule(texts):
         for name, _action, pattern in scan._INJECTIONS:
             if pattern.search(injection_lines) or pattern.search(normalized):
                 return name
-        if joiner:
+        if "\u200d" in text:
             return scan.JOINER_RULE
+        for char, rule in scan._PRIVATE_CHARACTERS.items():
+            if char in text:
+                return rule
     return None
 
 
@@ -487,7 +494,7 @@ def test_s18_round4_detection_bounds(rule, text):
 def test_s18_round4_bundle_version():
     from brigade import memory_content_scan as scan
 
-    assert scan._BUNDLE["version"] == "brigade-memory-scan.v5"
+    assert scan._BUNDLE["version"] == "brigade-memory-scan.v6"
 
 
 def test_s18_round4_base64_decode_window_is_bounded():
@@ -516,7 +523,7 @@ def test_s18_round5_prefilter_parity_corpus(name, monkeypatch):
 
     vectors = runpy.run_path(str(Path(__file__).with_name("memory_scan_adversarial.py")))["vectors"]
 
-    # Compare the same v5 rules with and without the necessary-condition
+    # Compare the same v6 rules with and without the necessary-condition
     # filters, including both Unicode and ASCII modes and all six positions.
     texts = [text for _, text in vectors(name, 512 * 1024)]
     expected = [scan.blocked_rule([text]) for text in texts]

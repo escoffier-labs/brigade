@@ -327,6 +327,8 @@ BLOCKED_CARDS = {
     "role-card": ("Release notes.\n\n" + ROLE_OVERRIDE, "role-override"),
     "guard-card": (f"The relay listens on {PRIVATE_IP} today.", "private-ipv4"),
 }
+# Private-only refusals name their own code (S18 amendment, bundle v6).
+PRIVATE_RULES = {"private-ipv4"}
 
 
 class MemoryOutput(Fixture):
@@ -361,7 +363,8 @@ class MemoryOutput(Fixture):
         for name, (text, rule) in BLOCKED_CARDS.items():
             (self.cards / f"{name}.md").write_text(text)
             for offset in (0, 5):
-                assert memory.memory_card(name, offset=offset) == {"card_id": name, "blocked": rule}
+                code = {"code": "memory_content_private"} if rule in PRIVATE_RULES else {}
+                assert memory.memory_card(name, offset=offset) == {"card_id": name, "blocked": rule, **code}
 
     @requires_local_state
     def test_scan_hit_in_any_card_field_blocks_the_match(self):
@@ -377,7 +380,7 @@ class MemoryOutput(Fixture):
             {"card_id": "title-hit", "blocked": "bidi-control"},
             {"card_id": "summary-hit", "blocked": "role-override"},
             {"card_id": "tag-hit", "blocked": "invisible-character"},
-            {"card_id": "alias-hit", "blocked": "private-ipv4"},
+            {"card_id": "alias-hit", "blocked": "private-ipv4", "code": "memory_content_private"},
         ]
         assert matches[4]["card_id"] == "clean" and matches[4]["content_trust"] == "untrusted"
 
@@ -405,6 +408,8 @@ class MemoryOutput(Fixture):
 def test_scan_rules_without_regex_for_invisible_characters():
     assert invisible_rule("\ufeffleading byte order mark is fine") is None
     assert invisible_rule("joiner \u200d and non-joiner \u200c stay allowed") is None
+    assert invisible_rule("grapheme \u034f joiner is private, not invisible") is None
+    assert invisible_rule("\u26a0\ufe0f and 1\ufe0f\u20e3 keep their selectors") is None
     assert invisible_rule("late \ufeff byte order mark") == "invisible-character"
     assert invisible_rule("tag \U000e0041 character") == "invisible-character"
     assert invisible_rule("isolate \u2066 control") == "bidi-control"

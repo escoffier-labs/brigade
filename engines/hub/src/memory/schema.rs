@@ -2,13 +2,79 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 1;
+pub const USER_VERSION: i64 = 2;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
 const TRUST: &str = "'reviewed','policy-promoted','imported','agent-unreviewed','flagged'";
+/// Version 2 admits `private` (the S18 amendment to D24).
+const SCAN_STATES: &str = "'clean','private','flagged','pending'";
+/// Tables whose scan-state CHECK names `private` from version 2.
+const SCANNED: [&str; 3] = ["memory_card_revisions", "memory_scans", "memory_handoffs"];
 
-fn ddl() -> String {
+/// One scanned table's DDL under `name`, so a migration can build a copy.
+fn scanned_table(table: &str, name: &str) -> String {
+    match table {
+        "memory_card_revisions" => format!(
+            "CREATE TABLE {name}(
+  scope TEXT NOT NULL,
+  card_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  content_hash TEXT NOT NULL REFERENCES memory_blobs(content_hash),
+  trust TEXT NOT NULL CHECK(trust IN ({TRUST})),
+  state TEXT NOT NULL CHECK(state IN ('live','retired')),
+  writer TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  proposal_id TEXT,
+  scan_state TEXT NOT NULL CHECK(scan_state IN ({SCAN_STATES})),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(scope, card_id, revision)
+) WITHOUT ROWID;
+"
+        ),
+        "memory_scans" => format!(
+            "CREATE TABLE {name}(
+  content_hash TEXT NOT NULL,
+  ruleset_version TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ({SCAN_STATES},'blocked')),
+  rule_ids TEXT NOT NULL,
+  scanned_at TEXT NOT NULL,
+  PRIMARY KEY(content_hash, ruleset_version)
+) WITHOUT ROWID;
+"
+        ),
+        _ => format!(
+            "CREATE TABLE {name}(
+  handoff_id TEXT PRIMARY KEY,
+  principal TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  content_hash TEXT NOT NULL REFERENCES memory_blobs(content_hash),
+  state TEXT NOT NULL CHECK(state IN ('pending','accepted','rejected')),
+  scan_state TEXT NOT NULL CHECK(scan_state IN ({SCAN_STATES})),
+  seq INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+) WITHOUT ROWID;
+"
+        ),
+    }
+}
+
+/// Version 1 to 2: SQLite cannot alter a CHECK, so rebuild each scanned
+/// table with the same columns and rows. Nothing references these tables and
+/// they carry no index or trigger beyond their primary keys.
+fn private_scan_state() -> String {
+    let mut sql = String::new();
+    for table in SCANNED {
+        sql += &scanned_table(table, &format!("{table}_v2"));
+        sql += &format!(
+            "INSERT INTO {table}_v2 SELECT * FROM {table};\nDROP TABLE {table};\nALTER TABLE {table}_v2 RENAME TO {table};\n"
+        );
+    }
+    sql
+}
+
+pub(super) fn ddl() -> String {
+    let scanned: String = SCANNED.iter().map(|t| scanned_table(t, t)).collect();
     format!(
         "
 CREATE TABLE memory_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -59,39 +125,7 @@ CREATE TABLE memory_cards(
   PRIMARY KEY(scope, card_id)
 ) WITHOUT ROWID;
 CREATE INDEX memory_cards_id ON memory_cards(card_id);
-CREATE TABLE memory_card_revisions(
-  scope TEXT NOT NULL,
-  card_id TEXT NOT NULL,
-  revision INTEGER NOT NULL,
-  content_hash TEXT NOT NULL REFERENCES memory_blobs(content_hash),
-  trust TEXT NOT NULL CHECK(trust IN ({TRUST})),
-  state TEXT NOT NULL CHECK(state IN ('live','retired')),
-  writer TEXT NOT NULL,
-  seq INTEGER NOT NULL,
-  proposal_id TEXT,
-  scan_state TEXT NOT NULL CHECK(scan_state IN ('clean','flagged','pending')),
-  created_at TEXT NOT NULL,
-  PRIMARY KEY(scope, card_id, revision)
-) WITHOUT ROWID;
-CREATE TABLE memory_scans(
-  content_hash TEXT NOT NULL,
-  ruleset_version TEXT NOT NULL,
-  state TEXT NOT NULL CHECK(state IN ('clean','flagged','blocked','pending')),
-  rule_ids TEXT NOT NULL,
-  scanned_at TEXT NOT NULL,
-  PRIMARY KEY(content_hash, ruleset_version)
-) WITHOUT ROWID;
-CREATE TABLE memory_handoffs(
-  handoff_id TEXT PRIMARY KEY,
-  principal TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  content_hash TEXT NOT NULL REFERENCES memory_blobs(content_hash),
-  state TEXT NOT NULL CHECK(state IN ('pending','accepted','rejected')),
-  scan_state TEXT NOT NULL CHECK(scan_state IN ('clean','flagged','pending')),
-  seq INTEGER NOT NULL,
-  created_at TEXT NOT NULL
-) WITHOUT ROWID;
-CREATE TABLE memory_grants(
+{scanned}CREATE TABLE memory_grants(
   principal TEXT NOT NULL,
   scope TEXT NOT NULL,
   rights TEXT NOT NULL,
@@ -173,6 +207,11 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
             "memory schema version {version} is newer than this hub ({USER_VERSION})"
         ));
     }
+    // Each step runs in its own transaction and records its version, so a
+    // later step appends here without repeating an earlier one.
+    if version < 2 {
+        step(c, &private_scan_state(), 2).map_err(err)?;
+    }
     for table in TABLES {
         let present: Option<i64> = c
             .query_row(
@@ -188,6 +227,18 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     }
     log_epoch(c).map_err(err)?;
     Ok(())
+}
+
+fn step(c: &Connection, sql: &str, version: i64) -> rusqlite::Result<()> {
+    c.execute_batch("BEGIN IMMEDIATE")?;
+    let applied = c
+        .execute_batch(sql)
+        .and_then(|()| c.pragma_update(None, "user_version", version))
+        .and_then(|()| c.execute_batch("COMMIT"));
+    if applied.is_err() {
+        let _ = c.execute_batch("ROLLBACK");
+    }
+    applied
 }
 
 pub fn log_epoch(c: &Connection) -> rusqlite::Result<String> {

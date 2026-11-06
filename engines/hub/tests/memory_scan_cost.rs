@@ -3,6 +3,24 @@
 use brigade_hub::memory::scan;
 use std::time::Instant;
 
+/// The verdict a hit on this bundle rule alone produces.
+fn rule_state(rule: &str) -> &'static str {
+    let bundle: serde_json::Value =
+        serde_json::from_str(include_str!("../../../src/brigade/guard/memory-rules.json")).unwrap();
+    let action = bundle["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(bundle["injections"].as_array().unwrap())
+        .find(|r| r["id"] == rule)
+        .map(|r| r["action"].as_str().unwrap().to_string());
+    match action.as_deref() {
+        Some("block") => "blocked",
+        Some("private") => "private",
+        _ => "flagged",
+    }
+}
+
 #[test]
 #[ignore = "manual 512 KiB scan benchmark"]
 fn memory_scan_cost() {
@@ -103,7 +121,7 @@ fn s18_round2_salutation_gap_is_bounded() {
 }
 
 #[test]
-fn s18_round3_nested_path_is_flagged() {
+fn s18_round3_nested_path_is_private() {
     let scanner = scan::bundled();
     let text = format!("C:\\Users\\{}!", "a/".repeat(1000)); // <!-- content-guard: allow windows-home-path -->
     for run in 1..=2 {
@@ -114,7 +132,7 @@ fn s18_round3_nested_path_is_flagged() {
             start.elapsed().as_secs_f64(),
             result.state()
         );
-        assert_eq!(result.state(), "flagged");
+        assert_eq!(result.state(), "private");
         assert!(result.rules().iter().any(|id| id == "windows-home-path"));
     }
 }
@@ -138,7 +156,7 @@ fn s18_round3_repeated_groups() {
             let text = format!("{prefix}{}", unit.repeat(size / unit.len() + 1));
             let result = scanner.scan(&text[..size]);
             if let Some(rule) = case["rule"].as_str() {
-                assert_eq!(result.state(), "flagged", "{name} bytes={size}");
+                assert_eq!(result.state(), rule_state(rule), "{name} bytes={size}");
                 assert!(
                     result.rules().iter().any(|id| id == rule),
                     "{name}: {result:?}"
@@ -239,7 +257,7 @@ fn s18_round4_adversarial_rule_corpus() {
             assert!(elapsed < 5.0, "{name} exceeded five seconds");
             if let Some(rule) = &expected {
                 assert!(
-                    matches!(result.state(), "flagged" | "blocked"),
+                    matches!(result.state(), "private" | "flagged" | "blocked"),
                     "{name}: {result:?}"
                 );
                 assert!(result.rules().contains(rule), "{name}: {result:?}");

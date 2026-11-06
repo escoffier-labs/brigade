@@ -21,7 +21,18 @@ _INJECTION_PATTERNS = (
     "do " + "not (tell|reveal)",
     "hidden " + "instruction",
     "send (all )?(sec" + "rets|tok" + "ens)",
-    "exfil" + "trat",
+    # The verb alone also names an attack in threat-intel prose ("data was
+    # exfil-trated") and in policy text ("Don't exfil-trate private data").
+    # Match it only as an order: at the start of a line or sentence, after an
+    # optional bullet and urgency word, addressed to the agent, or with a
+    # destination to send to.
+    r"(?:^|[.!?;:]\s{0,8})(?:[-*>]\s{0,8})?"
+    r"(?:(?:please|now|then|first|next|also|and|immediately|quietly|silently|secretly),?\s{1,8})?"
+    r"exfil" + r"trate\b",
+    r"\b(?:you (?:must|should|will|need to|are to)|(?:your|the) (?:task|job|goal|mission) is to|i want you to)"
+    r"\s{1,8}exfil" + r"trate\b",
+    r"\bexfil" + r"trate\b[^\n]{0,128}?\bto\s{1,8}(?:https?://|[a-z0-9._-]{1,64}@"
+    r"|(?:my|our|this|that|the attacker'?s?) (?:server|endpoint|webhook|url|bucket|inbox)\b)",
     "disable " + "safety",
     "bypass " + "safety",
 )

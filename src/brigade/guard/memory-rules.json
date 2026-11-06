@@ -1,9 +1,9 @@
 {
-  "version": "brigade-memory-scan.v5",
+  "version": "brigade-memory-scan.v6",
   "injections": [
     {
       "id": "classic-injection",
-      "pattern": "(?i)(ignore (all )?(previous|prior) instructions|do not (tell|reveal)|hidden instruction|send (all )?(secrets|tokens)|exfiltrat|disable safety|bypass safety)",
+      "pattern": "(?i)(ignore (all )?(previous|prior) instructions|do not (tell|reveal)|hidden instruction|send (all )?(secrets|tokens)|(?:^|[.!?;:]\\s{0,8})(?:[-*>]\\s{0,8})?(?:(?:please|now|then|first|next|also|and|immediately|quietly|silently|secretly),?\\s{1,8})?exfiltrate\\b|\\b(?:you (?:must|should|will|need to|are to)|(?:your|the) (?:task|job|goal|mission) is to|i want you to)\\s{1,8}exfiltrate\\b|\\bexfiltrate\\b[^\\n]{0,128}?\\bto\\s{1,8}(?:https?://|[a-z0-9._-]{1,64}@|(?:my|our|this|that|the attacker'?s?) (?:server|endpoint|webhook|url|bucket|inbox)\\b)|disable safety|bypass safety)",
       "flags": 42,
       "action": "warn"
     },
@@ -61,79 +61,79 @@
       "id": "example-phone-555",
       "pattern": "(?:(?<!\\w)\\+1[\\s.-]?\\(?555\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)\\(555\\)\\s{0,256}\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)555[\\s.-]\\d{3}[\\s.-]\\d{4}(?!\\w))",
       "flags": 2,
-      "action": "warn"
+      "action": "private"
     },
     {
       "id": "example-email-reserved",
       "pattern": "\\b[A-Z0-9._%+-]{1,256}@(?:(?:[A-Z0-9-]{1,63}\\.){0,127}example\\.(?:com|org|net)|(?:[A-Z0-9-]{1,63}\\.){0,127}(?:test|invalid|localhost|local))\\b",
       "flags": 2,
-      "action": "warn"
+      "action": "private"
     },
     {
       "id": "ssh-private-target",
       "pattern": "\\b[\\w.-]{1,256}@(?:10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|172\\.(?:1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}|192\\.168\\.\\d{1,3}\\.\\d{1,3}|127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})(?::\\S{1,4096})?",
       "flags": 0,
-      "action": "block"
+      "action": "private"
     },
     {
       "id": "private-ipv4",
       "pattern": "\\b(?:10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|172\\.(?:1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}|192\\.168\\.\\d{1,3}\\.\\d{1,3})\\b",
       "flags": 0,
-      "action": "block"
+      "action": "private"
     },
     {
       "id": "loopback-ipv4",
       "pattern": "\\b127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b",
       "flags": 0,
-      "action": "block"
+      "action": "private"
     },
     {
       "id": "localhost-port",
       "pattern": "\\blocalhost:\\d{1,256}\\b",
       "flags": 2,
-      "action": "block"
+      "action": "private"
     },
     {
       "id": "localhost-bare",
       "pattern": "(?<![\\w.-])localhost(?![\\w.-])",
       "flags": 2,
-      "action": "block"
+      "action": "private"
     },
     {
       "id": "port-reference",
       "pattern": "\\bport\\s{1,256}\\d{4,5}\\b",
       "flags": 2,
-      "action": "block"
+      "action": "private"
     },
     {
       "id": "windows-home-path",
       "pattern": "(?<![\\w.-])(?:(?<=(?P<windows_quote>[\\\"'`]))|(?<![\\\"'`]))[A-Z]:(?:\\\\{1,2}|/)Users(?:\\\\{1,2}|/)(?(windows_quote)[A-Za-z0-9._-](?:(?!(?P=windows_quote))[^\\r\\n<>:|?*])*?(?=(?P=windows_quote))|(?:[A-Za-z0-9._@+-]+(?: +[A-Za-z0-9._@+-]+)*(?:\\\\{1,2}|/))*(?:[A-Za-z0-9_@+-]+(?:[ .]+[A-Za-z0-9_@+-]+)*?\\.[A-Za-z0-9]+(?![\\w-]|\\.[\\w-])|[A-Za-z0-9._@+-]+))",
       "flags": 2,
-      "action": "warn"
+      "action": "private"
     },
     {
       "id": "home-path",
       "pattern": "(?<![\\w.-])/(?:home|Users)/(?!\\.(?:agents|cache|claude|codebuddy|codex|commandcode|config|copilot|cursor|factory|gemini|grok|kimi|local|localcode|pi|tabby)(?:/|$|[^A-Za-z0-9._-]))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._@+-]+)*",
       "flags": 0,
-      "action": "warn"
+      "action": "private"
     },
     {
       "id": "root-path",
       "pattern": "(?<![\\w.-])(?:(?<=(?P<root_quote>[\\\"'`]))/root(?:/[A-Za-z0-9._@+ -]+)+(?=(?P=root_quote))|/root(?:/[A-Za-z0-9._@+-]+)+)",
       "flags": 0,
-      "action": "block"
+      "action": "private"
     },
     {
       "id": "email",
       "pattern": "\\b[A-Z0-9._%+-]{1,256}@[A-Z0-9.-]{1,256}\\.[A-Z]{2,63}\\b(?!:\\S)",
       "flags": 2,
-      "action": "warn"
+      "action": "private"
     },
     {
       "id": "us-phone",
       "pattern": "(?:(?<!\\w)\\+1[\\s.-]?\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)\\(\\d{3}\\)\\s{0,256}\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)\\d{3}[\\s.-]\\d{3}[\\s.-]\\d{4}(?!\\w)|\\b(?:phone|tel|call)[\\s:]{1,256}\\+?1?[\\s.-]?\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}(?!\\w))",
       "flags": 2,
-      "action": "warn"
+      "action": "private"
     },
     {
       "id": "jwt-token",
@@ -169,7 +169,7 @@
       "id": "private-hostname",
       "pattern": "(?<![\\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+(?:local|internal|lan|corp|home|intranet|localdomain)(?![\\w-]|\\.[\\w-]|\\()",
       "flags": 2,
-      "action": "block"
+      "action": "private"
     }
   ]
 }
