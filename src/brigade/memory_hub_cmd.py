@@ -27,7 +27,10 @@ def register(memory_sub: argparse._SubParsersAction) -> None:
         "status": "Show the hub memory mode, the hub's memory status, the replica, the spool and open proposals.",
         "pull": "Follow the hub log into this host's replica; a changed log_epoch rebuilds it.",
         "push": 'Publish changed local cards to the configured scope (needs [hub] mode = "sync").',
-        "import": "Import cards into hub memory, one call per card (needs the import grant).",
+        "import": (
+            "Import Markdown notes (files or folders) into hub memory: --dry-run lists what it would append, "
+            "a second run appends nothing (the real run needs the import grant)."
+        ),
         "card": (
             "Read one hub card's text from the [hub] read scopes, in 30,000-character chunks; "
             "while the hub is unavailable, from this host's replica."
@@ -81,13 +84,35 @@ def register(memory_sub: argparse._SubParsersAction) -> None:
             command.add_argument("--out", type=Path, required=True, help="Destination folder for generated notes.")
             command.add_argument("--init", action="store_true", help="Initialize ownership in a non-empty folder.")
             command.add_argument("--dry-run", action="store_true", help="Report changes without writing the mirror.")
-        if name == "push":
+        if name in ("push", "import"):
             command.add_argument(
-                "--yes", action="store_true", help="Confirm the first publish into this scope after reading its count."
+                "--yes",
+                action="store_true",
+                help=f"Confirm the first {'publish' if name == 'push' else 'import'} into this scope after reading its count.",
             )
         if name == "import":
-            command.add_argument("paths", nargs="+", type=Path, help="Card files to import.")
+            command.add_argument("paths", nargs="+", type=Path, help="Markdown files, or folders searched recursively.")
             command.add_argument("--scope", help="Scope to import into (default: [hub] scope).")
+            command.add_argument(
+                "--dry-run", action="store_true", help="List what would be appended and write nothing."
+            )
+            command.add_argument(
+                "--update",
+                action="store_true",
+                help="Overwrite a card whose id exists with other text (default: report it as changed and keep the hub's).",
+            )
+            command.add_argument(
+                "--exclude",
+                action="append",
+                default=[],
+                metavar="GLOB",
+                help="Skip notes matching GLOB against the root-relative path (repeatable; `*` crosses `/`).",
+            )
+            command.add_argument(
+                "--root",
+                type=Path,
+                help="Folder that derived card ids are relative to (default: each folder argument, a file's own folder).",
+            )
         if name == "card":
             command.add_argument("card_id", help="Card id, [a-z0-9][a-z0-9._-]{0,127}.")
             command.add_argument("--scope", help="Scope to read from; one of the [hub] read scopes.")
@@ -523,15 +548,28 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
             ]
             return _emit(report, json_output=args.json, lines=lines)
         if name == "import":
+            from . import memory_hub_import as importer
+
             scope = args.scope or settings.scope
             if not hubc.valid_scope(scope):
                 raise hubc.HubConfigError("import needs --scope or [hub] scope")
-            report = sync.import_cards(target, client, scope=str(scope), paths=list(args.paths))
-            lines = [f"memory hub import into {report['scope']}:"]
-            for item in report["results"]:
-                detail = item.get("code") or item.get("reason") or item.get("revision") or ""
-                lines.append(f"- {item['path']}  {item['status']}  {detail}".rstrip())
-            return _emit(report, json_output=args.json, lines=lines, code=0 if report["ok"] else 1)
+            report = importer.run(
+                client,
+                scope=str(scope),
+                paths=list(args.paths),
+                root=args.root,
+                excludes=list(args.exclude),
+                dry_run=args.dry_run,
+                update=args.update,
+                yes=args.yes,
+            )
+            if args.json:
+                for row in importer.json_lines(report):
+                    print(json.dumps(row, sort_keys=True, ensure_ascii=False))
+            else:
+                for line in importer.lines(report):
+                    print(line)
+            return 0 if report["ok"] else 1
         try:
             payload = _hub_card(client, settings, args)
         except hubc.HubUnavailable as exc:

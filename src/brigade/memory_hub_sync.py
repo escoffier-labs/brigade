@@ -1140,69 +1140,6 @@ def _card_path(target: Path, rel: object) -> Path:
     return target / rel
 
 
-# --- import --------------------------------------------------------------------------
-
-
-def import_cards(target: Path, client: hubc.MemoryHubClient, *, scope: str, paths: list[Path]) -> dict[str, Any]:
-    """One `import` call per card. Refusals carry the hub's code. Nothing is spooled.
-
-    The hub's `status` is read first so an admin credential is refused. A
-    credential with no read grant cannot read status; it still imports, and
-    the hub checks each card's import grant.
-    """
-    from . import card_identity, memory_cmd
-
-    hub_status: dict[str, Any] = {}
-    try:
-        hub_status = hubc.refuse_admin(client.call("status"))
-    except hubc.HubRefusal as exc:
-        if not (exc.status == 403 and exc.code == "memory_grant_missing"):
-            raise
-    live = store.replica(target)
-    # A replica head is a base only when the replica was pulled as the
-    # principal and under the log_epoch the hub reports now. Otherwise the
-    # import names no base and the hub answers whether one is needed.
-    current = live.belongs_to(client.identity, hub_status.get("principal")) and live.meta.get(
-        "log_epoch"
-    ) == hub_status.get("log_epoch")
-    heads = live.readable_heads([scope]) if current else {}
-    results: list[dict[str, Any]] = []
-    for path in paths:
-        rel = path.as_posix()
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            results.append({"path": rel, "status": "unreadable", "error": type(exc).__name__})
-            continue
-        reason = withheld(text)
-        if reason is not None:
-            results.append({"path": rel, "status": "skipped", "reason": reason})
-            continue
-        meta, _ = memory_cmd._parse_frontmatter(text)
-        card_id = card_identity.card_identity(meta, path.name).card_id
-        if not hubc.valid_card_id(card_id):
-            results.append({"path": rel, "status": "skipped", "reason": "card-id-invalid"})
-            continue
-        head = heads.get(store.Replica.key(scope, card_id))
-        body: dict[str, Any] = {
-            "scope": scope,
-            "card_id": card_id,
-            "base_revision": head.get("revision") if head else None,
-            "text": text,
-            "client_event_id": hubc.event_id(),
-        }
-        if head:
-            body["base_epoch"] = live.meta.get("log_epoch")
-        try:
-            reply = client.call("import", **body)
-        except hubc.HubRefusal as exc:
-            results.append({"path": rel, "card_id": card_id, "status": "refused", "code": exc.code, "http": exc.status})
-            continue
-        event = hubc.obj(reply.get("event"))
-        results.append({"path": rel, "card_id": card_id, "status": "imported", "revision": event.get("revision")})
-    return {"scope": scope, "results": results, "ok": all(r["status"] in {"imported", "skipped"} for r in results)}
-
-
 # --- status ----------------------------------------------------------------------------
 
 
