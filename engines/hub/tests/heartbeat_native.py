@@ -429,7 +429,10 @@ class ReviewRegressions(unittest.TestCase):
         # ordinary work queued. Durable work is batched first, so a claim waits
         # for the batch in flight, not the queue. The bound is the v1 claim
         # client's 2.5 s timeout (CLAIM_TIMEOUT_SECONDS), which FIFO order
-        # exceeded at about 3.5 s. Best of three rounds absorbs a noisy runner.
+        # exceeded at about 3.5 s. With 20 samples the p99 is the slowest claim,
+        # so the bound applies to every claim in the best of three rounds, which
+        # absorbs a noisy runner. The rounds share one hub, so later rounds see
+        # a larger events table, which works against the bound, not for it.
         hub = self.hubs[1]
         bodies = []
         for i in range(256):
@@ -457,11 +460,12 @@ class ReviewRegressions(unittest.TestCase):
         for _ in range(3):
             answers, (depths, times) = self.flood(hub, bodies, claims)
             self.assertLessEqual({status for _, status, _ in answers}, {200, 503}, answers[:5])
-            p99 = times[max(0, -(-len(times) * 99 // 100) - 1)]
-            rounds.append((p99, max(depths)))
-            print(f"1,000-event flood claim p99 {p99:.3f} s, max writer queue depth {max(depths):.0f}, "
+            slowest = times[-1]
+            rounds.append((slowest, max(depths)))
+            print(f"1,000-event flood claim p99 (slowest of {len(times)}) {slowest:.3f} s, "
+                  f"median {times[len(times) // 2]:.3f} s, max writer queue depth {max(depths):.0f}, "
                   f"load {os.getloadavg()}", flush=True)
-            if p99 < 2.5:
+            if slowest < 2.5:
                 break
         best = min(rounds)
         self.assertLess(best[0], 2.5, rounds)
