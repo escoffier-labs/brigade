@@ -172,6 +172,57 @@ class Memory(unittest.TestCase):
             nodes = hc.request(hub.url, "GET", "/nodes", token=hub.admin_token)
             self.assertEqual(nodes.status, 200)
 
+    def test_hub_without_memory_route_never_reads_hub_toml(self):
+        # Not TOML at all: a hub that reads it at startup would refuse to start.
+        hub = self.run_hub("no-route", prepare=lambda s: (s / "hub.toml").write_text("[memory\n"))
+        self.assertEqual(hc.request(hub.url, "GET", "/health").status, 200)
+        self.assertEqual(status(hub).status, 404)
+
+    def test_unreadable_default_hub_toml_reports_memory_unavailable(self):
+        hub = self.run_hub(
+            "bad-toml", "--route-mode memory=native", lambda s: (s / "hub.toml").write_text("[memory\n")
+        )
+        response = status(hub)
+        self.assertEqual((response.status, response.json), (503, UNAVAILABLE))
+        self.assertEqual(hc.request(hub.url, "GET", "/health").status, 200)
+        self.assertIn(b"memory unavailable:", (self.work / "bad-toml" / "hub.log").read_bytes())
+
+    def test_named_memory_config_that_cannot_be_read_stops_startup(self):
+        state = self.work / "named"
+        state.mkdir()
+        (state / "named.toml").write_text("[memory\n")
+        with self.assertRaisesRegex(hc.ContractError, "could not be read"):
+            hub = launch(state, f"--route-mode memory=native --memory-config {state / 'named.toml'}")
+            self.addCleanup(hc.stop_hub, hub)
+
+    def test_planted_json_module_in_working_directory_is_not_imported(self):
+        # The hub's working directory is the state directory. The planted module
+        # records who imported it and then hands over to the real json, so the
+        # Python processes outside this boundary still work.
+        planted = (
+            "import os, sys\n"
+            "here = os.path.dirname(os.path.abspath(__file__))\n"
+            "with open(os.path.join(here, 'planted-%d' % os.getpid()), 'w') as f:\n"
+            "    f.write(repr(sys.argv))\n"
+            "saved = list(sys.path)\n"
+            "sys.path[:] = [p for p in sys.path if p not in ('', here)]\n"
+            "del sys.modules['json']\n"
+            "import json as real\n"
+            "sys.path[:] = saved\n"
+            "sys.modules['json'] = real\n"
+        )
+
+        def prepare(state: Path) -> None:
+            (state / "json.py").write_text(planted)
+            (state / "hub.toml").write_text('[memory]\nretrieval = "lexical"\n')
+
+        hub = self.run_hub("planted", "--route-mode memory=native", prepare)
+        response = status(hub)
+        self.assertEqual(response.status, 200, response)
+        self.assertEqual(response.json["retrieval"]["mode"], "lexical")
+        readers = [m.read_text() for m in (self.work / "planted").glob("planted-*")]
+        self.assertFalse([r for r in readers if "hub.toml" in r], readers)
+
     def test_native_memory_survives_restart_and_reports_metrics(self):
         state_name = "native"
         hub = self.run_hub(state_name, "--route-mode memory=native")

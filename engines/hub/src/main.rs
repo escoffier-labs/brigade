@@ -1,6 +1,7 @@
 //! S3 transport front. Python remains the authority for route semantics and storage.
 mod admission;
 mod claims_route;
+mod memory_config;
 mod memory_route;
 mod messages_route;
 mod registration;
@@ -1399,58 +1400,55 @@ async fn start_and_serve(
         std::sync::OnceLock<Box<dyn brigade_hub::maintenance::WriterCommands>>,
     > = Arc::default();
     let connections = Arc::new(Semaphore::new(config.max_connections as usize));
-    let memory_config_path = config.memory_config.clone().unwrap_or_else(|| {
-        path.with_file_name("hub.toml")
-            .to_string_lossy()
-            .into_owned()
-    });
-    let output =
-        Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
-            .args([
-                "-c",
-                include_str!("../resolve_memory.py"),
+    let memory_config_path = config
+        .memory_config
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| path.with_file_name("hub.toml"));
+    let memory = match modes.configured("memory") {
+        None => None,
+        Some(brigade_hub::modes::Mode::Native) => Some(
+            match memory_config::load(
+                &std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()),
                 &memory_config_path,
-            ])
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(|_| "memory configuration read failed")?;
-    if !output.status.success() {
-        return Err("memory configuration read failed".into());
-    }
-    let memory_config: serde_json::Value =
-        serde_json::from_slice(&output.stdout).map_err(|_| "invalid memory configuration")?;
-    let memory =
-        match modes.configured("memory") {
-            None => None,
-            Some(brigade_hub::modes::Mode::Native) => Some(match brigade_hub::memory::Store::open(
-                brigade_hub::memory::Options {
-                    memory: memory_path.clone(),
-                    hub: path.clone(),
-                    admin_digest: registration::digest(&admin),
-                    clock: brigade_hub::memory::ids::Clock {
-                        file: native_clock.clone().map(Into::into),
-                    },
-                    scanner: brigade_hub::memory::scan::bundled(),
-                    arbiter: arbiter.clone(),
-                    hook: None,
-                },
-                readers.clone(),
-            ) {
-                Ok(mut store) => {
-                    store.configure_retrieval(&memory_config)?;
-                    let store = Arc::new(store);
-                    store.refresh_dense().await?;
-                    store.start_embeddings();
-                    memory_route::MemoryRoute::Store(store)
-                }
-                Err(e) => {
-                    eprintln!("memory unavailable: {e}");
+                config.memory_config.is_some(),
+            )
+            .await?
+            {
+                Err(reason) => {
+                    eprintln!("memory unavailable: {reason}");
                     memory_route::MemoryRoute::Unavailable
                 }
-            }),
-            Some(_) => Some(memory_route::MemoryRoute::Unavailable),
-        };
+                Ok(memory_config) => match brigade_hub::memory::Store::open(
+                    brigade_hub::memory::Options {
+                        memory: memory_path.clone(),
+                        hub: path.clone(),
+                        admin_digest: registration::digest(&admin),
+                        clock: brigade_hub::memory::ids::Clock {
+                            file: native_clock.clone().map(Into::into),
+                        },
+                        scanner: brigade_hub::memory::scan::bundled(),
+                        arbiter: arbiter.clone(),
+                        hook: None,
+                    },
+                    readers.clone(),
+                ) {
+                    Ok(mut store) => {
+                        store.configure_retrieval(&memory_config)?;
+                        let store = Arc::new(store);
+                        store.refresh_dense().await?;
+                        store.start_embeddings();
+                        memory_route::MemoryRoute::Store(store)
+                    }
+                    Err(e) => {
+                        eprintln!("memory unavailable: {e}");
+                        memory_route::MemoryRoute::Unavailable
+                    }
+                },
+            },
+        ),
+        Some(_) => Some(memory_route::MemoryRoute::Unavailable),
+    };
     let storage = if config.upstream.is_none() {
         let sweeps: Arc<dyn brigade_hub::maintenance::WriterCommands> = Arc::new(HubSweeps {
             memory: match &memory {
