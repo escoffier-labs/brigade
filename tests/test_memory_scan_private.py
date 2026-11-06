@@ -55,7 +55,7 @@ def test_v6_fixture_covers_every_private_rule():
 
 def test_v6_bundle_classes():
     actions = {item["id"]: item["action"] for item in _BUNDLE["rules"] + _BUNDLE["injections"]}
-    assert _BUNDLE["version"] == "brigade-memory-scan.v6"
+    assert _BUNDLE["version"] == "brigade-memory-scan.v7"
     for rule in ("jwt-token", "bearer-token", "api-key-assignment", "bare-token-prefix", "private-key-block"):
         assert actions[rule] == "block"
     assert actions["classic-injection"] == "warn"

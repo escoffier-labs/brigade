@@ -102,6 +102,7 @@ baselines and allow comments do not apply. `status.scan.ruleset_version` and
 | Input-specific engine failure | `503 memory_scan_failed` with `retryable: false`. No bytes are stored |
 | Invalid UTF-8 or an unpaired surrogate in the JSON request | `400 memory_request_invalid` before normalization |
 
+Bundle `brigade-memory-scan.v7` normalizes scan copies with NFKC (see below).
 Bundle `brigade-memory-scan.v6` adds the private class for hub memory only.
 It covers the guard's `loopback-ipv4`, `private-ipv4`, `port-reference`,
 `localhost-bare`, `localhost-port`, `private-hostname`, `ssh-private-target`,
@@ -239,7 +240,7 @@ salutations are clean.
 Python prompt loads scan each distinct field and joined value once. They skip
 equal scan copies and redundant ASCII passes on ASCII text. Non-ASCII text
 retains both regex modes. Email and SSH-target rules require an `@` before
-running their unanchored searches. Full-width normalization is included in that
+running their unanchored searches. NFKC normalization is included in that
 check. Two Linux runs at 512 KiB reduced the six clean corpus cases from
 1.035-1.527 seconds to 0.103-0.246 seconds. Dense single-line salutations took
 0.355 seconds per `blocked_rule` call. The corpus subprocess deadline is
@@ -249,8 +250,8 @@ the remaining headroom on its slower runner.
 The bundle uses conservative guard matches in both PCRE2 UTF and byte modes.
 Python prompt loads also run Unicode and ASCII-class passes. The scanned
 copies preserve every Python `str.splitlines()` boundary as LF, remove
-Unicode 16 default-ignorable characters, and fold full-width ASCII
-U+FF01-U+FF5E plus U+3000 to ASCII. Every injection rule also runs on a copy
+Unicode 16 default-ignorable characters, and then normalize with NFKC (see
+below). Every injection rule also runs on a copy
 with an explicit shared whitespace set collapsed to single spaces. These
 copies never replace stored bytes. Bundle v3 bounds the salutation-to-override
 gap to 256 characters in both engines, including the flattened cross-line copy.
@@ -264,8 +265,36 @@ U+FE00-FE0F are allowed only immediately after a conservative emoji-base
 allowlist: U+2600, U+2764, U+1F680 and U+1F600-U+1F64F. Other selector
 positions block, including emoji bases outside this allowlist.
 
-Full NFKC remains deferred pending a maintainer decision on a normalization
-dependency. This release performs only the explicit full-width ASCII fold.
+Bundle v7 normalizes the line copy with NFKC after the ignorable characters
+are removed, in both scanners. Full-width forms, math alphanumerics such as
+U+1D400, ligatures such as U+FB01, superscripts, circled letters and U+3000
+therefore match the same rules as their plain spellings. The scanners return
+rule ids only, never offsets or redaction spans, and the stored bytes and the
+raw copy are untouched, so nothing maps a finding back into the text. NFKC can
+grow a text up to 11 times in bytes (U+FDFA). A card at the 512 KiB limit still
+scans in under a second in the native hub and in Python, and never reports
+`failed` for that reason.
+
+Python and the hub's `unicode-normalization` crate ship different Unicode
+versions: Python 3.11 has 14.0.0, Python 3.12 has 15.0.0 and crate 0.1.26 has
+18.0.0. The scan therefore normalizes only runs of code points Unicode 14.0.0
+assigns. The Unicode stability policy keeps NFKC of an assigned code point the
+same in every later version. A code point the pin leaves unassigned, such as the
+Unicode 15 Cyrillic modifier letters, passes through unchanged and ends the
+run, which is how Python 3.11 treats it. The pinned table is the bundle's
+`nfkc.unassigned` list, built by `scripts/memory_scan_bundle.py` from
+`scripts/memory_scan_unicode14_unassigned.ranges`, so one list drives both scanners
+and the ruleset digest covers it. Raising the pin is a bundle change: update the
+table and the version and rerun the parity tests.
+
+The hub pins the crate exactly (`unicode-normalization =0.1.26`), as the guard
+pins `pcre2`, and a test fails if the lockfile or the crate's Unicode version
+drifts. `tests/fixtures/memory-scan-nfkc.json` holds a digest of NFKC over every
+code point it changes (4,866 of them), the expected line copies of compatibility
+sequences, and the expected verdicts of a corpus of compatibility spellings.
+Python and the hub both check it. Regenerate it with
+`python tests/test_memory_scan_nfkc.py --write`. The crate was already in the
+lockfile through `url`, so this adds no new package.
 
 - `off`: `memory search` behaves exactly as before and never contacts the hub. A config that cannot be read or is not UTF-8 gives the same error and exit status as before.
 - `read`: `memory search` asks the hub within 800 ms and fuses its matches with local ones by reciprocal rank fusion. The same bytes under one card id in one scope appear once, and a local card joins the hub entry with its bytes. Each match says where it came from (`source`: `hub`, `local` or `replica`). The hub returns at most 20 matches, so a larger `--limit` is capped there with a warning, and `hub_match_count` reports how many the hub found.
