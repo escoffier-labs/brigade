@@ -4,6 +4,7 @@ import http.client
 import ipaddress
 import os
 from pathlib import Path
+import re
 import resource
 import sqlite3
 import signal
@@ -40,10 +41,24 @@ time.sleep(60)
 """
 
 
-def free_port():
-    with socket.socket() as sock:
-        sock.bind((HOST, 0))
-        return sock.getsockname()[1]
+def bound_port(log):
+    """The port the front reports binding, or None before it has.
+
+    Tests start the front on `--port 0` and read the assigned port back from
+    its "listening on" line, so no port is picked and released before the bind.
+    pread leaves the offset alone: the child shares it through the inherited log.
+    """
+    text = os.pread(log.fileno(), 1 << 20, 0).decode("utf-8", "replace")
+    found = re.search(r"^listening on [\d.]+:(\d+)$", text, re.MULTILINE)
+    return int(found.group(1)) if found else None
+
+
+@contextlib.contextmanager
+def refused_port():
+    """A port nothing accepts on, held bound so no other process can take it."""
+    with socket.socket() as held:
+        held.bind((HOST, 0))
+        yield held.getsockname()[1]
 
 
 def children(pid):
@@ -76,8 +91,7 @@ def alive(pid):
 @contextlib.contextmanager
 def front(upstream=None, extra=(), relative_db=False, env_overrides=None, default_db=False):
     with tempfile.TemporaryDirectory() as work:
-        port = free_port()
-        command = [str(BINARY), "--host", HOST, "--port", str(port), "--db", "hub.db" if relative_db else f"{work}/hub.db"]
+        command = [str(BINARY), "--host", HOST, "--port", "0", "--db", "hub.db" if relative_db else f"{work}/hub.db"]
         if default_db:
             command = command[:-2]
         command.extend(extra)
@@ -92,12 +106,14 @@ def front(upstream=None, extra=(), relative_db=False, env_overrides=None, defaul
         with tempfile.TemporaryFile() as log:
             child = subprocess.Popen(command, env=env, stdout=log, stderr=log, cwd=work if relative_db else None)
             try:
+                port = None
                 for _ in range(300):
                     if child.poll() is not None:
                         log.seek(0)
                         raise AssertionError(log.read().decode())
+                    port = port or bound_port(log)
                     try:
-                        if request(port, "/health")[0] == 200:
+                        if port and request(port, "/health")[0] == 200:
                             break
                     except OSError:
                         pass
@@ -218,14 +234,16 @@ class Transport(unittest.TestCase):
             self.assertEqual(forwarded, [b"/events", b"/sessions"] * 2)
 
     def test_down_and_readiness_recovery(self):
-        port = free_port()
-        with front(port) as (_, public):
-            self.assertEqual(request(public, "/ready")[0], 503)
-            answer = request(public, "/nodes")
-            self.assertEqual(answer[0], 502)
-            self.assertIn(b"upstream-down", answer[2])
-            with socket.socket() as listener:
-                listener.bind((HOST, port))
+        # Bound up front and listening only later: connects are refused until
+        # then, and no other process can take the port in between.
+        with socket.socket() as listener:
+            listener.bind((HOST, 0))
+            port = listener.getsockname()[1]
+            with front(port) as (_, public):
+                self.assertEqual(request(public, "/ready")[0], 503)
+                answer = request(public, "/nodes")
+                self.assertEqual(answer[0], 502)
+                self.assertIn(b"upstream-down", answer[2])
                 listener.listen()
 
                 def healthy():
@@ -240,8 +258,9 @@ class Transport(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertEqual(request(public, "/ready")[0], 200)
                 worker.join(3)
-            time.sleep(1.2)
-            self.assertEqual(request(public, "/ready")[0], 503)
+                listener.close()
+                time.sleep(1.2)
+                self.assertEqual(request(public, "/ready")[0], 503)
 
     def test_reset_after_commit_has_no_retry(self):
         with socket.socket() as listener, tempfile.TemporaryDirectory() as work:
@@ -480,7 +499,7 @@ class Transport(unittest.TestCase):
             )
             fake.chmod(0o755)
             env = dict(os.environ, BRIGADE_FLEET_TOKEN="fake-admin-token", BRIGADE_HUB_PYTHON=str(fake))
-            command = [str(BINARY), "--host", HOST, "--port", str(free_port()), "--db", f"{work}/hub.db"]
+            command = [str(BINARY), "--host", HOST, "--port", "0", "--db", f"{work}/hub.db"]
             child = subprocess.Popen(command, env=env, stdout=log, stderr=log)
             try:
                 for _ in range(500):
@@ -528,7 +547,7 @@ class Transport(unittest.TestCase):
         # signals are blocked or before the accept loop exists.
         with tempfile.TemporaryDirectory() as work, tempfile.TemporaryFile() as log:
             env = dict(os.environ, BRIGADE_FLEET_TOKEN="fake-admin-token")
-            command = [str(BINARY), "--host", HOST, "--port", str(free_port()), "--db", f"{work}/hub.db"]
+            command = [str(BINARY), "--host", HOST, "--port", "0", "--db", f"{work}/hub.db"]
             child = subprocess.Popen(command, env=env, stdout=log, stderr=log)
             time.sleep(0.1)
             child.send_signal(signal.SIGTERM)
@@ -546,13 +565,14 @@ class Transport(unittest.TestCase):
     def test_managed_sigterm_stops_the_upstream_with_sigterm_and_exits_zero(self):
         with tempfile.TemporaryDirectory() as work, tempfile.TemporaryFile() as log:
             env = dict(os.environ, BRIGADE_FLEET_TOKEN="fake-admin-token")
-            port = free_port()
-            command = [str(BINARY), "--host", HOST, "--port", str(port), "--db", f"{work}/hub.db"]
+            command = [str(BINARY), "--host", HOST, "--port", "0", "--db", f"{work}/hub.db"]
             child = subprocess.Popen(command, env=env, stdout=log, stderr=log)
             try:
+                port = None
                 for _ in range(300):
+                    port = port or bound_port(log)
                     with contextlib.suppress(OSError):
-                        if request(port, "/health")[0] == 200:
+                        if port and request(port, "/health")[0] == 200:
                             break
                     time.sleep(0.05)
                 child.send_signal(signal.SIGTERM)
@@ -566,14 +586,16 @@ class Transport(unittest.TestCase):
             self.assertEqual(code, 0, output)
             self.assertIn("managed upstream stopped cleanly after SIGTERM", output)
 
-    def managed(self, log, work, port, **popen):
+    def managed(self, log, work, **popen):
         """Start a managed front and wait until it answers /health."""
         env = dict(os.environ, BRIGADE_FLEET_TOKEN="fake-admin-token")
-        command = [str(BINARY), "--host", HOST, "--port", str(port), "--db", f"{work}/hub.db"]
+        command = [str(BINARY), "--host", HOST, "--port", "0", "--db", f"{work}/hub.db"]
         child = subprocess.Popen(command, env=env, stdout=log, stderr=log, **popen)
+        port = None
         for _ in range(300):
+            port = port or bound_port(log)
             with contextlib.suppress(OSError):
-                if request(port, "/health")[0] == 200:
+                if port and request(port, "/health")[0] == 200:
                     return child
             time.sleep(0.05)
         child.kill()
@@ -585,7 +607,7 @@ class Transport(unittest.TestCase):
         for signum in (signal.SIGINT, signal.SIGTERM):
             with self.subTest(signal=signum.name), tempfile.TemporaryDirectory() as work, tempfile.TemporaryFile() as log:
                 # Its own session, so the group signal stays inside this test.
-                child = self.managed(log, work, free_port(), start_new_session=True)
+                child = self.managed(log, work, start_new_session=True)
                 try:
                     (upstream,) = children(child.pid)
                     # Only brigade-hub shares the group, so it alone gets the
@@ -630,7 +652,7 @@ class Transport(unittest.TestCase):
     @unittest.skipUnless(Path("/proc").exists(), "reads the process table from procfs")
     def test_upstream_stops_when_the_front_is_killed(self):
         with tempfile.TemporaryDirectory() as work, tempfile.TemporaryFile() as log:
-            child = self.managed(log, work, free_port())
+            child = self.managed(log, work)
             (upstream,) = children(child.pid)
             child.kill()
             child.wait()

@@ -8,13 +8,14 @@ import unittest
 from unittest.mock import patch
 
 from brigade import fleet_client
-from transport import HOST, free_port, front
+from transport import HOST, front, refused_port
 
 
 @contextlib.contextmanager
 def failure_upstream(case):
     if case == "connect":
-        yield free_port()
+        with refused_port() as port:
+            yield port
         return
 
     class Handler(BaseHTTPRequestHandler):
