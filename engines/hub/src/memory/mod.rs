@@ -57,6 +57,9 @@ const COMMAND_DEADLINE: Duration = Duration::from_secs(10);
 const STATUS_SCOPES_MAX: usize = 64;
 /// How long `search` with `min_seq` waits for the index to reach it.
 pub const MIN_SEQ_WAIT: Duration = Duration::from_millis(500);
+/// The embedding scheduler's wait after an empty lease, doubled up to the max.
+const IDLE_MIN: Duration = Duration::from_secs(1);
+const IDLE_MAX: Duration = Duration::from_secs(30);
 /// Actions in the route table that later slices build.
 const LATER: &[&str] = &["propose", "decide", "rollback", "preflight"];
 
@@ -98,7 +101,9 @@ pub struct Store {
     index: Arc<index::Index>,
     retrieval: Option<Arc<embedder::Runtime>>,
     dense: Arc<dense::Index>,
-    coverage: std::sync::RwLock<(usize, usize)>,
+    coverage: std::sync::RwLock<embedding::Coverage>,
+    /// Woken by a committed `put`, so an idle scheduler starts at once.
+    embed_wake: Arc<tokio::sync::Notify>,
     embedding_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     pull_embeddings: bool,
 }
@@ -188,7 +193,8 @@ impl Store {
             index,
             retrieval: None,
             dense,
-            coverage: std::sync::RwLock::new((0, 0)),
+            coverage: std::sync::RwLock::new(embedding::Coverage::default()),
+            embed_wake: Arc::new(tokio::sync::Notify::new()),
             embedding_task: std::sync::Mutex::new(None),
             pull_embeddings: false,
         })
@@ -221,19 +227,23 @@ impl Store {
                 runtime.config.id.dimensions,
             )));
         }
-        *self.coverage.write().unwrap() = (
-            0,
-            self.index
-                .current()
-                .live(&vec![true; self.index.current().scopes().len()])
-                .len(),
-        );
+        let live = self
+            .index
+            .current()
+            .live(&vec![true; self.index.current().scopes().len()])
+            .len();
+        *self.coverage.write().unwrap() = embedding::Coverage {
+            covered: 0,
+            eligible: live,
+            total: live,
+        };
         Ok(())
     }
     async fn embedding_request(&self, credential: &Credential, action: &str, raw: &Json) -> Reply {
         let allowed: &[&str] = match action {
             "reindex" => &["action", "client_event_id", "drop"],
             "embed_lease" => &["action", "client_event_id", "embedder_id", "max"],
+            "embed_failed" => &["action", "client_event_id", "lease_id", "failures"],
             _ => &[
                 "action",
                 "client_event_id",
@@ -250,10 +260,19 @@ impl Store {
         {
             return invalid("unknown embedding field");
         }
-        let command = if action == "reindex" && raw["drop"].is_string() {
+        let drop_id = if action == "reindex" {
+            match embedding::parse_drop(raw) {
+                Ok(id) => id,
+                Err(reply) => return reply,
+            }
+        } else {
+            None
+        };
+        let command = if let Some(id) = &drop_id {
             embedding::Command::Reindex {
-                id: raw["drop"].as_str().unwrap().into(),
+                id: id.clone(),
                 drop: true,
+                explicit: true,
             }
         } else {
             let Some(runtime) = &self.retrieval else {
@@ -282,16 +301,11 @@ impl Store {
                 "event outside acceptance window",
             );
         }
-        let drop_id = if let embedding::Command::Reindex { id, drop: true } = &command {
-            Some(id.clone())
-        } else {
-            None
-        };
-        let reply = self
+        let mut reply = self
             .write(Prepared {
                 credential: credential.clone(),
                 action: Action::Embedding {
-                    command,
+                    command: command.clone(),
                     config: self.retrieval.as_ref().map(|r| r.config.clone()),
                 },
                 client_event_id: event,
@@ -299,31 +313,64 @@ impl Store {
                 now_ms: now,
             })
             .await;
-        // Complete the queue in bounded writer turns. No transaction holds all missing rows.
-        if action == "reindex" && drop_id.is_none() && reply.status == 200 {
-            while self
-                .derived(embedding::Command::Reindex {
-                    id: self.retrieval.as_ref().unwrap().config.id.key(),
-                    drop: false,
-                })
-                .await
-                .body["queued"]
-                .as_u64()
-                .unwrap_or(0)
-                > 0
-            {}
+        if reply.status != 200 {
+            return reply;
         }
-        if reply.status == 200 {
-            if let Some(id) = drop_id {
-                self.dense.drop_id(&id);
+        match (&command, &drop_id) {
+            // Bounded writer turns until the named embedder has no rows left.
+            (_, Some(id)) => {
+                let mut turn = reply.clone();
+                while ["vectors", "jobs", "lineage"]
+                    .iter()
+                    .any(|k| turn.body[k].as_u64().unwrap_or(0) > 0)
+                {
+                    turn = self.derived(command.clone()).await;
+                    if turn.status != 200 {
+                        return turn;
+                    }
+                    for k in ["vectors", "jobs", "lineage"] {
+                        reply.body[k] = json!(
+                            reply.body[k].as_u64().unwrap_or(0)
+                                + turn.body[k].as_u64().unwrap_or(0)
+                        );
+                    }
+                }
+                self.dense.drop_id(id);
             }
+            (embedding::Command::Reindex { .. }, None) => {
+                // Complete the queue in bounded writer turns. No transaction holds all missing rows.
+                self.drain_reindex().await;
+            }
+            _ => {}
+        }
+        if matches!(command, embedding::Command::Reindex { .. }) {
             let _ = self.refresh_dense().await;
         }
         reply
     }
+    /// Queue every missing vector in pages, then stop. Used at start-up and
+    /// by the operator's `memory reindex`. Later cards are queued by `put`.
+    async fn drain_reindex(&self) {
+        let Some(runtime) = &self.retrieval else {
+            return;
+        };
+        let id = runtime.config.id.key();
+        loop {
+            let turn = self
+                .derived(embedding::Command::Reindex {
+                    id: id.clone(),
+                    drop: false,
+                    explicit: false,
+                })
+                .await;
+            if turn.status != 200 || turn.body["queued"].as_u64().unwrap_or(0) == 0 {
+                return;
+            }
+        }
+    }
+    /// Scheduler and drain turns. Embedding commands write no idempotency row.
     async fn derived(&self, command: embedding::Command) -> Reply {
         let now = self.clock.now_ms();
-        let digest = ids::sha256_hex(format!("{command:?}").as_bytes());
         self.write(Prepared {
             credential: Credential::Admin,
             action: Action::Embedding {
@@ -331,7 +378,7 @@ impl Store {
                 config: self.retrieval.as_ref().map(|r| r.config.clone()),
             },
             client_event_id: ids::mint(now),
-            request_digest: digest,
+            request_digest: String::new(),
             now_ms: now,
         })
         .await
@@ -363,6 +410,9 @@ impl Store {
         Ok(())
     }
     /// One cancellable scheduler per store. Lexical mode creates no task.
+    /// It queues missing vectors once, then leases only while work is
+    /// queued. An empty lease doubles the idle wait up to [`IDLE_MAX`], and
+    /// a committed `put` wakes it at once.
     pub fn start_embeddings(self: &Arc<Self>) {
         if self.retrieval.is_none() {
             return;
@@ -372,66 +422,90 @@ impl Store {
             return;
         }
         let weak = Arc::downgrade(self);
+        let wake = self.embed_wake.clone();
         *task = Some(tokio::spawn(async move {
+            match weak.upgrade() {
+                Some(store) => store.drain_reindex().await,
+                None => return,
+            }
+            let mut idle = IDLE_MIN;
             loop {
                 let Some(store) = weak.upgrade() else {
                     return;
                 };
-                store.embedding_tick().await;
+                if store.pull_embeddings {
+                    return;
+                }
+                let worked = store.embedding_tick().await;
                 drop(store);
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                idle = if worked {
+                    IDLE_MIN
+                } else {
+                    (idle * 2).min(IDLE_MAX)
+                };
+                if worked {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(idle) => {}
+                    _ = wake.notified() => idle = IDLE_MIN,
+                }
             }
         }));
     }
-    pub async fn embedding_tick(&self) {
+    /// One in-process lease and embedding. Returns whether it leased work.
+    pub async fn embedding_tick(&self) -> bool {
         let Some(runtime) = self.retrieval.clone() else {
-            return;
+            return false;
         };
-        self.derived(embedding::Command::Reindex {
-            id: runtime.config.id.key(),
-            drop: false,
-        })
-        .await;
-        let _ = self.refresh_dense().await;
-        if !self.pull_embeddings {
-            let lease = self.derived(embedding::Command::Lease { max: 4 }).await;
-            if lease.status == 200 {
-                let jobs = lease.body["jobs"].as_array().cloned().unwrap_or_default();
-                if !jobs.is_empty() {
-                    let texts = jobs
-                        .iter()
-                        .map(|j| {
-                            (
-                                j["text"].as_str().unwrap_or("").into(),
-                                j["scan_state"].as_str().unwrap_or("pending").into(),
-                            )
-                        })
-                        .collect();
-                    let command = match runtime.documents(texts).await {
-                        Ok(rows) => embedding::Command::Submit {
-                            lease: lease.body["lease_id"].as_str().unwrap().into(),
-                            digest: runtime.config.id.model_digest.clone(),
-                            vectors: jobs
-                                .iter()
-                                .zip(rows)
-                                .map(|(j, v)| {
-                                    (
-                                        j["content_hash"].as_str().unwrap().into(),
-                                        v.iter().flat_map(|f| f.to_le_bytes()).collect(),
-                                    )
-                                })
-                                .collect(),
-                        },
-                        Err(e) => embedding::Command::Failed {
-                            lease: lease.body["lease_id"].as_str().unwrap().into(),
-                            reason: e.reason.into(),
-                        },
-                    };
-                    self.derived(command).await;
-                    let _ = self.refresh_dense().await;
-                }
-            }
+        // Never take a lease the endpoint cannot start on. A lease taken
+        // during a Retry-After backoff would expire before the request ran.
+        if self.pull_embeddings || !runtime.documents_ready() {
+            return false;
         }
+        let lease = self.derived(embedding::Command::Lease { max: 4 }).await;
+        if lease.status != 200 {
+            return false;
+        }
+        let jobs = lease.body["jobs"].as_array().cloned().unwrap_or_default();
+        if jobs.is_empty() {
+            return false;
+        }
+        let lease_id: String = lease.body["lease_id"].as_str().unwrap_or("").into();
+        let hashes: Vec<String> = jobs
+            .iter()
+            .map(|j| j["content_hash"].as_str().unwrap_or("").into())
+            .collect();
+        let texts = jobs
+            .iter()
+            .map(|j| {
+                (
+                    j["text"].as_str().unwrap_or("").into(),
+                    j["scan_state"].as_str().unwrap_or("pending").into(),
+                )
+            })
+            .collect();
+        let command = match runtime.documents(texts).await {
+            Ok(rows) => embedding::Command::Submit {
+                lease: lease_id,
+                digest: runtime.config.id.model_digest.clone(),
+                vectors: hashes
+                    .into_iter()
+                    .zip(rows)
+                    .map(|(h, v)| (h, v.iter().flat_map(|f| f.to_le_bytes()).collect()))
+                    .collect(),
+            },
+            Err(e) => embedding::Command::Failed {
+                lease: lease_id,
+                failures: hashes
+                    .into_iter()
+                    .map(|h| (h, e.reason.to_string()))
+                    .collect(),
+            },
+        };
+        self.derived(command).await;
+        true
     }
     pub fn retrieval_status(&self) -> Json {
         let mut status = match &self.retrieval {
@@ -441,9 +515,8 @@ impl Store {
                     json!({"mode": "hybrid", "effective": "lexical-fallback", "state": "degraded", "reason": reason, "endpoint_host": url::Url::parse(&runtime.config.endpoint).ok().and_then(|u| u.host_str().map(String::from)), "breaker_open": runtime.breaker_open()})
                 }
                 None => {
-                    let (covered, total) = *self.coverage.read().unwrap();
-                    let complete = covered == total;
-                    json!({"mode": "hybrid", "effective": if complete { "hybrid" } else { "lexical" }, "state": if complete { "ok" } else { "switching" }, "coverage": {"cards": covered, "total": total}})
+                    let complete = self.coverage.read().unwrap().complete();
+                    json!({"mode": "hybrid", "effective": if complete { "hybrid" } else { "lexical" }, "state": if complete { "ok" } else { "switching" }})
                 }
             },
         };
@@ -454,8 +527,7 @@ impl Store {
                     .and_then(|u| u.host_str().map(String::from))
             );
             status["breaker_open"] = json!(runtime.breaker_open());
-            let (cards, total) = *self.coverage.read().unwrap();
-            status["coverage"] = json!({"cards": cards, "total": total});
+            status["coverage"] = self.coverage.read().unwrap().json();
             status["embedder_id"] = json!(runtime.config.id.key());
         }
         status
@@ -516,7 +588,7 @@ impl Store {
         match action {
             "card" | "log" | "status" => self.read(credential, action, map).await,
             "search" => self.search(credential, map).await,
-            "reindex" | "embed_lease" | "embed_submit" => {
+            "reindex" | "embed_lease" | "embed_submit" | "embed_failed" => {
                 self.embedding_request(credential, action, &raw).await
             }
             "put" | "import" | "retire" | "handoff" | "capture" | "grant" => {
@@ -534,6 +606,15 @@ impl Store {
         }
     }
     async fn write(&self, prepared: Prepared) -> Reply {
+        // A lease changes no coverage, and the scheduler sends one per tick.
+        let counts = !matches!(
+            prepared.action,
+            Action::Embedding {
+                command: embedding::Command::Lease { .. },
+                ..
+            }
+        );
+        let queued = matches!(prepared.action, Action::Put { .. });
         match self
             .writer
             .submit(prepared, Instant::now() + COMMAND_DEADLINE)
@@ -541,7 +622,12 @@ impl Store {
         {
             Ok(reply) => {
                 if reply.status < 300 {
-                    self.refresh_coverage().await;
+                    if counts {
+                        self.refresh_coverage().await;
+                    }
+                    if queued {
+                        self.embed_wake.notify_one();
+                    }
                 }
                 reply
             }
@@ -871,12 +957,10 @@ impl Store {
             let Some(matrix) = self.dense.current(&runtime.config.id.key()) else {
                 return reply;
             };
-            let hashes = matrix.hashes();
-            let ready = snapshot
-                .live(&vec![true; snapshot.scopes().len()])
-                .iter()
-                .all(|n| hashes.contains(&*snapshot.doc(*n).content_hash));
-            if !ready {
+            // Coverage over embeddable cards, kept current by each write. An
+            // unembeddable card (pending scan, flagged, parked) is answered by
+            // BM25 alone and does not hold hybrid back.
+            if !self.coverage.read().unwrap().complete() {
                 return reply;
             }
             match runtime.query(&query).await {
@@ -905,7 +989,10 @@ impl Store {
                     {
                         return hybrid;
                     }
-                    reply.body["retrieval"]["stale"] = json!(true);
+                    reply.body["retrieval"]["mode"] = json!("lexical-fallback");
+                    reply.body["retrieval"]["effective"] = json!("lexical-fallback");
+                    reply.body["retrieval"]["degraded"] = json!(true);
+                    reply.body["retrieval"]["reason"] = json!("memory-reader-timeout");
                 }
             }
         }

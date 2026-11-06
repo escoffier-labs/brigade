@@ -68,15 +68,28 @@ lexical mode. S15b supplies the following storage and retrieval behavior.
 
 ## Jobs and switching
 
-The hub starts one scheduler only in hybrid mode. It queues missing content
-hashes in bounded writer turns. Matching vectors are reused across revisions
-and scopes. Query results remain lexical until the configured fingerprint
-covers every live head. Status reports switching with covered and total card
-counts during the backfill. A failed embedding leaves the lexical index
+The hub starts one scheduler only in hybrid mode. At start-up it queues
+missing content hashes in bounded writer turns. After that, `put` and
+`retire` queue and remove jobs inside their own transactions, so the
+scheduler never scans the corpus. It leases only while work is queued. An
+empty lease doubles its wait up to 30 seconds, and a committed `put` wakes
+it. It takes no lease while the endpoint is backing off. Matching vectors are
+reused across revisions and scopes. Query results remain lexical until the
+configured fingerprint covers every embeddable live head. Status reports
+switching during the backfill, with `coverage` fields `cards`, `eligible`,
+`unembeddable` and `total`. A card is unembeddable when its scan receipt is
+not clean, or when its job is parked. Unembeddable cards are answered by BM25
+alone and do not hold the switch to hybrid. In hybrid answers, `match_count`
+and `truncated` keep their lexical meaning. A failed embedding leaves the lexical index
 available. Changing back to lexical and restarting leaves vectors on disk,
 and loads none of them.
 
-Derived tables migrate the memory file from schema 1 to schema 2. The hub
+Derived tables migrate the memory file from schema 1 to schema 2. Triggers
+on `memory_vectors` append to `memory_vector_log`, and the dense index
+replays only the log rows after its watermark. A commit that touches no
+vector reads no vector row. The sweep keeps the newest 4,096 log rows, and a
+matrix behind the kept rows reloads its embedder through the
+`(embedder_id, normalizer_version, content_hash)` index. The hub
 keeps vectors under a fingerprint of model name, reported digest, dimensions,
 normalizer version and query prefix version. Bump the prefix version when
 changing the prefix. Vectors use little-endian float32. Immutable append
@@ -90,19 +103,33 @@ invalidates a pending build. A query whose live head has no matching vector
 continues using BM25.
 
 Normalizing document text uses title, summary and body. Unrelated frontmatter
-and card aliases do not enter the payload. The stored scan receipt must be
-clean or flagged, and S18 scans the exact outgoing payload again. Pending
-revisions wait. Retiring or replacing a head removes its old lineage rows.
+and card aliases do not enter the payload. Flagged text never leaves the
+host. The stored scan receipt must be clean, and S18 scans the exact
+outgoing payload again at lease time. Text that this scan flags or blocks is
+parked as unembeddable. Pending revisions are not queued.
+
+A document that fails is retried alone, so it cannot hold back the documents
+leased with it. Each failure of a document leased alone counts an attempt
+and backs off for 10 seconds, doubled per attempt up to one hour. After five
+attempts the job is parked with `state = 'failed'` and `last_error`. Endpoint
+faults (unavailable, timeout, refused credential, digest mismatch, busy)
+release the job without counting an attempt. An endpoint answer of 400, 413
+or 422 is a document refusal. Embedding commands write no idempotency row,
+because a lease reply carries card text. Retiring or replacing a head removes its old lineage rows.
 A shared vector stays until no live head in any scope refers to its content.
 Finished jobs expire after seven days through the bounded writer sweep.
 
 Use `brigade memory reindex --target WORKSPACE --admin-token-file FILE` to
 queue missing vectors. The command drains bounded pages, and repeating it
 queues nothing after those pages exist. Its queued count describes the first
-page. The explicit admin credential is separate from the node credential.
-Use `--drop EMBEDDER_ID` to remove only that embedder's vectors, lineage and
-jobs. A configured active embedder can backfill itself again on its next
-scheduler pass. Old matrices stay available until explicitly dropped.
+page. The command also requeues parked jobs. The explicit admin credential
+is separate from the node credential. Use `--drop EMBEDDER_ID` to remove
+only that embedder's vectors, lineage and jobs. The id must be 64 lowercase
+hex characters. The drop runs in writer turns of at most 512 rows per table
+and reports the deleted `vectors`, `jobs` and `lineage` counts. The hub
+refuses to drop the active embedder while hybrid is configured. Set
+`memory.retrieval = "lexical"` and restart first. Old matrices stay
+available until explicitly dropped.
 
 ## Pull worker
 
@@ -121,8 +148,12 @@ scopes it serves. It needs no read grant and never opens the hub database.
 Each lease names at most four scanned texts and expires after 60 seconds.
 The worker verifies the endpoint digest and vectors, then submits base64
 little-endian float32 rows with the lease id. The hub checks ownership,
-expiry, dimensions and digest again. `--once` processes at most one lease.
-A failed worker leaves the lease available for recovery after expiry.
+expiry, dimensions and digest again. When a batch is refused, the worker
+embeds each document alone, submits the vectors it got, and reports the rest
+with `embed_failed` (`lease_id` and up to four `content_hash` and `reason`
+pairs). It keeps leasing after per-document and endpoint failures, and
+sleeps only when a lease is empty. `--once` processes at most one lease. A
+worker that stops leaves the lease available for recovery after expiry.
 
 For reachable query embedding, configure `query_endpoint` or `endpoint` on
 the hub under the same allowlist and secret-file policy. Pull mode can omit

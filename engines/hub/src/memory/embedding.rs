@@ -12,16 +12,45 @@ use serde_json::{Value as Json, json};
 
 pub const DDL: &str = "
 CREATE TABLE memory_vectors(content_hash TEXT NOT NULL,embedder_id TEXT NOT NULL,normalizer_version INTEGER NOT NULL,vector BLOB NOT NULL,PRIMARY KEY(content_hash,embedder_id,normalizer_version)) WITHOUT ROWID;
+CREATE INDEX memory_vectors_embedder ON memory_vectors(embedder_id,normalizer_version,content_hash);
+CREATE TABLE memory_vector_log(seq INTEGER PRIMARY KEY AUTOINCREMENT,embedder_id TEXT NOT NULL,content_hash TEXT NOT NULL,present INTEGER NOT NULL);
+CREATE TRIGGER memory_vectors_added AFTER INSERT ON memory_vectors WHEN new.normalizer_version=1 BEGIN INSERT INTO memory_vector_log(embedder_id,content_hash,present) VALUES(new.embedder_id,new.content_hash,1); END;
+CREATE TRIGGER memory_vectors_removed AFTER DELETE ON memory_vectors WHEN old.normalizer_version=1 BEGIN INSERT INTO memory_vector_log(embedder_id,content_hash,present) VALUES(old.embedder_id,old.content_hash,0); END;
 CREATE TABLE memory_lineage(scope TEXT NOT NULL,card_id TEXT NOT NULL,revision INTEGER NOT NULL,artifact TEXT NOT NULL,artifact_key TEXT NOT NULL,content_hash TEXT NOT NULL,PRIMARY KEY(scope,card_id,revision,artifact,artifact_key)) WITHOUT ROWID;
-CREATE TABLE memory_embed_jobs(content_hash TEXT NOT NULL,embedder_id TEXT NOT NULL,state TEXT NOT NULL,lease_id TEXT,holder TEXT,expires_ms INTEGER,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,finished_ms INTEGER,PRIMARY KEY(content_hash,embedder_id)) WITHOUT ROWID;
+CREATE TABLE memory_embed_jobs(content_hash TEXT NOT NULL,embedder_id TEXT NOT NULL,state TEXT NOT NULL,lease_id TEXT,holder TEXT,expires_ms INTEGER,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,finished_ms INTEGER,not_before INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(content_hash,embedder_id)) WITHOUT ROWID;
+CREATE INDEX memory_embed_jobs_queue ON memory_embed_jobs(embedder_id,state,attempts,content_hash);
 CREATE INDEX memory_cards_hash ON memory_cards(content_hash);
 CREATE INDEX memory_lineage_hash ON memory_lineage(content_hash);
+CREATE INDEX memory_lineage_artifact ON memory_lineage(artifact,artifact_key);
 ";
+/// A document that fails this many times alone is parked as `failed`.
+pub const MAX_ATTEMPTS: i64 = 5;
+/// Backoff after a document fails alone: 10 s, doubled per attempt, capped at 1 h.
+pub const BACKOFF_MS: i64 = 10_000;
+pub const LEASE_MS: i64 = 60_000;
+/// Rows each `--drop` writer turn deletes from each derived table.
+pub const DROP_BATCH: i64 = 512;
+// The hub's own document request must finish inside the lease it holds.
+const _: () = assert!((super::embedder::DOCUMENT_DEADLINE.as_millis() as i64) < LEASE_MS - 5_000);
+/// Failures of the endpoint or the hub, not of one document. They release
+/// the job without counting an attempt.
+const TRANSIENT: &[&str] = &[
+    "embedder-busy",
+    "embedder-unavailable",
+    "embedder-timeout",
+    "embedder-refused",
+    "endpoint-refused",
+    "scan-unavailable",
+    "scan-pending",
+    "digest-mismatch",
+];
 #[derive(Clone, Debug)]
 pub enum Command {
     Reindex {
         id: String,
         drop: bool,
+        /// The operator's `memory reindex`. It also requeues parked jobs.
+        explicit: bool,
     },
     Lease {
         max: usize,
@@ -33,8 +62,25 @@ pub enum Command {
     },
     Failed {
         lease: String,
-        reason: String,
+        /// `(content_hash, reason)` for each document the holder gives back.
+        failures: Vec<(String, String)>,
     },
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Coverage {
+    /// Live cards whose text has a vector for the active embedder.
+    pub covered: usize,
+    /// Live cards that can be embedded: a vector, or clean and not parked.
+    pub eligible: usize,
+    pub total: usize,
+}
+impl Coverage {
+    pub fn complete(&self) -> bool {
+        self.covered >= self.eligible
+    }
+    pub fn json(&self) -> Json {
+        json!({"cards": self.covered, "eligible": self.eligible, "unembeddable": self.total - self.eligible, "total": self.total})
+    }
 }
 fn t(s: &str) -> Value {
     Value::Text(s.into())
@@ -49,18 +95,63 @@ fn s(v: &Value) -> String {
 fn n(v: &Value) -> i64 {
     if let Value::Integer(n) = v { *n } else { 0 }
 }
+fn hex64(h: &str) -> bool {
+    h.len() == 64 && h.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+}
+fn invalid() -> Reply {
+    error(422, "memory_vector_invalid", "invalid embedding command")
+}
+/// `--drop` names exactly one embedder id: 64 lowercase hex characters.
+pub fn parse_drop(raw: &Json) -> Result<Option<String>, Reply> {
+    match raw.get("drop") {
+        None => Ok(None),
+        Some(Json::String(id)) if hex64(id) => Ok(Some(id.clone())),
+        Some(_) => Err(error(
+            422,
+            "memory_vector_invalid",
+            "drop needs a 64-character lowercase hex embedder id",
+        )),
+    }
+}
 
 pub fn parse(action: &str, raw: &Json, config: &Config) -> Result<Command, Reply> {
-    let invalid = || error(422, "memory_vector_invalid", "invalid embedding command");
     let id = config.id.key();
     match action {
         "reindex" => Ok(Command::Reindex {
-            id: raw["drop"].as_str().unwrap_or(&id).into(),
-            drop: raw["drop"].is_string(),
+            id,
+            drop: false,
+            explicit: true,
         }),
         "embed_lease" if raw["embedder_id"].as_str() == Some(&id) => Ok(Command::Lease {
             max: raw["max"].as_u64().unwrap_or(4).clamp(1, 4) as usize,
         }),
+        "embed_failed" => {
+            let lease = raw["lease_id"].as_str().ok_or_else(invalid)?.to_string();
+            let rows = raw["failures"]
+                .as_array()
+                .filter(|v| !v.is_empty() && v.len() <= 4)
+                .ok_or_else(invalid)?;
+            let mut failures = Vec::new();
+            for row in rows {
+                let hash = row["content_hash"]
+                    .as_str()
+                    .filter(|h| hex64(h))
+                    .ok_or_else(invalid)?;
+                let reason = row["reason"]
+                    .as_str()
+                    .filter(|r| {
+                        !r.is_empty()
+                            && r.len() <= 40
+                            && r.bytes().all(|c| c.is_ascii_lowercase() || c == b'-')
+                    })
+                    .ok_or_else(invalid)?;
+                if failures.iter().any(|(h, _)| h == hash) {
+                    return Err(invalid());
+                }
+                failures.push((hash.to_string(), reason.to_string()));
+            }
+            Ok(Command::Failed { lease, failures })
+        }
         "embed_submit" => {
             use base64::Engine;
             let lease = raw["lease_id"].as_str().ok_or_else(invalid)?.to_string();
@@ -79,7 +170,7 @@ pub fn parse(action: &str, raw: &Json, config: &Config) -> Result<Command, Reply
             for row in rows {
                 let hash = row["content_hash"]
                     .as_str()
-                    .filter(|h| h.len() == 64 && h.bytes().all(|c| c.is_ascii_hexdigit()))
+                    .filter(|h| hex64(h))
                     .ok_or_else(invalid)?;
                 let text = row["vector"]
                     .as_str()
@@ -131,6 +222,15 @@ pub fn cleanup_card(tx: &dyn WriteTx, scope: &str, card: &str) -> rusqlite::Resu
     tx.execute("INSERT OR IGNORE INTO memory_lineage SELECT c.scope,c.card_id,c.revision,'vector',v.embedder_id,c.content_hash FROM memory_cards c JOIN memory_vectors v ON v.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.state='live'", &[t(scope),t(card)])?;
     Ok(())
 }
+/// Queue the card's live head for the active embedder inside the same
+/// transaction as its `put` or `retire`, so the scheduler never scans the
+/// corpus to find new work. Only text whose stored scan receipt is `clean`
+/// is queued. Jobs left for text no live card holds any more are removed.
+pub fn queue_card(tx: &dyn WriteTx, scope: &str, card: &str, id: &str) -> rusqlite::Result<()> {
+    tx.execute("DELETE FROM memory_embed_jobs WHERE state IN ('pending','failed') AND content_hash IN (SELECT content_hash FROM memory_card_revisions WHERE scope=?1 AND card_id=?2) AND NOT EXISTS(SELECT 1 FROM memory_cards c WHERE c.content_hash=memory_embed_jobs.content_hash AND c.state='live')", &[t(scope), t(card)])?;
+    tx.execute("INSERT INTO memory_embed_jobs(content_hash,embedder_id,state) SELECT c.content_hash,?3,'pending' FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.scope=?1 AND c.card_id=?2 AND c.state='live' AND r.scan_state='clean' AND NOT EXISTS(SELECT 1 FROM memory_vectors v WHERE v.content_hash=c.content_hash AND v.embedder_id=?3 AND v.normalizer_version=1) ON CONFLICT(content_hash,embedder_id) DO UPDATE SET state='pending',finished_ms=NULL WHERE state='done'", &[t(scope), t(card), t(id)])?;
+    Ok(())
+}
 /// Normalizer 1 is content-addressed. Card aliases and frontmatter unrelated to
 /// title/summary cannot change the payload for identical content bytes.
 pub fn document_text(body: &str, input_chars: usize) -> String {
@@ -156,6 +256,34 @@ pub fn document_text(body: &str, input_chars: usize) -> String {
         })
         .collect()
 }
+/// Delete at most [`DROP_BATCH`] rows from each table for one embedder id.
+fn drop_turn(tx: &dyn WriteTx, id: &str) -> rusqlite::Result<Reply> {
+    let limit = Value::Integer(DROP_BATCH);
+    let vectors = tx.execute("DELETE FROM memory_vectors WHERE (content_hash,embedder_id,normalizer_version) IN (SELECT content_hash,embedder_id,normalizer_version FROM memory_vectors WHERE embedder_id=?1 LIMIT ?2)", &[t(id), limit.clone()])?;
+    let jobs = tx.execute("DELETE FROM memory_embed_jobs WHERE embedder_id=?1 AND content_hash IN (SELECT content_hash FROM memory_embed_jobs WHERE embedder_id=?1 LIMIT ?2)", &[t(id), limit.clone()])?;
+    let lineage = tx.execute("DELETE FROM memory_lineage WHERE (scope,card_id,revision,artifact,artifact_key) IN (SELECT scope,card_id,revision,artifact,artifact_key FROM memory_lineage WHERE artifact='vector' AND artifact_key=?1 LIMIT ?2)", &[t(id), limit])?;
+    Ok(Reply::new(
+        200,
+        json!({"dropped": id, "vectors": vectors, "jobs": jobs, "lineage": lineage}),
+    ))
+}
+/// Scopes on which this credential may embed, or None for every scope.
+fn embed_scopes(tx: &dyn WriteTx, p: &Prepared) -> rusqlite::Result<Option<String>> {
+    if p.credential == super::Credential::Admin {
+        return Ok(None);
+    }
+    let mut allowed = Vec::new();
+    for row in tx.query(
+        "SELECT DISTINCT scope FROM memory_cards WHERE state='live'",
+        &[],
+    )? {
+        let scope = s(&row[0]);
+        if auth::has_right(tx, &p.credential, Some(&scope), "embed")? {
+            allowed.push(scope);
+        }
+    }
+    Ok(Some(Json::from(allowed).to_string()))
+}
 pub fn apply(
     tx: &dyn WriteTx,
     p: &Prepared,
@@ -163,18 +291,15 @@ pub fn apply(
     config: Option<&Config>,
     scanner: &dyn Scanner,
 ) -> rusqlite::Result<Reply> {
-    if let Command::Reindex { id, drop: true } = command {
-        for table in ["memory_vectors", "memory_embed_jobs"] {
-            tx.execute(
-                &format!("DELETE FROM {table} WHERE embedder_id=?1"),
-                &[t(id)],
-            )?;
+    if let Command::Reindex { id, drop: true, .. } = command {
+        if config.is_some_and(|c| c.id.key() == *id) {
+            return Ok(error(
+                409,
+                "memory_embedder_active",
+                "this embedder is active. Set memory.retrieval to lexical and restart the hub before dropping it",
+            ));
         }
-        tx.execute(
-            "DELETE FROM memory_lineage WHERE artifact='vector' AND artifact_key=?1",
-            &[t(id)],
-        )?;
-        return Ok(Reply::new(200, json!({"dropped": id})));
+        return drop_turn(tx, id);
     }
     let Some(config) = config else {
         return Ok(error(
@@ -185,59 +310,76 @@ pub fn apply(
     };
     let id = config.id.key();
     match command {
-        Command::Reindex { .. } => {
+        Command::Reindex { explicit, .. } => {
             cleanup(tx)?;
+            // Only the operator's command gives parked documents another chance.
+            let requeued = if *explicit {
+                tx.execute("UPDATE memory_embed_jobs SET state='pending',attempts=0,not_before=0,lease_id=NULL,holder=NULL,expires_ms=NULL WHERE embedder_id=?1 AND state='failed'", &[t(&id)])?
+            } else {
+                0
+            };
             let resumed = tx.execute("UPDATE memory_embed_jobs SET state='pending',finished_ms=NULL WHERE embedder_id=?1 AND state='done' AND NOT EXISTS(SELECT 1 FROM memory_vectors v WHERE v.content_hash=memory_embed_jobs.content_hash AND v.embedder_id=?1) AND EXISTS(SELECT 1 FROM memory_cards c WHERE c.content_hash=memory_embed_jobs.content_hash AND c.state='live')", &[t(&id)])?;
             // Queue in bounded pages. Existing jobs and vectors make repeats idempotent.
-            let rows = tx.query("SELECT DISTINCT c.content_hash FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.state='live' AND r.scan_state IN ('clean','flagged') AND NOT EXISTS(SELECT 1 FROM memory_vectors v WHERE v.content_hash=c.content_hash AND v.embedder_id=?1 AND v.normalizer_version=1) AND NOT EXISTS(SELECT 1 FROM memory_embed_jobs j WHERE j.content_hash=c.content_hash AND j.embedder_id=?1) LIMIT 256", &[t(&id)])?;
+            // Flagged text never leaves the host, so only clean receipts are queued.
+            let rows = tx.query("SELECT DISTINCT c.content_hash FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.state='live' AND r.scan_state='clean' AND NOT EXISTS(SELECT 1 FROM memory_vectors v WHERE v.content_hash=c.content_hash AND v.embedder_id=?1 AND v.normalizer_version=1) AND NOT EXISTS(SELECT 1 FROM memory_embed_jobs j WHERE j.content_hash=c.content_hash AND j.embedder_id=?1) LIMIT 256", &[t(&id)])?;
             for r in &rows {
                 tx.execute("INSERT INTO memory_embed_jobs(content_hash,embedder_id,state) VALUES(?1,?2,'pending')", &[r[0].clone(), t(&id)])?;
             }
             tx.execute("INSERT OR IGNORE INTO memory_lineage SELECT c.scope,c.card_id,c.revision,'vector',v.embedder_id,c.content_hash FROM memory_cards c JOIN memory_vectors v ON v.content_hash=c.content_hash WHERE c.state='live' AND v.embedder_id=?1", &[t(&id)])?;
             Ok(Reply::new(
                 200,
-                json!({"queued": rows.len() + resumed, "embedder_id": id}),
+                json!({"queued": rows.len() + resumed + requeued, "embedder_id": id}),
             ))
         }
         Command::Lease { max } => {
             if !scanner.describe().0 {
                 return Ok(error(503, "memory_scan_unavailable", "scan unavailable"));
             }
-            let rows = tx.query("SELECT j.content_hash,b.bytes,c.scope,r.scan_state,c.card_id FROM memory_embed_jobs j JOIN memory_cards c ON c.content_hash=j.content_hash JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE j.embedder_id=?1 AND c.state='live' AND r.scan_state IN ('clean','flagged') AND (j.state='pending' OR (j.state='leased' AND j.expires_ms<=?2)) ORDER BY j.content_hash,c.scope,c.card_id LIMIT 256", &[t(&id), Value::Integer(p.now_ms)])?;
+            // Distinct eligible hashes are chosen in SQL, after the scope's
+            // embed right and the backoff, before the limit applies.
+            let scopes = embed_scopes(tx, p)?;
+            let scopes = scopes.map_or(Value::Null, Value::Text);
+            let rows = tx.query("SELECT j.content_hash,j.attempts,(SELECT b.bytes FROM memory_blobs b WHERE b.content_hash=j.content_hash) FROM memory_embed_jobs j WHERE j.embedder_id=?1 AND (j.state='pending' OR (j.state='leased' AND j.expires_ms<=?2)) AND j.not_before<=?2 AND EXISTS(SELECT 1 FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.content_hash=j.content_hash AND c.state='live' AND r.scan_state='clean' AND (?3 IS NULL OR c.scope IN (SELECT value FROM json_each(?3)))) ORDER BY j.attempts>0,j.content_hash LIMIT ?4", &[t(&id), Value::Integer(p.now_ms), scopes, Value::Integer(4 * *max as i64)])?;
             let lease = ids::mint(p.now_ms);
             let mut jobs = Vec::new();
             let mut bytes = 0;
-            let mut hashes = std::collections::HashSet::new();
             for row in rows {
-                if jobs.len() == *max {
+                // A document that has failed before is retried alone, so it
+                // cannot hold back the documents batched with it.
+                let retry = n(&row[1]) > 0;
+                if jobs.len() == *max || retry && !jobs.is_empty() {
                     break;
                 }
                 let hash = s(&row[0]);
-                if hashes.contains(&hash)
-                    || !auth::has_right(tx, &p.credential, Some(&s(&row[2])), "embed")?
-                {
-                    continue;
-                }
-                let body = match &row[1] {
+                let body = match &row[2] {
                     Value::Blob(b) => String::from_utf8_lossy(b).into_owned(),
                     other => s(other),
                 };
                 let text = document_text(&body, config.input_chars);
-                if !matches!(
-                    scanner.scan(&text),
-                    Scan::Clean { .. } | Scan::Flagged { .. }
-                ) || bytes + text.len() > 32 * 1024
-                {
+                let parked = match scanner.scan(&text) {
+                    Scan::Clean { .. } => None,
+                    Scan::Flagged { .. } => Some("content-flagged"),
+                    Scan::Blocked { .. } => Some("content-blocked"),
+                    Scan::Unavailable | Scan::Failed => continue,
+                };
+                if let Some(reason) = parked {
+                    // Counted as unembeddable. `memory reindex` requeues it.
+                    tx.execute("UPDATE memory_embed_jobs SET state='failed',last_error=?3,finished_ms=?4 WHERE content_hash=?1 AND embedder_id=?2", &[t(&hash), t(&id), t(reason), Value::Integer(p.now_ms)])?;
                     continue;
                 }
+                if bytes + text.len() > 32 * 1024 {
+                    break;
+                }
                 bytes += text.len();
-                hashes.insert(hash.clone());
-                tx.execute("UPDATE memory_embed_jobs SET state='leased',lease_id=?3,holder=?4,expires_ms=?5,attempts=attempts+1 WHERE content_hash=?1 AND embedder_id=?2", &[t(&hash),t(&id),t(&lease),t(p.credential.principal()),Value::Integer(p.now_ms+60_000)])?;
-                jobs.push(json!({"content_hash": hash, "text": text, "scan_state": s(&row[3])}));
+                tx.execute("UPDATE memory_embed_jobs SET state='leased',lease_id=?3,holder=?4,expires_ms=?5 WHERE content_hash=?1 AND embedder_id=?2", &[t(&hash),t(&id),t(&lease),t(p.credential.principal()),Value::Integer(p.now_ms+LEASE_MS)])?;
+                jobs.push(json!({"content_hash": hash, "text": text, "scan_state": "clean"}));
+                if retry {
+                    break;
+                }
             }
             Ok(Reply::new(
                 200,
-                json!({"lease_id": lease, "embedder_id": id, "model_digest": config.id.model_digest, "dimensions": config.id.dimensions, "jobs": jobs, "expires_ms": p.now_ms+60_000}),
+                json!({"lease_id": lease, "embedder_id": id, "model_digest": config.id.model_digest, "dimensions": config.id.dimensions, "jobs": jobs, "expires_ms": p.now_ms+LEASE_MS}),
             ))
         }
         Command::Submit {
@@ -264,16 +406,56 @@ pub fn apply(
                 tx.execute("INSERT OR IGNORE INTO memory_lineage SELECT scope,card_id,revision,'vector',?2,content_hash FROM memory_cards WHERE content_hash=?1 AND state='live'", &[t(hash),t(&id)])?;
                 tx.execute("UPDATE memory_embed_jobs SET state='done',last_error=NULL,finished_ms=?3 WHERE content_hash=?1 AND embedder_id=?2", &[t(hash),t(&id),Value::Integer(p.now_ms)])?;
             }
-            cleanup(tx)?;
+            // A vector for text retired while it was leased has no reference.
+            for (hash, _) in vectors {
+                tx.execute("DELETE FROM memory_vectors WHERE content_hash=?1 AND embedder_id=?2 AND NOT EXISTS(SELECT 1 FROM memory_cards WHERE content_hash=?1 AND state='live')", &[t(hash), t(&id)])?;
+            }
             Ok(Reply::new(200, json!({"stored": vectors.len()})))
         }
-        Command::Failed { lease, reason } => {
-            tx.execute("UPDATE memory_embed_jobs SET state='pending',last_error=?3 WHERE lease_id=?1 AND holder=?2", &[t(lease),t(p.credential.principal()),t(reason)])?;
-            Ok(Reply::new(200, json!({"ok": true})))
+        Command::Failed { lease, failures } => {
+            let owner = [t(lease), t(p.credential.principal()), t(&id)];
+            let held = n(&tx.query("SELECT count(*) FROM memory_embed_jobs WHERE lease_id=?1 AND holder=?2 AND embedder_id=?3 AND state='leased'", &owner)?[0][0]);
+            let mut released = 0;
+            let mut parked = 0;
+            for (hash, reason) in failures {
+                let row = tx.query("SELECT attempts FROM memory_embed_jobs WHERE content_hash=?4 AND lease_id=?1 AND holder=?2 AND embedder_id=?3 AND state='leased'", &[owner[0].clone(), owner[1].clone(), owner[2].clone(), t(hash)])?;
+                let Some(row) = row.first() else {
+                    continue;
+                };
+                let key = [t(hash), t(&id), t(reason), Value::Integer(p.now_ms)];
+                if TRANSIENT.contains(&reason.as_str()) {
+                    tx.execute("UPDATE memory_embed_jobs SET state='pending',lease_id=NULL,holder=NULL,expires_ms=NULL,last_error=?3,not_before=?4+1000 WHERE content_hash=?1 AND embedder_id=?2", &key)?;
+                    released += 1;
+                    continue;
+                }
+                let attempts = n(&row[0]) + 1;
+                if attempts >= MAX_ATTEMPTS {
+                    tx.execute("UPDATE memory_embed_jobs SET state='failed',attempts=attempts+1,lease_id=NULL,holder=NULL,expires_ms=NULL,last_error=?3,finished_ms=?4 WHERE content_hash=?1 AND embedder_id=?2", &key)?;
+                    parked += 1;
+                    continue;
+                }
+                // A batch failure only proves one of its documents bad: each is
+                // retried alone at once. A document failing alone backs off.
+                let wait = if held > 1 {
+                    0
+                } else {
+                    (BACKOFF_MS << (attempts - 1)).min(3_600_000)
+                };
+                tx.execute("UPDATE memory_embed_jobs SET state='pending',attempts=attempts+1,lease_id=NULL,holder=NULL,expires_ms=NULL,last_error=?3,not_before=?4+?5 WHERE content_hash=?1 AND embedder_id=?2", &[key[0].clone(), key[1].clone(), key[2].clone(), key[3].clone(), Value::Integer(wait)])?;
+                released += 1;
+            }
+            Ok(Reply::new(
+                200,
+                json!({"released": released, "parked": parked}),
+            ))
         }
     }
 }
-pub fn coverage(tx: &dyn ReadTx, id: &str) -> rusqlite::Result<(usize, usize)> {
-    let rows = tx.query("SELECT count(*),COALESCE(sum(EXISTS(SELECT 1 FROM memory_vectors v WHERE v.content_hash=c.content_hash AND v.embedder_id=?1 AND v.normalizer_version=1)),0) FROM memory_cards c WHERE c.state='live'", &[t(id)])?;
-    Ok((n(&rows[0][1]) as usize, n(&rows[0][0]) as usize))
+pub fn coverage(tx: &dyn ReadTx, id: &str) -> rusqlite::Result<Coverage> {
+    let rows = tx.query("SELECT count(*),COALESCE(sum(v),0),COALESCE(sum(v OR (scan_state='clean' AND NOT parked)),0) FROM (SELECT r.scan_state,EXISTS(SELECT 1 FROM memory_vectors x WHERE x.content_hash=c.content_hash AND x.embedder_id=?1 AND x.normalizer_version=1) AS v,EXISTS(SELECT 1 FROM memory_embed_jobs j WHERE j.content_hash=c.content_hash AND j.embedder_id=?1 AND j.state='failed') AS parked FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.state='live')", &[t(id)])?;
+    Ok(Coverage {
+        covered: n(&rows[0][1]) as usize,
+        eligible: n(&rows[0][2]) as usize,
+        total: n(&rows[0][0]) as usize,
+    })
 }

@@ -264,7 +264,9 @@ pub(super) fn sweep(db: &Connection, now_ms: i64) -> rusqlite::Result<usize> {
     );
     let deleted = deleted.and_then(|n| {
         let jobs = db.execute("DELETE FROM memory_embed_jobs WHERE (content_hash,embedder_id) IN (SELECT content_hash,embedder_id FROM memory_embed_jobs WHERE state='done' AND finished_ms < ?1 LIMIT ?2)", rusqlite::params![now_ms - 7*24*3600*1000, (SWEEP_BATCH-n) as i64])?;
-        Ok(n + jobs)
+        // Keep the newest log rows. A matrix further behind reloads in full.
+        let log = db.execute("DELETE FROM memory_vector_log WHERE seq IN (SELECT seq FROM memory_vector_log WHERE seq <= (SELECT max(seq) FROM memory_vector_log) - ?1 ORDER BY seq LIMIT ?2)", rusqlite::params![super::dense::LOG_KEEP, (SWEEP_BATCH - n - jobs) as i64])?;
+        Ok(n + jobs + log)
     });
     let _ = db.progress_handler(0, None::<fn() -> bool>);
     match deleted {
@@ -292,12 +294,19 @@ fn apply_one(
     p: &Prepared,
     authority: &Authority,
     scanner: &dyn super::scan::Scanner,
+    embedder: Option<&str>,
 ) -> Answer {
     if db.execute_batch("SAVEPOINT command").is_err() {
         return Err(storage("storage-error"));
     }
     let result = catch_unwind(AssertUnwindSafe(|| {
-        ops::apply(&worker::Tx(db) as &dyn WriteTx, p, authority, scanner)
+        ops::apply(
+            &worker::Tx(db) as &dyn WriteTx,
+            p,
+            authority,
+            scanner,
+            embedder,
+        )
     }));
     if db.is_autocommit() {
         return Err(storage("storage-error"));
@@ -511,7 +520,14 @@ pub(crate) fn run(
                     p.command.action.needs_policy(),
                 ) {
                     Ok(authority) => {
-                        apply_one(&db, &p.command, &authority, config.scanner.as_ref())
+                        let embedder = config.dense.as_ref().and_then(|d| d.active_id());
+                        apply_one(
+                            &db,
+                            &p.command,
+                            &authority,
+                            config.scanner.as_ref(),
+                            embedder.as_deref(),
+                        )
                     }
                     Err(refusal) => refusal,
                 };

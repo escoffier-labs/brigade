@@ -264,24 +264,12 @@ pub fn run<T: ReadTx + ?Sized>(
     } else {
         (snap.score(&allowed, &request.tokens), true)
     };
-    let mut ranks = std::collections::HashMap::new();
-    let hits = if let Some((matrix, query)) = &request.dense {
-        let lexical = snap.top(hits, TOP);
-        let dense = snap.top(matrix.score(snap, &allowed, query), TOP);
-        let mut scores = std::collections::HashMap::new();
-        for (source, list) in [("lexical", lexical), ("dense", dense)] {
-            for (rank, (n, _)) in list.into_iter().enumerate() {
-                *scores.entry(n).or_insert(0.0) += 1.0 / (60 + rank + 1) as f64;
-                ranks.entry(n).or_insert_with(|| json!({}))[source] = json!(rank + 1);
-            }
-        }
-        scores.into_iter().collect()
-    } else {
-        hits
-    };
     // Push revalidates the exact snapshot head and its current scan receipt.
     // Unavailable, pending, flagged, retired and stale versions never leave here.
-    let hits = if request.push {
+    let eligible = |hits: Vec<(u32, f64)>| -> rusqlite::Result<Vec<(u32, f64)>> {
+        if !request.push {
+            return Ok(hits);
+        }
         let mut eligible = Vec::new();
         let (available, ruleset) = scanner.describe();
         if available {
@@ -298,11 +286,26 @@ pub fn run<T: ReadTx + ?Sized>(
                 }
             }
         }
-        eligible
+        Ok(eligible)
+    };
+    let hits = eligible(hits)?;
+    // `match_count` and `truncated` keep their lexical meaning in hybrid mode.
+    let total = hits.len();
+    let mut ranks = std::collections::HashMap::new();
+    let hits = if let Some((matrix, query)) = &request.dense {
+        let lexical = snap.top(hits, TOP);
+        let dense = snap.top(eligible(matrix.score(snap, &allowed, query))?, TOP);
+        let mut scores = std::collections::HashMap::new();
+        for (source, list) in [("lexical", lexical), ("dense", dense)] {
+            for (rank, (n, _)) in list.into_iter().enumerate() {
+                *scores.entry(n).or_insert(0.0) += 1.0 / (60 + rank + 1) as f64;
+                ranks.entry(n).or_insert_with(|| json!({}))[source] = json!(rank + 1);
+            }
+        }
+        scores.into_iter().collect()
     } else {
         hits
     };
-    let total = hits.len();
     let matches: Vec<Json> = snap
         .top(hits, TOP)
         .into_iter()

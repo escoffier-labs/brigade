@@ -1,3 +1,4 @@
+use super::embedding::LEASE_MS;
 use super::tests::*;
 use super::*;
 use base64::Engine;
@@ -65,14 +66,19 @@ async fn reindex_is_idempotent_shared_vectors_and_exact_retirement_lineage() {
         .await;
     assert_eq!(a.status, 201);
     assert_eq!(b.status, 201);
-    let first = command(&h, json!({"action": "reindex"})).await;
-    assert_eq!(first.body["queued"], 1);
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    // `put` queued the shared text once, inside its own transaction.
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM memory_embed_jobs", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
     assert_eq!(
         command(&h, json!({"action": "reindex"})).await.body["queued"],
         0
     );
     fill(&h, &id).await;
-    let db = rusqlite::Connection::open(h.memory()).unwrap();
     let count = |table: &str| {
         db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
             r.get::<_, i64>(0)
@@ -144,7 +150,12 @@ async fn switching_keeps_vectors_reuses_matching_and_falls_back_when_endpoint_st
         "switching"
     );
     assert_eq!(
-        command(&h, json!({"action": "reindex"})).await.body["queued"],
+        db.query_row(
+            "SELECT count(*) FROM memory_embed_jobs WHERE embedder_id=?1 AND state='pending'",
+            [&id],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
         1
     );
     let old = h.store.as_ref().unwrap().dense.current(&id).unwrap();
@@ -162,12 +173,10 @@ async fn switching_keeps_vectors_reuses_matching_and_falls_back_when_endpoint_st
         &old,
         &h.store.as_ref().unwrap().dense.current(&id).unwrap()
     ));
-    assert_eq!(
-        command(&h, json!({"action": "reindex", "drop": second}))
-            .await
-            .status,
-        200
-    );
+    // The active embedder cannot be dropped while hybrid is configured.
+    let refused = command(&h, json!({"action": "reindex", "drop": second})).await;
+    assert_eq!(refused.status, 409, "{refused:?}");
+    assert_eq!(refused.body["code"], "memory_embedder_active");
     assert_eq!(
         db.query_row(
             "SELECT count(*) FROM memory_vectors WHERE embedder_id=?1",
@@ -217,6 +226,466 @@ async fn scan_pending_digest_lease_expiry_and_principal_are_enforced() {
         0
     );
 }
+async fn rows(h: &Hub, sql: &str) -> i64 {
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    db.query_row(sql, [], |r| r.get(0)).unwrap()
+}
+fn raw_card(db: &rusqlite::Connection, scope: &str, card: &str, hash: &str, scan: &str) {
+    db.execute(
+        "INSERT OR IGNORE INTO memory_blobs VALUES(?1,?2,4,'test')",
+        rusqlite::params![hash, b"body"],
+    )
+    .unwrap();
+    db.execute("INSERT INTO memory_cards VALUES(?1,?2,1,?3,'live','reviewed','hub:admin','admin','','','[]','test','test')", rusqlite::params![scope, card, hash]).unwrap();
+    db.execute("INSERT INTO memory_card_revisions VALUES(?1,?2,1,?3,'reviewed','live','hub:admin',1,NULL,?4,'test')", rusqlite::params![scope, card, hash, scan]).unwrap();
+}
+
+#[tokio::test]
+async fn lease_reply_is_never_stored_or_replayed_after_retirement() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = setup(&mut h);
+    let put = h
+        .put(
+            ADMIN_TOKEN,
+            "fleet",
+            "one",
+            None,
+            "remembered orchard notes",
+        )
+        .await;
+    let before = rows(&h, "SELECT count(*) FROM memory_idempotency").await;
+    let event = h.id();
+    let raw =
+        json!({"action": "embed_lease", "embedder_id": id, "max": 4, "client_event_id": event});
+    let lease = h.call(ADMIN_TOKEN, raw.clone()).await;
+    assert!(
+        lease.body["jobs"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("orchard")
+    );
+    // Neither the lease nor the derived reindex turns store a reply.
+    assert_eq!(command(&h, json!({"action": "reindex"})).await.status, 200);
+    assert_eq!(
+        rows(&h, "SELECT count(*) FROM memory_idempotency").await,
+        before
+    );
+    assert_eq!(
+        rows(
+            &h,
+            "SELECT count(*) FROM memory_idempotency WHERE response LIKE '%orchard%'"
+        )
+        .await,
+        0
+    );
+    let retire = command(&h, json!({"action": "retire", "scope": "fleet", "card_id": "one", "base_revision": rev(&put), "base_epoch": h.epoch().await})).await;
+    assert_eq!(retire.status, 200);
+    h.set_clock(h.now() + LEASE_MS + 1);
+    let replay = h.call(ADMIN_TOKEN, raw).await;
+    assert_eq!(replay.status, 200, "{replay:?}");
+    assert_eq!(replay.body["jobs"], json!([]));
+    assert!(!replay.body.to_string().contains("orchard"));
+}
+
+/// A test endpoint that refuses any batch holding the word "poison" with 400.
+async fn picky() -> (
+    String,
+    Arc<std::sync::Mutex<usize>>,
+    tokio::task::JoinHandle<()>,
+) {
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Bytes;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let calls = Arc::new(std::sync::Mutex::new(0));
+    let seen = calls.clone();
+    let task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let service = hyper::service::service_fn(
+                    move |req: hyper::Request<hyper::body::Incoming>| {
+                        let seen = seen.clone();
+                        async move {
+                            let body = req.into_body().collect().await?.to_bytes();
+                            let value: Json = serde_json::from_slice(&body).unwrap();
+                            *seen.lock().unwrap() += 1;
+                            let inputs = value["input"].as_array().unwrap();
+                            if inputs
+                                .iter()
+                                .any(|t| t.as_str().unwrap().contains("poison"))
+                            {
+                                return Ok::<_, hyper::Error>(
+                                    hyper::Response::builder()
+                                        .status(400)
+                                        .body(Full::new(Bytes::new()))
+                                        .unwrap(),
+                                );
+                            }
+                            let n = inputs.len();
+                            Ok(hyper::Response::new(Full::new(Bytes::from(
+                                json!({"model_digest": "fake-digest", "embeddings": vec![vec![3.0, 4.0]; n]}).to_string(),
+                            ))))
+                        }
+                    },
+                );
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    (format!("http://{address}/api/embed"), calls, task)
+}
+
+#[tokio::test]
+async fn poison_document_is_retried_alone_then_parked_without_stalling_the_backfill() {
+    let (endpoint, calls, task) = picky().await;
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = setup(&mut h);
+    let runtime = h.store.as_mut().unwrap().retrieval.take().unwrap();
+    let mut config = runtime.config.clone();
+    config.endpoint = endpoint.clone();
+    config.allowlist = vec![endpoint];
+    config.pull = false;
+    h.store.as_mut().unwrap().retrieval =
+        Some(embedder::Runtime::new(config, scan::bundled()).unwrap());
+    h.store.as_mut().unwrap().pull_embeddings = false;
+    for (card, text) in [
+        ("a", "apple notes"),
+        ("b", "poison pill"),
+        ("c", "pear notes"),
+    ] {
+        assert_eq!(
+            h.put(ADMIN_TOKEN, "fleet", card, None, text).await.status,
+            201
+        );
+    }
+    for _ in 0..12 {
+        h.store
+            .as_ref()
+            .unwrap()
+            .retrieval
+            .as_ref()
+            .unwrap()
+            .reset_backoff();
+        h.set_clock(h.now() + 3_600_001);
+        h.store.as_ref().unwrap().embedding_tick().await;
+    }
+    task.abort();
+    assert_eq!(rows(&h, "SELECT count(*) FROM memory_vectors").await, 2);
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let (state, attempts, error): (String, i64, String) = db
+        .query_row(
+            "SELECT j.state,j.attempts,j.last_error FROM memory_embed_jobs j JOIN memory_cards c ON c.content_hash=j.content_hash WHERE c.card_id='b' AND j.embedder_id=?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (state.as_str(), attempts, error.as_str()),
+        ("failed", embedding::MAX_ATTEMPTS, "embedder-rejected")
+    );
+    // One batch, then each document alone until the poison one is parked.
+    assert!(*calls.lock().unwrap() <= 2 + embedding::MAX_ATTEMPTS as usize);
+    // Further ticks send nothing.
+    let sent = *calls.lock().unwrap();
+    h.store.as_ref().unwrap().embedding_tick().await;
+    assert_eq!(*calls.lock().unwrap(), sent);
+    let status = h.store.as_ref().unwrap().retrieval_status();
+    assert_eq!(status["state"], "ok", "{status}");
+    assert_eq!(status["coverage"]["unembeddable"], 1);
+}
+
+#[tokio::test]
+async fn embed_failed_over_http_backs_off_parks_and_never_reopens_done_jobs() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = setup(&mut h);
+    h.put(ADMIN_TOKEN, "fleet", "bad", None, "refused text")
+        .await;
+    async fn lease_of(h: &Hub, id: &str) -> Reply {
+        command(h, json!({"action": "embed_lease", "embedder_id": id})).await
+    }
+    async fn fail(h: &Hub, lease: Json, reason: &str) -> Reply {
+        command(h, json!({"action": "embed_failed", "lease_id": lease["lease_id"], "failures": [{"content_hash": lease["jobs"][0]["content_hash"], "reason": reason}]})).await
+    }
+    // An endpoint fault releases the job without counting an attempt.
+    let first = lease_of(&h, &id).await.body;
+    let released = fail(&h, first, "embedder-unavailable").await;
+    assert_eq!(released.status, 200, "{released:?}");
+    assert_eq!(released.body["released"], 1);
+    assert_eq!(rows(&h, "SELECT attempts FROM memory_embed_jobs").await, 0);
+    for attempt in 1..=embedding::MAX_ATTEMPTS {
+        h.set_clock(h.now() + 3_600_001);
+        let leased = lease_of(&h, &id).await.body;
+        assert_eq!(
+            leased["jobs"].as_array().unwrap().len(),
+            1,
+            "attempt {attempt}"
+        );
+        let reply = fail(&h, leased, "embedder-rejected").await;
+        assert_eq!(reply.status, 200);
+        if attempt < embedding::MAX_ATTEMPTS {
+            // Backing off: the job is not offered again yet.
+            assert_eq!(lease_of(&h, &id).await.body["jobs"], json!([]));
+        } else {
+            assert_eq!(reply.body["parked"], 1);
+        }
+    }
+    h.set_clock(h.now() + 3_600_001);
+    assert_eq!(lease_of(&h, &id).await.body["jobs"], json!([]));
+    assert_eq!(
+        rows(&h, "SELECT count(*) FROM memory_embed_jobs WHERE state='failed' AND last_error='embedder-rejected'").await,
+        1
+    );
+    // A late failure report never reopens a finished job.
+    h.put(ADMIN_TOKEN, "fleet", "good", None, "accepted text")
+        .await;
+    let leased = lease_of(&h, &id).await.body;
+    let vectors = json!([{"content_hash": leased["jobs"][0]["content_hash"], "vector": encoded(&[1.0, 0.0])}]);
+    assert_eq!(command(&h, json!({"action": "embed_submit", "lease_id": leased["lease_id"], "model_digest": "fake-digest", "vectors": vectors})).await.status, 200);
+    let late = fail(&h, leased, "embedder-rejected").await;
+    assert_eq!(late.body["released"], 0);
+    assert_eq!(
+        rows(
+            &h,
+            "SELECT count(*) FROM memory_embed_jobs WHERE state='done'"
+        )
+        .await,
+        1
+    );
+    // The operator's reindex gives the parked document another chance.
+    assert_eq!(
+        command(&h, json!({"action": "reindex"})).await.body["queued"],
+        1
+    );
+    let bad = command(&h, json!({"action": "embed_failed", "lease_id": "x", "failures": [{"content_hash": "short", "reason": "embedder-rejected"}]})).await;
+    assert_eq!(bad.status, 422);
+}
+
+/// Clean unless the text holds a word that the current rules flag.
+struct Rules(std::sync::atomic::AtomicBool);
+impl scan::Scanner for Rules {
+    fn scan(&self, text: &str) -> scan::Scan {
+        let flagged = text.contains("flagme")
+            || self.0.load(std::sync::atomic::Ordering::SeqCst) && text.contains("changed");
+        if flagged {
+            scan::Scan::Flagged {
+                ruleset: "r1".into(),
+                rules: vec!["role-override".into()],
+            }
+        } else {
+            scan::Scan::Clean {
+                ruleset: "r1".into(),
+            }
+        }
+    }
+    fn describe(&self) -> (bool, Option<String>) {
+        (true, Some("r1".into()))
+    }
+}
+
+#[tokio::test]
+async fn pending_and_flagged_cards_are_unembeddable_and_do_not_hold_hybrid() {
+    let mut h = Hub::new();
+    h.put(ADMIN_TOKEN, "fleet", "pending", None, "pending body")
+        .await;
+    drop(h.store.take());
+    let rules = Arc::new(Rules(std::sync::atomic::AtomicBool::new(false)));
+    h.open(rules.clone(), None);
+    let id = setup(&mut h);
+    h.put(ADMIN_TOKEN, "fleet", "clean", None, "clean apple")
+        .await;
+    h.put(ADMIN_TOKEN, "fleet", "stored", None, "flagme at write")
+        .await;
+    h.put(ADMIN_TOKEN, "fleet", "later", None, "changed rules later")
+        .await;
+    // Only clean receipts are queued. Flagged text never leaves the host.
+    assert_eq!(rows(&h, "SELECT count(*) FROM memory_embed_jobs").await, 2);
+    rules.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    let lease = command(&h, json!({"action": "embed_lease", "embedder_id": id})).await;
+    let jobs = lease.body["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1, "{lease:?}");
+    assert!(jobs[0]["text"].as_str().unwrap().contains("apple"));
+    let vectors =
+        json!([{"content_hash": jobs[0]["content_hash"], "vector": encoded(&[1.0, 0.0])}]);
+    assert_eq!(command(&h, json!({"action": "embed_submit", "lease_id": lease.body["lease_id"], "model_digest": "fake-digest", "vectors": vectors})).await.status, 200);
+    assert_eq!(
+        rows(&h, "SELECT count(*) FROM memory_embed_jobs WHERE state='failed' AND last_error='content-flagged'").await,
+        1
+    );
+    h.store.as_ref().unwrap().refresh_dense().await.unwrap();
+    let status = h.store.as_ref().unwrap().retrieval_status();
+    assert_eq!(status["effective"], "hybrid", "{status}");
+    assert_eq!(status["state"], "ok");
+    assert_eq!(
+        status["coverage"],
+        json!({"cards": 1, "eligible": 1, "unembeddable": 3, "total": 4})
+    );
+}
+
+#[tokio::test]
+async fn lease_filters_scope_rights_and_duplicate_hashes_before_the_limit() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = setup(&mut h);
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    db.execute_batch("BEGIN").unwrap();
+    for i in 0..300 {
+        raw_card(
+            &db,
+            "repo:a/r",
+            &format!("a-{i}"),
+            &format!("1{i:063x}"),
+            "clean",
+        );
+        // Three hundred cards in one scope share one text.
+        raw_card(&db, "fleet", &format!("same-{i}"), &"0".repeat(64), "clean");
+    }
+    raw_card(
+        &db,
+        "fleet",
+        "other",
+        &format!("2{}", "0".repeat(63)),
+        "clean",
+    );
+    raw_card(&db, "repo:b/r", "mine", &"f".repeat(64), "clean");
+    db.execute_batch("COMMIT").unwrap();
+    assert_eq!(command(&h, json!({"action": "reindex"})).await.status, 200);
+    let admin = command(&h, json!({"action": "embed_lease", "embedder_id": id})).await;
+    let hashes: Vec<_> = admin.body["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["content_hash"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(hashes.len(), 4, "{hashes:?}");
+    assert_eq!(hashes[0], "0".repeat(64));
+    command(
+        &h,
+        json!({"action": "grant", "principal": "agent:dot", "scope": "repo:b/r", "rights": ["embed"]}),
+    )
+    .await;
+    let agent = h
+        .call(
+            AGENT_TOKEN,
+            json!({"action": "embed_lease", "embedder_id": id, "client_event_id": h.id()}),
+        )
+        .await;
+    assert_eq!(agent.status, 200, "{agent:?}");
+    assert_eq!(agent.body["jobs"].as_array().unwrap().len(), 1);
+    assert_eq!(agent.body["jobs"][0]["content_hash"], "f".repeat(64));
+}
+
+#[tokio::test]
+async fn scheduler_tick_scans_no_corpus_and_put_queues_its_own_job() {
+    let mut h = Hub::with(scan::bundled(), None);
+    setup(&mut h);
+    h.store.as_mut().unwrap().pull_embeddings = false;
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    raw_card(&db, "fleet", "raw", &"a".repeat(64), "clean");
+    let before = rows(&h, "SELECT count(*) FROM memory_idempotency").await;
+    for _ in 0..3 {
+        assert!(!h.store.as_ref().unwrap().embedding_tick().await);
+    }
+    // The tick only leases. Finding unqueued cards is reindex's job.
+    assert_eq!(rows(&h, "SELECT count(*) FROM memory_embed_jobs").await, 0);
+    assert_eq!(
+        rows(&h, "SELECT count(*) FROM memory_idempotency").await,
+        before
+    );
+    h.put(ADMIN_TOKEN, "fleet", "new", None, "fresh text").await;
+    assert_eq!(rows(&h, "SELECT count(*) FROM memory_embed_jobs").await, 1);
+}
+
+thread_local! {
+    static TRACED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+fn traced(event: rusqlite::trace::TraceEvent<'_>) {
+    if let rusqlite::trace::TraceEvent::Stmt(stmt, _) = event {
+        TRACED.with(|t| t.borrow_mut().push(stmt.sql().into_owned()));
+    }
+}
+fn take_traced() -> Vec<String> {
+    TRACED.with(|t| std::mem::take(&mut *t.borrow_mut()))
+}
+#[test]
+fn dense_refresh_reads_only_changed_vectors_through_the_log() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    schema::migrate(&db, 1_800_000_000_000).unwrap();
+    let plan: String = db
+        .query_row("EXPLAIN QUERY PLAN SELECT content_hash,vector FROM memory_vectors WHERE embedder_id='id' AND normalizer_version=1 ORDER BY content_hash", [], |r| r.get(3))
+        .unwrap();
+    assert!(plan.contains("memory_vectors_embedder"), "{plan}");
+    let index = Arc::new(dense::Index::default());
+    let bytes: Vec<_> = [1.0f32, 0.0].iter().flat_map(|f| f.to_le_bytes()).collect();
+    for hash in ["one", "two"] {
+        db.execute(
+            "INSERT INTO memory_vectors VALUES(?1,'id',1,?2)",
+            rusqlite::params![hash, &bytes],
+        )
+        .unwrap();
+    }
+    let first = index.refresh(&db, "id", 2).unwrap();
+    assert_eq!(first.rows, 2);
+    db.trace_v2(
+        rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(traced),
+    );
+    take_traced();
+    // A commit that touches no vector reads no vector row.
+    db.execute("INSERT INTO memory_meta VALUES('unrelated','x')", [])
+        .unwrap();
+    take_traced();
+    let same = index.refresh(&db, "id", 2).unwrap();
+    assert!(Arc::ptr_eq(&first, &same));
+    let reads = take_traced();
+    assert!(
+        reads.iter().all(|sql| !sql.contains("FROM memory_vectors")),
+        "{reads:?}"
+    );
+    // Another embedder's vector advances the log and still reads no vector.
+    db.execute(
+        "INSERT INTO memory_vectors VALUES('three','other',1,?1)",
+        [&bytes],
+    )
+    .unwrap();
+    take_traced();
+    assert_eq!(index.refresh(&db, "id", 2).unwrap().rows, 2);
+    let reads = take_traced();
+    assert!(
+        reads.iter().all(|sql| !sql.contains("FROM memory_vectors")),
+        "{reads:?}"
+    );
+    db.execute(
+        "INSERT INTO memory_vectors VALUES('three','id',1,?1)",
+        [&bytes],
+    )
+    .unwrap();
+    take_traced();
+    let added = index.refresh(&db, "id", 2).unwrap();
+    assert_eq!(added.hashes().len(), 3);
+    let reads = take_traced();
+    let vector_reads: Vec<_> = reads
+        .iter()
+        .filter(|sql| sql.contains("FROM memory_vectors"))
+        .collect();
+    assert_eq!(vector_reads.len(), 1, "{reads:?}");
+    assert!(vector_reads[0].contains("content_hash="), "{reads:?}");
+    db.execute("DELETE FROM memory_vectors WHERE content_hash='one'", [])
+        .unwrap();
+    let removed = index.refresh(&db, "id", 2).unwrap();
+    assert_eq!(removed.hashes().len(), 2);
+    assert!(!removed.hashes().contains("one"));
+    db.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+    // A matrix behind a trimmed log reloads in full instead of missing rows.
+    db.execute("DELETE FROM memory_vector_log", []).unwrap();
+    db.execute("DELETE FROM memory_vectors WHERE content_hash='two'", [])
+        .unwrap();
+    db.execute("DELETE FROM memory_vector_log", []).unwrap();
+    let reloaded = index.refresh(&db, "id", 2).unwrap();
+    assert_eq!(reloaded.hashes().len(), 1);
+}
+
 #[test]
 fn dense_segments_preserve_retained_snapshots_and_score_with_scope_mask() {
     let db = rusqlite::Connection::open_in_memory().unwrap();
@@ -309,6 +778,8 @@ async fn scheduler_and_hybrid_use_real_http_and_respect_read_grants() {
         .await;
     assert_eq!(search.body["retrieval"]["mode"], "hybrid");
     assert_eq!(search.body["matches"].as_array().unwrap().len(), 2);
+    // `match_count` keeps its lexical meaning: nothing matched the words.
+    assert_eq!(search.body["match_count"], 0);
     assert_eq!(search.body["matches"][0]["ranks"]["dense"], 1);
     command(
         &h,
@@ -374,9 +845,16 @@ async fn lexical_starts_no_scheduler_and_revival_requeues_collected_vector() {
         .status,
         201
     );
+    // The revival queued the collected text again inside its own transaction.
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
     assert_eq!(
-        command(&h, json!({"action": "reindex"})).await.body["queued"],
-        1
+        db.query_row(
+            "SELECT state FROM memory_embed_jobs WHERE embedder_id=?1",
+            [&id],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "pending"
     );
     assert_eq!(
         command(&h, json!({"action": "reindex"})).await.body["queued"],
@@ -434,32 +912,63 @@ async fn reindex_drains_multiple_pages_and_drop_preserves_other_embedder_rows() 
         command(&h, json!({"action": "reindex"})).await.body["queued"],
         0
     );
+    let other = "b".repeat(64);
+    let gone = "c".repeat(64);
+    db.execute_batch("BEGIN").unwrap();
     db.execute(
-        "INSERT INTO memory_vectors VALUES('other-hash','other-id',1,?1)",
-        [vec![0u8; 8]],
+        "INSERT INTO memory_vectors VALUES('other-hash',?1,1,?2)",
+        rusqlite::params![&other, vec![0u8; 8]],
     )
     .unwrap();
-    assert_eq!(
-        command(&h, json!({"action": "reindex", "drop": id}))
-            .await
-            .status,
-        200
-    );
+    // More rows than one writer turn deletes.
+    for i in 0..700 {
+        db.execute(
+            "INSERT INTO memory_vectors VALUES(?1,?2,1,?3)",
+            rusqlite::params![format!("{i:064x}"), &gone, vec![0u8; 8]],
+        )
+        .unwrap();
+    }
+    db.execute_batch("COMMIT").unwrap();
+    for bad in [
+        json!(""),
+        json!("not-an-id"),
+        json!("B".repeat(64)),
+        json!(7),
+    ] {
+        let refused = command(&h, json!({"action": "reindex", "drop": bad})).await;
+        assert_eq!(refused.status, 422, "{refused:?}");
+    }
+    let active = command(&h, json!({"action": "reindex", "drop": id})).await;
+    assert_eq!(active.status, 409);
+    let dropped = command(&h, json!({"action": "reindex", "drop": gone})).await;
+    assert_eq!(dropped.status, 200, "{dropped:?}");
+    assert_eq!(dropped.body["vectors"], 700);
+    assert_eq!(dropped.body["jobs"], 0);
+    let count = |embedder: &str| {
+        db.query_row(
+            "SELECT count(*) FROM memory_vectors WHERE embedder_id=?1",
+            [embedder],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(count(&gone), 0);
+    assert_eq!(count(&other), 1);
     assert_eq!(
         db.query_row(
-            "SELECT count(*) FROM memory_vectors WHERE embedder_id='other-id'",
-            [],
+            "SELECT count(*) FROM memory_embed_jobs WHERE embedder_id=?1",
+            [&id],
             |r| r.get::<_, i64>(0)
         )
         .unwrap(),
-        1
+        270
     );
 }
 #[test]
 fn schema_one_upgrades_and_finished_jobs_expire_in_bounded_sweep() {
     let db = rusqlite::Connection::open_in_memory().unwrap();
     schema::migrate(&db, 1_800_000_000_000).unwrap();
-    db.execute_batch("DROP TABLE memory_vectors; DROP TABLE memory_lineage; DROP TABLE memory_embed_jobs; DROP INDEX memory_cards_hash; PRAGMA user_version=1").unwrap();
+    db.execute_batch("DROP TABLE memory_vectors; DROP TABLE memory_vector_log; DROP TABLE memory_lineage; DROP TABLE memory_embed_jobs; DROP INDEX memory_cards_hash; PRAGMA user_version=1").unwrap();
     schema::migrate(&db, 1_800_000_000_000).unwrap();
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
@@ -550,9 +1059,23 @@ async fn dropping_embedder_during_rebuild_cannot_resurrect_its_matrix() {
         }
     }
     let release = Release(gate);
+    assert_eq!(
+        command(&h, json!({"action": "reindex", "drop": id}))
+            .await
+            .status,
+        409
+    );
+    // Switching to lexical is the way to drop it. The paused rebuild was
+    // captured before the switch and cannot publish the matrix again.
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&json!({"retrieval": "lexical"}))
+        .unwrap();
     let dropped = command(&h, json!({"action": "reindex", "drop": id})).await;
     drop(release);
     dense.wait_rebuild().await;
-    assert_eq!(dropped.status, 200);
-    assert!(dense.current(&id).unwrap().hashes().is_empty());
+    assert_eq!(dropped.status, 200, "{dropped:?}");
+    assert_eq!(dropped.body["vectors"], 2);
+    assert!(dense.current(&id).is_none());
 }

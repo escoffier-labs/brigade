@@ -3,12 +3,19 @@
 use super::{embedder::normalize_vector, index::Snapshot, writer};
 use rusqlite::Connection;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
+
+/// `memory_vector_log` rows the sweep keeps. A matrix whose watermark is
+/// older than the oldest kept row reloads its embedder's vectors in full.
+pub const LOG_KEEP: i64 = 4096;
+/// How long a failed tail replay holds off the next compaction.
+const REBUILD_RETRY: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 pub struct Segment {
@@ -21,6 +28,8 @@ pub struct Matrix {
     pub segments: Vec<Arc<Segment>>,
     pub rows: usize,
     pub indexed_seq: i64,
+    /// The last `memory_vector_log` row this matrix reflects.
+    pub log_seq: i64,
     /// None means all materialized rows. Deletions copy only this metadata.
     pub live: Option<Arc<HashSet<String>>>,
 }
@@ -90,6 +99,7 @@ impl Matrix {
             segments: vec![Arc::new(Segment { hashes, matrix })],
             rows,
             indexed_seq: self.indexed_seq,
+            log_seq: self.log_seq,
             live: None,
         }
     }
@@ -115,6 +125,8 @@ pub struct Index {
     sender: Mutex<Option<tokio::sync::mpsc::WeakSender<writer::Job>>>,
     epoch: AtomicU64,
     rebuilding: AtomicBool,
+    /// Set when a tail replay failed, so the tick does not compact every second.
+    rebuild_failed: Mutex<Option<Instant>>,
     stopping: AtomicBool,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     completed: tokio::sync::Notify,
@@ -129,6 +141,14 @@ pub struct Gate {
 impl Index {
     pub fn current(&self, id: &str) -> Option<Arc<Matrix>> {
         self.matrices.read().unwrap().get(id).cloned()
+    }
+    /// The active embedder id, which `put` and `retire` queue jobs for.
+    pub fn active_id(&self) -> Option<String> {
+        self.active
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|(id, _)| id.clone())
     }
     pub fn attach(&self, sender: tokio::sync::mpsc::WeakSender<writer::Job>) {
         *self.sender.lock().unwrap() = Some(sender);
@@ -152,46 +172,132 @@ impl Index {
         self.epoch.fetch_add(1, Ordering::SeqCst);
         self.matrices.write().unwrap().remove(id);
     }
-    /// Read only vectors absent from the captured live table. The key scan
-    /// replays additions and removals committed after a rebuild watermark.
-    fn delta(db: &Connection, id: &str, base: &Matrix) -> rusqlite::Result<Matrix> {
-        let known = base.hashes();
+    fn heads(db: &Connection) -> rusqlite::Result<(i64, i64)> {
+        db.query_row("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='memory_vector_log'),0),COALESCE((SELECT max(seq) FROM memory_events),0)", [], |r| Ok((r.get(0)?, r.get(1)?)))
+    }
+    fn decode(bytes: Vec<u8>, dimensions: usize) -> rusqlite::Result<Vec<f32>> {
+        if bytes.len() != dimensions * 4 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let floats = bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        normalize_vector(floats, dimensions).map_err(|_| rusqlite::Error::InvalidQuery)
+    }
+    /// Every vector of one embedder, through `memory_vectors_embedder`.
+    fn load(
+        db: &Connection,
+        id: &str,
+        dimensions: usize,
+        heads: (i64, i64),
+    ) -> rusqlite::Result<Matrix> {
         let mut segment = Segment {
             hashes: Vec::new(),
             matrix: Vec::new(),
         };
-        let mut live = HashSet::new();
         let mut stmt = db.prepare("SELECT content_hash,vector FROM memory_vectors WHERE embedder_id=?1 AND normalizer_version=1 ORDER BY content_hash")?;
         let mut rows = stmt.query([id])?;
         while let Some(row) = rows.next()? {
-            let hash: String = row.get(0)?;
-            live.insert(hash.clone());
-            if known.contains(hash.as_str()) {
-                continue;
-            }
-            let bytes: Vec<u8> = row.get(1)?;
-            if bytes.len() != base.dimensions * 4 {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            let floats = bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-                .collect();
-            let floats = normalize_vector(floats, base.dimensions)
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
-            segment.hashes.push(hash);
-            segment.matrix.extend(floats);
+            segment.hashes.push(row.get(0)?);
+            segment
+                .matrix
+                .extend(Self::decode(row.get(1)?, dimensions)?);
         }
-        let mut next = base.clone();
+        let rows = segment.hashes.len();
+        Ok(Matrix {
+            dimensions,
+            segments: if rows == 0 {
+                Vec::new()
+            } else {
+                vec![Arc::new(segment)]
+            },
+            rows,
+            indexed_seq: heads.1,
+            log_seq: heads.0,
+            live: None,
+        })
+    }
+    /// Replay the vector log after the base's watermark. A commit that did
+    /// not touch vectors costs two primary-key reads and no vector scan.
+    fn delta(db: &Connection, id: &str, base: &Matrix) -> rusqlite::Result<Matrix> {
+        let heads = Self::heads(db)?;
+        if heads.0 == base.log_seq {
+            return Ok(Matrix {
+                indexed_seq: heads.1,
+                ..base.clone()
+            });
+        }
+        let oldest: Option<i64> =
+            db.query_row("SELECT min(seq) FROM memory_vector_log", [], |r| r.get(0))?;
+        let fresh = base.log_seq == 0 && base.rows == 0;
+        if fresh || heads.0 < base.log_seq || oldest.is_none_or(|o| o > base.log_seq + 1) {
+            return Self::load(db, id, base.dimensions, heads);
+        }
+        // Only each hash's last operation in the tail decides its state.
+        let mut last = BTreeMap::new();
+        let mut log_seq = heads.0;
+        {
+            let mut stmt = db.prepare("SELECT seq,content_hash,present FROM memory_vector_log WHERE seq>?1 AND embedder_id=?2 ORDER BY seq")?;
+            let mut rows = stmt.query(rusqlite::params![base.log_seq, id])?;
+            while let Some(row) = rows.next()? {
+                log_seq = log_seq.max(row.get(0)?);
+                last.insert(row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0);
+            }
+        }
+        let mut segment = Segment {
+            hashes: Vec::new(),
+            matrix: Vec::new(),
+        };
+        let mut removed = Vec::new();
+        let mut stmt = db.prepare("SELECT vector FROM memory_vectors WHERE embedder_id=?1 AND normalizer_version=1 AND content_hash=?2")?;
+        for (hash, present) in last {
+            let vector: Option<Vec<u8>> = if present {
+                stmt.query_row(rusqlite::params![id, &hash], |r| r.get(0))
+                    .map(Some)
+                    .or_else(|e| match e {
+                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                        e => Err(e),
+                    })?
+            } else {
+                None
+            };
+            match vector {
+                Some(bytes) => {
+                    segment.matrix.extend(Self::decode(bytes, base.dimensions)?);
+                    segment.hashes.push(hash);
+                }
+                None => removed.push(hash),
+            }
+        }
+        let mut next = Matrix {
+            indexed_seq: heads.1,
+            log_seq,
+            ..base.clone()
+        };
+        let known = (!removed.is_empty() || base.live.is_some()).then(|| base.hashes());
+        let removes = known
+            .as_ref()
+            .is_some_and(|k| removed.iter().any(|h| k.contains(h.as_str())));
+        if removes || base.live.is_some() {
+            let mut live: HashSet<String> = match &base.live {
+                Some(live) => (**live).clone(),
+                None => known
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+            };
+            for hash in &removed {
+                live.remove(hash);
+            }
+            live.extend(segment.hashes.iter().cloned());
+            next.live = Some(Arc::new(live));
+        }
         next.rows += segment.hashes.len();
         if !segment.hashes.is_empty() {
             next.segments.push(Arc::new(segment));
         }
-        next.live = Some(Arc::new(live));
-        next.indexed_seq =
-            db.query_row("SELECT COALESCE(max(seq),0) FROM memory_events", [], |r| {
-                r.get(0)
-            })?;
         Ok(next)
     }
     pub fn refresh(
@@ -207,16 +313,14 @@ impl Index {
                 ..Matrix::default()
             })
         });
-        let next = Arc::new(Self::delta(db, id, &old)?);
-        if next.rows == old.rows
-            && next.indexed_seq == old.indexed_seq
-            && next.hashes() == old.hashes()
-        {
+        let next = Self::delta(db, id, &old)?;
+        if next.log_seq == old.log_seq && next.indexed_seq == old.indexed_seq {
             if old.needs_rebuild() {
                 self.rebuild(id, old.clone());
             }
             return Ok(old);
         }
+        let next = Arc::new(next);
         self.matrices
             .write()
             .unwrap()
@@ -234,7 +338,14 @@ impl Index {
         }
     }
     fn rebuild(self: &Arc<Self>, id: &str, captured: Arc<Matrix>) {
-        if self.stopping.load(Ordering::SeqCst) || self.rebuilding.load(Ordering::SeqCst) {
+        if self.stopping.load(Ordering::SeqCst)
+            || self.rebuilding.load(Ordering::SeqCst)
+            || self
+                .rebuild_failed
+                .lock()
+                .unwrap()
+                .is_some_and(|at| at.elapsed() < REBUILD_RETRY)
+        {
             return;
         }
         let sender = self.sender.lock().unwrap().clone();
@@ -293,15 +404,23 @@ impl Index {
         if !self.stopping.load(Ordering::SeqCst)
             && self.epoch.load(Ordering::SeqCst) == rebuilt.epoch
         {
-            if let Ok(next) = Self::delta(db, &rebuilt.id, &rebuilt.matrix) {
-                self.matrices
-                    .write()
-                    .unwrap()
-                    .insert(rebuilt.id, Arc::new(next));
+            match Self::delta(db, &rebuilt.id, &rebuilt.matrix) {
+                Ok(next) => {
+                    *self.rebuild_failed.lock().unwrap() = None;
+                    self.matrices
+                        .write()
+                        .unwrap()
+                        .insert(rebuilt.id, Arc::new(next));
+                }
+                Err(_) => *self.rebuild_failed.lock().unwrap() = Some(Instant::now()),
             }
         }
         self.rebuilding.store(false, Ordering::SeqCst);
         self.completed.notify_waiters();
+    }
+    #[cfg(test)]
+    pub fn rebuild_held(&self) -> bool {
+        self.rebuild_failed.lock().unwrap().is_some()
     }
     #[cfg(test)]
     pub fn pause_next(&self) -> Arc<Gate> {

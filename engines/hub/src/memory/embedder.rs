@@ -311,10 +311,12 @@ impl HttpEmbedder {
             .map_err(|_| EmbedError::new("embedder-unavailable"))?;
         let status = response.status().as_u16();
         if status != 200 {
-            let mut err = EmbedError::new(if status == 401 || status == 403 {
-                "embedder-refused"
-            } else {
-                "embedder-unavailable"
+            // 400, 413 and 422 refuse this input, not the endpoint. The job
+            // layer retries such a batch one document at a time.
+            let mut err = EmbedError::new(match status {
+                401 | 403 => "embedder-refused",
+                400 | 413 | 422 => "embedder-rejected",
+                _ => "embedder-unavailable",
             });
             if status == 429 || status == 503 {
                 err.retry_after = response
@@ -541,6 +543,19 @@ impl Runtime {
                 }
             }
         });
+    }
+    #[cfg(test)]
+    pub fn reset_backoff(&self) {
+        let mut s = self.state.lock().unwrap();
+        s.retry_at = Instant::now();
+        s.quiet_until = Instant::now();
+    }
+    /// Whether a document request could start now. The scheduler checks
+    /// this before it leases, so no lease waits out a backoff.
+    pub fn documents_ready(&self) -> bool {
+        let s = self.state.lock().unwrap();
+        let now = Instant::now();
+        !(s.document || s.probe || s.queries > 0 || now < s.quiet_until || now < s.retry_at)
     }
     pub async fn documents(
         self: &Arc<Self>,

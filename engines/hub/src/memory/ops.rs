@@ -59,7 +59,8 @@ impl Action {
             Action::Embedding { command, .. } => match command {
                 super::embedding::Command::Reindex { .. } => "reindex",
                 super::embedding::Command::Lease { .. } => "embed_lease",
-                _ => "embed_submit",
+                super::embedding::Command::Failed { .. } => "embed_failed",
+                super::embedding::Command::Submit { .. } => "embed_submit",
             },
             Action::Put { import: false, .. } => "put",
             Action::Put { import: true, .. } => "import",
@@ -370,6 +371,7 @@ pub fn apply(
     p: &Prepared,
     authority: &Authority,
     scanner: &dyn super::scan::Scanner,
+    embedder: Option<&str>,
 ) -> rusqlite::Result<Reply> {
     let (scope, right) = p.action.requirement();
     if !auth::has_right(tx, &p.credential, scope, right)? {
@@ -380,10 +382,19 @@ pub fn apply(
         ));
     }
     let principal = p.credential.principal();
-    let stored = tx.query(
+    // Embedding commands keep no idempotency row. A lease reply carries card
+    // text, and a stored copy would outlive the card's retirement and answer
+    // a replay without the grant, state and scan checks. Each command is
+    // safe to repeat: a second submit or failure finds no leased job.
+    let replayable = !matches!(p.action, Action::Embedding { .. });
+    let stored = if replayable {
+        tx.query(
         "SELECT request_digest,status,response FROM memory_idempotency WHERE principal=?1 AND client_event_id=?2",
-        &[t(principal), t(&p.client_event_id)],
-    )?;
+            &[t(principal), t(&p.client_event_id)],
+        )?
+    } else {
+        Vec::new()
+    };
     if let Some(row) = stored.first() {
         // Checked before compare-and-set, so a retry of a committed write gets
         // its original answer even after the card moved.
@@ -410,12 +421,15 @@ pub fn apply(
     if reply.status < 300 {
         match &p.action {
             Action::Put { scope, card_id, .. } | Action::Retire { scope, card_id, .. } => {
-                super::embedding::cleanup_card(tx, scope, card_id)?
+                super::embedding::cleanup_card(tx, scope, card_id)?;
+                if let Some(id) = embedder {
+                    super::embedding::queue_card(tx, scope, card_id, id)?;
+                }
             }
             _ => (),
         }
     }
-    if reply.status < 300 {
+    if reply.status < 300 && replayable {
         tx.execute(
             "INSERT INTO memory_idempotency(principal,client_event_id,request_digest,status,response,created_ms) VALUES(?1,?2,?3,?4,?5,?6)",
             &[
