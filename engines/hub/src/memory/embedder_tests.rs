@@ -476,7 +476,7 @@ async fn flagged_query_and_document_never_leave_the_host() {
 #[test]
 fn unscanned_text_needs_a_loopback_address_not_a_name() {
     let url = |s: &str| url::Url::parse(s).unwrap();
-    let lan: std::net::IpAddr = "192.168.1.20".parse().unwrap();
+    let lan: std::net::IpAddr = "192.168.1.20".parse().unwrap(); // <!-- content-guard: allow private-ipv4 -->
     let v4: std::net::IpAddr = "127.0.0.1".parse().unwrap();
     let v6: std::net::IpAddr = "::1".parse().unwrap();
     // `localhost` that resolves to a LAN address gets no exemption.
@@ -497,7 +497,7 @@ fn unscanned_text_needs_a_loopback_address_not_a_name() {
         None
     ));
     assert!(!unscanned_permitted(
-        &url("http://10.0.0.5/api/embed"),
+        &url("http://10.0.0.5/api/embed"), // <!-- content-guard: allow private-ipv4 -->
         None
     ));
     assert!(!unscanned_permitted(
