@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import bisect
+import hashlib
 import re
 from importlib.resources import files
 from typing import Iterable, Iterator
@@ -108,7 +109,13 @@ def _selector_exempt(text: str, index: int) -> bool:
     return text[index] == "\ufe0f" and previous in "#*0123456789" and text[index + 1 : index + 2] == "\u20e3"
 
 
-_BUNDLE = json.loads(files("brigade.guard").joinpath("memory-rules.json").read_text(encoding="utf-8"))
+_BUNDLE_BYTES = files("brigade.guard").joinpath("memory-rules.json").read_bytes()
+_BUNDLE = json.loads(_BUNDLE_BYTES.decode("utf-8"))
+
+
+def ruleset_version() -> str:
+    """The bundle's `<version>:<sha256 of the rules file>`, as the hub reports it in `status.scan.ruleset_version`."""
+    return f"{_BUNDLE['version']}:{hashlib.sha256(_BUNDLE_BYTES).hexdigest()}"
 
 
 def _compile(items: list[dict], ascii_mode: bool = False) -> list[tuple[str, str, re.Pattern[str]]]:
