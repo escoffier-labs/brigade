@@ -42,7 +42,40 @@ replica_max_mb = 50            # cap on the replica's heads.json
 
 `read` and `sync` need `scope` or `read_scopes`. Every hub search and card read names the read scopes, so a credential that can read more, such as one with a `principal:` grant, still answers only from them. Dot and Duet read through the same commands and get the same limit.
 
-The hub URL comes from `[fleet] hub_url` and the credential is this machine's node token (`BRIGADE_FLEET_NODE_TOKEN` or `[fleet] node_token_file`). The client never reads the shared admin token: with only an admin token configured, the hub client reports `no-node-credential` and sends nothing. If the node-token slot holds the admin token by mistake, `status`, `pull`, `push`, `import`, `card` and `proposals drop` refuse with exit 2 as soon as the hub's `status` reports `credential: "admin"`. Dot and Duet `memory_card` run `card`, so they refuse too. Search (`memory search`, and Dot and Duet `memory_search`) makes no `status` call, to keep within its 800 ms budget, so it cannot tell: with the admin token in the node slot it returns any match the admin can read inside the read scopes, including a scope this node holds no grant for. Search writes and replicates nothing. The token is sent as a bearer header and is never printed or stored.
+By default the hub URL comes from `[fleet] hub_url` and the credential is this machine's node token (`BRIGADE_FLEET_NODE_TOKEN` or `[fleet] node_token_file`). Memory can use a different hub than fleet coordination. That choice is per user, in `~/.brigade/fleet.toml` (the file `[fleet]` lives in, or `$BRIGADE_HOME/fleet.toml` when `BRIGADE_HOME` is set), never in the workspace:
+
+```toml
+# ~/.brigade/fleet.toml
+[fleet]
+hub_url = "https://fleet-hub.example.test:3774"
+node_token_file = "~/.brigade/node-token"
+
+[memory_hub]
+hub_url = "https://memory-hub.example.test:3774"   # memory's own hub
+node_token_file = "~/.brigade/memory-node-token"   # this machine's node token on that hub
+```
+
+A workspace file never chooses where a credential goes. `[hub]` in `.brigade/memory-care.toml` refuses `hub_url` and `node_token_file` with a config error that points here, and keeps only `mode`, `scope`, `read_scopes` and `replica_max_mb`.
+
+The pair replaces both fleet values for hub memory only: `status`, `search`, `card`, `pull`, `push`, `import` and `proposals`, and the Dot and Duet memory tools, which run those commands. `brigade fleet` commands keep reading `[fleet]`. The keys go together, and setting one without the other is a config error that names the missing key. The checks:
+
+- `hub_url` follows the fleet hub URL rule (https, or http on loopback) and may not carry a user name or password.
+- `node_token_file` expands a leading `~` and must then be an absolute path. It must be a private regular file you own, with no group or other permission bits, holding 32 to 512 URL-safe characters (letters, digits, `_` and `-`). This is the check the message credentials get. The fleet `node_token_file` is read without it, so a fleet node token outside that range works through `[fleet]` but is refused here.
+- The override must not be a fleet credential. A token equal to the fleet node token or admin token is refused, and so is a file that is the same file as `[fleet] node_token_file` or `[fleet] token_file`. The error names the setting and never prints either token.
+
+In `off` mode the override is not read.
+
+Precedence, highest first:
+
+1. `BRIGADE_MEMORY_HUB_URL` and `BRIGADE_MEMORY_HUB_TOKEN_FILE`, set together. These follow the existing `BRIGADE_FLEET_*` and `BRIGADE_FLEET_MESSAGE_TOKEN_FILE` pattern. An empty value counts as unset, and the token file path must be absolute.
+2. `[memory_hub]` in `~/.brigade/fleet.toml`.
+3. The fleet settings.
+
+Dot and Duet run the CLI with a minimal environment that passes `HOME` and `BRIGADE_HOME` but no `BRIGADE_FLEET_*` or `BRIGADE_MEMORY_*` variable, so for them use `[memory_hub]`. Their child reads the same `fleet.toml` as you.
+
+`brigade memory hub status` prints `hub url: <url> (source: <source>)` with `env`, `[memory_hub]` or `fleet` as the source, and the JSON report carries `hub_url` and `hub_source`. It never shows the token, and drops any user name or password from the URL it prints. The replica records the hub identity it was pulled from, so switching memory to another hub never serves the old replica. The next `pull` discards it and rebuilds from empty instead of merging two logs. Spooled writes and proposals stay tied to the hub they were made for and are not sent to the new one.
+
+The client never reads the shared admin token: with only an admin token configured, the hub client reports `no-node-credential` and sends nothing. If the node-token slot holds the admin token by mistake, `status`, `pull`, `push`, `import`, `card` and `proposals drop` refuse with exit 2 as soon as the hub's `status` reports `credential: "admin"`. Dot and Duet `memory_card` run `card`, so they refuse too. Search (`memory search`, and Dot and Duet `memory_search`) makes no `status` call, to keep within its 800 ms budget, so it cannot tell: with the admin token in the node slot it returns any match the admin can read inside the read scopes, including a scope this node holds no grant for. Search writes and replicates nothing. The token is sent as a bearer header and is never printed or stored.
 
 ```bash
 brigade memory hub status --target . --json
@@ -51,6 +84,94 @@ brigade memory hub proposals list --target .
 ```
 
 `memory hub import --scope <scope> <card.md>...` sends one `import` call per card and needs the hub's import grant. `memory hub card <card_id>` prints one hub card's text from the read scopes. When the id is in more than one of them it answers `memory_card_ambiguous`, and `--scope` picks one. With `--all`, every chunk must come from the first chunk's revision and `log_epoch`: a restore between chunks restarts the read once and then refuses with `memory_epoch_changed`, and joined text that does not hash to the card's `content_hash` is refused. While the hub is unavailable (the same answers that send search to the replica), the card comes from this host's replica, with `source: "replica"` and a warning on stderr. A refusal never falls back. A scope the hub refused the card in during the read (`memory_grant_missing` or `memory_card_not_found`) is never served from the replica, whether the hub then turns unavailable on another scope, on a later chunk, or on the restarted read after an epoch change. The replica serves nothing at all when the hub's `status` answered 403 `memory_grant_missing` (this credential can read no scope) or when the `log_epoch` moved during the read. When `status` or a scope's first chunk answered before the hub turned unavailable, the replica stands in only if it was pulled as the principal `status` named and under the `log_epoch` every answer carried. A restore since the last pull, or a node token that now belongs to another principal, means no replica answer until the next pull. If `status` itself is unavailable, nothing was learned, so the replica still stands in. Dot and Duet `memory_card` take the same optional `scope`, as a search match reports it. Every hub refusal is reported with its `code`, for example `memory_grant_missing`.
+
+Hub writes scan the normalized UTF-8 bytes under the write authorization and
+memory transaction. The hub links the guard's pinned PCRE2 engine and bundles
+its default rules with the connector's injection rules. Repository policies,
+baselines and allow comments do not apply. `status.scan.ruleset_version` and
+`memory_meta.scan_ruleset_version` identify the bundle by version and digest.
+
+| Input or operation | Result |
+|---|---|
+| Blocking guard rule, bidi control, invisible operator, embedded BOM or tag character | `422 memory_content_blocked` with rule ids only. No bytes are stored |
+| Warning, role override, U+200C or U+200D | `put` stores `flagged`, with a Tier 2 floor and rule ids attached to the content hash |
+| Clean `put`, including combining marks or a leading BOM | Stores `agent-unreviewed`. Scanning never raises trust |
+| `import` with any finding | Refused with `422`. Imports keep their clean-scan requirement |
+| Engine missing, pin mismatch or rule compilation failure | `put` and `handoff` store `pending`. `import` returns `503 memory_scan_unavailable` with `retryable: true` |
+| Input-specific engine failure | `503 memory_scan_failed` with `retryable: false`. No bytes are stored |
+| Invalid UTF-8 or an unpaired surrogate in the JSON request | `400 memory_request_invalid` before normalization |
+
+The `memory-scan` Cargo feature is enabled by default. A build with
+`--no-default-features` has no scanner and serves pending writes and explicit
+searches only. Restarting with the scanner does not promote or rescan old
+versions automatically. A later authorized write scans its exact bytes.
+
+Searches with `query_source: "prompt"` scan the returned fields and card bytes
+again. Any finding replaces the match with `{card_id, blocked: "<rule id>"}`.
+The response carries `content_trust: "untrusted"`. Explicit searches can still
+inspect flagged versions. Local connector prompt loads share the same rule
+bundle and placeholder. Every finding, including a warning, withholds prompt
+text. Leading BOM handling applies to each field separately.
+
+The internal `Store::push` boundary requires a current, live, trusted head with
+a clean scan under the current bundle. It then applies the prompt-load scan.
+An unavailable scanner, a pending scan or an old rule-set receipt produces no
+push hits. S23 connects this boundary to native tool responses. The public
+search API continues to reject `query_source: "push"`.
+
+Input-specific PCRE2 failures return `503 memory_scan_failed` for puts,
+imports and handoffs. No blobs, events, scan receipts or idempotency rows are
+stored. An earlier or later blocking finding still returns
+`422 memory_content_blocked`. Missing engines retain the pending-write policy.
+The response includes `retryable: false` and the message
+`input cannot be scanned, retrying will not help`. Edit the input before
+submitting it again. The Python client records a proposal and removes any
+spooled copy. It does not automatically retry this refusal. Generic status-based
+retry policies should not retry `memory_scan_failed`, even though its status is 503.
+The in-tree client treats every coded 503 as a refusal, including
+`memory_scan_unavailable`. The `retryable` field is a hint for other clients.
+It does not make the in-tree client spool or retry that refusal.
+Each native regex has an explicit 8,388,608 match limit, 16 times the
+512 KiB text limit. Each compiled regex also has an explicit 32 MiB JIT stack
+ceiling, allocated on demand. The former implicit 32 KiB ceiling returned PCRE2
+`-46` on a 1,000-segment Windows path. That input now reaches the Windows-path
+warning. A separate exponential regex tests the match limit (`-47`), and a
+repeated-alternation regex tests the explicit JIT stack limit (`-46`).
+The 32 MiB setting was measured against 128 KiB and 512 KiB repeated path
+segments, Windows space-separated tokens and dotted hostnames. Home paths
+produce their existing warning ids. Dotted hostnames and dense single-line
+salutations are clean.
+
+Python prompt loads scan each distinct field and joined value once. They skip
+equal scan copies and redundant ASCII passes on ASCII text. Non-ASCII text
+retains both regex modes. Email and SSH-target rules require an `@` before
+running their unanchored searches. Full-width normalization is included in that
+check. Two Linux runs at 512 KiB reduced the six clean corpus cases from
+1.035-1.527 seconds to 0.103-0.246 seconds. Dense single-line salutations took
+0.355 seconds per `blocked_rule` call. The corpus subprocess deadline is
+5 seconds, over 14 times the slowest measured call. Windows CI must confirm
+the remaining headroom on its slower runner.
+
+The bundle uses conservative guard matches in both PCRE2 UTF and byte modes.
+Python prompt loads also run Unicode and ASCII-class passes. The scanned
+copies preserve every Python `str.splitlines()` boundary as LF, remove
+Unicode 16 default-ignorable characters, and fold full-width ASCII
+U+FF01-U+FF5E plus U+3000 to ASCII. Every injection rule also runs on a copy
+with an explicit shared whitespace set collapsed to single spaces. These
+copies never replace stored bytes. Bundle v3 bounds the salutation-to-override
+gap to 256 characters in both engines, including the flattened cross-line copy.
+Cross-line detection remains enabled. Publication-guard context exceptions do
+not apply.
+
+Bidi marks U+061C, U+200E and U+200F block alongside overrides and isolates.
+Default-ignorable characters and U+FFF9-FFFB block, except U+200C/U+200D
+flag and an initial BOM is allowed. U+E0100-E01EF always block. Selectors
+U+FE00-FE0F are allowed only immediately after a conservative emoji-base
+allowlist: U+2600, U+2764, U+1F680 and U+1F600-U+1F64F. Other selector
+positions block, including emoji bases outside this allowlist.
+
+Full NFKC remains deferred pending a maintainer decision on a normalization
+dependency. This release performs only the explicit full-width ASCII fold.
 
 - `off`: `memory search` behaves exactly as before and never contacts the hub. A config that cannot be read or is not UTF-8 gives the same error and exit status as before.
 - `read`: `memory search` asks the hub within 800 ms and fuses its matches with local ones by reciprocal rank fusion. The same bytes under one card id in one scope appear once, and a local card joins the hub entry with its bytes. Each match says where it came from (`source`: `hub`, `local` or `replica`). The hub returns at most 20 matches, so a larger `--limit` is capped there with a warning, and `hub_match_count` reports how many the hub found.
@@ -63,6 +184,65 @@ brigade memory hub proposals list --target .
 - `push` and proposal changes hold a lock on the workspace's hub state for their whole run. `pull` holds a separate pull lock for its whole run and takes the state lock only while it changes the replica, so a push never waits on a long pull's network calls. A run that waits more than 30 seconds for a lock exits 75 with `another memory hub push or pull is running`.
 
 All of this state is per host, in `.brigade/memory/hub/`: a 0700 directory with 0600 files and a `*` ignore marker, so Git skips all of it. The shared `.brigade/memory/` keeps its own mode.
+
+The v5 bundle bounds retryable address spans at 256 characters for the local
+part and the domain span before the final dot, with a 63-character TLD. Reserved
+domains allow 127 labels of at most 63 characters. Longer uninterrupted local
+parts or domains no longer match that address rule. Dotted local parts can
+still match a suffix that starts within 256 characters of `@`.
+
+Whitespace and cue gaps allow 256 characters per span. The optional slash
+in a system tag permits two adjacent spans, so its combined gap can reach
+512 characters. Directive scan copies collapse whitespace before matching.
+Bearer and quoted assigned tokens hit at 4097 characters even without a
+closing delimiter. JWT segments hit at 4097 characters after their fixed
+prefixes. Provider suffixes hit at 8193, including oversized AWS-shaped values.
+Ordinary AWS credentials retain their fixed-length boundary checks. Unquoted assignments retain their safe-code
+exclusions. Short unquoted values need a digit within the first 4096 characters,
+and longer token runs also hit the ceiling without a digit.
+A PEM private-key header alone blocks, independent of body size or an END line.
+The shared guard policy engine extends detected token spans through the full
+token run and PEM spans through the END line. Without END, the mask stops at
+the contiguous base64 body, including consistent indentation or quote prefixes,
+literal `\n` or `\r\n` escapes, and space-separated runs on the header line.
+Encrypted `Proc-Type:` and `DEK-Info:` metadata uses the same validated indent
+or single `> ` quote prefix as body lines. On the header line, escaped newline
+separators may surround metadata before the base64 run. Inline base64 tokens
+must end at whitespace, an escaped newline, a quote or the line end.
+A blank after the body ends the mask. Header-only mentions preserve the following
+paragraph. Same-line words after a header can be masked as base64.
+Without END, unsupported layouts such as nested `> > ` quotes, `>` without a
+space, or double-escaped newlines still mask only the header.
+END searches share a per-scan cache, including exhausted suffixes.
+Later rules compare raw spans and retain their findings inside expanded secrets.
+Only masking secret edits supersede contained edits, so allowing or warning on a
+PEM still permits independent hostname masking. This applies to
+Python and native matching, including the pre-push content guard and evidence
+redaction. It prevents bounded prefix matches from leaving secret tails.
+Custom rules retain their configured spans.
+
+The Python memory scanner skips literal-based bundle rules on raw copies
+without ASCII letters or digits, including Unicode letter case folds. Unicode
+phone matches still scan the raw copy to preserve boundary behavior. Assignment
+digit indexes are built only when an assignment prefix exists. Folded copies
+retain the email-domain prefilter and are scanned once per required regex mode.
+
+SSH suffixes still match their first 4096 characters and local port strings
+allow 256 digits. The base64 heuristic accepts a bounded prefix of a longer
+blob. It searches for a blob starting within the first 256 characters of a
+line and a decode cue within 4096 characters per line across a four-line window.
+Cues outside that window remain documented heuristic misses.
+The shared untrusted-context directive rules use the same gap bounds.
+For `a@b.co:\x1fx`, Python flags the warn-level email rule while the hub is less strict and scans clean, because their ASCII whitespace classes differ.
+
+Python skips impossible address rules with necessary domain/prefix checks and
+indexes assignment digits once before trying bounded candidates. Parity tests
+compare these filters with the same rules running without filters.
+The corpus test asserts each subprocess-reported scan time below 2 seconds,
+with a separate 60-second process timeout for startup and runner stalls.
+On Linux the worst local 512 KiB case fell from 2.29 seconds to 0.28 seconds
+across all six placements and ASCII/full-width forms. These are local scan
+measurements, excluding interpreter startup. Windows speed is not measured here.
 
 ## Evidence projection and identity audit
 

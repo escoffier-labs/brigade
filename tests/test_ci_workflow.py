@@ -2779,3 +2779,29 @@ def test_windows_verifier_is_resolved_before_path_is_replaced():
     main = script[script.index("    $ghExe = $null") :]
     assert main.index("Get-Command gh -CommandType Application") < main.index("    Set-AcceptancePath ")
     assert "-GhExe $ghExe" in main
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "engines/brigade-guard/**",
+        "src/brigade/guard/**",
+        "src/brigade/untrusted.py",
+        "src/brigade/memory_content_scan.py",
+        "tests/test_memory_content_scan.py",
+        "scripts/memory_scan_bundle.py",
+        "tests/fixtures/memory-scan-corpus.json",
+        "tests/fixtures/memory-scan-groups.json",
+        "tests/fixtures/memory-scan-adversarial.json",
+        "tests/memory_scan_adversarial.py",
+    ],
+)
+def test_s18_round2_hub_filter_tracks_scan_inputs(path):
+    text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    changes = _workflow_job_section(text, "changes")
+    hub = changes.split("            hub:\n", 1)[1]
+    assert f"              - '{path}'" in hub
+    workflow = (ROOT / ".github/workflows/hub.yml").read_text(encoding="utf-8")
+    assert "on:\n  workflow_call:\n" in workflow
+    assert "Memory scan bundle" in workflow
+    assert "Missing memory scanner fails closed" in workflow

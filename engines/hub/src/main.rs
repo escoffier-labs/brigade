@@ -2,6 +2,7 @@
 mod admission;
 mod claims_route;
 mod heartbeat;
+mod memory_config;
 mod memory_route;
 mod messages_route;
 mod registration;
@@ -174,6 +175,9 @@ struct Config {
     /// Repeatable route override. Unimplemented handlers are refused.
     #[arg(long)]
     route_mode: Vec<String>,
+    /// hub.toml containing [memory]. Defaults beside the hub database.
+    #[arg(long)]
+    memory_config: Option<String>,
     #[arg(long)]
     host: String,
     /// Acceptance-only clock, shared with the Python upstream.
@@ -717,6 +721,13 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
             text += "brigade_hub_checkpoint_stall_frames NaN\n";
         }
         if let Some(memory_route::MemoryRoute::Store(store)) = &app.memory {
+            let retrieval = store.retrieval_status();
+            text.push_str(&format!(
+                "brigade_hub_memory_retrieval{{mode=\"{}\",effective=\"{}\",state=\"{}\"}} 1\n",
+                retrieval["mode"].as_str().unwrap_or(""),
+                retrieval["effective"].as_str().unwrap_or(""),
+                retrieval["state"].as_str().unwrap_or("")
+            ));
             let m = store.metrics();
             text += &format!(
                 "brigade_hub_memory_batches_total {}\nbrigade_hub_memory_hub_lock_residence_seconds_last {}\nbrigade_hub_memory_hub_lock_residence_seconds_max {}\nbrigade_hub_memory_hub_lock_residence_seconds_sum {}\nbrigade_hub_memory_hub_lock_wait_seconds_max {}\nbrigade_hub_memory_authority_timeouts_total {}\nbrigade_hub_memory_commit_failures_total {}\nbrigade_hub_memory_residence_bucket_seconds {}\n",
@@ -1419,31 +1430,64 @@ async fn start_and_serve(
         std::sync::OnceLock<Box<dyn brigade_hub::maintenance::WriterCommands>>,
     > = Arc::default();
     let connections = Arc::new(Semaphore::new(config.max_connections as usize));
-    let memory =
-        match modes.configured("memory") {
-            None => None,
-            Some(brigade_hub::modes::Mode::Native) => Some(match brigade_hub::memory::Store::open(
-                brigade_hub::memory::Options {
-                    memory: memory_path.clone(),
-                    hub: path.clone(),
-                    admin_digest: registration::digest(&admin),
-                    clock: brigade_hub::memory::ids::Clock {
-                        file: native_clock.clone().map(Into::into),
-                    },
-                    scanner: Arc::new(brigade_hub::memory::scan::Unavailable),
-                    arbiter: arbiter.clone(),
-                    hook: None,
-                },
-                readers.clone(),
-            ) {
-                Ok(store) => memory_route::MemoryRoute::Store(Arc::new(store)),
-                Err(e) => {
-                    eprintln!("memory unavailable: {e}");
+    let memory_config_path = config
+        .memory_config
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| path.with_file_name("hub.toml"));
+    let memory = match modes.configured("memory") {
+        None => None,
+        Some(brigade_hub::modes::Mode::Native) => Some(
+            match memory_config::load(
+                &std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()),
+                &memory_config_path,
+                config.memory_config.is_some(),
+            )
+            .await?
+            {
+                Err(reason) => {
+                    eprintln!("memory unavailable: {reason}");
                     memory_route::MemoryRoute::Unavailable
                 }
-            }),
-            Some(_) => Some(memory_route::MemoryRoute::Unavailable),
-        };
+                Ok(memory_config) => match brigade_hub::memory::Store::open(
+                    brigade_hub::memory::Options {
+                        memory: memory_path.clone(),
+                        hub: path.clone(),
+                        admin_digest: registration::digest(&admin),
+                        clock: brigade_hub::memory::ids::Clock {
+                            file: native_clock.clone().map(Into::into),
+                        },
+                        scanner: brigade_hub::memory::scan::bundled(),
+                        arbiter: arbiter.clone(),
+                        hook: None,
+                    },
+                    readers.clone(),
+                ) {
+                    Ok(mut store) => match store.configure_retrieval(&memory_config) {
+                        Ok(()) => memory_route::MemoryRoute::Store(Arc::new(store)),
+                        // A file the operator named stops startup. The
+                        // default file leaves memory unavailable and the
+                        // rest of the hub serving, as an unreadable one does.
+                        Err(e) if config.memory_config.is_some() => {
+                            return Err(format!(
+                                "memory configuration {}: {e}",
+                                memory_config_path.display()
+                            ));
+                        }
+                        Err(e) => {
+                            eprintln!("memory unavailable: {e}");
+                            memory_route::MemoryRoute::Unavailable
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("memory unavailable: {e}");
+                        memory_route::MemoryRoute::Unavailable
+                    }
+                },
+            },
+        ),
+        Some(_) => Some(memory_route::MemoryRoute::Unavailable),
+    };
     let storage = if config.upstream.is_none() {
         let sweeps: Arc<dyn brigade_hub::maintenance::WriterCommands> = Arc::new(HubSweeps {
             memory: match &memory {

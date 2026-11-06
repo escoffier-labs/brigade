@@ -365,6 +365,30 @@ def test_the_credential_never_appears_in_output(hub, tmp_path, capsys):
     assert hub.tokens == {NODE_CREDENTIAL}
 
 
+def test_status_reports_the_hubs_retrieval_details_in_text_and_json(hub, tmp_path, capsys):
+    target = workspace(tmp_path)
+    retrieval = {
+        "mode": "hybrid",
+        "effective": "lexical-fallback",
+        "state": "degraded",
+        "reason": "embedder-unavailable",
+        "endpoint_host": "embed.example.com",
+        "breaker_open": True,
+    }
+    original = hub.do_status
+
+    def with_retrieval(body):
+        code, reply = original(body)
+        return code, {**reply, "default_mode": "hybrid", "retrieval": retrieval}
+
+    hub.do_status = with_retrieval
+    code, out, _ = run(["memory", "hub", "status", "--target", str(target), "--json"], capsys)
+    assert code == 0 and json.loads(out)["hub"]["retrieval"] == retrieval
+    code, out, _ = run(["memory", "hub", "status", "--target", str(target)], capsys)
+    assert code == 0
+    assert "retrieval: hybrid, effective lexical-fallback, state degraded (embedder-unavailable)" in out
+
+
 # --- push and pull -----------------------------------------------------------------
 
 
@@ -1343,6 +1367,32 @@ def test_drop_refuses_a_replica_from_an_old_epoch_or_without_one(hub, tmp_path, 
     assert code == 0 and "over hub revision 2" in out
 
 
+def test_offline_card_json_carries_the_replica_scan_metadata(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "fleet", "theirs", "replicated text")
+    _put(hub, "fleet", "older", "an older replica")
+    sync.pull(target, client(hub), settings(target))
+    held = store.replica(target)
+    held.heads[store.Replica.key("fleet", "theirs")].update(
+        scan_state="clean", writer="node-a", updated_at="2026-11-05T00:00:00Z"
+    )
+    for name in ("scan_state", "writer", "updated_at"):
+        held.heads[store.Replica.key("fleet", "older")].pop(name, None)
+    held.save()
+    hub.mode = "down"
+    code, out, _ = run(["memory", "hub", "card", "--target", str(target), "--all", "--json", "theirs"], capsys)
+    card = json.loads(out)["card"]
+    assert code == 0 and (card["scan_state"], card["writer"], card["updated_at"]) == (
+        "clean",
+        "node-a",
+        "2026-11-05T00:00:00Z",
+    )
+    # An older replica lacks them: the read still answers, without the keys.
+    code, out, _ = run(["memory", "hub", "card", "--target", str(target), "--all", "--json", "older"], capsys)
+    card = json.loads(out)["card"]
+    assert code == 0 and not {"scan_state", "writer", "updated_at"} & set(card)
+
+
 def test_card_reads_fall_back_to_the_replica_only_when_the_hub_is_unavailable(hub, tmp_path, capsys):
     target = workspace(tmp_path, mode="read")
     _put(hub, "fleet", "theirs", "replicated text that spans several chunks")
@@ -2223,3 +2273,50 @@ def test_import_names_a_replica_base_only_under_the_hubs_current_epoch(hub, tmp_
     hub.restore(hub.snapshot())
     sync.import_cards(target, client(hub), scope="repo:test/app", paths=[path])
     assert last_import()["base_revision"] is None and "base_epoch" not in last_import()
+
+
+@pytest.mark.parametrize("spooled", [False, True])
+def test_s18_round2_scan_failure_is_not_spooled_or_retried(hub, tmp_path, spooled):
+    target = workspace(tmp_path, mode="sync", one="# One\n")
+    if spooled:
+        hub.mode = "down"
+        sync.push(target, client(hub), settings(target), yes=True)
+        assert store.spool_count(target) == 1
+        hub.mode = "up"
+    reply = {
+        "code": "memory_scan_failed",
+        "retryable": False,
+        "error": "input cannot be scanned, retrying will not help",
+    }
+    hub.put_reply = (503, reply)
+    with pytest.raises(hubc.HubRefusal) as error:
+        client(hub).call("put", text="# One\n")
+    assert error.value.body == reply
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert report["spooled"] == []
+    assert report["refused"] == [{"card_id": "one", "status": 503, "code": "memory_scan_failed"}]
+    assert [p["reason"] for p in report["proposals"]] == ["memory_scan_failed"]
+    assert store.spool_count(target) == 0
+    calls = len(hub.puts())
+    again = sync.push(target, client(hub), settings(target), yes=True)
+    assert again["spooled"] == []
+    assert len(hub.puts()) == calls
+
+
+def test_s18_round3_handoff_call_refuses_scan_failure_once():
+    calls = []
+    reply = {
+        "code": "memory_scan_failed",
+        "retryable": False,
+        "error": "input cannot be scanned, retrying will not help",
+    }
+
+    def transport(url, token, body, timeout):
+        calls.append(body)
+        return 503, reply
+
+    c = hubc.MemoryHubClient(HUB_URL, NODE_CREDENTIAL, transport=transport)
+    with pytest.raises(hubc.HubRefusal) as error:
+        c.call("handoff", kind="note", text="release notes", client_event_id=hubc.event_id())
+    assert error.value.body == reply
+    assert [body["action"] for body in calls] == ["handoff"]

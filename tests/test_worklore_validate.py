@@ -117,7 +117,7 @@ def test_ordinary_identities_are_not_private_paths(value: str) -> None:
         "sk-" + "c" * 32,
         "AKIAIOSFODNN7EXAMPLE",  # content-guard: allow bare-token-prefix
         "ASIAIOSFODNN7EXAMPLE",
-        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "-----BEGIN OPENSSH PRIVATE KEY-----",  # content-guard: allow private-key-block
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghij",
         "password=" + "s" * 20,
         "https://operator:" + "hunter2" + "@example.invalid/x",

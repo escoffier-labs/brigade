@@ -5,9 +5,10 @@
 //! `search` answers from the lexical index in [`index`] (S13b), with the
 //! scorer and tokenizer copied from Python in [`text`].
 //!
-//! Not here yet: proposals and decisions (S19a), embedding (S15) and content
-//! scanning (S18). The scan hook reports unavailable, so no write raises trust.
+//! Writes and prompt loads use the versioned guard scanner (S18).
+//! Proposals and decisions (S19a) and embedding (S15) follow in later slices.
 pub mod auth;
+pub mod embedder;
 pub mod ids;
 pub mod index;
 pub mod ops;
@@ -18,6 +19,8 @@ pub mod search;
 pub mod text;
 pub mod writer;
 
+#[cfg(test)]
+mod embedder_tests;
 #[cfg(test)]
 mod lexical_tests;
 #[cfg(test)]
@@ -95,6 +98,7 @@ pub struct Store {
     scanner: Arc<dyn Scanner>,
     last_sweep: std::sync::atomic::AtomicI64,
     index: Arc<index::Index>,
+    retrieval: Option<Arc<embedder::Runtime>>,
 }
 
 impl Drop for Store {
@@ -140,6 +144,12 @@ impl Store {
         let created = !options.memory.exists();
         let db = worker::open_file(&options.memory, true).map_err(|e| e.to_string())?;
         schema::migrate(&db, options.clock.now_ms())?;
+        let ruleset = options
+            .scanner
+            .describe()
+            .1
+            .unwrap_or_else(|| "unavailable".into());
+        db.execute("INSERT INTO memory_meta(key,value) VALUES('scan_ruleset_version',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&ruleset]).map_err(|e| e.to_string())?;
         // A restart rebuilds the index from the store before the hub serves.
         let index = index::Index::open(&db, options.memory.clone()).map_err(|e| e.to_string())?;
         if created {
@@ -154,6 +164,7 @@ impl Store {
             options.admin_digest.clone(),
         );
         config.hook = options.hook;
+        config.scanner = options.scanner.clone();
         config.index = Some(index.clone());
         let writer = writer::Writer::start(config, db, options.arbiter.clone())
             .map_err(|e| e.to_string())?;
@@ -167,7 +178,44 @@ impl Store {
             scanner: options.scanner,
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
             index,
+            retrieval: None,
         })
+    }
+    /// Lexical mode ignores an unused embedder table, including credentials.
+    pub fn configure_retrieval(&mut self, config: &Json) -> Result<(), String> {
+        // Absent means lexical. Present but not a string is a typo, never lexical.
+        let retrieval = match config.get("retrieval") {
+            None => "lexical",
+            Some(Json::String(mode)) => mode.as_str(),
+            Some(_) => return Err("memory.retrieval must be lexical or hybrid".into()),
+        };
+        match retrieval {
+            "lexical" => {
+                self.retrieval = None;
+                if config.get("embedder").is_some() {
+                    eprintln!("INFO memory.embedder unused in lexical mode");
+                }
+            }
+            "hybrid" => {
+                self.retrieval = Some(embedder::Runtime::new(
+                    embedder::Config::parse(&config["embedder"])?,
+                    self.scanner.clone(),
+                )?)
+            }
+            _ => return Err("memory.retrieval must be lexical or hybrid".into()),
+        }
+        Ok(())
+    }
+    pub fn retrieval_status(&self) -> Json {
+        match &self.retrieval {
+            None => json!({"mode": "lexical", "effective": "lexical", "state": "ok"}),
+            Some(runtime) => match runtime.reason() {
+                Some(reason) => {
+                    json!({"mode": "hybrid", "effective": "lexical-fallback", "state": "degraded", "reason": reason, "endpoint_host": url::Url::parse(&runtime.config.endpoint).ok().and_then(|u| u.host_str().map(String::from)), "breaker_open": runtime.breaker_open()})
+                }
+                None => json!({"mode": "hybrid", "effective": "lexical", "state": "switching"}),
+            },
+        }
     }
     /// The lexical index, for `/metrics` and `status`.
     pub fn index(&self) -> &Arc<index::Index> {
@@ -253,7 +301,7 @@ impl Store {
         }
     }
 
-    /// Validation, normalization, hashing and the scan, outside every lock.
+    /// Validation, normalization and hashing outside locks. Scanning is authorized in apply.
     pub fn prepare(
         &self,
         credential: &Credential,
@@ -363,7 +411,7 @@ impl Store {
                 return Err(error(413, "memory_card_too_large", "text is too large"));
             }
             let hash = ids::sha256_hex(normalized.as_bytes());
-            let scan = self.scanner.scan(&normalized);
+            let scan = Scan::Unavailable;
             Ok((normalized, hash, scan))
         };
         let short = |key: &str, limit: usize, required: bool| -> Result<Option<String>, Reply> {
@@ -515,19 +563,41 @@ impl Store {
         })
     }
 
+    /// S23's internal push boundary. The public search contract stays unchanged.
+    pub async fn push(&self, credential: &Credential, map: &Map<String, Json>) -> Reply {
+        self.search_for(credential, map, true).await
+    }
+
     async fn search(&self, credential: &Credential, map: &Map<String, Json>) -> Reply {
-        let request = match search::parse(map) {
+        self.search_for(credential, map, false).await
+    }
+
+    async fn search_for(
+        &self,
+        credential: &Credential,
+        map: &Map<String, Json>,
+        push: bool,
+    ) -> Reply {
+        let mut request = match search::parse(map) {
             Ok(r) => r,
             Err(reply) => return reply,
         };
+        request.push = push;
+        request.prompt |= push;
         let snapshot = match request.min_seq {
             Some(min) => self.index.wait(min, MIN_SEQ_WAIT).await,
             None => self.index.current(),
         };
         let credential = credential.clone();
+        let scanner = self.scanner.clone();
+        // S15a sends no query to the embedder: with no dense retrieval yet the
+        // vector would be discarded, so the call would be egress for nothing.
+        // S15b restores the call together with dense retrieval.
         match self
             .readers
-            .submit(move |c| search::run(&Conn(c), &credential, &request, &snapshot))
+            .submit(move |c| {
+                search::run(&Conn(c), &credential, &request, &snapshot, scanner.as_ref())
+            })
             .await
         {
             Ok(reply) => reply,
@@ -545,6 +615,8 @@ impl Store {
         let now_ms = self.clock.now_ms();
         let scan = self.scanner.describe();
         let indexed_seq = self.index.current().indexed_seq;
+        let retrieval = self.retrieval_status();
+        let is_status = action == "status";
         match self
             .readers
             .submit(move |c| {
@@ -560,7 +632,13 @@ impl Store {
             })
             .await
         {
-            Ok(reply) => reply,
+            Ok(mut reply) => {
+                if is_status && reply.status == 200 {
+                    reply.body["default_mode"] = retrieval["mode"].clone();
+                    reply.body["retrieval"] = retrieval;
+                }
+                reply
+            }
             Err(_) => Reply::new(
                 503,
                 json!({"error": "hub busy", "reason": "memory-reader-timeout"}),
@@ -814,11 +892,11 @@ fn reads<T: ReadTx + ?Sized>(
             let params = [Value::Text(scope.clone()), Value::Text(card_id.into())];
             let row = match revision {
                 Some(rev) => tx.query(
-                    "SELECT r.revision,r.content_hash,r.trust,r.state,b.bytes FROM memory_card_revisions r JOIN memory_blobs b ON b.content_hash=r.content_hash WHERE r.scope=?1 AND r.card_id=?2 AND r.revision=?3",
+                    "SELECT r.revision,r.content_hash,r.trust,r.state,b.bytes,r.scan_state,r.writer,r.created_at FROM memory_card_revisions r JOIN memory_blobs b ON b.content_hash=r.content_hash WHERE r.scope=?1 AND r.card_id=?2 AND r.revision=?3",
                     &[params[0].clone(), params[1].clone(), Value::Integer(rev)],
                 )?,
                 None => tx.query(
-                    "SELECT c.revision,c.content_hash,c.trust,c.state,b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2",
+                    "SELECT c.revision,c.content_hash,c.trust,c.state,b.bytes,r.scan_state,r.writer,r.created_at FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2",
                     &params,
                 )?,
             };
@@ -841,6 +919,9 @@ fn reads<T: ReadTx + ?Sized>(
                     "next_offset": next_offset,
                     "trust": text(&row[2]),
                     "state": text(&row[3]),
+                    "scan_state": text(&row[5]),
+                    "writer": text(&row[6]),
+                    "updated_at": text(&row[7]),
                     "seq": revision,
                 }, "log_epoch": epoch}),
             ))

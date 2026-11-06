@@ -1,5 +1,5 @@
 //! Memory write commands. A command arrives at the memory writer fully
-//! prepared (validated, normalized, hashed and scanned). `apply` runs inside
+//! prepared (validated, normalized and hashed). `apply` scans inside
 //! the memory transaction while the hub write lock is held, and does every
 //! decision read there: grants, the idempotency record, the epoch and the head.
 use super::{Reply, auth, auth::Credential, ids, scan::Scan};
@@ -36,6 +36,7 @@ pub enum Action {
         hash: String,
         scan: Scan,
     },
+    // Audit-only free-form strings. Capture fields never reach a prompt.
     Capture {
         payload: Json,
     },
@@ -350,7 +351,12 @@ fn scan_state_of<T: ReadTx + ?Sized>(tx: &T, hash: &str) -> rusqlite::Result<Str
 
 /// Apply one prepared command. Refusals are returned as replies; the writer
 /// rolls back the command's savepoint for any status of 400 or more.
-pub fn apply(tx: &dyn WriteTx, p: &Prepared, authority: &Authority) -> rusqlite::Result<Reply> {
+pub fn apply(
+    tx: &dyn WriteTx,
+    p: &Prepared,
+    authority: &Authority,
+    scanner: &dyn super::scan::Scanner,
+) -> rusqlite::Result<Reply> {
     let (scope, right) = p.action.requirement();
     if !auth::has_right(tx, &p.credential, scope, right)? {
         return Ok(error(
@@ -377,7 +383,16 @@ pub fn apply(tx: &dyn WriteTx, p: &Prepared, authority: &Authority) -> rusqlite:
             "client_event_id was already used for a different request",
         ));
     }
-    let reply = run(tx, p, authority)?;
+    // Scan the exact immutable normalized bytes after grants and idempotency,
+    // inside the savepoint and authority lock. Never accept a prepared scan.
+    let mut p = p.clone();
+    match &mut p.action {
+        Action::Put { text, scan, .. } | Action::Handoff { text, scan, .. } => {
+            *scan = scanner.scan(text);
+        }
+        _ => {}
+    }
+    let reply = run(tx, &p, authority)?;
     if reply.status < 300 {
         tx.execute(
             "INSERT INTO memory_idempotency(principal,client_event_id,request_digest,status,response,created_ms) VALUES(?1,?2,?3,?4,?5,?6)",
@@ -418,10 +433,23 @@ fn run(tx: &dyn WriteTx, p: &Prepared, _authority: &Authority) -> rusqlite::Resu
             scan,
             import,
         } => {
+            if matches!(scan, Scan::Failed) {
+                return Ok(with(
+                    error(
+                        503,
+                        "memory_scan_failed",
+                        "input cannot be scanned, retrying will not help",
+                    ),
+                    json!({"retryable": false}),
+                ));
+            }
             // Only import raises trust here, and only on a clean scan (D24).
             if *import && !scan.permits_raise() {
                 return Ok(match scan {
-                    Scan::Unavailable => error(503, "memory_scan_unavailable", "scan unavailable"),
+                    Scan::Unavailable => with(
+                        error(503, "memory_scan_unavailable", "scan unavailable"),
+                        json!({"retryable": true}),
+                    ),
                     _ => blocked(scan.rules()),
                 });
             }
@@ -458,7 +486,7 @@ fn run(tx: &dyn WriteTx, p: &Prepared, _authority: &Authority) -> rusqlite::Resu
                     content_hash: Some(hash),
                     trust: Some(trust),
                     origin: origin.as_deref(),
-                    payload: json!({"size": text.len(), "revived": current.as_ref().is_some_and(|h| h.state == "retired")}),
+                    payload: json!({"size": text.len(), "revived": current.as_ref().is_some_and(|h| h.state == "retired"), "tier_floor": scan.tier_floor()}),
                     policy_digest: None,
                 },
             )?;
@@ -481,7 +509,7 @@ fn run(tx: &dyn WriteTx, p: &Prepared, _authority: &Authority) -> rusqlite::Resu
             )?;
             Ok(Reply::new(
                 201,
-                json!({"event": event_json(scope, card_id, seq, hash, trust, "live"), "log_epoch": current_epoch}),
+                json!({"event": event_json(scope, card_id, seq, hash, trust, "live"), "log_epoch": current_epoch, "tier_floor": scan.tier_floor()}),
             ))
         }
         Action::Retire {
@@ -546,6 +574,16 @@ fn run(tx: &dyn WriteTx, p: &Prepared, _authority: &Authority) -> rusqlite::Resu
             hash,
             scan,
         } => {
+            if matches!(scan, Scan::Failed) {
+                return Ok(with(
+                    error(
+                        503,
+                        "memory_scan_failed",
+                        "input cannot be scanned, retrying will not help",
+                    ),
+                    json!({"retryable": false}),
+                ));
+            }
             if let Scan::Blocked { rules, .. } = scan {
                 return Ok(blocked(rules));
             }

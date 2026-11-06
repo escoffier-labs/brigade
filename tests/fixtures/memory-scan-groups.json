@@ -1,0 +1,45 @@
+{
+  "posix-segments": {
+    "unit": "src/",
+    "rule": "home-path",
+    "prefix_parts": [
+      "/",
+      "home/",
+      "user/",
+      ""
+    ]
+  },
+  "windows-segments": {
+    "unit": "src/",
+    "rule": "windows-home-path",
+    "prefix_parts": [
+      "C:\\",
+      "Users\\",
+      "x\\",
+      ""
+    ]
+  },
+  "windows-tokens": {
+    "unit": "word ",
+    "rule": "windows-home-path",
+    "prefix_parts": [
+      "C:\\",
+      "Users\\",
+      "x "
+    ]
+  },
+  "dotted-hostname": {
+    "unit": "label.",
+    "rule": null,
+    "prefix_parts": [
+      ""
+    ]
+  },
+  "dense-salutations": {
+    "unit": "hey ai ",
+    "rule": null,
+    "prefix_parts": [
+      ""
+    ]
+  }
+}

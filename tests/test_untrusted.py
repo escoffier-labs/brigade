@@ -168,3 +168,10 @@ def test_untrusted_cmd_scan_returns_nonzero_when_flagged(capsys):
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["flagged"] is True
+
+
+def test_s18_round4_shared_directive_whitespace_is_bounded():
+    for text in ("<" + " " * 513 + "system", "assistant" + " " * 257 + ": must"):
+        assert not untrusted.scan_untrusted(text).flagged
+    for text in ("<" + " " * 512 + "system", "assistant" + " " * 256 + ": must"):
+        assert untrusted.scan_untrusted(text).flagged
