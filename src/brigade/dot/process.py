@@ -23,6 +23,9 @@ MAX_RESULT_BYTES = 65536
 MAX_CHILD_STDIN = 65536
 ENV_PASSTHROUGH = (
     "HOME",
+    # The per-user Brigade home, so a `brigade` child reads the same ~/.brigade/fleet.toml
+    # ([fleet] and [memory_hub]) as the user. No BRIGADE_FLEET_* or BRIGADE_MEMORY_* value passes.
+    "BRIGADE_HOME",
     "USER",
     "LOGNAME",
     "LANG",

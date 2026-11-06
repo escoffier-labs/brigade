@@ -23,6 +23,22 @@ import hub_contract_memory as hm  # noqa: E402
 BINARY = Path(os.environ.get("BRIGADE_HUB_BINARY", ROOT / "engines/hub/target/debug/brigade-hub"))
 BASE = f"{BINARY} --host {{host}} --port {{port}} --db {{db}} --token-file {{token_file}} --route-mode registration=native"
 UNAVAILABLE = {"error": "hub busy", "reason": "memory-unavailable"}
+# Valid apart from its token file, which does not exist.
+HYBRID_MISSING_TOKEN = """[memory]
+retrieval = "hybrid"
+
+[memory.embedder]
+backend = "local"
+endpoint = "http://127.0.0.1:9/api/embed"
+allowlist = ["http://127.0.0.1:9/api/embed"]
+token_file = "no-such.token"
+shape = "api/embed"
+name = "test-model"
+model_digest = "test-digest"
+dimensions = 2
+input_chars = 6000
+query_prefix_version = 1
+"""
 
 
 def launch(state: Path, extra: str = "") -> hc.Hub:
@@ -185,6 +201,81 @@ class Memory(unittest.TestCase):
             self.assertEqual(hc.request(hub.url, "GET", "/health").status, 200)
             nodes = hc.request(hub.url, "GET", "/nodes", token=hub.admin_token)
             self.assertEqual(nodes.status, 200)
+
+    def test_hub_without_memory_route_never_reads_hub_toml(self):
+        # Not TOML at all: a hub that reads it at startup would refuse to start.
+        hub = self.run_hub("no-route", prepare=lambda s: (s / "hub.toml").write_text("[memory\n"))
+        self.assertEqual(hc.request(hub.url, "GET", "/health").status, 200)
+        self.assertEqual(status(hub).status, 404)
+
+    def test_unreadable_default_hub_toml_reports_memory_unavailable(self):
+        hub = self.run_hub(
+            "bad-toml", "--route-mode memory=native", lambda s: (s / "hub.toml").write_text("[memory\n")
+        )
+        response = status(hub)
+        self.assertEqual((response.status, response.json), (503, UNAVAILABLE))
+        self.assertEqual(hc.request(hub.url, "GET", "/health").status, 200)
+        self.assertIn(b"memory unavailable:", (self.work / "bad-toml" / "hub.log").read_bytes())
+
+    def test_named_memory_config_that_cannot_be_read_stops_startup(self):
+        state = self.work / "named"
+        state.mkdir()
+        (state / "named.toml").write_text("[memory\n")
+        with self.assertRaisesRegex(hc.ContractError, "could not be read"):
+            hub = launch(state, f"--route-mode memory=native --memory-config {state / 'named.toml'}")
+            self.addCleanup(hc.stop_hub, hub)
+
+    def test_bad_hybrid_settings_in_default_hub_toml_leave_memory_unavailable(self):
+        # A hybrid table whose token file is missing, and a retrieval mode
+        # that does not exist. Each leaves memory unavailable with the reason
+        # in the hub log, and the rest of the hub serving.
+        cases = {
+            "missing-token": (HYBRID_MISSING_TOKEN, b"memory unavailable: embedder token file unavailable"),
+            "bad-mode": ('[memory]\nretrieval = "dense"\n', b"memory unavailable: memory.retrieval must be"),
+        }
+        for name, (text, logged) in cases.items():
+            with self.subTest(name):
+                hub = self.run_hub(name, "--route-mode memory=native", lambda s, t=text: (s / "hub.toml").write_text(t))
+                response = status(hub)
+                self.assertEqual((response.status, response.json), (503, UNAVAILABLE))
+                self.assertEqual(hc.request(hub.url, "GET", "/health").status, 200)
+                self.assertIn(logged, (self.work / name / "hub.log").read_bytes())
+
+    def test_bad_hybrid_settings_in_a_named_memory_config_stop_startup(self):
+        state = self.work / "named-hybrid"
+        state.mkdir()
+        (state / "named.toml").write_text(HYBRID_MISSING_TOKEN)
+        with self.assertRaisesRegex(hc.ContractError, "embedder token file unavailable"):
+            hub = launch(state, f"--route-mode memory=native --memory-config {state / 'named.toml'}")
+            self.addCleanup(hc.stop_hub, hub)
+
+    def test_planted_json_module_in_working_directory_is_not_imported(self):
+        # The hub's working directory is the state directory. The planted module
+        # records who imported it and then hands over to the real json, so the
+        # Python processes outside this boundary still work.
+        planted = (
+            "import os, sys\n"
+            "here = os.path.dirname(os.path.abspath(__file__))\n"
+            "with open(os.path.join(here, 'planted-%d' % os.getpid()), 'w') as f:\n"
+            "    f.write(repr(sys.argv))\n"
+            "saved = list(sys.path)\n"
+            "sys.path[:] = [p for p in sys.path if p not in ('', here)]\n"
+            "del sys.modules['json']\n"
+            "import json as real\n"
+            "sys.path[:] = saved\n"
+            "sys.modules['json'] = real\n"
+        )
+
+        def prepare(state: Path) -> None:
+            (state / "json.py").write_text(planted)
+            (state / "hub.toml").write_text('[memory]\nretrieval = "lexical"\n')
+
+        hub = self.run_hub("planted", "--route-mode memory=native", prepare)
+        response = status(hub)
+        self.assertEqual(response.status, 200, response)
+        self.assertEqual(response.json["retrieval"]["mode"], "lexical")
+        readers = [m.read_text() for m in (self.work / "planted").glob("planted-*")]
+        self.assertFalse([r for r in readers if "hub.toml" in r], readers)
 
     def test_native_memory_survives_restart_and_reports_metrics(self):
         state_name = "native"

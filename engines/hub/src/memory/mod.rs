@@ -8,6 +8,7 @@
 //! Writes and prompt loads use the versioned guard scanner (S18).
 //! Proposals and decisions (S19a) and embedding (S15) follow in later slices.
 pub mod auth;
+pub mod embedder;
 pub mod ids;
 pub mod index;
 pub mod ops;
@@ -18,6 +19,8 @@ pub mod search;
 pub mod text;
 pub mod writer;
 
+#[cfg(test)]
+mod embedder_tests;
 #[cfg(test)]
 mod lexical_tests;
 #[cfg(test)]
@@ -97,6 +100,7 @@ pub struct Store {
     scanner: Arc<dyn Scanner>,
     last_sweep: std::sync::atomic::AtomicI64,
     index: Arc<index::Index>,
+    retrieval: Option<Arc<embedder::Runtime>>,
 }
 
 impl Drop for Store {
@@ -176,7 +180,44 @@ impl Store {
             scanner: options.scanner,
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
             index,
+            retrieval: None,
         })
+    }
+    /// Lexical mode ignores an unused embedder table, including credentials.
+    pub fn configure_retrieval(&mut self, config: &Json) -> Result<(), String> {
+        // Absent means lexical. Present but not a string is a typo, never lexical.
+        let retrieval = match config.get("retrieval") {
+            None => "lexical",
+            Some(Json::String(mode)) => mode.as_str(),
+            Some(_) => return Err("memory.retrieval must be lexical or hybrid".into()),
+        };
+        match retrieval {
+            "lexical" => {
+                self.retrieval = None;
+                if config.get("embedder").is_some() {
+                    eprintln!("INFO memory.embedder unused in lexical mode");
+                }
+            }
+            "hybrid" => {
+                self.retrieval = Some(embedder::Runtime::new(
+                    embedder::Config::parse(&config["embedder"])?,
+                    self.scanner.clone(),
+                )?)
+            }
+            _ => return Err("memory.retrieval must be lexical or hybrid".into()),
+        }
+        Ok(())
+    }
+    pub fn retrieval_status(&self) -> Json {
+        match &self.retrieval {
+            None => json!({"mode": "lexical", "effective": "lexical", "state": "ok"}),
+            Some(runtime) => match runtime.reason() {
+                Some(reason) => {
+                    json!({"mode": "hybrid", "effective": "lexical-fallback", "state": "degraded", "reason": reason, "endpoint_host": url::Url::parse(&runtime.config.endpoint).ok().and_then(|u| u.host_str().map(String::from)), "breaker_open": runtime.breaker_open()})
+                }
+                None => json!({"mode": "hybrid", "effective": "lexical", "state": "switching"}),
+            },
+        }
     }
     /// The lexical index, for `/metrics` and `status`.
     pub fn index(&self) -> &Arc<index::Index> {
@@ -551,6 +592,9 @@ impl Store {
         };
         let credential = credential.clone();
         let scanner = self.scanner.clone();
+        // S15a sends no query to the embedder: with no dense retrieval yet the
+        // vector would be discarded, so the call would be egress for nothing.
+        // S15b restores the call together with dense retrieval.
         match self
             .readers
             .submit(move |c| {
@@ -573,6 +617,8 @@ impl Store {
         let now_ms = self.clock.now_ms();
         let scan = self.scanner.describe();
         let indexed_seq = self.index.current().indexed_seq;
+        let retrieval = self.retrieval_status();
+        let is_status = action == "status";
         match self
             .readers
             .submit(move |c| {
@@ -588,7 +634,13 @@ impl Store {
             })
             .await
         {
-            Ok(reply) => reply,
+            Ok(mut reply) => {
+                if is_status && reply.status == 200 {
+                    reply.body["default_mode"] = retrieval["mode"].clone();
+                    reply.body["retrieval"] = retrieval;
+                }
+                reply
+            }
             Err(_) => Reply::new(
                 503,
                 json!({"error": "hub busy", "reason": "memory-reader-timeout"}),

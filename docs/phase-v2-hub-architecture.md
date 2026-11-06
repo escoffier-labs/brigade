@@ -2683,7 +2683,7 @@ contract (D30).
   tailnet address in front of it.
 - Access. A tailnet ACL lets only the LXC hub host's node reach the endpoint's
   port. Every request carries a bearer token that the hub holds as a secret
-  file, mode 0600, like the admin token, and the endpoint refuses a request
+  file, mode 0600 or 0400 and owned by the hub's user, like the admin token, and the endpoint refuses a request
   without it. The ACL does not filter processes on the workstation itself,
   which reach its address locally, and on a single-user machine they can read
   the token ([Threat model for an everyday
@@ -2693,7 +2693,10 @@ contract (D30).
 - Transport. The hub's endpoint allowlist names the endpoint by its tailnet
   name. The private network encrypts and authenticates each link, so plain
   HTTP is accepted for an allowlisted tailnet address. Any other non-loopback
-  endpoint needs HTTPS through rustls.
+  endpoint needs HTTPS through rustls. On `http://`, which the hub accepts
+  only for private ranges, the bearer token crosses the LAN in cleartext.
+  The allowlist lives in the same hub.toml as the endpoint, so it catches
+  typos, not tampering.
 - Timeouts. A query embedding call gets 250 ms, connect included, inside the
   300 ms query budget. A document request gets 30 s.
 - Fallback. A failed or timed-out query is answered in BM25 mode, labeled
@@ -2721,8 +2724,9 @@ contract (D30).
   query text after normalization (one line, at most 256 characters). Nothing
   else: no credential, token digest, message body, audit row or card
   metadata beyond those fields. Embed jobs exist only for versions whose scan
-  state is `clean` or `flagged`. The guard refuses a blocked version before
-  it is stored, and a version stored `pending` while the scanner is
+  state is `clean`, and a `flagged` version is never pushed (S18), so its
+  text never reaches the endpoint either. The guard refuses a blocked version
+  before it is stored, and a version stored `pending` while the scanner is
   unavailable waits for its scan before any of its text leaves. A query that
   matches a blocking guard rule is answered in BM25 mode and never sent, and
   while the scanner is unavailable no query goes to a non-loopback endpoint.
