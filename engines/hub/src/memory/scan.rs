@@ -298,7 +298,7 @@ mod native {
         }
         let assigned = |c: char| {
             let at = unassigned.partition_point(|&(_, hi)| hi < c as u32);
-            !unassigned.get(at).is_some_and(|&(lo, _)| lo <= c as u32)
+            unassigned.get(at).is_none_or(|&(lo, _)| lo > c as u32)
         };
         let mut out = String::with_capacity(text.len());
         let mut run = 0;
@@ -478,6 +478,14 @@ mod native {
             assert_eq!(unicode_normalization::UNICODE_VERSION, (18, 0, 0));
         }
 
+        fn hex(bytes: &[u8]) -> String {
+            use std::fmt::Write;
+            bytes.iter().fold(String::new(), |mut out, b| {
+                write!(out, "{b:02x}").unwrap();
+                out
+            })
+        }
+
         #[test]
         fn nfkc_matches_python_on_every_code_point() {
             use sha2::{Digest, Sha256};
@@ -493,18 +501,15 @@ mod native {
                 let text = c.to_string();
                 let out = nfkc(&guard.unassigned, &text);
                 if out != text {
-                    let hex: String = out.bytes().map(|b| format!("{b:02x}")).collect();
-                    digest.update(format!("{code:X}:{hex}\n"));
+                    digest.update(format!("{code:X}:{}\n", hex(out.as_bytes())));
                     changed += 1;
                 }
             }
-            let sha: String = digest
-                .finalize()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
             assert_eq!(changed, fixture["changed_code_points"].as_u64().unwrap());
-            assert_eq!(sha, fixture["changed_sha256"].as_str().unwrap());
+            assert_eq!(
+                hex(&digest.finalize()),
+                fixture["changed_sha256"].as_str().unwrap()
+            );
         }
 
         #[test]
