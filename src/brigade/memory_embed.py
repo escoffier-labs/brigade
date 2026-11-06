@@ -40,6 +40,23 @@ class EndpointError(ValueError):
         self.reason = reason
 
 
+# Mirrors the hub's TRANSIENT list: reasons that release a job without counting an attempt.
+TRANSIENT_REASONS = frozenset(
+    {
+        "embedder-busy",
+        "embedder-unavailable",
+        "embedder-timeout",
+        "embedder-refused",
+        "endpoint-refused",
+        "scan-unavailable",
+        "scan-pending",
+        "digest-mismatch",
+    }
+)
+BACKOFF_START = 1.0
+BACKOFF_MAX = 60.0
+
+
 class DocumentRefused(ValueError):
     """This text was refused. The hub retries it alone, backs off, then parks it."""
 
@@ -189,7 +206,8 @@ def _embed_each(config: dict, jobs: list[dict], token: str) -> tuple[list[tuple[
         return [], [{"content_hash": job["content_hash"], "reason": exc.reason} for job in jobs]
     except DocumentRefused as exc:
         if len(jobs) == 1:
-            return [], [{"content_hash": jobs[0]["content_hash"], "reason": exc.reason}]
+            # `alone` tells the hub this document was already tried by itself.
+            return [], [{"content_hash": jobs[0]["content_hash"], "reason": exc.reason, "alone": True}]
     stored: list[tuple[dict, list[float]]] = []
     failures: list[dict] = []
     for job in jobs:
@@ -199,12 +217,16 @@ def _embed_each(config: dict, jobs: list[dict], token: str) -> tuple[list[tuple[
     return stored, failures
 
 
-def step(client: hubc.MemoryHubClient, config: dict, token: str) -> tuple[int, int]:
-    """Lease once. Returns (documents leased, vectors stored)."""
+def step(client: hubc.MemoryHubClient, config: dict, token: str) -> tuple[int, int, bool]:
+    """Lease once. Returns (documents leased, vectors stored, endpoint fault).
+
+    The last item is true when nothing was stored and every failure was an
+    endpoint or hub fault rather than a refusal of one document.
+    """
     lease = client.call("embed_lease", embedder_id=identity(config), max=4, client_event_id=hubc.event_id())
     jobs = lease.get("jobs", [])
     if not jobs:
-        return 0, 0
+        return 0, 0, False
     if lease.get("model_digest") != config["model_digest"] or lease.get("dimensions") != config["dimensions"]:
         raise ValueError("lease identity mismatch")
     # Only clean receipts may leave the host. Anything else goes back unsent.
@@ -235,16 +257,22 @@ def step(client: hubc.MemoryHubClient, config: dict, token: str) -> tuple[int, i
         for failure in failures:
             print(f"document {failure['content_hash'][:12]} not embedded: {failure['reason']}", file=sys.stderr)
         client.call("embed_failed", lease_id=lease["lease_id"], failures=failures, client_event_id=hubc.event_id())
-    return len(jobs), len(stored)
+    down = bool(failures) and not stored and all(f["reason"] in TRANSIENT_REASONS for f in failures)
+    return len(jobs), len(stored), down
 
 
 def serve(
     client: hubc.MemoryHubClient, config: dict, token: str, *, once: bool = False, sleep: Any = time.sleep
 ) -> int:
-    """Lease until stopped. Per-document failures are reported and the loop goes on."""
+    """Lease until stopped. Per-document failures are reported and the loop goes on.
+
+    While the endpoint is down the loop sleeps 1 s, doubling to 60 s, so a long
+    queue is not leased and released in a tight loop. A good step resets it.
+    """
+    delay = BACKOFF_START
     while True:
         try:
-            leased, stored = step(client, config, token)
+            leased, stored, down = step(client, config, token)
         except hubc.HubUnavailable:
             if once:
                 raise
@@ -259,7 +287,12 @@ def serve(
         print(f"embedded {stored} of {leased} document(s)", flush=True)
         if once:
             return 0
-        # Sleep only when there was nothing to lease.
+        if down:
+            sleep(delay)
+            delay = min(delay * 2, BACKOFF_MAX)
+            continue
+        delay = BACKOFF_START
+        # Otherwise sleep only when there was nothing to lease.
         if not leased:
             sleep(1)
 

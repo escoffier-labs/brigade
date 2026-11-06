@@ -78,7 +78,7 @@ class Client:
 def test_worker_lease_http_submit_normalizes_vectors(endpoint):
     config, seen = endpoint
     client = Client()
-    assert embed.step(client, config, "fake-token") == (1, 1)
+    assert embed.step(client, config, "fake-token") == (1, 1, False)
     assert len(seen) == 1
     action, submitted = client.calls[-1]
     assert action == "embed_submit"
@@ -91,7 +91,8 @@ def test_worker_pending_and_blocked_never_send(endpoint):
     config, seen = endpoint
     for state in ("pending", "flagged"):
         client = Client(state)
-        assert embed.step(client, config, "fake-token") == (1, 0)
+        # scan-pending is a transient reason, so the step counts as a fault that backs off.
+        assert embed.step(client, config, "fake-token") == (1, 0, True)
         action, fields = client.calls[-1]
         assert action == "embed_failed"
         assert fields["failures"] == [{"content_hash": "0" * 64, "reason": "scan-pending"}]
@@ -150,20 +151,20 @@ def test_worker_passes_s18_warning_but_prompt_scan_still_withholds_it(endpoint):
 def test_worker_retries_a_refused_batch_alone_and_reports_the_bad_document(endpoint):
     config, seen = endpoint
     client = Client(texts=("apple notes", "poison pill", "pear notes"))
-    assert embed.step(client, config, "fake-token") == (3, 2)
+    assert embed.step(client, config, "fake-token") == (3, 2, False)
     # One batch, then each document alone.
     assert [len(body["input"]) for body in seen] == [3, 1, 1, 1]
     submitted = dict(client.calls)["embed_submit"]
     assert [v["content_hash"] for v in submitted["vectors"]] == ["0" * 64, "2".zfill(64)]
     failed = dict(client.calls)["embed_failed"]
-    assert failed["failures"] == [{"content_hash": "1".zfill(64), "reason": "embedder-rejected"}]
+    assert failed["failures"] == [{"content_hash": "1".zfill(64), "reason": "embedder-rejected", "alone": True}]
 
 
 def test_worker_endpoint_fault_releases_the_lease_without_a_document_reason(endpoint):
     config, seen = endpoint
     stopped = {**config, "endpoint": "http://127.0.0.1:1/api/embed", "allowlist": ["http://127.0.0.1:1/api/embed"]}
     client = Client(texts=("apple notes", "pear notes"))
-    assert embed.step(client, stopped, "fake-token") == (2, 0)
+    assert embed.step(client, stopped, "fake-token") == (2, 0, True)
     failed = dict(client.calls)["embed_failed"]
     assert {f["reason"] for f in failed["failures"]} == {"embedder-unavailable"}
     assert "embed_submit" not in dict(client.calls)
@@ -175,7 +176,16 @@ def test_worker_loop_continues_and_sleeps_only_when_a_lease_is_empty(monkeypatch
     class Stop(Exception):
         pass
 
-    results = iter([(4, 4), hubc.HubRefusal(409, {"code": "memory_lease_expired"}), (2, 1), (0, 0), (3, 3), Stop()])
+    results = iter(
+        [
+            (4, 4, False),
+            hubc.HubRefusal(409, {"code": "memory_lease_expired"}),
+            (2, 1, False),
+            (0, 0, False),
+            (3, 3, False),
+            Stop(),
+        ]
+    )
 
     def fake_step(*_):
         item = next(results)
@@ -193,6 +203,78 @@ def test_worker_loop_continues_and_sleeps_only_when_a_lease_is_empty(monkeypatch
     )
     with pytest.raises(hubc.HubRefusal):
         embed.serve(object(), {}, "fake-token", sleep=sleeps.append)
+
+
+def test_worker_backs_off_exponentially_while_the_endpoint_is_down_and_resets(monkeypatch):
+    class Stop(Exception):
+        pass
+
+    down, good, refused = (3, 0, True), (3, 3, False), (3, 2, False)
+    # A refused document is not an endpoint fault, so it never backs off.
+    results = iter([down, down, down, refused, down, good, down, Stop()])
+
+    def fake_step(*_):
+        item = next(results)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    sleeps = []
+    monkeypatch.setattr(embed, "step", fake_step)
+    with pytest.raises(Stop):
+        embed.serve(object(), {}, "fake-token", sleep=sleeps.append)
+    # 1, 2, 4 while down. The refusal resets the delay, so the next outage restarts at 1.
+    # The good step resets it again.
+    assert sleeps == [1.0, 2.0, 4.0, 1.0, 1.0]
+
+
+def test_worker_backoff_caps_at_sixty_seconds(monkeypatch):
+    class Stop(Exception):
+        pass
+
+    results = iter([(1, 0, True)] * 9 + [Stop()])
+
+    def fake_step(*_):
+        item = next(results)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    sleeps = []
+    monkeypatch.setattr(embed, "step", fake_step)
+    with pytest.raises(Stop):
+        embed.serve(object(), {}, "fake-token", sleep=sleeps.append)
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0, 60.0]
+
+
+def test_worker_with_a_dead_endpoint_backs_off_and_a_refused_document_does_not(endpoint):
+    """End to end through step: the flag comes from the failures, not from a guess."""
+    config, _ = endpoint
+    dead = {**config, "endpoint": "http://127.0.0.1:1/api/embed", "allowlist": ["http://127.0.0.1:1/api/embed"]}
+
+    class Stop(Exception):
+        pass
+
+    class Looping(Client):
+        def __init__(self, texts):
+            super().__init__(texts=texts)
+            self.leases = 0
+
+        def call(self, action, **fields):
+            if action == "embed_lease":
+                self.leases += 1
+                if self.leases > 3:
+                    raise Stop()
+            return super().call(action, **fields)
+
+    sleeps = []
+    with pytest.raises(Stop):
+        embed.serve(Looping(("apple notes",)), dead, "fake-token", sleep=sleeps.append)
+    assert sleeps == [1.0, 2.0, 4.0]
+    sleeps.clear()
+    with pytest.raises(Stop):
+        embed.serve(Looping(("poison pill",)), config, "fake-token", sleep=sleeps.append)
+    assert sleeps == []
 
 
 def test_identity_requires_the_keys_the_hub_requires():
