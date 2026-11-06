@@ -23,8 +23,12 @@ rusqlite = { version = "0.40", features = ["bundled", "hooks", "trace"] }
 sha2 = "0.10"
 subtle = "2.6"
 serde_json = "1"
-tokio = { version = "1", features = ["full", "test-util"] }
+tokio = { version = "1", features = ["full"] }
 url = "=2.4.1"
+
+[dev-dependencies]
+# Paused-clock tests only. Never in the release binary.
+tokio = { version = "1", features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.191"
