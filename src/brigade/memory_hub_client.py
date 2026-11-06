@@ -425,14 +425,22 @@ def event_id(ms: int | None = None) -> str:
     within one millisecond: the next one adds one to the previous random part.
     """
     if ms is not None:
-        value = (ms << 80) | secrets.randbits(80)
-    else:
-        with _LAST_EVENT_LOCK:
-            value = (int(time.time() * 1000) << 80) | secrets.randbits(80)
-            if value <= _LAST_EVENT[0]:
-                value = _LAST_EVENT[0] + 1
-            _LAST_EVENT[0] = value
+        return event_id_at(ms, secrets.randbits(80))
+    with _LAST_EVENT_LOCK:
+        value = (int(time.time() * 1000) << 80) | secrets.randbits(80)
+        if value <= _LAST_EVENT[0]:
+            value = _LAST_EVENT[0] + 1
+        _LAST_EVENT[0] = value
+    return _crockford(value)
+
+
+def _crockford(value: int) -> str:
     return "".join(CROCKFORD[(value >> (5 * i)) & 31] for i in reversed(range(26)))
+
+
+def event_id_at(ms: int, tail: int) -> str:
+    """The event id for Unix milliseconds `ms` and the 80-bit `tail`: the same pair always gives the same id."""
+    return _crockford((ms << 80) | (tail & ((1 << 80) - 1)))
 
 
 def event_id_ms(value: str) -> int | None:

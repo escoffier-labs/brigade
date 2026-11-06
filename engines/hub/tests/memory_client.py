@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "registry/skills/verify-brigade"))
 import hub_contract as hc  # noqa: E402 - repository-local drive helper
 
 from brigade import memory_hub_client as hubc  # noqa: E402
+from brigade import memory_hub_import as importer  # noqa: E402
 from brigade import memory_hub_search as hub_search  # noqa: E402
 from brigade import memory_hub_store as store  # noqa: E402
 from brigade import memory_hub_sync as sync  # noqa: E402
@@ -157,13 +158,39 @@ class Client(unittest.TestCase):
 
     def test_refusals_carry_the_hub_code(self):
         target = self.workspace("refused", "sync", plum="# Plum\n")
-        result = sync.import_cards(
-            target, self.client(), scope=SCOPE, paths=[target / "memory/cards/plum.md"]
-        )["results"][0]
-        self.assertEqual((result["status"], result["code"], result["http"]), ("refused", "memory_grant_missing", 403))
+        report = importer.run(
+            self.client(),
+            scope=SCOPE,
+            paths=[target / "memory/cards/plum.md"],
+            root=None,
+            excludes=[],
+            dry_run=False,
+            update=False,
+            yes=True,
+        )
+        [item] = report["items"]
+        self.assertEqual(item.result, {"status": "refused", "code": "memory_grant_missing", "http": 403})
+        self.assertFalse(report["ok"])
         with self.assertRaises(hubc.HubRefusal) as caught:
             self.client().call("card", scope=SCOPE, card_id="absent")
         self.assertEqual((caught.exception.status, caught.exception.code), (404, "memory_card_not_found"))
+
+    def test_an_import_dry_run_plans_with_the_native_scanner_ruleset(self):
+        # The dry run refuses unless the hub reports this client's ruleset id and digest.
+        target = self.workspace("dry-run", "read", kiwi="# Kiwi\nfruit\n", mango="# Mango\n\u202e\n")
+        report = importer.run(
+            self.client(),
+            scope=SCOPE,
+            paths=[target / "memory/cards"],
+            root=None,
+            excludes=[],
+            dry_run=True,
+            update=False,
+            yes=False,
+        )
+        self.assertEqual([(i.path, i.action) for i in report["items"]], [("kiwi.md", "import"), ("mango.md", "blocked")])
+        status = self.client().call("status")
+        self.assertEqual(status["scan"]["ruleset_version"], importer.scanner.ruleset_version())
 
     def test_a_prompt_query_reaches_no_file_log_or_metric(self):
         target = self.workspace("sentinel", "read", lime="# Lime\nnothing\n")

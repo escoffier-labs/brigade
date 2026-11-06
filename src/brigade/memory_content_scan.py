@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import bisect
+import hashlib
 import re
 import unicodedata
 from importlib.resources import files
@@ -113,7 +114,8 @@ def _selector_exempt(text: str, index: int) -> bool:
     return text[index] == "\ufe0f" and previous in "#*0123456789" and text[index + 1 : index + 2] == "\u20e3"
 
 
-_BUNDLE = json.loads(files("brigade.guard").joinpath("memory-rules.json").read_text(encoding="utf-8"))
+_BUNDLE_BYTES = files("brigade.guard").joinpath("memory-rules.json").read_bytes()
+_BUNDLE = json.loads(_BUNDLE_BYTES.decode("utf-8"))
 NFKC_UNICODE = "14.0.0"
 
 
@@ -124,6 +126,11 @@ def _check_nfkc_pin(bundle: dict) -> None:
 
 
 _check_nfkc_pin(_BUNDLE)
+
+
+def ruleset_version() -> str:
+    """The bundle's `<version>:<sha256 of the rules file>`, as the hub reports it in `status.scan.ruleset_version`."""
+    return f"{_BUNDLE['version']}:{hashlib.sha256(_BUNDLE_BYTES).hexdigest()}"
 
 
 def _assigned_run(spec: str) -> re.Pattern[str]:

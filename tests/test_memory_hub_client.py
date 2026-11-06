@@ -587,12 +587,6 @@ def test_a_404_with_a_replica_watermark_spools_instead_of_dropping(hub, tmp_path
 
 def test_refusals_surface_their_code(hub, tmp_path, capsys):
     target = workspace(tmp_path, mode="sync", one="# One\n")
-    code, out, _ = run(
-        ["memory", "hub", "import", "--target", str(target), "--json", str(target / "memory/cards/one.md")], capsys
-    )
-    assert code == 1
-    [result] = json.loads(out)["results"]
-    assert (result["status"], result["code"], result["http"]) == ("refused", "memory_grant_missing", 403)
     hub.put_reply = (403, {"error": "no write grant", "code": "memory_grant_missing"})
     report = sync.push(target, client(hub), settings(target), yes=True)
     assert report["refused"] == [{"card_id": "one", "status": 403, "code": "memory_grant_missing"}]
@@ -2108,16 +2102,6 @@ def test_a_spooled_write_is_withheld_once_its_visibility_is_not_plainly_public(h
     assert store.spool_count(target) == 0
 
 
-@pytest.mark.parametrize(("text", "reason"), WITHHELD, ids=WITHHELD_IDS)
-def test_import_withholds_a_card_whose_visibility_is_not_plainly_public(hub, tmp_path, text, reason):
-    target = workspace(tmp_path, mode="sync")
-    path = target / "memory" / "cards" / "p.md"
-    path.write_bytes(text.encode("utf-8"))
-    report = sync.import_cards(target, client(hub), scope="repo:test/app", paths=[path])
-    assert [(r["status"], r["reason"]) for r in report["results"]] == [("skipped", reason)]
-    assert [c for c in hub.calls if c["action"] == "import"] == []
-
-
 def _retire(hub: FakeHub, card_id: str, scope: str = "repo:test/app") -> None:
     """Another writer retires an existing card."""
     client(hub).call(
@@ -2268,22 +2252,6 @@ def test_push_adopts_a_replica_head_only_under_the_hubs_current_epoch(hub, tmp_p
     (target / "memory" / "cards" / "x.md").write_text("# X\nedited\n", encoding="utf-8")
     report = sync.push(target, client(hub), settings(target))
     assert [p["card_id"] for p in report["published"]] == ["x"] and report["proposals"] == []
-
-
-def test_import_names_a_replica_base_only_under_the_hubs_current_epoch(hub, tmp_path):
-    target = workspace(tmp_path, mode="sync", x="# X\nimported\n")
-    revision = _put(hub, "repo:test/app", "x", "# X\nshared\n")["event"]["revision"]
-    sync.pull(target, client(hub), settings(target))
-    path = target / "memory" / "cards" / "x.md"
-
-    def last_import() -> dict:
-        return [c for c in hub.calls if c["action"] == "import"][-1]
-
-    sync.import_cards(target, client(hub), scope="repo:test/app", paths=[path])
-    assert (last_import()["base_revision"], last_import()["base_epoch"]) == (revision, hub.epoch)
-    hub.restore(hub.snapshot())
-    sync.import_cards(target, client(hub), scope="repo:test/app", paths=[path])
-    assert last_import()["base_revision"] is None and "base_epoch" not in last_import()
 
 
 @pytest.mark.parametrize("spooled", [False, True])

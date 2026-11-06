@@ -39,7 +39,7 @@ out as well:
   override and isolate controls plus zero-width and other invisible
   characters, and applies the instruction-override heuristics that handoff
   linting uses. A hit replaces the item with `{card_id, blocked: "<rule id>"}`
-  and returns none of the text.
+  and returns none of the text. A refused search match keeps its hub `scope` when that scope is valid and scans clean.
 
 The scan fails closed. A card that names a private host, a home path or a
 credential-shaped value comes back blocked, as does a card that quotes an

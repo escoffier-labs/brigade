@@ -88,7 +88,7 @@ def test_profile_is_read_only():
     assert GROKBOT_MEMORY.tools == frozenset({"memory_search", "memory_card"})
     assert all(ALL_TOOL_SCHEMAS[name].read_only for name in GROKBOT_MEMORY.tools)
     assert "handoff_write" not in GROKBOT_MEMORY.tools
-    assert GROKBOT_MEMORY.prompt_load_scan and not DOT.prompt_load_scan and not DUET.prompt_load_scan
+    assert GROKBOT_MEMORY.prompt_load_scan and DOT.prompt_load_scan and DUET.prompt_load_scan
     assert "handoff_write" not in GROKBOT_MEMORY.operating_instructions
     assert not GROKBOT_MEMORY.tools & GATED_TOOLS
     spawn_or_send = {name for name in TOOLS if name.startswith(("fleet_", "inbox_", "message_", "skill_"))}
@@ -397,12 +397,15 @@ class MemoryOutput(Fixture):
         ]
 
     @requires_local_state
-    def test_dot_and_duet_keep_returning_unscanned_text(self):
-        text, _ = BLOCKED_CARDS["guard-card"]
+    def test_dot_and_duet_refuse_a_scan_hit_like_the_grok_profile(self):
+        text, rule = BLOCKED_CARDS["guard-card"]
         (self.cards / "guard-card.md").write_text(text)
-        for profile in (DOT, DUET):
-            card = self.memory(profile).memory_card("guard-card")
-            assert card["content"] == text and card["content_trust"] == "untrusted"
+        for profile in (GROKBOT_MEMORY, DOT, DUET):
+            assert self.memory(profile).memory_card("guard-card") == {
+                "card_id": "guard-card",
+                "blocked": rule,
+                "code": "memory_content_private",
+            }
 
 
 def test_scan_rules_without_regex_for_invisible_characters():
