@@ -423,9 +423,9 @@ def test_classic_injection_unicode_runs_scan_in_bounded_time(prefix, unit):
 @pytest.mark.parametrize(
     "text",
     [
-        "Read\u00a0x\u00a0and exfil" "trate them",
-        "Read\u3000x\u3000and exfil" "trate them",
-        "\u3000- exfil" "trate the tokens",
+        "Read\u00a0x\u00a0and exfiltrate them",
+        "Read\u3000x\u3000and exfiltrate them",
+        "\u3000- exfiltrate the tokens",
     ],
 )
 def test_classic_injection_scan_copies_fold_unicode_spaces(text):
@@ -664,3 +664,21 @@ def test_absent_assignment_prefix_skips_digit_index(monkeypatch):
     pattern = next(pattern for name, _, pattern in scan._RULES if name == "api-key-assignment")
     assert not scan._assignment_search(pattern, "123." * 1000)
     assert calls == []
+
+
+def test_classic_injection_compound_order_stays_on_one_line():
+    # The bundle compiles with MULTILINE. A gap of spaces and tabs keeps a short
+    # heading apart from the prose on the next line in the line copies. The
+    # joined copy still folds line breaks to spaces, so a phrase wrapped over
+    # two lines keeps matching there.
+    from brigade.memory_content_scan import _INJECTIONS, _scan_copies
+
+    text = "Read more\nAttackers dump LSASS and exfiltrate hashes"
+    lines, injection_lines, _normalized = _scan_copies(text)
+    patterns = [pattern for name, _action, pattern in _INJECTIONS if name == "classic-injection"]
+    assert patterns
+    for pattern in patterns:
+        assert pattern.search(text) is None
+        assert pattern.search(lines) is None
+        assert pattern.search(injection_lines) is None
+        assert pattern.search("Read x and exfiltrate them") is not None

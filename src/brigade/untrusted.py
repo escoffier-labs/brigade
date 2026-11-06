@@ -16,6 +16,8 @@ import secrets
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
+from .memory_content_scan import _WHITESPACE
+
 # Parts of the exfil-tration order patterns below. Hub memory (bundle v6) and
 # every `scan_untrusted` and injection-lint caller share them.
 _URGENCY = "please|now|then|first|next|also|just|immediately|quietly|silently|secretly|carefully|kindly"
@@ -67,11 +69,12 @@ _INJECTION_PATTERNS = (
     # sentence has a subject first ("Attackers dump LSASS and exfil-trate
     # hashes"), so only a line that starts with the verb matches. A token is a
     # possessive run of characters other than space, tab and line breaks, and a
-    # gap is a run of exactly those four. The two sets share no character, so
-    # a run of Unicode spaces (U+3000, U+00A0) has one way to match. The scan
-    # copies that fold Unicode whitespace to a space still match across it.
-    r"^" + _MARKUP + r"(?:(?:" + _URGENCY + r"),?\s{1,8}+){0,2}+(?:" + _ORDER_VERBS + r")[ \t\r\n]{1,8}+"
-    r"(?:[^ \t\r\n]{1,60}+(?<![.!?;:,])[ \t\r\n]{1,8}+){1,6}and[ \t\r\n]{1,8}+(?:then[ \t\r\n]{1,8}+)?" + _EXFIL_ORDER,
+    # gap is a run of spaces and tabs. The two sets share no character, so a
+    # run of Unicode spaces (U+3000, U+00A0) has one way to match, and a line
+    # break ends the match so a short heading cannot join the next line. The
+    # callers fold Unicode whitespace to a space first (`fold_whitespace`).
+    r"^" + _MARKUP + r"(?:(?:" + _URGENCY + r"),?\s{1,8}+){0,2}+(?:" + _ORDER_VERBS + r")[ \t]{1,8}+"
+    r"(?:[^ \t\r\n]{1,60}+(?<![.!?;:,])[ \t]{1,8}+){1,6}and[ \t]{1,8}+(?:then[ \t]{1,8}+)?" + _EXFIL_ORDER,
     r"\bexfil" + r"trat(?:e|ing)\b[^\n]{0,128}?\bto\s{1,8}(?:https?://|[a-z0-9._-]{1,64}@"
     r"|(?:[a-z0-9-]{1,63}\.){1,8}[a-z]{2,24}\b"
     r"|(?:my|our|this|that|the attacker'?s?) (?:server|endpoint|webhook|url|bucket|inbox)\b)",
@@ -208,6 +211,19 @@ _DISREGARD_SYSTEM_RE = next(pattern for rule_id, pattern in _LINE_RULES if rule_
 _SECRET_EXFIL_RE = re.compile(r"(?i)(?:" + "send (all )?(sec" + "rets|tok" + "ens)|" + "exfil" + "trat)")
 
 
+_SPACE_FOLD = dict.fromkeys(map(ord, _WHITESPACE), " ")
+
+
+def fold_whitespace(text: str) -> str:
+    """Fold every Unicode space to one space and drop leading and trailing runs.
+
+    The hub scanner searches the same copy (`memory_content_scan._scan_copies`),
+    so an order set off by NBSP, U+3000 or an indent flags the same way in
+    every caller of `PROMPT_INJECTION_RE`. Keep excerpts on the raw text.
+    """
+    return " ".join(part for part in text.translate(_SPACE_FOLD).split(" ") if part)
+
+
 def _excerpt(line: str) -> str:
     return line.strip()[:_MARKER_MAX]
 
@@ -240,7 +256,7 @@ def _clause_is_imperative_injection(clause: str) -> bool:
     if not (
         _IGNORE_INSTRUCTIONS_RE.search(clause)
         or _DISREGARD_SYSTEM_RE.search(clause)
-        or PROMPT_INJECTION_RE.search(clause)
+        or PROMPT_INJECTION_RE.search(fold_whitespace(clause))
     ):
         return False
     injected = _INJECTION_VERB.search(clause)
@@ -290,8 +306,11 @@ def _benign_injection_discussion(line: str, *, text: str) -> bool:
 def _line_hits(line: str, line_number: int, *, text: str) -> list[InjectionHit]:
     hits: list[InjectionHit] = []
     seen_rules: set[str] = set()
+    folded = fold_whitespace(line)
     for rule_id, pattern in _LINE_RULES:
-        if not pattern.search(line):
+        # Only the classic-injection pattern is searched on the folded copy.
+        # The other rules cap their whitespace runs, and folding would lift the cap.
+        if not (pattern.search(line) or (pattern is PROMPT_INJECTION_RE and pattern.search(folded))):
             continue
         severity = "info" if _benign_injection_discussion(line, text=text) else "warning"
         if rule_id in seen_rules:
@@ -302,11 +321,11 @@ def _line_hits(line: str, line_number: int, *, text: str) -> list[InjectionHit]:
 
 
 def _cross_line_hits(text: str) -> list[InjectionHit]:
-    normalized = re.sub(r"\s+", " ", text)
+    normalized = fold_whitespace(text)
     if not PROMPT_INJECTION_RE.search(normalized):
         return []
     for _line_number, line in enumerate(text.splitlines(), start=1):
-        if PROMPT_INJECTION_RE.search(line):
+        if PROMPT_INJECTION_RE.search(fold_whitespace(line)):
             return []
     start = PROMPT_INJECTION_RE.search(normalized)
     if not start:

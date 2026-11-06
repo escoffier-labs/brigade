@@ -178,9 +178,12 @@ because it reads as an order. Every repeat in the pattern is bounded, and
 the units next to each other share no character, so a run of Unicode spaces,
 letters or symbols cannot make the native scan hit its match limit and report
 `failed`. The scan copies fold Unicode spaces to a plain space before the
-compound order and the leading marks are matched. The same pattern
-is `PROMPT_INJECTION_RE` in `untrusted.py`, so `scan_untrusted`, the handoff
-injection lint and every other caller use it too.
+compound order and the leading marks are matched, and the compound order's
+gaps are spaces and tabs, so it cannot continue onto the next line in the line
+copies. The same pattern is `PROMPT_INJECTION_RE` in `untrusted.py`. Its callers
+(`scan_untrusted`, the handoff injection lint, `learn` and the security scan)
+search a copy folded the same way (`fold_whitespace`, one line at a time), so an
+order set off by a no-break space, U+3000 or an indent flags on any line.
 
 Schema version 2 rebuilds `memory_card_revisions`, `memory_scans` and
 `memory_handoffs` to admit the `private` state. There is no down-migration:
