@@ -1061,6 +1061,9 @@ def test_final_marker_write_is_synced(setup, monkeypatch):
     assert events[-3:] == ["sync", f"write {mirror.MARKER}", "sync"]
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="Windows cannot open a directory to fsync it, so the mirror skips the sync there"
+)
 def test_directory_sync_fsyncs_the_folder(tmp_path, monkeypatch):
     synced: list[bool] = []
     real_fsync = os.fsync
@@ -1069,6 +1072,9 @@ def test_directory_sync_fsyncs_the_folder(tmp_path, monkeypatch):
     assert synced == [True]
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="Windows cannot open a directory to fsync it, so the mirror skips the sync there"
+)
 @pytest.mark.parametrize("code", ["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EBADF"])
 @pytest.mark.parametrize("step", ["open", "fsync"])
 def test_directory_sync_skips_filesystems_that_refuse_it(tmp_path, monkeypatch, code, step):
@@ -1084,6 +1090,9 @@ def test_directory_sync_skips_filesystems_that_refuse_it(tmp_path, monkeypatch, 
     mirror._sync_directory(tmp_path)
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="Windows cannot open a directory to fsync it, so the mirror skips the sync there"
+)
 def test_directory_sync_raises_other_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(mirror.os, "name", "posix")
 
