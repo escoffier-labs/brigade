@@ -26,6 +26,7 @@ fn config_with_mode(endpoint: String, _mode: u32) -> Config {
     Config {
         backend: "remote".into(),
         pull: false,
+        pull_private: false,
         allowlist: vec![endpoint.clone()],
         endpoint,
         token_file: token,

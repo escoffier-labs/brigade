@@ -32,6 +32,9 @@ pub const LEASE_MS: i64 = 60_000;
 pub const DROP_BATCH: i64 = 512;
 // The hub's own document request must finish inside the lease it holds.
 const _: () = assert!((super::embedder::DOCUMENT_DEADLINE.as_millis() as i64) < LEASE_MS - 5_000);
+/// Verdicts about one document's text. A worker that reports one has already
+/// seen the text, so the job parks at once instead of re-leasing it.
+pub(super) const PARK_AT_ONCE: &[&str] = &["content-private", "content-blocked"];
 /// Failures of the endpoint or the hub, not of one document. They release
 /// the job without counting an attempt.
 pub(super) const TRANSIENT: &[&str] = &[
@@ -240,10 +243,19 @@ pub fn cleanup_card(tx: &dyn WriteTx, scope: &str, card: &str) -> rusqlite::Resu
     tx.execute("INSERT OR IGNORE INTO memory_lineage SELECT c.scope,c.card_id,c.revision,'vector',v.embedder_id,c.content_hash FROM memory_cards c JOIN memory_vectors v ON v.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.state='live'", &[t(scope),t(card)])?;
     Ok(())
 }
-/// Whether this embedder's endpoint may receive text that scans private
-/// (S18): a loopback endpoint only. Every other private card is neither
-/// queued nor leased, and coverage counts it as unembeddable.
+/// Whether this embedder may be handed text that scans private (S18).
+///
+/// Push mode embeds in the hub process, so the hub's own endpoint is the
+/// destination: loopback only. In pull mode the documents go to whichever
+/// worker leases them, and `endpoint` is only the hub's query embedder, so it
+/// decides nothing. Pull mode leases private text only when the operator set
+/// `pull_private`, asserting that every worker with the embed grant runs on
+/// their own machines. Otherwise a private card is neither queued nor leased,
+/// and coverage counts it as unembeddable.
 pub fn private_ok(config: &Config) -> bool {
+    if config.pull {
+        return config.pull_private;
+    }
     url::Url::parse(&config.endpoint)
         .is_ok_and(|url| super::embedder::private_permitted(&url, None))
 }
@@ -474,7 +486,7 @@ pub fn apply(
                     continue;
                 }
                 let attempts = n(&row[0]) + 1;
-                if attempts >= MAX_ATTEMPTS {
+                if attempts >= MAX_ATTEMPTS || PARK_AT_ONCE.contains(&reason.as_str()) {
                     tx.execute("UPDATE memory_embed_jobs SET state='failed',attempts=attempts+1,lease_id=NULL,holder=NULL,expires_ms=NULL,last_error=?3,finished_ms=?4 WHERE content_hash=?1 AND embedder_id=?2", &key)?;
                     parked += 1;
                     continue;

@@ -464,6 +464,11 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
                         + (f" ({retrieval['reason']})" if retrieval.get("reason") else "")
                         + _coverage_text(retrieval.get("coverage"))
                         + (f", endpoint {retrieval['endpoint_host']}" if retrieval.get("endpoint_host") else "")
+                        + (
+                            f", pull_private {'on' if retrieval.get('pull_private') else 'off'}"
+                            if retrieval.get("pull")
+                            else ""
+                        )
                     )
             else:
                 lines.append(f"hub: unavailable ({hub.get('reason')})")

@@ -655,6 +655,11 @@ impl Store {
                     .and_then(|u| u.host_str().map(String::from))
             );
             status["breaker_open"] = json!(runtime.breaker_open());
+            status["pull"] = json!(runtime.config.pull);
+            if runtime.config.pull {
+                // Whether the hub leases private cards to its pull workers.
+                status["pull_private"] = json!(runtime.config.pull_private);
+            }
             status["coverage"] = self.coverage.read().unwrap().json();
             status["embedder_id"] = json!(runtime.config.id.key());
         }

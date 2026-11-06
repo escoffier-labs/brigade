@@ -81,6 +81,10 @@ pub trait Embedder: Send + Sync {
 pub struct Config {
     pub backend: String,
     pub pull: bool,
+    /// Pull mode only: the operator asserts that every worker holding the
+    /// embed grant runs on their own machines, so the hub may lease private
+    /// text to it. The query endpoint says nothing about where documents go.
+    pub pull_private: bool,
     pub endpoint: String,
     pub allowlist: Vec<String>,
     pub token_file: PathBuf,
@@ -109,6 +113,14 @@ impl Config {
             Some(Value::Bool(b)) => *b,
             Some(_) => return Err("memory.embedder.pull must be true or false".into()),
         };
+        let pull_private = match v.get("pull_private") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err("memory.embedder.pull_private must be true or false".into()),
+        };
+        if pull_private && !pull {
+            return Err("memory.embedder.pull_private requires memory.embedder.pull = true".into());
+        }
         let endpoint = v["query_endpoint"]
             .as_str()
             .or_else(|| v["endpoint"].as_str())
@@ -121,6 +133,7 @@ impl Config {
         Ok(Self {
             backend: s("backend")?,
             pull,
+            pull_private,
             endpoint: endpoint.clone(),
             token_file: if endpoint.is_empty() {
                 PathBuf::new()

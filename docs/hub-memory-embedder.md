@@ -93,13 +93,17 @@ HTTPS gets one only for a loopback IP literal.
 
 Text that scans private (S18) goes only to a loopback endpoint, by the same
 rule as the unscanned exemption: a loopback literal, or plain HTTP
-`localhost` whose pinned address is loopback. For that endpoint a `private`
+`localhost` whose pinned address is loopback. That rule applies in push mode,
+where the hub embeds in its own process. For that endpoint a `private`
 receipt is queued, leased and embedded like a clean one. For every other
 endpoint, including a private-network address, a private card is not queued by
 `put` or `memory reindex` and is not leased. A job whose lease-time scan finds
 private text there is parked as `content-private`. That reason is not
-transient. `embed-worker` follows the same rule, and reports a private lease
-as `content-private` unless its own endpoint is a numeric loopback address.
+transient. A worker that reports `content-private` or `content-blocked` for a
+lease parks the job at once, without the retries that re-lease the text.
+`embed-worker` follows the same rule, and reports a private lease as
+`content-private` unless its own endpoint is a numeric loopback address. Pull
+mode has its own rule, under Pull worker below.
 
 A query that succeeds clears an earlier fault, even when the probe failed,
 and an expired breaker window counts as closed. Status leaves `degraded`
@@ -120,8 +124,9 @@ reused across revisions and scopes. Query results remain lexical until the
 configured fingerprint covers every embeddable live head. Status reports
 switching during the backfill, with `coverage` fields `cards`, `eligible`,
 `unembeddable` and `total`. A card is unembeddable when its scan receipt is
-not clean (a `private` receipt counts as clean for a loopback endpoint only),
-or when its job is parked. Unembeddable cards are answered by BM25
+not clean (a `private` receipt counts as clean for a loopback endpoint in push
+mode, and in pull mode only when `pull_private` is on), or when its job is
+parked. Unembeddable cards are answered by BM25
 alone and do not hold the switch to hybrid, with one exception. When no card
 has a vector and every card that could be embedded has parked on an embedding
 failure, which is what an endpoint that always answers the wrong row count
@@ -213,6 +218,30 @@ of texts the lease-time scan parked. It keeps leasing after per-document
 failures. While the endpoint is down it sleeps 1 s, doubling to 60 s, and a
 good step resets that. It also sleeps 1 s when a lease is empty. `--once` processes at most one lease. A
 worker that stops leaves the lease available for recovery after expiry.
+
+### Private cards in pull mode
+
+In pull mode the hub's `endpoint` or `query_endpoint` is only the query
+embedder. Documents go to whichever worker leases them, so that endpoint says
+nothing about where private text lands, and the hub does not use it for the
+private gate. The default is closed: private cards are never queued or leased,
+and `coverage` counts them as unembeddable, whatever the query endpoint is.
+
+```toml
+[memory.embedder]
+pull = true
+pull_private = true
+```
+
+`pull_private` is a bool that defaults to false. A non-bool is a
+configuration error, and so is `pull_private = true` without `pull = true`.
+Turning it on asserts that every worker holding the embed grant runs on the
+operator's own machines. The hub then queues and leases private text to any
+credential with that grant, and trusts the operator to have kept the grant
+inside that boundary. The worker's own check still applies: `embed-worker`
+sends private text only to a numeric loopback endpoint and reports
+`content-private` for anything else. `memory status` shows `pull_private on`
+or `off` in the retrieval line for a pull hub.
 
 For reachable query embedding, configure `query_endpoint` or `endpoint` on
 the hub under the same allowlist and secret-file policy. Pull mode can omit

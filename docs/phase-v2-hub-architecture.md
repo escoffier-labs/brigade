@@ -2267,7 +2267,10 @@ vault refused 33% with the same mix, plus U+034F and U+200C from pasted text.
   with a placeholder carrying `code: "memory_content_private"`, and an
   embedder may send it only to an endpoint whose pinned address is loopback
   (reason `content-private` otherwise, checked before any lookup or
-  connection). Any warning or blocking
+  connection). In pull mode the hub's query endpoint
+  does not decide: private cards are leased to workers only with
+  `[memory.embedder] pull_private = true`, which asserts that every worker with
+  the embed grant runs on the operator's machines. Any warning or blocking
   finding beside a private one keeps the stricter verdict.
 - `brigade run` composes no recall into a seat prompt. A local or fleet-node
   Claude seat may get hook recall from the operator's hub under the

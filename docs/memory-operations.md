@@ -132,6 +132,8 @@ it:
 | `memory_hits` on `inbox_list` and `fleet_digest` | Connector | Dropped and counted, as for any finding |
 | Dot and Duet `memory_search` and `memory_card` | Connector | Unchanged: these profiles return card text without a prompt-load scan, as before bundle v6 |
 | Embedder (S15a query, document and probe sends) | Loopback only | Sent only when the pinned address is loopback. Any other endpoint, a private-network one included, refuses with reason `content-private` before any lookup or connection. A stored `private` version embeds only for a loopback endpoint |
+| Embedder, push mode (S15b, the hub embeds in process) | Loopback only | Same rule as the row above. A stored `private` version is queued and leased only for a loopback endpoint |
+| Embedder, pull mode (S15b, workers lease documents) | Workers holding the embed grant | Off by default: never queued or leased, counted as unembeddable. With `[memory.embedder] pull_private = true` the hub leases private text to every credential with the embed grant, so the operator is trusted to keep that grant on their own machines. The hub's query endpoint plays no part, and the worker still sends private text only to a numeric loopback endpoint |
 | `brigade run` seat prompts | See below | The composed seat prompt holds no recall |
 
 `brigade run` builds no memory recall into a seat prompt. The dispatcher,

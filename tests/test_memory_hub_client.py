@@ -390,6 +390,14 @@ def test_status_reports_the_hubs_retrieval_details_in_text_and_json(hub, tmp_pat
     assert "retrieval: hybrid, effective lexical-fallback, state degraded (embedder-unavailable)" in out
     # Cards over eligible cards, as readiness compares them, not over the corpus total.
     assert "coverage 7/7 (3 unembeddable)" in out and "7/10" not in out
+    # Not a pull hub: no pull_private detail.
+    assert "pull_private" not in out
+    retrieval.update(pull=True, pull_private=False)
+    code, out, _ = run(["memory", "hub", "status", "--target", str(target)], capsys)
+    assert code == 0 and "pull_private off" in out
+    retrieval.update(pull_private=True)
+    code, out, _ = run(["memory", "hub", "status", "--target", str(target)], capsys)
+    assert code == 0 and "pull_private on" in out
 
 
 # --- push and pull -----------------------------------------------------------------
