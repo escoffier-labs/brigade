@@ -217,8 +217,11 @@ def _rule_possible(name: str, text: str) -> bool:
     return True
 
 
-def _findings(texts: Iterable[str]) -> Iterator[tuple[str, str]]:
-    """Every (rule id, action) in the order prompt loads report the first one."""
+def _findings(texts: Iterable[str], *, blocking_only: bool = False) -> Iterator[tuple[str, str]]:
+    """Every (rule id, action) in the order prompt loads report the first one.
+
+    ``blocking_only`` yields block findings alone: embedding may pass warnings.
+    """
     # Scan each field independently too: a leading BOM exemption belongs to one
     # field, and concatenation must not hide a field's role directive at line start.
     values = [value for value in texts if isinstance(value, str)]
@@ -238,6 +241,8 @@ def _findings(texts: Iterable[str]) -> Iterator[tuple[str, str]]:
         literal_copies = {copy: _BUNDLE_LITERAL.search(copy) is not None for copy in copies}
         possible: dict[tuple[str, str], bool] = {}
         for name, action, pattern in _RULES:
+            if blocking_only and action != "block":
+                continue
             for copy in copies:
                 if name != "us-phone" and not literal_copies[copy]:
                     continue
@@ -252,8 +257,12 @@ def _findings(texts: Iterable[str]) -> Iterator[tuple[str, str]]:
                     yield name, action
                     break
         for name, action, pattern in _INJECTIONS:
+            if blocking_only and action != "block":
+                continue
             if any(pattern.search(copy) for copy in extra_copies if not (pattern.flags & re.ASCII and copy.isascii())):
                 yield name, action
+        if blocking_only:
+            continue
         if "\u200d" in text:
             yield JOINER_RULE, "warn"
         for char, rule in _PRIVATE_CHARACTERS.items():
@@ -261,9 +270,12 @@ def _findings(texts: Iterable[str]) -> Iterator[tuple[str, str]]:
                 yield rule, "private"
 
 
-def blocked_rule(texts: Iterable[str]) -> str | None:
-    """Return an id only. Every finding withholds egress text, private included."""
-    return next((name for name, _action in _findings(texts)), None)
+def blocked_rule(texts: Iterable[str], *, blocking_only: bool = False) -> str | None:
+    """Return an id only. Every finding withholds egress text, private included.
+
+    Embedding passes ``blocking_only`` to let warnings and the private class through.
+    """
+    return next((name for name, _action in _findings(texts, blocking_only=blocking_only)), None)
 
 
 def scan_verdict(texts: Iterable[str]) -> tuple[str, tuple[str, ...]]:

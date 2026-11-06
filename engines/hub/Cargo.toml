@@ -12,9 +12,11 @@ memory-scan = ["dep:brigade-guard"]
 
 [dependencies]
 brigade-guard = { path = "../brigade-guard", optional = true }
+base64 = "=0.22.1"
 axum = "0.8"
 clap = { version = "=4.5.60", features = ["derive"] }
 futures-util = "0.3"
+httpdate = "=1.0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-rustls = { version = "=0.27.7", default-features = false, features = ["http1", "ring", "webpki-roots", "tls12"] }

@@ -1434,7 +1434,13 @@ async fn start_and_serve(
                     readers.clone(),
                 ) {
                     Ok(mut store) => match store.configure_retrieval(&memory_config) {
-                        Ok(()) => memory_route::MemoryRoute::Store(Arc::new(store)),
+                        Ok(()) => {
+                            let store = Arc::new(store);
+                            // A failed first load degrades retrieval to lexical.
+                            // It never stops the hub.
+                            store.start_retrieval().await;
+                            memory_route::MemoryRoute::Store(store)
+                        }
                         // A file the operator named stops startup. The
                         // default file leaves memory unavailable and the
                         // rest of the hub serving, as an unreadable one does.

@@ -1614,7 +1614,7 @@ bumps `normalizer_version`, which is part of every derived key.
 
 Every write action carries `client_event_id`: `put`, `retire`, `import`,
 `handoff`, `propose`, `decide`, `rollback`, `capture`, `embed_lease`,
-`embed_submit` and `grant`. It is a time-ordered id: 48 bits of Unix
+`embed_submit`, `embed_failed`, `reindex` and `grant`. It is a time-ordered id: 48 bits of Unix
 milliseconds, then 80 random bits, written as 26 characters of Crockford
 base32. A malformed id gets `400` with `code: "memory_client_event_invalid"`.
 
@@ -1642,8 +1642,8 @@ case, which only card writes have. Per action:
 |---|---|---|
 | `put`, `retire`, `import` | the stored response | refused by the window. Compare-and-set refuses it too if the first copy moved the card |
 | `decide` | the stored response | refused by the window. A decided proposal also refuses a second decision |
-| `propose`, `rollback`, `handoff`, `capture`, `grant`, `embed_lease` | the stored response | refused by the window, which is the only guard |
-| `embed_submit` | the stored response | refused by the window and by the expired lease |
+| `propose`, `rollback`, `handoff`, `capture`, `grant` | the stored response | refused by the window, which is the only guard |
+| `embed_lease`, `embed_submit`, `embed_failed`, `reindex` | run again: no record is kept, because a lease reply carries card text that must not outlive the card's retirement. A second lease checks grants, card state and scans again. A second submit or failure finds no leased job | refused by the window |
 
 This is finite deduplication for honest retries and replays. A principal that
 forges a fresh id is sending a new request it could send anyway, under the
@@ -1687,7 +1687,7 @@ One route, `POST /memory`, with an `action` field, the same style as
 | `propose`, `decide`, `rollback` | reflect, review | proposal v2 body and `client_event_id` | `201` or `200` with the proposal state and its dry-run diff |
 | `preflight` | read | `proposal_id` | `200` with the `brigade.memory-tier0-preflight.v1` report (S19c). Writes nothing |
 | `capture` | read | `session_ref` (a client-side HMAC), `pushed`, `opened`, optional `outcome`, `client_event_id` | `200 {recorded: true}` |
-| `embed_lease`, `embed_submit` | embed | `embedder_id` and `max`, or `lease_id` and base64 float32 little-endian `vectors`, plus `client_event_id` | `200` |
+| `embed_lease`, `embed_submit`, `embed_failed` | embed | `embedder_id` and `max`, or `lease_id` and base64 float32 little-endian `vectors`, or `lease_id` and up to four `failures` of `content_hash` and `reason`, plus `client_event_id` | `200` |
 | `grant` | admin token | `principal`, `scope`, `rights`, `client_event_id` | `200 {grant}` |
 | `status` | read | none | `200 {cards, revisions, seq, indexed_seq, log_epoch, hub_time, scan: {available, ruleset_version}, embedders: [{id, coverage}], default_mode}` |
 
@@ -2289,8 +2289,9 @@ vault refused 33% with the same mix, plus U+034F and U+200C from pasted text.
   clause, addressed to the agent, or with a destination,
   including a bare domain. The pattern is also `PROMPT_INJECTION_RE`, so
   `scan_untrusted` and the handoff injection lint follow it.
-- Schema version 2 rebuilds `memory_card_revisions`, `memory_scans` and
-  `memory_handoffs` so their CHECK constraints admit `private`.
+- Schema version 3 rebuilds `memory_card_revisions`, `memory_scans` and
+  `memory_handoffs` so their CHECK constraints admit `private`. Version 2 is
+  S15b's embedding tables.
 
 ### Reflect, proposals and promotion on hub memory
 

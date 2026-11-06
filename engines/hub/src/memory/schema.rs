@@ -2,14 +2,14 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 2;
+pub const USER_VERSION: i64 = 3;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
 const TRUST: &str = "'reviewed','policy-promoted','imported','agent-unreviewed','flagged'";
-/// Version 2 admits `private` (the S18 amendment to D24).
+/// Version 3 admits `private` (the S18 amendment to D24).
 const SCAN_STATES: &str = "'clean','private','flagged','pending'";
-/// Tables whose scan-state CHECK names `private` from version 2.
+/// Tables whose scan-state CHECK names `private` from version 3.
 const SCANNED: [&str; 3] = ["memory_card_revisions", "memory_scans", "memory_handoffs"];
 
 /// One scanned table's DDL under `name`, so a migration can build a copy.
@@ -59,15 +59,15 @@ fn scanned_table(table: &str, name: &str) -> String {
     }
 }
 
-/// Version 1 to 2: SQLite cannot alter a CHECK, so rebuild each scanned
+/// Version 2 to 3: SQLite cannot alter a CHECK, so rebuild each scanned
 /// table with the same columns and rows. Nothing references these tables and
 /// they carry no index or trigger beyond their primary keys.
 fn private_scan_state() -> String {
     let mut sql = String::new();
     for table in SCANNED {
-        sql += &scanned_table(table, &format!("{table}_v2"));
+        sql += &scanned_table(table, &format!("{table}_v3"));
         sql += &format!(
-            "INSERT INTO {table}_v2 SELECT * FROM {table};\nDROP TABLE {table};\nALTER TABLE {table}_v2 RENAME TO {table};\n"
+            "INSERT INTO {table}_v3 SELECT * FROM {table};\nDROP TABLE {table};\nALTER TABLE {table}_v3 RENAME TO {table};\n"
         );
     }
     sql
@@ -143,7 +143,9 @@ CREATE TABLE memory_idempotency(
   PRIMARY KEY(principal, client_event_id)
 ) WITHOUT ROWID;
 CREATE INDEX memory_idempotency_age ON memory_idempotency(created_ms);
-"
+{}
+",
+        super::embedding::DDL
     )
 }
 
@@ -157,6 +159,9 @@ pub const TABLES: &[&str] = &[
     "memory_handoffs",
     "memory_grants",
     "memory_idempotency",
+    "memory_vectors",
+    "memory_lineage",
+    "memory_embed_jobs",
 ];
 
 /// Create a fresh file's schema, or check an existing one. Never downgrades,
@@ -207,10 +212,14 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
             "memory schema version {version} is newer than this hub ({USER_VERSION})"
         ));
     }
-    // Each step runs in its own transaction and records its version, so a
-    // later step appends here without repeating an earlier one.
+    // Each step runs in its own transaction and re-reads the version under the
+    // write lock, so a later step appends here without repeating an earlier one.
+    // Version 2 is S15b's embedding tables, version 3 the private scan state.
     if version < 2 {
-        step(c, &private_scan_state(), 2).map_err(err)?;
+        step(c, super::embedding::DDL, 2).map_err(err)?;
+    }
+    if version < 3 {
+        step(c, &private_scan_state(), 3).map_err(err)?;
     }
     for table in TABLES {
         let present: Option<i64> = c

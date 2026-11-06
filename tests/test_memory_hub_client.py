@@ -374,6 +374,7 @@ def test_status_reports_the_hubs_retrieval_details_in_text_and_json(hub, tmp_pat
         "reason": "embedder-unavailable",
         "endpoint_host": "embed.example.com",
         "breaker_open": True,
+        "coverage": {"cards": 7, "eligible": 7, "unembeddable": 3, "total": 10},
     }
     original = hub.do_status
 
@@ -387,6 +388,8 @@ def test_status_reports_the_hubs_retrieval_details_in_text_and_json(hub, tmp_pat
     code, out, _ = run(["memory", "hub", "status", "--target", str(target)], capsys)
     assert code == 0
     assert "retrieval: hybrid, effective lexical-fallback, state degraded (embedder-unavailable)" in out
+    # Cards over eligible cards, as readiness compares them, not over the corpus total.
+    assert "coverage 7/7 (3 unembeddable)" in out and "7/10" not in out
 
 
 # --- push and pull -----------------------------------------------------------------

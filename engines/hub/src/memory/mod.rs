@@ -6,9 +6,14 @@
 //! scorer and tokenizer copied from Python in [`text`].
 //!
 //! Writes and prompt loads use the versioned guard scanner (S18).
-//! Proposals and decisions (S19a) and embedding (S15) follow in later slices.
+//! Embedding and dense retrieval use the S18 scan gate (S15).
+//! Proposals and decisions follow in S19a.
 pub mod auth;
+pub mod dense;
 pub mod embedder;
+pub mod embedding;
+#[cfg(test)]
+mod embedding_tests;
 pub mod ids;
 pub mod index;
 pub mod ops;
@@ -54,15 +59,22 @@ const COMMAND_DEADLINE: Duration = Duration::from_secs(10);
 const STATUS_SCOPES_MAX: usize = 64;
 /// How long `search` with `min_seq` waits for the index to reach it.
 pub const MIN_SEQ_WAIT: Duration = Duration::from_millis(500);
+/// The embedding scheduler's wait after an empty lease, doubled up to the max.
+/// Status and search reason when every embeddable card parked and none has a vector.
+/// A wrong row count is parked per document (`vector-invalid`), so an endpoint that
+/// always miscounts parks the whole corpus. Treating a run of them across distinct
+/// documents as an endpoint fault needs a shared window in the lease path. Add it
+/// when a second cause of an endpoint-wide refusal shows up. Until then `memory
+/// reindex` requeues the parked documents once the endpoint is fixed.
+const ALL_FAILED: &str = "all-embeddings-failed";
+/// The first dense load failed, so retrieval stays lexical until a retry works.
+const DENSE_LOAD_FAILED: &str = "dense-load-failed";
+/// No dense matrix has been installed yet for the active embedder.
+const DENSE_NOT_LOADED: &str = "dense-not-loaded";
+const IDLE_MIN: Duration = Duration::from_secs(1);
+const IDLE_MAX: Duration = Duration::from_secs(30);
 /// Actions in the route table that later slices build.
-const LATER: &[&str] = &[
-    "propose",
-    "decide",
-    "rollback",
-    "preflight",
-    "embed_lease",
-    "embed_submit",
-];
+const LATER: &[&str] = &["propose", "decide", "rollback", "preflight"];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reply {
@@ -101,6 +113,16 @@ pub struct Store {
     last_sweep: std::sync::atomic::AtomicI64,
     index: Arc<index::Index>,
     retrieval: Option<Arc<embedder::Runtime>>,
+    dense: Arc<dense::Index>,
+    coverage: std::sync::RwLock<embedding::Coverage>,
+    /// Woken by a committed `put`, so an idle scheduler starts at once.
+    embed_wake: Arc<tokio::sync::Notify>,
+    embedding_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pull_embeddings: bool,
+    /// The memory file, for the startup load's own connection.
+    memory_path: PathBuf,
+    /// Set while the last unbounded dense load failed and no matrix exists.
+    dense_fault: std::sync::atomic::AtomicBool,
 }
 
 impl Drop for Store {
@@ -108,6 +130,10 @@ impl Drop for Store {
     /// connection is closed before anything swaps the memory file. The
     /// writer then answers what is queued and closes its connections.
     fn drop(&mut self) {
+        if let Some(task) = self.embedding_task.lock().unwrap().take() {
+            task.abort();
+        }
+        self.dense.stop();
         self.index.stop();
     }
 }
@@ -160,6 +186,7 @@ impl Store {
         }
         let readers =
             ReaderPool::open_unchecked(&options.memory, MEMORY_THREADS, MEMORY_QUEUE, READ_LIMIT)?;
+        let dense = Arc::new(dense::Index::default());
         let mut config = writer::Config::new(
             options.memory.clone(),
             options.hub,
@@ -168,6 +195,7 @@ impl Store {
         config.hook = options.hook;
         config.scanner = options.scanner.clone();
         config.index = Some(index.clone());
+        config.dense = Some(dense.clone());
         let writer = writer::Writer::start(config, db, options.arbiter.clone())
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -181,10 +209,18 @@ impl Store {
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
             index,
             retrieval: None,
+            dense,
+            coverage: std::sync::RwLock::new(embedding::Coverage::default()),
+            embed_wake: Arc::new(tokio::sync::Notify::new()),
+            embedding_task: std::sync::Mutex::new(None),
+            pull_embeddings: false,
+            memory_path: options.memory,
+            dense_fault: std::sync::atomic::AtomicBool::new(false),
         })
     }
     /// Lexical mode ignores an unused embedder table, including credentials.
     pub fn configure_retrieval(&mut self, config: &Json) -> Result<(), String> {
+        self.pull_embeddings = config["embedder"]["pull"].as_bool().unwrap_or(false);
         // Absent means lexical. Present but not a string is a typo, never lexical.
         let retrieval = match config.get("retrieval") {
             None => "lexical",
@@ -193,7 +229,12 @@ impl Store {
         };
         match retrieval {
             "lexical" => {
+                if let Some(task) = self.embedding_task.lock().unwrap().take() {
+                    task.abort();
+                }
                 self.retrieval = None;
+                self.dense.configure(None);
+                self.dense.set_private_ok(false);
                 if config.get("embedder").is_some() {
                     eprintln!("INFO memory.embedder unused in lexical mode");
                 }
@@ -206,18 +247,418 @@ impl Store {
             }
             _ => return Err("memory.retrieval must be lexical or hybrid".into()),
         }
+        if let Some(runtime) = &self.retrieval {
+            self.dense.configure(Some((
+                runtime.config.id.key(),
+                runtime.config.id.dimensions,
+            )));
+            self.dense
+                .set_private_ok(embedding::private_ok(&runtime.config));
+        }
+        let live = self
+            .index
+            .current()
+            .live(&vec![true; self.index.current().scopes().len()])
+            .len();
+        *self.coverage.write().unwrap() = embedding::Coverage {
+            covered: 0,
+            eligible: live,
+            total: live,
+            failed: 0,
+        };
         Ok(())
     }
+    async fn embedding_request(&self, credential: &Credential, action: &str, raw: &Json) -> Reply {
+        let allowed: &[&str] = match action {
+            "reindex" => &["action", "client_event_id", "drop"],
+            "embed_lease" => &["action", "client_event_id", "embedder_id", "max"],
+            "embed_failed" => &["action", "client_event_id", "lease_id", "failures"],
+            _ => &[
+                "action",
+                "client_event_id",
+                "lease_id",
+                "model_digest",
+                "vectors",
+            ],
+        };
+        if raw
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|k| !allowed.contains(&k.as_str()))
+        {
+            return invalid("unknown embedding field");
+        }
+        let drop_id = if action == "reindex" {
+            match embedding::parse_drop(raw) {
+                Ok(id) => id,
+                Err(reply) => return reply,
+            }
+        } else {
+            None
+        };
+        let command = if let Some(id) = &drop_id {
+            embedding::Command::Reindex {
+                id: id.clone(),
+                drop: true,
+                explicit: true,
+            }
+        } else {
+            let Some(runtime) = &self.retrieval else {
+                return error(503, "memory_action_unavailable", "no embedder configured");
+            };
+            match embedding::parse(action, raw, &runtime.config) {
+                Ok(command) => command,
+                Err(reply) => return reply,
+            }
+        };
+        let Some((event, at)) = raw["client_event_id"]
+            .as_str()
+            .and_then(ids::parse_event_id)
+        else {
+            return error(
+                400,
+                "memory_client_event_invalid",
+                "client_event_id required",
+            );
+        };
+        let now = self.clock.now_ms();
+        if at < now - ids::WINDOW_MS || at > now + ids::FUTURE_MS {
+            return error(
+                409,
+                "memory_client_event_expired",
+                "event outside acceptance window",
+            );
+        }
+        let mut reply = self
+            .write(Prepared {
+                credential: credential.clone(),
+                action: Action::Embedding {
+                    command: command.clone(),
+                    config: self.retrieval.as_ref().map(|r| r.config.clone()),
+                },
+                client_event_id: event,
+                request_digest: ids::sha256_hex(raw.to_string().as_bytes()),
+                now_ms: now,
+            })
+            .await;
+        if reply.status != 200 {
+            return reply;
+        }
+        match (&command, &drop_id) {
+            // Bounded writer turns until the named embedder has no rows left.
+            (_, Some(id)) => {
+                let mut turn = reply.clone();
+                while ["vectors", "jobs", "lineage"]
+                    .iter()
+                    .any(|k| turn.body[k].as_u64().unwrap_or(0) > 0)
+                {
+                    turn = self.derived(command.clone()).await;
+                    if turn.status != 200 {
+                        return turn;
+                    }
+                    for k in ["vectors", "jobs", "lineage"] {
+                        reply.body[k] = json!(
+                            reply.body[k].as_u64().unwrap_or(0)
+                                + turn.body[k].as_u64().unwrap_or(0)
+                        );
+                    }
+                }
+                self.dense.drop_id(id);
+            }
+            (embedding::Command::Reindex { .. }, None) => {
+                // Complete the queue in bounded writer turns. No transaction holds all missing rows.
+                self.drain_reindex().await;
+            }
+            _ => {}
+        }
+        if matches!(command, embedding::Command::Reindex { .. }) {
+            let _ = self.refresh_dense().await;
+        }
+        reply
+    }
+    /// Queue every missing vector in pages, then stop. Used at start-up and
+    /// by the operator's `memory reindex`. Later cards are queued by `put`.
+    async fn drain_reindex(&self) {
+        let Some(runtime) = &self.retrieval else {
+            return;
+        };
+        let id = runtime.config.id.key();
+        loop {
+            let turn = self
+                .derived(embedding::Command::Reindex {
+                    id: id.clone(),
+                    drop: false,
+                    explicit: false,
+                })
+                .await;
+            if turn.status != 200 || turn.body["queued"].as_u64().unwrap_or(0) == 0 {
+                return;
+            }
+        }
+    }
+    /// Scheduler and drain turns. Embedding commands write no idempotency row.
+    async fn derived(&self, command: embedding::Command) -> Reply {
+        let now = self.clock.now_ms();
+        self.write(Prepared {
+            credential: Credential::Admin,
+            action: Action::Embedding {
+                command,
+                config: self.retrieval.as_ref().map(|r| r.config.clone()),
+            },
+            client_event_id: ids::mint(now),
+            request_digest: String::new(),
+            now_ms: now,
+        })
+        .await
+    }
+    async fn refresh_coverage(&self) {
+        if let Some(runtime) = &self.retrieval {
+            let id = runtime.config.id.key();
+            let private = embedding::private_ok(&runtime.config);
+            if let Ok(pair) = self
+                .readers
+                .submit(move |c| embedding::coverage(&Conn(c), &id, private))
+                .await
+            {
+                *self.coverage.write().unwrap() = pair;
+            }
+        }
+    }
+    pub async fn refresh_dense(&self) -> Result<(), String> {
+        let Some(runtime) = &self.retrieval else {
+            return Ok(());
+        };
+        let id = runtime.config.id.key();
+        let dimensions = runtime.config.id.dimensions;
+        let dense = self.dense.clone();
+        self.readers
+            .submit(move |c| dense.refresh(c, &id, dimensions).map(|_| ()))
+            .await
+            .map_err(|_| "dense refresh failed")?;
+        self.refresh_coverage().await;
+        Ok(())
+    }
+    /// The first matrix load, with no reader deadline. It walks every vector
+    /// row, so a large corpus can run past `READ_LIMIT`, and the pool would
+    /// reject that as a timeout. It runs on its own read-only connection in a
+    /// blocking task. A failure never stops the hub: retrieval reports
+    /// `degraded` and stays lexical, and the scheduler retries. Returns
+    /// whether a matrix is installed.
+    pub async fn load_dense(&self) -> bool {
+        let Some(runtime) = &self.retrieval else {
+            return true;
+        };
+        let id = runtime.config.id.key();
+        let dimensions = runtime.config.id.dimensions;
+        let dense = self.dense.clone();
+        let path = self.memory_path.clone();
+        let loaded = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let mut db = crate::schema::audit::open(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            db.execute_batch("PRAGMA query_only=ON; PRAGMA wal_autocheckpoint=0;")
+                .map_err(|e| e.to_string())?;
+            db.busy_timeout(Duration::from_secs(5))
+                .map_err(|e| e.to_string())?;
+            // One snapshot, so the heads and the rows agree.
+            let tx = db
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+                .map_err(|e| e.to_string())?;
+            dense
+                .refresh(&tx, &id, dimensions)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        let ok = loaded.is_ok();
+        if let Err(e) = loaded {
+            eprintln!("memory dense load failed: {e}");
+        }
+        self.dense_fault
+            .store(!ok, std::sync::atomic::Ordering::SeqCst);
+        self.refresh_coverage().await;
+        ok
+    }
+    /// Startup for hybrid mode: load the matrix, then start the scheduler.
+    /// Never fails. See [`Store::load_dense`].
+    pub async fn start_retrieval(self: &Arc<Self>) {
+        self.load_dense().await;
+        self.start_embeddings();
+    }
+    /// A failed first load, retried by the scheduler until a matrix exists.
+    /// Another commit's refresh may install one first, which ends the retry.
+    async fn retry_dense(&self) {
+        if !self.dense_fault.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let Some(runtime) = &self.retrieval else {
+            return;
+        };
+        if self.dense.current(&runtime.config.id.key()).is_some() {
+            self.dense_fault
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
+        self.load_dense().await;
+    }
+    /// The active embedder has no installed matrix. `Some` carries the reason
+    /// status and search report: a failed load is a fault, a load that has not
+    /// run yet is only `switching`.
+    fn dense_missing(&self) -> Option<&'static str> {
+        let runtime = self.retrieval.as_ref()?;
+        if self.dense.current(&runtime.config.id.key()).is_some() {
+            return None;
+        }
+        Some(
+            if self.dense_fault.load(std::sync::atomic::Ordering::SeqCst) {
+                DENSE_LOAD_FAILED
+            } else {
+                DENSE_NOT_LOADED
+            },
+        )
+    }
+    /// One cancellable scheduler per store. Lexical mode creates no task.
+    /// It queues missing vectors once, then leases only while work is
+    /// queued. An empty lease doubles the idle wait up to [`IDLE_MAX`], and
+    /// a committed `put` wakes it at once.
+    pub fn start_embeddings(self: &Arc<Self>) {
+        if self.retrieval.is_none() {
+            return;
+        }
+        let mut task = self.embedding_task.lock().unwrap();
+        if task.is_some() {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        let wake = self.embed_wake.clone();
+        *task = Some(tokio::spawn(async move {
+            match weak.upgrade() {
+                Some(store) => store.drain_reindex().await,
+                None => return,
+            }
+            let mut idle = IDLE_MIN;
+            loop {
+                let Some(store) = weak.upgrade() else {
+                    return;
+                };
+                store.retry_dense().await;
+                let faulted = store.dense_fault.load(std::sync::atomic::Ordering::SeqCst);
+                if store.pull_embeddings && !faulted {
+                    return;
+                }
+                let worked = !store.pull_embeddings && store.embedding_tick().await;
+                drop(store);
+                idle = if worked {
+                    IDLE_MIN
+                } else {
+                    (idle * 2).min(IDLE_MAX)
+                };
+                if worked {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(idle) => {}
+                    _ = wake.notified() => idle = IDLE_MIN,
+                }
+            }
+        }));
+    }
+    /// One in-process lease and embedding. Returns whether it leased work.
+    pub async fn embedding_tick(&self) -> bool {
+        let Some(runtime) = self.retrieval.clone() else {
+            return false;
+        };
+        // Never take a lease the endpoint cannot start on. A lease taken
+        // during a Retry-After backoff would expire before the request ran.
+        if self.pull_embeddings || !runtime.documents_ready() {
+            return false;
+        }
+        let lease = self.derived(embedding::Command::Lease { max: 4 }).await;
+        if lease.status != 200 {
+            return false;
+        }
+        let jobs = lease.body["jobs"].as_array().cloned().unwrap_or_default();
+        if jobs.is_empty() {
+            return false;
+        }
+        let lease_id: String = lease.body["lease_id"].as_str().unwrap_or("").into();
+        let hashes: Vec<String> = jobs
+            .iter()
+            .map(|j| j["content_hash"].as_str().unwrap_or("").into())
+            .collect();
+        let texts = jobs
+            .iter()
+            .map(|j| {
+                (
+                    j["text"].as_str().unwrap_or("").into(),
+                    j["scan_state"].as_str().unwrap_or("pending").into(),
+                )
+            })
+            .collect();
+        let command = match runtime.documents(texts).await {
+            Ok(rows) => embedding::Command::Submit {
+                lease: lease_id,
+                digest: runtime.config.id.model_digest.clone(),
+                vectors: hashes
+                    .into_iter()
+                    .zip(rows)
+                    .map(|(h, v)| (h, v.iter().flat_map(|f| f.to_le_bytes()).collect()))
+                    .collect(),
+            },
+            // A batch failure names every document, and the next lease retries each alone.
+            Err(e) => embedding::Command::Failed {
+                lease: lease_id,
+                failures: hashes
+                    .into_iter()
+                    .map(|h| (h, e.reason.to_string(), false))
+                    .collect(),
+            },
+        };
+        self.derived(command).await;
+        true
+    }
     pub fn retrieval_status(&self) -> Json {
-        match &self.retrieval {
+        let mut status = match &self.retrieval {
             None => json!({"mode": "lexical", "effective": "lexical", "state": "ok"}),
             Some(runtime) => match runtime.reason() {
                 Some(reason) => {
                     json!({"mode": "hybrid", "effective": "lexical-fallback", "state": "degraded", "reason": reason, "endpoint_host": url::Url::parse(&runtime.config.endpoint).ok().and_then(|u| u.host_str().map(String::from)), "breaker_open": runtime.breaker_open()})
                 }
-                None => json!({"mode": "hybrid", "effective": "lexical", "state": "switching"}),
+                None => {
+                    let coverage = *self.coverage.read().unwrap();
+                    if let Some(reason) = self.dense_missing() {
+                        // No matrix to rank with, so search answers lexically.
+                        if reason == DENSE_LOAD_FAILED {
+                            json!({"mode": "hybrid", "effective": "lexical-fallback", "state": "degraded", "reason": reason})
+                        } else {
+                            json!({"mode": "hybrid", "effective": "lexical", "state": "switching", "reason": reason})
+                        }
+                    } else if coverage.all_failed() {
+                        // Every embeddable card parked and none has a vector.
+                        json!({"mode": "hybrid", "effective": "lexical-fallback", "state": "degraded", "reason": ALL_FAILED})
+                    } else {
+                        let complete = coverage.complete();
+                        json!({"mode": "hybrid", "effective": if complete { "hybrid" } else { "lexical" }, "state": if complete { "ok" } else { "switching" }})
+                    }
+                }
             },
+        };
+        if let Some(runtime) = &self.retrieval {
+            status["endpoint_host"] = json!(
+                url::Url::parse(&runtime.config.endpoint)
+                    .ok()
+                    .and_then(|u| u.host_str().map(String::from))
+            );
+            status["breaker_open"] = json!(runtime.breaker_open());
+            status["coverage"] = self.coverage.read().unwrap().json();
+            status["embedder_id"] = json!(runtime.config.id.key());
         }
+        status
     }
     /// The lexical index, for `/metrics` and `status`.
     pub fn index(&self) -> &Arc<index::Index> {
@@ -275,6 +716,9 @@ impl Store {
         match action {
             "card" | "log" | "status" => self.read(credential, action, map).await,
             "search" => self.search(credential, map).await,
+            "reindex" | "embed_lease" | "embed_submit" | "embed_failed" => {
+                self.embedding_request(credential, action, &raw).await
+            }
             "put" | "import" | "retire" | "handoff" | "capture" | "grant" => {
                 match self.prepare(credential, action, map, &raw) {
                     Ok(prepared) => self.write(prepared).await,
@@ -290,12 +734,32 @@ impl Store {
         }
     }
     async fn write(&self, prepared: Prepared) -> Reply {
+        // A lease changes no coverage unless it parks text (the reply says so),
+        // and the scheduler sends one per tick.
+        let lease = matches!(
+            prepared.action,
+            Action::Embedding {
+                command: embedding::Command::Lease { .. },
+                ..
+            }
+        );
+        let queued = matches!(prepared.action, Action::Put { .. });
         match self
             .writer
             .submit(prepared, Instant::now() + COMMAND_DEADLINE)
             .await
         {
-            Ok(reply) => reply,
+            Ok(reply) => {
+                if reply.status < 300 {
+                    if !lease || reply.body["parked"].as_u64().unwrap_or(0) > 0 {
+                        self.refresh_coverage().await;
+                    }
+                    if queued {
+                        self.embed_wake.notify_one();
+                    }
+                }
+                reply
+            }
             Err(failure) => Reply::new(
                 failure.status,
                 json!({"error": "hub busy", "reason": failure.reason}),
@@ -590,24 +1054,90 @@ impl Store {
             Some(min) => self.index.wait(min, MIN_SEQ_WAIT).await,
             None => self.index.current(),
         };
-        let credential = credential.clone();
+        let query = request.query.clone();
+        let lexical = map.get("mode").and_then(Json::as_str) == Some("lexical");
+        let c = credential.clone();
+        let r = request.clone();
+        let snap = snapshot.clone();
         let scanner = self.scanner.clone();
-        // S15a sends no query to the embedder: with no dense retrieval yet the
-        // vector would be discarded, so the call would be egress for nothing.
-        // S15b restores the call together with dense retrieval.
-        match self
+        let first = self
             .readers
-            .submit(move |c| {
-                search::run(&Conn(c), &credential, &request, &snapshot, scanner.as_ref())
-            })
-            .await
-        {
+            .submit(move |db| search::run(&Conn(db), &c, &r, &snap, scanner.as_ref()))
+            .await;
+        let mut reply = match first {
             Ok(reply) => reply,
-            Err(_) => Reply::new(
-                503,
-                json!({"error": "hub busy", "reason": "memory-reader-timeout"}),
-            ),
+            Err(_) => {
+                return Reply::new(
+                    503,
+                    json!({"error": "hub busy", "reason": "memory-reader-timeout"}),
+                );
+            }
+        };
+        if reply.status != 200 || lexical {
+            return reply;
         }
+        if let Some(runtime) = &self.retrieval {
+            let all_failed = self.coverage.read().unwrap().all_failed();
+            let load_failed = self.dense_missing().filter(|r| *r == DENSE_LOAD_FAILED);
+            if let Some(reason) = runtime
+                .reason()
+                .or(load_failed)
+                .or(all_failed.then_some(ALL_FAILED))
+            {
+                reply.body["retrieval"]["mode"] = json!("lexical-fallback");
+                reply.body["retrieval"]["effective"] = json!("lexical-fallback");
+                reply.body["retrieval"]["degraded"] = json!(true);
+                reply.body["retrieval"]["reason"] = json!(reason);
+            }
+            let Some(matrix) = self.dense.current(&runtime.config.id.key()) else {
+                return reply;
+            };
+            // Coverage over embeddable cards, kept current by each write. An
+            // unembeddable card (pending scan, flagged, parked) is answered by
+            // BM25 alone and does not hold hybrid back.
+            if !self.coverage.read().unwrap().complete() {
+                return reply;
+            }
+            // An empty corpus has nothing to rank. Sending the query text to
+            // the endpoint would cost a call, and a down endpoint would flip
+            // an empty hub to degraded.
+            if matrix.rows == 0 {
+                return reply;
+            }
+            match runtime.query(&query).await {
+                Err(error) => {
+                    reply.body["retrieval"]["mode"] = json!("lexical-fallback");
+                    reply.body["retrieval"]["effective"] = json!("lexical-fallback");
+                    reply.body["retrieval"]["degraded"] = json!(true);
+                    reply.body["retrieval"]["reason"] = json!(error.reason);
+                }
+                Ok(vector) => {
+                    request.dense = Some((matrix, vector));
+                    let credential = credential.clone();
+                    let scanner = self.scanner.clone();
+                    if let Ok(hybrid) = self
+                        .readers
+                        .submit(move |db| {
+                            search::run(
+                                &Conn(db),
+                                &credential,
+                                &request,
+                                &snapshot,
+                                scanner.as_ref(),
+                            )
+                        })
+                        .await
+                    {
+                        return hybrid;
+                    }
+                    reply.body["retrieval"]["mode"] = json!("lexical-fallback");
+                    reply.body["retrieval"]["effective"] = json!("lexical-fallback");
+                    reply.body["retrieval"]["degraded"] = json!(true);
+                    reply.body["retrieval"]["reason"] = json!("memory-reader-timeout");
+                }
+            }
+        }
+        reply
     }
 
     async fn read(&self, credential: &Credential, action: &str, map: &Map<String, Json>) -> Reply {
@@ -637,6 +1167,10 @@ impl Store {
             Ok(mut reply) => {
                 if is_status && reply.status == 200 {
                     reply.body["default_mode"] = retrieval["mode"].clone();
+                    if let Some(id) = retrieval.get("embedder_id") {
+                        reply.body["embedders"] =
+                            json!([{"id": id, "coverage": retrieval["coverage"]}]);
+                    }
                     reply.body["retrieval"] = retrieval;
                 }
                 reply

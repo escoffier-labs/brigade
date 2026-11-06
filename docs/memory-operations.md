@@ -185,10 +185,12 @@ copies. The same pattern is `PROMPT_INJECTION_RE` in `untrusted.py`. Its callers
 search a copy folded the same way (`fold_whitespace`, one line at a time), so an
 order set off by a no-break space, U+3000 or an indent flags on any line.
 
-Schema version 2 rebuilds `memory_card_revisions`, `memory_scans` and
-`memory_handoffs` to admit the `private` state. There is no down-migration:
-rolling back to a hub binary with schema version 1 means restoring a backup
-taken before the upgrade.
+Schema version 3 rebuilds `memory_card_revisions`, `memory_scans` and
+`memory_handoffs` to admit the `private` state. It follows version 2, which
+holds the S15b embedding tables, so a version 1 file takes both steps and a
+version 2 file takes this one. Each step re-reads the version under the write
+lock. There is no down-migration: rolling back to a hub binary with schema
+version 2 or older means restoring a backup taken before the upgrade.
 
 The `memory-scan` Cargo feature is enabled by default. A build with
 `--no-default-features` has no scanner and serves pending writes and explicit

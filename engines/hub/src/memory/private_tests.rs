@@ -322,9 +322,17 @@ async fn private_joiners_are_stripped_from_rendered_prompt_hits() {
     );
 }
 
-fn v1_file(path: &std::path::Path) -> Connection {
+/// A file as an older hub left it: version 1 has neither the embedding tables
+/// (S15b, version 2) nor the `private` scan state (version 3). Version 2 has
+/// the embedding tables and still refuses `private`.
+fn old_file(path: &std::path::Path, version: i64) -> Connection {
     let c = Connection::open(path).unwrap();
-    let v1 = schema::ddl()
+    let mut v1 = schema::ddl();
+    if version < 2 {
+        v1 = v1.replace(super::embedding::DDL, "");
+        assert!(!v1.contains("memory_vectors"));
+    }
+    let v1 = v1
         .replace(
             "'clean','private','flagged','pending','blocked'",
             "'clean','flagged','blocked','pending'",
@@ -341,11 +349,15 @@ fn v1_file(path: &std::path::Path) -> Connection {
          INSERT INTO memory_card_revisions VALUES('fleet','card',1,'h1','flagged','live','admin',1,NULL,'flagged','t');
          INSERT INTO memory_scans VALUES('h1','r1','flagged','[\"role-override\"]','t');
          INSERT INTO memory_handoffs VALUES('ho1','admin','note','h1','pending','clean',2,'t');
-         PRAGMA application_id={}; PRAGMA user_version=1;",
+         PRAGMA application_id={}; PRAGMA user_version={version};",
         schema::APPLICATION_ID
     ))
     .unwrap();
     c
+}
+
+fn v1_file(path: &std::path::Path) -> Connection {
+    old_file(path, 1)
 }
 
 /// A hub that read version 1 before another process migrated the file skips
@@ -360,11 +372,12 @@ fn a_step_another_process_applied_is_skipped() {
     schema::migrate(&first, 0).unwrap();
     // The SQL would fail if it ran, so success proves the step was skipped.
     schema::step(&late, "SELECT no_such_function()", 2).unwrap();
-    assert!(schema::step(&late, "SELECT no_such_function()", 3).is_err());
+    schema::step(&late, "SELECT no_such_function()", 3).unwrap();
+    assert!(schema::step(&late, "SELECT no_such_function()", 4).is_err());
     let version: i64 = late
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     drop((late, first));
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -423,12 +436,113 @@ fn version_1_file_migrates_to_admit_private_and_keeps_rows() {
     );
     let objects: i64 = c
         .query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name LIKE '%_v2'",
+            "SELECT count(*) FROM sqlite_schema WHERE name LIKE '%_v2' OR name LIKE '%_v3'",
             [],
             |r| r.get(0),
         )
         .unwrap();
     assert_eq!(objects, 0);
+    drop(c);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Table names and every row, to show a migration kept them.
+fn snapshot(c: &Connection) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut names = c
+        .prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .unwrap();
+    let tables: Vec<String> = names
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    for t in tables {
+        let mut q = c.prepare(&format!("SELECT * FROM {t}")).unwrap();
+        let n = q.column_count();
+        let mut rows = q.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            let values: Vec<rusqlite::types::Value> = (0..n).map(|i| row.get(i).unwrap()).collect();
+            out.push(format!("{t} {values:?}"));
+        }
+    }
+    out
+}
+
+fn version_of(c: &Connection) -> i64 {
+    c.pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn version_1_file_gains_embedding_tables_and_the_private_state() {
+    let dir = std::env::temp_dir().join(format!("s18-v1to3-{}", super::ids::mint(0)));
+    std::fs::create_dir_all(&dir).unwrap();
+    let c = v1_file(&dir.join("memory.db"));
+    assert_eq!(version_of(&c), 1);
+    assert!(c.prepare("SELECT 1 FROM memory_embed_jobs").is_err());
+    let before = snapshot(&c);
+    schema::migrate(&c, 0).unwrap();
+    assert_eq!(version_of(&c), 3);
+    // Rows keep, and the S15b tables exist and are empty.
+    for row in &before {
+        assert!(snapshot(&c).contains(row), "lost {row}");
+    }
+    for t in ["memory_vectors", "memory_lineage", "memory_embed_jobs"] {
+        let n: i64 = c
+            .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+    c.execute(
+        "INSERT INTO memory_scans VALUES('h1','r2','private','[]','t')",
+        [],
+    )
+    .unwrap();
+    // Opening again is a no-op.
+    schema::migrate(&c, 0).unwrap();
+    assert_eq!(version_of(&c), 3);
+    drop(c);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn version_2_file_from_s15b_migrates_to_3_and_keeps_embedding_rows() {
+    let dir = std::env::temp_dir().join(format!("s18-v2to3-{}", super::ids::mint(0)));
+    std::fs::create_dir_all(&dir).unwrap();
+    let c = old_file(&dir.join("memory.db"), 2);
+    assert_eq!(version_of(&c), 2);
+    c.execute_batch(
+        "INSERT INTO memory_vectors VALUES('h1','emb',1,x'0102');
+         INSERT INTO memory_lineage VALUES('fleet','card',1,'vector','emb','h1');
+         INSERT INTO memory_embed_jobs(content_hash,embedder_id,state,attempts) VALUES('h1','emb','done',1);",
+    )
+    .unwrap();
+    assert!(
+        c.execute(
+            "INSERT INTO memory_scans VALUES('h1','r2','private','[]','t')",
+            []
+        )
+        .is_err(),
+        "v2 must refuse private"
+    );
+    let before = snapshot(&c);
+    schema::migrate(&c, 0).unwrap();
+    assert_eq!(version_of(&c), 3);
+    let after = snapshot(&c);
+    for row in &before {
+        assert!(after.contains(row), "lost {row}");
+    }
+    // The vector log trigger rows and the S15b tables survive the rebuild.
+    let vectors: i64 = c
+        .query_row("SELECT count(*) FROM memory_vectors", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(vectors, 1);
+    c.execute(
+        "INSERT INTO memory_scans VALUES('h1','r2','private','[]','t')",
+        [],
+    )
+    .unwrap();
     drop(c);
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -440,6 +554,6 @@ fn a_fresh_file_starts_at_the_current_version() {
     let version: i64 = c
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     c.execute_batch("INSERT INTO memory_blobs VALUES('h1',x'6869',2,'t'); INSERT INTO memory_handoffs VALUES('ho1','admin','note','h1','pending','private',1,'t');").unwrap();
 }
