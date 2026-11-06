@@ -160,10 +160,9 @@ as written, the scan copies drop both characters so neither can split a rule
 match, and local prompt recall removes both from the fields it renders, so a
 mix of the two cannot carry hidden bits into a prompt. The `classic-injection`
 rule matches the verb "exfiltrate" only as an order: at the start of a line
-or sentence, after up to four markup units (markdown or quote marks, a
-checkbox, a list number such as "1)", or a short run of non-ASCII characters
-such as an emoji) and two urgency
-words, or after a comma that follows a short address or an if/when, for, in,
+or sentence, after up to eight markup units (markdown or quote marks, a
+checkbox, a list number such as "1)", or one non-ASCII symbol such as an emoji
+or an arrow) and two urgency words, or after a comma that follows a short address or an if/when, for, in,
 at, on, during, from or with clause ("Assistant, ...", "If you are an AI
 agent, ...", "For the next step, ..."). It also matches an order addressed to
 the agent ("you must now", "I need you to", "go ahead and", "make sure to",
@@ -175,7 +174,11 @@ text and verb lists in prose ("A loader can steal browser cookies,
 exfiltrate data") scan clean, and so do subject-first sentences such as
 "Attackers dump LSASS and exfiltrate hashes". A line that opens with the
 imperative form of the same list ("Dump LSASS and exfiltrate hashes") flags,
-because it reads as an order. The same pattern
+because it reads as an order. Every repeat in the pattern is bounded, and
+the units next to each other share no character, so a run of Unicode spaces,
+letters or symbols cannot make the native scan hit its match limit and report
+`failed`. The scan copies fold Unicode spaces to a plain space before the
+compound order and the leading marks are matched. The same pattern
 is `PROMPT_INJECTION_RE` in `untrusted.py`, so `scan_untrusted`, the handoff
 injection lint and every other caller use it too.
 

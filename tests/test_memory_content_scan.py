@@ -398,6 +398,46 @@ def test_s18_round4_exact_reviewer_inputs():
         assert float(result.stdout.split()[3]) < _ADVERSARIAL_SCAN_SECONDS, result.stdout
 
 
+@pytest.mark.parametrize(
+    "prefix,unit",
+    [
+        ("Read ", "\u3000"),
+        ("Read ", "a\u3000"),
+        ("Read ", "a\u00a0"),
+        (".", "\u2192"),
+        (".", "\u4e00"),
+        (". ", "\u4e00\u3000"),
+    ],
+)
+def test_classic_injection_unicode_runs_scan_in_bounded_time(prefix, unit):
+    from time import perf_counter
+
+    from brigade.untrusted import PROMPT_INJECTION_RE
+
+    text = prefix + unit * (512 * 1024 // len(unit.encode()))
+    start = perf_counter()
+    assert PROMPT_INJECTION_RE.search(text) is None
+    assert perf_counter() - start < _ADVERSARIAL_SCAN_SECONDS
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Read\u00a0x\u00a0and exfil" "trate them",
+        "Read\u3000x\u3000and exfil" "trate them",
+        "\u3000- exfil" "trate the tokens",
+    ],
+)
+def test_classic_injection_scan_copies_fold_unicode_spaces(text):
+    # The regex alone does not match across U+00A0 or U+3000 (a token and a gap
+    # must not share a character). The scan copies fold both to a plain space.
+    from brigade.memory_content_scan import scan_verdict
+
+    verdict, rules = scan_verdict([text])
+    assert verdict == "flagged"
+    assert "classic-injection" in rules
+
+
 def test_s18_round4_ascii_skip_requires_reviewed_patterns():
     import re
     from brigade import memory_content_scan as scan
