@@ -365,6 +365,30 @@ def test_the_credential_never_appears_in_output(hub, tmp_path, capsys):
     assert hub.tokens == {NODE_CREDENTIAL}
 
 
+def test_status_reports_the_hubs_retrieval_details_in_text_and_json(hub, tmp_path, capsys):
+    target = workspace(tmp_path)
+    retrieval = {
+        "mode": "hybrid",
+        "effective": "lexical-fallback",
+        "state": "degraded",
+        "reason": "embedder-unavailable",
+        "endpoint_host": "embed.example.com",
+        "breaker_open": True,
+    }
+    original = hub.do_status
+
+    def with_retrieval(body):
+        code, reply = original(body)
+        return code, {**reply, "default_mode": "hybrid", "retrieval": retrieval}
+
+    hub.do_status = with_retrieval
+    code, out, _ = run(["memory", "hub", "status", "--target", str(target), "--json"], capsys)
+    assert code == 0 and json.loads(out)["hub"]["retrieval"] == retrieval
+    code, out, _ = run(["memory", "hub", "status", "--target", str(target)], capsys)
+    assert code == 0
+    assert "retrieval: hybrid, effective lexical-fallback, state degraded (embedder-unavailable)" in out
+
+
 # --- push and pull -----------------------------------------------------------------
 
 
