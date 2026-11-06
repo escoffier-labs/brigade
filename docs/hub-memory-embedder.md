@@ -133,7 +133,13 @@ failure, which is what an endpoint that always answers the wrong row count
 produces, status reports `degraded` with reason `all-embeddings-failed` and
 searches answer from BM25 alone. A card parked by a scan verdict does not count
 as a failure. Run `memory reindex` once the endpoint is fixed to requeue the
-parked documents. In hybrid answers, `match_count`
+parked documents. While the loaded matrix has no live row, because the hub has
+no card to embed, every embeddable card is unembeddable, or every vector was
+collected, status reports `effective: lexical` with state `ok`. Search answers
+from BM25 alone and does not send the query text to the endpoint. Covered cards
+with an empty matrix report `switching` until the matrix catches up. A vector
+committed while the first matrix load scans joins the matrix as soon as that
+load finishes, without waiting for another write. In hybrid answers, `match_count`
 and `truncated` keep their lexical meaning. A failed embedding leaves the lexical index
 available. Changing back to lexical and restarting leaves vectors on disk,
 and loads none of them.

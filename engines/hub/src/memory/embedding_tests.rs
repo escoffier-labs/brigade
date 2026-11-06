@@ -568,7 +568,8 @@ async fn lease_that_parks_the_last_job_refreshes_coverage_without_a_later_write(
     assert_eq!(lease.body["parked"], 1);
     let status = h.store.as_ref().unwrap().retrieval_status();
     assert_eq!(status["state"], "ok", "{status}");
-    assert_eq!(status["effective"], "hybrid");
+    // The only card is unembeddable, so the matrix has no row to rank with.
+    assert_eq!(status["effective"], "lexical");
     assert_eq!(
         status["coverage"],
         json!({"cards": 0, "eligible": 0, "unembeddable": 1, "total": 1})
@@ -1367,12 +1368,13 @@ async fn status_is_not_hybrid_while_no_matrix_was_ever_installed() {
         .call(ADMIN_TOKEN, json!({"action": "search", "query": "apple"}))
         .await;
     assert_eq!(search.body["retrieval"]["mode"], "lexical", "{search:?}");
-    // The first load installs an empty matrix, and status agrees with search.
+    // The first load installs an empty matrix. Nothing can rank, so status
+    // says lexical, as search does, and is not a fault.
     let store = h.store.as_ref().unwrap();
     assert!(store.load_dense().await);
     assert!(store.dense.current(&id).is_some());
     let status = store.retrieval_status();
-    assert_eq!(status["effective"], "hybrid", "{status}");
+    assert_eq!(status["effective"], "lexical", "{status}");
     assert_eq!(status["state"], "ok", "{status}");
 }
 
@@ -1430,6 +1432,104 @@ async fn an_empty_matrix_never_sends_query_text_to_the_endpoint() {
     let status = store.retrieval_status();
     assert_ne!(status["state"], "degraded", "{status}");
     assert_ne!(status["reason"], "embedder-unavailable", "{status}");
+}
+
+#[tokio::test]
+async fn a_vector_submitted_during_the_first_load_joins_the_matrix_without_a_later_write() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = restarted_with_one_vector(&mut h).await;
+    let store = h.store.as_ref().unwrap();
+    assert!(store.dense.current(&id).is_none());
+    // The scan holds one read snapshot taken before the sleep begins.
+    store
+        .dense
+        .delay_next_load(std::time::Duration::from_millis(1200));
+    let submit = async {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let put = h
+            .put(ADMIN_TOKEN, "fleet", "two", None, "submitted during a load")
+            .await;
+        assert_eq!(put.status, 201, "{put:?}");
+        let lease = command(
+            &h,
+            json!({"action": "embed_lease", "embedder_id": id, "max": 4}),
+        )
+        .await;
+        let jobs = lease.body["jobs"].as_array().unwrap();
+        assert_eq!(jobs.len(), 1, "{lease:?}");
+        let vectors =
+            json!([{"content_hash": jobs[0]["content_hash"], "vector": encoded(&[0.0, 1.0])}]);
+        let result = command(&h, json!({"action": "embed_submit", "lease_id": lease.body["lease_id"], "model_digest": "fake-digest", "vectors": vectors})).await;
+        assert_eq!(result.status, 200, "{result:?}");
+    };
+    let (loaded, ()) = tokio::join!(store.load_dense(), submit);
+    assert!(loaded);
+    // No commit follows. The matrix already holds both vectors.
+    let matrix = store.dense.current(&id).unwrap();
+    assert_eq!(matrix.rows, 2);
+    assert_eq!(matrix.hashes().len(), 2);
+    let status = store.retrieval_status();
+    assert_eq!(status["effective"], "hybrid", "{status}");
+    assert_eq!(status["state"], "ok", "{status}");
+}
+
+#[tokio::test]
+async fn a_matrix_whose_rows_are_all_collected_reports_lexical_and_skips_the_endpoint() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = setup(&mut h);
+    let put = h
+        .put(ADMIN_TOKEN, "fleet", "one", None, "searchable apple")
+        .await;
+    fill(&h, &id).await;
+    let store = h.store.as_ref().unwrap();
+    assert!(store.retrieval_status()["effective"] == "hybrid");
+    // Retiring the only card collects its vector. The matrix keeps the dead row
+    // until a rebuild compacts it.
+    let retire = command(&h, json!({"action": "retire", "scope": "fleet", "card_id": "one", "base_revision": rev(&put), "base_epoch": h.epoch().await})).await;
+    assert_eq!(retire.status, 200, "{retire:?}");
+    store.refresh_dense().await.unwrap();
+    // A background compaction may already have emptied the matrix. Either
+    // form has no live row.
+    assert!(!store.dense.current(&id).unwrap().has_live_rows());
+    let status = store.retrieval_status();
+    assert_eq!(status["effective"], "lexical", "{status}");
+    assert_eq!(status["state"], "ok", "{status}");
+    // The endpoint is `127.0.0.1:1`, which refuses every connection. A query
+    // that reached it would come back degraded.
+    let search = h
+        .call(ADMIN_TOKEN, json!({"action": "search", "query": "apple"}))
+        .await;
+    assert_eq!(search.status, 200, "{search:?}");
+    assert_ne!(
+        search.body["retrieval"]["degraded"],
+        json!(true),
+        "{search:?}"
+    );
+    assert_eq!(search.body["retrieval"]["mode"], "lexical", "{search:?}");
+}
+
+#[tokio::test]
+async fn a_corpus_of_only_unembeddable_cards_reports_lexical_and_skips_the_endpoint() {
+    let mut h = Hub::with(tiers(), None);
+    let id = setup(&mut h);
+    // Private text on a non-loopback endpoint is never embedded.
+    h.put(ADMIN_TOKEN, "fleet", "lab", None, "labhost notes")
+        .await;
+    let store = h.store.as_ref().unwrap();
+    assert!(store.load_dense().await);
+    assert_eq!(store.dense.current(&id).unwrap().rows, 0);
+    let status = store.retrieval_status();
+    assert_eq!(status["effective"], "lexical", "{status}");
+    assert_eq!(status["state"], "ok", "{status}");
+    assert_eq!(status["coverage"]["eligible"], 0, "{status}");
+    let search = h
+        .call(ADMIN_TOKEN, json!({"action": "search", "query": "labhost"}))
+        .await;
+    assert_ne!(
+        search.body["retrieval"]["degraded"],
+        json!(true),
+        "{search:?}"
+    );
 }
 
 /// Clean, except text with `labhost` scans private, and text with `shifted`

@@ -37,6 +37,11 @@ impl Matrix {
     fn has(&self, hash: &str) -> bool {
         self.live.as_ref().is_none_or(|live| live.contains(hash))
     }
+    /// Whether any row can still score. A matrix with no rows, or whose rows
+    /// were all collected, ranks nothing until a rebuild compacts it.
+    pub fn has_live_rows(&self) -> bool {
+        self.rows > 0 && self.live.as_ref().is_none_or(|live| !live.is_empty())
+    }
     pub fn hashes(&self) -> HashSet<&str> {
         self.segments
             .iter()
@@ -318,6 +323,9 @@ impl Index {
     /// without `publication`: the writer's commit path takes that lock, and a
     /// retry must not park every write and reply for the length of the scan.
     /// Only the install holds it, after the epoch check and the tail replay.
+    /// When the caller holds one read snapshot, as `Store::load_dense` does,
+    /// that replay sees no newer rows. The caller refreshes once more on a
+    /// fresh reader after the install.
     fn load_first(
         self: &Arc<Self>,
         db: &Connection,
