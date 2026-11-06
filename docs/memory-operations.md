@@ -265,8 +265,12 @@ U+FE00-FE0F are allowed only immediately after a conservative emoji-base
 allowlist: U+2600, U+2764, U+1F680 and U+1F600-U+1F64F. Other selector
 positions block, including emoji bases outside this allowlist.
 
-Bundle v7 normalizes the line copy with NFKC after the ignorable characters
-are removed, in both scanners. Full-width forms, math alphanumerics such as
+Bundle v7 adds an NFKC line copy after the ignorable characters are removed,
+in both scanners. It keeps the v6 full-width fold copy beside it, because NFKC
+can absorb a trailing ASCII letter (A and U+0301 compose) or turn a symbol such
+as U+2122 into word characters, which breaks a `\b` around a match. Scanning
+both copies makes every v7 verdict at least as severe as v6. Equal copies are
+scanned once, so ASCII text costs nothing extra. Full-width forms, math alphanumerics such as
 U+1D400, ligatures such as U+FB01, superscripts, circled letters and U+3000
 therefore match the same rules as their plain spellings. The scanners return
 rule ids only, never offsets or redaction spans, and the stored bytes and the

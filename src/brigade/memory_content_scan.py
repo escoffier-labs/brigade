@@ -60,6 +60,11 @@ _IGNORABLE_RANGES = (
 _IGNORABLE = frozenset(chr(code) for lo, hi in _IGNORABLE_RANGES for code in range(lo, hi + 1))
 _INVISIBLE = _IGNORABLE | frozenset("\ufff9\ufffa\ufffb")
 _STRIP_IGNORABLE = dict.fromkeys(map(ord, _IGNORABLE))
+# The v6 fold stays a scan copy beside NFKC. NFKC can absorb a trailing ASCII
+# letter into a composed letter (A + U+0301) and turn a compatibility symbol
+# into word characters (U+2122 to TM), which breaks `\b` and `(?!\w)` around
+# a match. Scanning both copies makes every verdict at least as severe as v6.
+_FOLD_FULLWIDTH = {code: code - 0xFEE0 for code in range(0xFF01, 0xFF5F)} | {0x3000: 0x20}
 _LINE_TRANSLATION = dict.fromkeys(map(ord, _BOUNDARIES), "\n")
 _SPACE_TRANSLATION = dict.fromkeys(map(ord, WHITESPACE), " ")
 
@@ -169,15 +174,29 @@ def invisible_rule(text: str) -> str | None:
     return None
 
 
-def _scan_copies(text: str) -> tuple[str, str, str]:
+def _base_lines(text: str) -> str:
     # Preserve all splitlines boundaries before applying MULTILINE line rules.
-    lines = text.replace("\r\n", "\n").translate(_LINE_TRANSLATION)
-    lines = _nfkc(lines.translate(_STRIP_IGNORABLE))
+    return text.replace("\r\n", "\n").translate(_LINE_TRANSLATION).translate(_STRIP_IGNORABLE)
+
+
+def _derive_copies(lines: str) -> tuple[str, str, str]:
     normalized = " ".join(part for part in lines.translate(_SPACE_TRANSLATION).split(" ") if part)
     injection_lines = "\n".join(
         " ".join(part for part in line.translate(_SPACE_TRANSLATION).split(" ") if part) for line in lines.split("\n")
     )
     return lines, injection_lines, normalized
+
+
+def _scan_copies(text: str) -> tuple[str, str, str]:
+    """The NFKC line, injection-line and normalized copies."""
+    return _derive_copies(_nfkc(_base_lines(text)))
+
+
+def _scan_copy_sets(text: str) -> tuple[tuple[str, str, str], ...]:
+    """The v6 full-width fold copies and the NFKC copies, equal sets merged."""
+    base = _base_lines(text)
+    # Derive once per distinct line copy: ASCII text costs nothing extra.
+    return tuple(_derive_copies(lines) for lines in dict.fromkeys((base.translate(_FOLD_FULLWIDTH), _nfkc(base))))
 
 
 # Necessary conditions only. These linear searches have no failing suffix on
@@ -255,12 +274,18 @@ def _findings(texts: Iterable[str], *, blocking_only: bool = False) -> Iterator[
         rule = invisible_rule(text)
         if rule:
             yield rule, "block"
-        lines, injection_lines, normalized = _scan_copies(text)
+        copy_sets = _scan_copy_sets(text)
         # Bundle patterns are ASCII. On an ASCII copy the earlier Unicode
         # pass finds a superset for these patterns, so only non-ASCII copies
         # need the ASCII pass. Bundle tests require review of inverse classes.
-        copies = tuple(dict.fromkeys((text, lines)))
-        extra_copies = tuple(copy for copy in dict.fromkeys((injection_lines, normalized)) if copy not in copies)
+        copies = tuple(dict.fromkeys((text, *(lines for lines, _, _ in copy_sets))))
+        extra_copies = tuple(
+            copy
+            for copy in dict.fromkeys(
+                copy for _, injection_lines, normalized in copy_sets for copy in (injection_lines, normalized)
+            )
+            if copy not in copies
+        )
         literal_copies = {copy: _BUNDLE_LITERAL.search(copy) is not None for copy in copies}
         possible: dict[tuple[str, str], bool] = {}
         for name, action, pattern in _RULES:
