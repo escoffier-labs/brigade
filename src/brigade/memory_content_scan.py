@@ -269,11 +269,12 @@ def scan_verdict(texts: Iterable[str]) -> tuple[str, tuple[str, ...]]:
     found: dict[str, str] = {}
     for name, action in _findings(texts):
         found.setdefault(name, action)
-    for verdict, action in ((BLOCKED, "block"), (FLAGGED, "warn"), (PRIVATE, "private")):
-        if action in found.values():
-            order = {"block": 0, "warn": 1, "private": 2}
-            return verdict, tuple(sorted(found, key=lambda name: order[found[name]]))
-    return CLEAN, ()
+    rank = {"block": 0, "warn": 1, "private": 2}
+    if not found:
+        return CLEAN, ()
+    worst = min(found.values(), key=rank.__getitem__)
+    verdict = {"block": BLOCKED, "warn": FLAGGED, "private": PRIVATE}[worst]
+    return verdict, tuple(sorted(found, key=lambda name: rank[found[name]]))
 
 
 def egress_refusal(texts: Iterable[str]) -> dict[str, str] | None:
