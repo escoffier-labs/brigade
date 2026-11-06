@@ -31,6 +31,8 @@ CONFLICT_CODES = {
     "memory_client_event_expired",
     "memory_client_event_conflict",
 }
+# Card metadata a head keeps beside its text. Replicas pulled before S18 lack all of it.
+SCAN_FIELDS = ("state", "scan_state", "writer", "updated_at")
 HEAD_KINDS = {"card.put", "card.import", "card.retire", "card.trust", "proposal.apply", "proposal.rollback"}
 
 
@@ -141,7 +143,14 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
     principal = str(status["principal"])
     readable = set(status["readable_scopes"]) & set(settings.read_scopes)
     hub = client.identity
-    report: dict[str, Any] = {"hub": hub, "log_epoch": epoch, "rebuilt": False, "applied": 0, "warnings": []}
+    report: dict[str, Any] = {
+        "hub": hub,
+        "log_epoch": epoch,
+        "principal": principal,
+        "rebuilt": False,
+        "applied": 0,
+        "warnings": [],
+    }
     with store.locked(target):
         swap, replica = _prepare(target, hub, epoch, principal, readable, report)
 
@@ -186,6 +195,94 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
         )
     report.update(seq=replica.meta.get("seq"), cards=len(replica.heads), bytes=replica.bytes())
     return report
+
+
+def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> int:
+    """Fill in scan metadata on readable heads that lack `scan_state`, in place. Returns how many it refreshed.
+
+    The live replica keeps serving the whole time: nothing is discarded or
+    rebuilt. Each stale head costs one `card` read of its own revision, made
+    under the pull lock, and the results are written back under the state lock
+    only if the replica is still the same hub, principal and log_epoch.
+    Raises HubConfigError when the hub answers without `scan_state` (it predates
+    scan metadata) or the replica or log moved meanwhile. A HubUnavailable
+    propagates, with the replica untouched.
+    """
+    hub = client.identity
+    with store.pulling(target):
+        with store.locked(target):
+            live = store.replica(target)
+            epoch, principal = str(live.meta.get("log_epoch") or ""), live.meta.get("principal")
+            stale = {
+                key: head for key, head in live.readable_heads(settings.read_scopes).items() if "scan_state" not in head
+            }
+        fetched: dict[str, dict[str, Any]] = {}
+        for key, head in stale.items():
+            try:
+                body = client.call(
+                    "card", scope=head["scope"], card_id=head["card_id"], revision=head["revision"], offset=0
+                )
+            except hubc.HubRefusal as exc:
+                if exc.status == 403 and exc.code == "memory_grant_missing":
+                    _drop_revoked_scope(target, hub, principal, epoch, head["scope"])
+                if exc.code in ("memory_card_not_found", "memory_grant_missing"):
+                    raise hubc.HubConfigError(
+                        f"the hub no longer serves {head['scope']}/{head['card_id']} at revision {head['revision']}"
+                        ". Run memory hub pull"
+                    ) from exc
+                raise
+            if str(body.get("log_epoch") or "") != epoch:
+                raise hubc.HubConfigError(
+                    "the hub's log_epoch changed during the metadata refresh. Run memory hub pull"
+                )
+            card = hubc.obj(body.get("card"))
+            if "scan_state" not in card:
+                raise hubc.HubConfigError("the hub's card read has no scan_state: the hub predates scan metadata")
+            if head.get("content_hash") and card.get("content_hash") not in (None, head["content_hash"]):
+                raise hubc.HubConfigError(
+                    f"the hub's {head['scope']}/{head['card_id']} differs from the replica. Run memory hub pull"
+                )
+            fetched[key] = {name: card[name] for name in SCAN_FIELDS if name in card}
+        with store.locked(target):
+            live = store.replica(target)
+            if not live.belongs_to(hub, principal) or str(live.meta.get("log_epoch") or "") != epoch:
+                raise hubc.HubConfigError("the replica changed during the metadata refresh. Run memory hub pull")
+            updated = {
+                key: {**live.heads[key], **fields}
+                for key, fields in fetched.items()
+                if key in live.heads and live.heads[key].get("revision") == stale[key].get("revision")
+            }
+            # The added fields can grow a replica that sits near the cap. A replica over it would be
+            # accepted as complete, because nothing is marked missing, so refuse and save nothing.
+            grown = live.bytes() + sum(
+                store.head_size(key, head) - store.head_size(key, live.heads[key]) for key, head in updated.items()
+            )
+            if grown > settings.replica_max_bytes:
+                raise hubc.HubConfigError(
+                    "refreshing scan metadata would push the replica past its "
+                    f"{settings.replica_max_bytes // (1024 * 1024)} MB cap, replica unchanged. "
+                    "Increase [hub] replica_max_mb and run memory hub pull"
+                )
+            live.heads.update(updated)
+            if updated:
+                live.save()
+    return len(fetched)
+
+
+def _drop_revoked_scope(target: Path, hub: str, principal: object, epoch: str, scope: str) -> None:
+    """Take a scope the hub just refused out of the live replica and save it, as `_apply` does. Hold the pull lock.
+
+    Only when the replica is still this hub, principal and log_epoch. A refusal
+    that is not about a grant never reaches here, so an ordinary outage keeps the replica.
+    """
+    with store.locked(target):
+        live = store.replica(target)
+        if not live.belongs_to(hub, principal) or str(live.meta.get("log_epoch") or "") != epoch:
+            return
+        kept = {name for name in live.meta.get("read_scopes") or [] if name != scope}
+        live.retain_scopes(kept)
+        live.meta["read_scopes"] = sorted(kept)
+        live.save()
 
 
 def _prepare(
@@ -331,13 +428,14 @@ def _apply(
         return replica.bytes()
     if card is None or card.get("state") == "retired":
         return used
-    head = {
+    head: dict[str, Any] = {
         "scope": event["scope"],
         "card_id": event["card_id"],
         "revision": card.get("revision", event["revision"]),
         "content_hash": card.get("content_hash", ""),
         "trust": card.get("trust", ""),
         "text": card["text"],
+        **{name: card[name] for name in SCAN_FIELDS if name in card},
     }
     size = store.head_size(key, head)
     if used + size > settings.replica_max_bytes:

@@ -2585,3 +2585,86 @@ check does not protect against a hostile same-UID process racing those readers,
 and the report is never a reusable approval token.
 
 The receipt export subcommand and context import flag retain their legacy spelling for compatibility through v0.32.
+
+### Disposable hub memory mirror
+
+`brigade memory hub mirror --out "Hub Memory/"` pulls through the S14 client
+and exports the readable replica as Markdown. It lives under `memory hub`
+because it uses the same hub settings, node credential and replica as `pull`.
+Set `[hub] mode = "read"` and `read_scopes` in `.brigade/memory-care.toml`,
+configure `[fleet] hub_url` and this machine's node credential first.
+
+Use `--dry-run` to list writes and deletions without changing the output.
+Use `--init` to initialize a non-empty output folder. Existing foreign files
+are preserved, and a foreign file at a generated path causes a refusal.
+The `.brigade-memory-mirror.json` marker records owned files. Keep it with the
+notes. Deleting the entire mirror folder is safe. The next run rebuilds it.
+The marker is written, and the folder synced to disk on POSIX, before any note
+changes, so a run killed midway or a host crash leaves nothing unowned. The
+final marker write is synced the same way. Windows cannot open a folder to sync
+it, so it skips that step. A file the marker does not own but whose bytes equal the
+generated note is adopted rather than refused. The destination itself must not
+be a symlink, but a symlinked parent such as a symlinked home is fine.
+A real run holds an exclusive lock on the output folder from the marker read to
+the final marker write, so two runs on one folder never interleave. Each run
+plans from the replica as it stands once it holds the lock, so the run that
+writes last writes the newest state. The principal the pull authenticated as is
+kept, and a replica that another principal pulled into before the lock was taken
+is refused with the folder unchanged. Use one folder per workspace identity. The
+marker records the hub, the principal and the resolved workspace path that wrote
+it, and a run under another hub, principal or workspace refuses the folder
+unless `--init` is given, which adopts it. A marker from before these fields is
+adopted by the next run. The lock is the
+dotfile `.brigade-memory-mirror.lock` inside the folder. The mirror never
+deletes it or counts it as a foreign file.
+A run that cannot get the lock exits busy with code 75. Temp files are named
+`.brigade-mirror-<random>.tmp`. A real run removes those older than 10 minutes,
+which a killed run leaves behind, and only in a folder that already has a valid
+marker. Any other name, such as a user's `.mirror-backup.tmp` or
+`.mirror-backup01.tmp`, is never touched. A destination filesystem that refuses
+to sync a folder (some FUSE, SMB and 9p mounts) runs without that sync. A folder holding only the lock
+and `.brigade-mirror-*.tmp` files, left by a first run killed before its marker,
+counts as empty, so the next run needs no `--init`.
+
+Only live, scan-clean, non-private heads are exported. Flagged, pending,
+unknown-scan and superseded cards are counted by reason. The client's privacy
+withholding rules apply, including malformed visibility declarations.
+A head without scan metadata is never treated as skippable, because that
+would delete its note. The mirror refetches only those heads in place under the
+pull lock, with the live replica serving throughout and nothing discarded. The
+refresh checks the grown replica against `replica_max_mb` before it saves, and
+a replica it would push past the cap is left as it was and the run fails. If
+the hub is unreachable or still returns no `scan_state`, the run exits non-zero
+and the folder stays unchanged until the hub is upgraded and `memory hub pull`
+has run. A card that is `pending` because the scanner was unavailable stays out
+of the mirror until a new revision is written. A card the hub refuses with
+`memory_grant_missing` during that refresh is dropped from the replica, along
+with the rest of its scope. Retirement events remove cards from the replica before export.
+Supersession metadata uses `supersedes` for predecessor ids or `superseded_by`
+for a successor id in card front matter, within the same scope.
+
+Each note includes card identity, scope, revision, update time, source, tags
+and scan state in one YAML front matter block. A card's own front matter is
+removed from the body and kept under a `card` key in that block, with its
+`tags` in the top-level `tags`. The parser keeps only part of some blocks (a
+multiline `description` or a nested map loses its content), so the stripped
+block is also kept as written under a `card_frontmatter` string. The card's own
+string `aliases` join the title and the id in the top-level `aliases`, once
+each, so Obsidian offers them. The body preserves the rest of the card text
+and its wiki links. Notes have readable slugs and a scope-and-id hash suffix. Filenames
+remain stable across title changes while the marker is retained, even if the
+card is skipped for a few runs and comes back. The generated
+index links to notes by scope. Unchanged files retain their bytes and mtimes.
+Changed files use a temporary file in the output folder and an atomic rename.
+
+`memory hub card --json` answered from the replica while the hub is down carries
+`scan_state`, `writer` and `updated_at` when the replica holds them. A replica
+pulled before they were kept lacks them, and the read still answers.
+
+Hub outages use the readable local replica and print a warning. Missing,
+incomplete or rebuilding replicas leave the mirror untouched and exit non-zero.
+An access refusal never falls back to the replica. Dry runs may refresh the
+workspace's replica, but do not create or modify the output folder.
+
+Local edits are replaced on the next run. A future edit-to-proposal workflow
+would integrate with hub proposals and require explicit review.

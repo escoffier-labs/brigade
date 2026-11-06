@@ -11,7 +11,7 @@ from typing import Any
 from . import memory_hub_client as hubc
 from .inbox_lock import InboxLockTimeout
 
-COMMANDS = ("status", "pull", "push", "import", "card", "proposals")
+COMMANDS = ("status", "pull", "push", "import", "card", "proposals", "mirror")
 # Another push, pull or proposal change holds the hub state lock (EX_TEMPFAIL).
 EXIT_BUSY = 75
 BUSY = "another memory hub push or pull is running in this workspace; try again when it finishes"
@@ -23,6 +23,7 @@ def register(memory_sub: argparse._SubParsersAction) -> None:
     )
     commands = hub.add_subparsers(dest="memory_hub_command", metavar="<memory-hub-command>", required=True)
     helps = {
+        "mirror": "Export readable hub cards as a disposable one-way Markdown mirror.",
         "status": "Show the hub memory mode, the hub's memory status, the replica, the spool and open proposals.",
         "pull": "Follow the hub log into this host's replica; a changed log_epoch rebuilds it.",
         "push": 'Publish changed local cards to the configured scope (needs [hub] mode = "sync").',
@@ -76,6 +77,10 @@ def register(memory_sub: argparse._SubParsersAction) -> None:
             continue
         command.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace with the [hub] config.")
         command.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+        if name == "mirror":
+            command.add_argument("--out", type=Path, required=True, help="Destination folder for generated notes.")
+            command.add_argument("--init", action="store_true", help="Initialize ownership in a non-empty folder.")
+            command.add_argument("--dry-run", action="store_true", help="Report changes without writing the mirror.")
         if name == "push":
             command.add_argument(
                 "--yes", action="store_true", help="Confirm the first publish into this scope after reading its count."
@@ -117,6 +122,8 @@ NO_NODE_CREDENTIAL = (
 def _unavailable(exc: hubc.HubUnavailable, *, json_output: bool) -> int:
     payload = {"ok": False, "hub": "unavailable", "reason": exc.reason}
     detail = f": {NO_NODE_CREDENTIAL}" if exc.reason == "no-node-credential" else ""
+    if exc.reason == "no-hub-configured":
+        detail = ": configure [fleet] hub_url and a node token, then [hub] mode and read_scopes"
     return _emit(
         payload, json_output=json_output, lines=[f"error: hub memory unavailable ({exc.reason}){detail}"], code=1
     )
@@ -383,7 +390,7 @@ def _replica_card(
         chunk = text[args.offset : args.offset + REPLICA_CHUNK]
         end = args.offset + len(chunk)
         following = end if end < len(text) else None
-    card = {
+    card: dict[str, Any] = {
         "scope": head.get("scope"),
         "card_id": args.card_id,
         "revision": head.get("revision"),
@@ -391,6 +398,8 @@ def _replica_card(
         "trust": head.get("trust"),
         "text": chunk,
         "next_offset": following,
+        # What the hub's own read carries. A replica pulled before these were kept lacks them.
+        **{name: head[name] for name in ("scan_state", "writer", "updated_at") if name in head},
     }
     return {"ok": True, "card": card, "log_epoch": replica.meta.get("log_epoch"), "source": "replica"}
 
@@ -445,6 +454,17 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
                 lines.append(f"- {item['proposal_id']}  {item['card_id']}  ({item['reason']})")
             return _emit(report, json_output=args.json, lines=lines)
         assert client is not None
+        if name == "mirror":
+            from . import memory_hub_mirror
+
+            report = memory_hub_mirror.mirror(
+                target, client, settings, args.out.expanduser(), init=args.init, dry_run=args.dry_run
+            )
+            lines = [f"memory hub mirror: {len(report['written'])} write(s), {len(report['deleted'])} deletion(s)"]
+            lines += [f"write: {name}" for name in report["written"]]
+            lines += [f"delete: {name}" for name in report["deleted"]]
+            lines += [f"skipped {reason}: {count}" for reason, count in report["skipped"].items()]
+            return _emit(report, json_output=args.json, lines=lines)
         if name == "pull":
             report = sync.pull(target, client, settings)
             lines = [
