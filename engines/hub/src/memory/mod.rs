@@ -58,6 +58,13 @@ const STATUS_SCOPES_MAX: usize = 64;
 /// How long `search` with `min_seq` waits for the index to reach it.
 pub const MIN_SEQ_WAIT: Duration = Duration::from_millis(500);
 /// The embedding scheduler's wait after an empty lease, doubled up to the max.
+/// Status and search reason when every embeddable card parked and none has a vector.
+/// A wrong row count is parked per document (`vector-invalid`), so an endpoint that
+/// always miscounts parks the whole corpus. Treating a run of them across distinct
+/// documents as an endpoint fault needs a shared window in the lease path. Add it
+/// when a second cause of an endpoint-wide refusal shows up. Until then `memory
+/// reindex` requeues the parked documents once the endpoint is fixed.
+const ALL_FAILED: &str = "all-embeddings-failed";
 const IDLE_MIN: Duration = Duration::from_secs(1);
 const IDLE_MAX: Duration = Duration::from_secs(30);
 /// Actions in the route table that later slices build.
@@ -242,6 +249,7 @@ impl Store {
             covered: 0,
             eligible: live,
             total: live,
+            failed: 0,
         };
         Ok(())
     }
@@ -522,8 +530,14 @@ impl Store {
                     json!({"mode": "hybrid", "effective": "lexical-fallback", "state": "degraded", "reason": reason, "endpoint_host": url::Url::parse(&runtime.config.endpoint).ok().and_then(|u| u.host_str().map(String::from)), "breaker_open": runtime.breaker_open()})
                 }
                 None => {
-                    let complete = self.coverage.read().unwrap().complete();
-                    json!({"mode": "hybrid", "effective": if complete { "hybrid" } else { "lexical" }, "state": if complete { "ok" } else { "switching" }})
+                    let coverage = *self.coverage.read().unwrap();
+                    if coverage.all_failed() {
+                        // Every embeddable card parked and none has a vector.
+                        json!({"mode": "hybrid", "effective": "lexical-fallback", "state": "degraded", "reason": ALL_FAILED})
+                    } else {
+                        let complete = coverage.complete();
+                        json!({"mode": "hybrid", "effective": if complete { "hybrid" } else { "lexical" }, "state": if complete { "ok" } else { "switching" }})
+                    }
                 }
             },
         };
@@ -956,7 +970,8 @@ impl Store {
             return reply;
         }
         if let Some(runtime) = &self.retrieval {
-            if let Some(reason) = runtime.reason() {
+            let all_failed = self.coverage.read().unwrap().all_failed();
+            if let Some(reason) = runtime.reason().or(all_failed.then_some(ALL_FAILED)) {
                 reply.body["retrieval"]["mode"] = json!("lexical-fallback");
                 reply.body["retrieval"]["effective"] = json!("lexical-fallback");
                 reply.body["retrieval"]["degraded"] = json!(true);

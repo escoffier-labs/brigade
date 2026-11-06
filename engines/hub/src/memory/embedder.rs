@@ -103,7 +103,12 @@ impl Config {
                 .map(|n| n as usize)
                 .ok_or_else(|| format!("invalid memory.embedder.{k}"))
         };
-        let pull = v["pull"].as_bool().unwrap_or(false);
+        // Like `retrieval`, a value of the wrong type is a typo, never a default.
+        let pull = match v.get("pull") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err("memory.embedder.pull must be true or false".into()),
+        };
         let endpoint = v["query_endpoint"]
             .as_str()
             .or_else(|| v["endpoint"].as_str())

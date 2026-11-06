@@ -111,7 +111,13 @@ configured fingerprint covers every embeddable live head. Status reports
 switching during the backfill, with `coverage` fields `cards`, `eligible`,
 `unembeddable` and `total`. A card is unembeddable when its scan receipt is
 not clean, or when its job is parked. Unembeddable cards are answered by BM25
-alone and do not hold the switch to hybrid. In hybrid answers, `match_count`
+alone and do not hold the switch to hybrid, with one exception. When no card
+has a vector and every card that could be embedded has parked on an embedding
+failure, which is what an endpoint that always answers the wrong row count
+produces, status reports `degraded` with reason `all-embeddings-failed` and
+searches answer from BM25 alone. A card parked by a scan verdict does not count
+as a failure. Run `memory reindex` once the endpoint is fixed to requeue the
+parked documents. In hybrid answers, `match_count`
 and `truncated` keep their lexical meaning. A failed embedding leaves the lexical index
 available. Changing back to lexical and restarting leaves vectors on disk,
 and loads none of them.

@@ -554,6 +554,70 @@ async fn lease_that_parks_the_last_job_refreshes_coverage_without_a_later_write(
 }
 
 #[tokio::test]
+async fn a_corpus_parked_by_embedding_failures_is_degraded_and_searches_lexically() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = setup(&mut h);
+    h.put(ADMIN_TOKEN, "fleet", "one", None, "searchable apple")
+        .await;
+    h.put(ADMIN_TOKEN, "fleet", "two", None, "searchable pear")
+        .await;
+    // An endpoint that always answers the wrong row count: every document
+    // fails with `vector-invalid` until it parks.
+    for _ in 0..(2 * embedding::MAX_ATTEMPTS) {
+        h.set_clock(h.now() + 3_600_001);
+        let lease = command(&h, json!({"action": "embed_lease", "embedder_id": id})).await;
+        let jobs = lease.body["jobs"].as_array().unwrap();
+        if jobs.is_empty() {
+            continue;
+        }
+        let failures: Vec<_> = jobs
+            .iter()
+            .map(|j| json!({"content_hash": j["content_hash"], "reason": "vector-invalid", "alone": jobs.len() == 1}))
+            .collect();
+        let reply = command(&h, json!({"action": "embed_failed", "lease_id": lease.body["lease_id"], "failures": failures})).await;
+        assert_eq!(reply.status, 200, "{reply:?}");
+    }
+    assert_eq!(
+        rows(&h, "SELECT count(*) FROM memory_embed_jobs WHERE state='failed' AND last_error='vector-invalid'").await,
+        2
+    );
+    let status = h.store.as_ref().unwrap().retrieval_status();
+    assert_eq!(status["state"], "degraded", "{status}");
+    assert_eq!(status["effective"], "lexical-fallback");
+    assert_eq!(status["reason"], "all-embeddings-failed");
+    assert_eq!(status["coverage"]["cards"], 0);
+    let found = h
+        .call(ADMIN_TOKEN, json!({"action": "search", "query": "apple"}))
+        .await;
+    assert_eq!(found.status, 200);
+    assert_eq!(
+        found.body["retrieval"]["mode"], "lexical-fallback",
+        "{found:?}"
+    );
+    assert_eq!(found.body["retrieval"]["degraded"], true);
+    assert_eq!(found.body["retrieval"]["reason"], "all-embeddings-failed");
+    assert_eq!(found.body["matches"].as_array().unwrap().len(), 1);
+    // The operator's reindex requeues the parked documents. Once one has a
+    // vector the corpus is hybrid again, with the other left to BM25.
+    assert_eq!(
+        command(&h, json!({"action": "reindex"})).await.body["queued"],
+        2
+    );
+    let lease = command(
+        &h,
+        json!({"action": "embed_lease", "embedder_id": id, "max": 1}),
+    )
+    .await;
+    let jobs = lease.body["jobs"].as_array().unwrap();
+    let vectors =
+        json!([{"content_hash": jobs[0]["content_hash"], "vector": encoded(&[1.0, 0.0])}]);
+    assert_eq!(command(&h, json!({"action": "embed_submit", "lease_id": lease.body["lease_id"], "model_digest": "fake-digest", "vectors": vectors})).await.status, 200);
+    let status = h.store.as_ref().unwrap().retrieval_status();
+    assert_ne!(status["reason"], "all-embeddings-failed", "{status}");
+    assert_ne!(status["state"], "degraded", "{status}");
+}
+
+#[tokio::test]
 async fn a_reported_batch_backs_off_each_document_the_worker_already_tried_alone() {
     let mut h = Hub::with(scan::bundled(), None);
     let id = setup(&mut h);

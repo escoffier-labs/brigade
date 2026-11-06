@@ -74,10 +74,22 @@ pub struct Coverage {
     /// Live cards that can be embedded: a vector, or clean and not parked.
     pub eligible: usize,
     pub total: usize,
+    /// Clean live cards with no vector whose job parked on an embedding
+    /// failure. A scan verdict (`content-flagged`, `content-blocked`) is a
+    /// policy decision about one card and is not counted here.
+    pub failed: usize,
 }
 impl Coverage {
+    /// Every embeddable card has a vector. Parked cards do not hold hybrid
+    /// back, except when no card has a vector and the only candidates left
+    /// are parked failures: that is the endpoint failing, not a few bad
+    /// documents, so hybrid has nothing to rank with.
     pub fn complete(&self) -> bool {
-        self.covered >= self.eligible
+        self.covered >= self.eligible && !self.all_failed()
+    }
+    /// No vector exists and every embeddable card parked on a failure.
+    pub fn all_failed(&self) -> bool {
+        self.covered == 0 && self.eligible == 0 && self.failed > 0
     }
     pub fn json(&self) -> Json {
         json!({"cards": self.covered, "eligible": self.eligible, "unembeddable": self.total - self.eligible, "total": self.total})
@@ -461,10 +473,11 @@ pub fn apply(
     }
 }
 pub fn coverage(tx: &dyn ReadTx, id: &str) -> rusqlite::Result<Coverage> {
-    let rows = tx.query("SELECT count(*),COALESCE(sum(v),0),COALESCE(sum(v OR (scan_state='clean' AND NOT parked)),0) FROM (SELECT r.scan_state,EXISTS(SELECT 1 FROM memory_vectors x WHERE x.content_hash=c.content_hash AND x.embedder_id=?1 AND x.normalizer_version=1) AS v,EXISTS(SELECT 1 FROM memory_embed_jobs j WHERE j.content_hash=c.content_hash AND j.embedder_id=?1 AND j.state='failed') AS parked FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.state='live')", &[t(id)])?;
+    let rows = tx.query("SELECT count(*),COALESCE(sum(v),0),COALESCE(sum(v OR (scan_state='clean' AND NOT parked)),0),COALESCE(sum(NOT v AND scan_state='clean' AND broken),0) FROM (SELECT r.scan_state,EXISTS(SELECT 1 FROM memory_vectors x WHERE x.content_hash=c.content_hash AND x.embedder_id=?1 AND x.normalizer_version=1) AS v,EXISTS(SELECT 1 FROM memory_embed_jobs j WHERE j.content_hash=c.content_hash AND j.embedder_id=?1 AND j.state='failed') AS parked,EXISTS(SELECT 1 FROM memory_embed_jobs j WHERE j.content_hash=c.content_hash AND j.embedder_id=?1 AND j.state='failed' AND COALESCE(j.last_error,'') NOT IN ('content-flagged','content-blocked')) AS broken FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.state='live')", &[t(id)])?;
     Ok(Coverage {
         covered: n(&rows[0][1]) as usize,
         eligible: n(&rows[0][2]) as usize,
         total: n(&rows[0][0]) as usize,
+        failed: n(&rows[0][3]) as usize,
     })
 }

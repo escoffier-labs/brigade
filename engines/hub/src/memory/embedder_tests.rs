@@ -762,6 +762,29 @@ async fn retrieval_that_is_present_but_not_a_string_is_a_config_error() {
 }
 
 #[tokio::test]
+async fn embedder_pull_that_is_present_but_not_a_bool_is_a_config_error() {
+    let mut hub = Hub::new();
+    let store = hub.store.as_mut().unwrap();
+    let hybrid = |pull: serde_json::Value| json!({"retrieval": "hybrid", "embedder": {"backend": "remote", "endpoint": "http://127.0.0.1:1/api/embed", "allowlist": ["http://127.0.0.1:1/api/embed"], "token_file": "/nonexistent", "shape": "api/embed", "name": "m", "model_digest": "d", "dimensions": 2, "input_chars": 6000, "query_prefix_version": 1, "pull": pull}});
+    for pull in [
+        json!("true"),
+        json!(1),
+        json!(null),
+        json!(["true"]),
+        json!({}),
+    ] {
+        let error = store
+            .configure_retrieval(&hybrid(pull.clone()))
+            .unwrap_err();
+        assert!(error.contains("embedder.pull"), "{pull}: {error}");
+    }
+    // Lexical mode still ignores an unused embedder table.
+    store
+        .configure_retrieval(&json!({"retrieval": "lexical", "embedder": {"pull": "yes"}}))
+        .unwrap();
+}
+
+#[tokio::test]
 async fn local_backend_refuses_a_public_https_endpoint_even_when_allowlisted() {
     let local = |endpoint: &str| {
         let mut c = config(endpoint.into());
