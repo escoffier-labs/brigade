@@ -53,12 +53,13 @@ class Scan(Fixture):
         return {**base, "summary": "", "tags": ["release"], "card_aliases": [card_id], **fields}
 
 
-class TestRemoteProfiles(Scan):
-    def test_both_profiles_scan_and_every_profile_does(self):
-        assert DOT.prompt_load_scan and DUET.prompt_load_scan and GROKBOT_MEMORY.prompt_load_scan
-        # A new profile serves a remote audience too: it must opt in on purpose, not by omission.
-        assert all(profile.prompt_load_scan for profile in PROFILES.values())
+def test_both_profiles_scan_and_every_profile_does():
+    assert DOT.prompt_load_scan and DUET.prompt_load_scan and GROKBOT_MEMORY.prompt_load_scan
+    # A new profile serves a remote audience too: it must opt in on purpose, not by omission.
+    assert all(profile.prompt_load_scan for profile in PROFILES.values())
 
+
+class TestRemoteProfiles(Scan):
     @requires_local_state
     def test_memory_card_returns_text_only_for_a_clean_card(self):
         for name, (text, _rule, _code) in CARDS.items():
