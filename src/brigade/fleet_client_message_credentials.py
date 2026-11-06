@@ -64,8 +64,11 @@ class FleetMessageHubError(fleet_client.FleetClientError):
         self.code = code if isinstance(code, str) and code in MESSAGE_CODES else None
 
 
-def read_message_token_file(path: str) -> str:
-    """Read a bounded private regular file without following its final symlink."""
+def read_message_token_file(path: str, *, label: str = "message") -> str:
+    """Read a bounded private regular file without following its final symlink.
+
+    `label` names the credential in the refusal; the checks do not change.
+    """
     fd = None
     try:
         # NONBLOCK prevents a hostile FIFO from blocking before fstat rejects it.
@@ -94,7 +97,7 @@ def read_message_token_file(path: str) -> str:
         return token
     except (OSError, ValueError, UnicodeError):
         raise FleetMessageHubError(
-            "message token file must be a private, owned regular file containing a valid token",
+            f"{label} token file must be a private, owned regular file containing a valid token",
             code="token_file_invalid",
         ) from None
     finally:

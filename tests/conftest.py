@@ -146,6 +146,9 @@ def _no_live_fleet_hub(monkeypatch):
     monkeypatch.delenv("BRIGADE_FLEET_HUB_URL", raising=False)
     monkeypatch.delenv("BRIGADE_FLEET_TOKEN", raising=False)
     monkeypatch.delenv("BRIGADE_FLEET_NODE_TOKEN", raising=False)
+    # A memory hub override (#2318) would send memory traffic to a live hub too.
+    monkeypatch.delenv("BRIGADE_MEMORY_HUB_URL", raising=False)
+    monkeypatch.delenv("BRIGADE_MEMORY_HUB_TOKEN_FILE", raising=False)
 
 
 @pytest.fixture(autouse=True)
