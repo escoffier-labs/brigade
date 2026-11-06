@@ -846,3 +846,62 @@ fn commit_histogram_has_sum() {
     assert_eq!(metric(&text, "writer_commit_duration_seconds_count"), 2.0);
     assert!((metric(&text, "writer_commit_duration_seconds_sum") - 0.023).abs() < 1e-9);
 }
+
+#[test]
+fn durable_commands_run_ahead_of_queued_ordinary_work() {
+    // Three ordinary maximum-size commands queue ahead of one claim-sized
+    // durable command. Each ordinary command fills a batch on its own, so FIFO
+    // order would commit the durable command fourth.
+    let path = fixture();
+    let arbiter = Arc::new(Arbiter::default());
+    let (sender, receiver) = mpsc::channel(100);
+    let mut replies = Vec::new();
+    for (value, durable) in [
+        ("first", false),
+        ("second", false),
+        ("third", false),
+        ("claim", true),
+    ] {
+        if durable {
+            arbiter.durable(1);
+        }
+        let (reply, answer) = oneshot::channel();
+        let sql: &'static str =
+            Box::leak(format!("INSERT INTO rows(value) VALUES('{value}')").into_boxed_str());
+        sender
+            .try_send(Envelope {
+                command: Box::new(Sql(sql)),
+                budget: Budget {
+                    bytes: if durable { 100 } else { 8 * 1024 * 1024 },
+                    ..budget(durable)
+                },
+                reply: Some(reply),
+                _permits: vec![],
+                arbiter: arbiter.clone(),
+            })
+            .unwrap_or_else(|_| panic!("queue"));
+        replies.push(answer);
+    }
+    drop(sender);
+    let stats = Arc::new(WriterStats::default());
+    worker::run(
+        worker::open(&path).unwrap(),
+        receiver,
+        Config::new(path.clone()),
+        arbiter,
+        stats.clone(),
+    );
+    for reply in replies {
+        assert!(reply.blocking_recv().unwrap().is_ok());
+    }
+    let db = Connection::open(&path).unwrap();
+    let order: Vec<String> = db
+        .prepare("SELECT value FROM rows ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(order, ["claim", "first", "second", "third"]);
+    assert_eq!(stats.snapshot().queue_depth, 0);
+}

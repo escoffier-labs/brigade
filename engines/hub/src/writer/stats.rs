@@ -3,7 +3,7 @@
 //! never per command. The gauges hold the last batch the thread finished.
 use crate::telemetry::QueueProbe;
 use std::{
-    sync::atomic::{AtomicU64, Ordering::Relaxed},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed},
     time::Duration,
 };
 
@@ -34,6 +34,8 @@ const COMMIT_BOUNDS: [f64; 21] = [
 #[derive(Default)]
 pub struct WriterStats {
     queue: Option<QueueProbe>,
+    /// Envelopes the worker took off the channel to order them by class.
+    backlog: AtomicUsize,
     batch_size: AtomicU64,
     apply_nanos: AtomicU64,
     commit_nanos: AtomicU64,
@@ -65,6 +67,10 @@ impl WriterStats {
             queue: Some(queue),
             ..Self::default()
         }
+    }
+    /// Stored once per batch start and end, like the other gauges.
+    pub(super) fn backlog(&self, held: usize) {
+        self.backlog.store(held, Relaxed);
     }
     /// Time from taking a command off the queue to holding the hub write lock,
     /// the arbiter turn and the BEGIN retries included. Recorded when the lock
@@ -108,7 +114,8 @@ impl WriterStats {
     }
     pub fn snapshot(&self) -> WriterSnapshot {
         WriterSnapshot {
-            queue_depth: self.queue.as_ref().map_or(0, |depth| depth()),
+            queue_depth: self.queue.as_ref().map_or(0, |depth| depth())
+                + self.backlog.load(Relaxed),
             batch_size: self.batch_size.load(Relaxed),
             apply_seconds: seconds(&self.apply_nanos),
             commit_seconds: seconds(&self.commit_nanos),

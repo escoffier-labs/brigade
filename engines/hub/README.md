@@ -305,7 +305,9 @@ clock with the managed Python upstream. This flag is for throwaway fixtures.
 is refused until a heartbeat shadow audit exists. The native commands share
 one hub-file writer with registration, claims and messages. Event and session
 admission is non-durable, with the durable queue reserve left for claims and
-credentials. Every commit still uses `FULL`.
+credentials. Every batch takes queued durable commands first, so a claim waits
+for the batch in flight rather than every heartbeat ahead of it. Each class
+stays in arrival order. Every commit still uses `FULL`.
 
 An event object or an array of up to 1,000 events validates before insertion.
 Dedupe keys, receipt timestamps, optional fields and `run.failed` outbox rows

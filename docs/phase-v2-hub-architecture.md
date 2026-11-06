@@ -452,7 +452,9 @@ loop:
   writes use D23.
 - Durable commands: claim acquire, renew and release, fence updates, node add
   and revoke, principal add, grant and revoke. The writer queue keeps 512 of
-  its 4,096 slots for them, so event floods cannot crowd them out. A durable
+  its 4,096 slots for them, so event floods cannot crowd them out. Each batch
+  takes queued durable commands before ordinary ones, so a claim waits for the
+  batch in flight, not for every event batch queued ahead of it. A durable
   command is never shed with 503. If it cannot get a slot or its deadline
   passes, it gets `504 {"error": "hub busy", "reason": "writer-timeout"}`,
   which a v1 claim client handles like an unreachable hub.

@@ -1,6 +1,7 @@
 use super::*;
 use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::{
+    collections::VecDeque,
     panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
 };
@@ -187,6 +188,44 @@ fn apply(db: &Connection, e: &Envelope) -> Answer {
     result.map(|(value, _)| value)
 }
 
+/// Envelopes taken off the channel, split by admission class. Batches take
+/// durable work (claims, messages, registration) first, so a claim waits for
+/// at most the batch in flight instead of every ordinary command queued ahead
+/// of it. Each class stays FIFO. Admission still bounds both queues: an
+/// envelope keeps its slot and byte permits until it is answered.
+#[derive(Default)]
+struct Backlog {
+    durable: VecDeque<Envelope>,
+    ordinary: VecDeque<Envelope>,
+}
+impl Backlog {
+    fn class(&mut self, e: &Envelope) -> &mut VecDeque<Envelope> {
+        if e.budget.durable {
+            &mut self.durable
+        } else {
+            &mut self.ordinary
+        }
+    }
+    fn drain(&mut self, receiver: &mut mpsc::Receiver<Envelope>) {
+        while let Ok(e) = receiver.try_recv() {
+            self.class(&e).push_back(e);
+        }
+    }
+    fn next(&mut self, receiver: &mut mpsc::Receiver<Envelope>) -> Option<Envelope> {
+        self.drain(receiver);
+        self.durable
+            .pop_front()
+            .or_else(|| self.ordinary.pop_front())
+    }
+    /// A command that did not fit the batch goes back to the head of its class.
+    fn defer(&mut self, e: Envelope) {
+        self.class(&e).push_front(e);
+    }
+    fn len(&self) -> usize {
+        self.durable.len() + self.ordinary.len()
+    }
+}
+
 pub(super) fn run(
     mut db: Connection,
     mut receiver: mpsc::Receiver<Envelope>,
@@ -194,10 +233,14 @@ pub(super) fn run(
     arbiter: Arc<Arbiter>,
     stats: Arc<WriterStats>,
 ) {
-    let mut pending = None;
+    let mut backlog = Backlog::default();
     let mut directory_synced = false;
     let mut version = crate::schema::DataVersion::new(&db).ok();
-    while let Some(first) = pending.take().or_else(|| receiver.blocking_recv()) {
+    while let Some(first) = backlog
+        .next(&mut receiver)
+        .or_else(|| receiver.blocking_recv())
+    {
+        stats.backlog(backlog.len());
         let dequeued = Instant::now();
         let lock_deadline = (Instant::now() + config.begin_wait.min(Duration::from_secs(5)))
             .min(first.budget.deadline);
@@ -244,7 +287,7 @@ pub(super) fn run(
                     || bytes + e.budget.bytes > 8 * 1024 * 1024
                     || started.elapsed() >= Duration::from_millis(50))
             {
-                pending = Some(e);
+                backlog.defer(e);
                 break;
             }
             events += e.budget.events;
@@ -277,8 +320,9 @@ pub(super) fn run(
             } else {
                 batch.push((e, result));
             }
-            next = receiver.try_recv().ok();
+            next = backlog.next(&mut receiver);
         }
+        stats.backlog(backlog.len());
         let applied = started.elapsed();
         let commit_started = Instant::now();
         let committed = !broken && db.execute_batch("COMMIT").is_ok();
@@ -308,9 +352,10 @@ pub(super) fn run(
                 }
                 Err(_) => {
                     receiver.close();
-                    if let Some(e) = pending.take() {
+                    for e in backlog.durable.drain(..).chain(backlog.ordinary.drain(..)) {
                         answer(e, Err(Failure::storage("storage-error")));
                     }
+                    stats.backlog(0);
                     while let Some(e) = receiver.blocking_recv() {
                         answer(e, Err(Failure::storage("storage-error")));
                     }
