@@ -411,6 +411,7 @@ def build_plan(sources: list[tuple[Path, str]], heads: Heads, *, update: bool) -
     """One Item per note, in path order. The same call plans the dry run and the real run."""
     notes = [_read(path, rel) for path, rel in sources]
     owners = Counter(note.card_id for note in notes if note.item is None)
+    masked = _masked_collision_ids(notes, owners)
     seen: set[str] = set()
     items: list[Item] = []
     for note in notes:
@@ -424,8 +425,8 @@ def build_plan(sources: list[tuple[Path, str]], heads: Heads, *, update: bool) -
         retired = heads.retired.get(card_id)
         if owners[card_id] > 1:
             item.action = "collision"
-            if note.frontmatter_id:
-                _show_id_if_clean(item)
+            if card_id in masked:
+                item.card_id = None
         elif head is not None and card_id not in heads.head_hash:
             # No event of this card carries a hash, so "changed" could not be told from "unchanged".
             item.action, item.reason = "unknown-head", "head-without-content-hash"
@@ -448,17 +449,40 @@ def build_plan(sources: list[tuple[Path, str]], heads: Heads, *, update: bool) -
     return items
 
 
-def _show_id_if_clean(item: Item) -> None:
-    """Keep the id in the report only when it scans clean on its own, since the id itself may be a finding."""
-    if item.card_id and scanner.scan_verdict([item.card_id])[0] != scanner.CLEAN:
-        item.card_id = None
+def _id_scans_clean(card_id: str) -> bool:
+    return scanner.scan_verdict([card_id])[0] == scanner.CLEAN
+
+
+def _body_trips_a_rule(text: str) -> bool:
+    return scanner.scan_verdict([hubc.normalize_text(text)])[0] in {scanner.BLOCKED, scanner.FLAGGED}
+
+
+def _masked_collision_ids(notes: list[_Note], owners: Counter[str | None]) -> set[str]:
+    """Colliding frontmatter ids the report must not show.
+
+    Collisions are decided before the scan, and a context rule can fire on an
+    `id:` line only beside the body (a long id with "decode" nearby), so the id is
+    masked when it is not clean alone or when any colliding note's body is blocked or flagged.
+    """
+    groups: dict[str, list[_Note]] = {}
+    for note in notes:
+        if note.item is None and owners[note.card_id] > 1:
+            groups.setdefault(str(note.card_id), []).append(note)
+    return {
+        card_id
+        for card_id, group in groups.items()
+        if any(note.frontmatter_id for note in group)
+        and (not _id_scans_clean(card_id) or any(_body_trips_a_rule(note.text) for note in group))
+    }
 
 
 def _scan(item: Item, text: str) -> None:
     verdict, rules = scanner.scan_verdict([hubc.normalize_text(text)])
     if verdict in {scanner.BLOCKED, scanner.FLAGGED}:
         item.action, item.rules = verdict, rules
-        _show_id_if_clean(item)
+        # The id may be what tripped a rule, alone or beside the body, so a frontmatter id is never shown.
+        if item.frontmatter_id:
+            item.card_id = None
     elif verdict == scanner.PRIVATE:
         item.scan, item.rules = "private", rules
     else:

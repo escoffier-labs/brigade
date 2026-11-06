@@ -449,7 +449,8 @@ def test_a_blocked_note_never_shows_its_frontmatter_id(hub, tmp_path, capsys):
     notes = notes_of(rows)
     assert code == 0 and sentinel not in out + err and shared not in out + err
     assert (notes["tripped.md"]["action"], notes["tripped.md"]["card_id"]) == ("blocked", None)
-    assert (notes["fine-id.md"]["action"], notes["fine-id.md"]["card_id"]) == ("blocked", "clean-id")
+    # A frontmatter id is hidden whenever the note's own body is blocked, even if the id is clean alone.
+    assert (notes["fine-id.md"]["action"], notes["fine-id.md"]["card_id"]) == ("blocked", None)
     for name in ("dup-a.md", "dup-b.md"):  # collisions are decided before the scan, so the id is checked on its own
         assert (notes[name]["action"], notes[name]["card_id"]) == ("collision", None)
     for name in ("tpl-a.md", "tpl-b.md"):  # a clean shared id is still shown
@@ -462,6 +463,33 @@ def test_a_blocked_note_never_shows_its_frontmatter_id(hub, tmp_path, capsys):
     assert "- tripped.md  -  blocked  " in text and "- fine-id.md  -  blocked  " in text
     assert "- dup-a.md  -  collision" in text and "- dup-b.md  -  collision" in text
     assert "- tpl-a.md  tpl  collision" in text
+
+
+def test_a_context_rule_that_fires_on_the_id_line_hides_the_id_for_flagged_notes_and_collisions(hub, tmp_path, capsys):
+    long_id = "a1" * 45  # 90 alphanumerics: clean alone, but base64-decode-chain fires when "decode" follows
+    twin_id = "b2" * 45
+    assert scanner.scan_verdict([long_id])[0] == scanner.CLEAN
+    vault = make_vault(
+        tmp_path / "vault",
+        {
+            "flagged.md": f"---\nid: {long_id}\nnote: decode\n---\n# F\n",
+            "twin-a.md": f"---\nid: {twin_id}\nnote: decode\n---\n# A\n",
+            "twin-b.md": f"---\nid: {twin_id}\n---\n# B\n",  # clean body, but its twin's body is flagged
+        },
+    )
+    code, rows, out, err = import_cli(tmp_path, capsys, "--dry-run", str(vault))
+    notes = notes_of(rows)
+    assert code == 0 and long_id not in out + err and twin_id not in out + err
+    assert (notes["flagged.md"]["action"], notes["flagged.md"]["card_id"]) == ("flagged", None)
+    assert notes["flagged.md"]["rules"] == ["base64-decode-chain"]
+    for name in ("twin-a.md", "twin-b.md"):
+        assert (notes[name]["action"], notes[name]["card_id"]) == ("collision", None)
+    target = workspace(tmp_path / "ws", mode="read")
+    code, text, err = run(
+        ["memory", "hub", "import", "--target", str(target), "--scope", SCOPE, "--dry-run", str(vault)], capsys
+    )
+    assert long_id not in text + err and twin_id not in text + err
+    assert "- flagged.md  -  flagged  " in text and "- twin-a.md  -  collision" in text
 
 
 def test_an_import_with_only_a_private_class_id_shows_it_because_the_card_will_exist_under_it(hub, tmp_path, capsys):
