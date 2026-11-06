@@ -71,31 +71,40 @@ class MemoryTools:
                 if not _well_formed(item):
                     matches.append(_refused_match(item, {"blocked": MALFORMED_MATCH}))
                     continue
-                # A path that cannot be shown as a workspace-relative one is refused the same way.
-                relative = _relative_path(item.get("path"), self.workspace)
-                if relative is None and item.get("path") is not None:
-                    matches.append(_refused_match(item, {"blocked": MALFORMED_MATCH}))
-                    continue
-                item["path"] = relative
+                source = item.get("source")
+                if source is not None and source != "local":
+                    # A hub or replica match: the hub's own path is free text, so it is rebuilt from the card id.
+                    item["path"] = _hub_card_path(item.get("card_id"))
+                else:
+                    # A path that cannot be shown as a workspace-relative one is refused the same way.
+                    relative = _relative_path(item.get("path"), self.workspace)
+                    if relative is None and item.get("path") is not None:
+                        matches.append(_refused_match(item, {"blocked": MALFORMED_MATCH}))
+                        continue
+                    item["path"] = relative
                 # The returned path and hub scope are scanned too: a file name or scope can carry the text.
                 refusal = egress_refusal([*_card_texts(item), *_location_texts(item)])
                 if refusal:
                     matches.append(_refused_match(item, refusal))
                     continue
                 _keep_known_hub_labels(item)
+                if not _is_number(item.get("score")):
+                    item["score"] = None
             item["content_trust"] = "untrusted"
             matches.append(item)
+        match_count = value.get("match_count")
         payload = dict(
             query=query,
-            match_count=value.get("match_count"),
+            match_count=match_count if not self.profile.prompt_load_scan or _is_count(match_count) else None,
             matches=matches,
             workspace=str(self.workspace),
             next="Read a card with memory_card(name=<path basename without .md>).",
         )
         if self.profile.prompt_load_scan:
             # The directory name only: the absolute path is local configuration, and a home path is private text.
+            # A workspace that is the home directory is named by the user, so it gets no name.
             name = self.workspace.name
-            payload["workspace"] = name if egress_refusal([name]) is None else None
+            payload["workspace"] = None if _is_home(self.workspace) or egress_refusal([name]) else name
         if isinstance(value.get("retrieval"), dict):
             payload["next"] = (
                 "Read a card with memory_card(name=<path basename without .md>); "
@@ -146,7 +155,7 @@ class MemoryTools:
             # Hub JSON is returned beside the text, so each label is checked: a scope must be a valid
             # one that scans with the card, a revision an integer and a hash 64 hex digits.
             scope = scope if valid_scope(scope) else None
-            revision = revision if _is_revision(revision) else None
+            revision = revision if _is_count(revision) else None
             sha256 = sha256 if isinstance(sha256, str) and _SHA256.fullmatch(sha256) else None
             # The whole card is scanned, as for a local card.
             refusal = egress_refusal([text, *([scope] if scope else [])])
@@ -396,6 +405,9 @@ _TRUST_LEVELS = frozenset({"reviewed", "policy-promoted", "imported", "agent-unr
 _SOURCES = frozenset({"local", "hub", "replica"})
 _RETRIEVAL_HUB = frozenset({"ok", "unavailable", "refused"})
 _RETRIEVAL_MODES = frozenset({"lexical", "hybrid", "lexical-fallback"})
+# What a search can fail with: the client's own reasons, the 503 reasons the hub's memory route sends,
+# and the coded refusals `search` returns. Card, write and sync codes (for example
+# memory_card_not_found, memory_base_mismatch or memory_content_private) never come back from it.
 _RETRIEVAL_REASONS = frozenset(
     {
         "no-hub-configured",
@@ -405,30 +417,43 @@ _RETRIEVAL_REASONS = frozenset(
         "no-hub-memory",
         "hub-busy",
         "hub-config-invalid",
+        "memory-unavailable",
+        "memory-reader-timeout",
         "unauthorized",
         "memory_grant_missing",
-        "memory_card_not_found",
-        "memory_card_ambiguous",
-        "memory_request_invalid",
         "memory_query_invalid",
+        "memory_request_invalid",
         "memory_method_invalid",
-        "memory_action_unavailable",
-        "memory_unavailable",
-        "memory_epoch_changed",
-        "memory_scan_unavailable",
-        "memory_scan_failed",
     }
 )
 _HTTP_REASON = re.compile(r"http-[1-5][0-9]{2}")
 # A search warning leaves only as one of these codes, never the CLI's text (it embeds a hub reason).
 WARNING_HUB_REFUSED = "hub_search_refused"
 WARNING_HUB_UNAVAILABLE = "hub_search_unavailable"
-WARNING_REPLICA_INCOMPLETE = "replica_incomplete"
 WARNING_HUB_LIMIT = "hub_limit_capped"
 
 
-def _is_revision(value: object) -> bool:
+def _is_count(value: object) -> bool:
+    """A non-negative integer, as a revision or a match count is. A bool is not one."""
     return type(value) is int and value >= 0
+
+
+def _is_number(value: object) -> bool:
+    return type(value) in (int, float)
+
+
+def _is_home(path: Path) -> bool:
+    try:
+        return path == Path.home()
+    except (RuntimeError, KeyError):
+        return False
+
+
+def _hub_card_path(card_id: object) -> str | None:
+    """`cards/<card_id>.md` for a hub or replica match, only from a slug id that scans clean."""
+    if isinstance(card_id, str) and _SAFE_CARD_ID.fullmatch(card_id) and egress_refusal([card_id]) is None:
+        return f"cards/{card_id}.md"
+    return None
 
 
 def _relative_path(path: object, workspace: Path) -> str | None:
@@ -460,7 +485,7 @@ def _keep_known_hub_labels(item: dict[str, Any]) -> None:
     for key, known in (("source", _SOURCES), ("trust", _TRUST_LEVELS)):
         if key in item and not (isinstance(item[key], str) and item[key] in known):
             item[key] = None
-    if "revision" in item and not _is_revision(item["revision"]):
+    if "revision" in item and not _is_count(item["revision"]):
         item["revision"] = None
 
 
@@ -495,8 +520,6 @@ def _warning_code(warning: object, retrieval: dict[str, Any]) -> str | None:
         return WARNING_HUB_REFUSED
     if retrieval.get("hub") == "unavailable":
         return WARNING_HUB_UNAVAILABLE
-    if retrieval.get("replica_incomplete") is True:
-        return WARNING_REPLICA_INCOMPLETE
     return WARNING_HUB_LIMIT if "hub_limit" in retrieval else None
 
 

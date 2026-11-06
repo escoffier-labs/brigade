@@ -174,15 +174,16 @@ in a reduced form:
 
 | Field | What the connector receives |
 |---|---|
-| `memory_search` `workspace` | The workspace directory name only, never the absolute path. It is dropped if the name itself scans as private |
-| `memory_search` match `path` | Relative to the workspace. An absolute path inside the workspace is made relative. Any other absolute path, a drive or backslash path, an empty path or one that climbs out with `..` refuses the match as `malformed-match` |
+| `memory_search` `workspace` | The workspace directory name only, never the absolute path. It comes back as `null` when the workspace is the user's home directory or the name itself scans as private |
+| `memory_search` match `path` | For a local match, relative to the workspace. An absolute path inside the workspace is made relative. Any other absolute path, a drive or backslash path, an empty path or one that climbs out with `..` refuses the match as `malformed-match`. For a hub or replica match the hub's own path is never passed on: it is rebuilt as `cards/<card_id>.md`, or `null` when the id is not a plain slug that scans clean |
 | `memory_card` `path` | Relative to the workspace, as in `memory/cards/<name>.md` |
 | match `source`, `trust` | Only `local`, `hub` or `replica`, and only `reviewed`, `policy-promoted`, `imported`, `agent-unreviewed` or `flagged`. Any other value comes back as `null` |
 | match `revision`, hub card `revision` | A non-negative integer, else `null` |
+| match `score`, `match_count` | A number for `score` and a non-negative integer for `match_count`, else `null` |
 | match `scope`, hub card `scope` | A valid hub scope, else `null`. A hub card's scope is scanned with its text |
 | hub card `sha256` | 64 lowercase hex digits, else `null` |
-| `retrieval` | Only the keys `hub`, `degraded`, `stale`, `effective`, `reason`, `status`, `hub_limit`, `replica_incomplete` and `fallback`, each with its documented values. `reason` is one of the client's reason codes, a coded hub refusal such as `memory_grant_missing`, or `http-<status>`. An unknown key or value is dropped |
-| `warning` | One code, never the CLI's text, because that text embeds the hub's reason. In priority order: `hub_search_refused`, `hub_search_unavailable`, `replica_incomplete`, `hub_limit_capped`. It is left out when the checked `retrieval` shows none of them |
+| `retrieval` | Only the keys `hub`, `degraded`, `stale`, `effective`, `reason`, `status`, `hub_limit`, `replica_incomplete` and `fallback`, each with its documented values. `reason` is one of the client's reason codes, a reason the hub's memory route sends (`memory-unavailable`, `memory-reader-timeout`), a refusal a `search` can return (`unauthorized`, `memory_grant_missing`, `memory_query_invalid`, `memory_request_invalid`, `memory_method_invalid`), or `http-<status>`. Codes only card reads, writes or sync return, such as `memory_card_not_found` or `memory_base_mismatch`, are dropped like any unknown key or value |
+| `warning` | One code, never the CLI's text, because that text embeds the hub's reason. In priority order: `hub_search_refused`, `hub_search_unavailable`, `hub_limit_capped`. It is left out when the checked `retrieval` shows none of them. `retrieval.replica_incomplete` still reports an incomplete replica, which the CLI sets only while the hub is unavailable |
 
 Search scans the
 returned snippets, not the cards. Measured on one host, the scan costs about
