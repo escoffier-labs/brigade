@@ -3,9 +3,11 @@
 import base64
 import json
 import os
+import re
 import struct
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -89,16 +91,23 @@ def test_worker_lease_http_submit_normalizes_vectors(endpoint):
 
 def test_worker_pending_and_blocked_never_send(endpoint):
     config, seen = endpoint
-    for state in ("pending", "flagged"):
+    # scan-pending is transient, so that step counts as a fault that backs off. A
+    # flagged or blocked receipt is a refusal the hub can park.
+    for state, reason, fault in (("pending", "scan-pending", True), ("flagged", "content-blocked", False)):
         client = Client(state)
-        # scan-pending is a transient reason, so the step counts as a fault that backs off.
-        assert embed.step(client, config, "fake-token") == (1, 0, True)
+        assert embed.step(client, config, "fake-token") == (1, 0, fault)
         action, fields = client.calls[-1]
         assert action == "embed_failed"
-        assert fields["failures"] == [{"content_hash": "0" * 64, "reason": "scan-pending"}]
+        assert fields["failures"] == [{"content_hash": "0" * 64, "reason": reason}]
     with pytest.raises(ValueError, match="payload refused"):
         embed.local_embed(config, [" ".join(["-----BEGIN", "PRIVATE KEY-----"])], "fake-token")
     assert seen == []
+
+
+def test_transient_reasons_match_the_hub():
+    source = (Path(__file__).resolve().parents[1] / "engines/hub/src/memory/embedding.rs").read_text(encoding="utf-8")
+    block = source.split("const TRANSIENT: &[&str] = &[", 1)[1].split("];", 1)[0]
+    assert set(re.findall(r'"([a-z-]+)"', block)) == set(embed.TRANSIENT_REASONS)
 
 
 def test_worker_rejects_remote_endpoint_and_digest_swap(endpoint):

@@ -229,9 +229,14 @@ def step(client: hubc.MemoryHubClient, config: dict, token: str) -> tuple[int, i
         return 0, 0, False
     if lease.get("model_digest") != config["model_digest"] or lease.get("dimensions") != config["dimensions"]:
         raise ValueError("lease identity mismatch")
-    # Only clean receipts may leave the host. Anything else goes back unsent.
+    # Only clean receipts may leave the host. Anything else goes back unsent. A
+    # pending scan is transient, while a flagged or blocked receipt is reported
+    # as content-blocked so the hub parks it instead of releasing it forever.
     failures = [
-        {"content_hash": job["content_hash"], "reason": "scan-pending"}
+        {
+            "content_hash": job["content_hash"],
+            "reason": "scan-pending" if job.get("scan_state") in (None, "pending") else "content-blocked",
+        }
         for job in jobs
         if job.get("scan_state") != "clean"
     ]
