@@ -114,6 +114,16 @@ def _selector_exempt(text: str, index: int) -> bool:
 
 
 _BUNDLE = json.loads(files("brigade.guard").joinpath("memory-rules.json").read_text(encoding="utf-8"))
+NFKC_UNICODE = "14.0.0"
+
+
+def _check_nfkc_pin(bundle: dict) -> None:
+    """Refuse a bundle whose NFKC table is not the Unicode version the parity tests cover."""
+    if bundle["nfkc"]["unicode"] != NFKC_UNICODE:
+        raise ValueError(f"memory scan bundle pins Unicode {bundle['nfkc']['unicode']}, expected {NFKC_UNICODE}")
+
+
+_check_nfkc_pin(_BUNDLE)
 
 
 def _assigned_run(spec: str) -> re.Pattern[str]:

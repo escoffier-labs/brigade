@@ -115,16 +115,16 @@ fn expanding_compatibility_runs_stay_scannable() {
     let scanner = scan::bundled();
     assert!(scanner.describe().0);
     let size = 512 * 1024;
-    for (name, unit) in [
-        ("arabic-ligature", "\u{fdfa}"),
-        ("square-unit", "\u{3392}"),
-        ("latin-ligature", "\u{fb03}"),
-        ("parenthesized-digit", "\u{2474}"),
-        ("math-bold-letters", "\u{1d41a}"),
-        ("digit-full-stop", "\u{2488}"),
-        ("number-ten-full-stop", "\u{2491}"),
-        ("telephone-sign", "\u{2121}"),
-        ("trade-mark-sign", "\u{2122}"),
+    for (name, unit, alone) in [
+        ("arabic-ligature", "\u{fdfa}", "clean"),
+        ("square-unit", "\u{3392}", "clean"),
+        ("latin-ligature", "\u{fb03}", "clean"),
+        ("parenthesized-digit", "\u{2474}", "clean"),
+        ("math-bold-letters", "\u{1d41a}", "clean"),
+        ("digit-full-stop", "\u{2488}", "clean"),
+        ("number-ten-full-stop", "\u{2491}", "private"),
+        ("telephone-sign", "\u{2121}", "clean"),
+        ("trade-mark-sign", "\u{2122}", "clean"),
     ] {
         let padding = unit.repeat(size / unit.len() - 64);
         for (position, text) in [
@@ -150,13 +150,13 @@ fn expanding_compatibility_runs_stay_scannable() {
                 "{name}/{position} took {elapsed:.1} seconds"
             );
             // U+2491 expands to "10." and the repeated run reads as a private
-            // address, so padding alone may scan private. Never `failed`.
-            let ok = if position == "alone" {
-                matches!(result.state(), "clean" | "private")
+            // address. A payload after any padding flags.
+            let expected = if position == "alone" {
+                alone
             } else {
-                result.state() == "flagged"
+                "flagged"
             };
-            assert!(ok, "{name}/{position}: {result:?}");
+            assert_eq!(result.state(), expected, "{name}/{position}: {result:?}");
         }
     }
 }

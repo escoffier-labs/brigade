@@ -13,9 +13,9 @@ import re
 import sys
 import time
 import unicodedata
-from unittest import mock
 from importlib.resources import files
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -28,8 +28,10 @@ from brigade.memory_content_scan import (
     _base_lines,
     _derive_copies,
     _FOLD_FULLWIDTH,
+    _check_nfkc_pin,
     _nfkc,
     _scan_copies,
+    _scan_copy_sets,
     scan_verdict,
 )
 
@@ -351,9 +353,14 @@ def test_nfkc_alone_would_have_lost_the_review_cases():
     assert lost, "no review case depends on the fold copy any more"
 
 
-def test_scan_copy_sets_merge_equal_copies():
-    from brigade.memory_content_scan import _scan_copy_sets
+def test_python_refuses_a_bundle_with_another_unicode_version():
+    _check_nfkc_pin(scan._BUNDLE)
+    for version in ("15.0.0", "14.0", ""):
+        with pytest.raises(ValueError, match="expected 14.0.0"):
+            _check_nfkc_pin({"nfkc": {"unicode": version}})
 
+
+def test_scan_copy_sets_merge_equal_copies():
     assert len(_scan_copy_sets("plain ascii text")) == 1
     assert len(_scan_copy_sets(u("caf{E9}"))) == 1  # NFKC leaves a composed letter alone
     assert len(_scan_copy_sets(fullwidth("abc"))) == 1  # fold and NFKC agree
@@ -362,37 +369,36 @@ def test_scan_copy_sets_merge_equal_copies():
 
 # Units that grow most under NFKC. The ASCII-dense ones expand into text every
 # rule can start on: each is at most about 4/3 ASCII characters per input byte.
+# unit, then the verdict of the padding alone. U+2491 expands to "10." and the
+# repeated run reads as a private address. A payload after any padding flags.
 EXPANDING_UNITS = {
-    "arabic-ligature": chr(0xFDFA),
-    "square-unit": chr(0x3392),
-    "latin-ligature": chr(0xFB03),
-    "parenthesized-digit": chr(0x2474),
-    "digit-full-stop": chr(0x2488),
-    "number-ten-full-stop": chr(0x2491),
-    "telephone-sign": chr(0x2121),
-    "trade-mark-sign": chr(0x2122),
+    "arabic-ligature": (chr(0xFDFA), "clean"),
+    "square-unit": (chr(0x3392), "clean"),
+    "latin-ligature": (chr(0xFB03), "clean"),
+    "parenthesized-digit": (chr(0x2474), "clean"),
+    "digit-full-stop": (chr(0x2488), "clean"),
+    "number-ten-full-stop": (chr(0x2491), "private"),
+    "telephone-sign": (chr(0x2121), "clean"),
+    "trade-mark-sign": (chr(0x2122), "clean"),
 }
 
 
 @pytest.mark.parametrize("name", list(EXPANDING_UNITS))
 def test_expanding_compatibility_runs_stay_scannable(name):
     """A 512 KiB card still gets a verdict in generous time, payload caught after padding."""
-    unit = EXPANDING_UNITS[name]
+    unit, alone = EXPANDING_UNITS[name]
     size = 512 * 1024
     padding = unit * (size // len(unit.encode()) - 64)
     assert len(padding.encode()) <= size
     payload = bold(PHRASE)
-    for text, expected in ((padding, None), (f"{padding} {payload}", "flagged")):
+    for text, expected in ((padding, alone), (f"{padding} {payload}", "flagged")):
         started = time.perf_counter()
         state, _rules = scan_verdict([text])
         elapsed = time.perf_counter() - started
         # Seconds on a laptop. The bound only has to catch a regression that
         # makes the scan super-linear, not to rank slow CI runners.
         assert elapsed < 120, f"{name}: {elapsed:.1f}s"
-        if expected:
-            assert state == expected
-        else:
-            assert state in SEVERITY
+        assert state == expected, f"{name}: {state}"
 
 
 if __name__ == "__main__":
