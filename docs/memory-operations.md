@@ -131,7 +131,7 @@ it:
 | Grok Bot memory `memory_search` and `memory_card` | Connector | Placeholder with `code: "memory_content_private"` |
 | `memory_hits` on `inbox_list` and `fleet_digest` | Connector | Dropped and counted, as for any finding |
 | Dot and Duet `memory_search` and `memory_card` | Connector | Unchanged: these profiles return card text without a prompt-load scan, as before bundle v6 |
-| Embedder | Loopback only | Sent only to a loopback endpoint |
+| Embedder (S15a query, document and probe sends) | Loopback only | Sent only when the pinned address is loopback. Any other endpoint, a private-network one included, refuses with reason `content-private` before any lookup or connection. A stored `private` version embeds only for a loopback endpoint |
 | `brigade run` seat prompts | See below | The composed seat prompt holds no recall |
 
 `brigade run` builds no memory recall into a seat prompt. The dispatcher,

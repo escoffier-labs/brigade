@@ -2265,7 +2265,9 @@ vault refused 33% with the same mix, plus U+034F and U+200C from pasted text.
   searchable, replicated to the operator's nodes and loaded into local
   prompts. The push boundary excludes it, connector prompt loads replace it
   with a placeholder carrying `code: "memory_content_private"`, and an
-  embedder may send it only to a loopback endpoint. Any warning or blocking
+  embedder may send it only to an endpoint whose pinned address is loopback
+  (reason `content-private` otherwise, checked before any lookup or
+  connection). Any warning or blocking
   finding beside a private one keeps the stricter verdict.
 - `brigade run` composes no recall into a seat prompt. A local or fleet-node
   Claude seat may get hook recall from the operator's hub under the
