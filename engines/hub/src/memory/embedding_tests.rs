@@ -1504,7 +1504,7 @@ async fn push_mode_non_loopback_endpoint_never_queues_or_leases_private_cards() 
     // A private-network address is not loopback, so private text stays home.
     let id = setup_with(
         &mut h,
-        Some("http://10.0.0.5:1/api/embed"),
+        Some("http://10.0.0.5:1/api/embed"), // <!-- content-guard: allow private-ipv4 -->
         json!({"pull": false}),
     ); // <!-- content-guard: allow private-ipv4 -->
     assert!(!embedding::private_ok(
