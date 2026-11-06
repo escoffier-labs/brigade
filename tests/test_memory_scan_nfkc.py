@@ -127,6 +127,11 @@ def v6_scan_verdict(text: str) -> tuple[str, tuple[str, ...]]:
         return scan_verdict([text])
 
 
+def dotted(*octets: str) -> list[str]:
+    """An address as one part per octet and dot, so the fixture holds no address literal."""
+    return [part for octet in octets for part in (octet, ".")][:-1]
+
+
 # One sample per bundle rule. Parts join at run time, so this file and the
 # fixture hold no address, token or path literal.
 CORPUS: dict[str, list[str]] = {
@@ -140,9 +145,9 @@ CORPUS: dict[str, list[str]] = {
     "coauthored-by-trailer": ["Co-auth", "ored-by: Someone"],
     "example-phone-555": ["555", "-123", "-4567"],
     "example-email-reserved": ["a@", "example", ".com"],
-    "ssh-private-target": ["root@", ".".join(("10", "0", "0", "1"))],
-    "private-ipv4": [".".join(("192", "168", "1", "5"))],
-    "loopback-ipv4": [".".join(("127", "0", "0", "1"))],
+    "ssh-private-target": ["root@", *dotted("10", "0", "0", "1")],
+    "private-ipv4": dotted("192", "168", "1", "5"),
+    "loopback-ipv4": dotted("127", "0", "0", "1"),
     "localhost-port": ["local", "host:", "8080"],
     "localhost-bare": ["local", "host"],
     "port-reference": ["port ", "8080"],

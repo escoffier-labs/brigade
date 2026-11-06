@@ -1261,7 +1261,13 @@
    "name": "ssh-private-target/ascii/composed-last",
    "parts": [
     "root@",
-    "10.0.0.1",
+    "10",
+    ".",
+    "0",
+    ".",
+    "0",
+    ".",
+    "1",
     "\u0301"
    ],
    "v6": "private",
@@ -1276,7 +1282,13 @@
    "parts": [
     "\u2122",
     "root@",
-    "10.0.0.1"
+    "10",
+    ".",
+    "0",
+    ".",
+    "0",
+    ".",
+    "1"
    ],
    "v6": "private",
    "v7": "private",
@@ -1290,7 +1302,13 @@
    "parts": [
     "\u2122",
     "root@",
-    "10.0.0.1",
+    "10",
+    ".",
+    "0",
+    ".",
+    "0",
+    ".",
+    "1",
     "\u0301"
    ],
    "v6": "private",
@@ -1304,7 +1322,13 @@
    "name": "ssh-private-target/ascii/per-account-last",
    "parts": [
     "root@",
-    "10.0.0.1",
+    "10",
+    ".",
+    "0",
+    ".",
+    "0",
+    ".",
+    "1",
     "\u2100"
    ],
    "v6": "private",
@@ -1318,7 +1342,13 @@
    "name": "ssh-private-target/fullwidth/composed-last",
    "parts": [
     "\uff52\uff4f\uff4f\uff54\uff20",
-    "\uff11\uff10\uff0e\uff10\uff0e\uff10\uff0e\uff11",
+    "\uff11\uff10",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff11",
     "\u0301"
    ],
    "v6": "private",
@@ -1333,7 +1363,13 @@
    "parts": [
     "\u2122",
     "\uff52\uff4f\uff4f\uff54\uff20",
-    "\uff11\uff10\uff0e\uff10\uff0e\uff10\uff0e\uff11"
+    "\uff11\uff10",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff11"
    ],
    "v6": "private",
    "v7": "private",
@@ -1347,7 +1383,13 @@
    "parts": [
     "\u2122",
     "\uff52\uff4f\uff4f\uff54\uff20",
-    "\uff11\uff10\uff0e\uff10\uff0e\uff10\uff0e\uff11",
+    "\uff11\uff10",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff11",
     "\u0301"
    ],
    "v6": "private",
@@ -1361,7 +1403,13 @@
    "name": "ssh-private-target/fullwidth/per-account-last",
    "parts": [
     "\uff52\uff4f\uff4f\uff54\uff20",
-    "\uff11\uff10\uff0e\uff10\uff0e\uff10\uff0e\uff11",
+    "\uff11\uff10",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff11",
     "\u2100"
    ],
    "v6": "private",
@@ -1374,7 +1422,13 @@
   {
    "name": "private-ipv4/ascii/composed-last",
    "parts": [
-    "192.168.1.5",
+    "192",
+    ".",
+    "168",
+    ".",
+    "1",
+    ".",
+    "5",
     "\u0301"
    ],
    "v6": "private",
@@ -1387,7 +1441,13 @@
    "name": "private-ipv4/ascii/trademark-first",
    "parts": [
     "\u2122",
-    "192.168.1.5"
+    "192",
+    ".",
+    "168",
+    ".",
+    "1",
+    ".",
+    "5"
    ],
    "v6": "private",
    "v7": "private",
@@ -1399,7 +1459,13 @@
    "name": "private-ipv4/ascii/both",
    "parts": [
     "\u2122",
-    "192.168.1.5",
+    "192",
+    ".",
+    "168",
+    ".",
+    "1",
+    ".",
+    "5",
     "\u0301"
    ],
    "v6": "private",
@@ -1411,7 +1477,13 @@
   {
    "name": "private-ipv4/ascii/per-account-last",
    "parts": [
-    "192.168.1.5",
+    "192",
+    ".",
+    "168",
+    ".",
+    "1",
+    ".",
+    "5",
     "\u2100"
    ],
    "v6": "private",
@@ -1423,7 +1495,13 @@
   {
    "name": "private-ipv4/fullwidth/composed-last",
    "parts": [
-    "\uff11\uff19\uff12\uff0e\uff11\uff16\uff18\uff0e\uff11\uff0e\uff15",
+    "\uff11\uff19\uff12",
+    "\uff0e",
+    "\uff11\uff16\uff18",
+    "\uff0e",
+    "\uff11",
+    "\uff0e",
+    "\uff15",
     "\u0301"
    ],
    "v6": "private",
@@ -1436,7 +1514,13 @@
    "name": "private-ipv4/fullwidth/trademark-first",
    "parts": [
     "\u2122",
-    "\uff11\uff19\uff12\uff0e\uff11\uff16\uff18\uff0e\uff11\uff0e\uff15"
+    "\uff11\uff19\uff12",
+    "\uff0e",
+    "\uff11\uff16\uff18",
+    "\uff0e",
+    "\uff11",
+    "\uff0e",
+    "\uff15"
    ],
    "v6": "private",
    "v7": "private",
@@ -1448,7 +1532,13 @@
    "name": "private-ipv4/fullwidth/both",
    "parts": [
     "\u2122",
-    "\uff11\uff19\uff12\uff0e\uff11\uff16\uff18\uff0e\uff11\uff0e\uff15",
+    "\uff11\uff19\uff12",
+    "\uff0e",
+    "\uff11\uff16\uff18",
+    "\uff0e",
+    "\uff11",
+    "\uff0e",
+    "\uff15",
     "\u0301"
    ],
    "v6": "private",
@@ -1460,7 +1550,13 @@
   {
    "name": "private-ipv4/fullwidth/per-account-last",
    "parts": [
-    "\uff11\uff19\uff12\uff0e\uff11\uff16\uff18\uff0e\uff11\uff0e\uff15",
+    "\uff11\uff19\uff12",
+    "\uff0e",
+    "\uff11\uff16\uff18",
+    "\uff0e",
+    "\uff11",
+    "\uff0e",
+    "\uff15",
     "\u2100"
    ],
    "v6": "private",
@@ -1472,7 +1568,13 @@
   {
    "name": "loopback-ipv4/ascii/composed-last",
    "parts": [
-    "127.0.0.1",
+    "127",
+    ".",
+    "0",
+    ".",
+    "0",
+    ".",
+    "1",
     "\u0301"
    ],
    "v6": "private",
@@ -1485,7 +1587,13 @@
    "name": "loopback-ipv4/ascii/trademark-first",
    "parts": [
     "\u2122",
-    "127.0.0.1"
+    "127",
+    ".",
+    "0",
+    ".",
+    "0",
+    ".",
+    "1"
    ],
    "v6": "private",
    "v7": "private",
@@ -1497,7 +1605,13 @@
    "name": "loopback-ipv4/ascii/both",
    "parts": [
     "\u2122",
-    "127.0.0.1",
+    "127",
+    ".",
+    "0",
+    ".",
+    "0",
+    ".",
+    "1",
     "\u0301"
    ],
    "v6": "private",
@@ -1509,7 +1623,13 @@
   {
    "name": "loopback-ipv4/ascii/per-account-last",
    "parts": [
-    "127.0.0.1",
+    "127",
+    ".",
+    "0",
+    ".",
+    "0",
+    ".",
+    "1",
     "\u2100"
    ],
    "v6": "private",
@@ -1521,7 +1641,13 @@
   {
    "name": "loopback-ipv4/fullwidth/composed-last",
    "parts": [
-    "\uff11\uff12\uff17\uff0e\uff10\uff0e\uff10\uff0e\uff11",
+    "\uff11\uff12\uff17",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff11",
     "\u0301"
    ],
    "v6": "private",
@@ -1534,7 +1660,13 @@
    "name": "loopback-ipv4/fullwidth/trademark-first",
    "parts": [
     "\u2122",
-    "\uff11\uff12\uff17\uff0e\uff10\uff0e\uff10\uff0e\uff11"
+    "\uff11\uff12\uff17",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff11"
    ],
    "v6": "private",
    "v7": "private",
@@ -1546,7 +1678,13 @@
    "name": "loopback-ipv4/fullwidth/both",
    "parts": [
     "\u2122",
-    "\uff11\uff12\uff17\uff0e\uff10\uff0e\uff10\uff0e\uff11",
+    "\uff11\uff12\uff17",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff11",
     "\u0301"
    ],
    "v6": "private",
@@ -1558,7 +1696,13 @@
   {
    "name": "loopback-ipv4/fullwidth/per-account-last",
    "parts": [
-    "\uff11\uff12\uff17\uff0e\uff10\uff0e\uff10\uff0e\uff11",
+    "\uff11\uff12\uff17",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff10",
+    "\uff0e",
+    "\uff11",
     "\u2100"
    ],
    "v6": "private",
