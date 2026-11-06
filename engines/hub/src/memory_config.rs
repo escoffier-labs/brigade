@@ -13,8 +13,16 @@ pub async fn load(
     path: &Path,
     explicit: bool,
 ) -> Result<Result<Value, String>, String> {
-    // A missing default file means lexical mode and needs no interpreter.
-    if !explicit && matches!(path.try_exists(), Ok(false)) {
+    // A missing default file means lexical mode and needs no interpreter. A
+    // missing file the operator named is a typo, so it stops startup rather
+    // than quietly running lexical.
+    if matches!(path.try_exists(), Ok(false)) {
+        if explicit {
+            return Err(format!(
+                "memory configuration {} does not exist",
+                path.display()
+            ));
+        }
         return Ok(Ok(json!({})));
     }
     match read(python, path).await {
@@ -83,6 +91,16 @@ mod tests {
                 .unwrap(),
             json!({})
         );
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_named_config_that_does_not_exist_stops_startup() {
+        let d = dir();
+        let error = load("python3", &d.join("typo.toml"), true)
+            .await
+            .unwrap_err();
+        assert!(error.contains("does not exist"), "{error}");
         std::fs::remove_dir_all(d).unwrap();
     }
 
