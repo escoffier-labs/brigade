@@ -1480,7 +1480,7 @@ async fn a_loopback_endpoint_queues_and_leases_private_cards() {
 async fn a_non_loopback_endpoint_never_queues_or_leases_private_cards() {
     let mut h = Hub::with(tiers(), None);
     // A private-network address is not loopback, so private text stays home.
-    let id = setup_at(&mut h, "http://10.0.0.5:1/api/embed");
+    let id = setup_at(&mut h, "http://10.0.0.5:1/api/embed"); // <!-- content-guard: allow private-ipv4 -->
     assert!(!embedding::private_ok(
         &h.store.as_ref().unwrap().retrieval.as_ref().unwrap().config
     ));
@@ -1523,7 +1523,7 @@ async fn a_non_loopback_endpoint_never_queues_or_leases_private_cards() {
 async fn the_lease_rescan_treats_private_by_endpoint() {
     for (endpoint, loopback) in [
         ("http://127.0.0.1:1/api/embed", true),
-        ("http://10.0.0.5:1/api/embed", false),
+        ("http://10.0.0.5:1/api/embed", false), // <!-- content-guard: allow private-ipv4 -->
     ] {
         let rules = tiers();
         let mut h = Hub::with(rules.clone(), None);
