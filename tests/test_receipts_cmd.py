@@ -9,6 +9,10 @@ from brigade import cli, localio, outcome, outcome_cmd, provenance, receipt_sign
 
 from tests.work_cmd_test_helpers import _init_git_repo
 
+MISELEDGER_DEPRECATION_NOTICE = (
+    "receipts export miseledger is deprecated; use receipts export evidence; removed in v0.33.0\n"
+)
+
 
 def _init_git_repo_with_head(path):
     _init_git_repo(path)
@@ -957,7 +961,7 @@ def test_receipts_export_miseledger_json_empty_is_typed_and_healthy(tmp_path, ca
         "status": "empty",
         "target_label": "repository",
     }
-    assert captured.err == ""
+    assert captured.err == MISELEDGER_DEPRECATION_NOTICE
 
 
 def test_receipts_export_miseledger_json_empty_write_failure_emits_failed_result(tmp_path, monkeypatch, capsys):
@@ -1075,7 +1079,7 @@ def test_receipts_export_miseledger_json_zero_row_import_emits_only_result_json(
     payload = json.loads(captured.out)
     assert payload["status"] == "nothing-new"
     assert captured.out.count("\n") == 1
-    assert captured.err == ""
+    assert captured.err == MISELEDGER_DEPRECATION_NOTICE
 
 
 def test_receipts_export_miseledger_json_reports_exported_counts(tmp_path, capsys):
@@ -1379,7 +1383,7 @@ def test_receipts_export_miseledger_fleet_empty_and_nothing_new_are_healthy(tmp_
         "seen": "nothing-new",
     }
     assert captured.out.count("\n") == 1
-    assert captured.err == ""
+    assert captured.err == MISELEDGER_DEPRECATION_NOTICE
 
 
 def test_receipts_export_miseledger_fleet_preserves_failure_and_continues(tmp_path, monkeypatch, capsys):

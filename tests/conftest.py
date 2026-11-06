@@ -34,6 +34,19 @@ def _drain_orphan_claim_releases(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _reset_engine_deprecation_notices(monkeypatch):
+    """Give every test a fresh once-per-process deprecation notice state.
+
+    ``engine_deprecation.notice`` prints each legacy spelling once per process, so
+    whether a test sees the line on stderr would otherwise depend on which test ran
+    first in the same worker. Tests that use a legacy spelling assert the line.
+    """
+    from brigade import engine_deprecation
+
+    monkeypatch.setattr(engine_deprecation, "_seen", set())
+
+
+@pytest.fixture(autouse=True)
 def _bound_git_discovery_to_pytest_temp_root(tmp_path_factory, monkeypatch):
     """Keep Git discovery for test and subprocess work below pytest's temp root."""
     base_temp = tmp_path_factory.getbasetemp().resolve()
