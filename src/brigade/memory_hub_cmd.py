@@ -95,6 +95,17 @@ def register(memory_sub: argparse._SubParsersAction) -> None:
             command.add_argument("--all", action="store_true", help="Read every chunk and print the whole text.")
 
 
+def _coverage_text(coverage: Any) -> str:
+    """Cards with a vector over the cards that can have one. Readiness compares
+    these two, so a hub at `ok` with unembeddable cards still reads full."""
+    if not isinstance(coverage, dict):
+        return ""
+    eligible = coverage.get("eligible", coverage.get("total"))
+    text = f", coverage {coverage.get('cards')}/{eligible}"
+    unembeddable = coverage.get("unembeddable")
+    return text + (f" ({unembeddable} unembeddable)" if unembeddable else "")
+
+
 def _emit(payload: dict[str, Any], *, json_output: bool, lines: list[str], code: int = 0) -> int:
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
@@ -451,11 +462,7 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
                         f"retrieval: {retrieval.get('mode')}, effective {retrieval.get('effective')}, "
                         f"state {retrieval.get('state')}"
                         + (f" ({retrieval['reason']})" if retrieval.get("reason") else "")
-                        + (
-                            f", coverage {retrieval['coverage'].get('cards')}/{retrieval['coverage'].get('total')}"
-                            if isinstance(retrieval.get("coverage"), dict)
-                            else ""
-                        )
+                        + _coverage_text(retrieval.get("coverage"))
                         + (f", endpoint {retrieval['endpoint_host']}" if retrieval.get("endpoint_host") else "")
                     )
             else:

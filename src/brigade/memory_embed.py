@@ -177,9 +177,10 @@ def _exchange(conn: Any, path: str, payload: bytes, token: str, config: dict, co
         return _parse_reply(body, response.getheader("x-model-digest"), config, count)
     except (DocumentRefused, EndpointError):
         raise
-    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
         # A body of the wrong shape or type says the endpoint is wrong, not one
-        # document. It must not escape the step and stop the worker.
+        # document. A JSON integer too large for a float is the same kind of
+        # fault. None of them may escape the step and stop the worker.
         raise EndpointError("malformed embedding reply") from exc
 
 
@@ -204,7 +205,8 @@ def _parse_reply(body: bytes, header: str | None, config: dict, count: int) -> l
     for row in rows:
         if len(row) != config["dimensions"] or not all(isinstance(x, (int, float)) and math.isfinite(x) for x in row):
             raise DocumentRefused("invalid vector", "vector-invalid")
-        norm = math.sqrt(sum(float(x) ** 2 for x in row))
+        # hypot does not overflow where squaring a large float does.
+        norm = math.hypot(*row)
         if not math.isfinite(norm) or not norm:
             raise DocumentRefused("invalid vector norm", "vector-invalid")
         result.append([x / norm for x in row])

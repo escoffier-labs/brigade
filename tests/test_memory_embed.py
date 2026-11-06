@@ -238,6 +238,49 @@ def test_worker_exchange_refuses_a_reply_with_the_wrong_row_count(endpoint):
         assert exc.value.reason == "vector-invalid"
 
 
+def test_worker_exchange_survives_huge_json_numbers(endpoint):
+    config, _ = endpoint
+
+    class Response:
+        status = 200
+
+        def __init__(self, body):
+            self.body = body
+
+        def getheader(self, _name):
+            return None
+
+        def read1(self, _n):
+            body, self.body = self.body, b""
+            return body
+
+    class Conn:
+        sock = None
+
+        def __init__(self, body):
+            self.body = body
+
+        def connect(self):
+            self.sock = type("Sock", (), {"settimeout": lambda *_: None})()
+
+        def request(self, *_):
+            pass
+
+        def getresponse(self):
+            return Response(self.body)
+
+    def exchange(row):
+        body = json.dumps({"model_digest": "digest", "embeddings": [row]}).encode()
+        return embed._exchange(Conn(body), "/", b"{}", "fake-token", {**config, "shape": "api/embed"}, 1, lambda: 5.0)
+
+    # Squaring 1e200 overflows a float. The norm no longer squares, so it is a valid vector.
+    assert exchange([1e200, 1e200])[0] == pytest.approx([2**-0.5, 2**-0.5])
+    # An integer past float range raises OverflowError. It is an endpoint fault, not a crash.
+    with pytest.raises(embed.EndpointError) as exc:
+        exchange([10**400, 1])
+    assert exc.value.reason == "embedder-unavailable"
+
+
 def test_worker_endpoint_fault_releases_the_lease_without_a_document_reason(endpoint):
     config, seen = endpoint
     stopped = {**config, "endpoint": "http://127.0.0.1:1/api/embed", "allowlist": ["http://127.0.0.1:1/api/embed"]}
