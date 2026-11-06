@@ -93,6 +93,9 @@ struct Envelope {
     reply: Option<oneshot::Sender<Answer>>,
     _permits: Vec<OwnedSemaphorePermit>,
     arbiter: Arc<Arbiter>,
+    /// When admission accepted it. Ordinary budgets differ (10 s for
+    /// heartbeats, 250 ms for sweeps), so the deadline alone cannot date it.
+    queued: Instant,
 }
 impl Drop for Envelope {
     fn drop(&mut self) {
@@ -201,6 +204,7 @@ impl Writer {
             reply: Some(reply),
             _permits: permits,
             arbiter: self.arbiter.clone(),
+            queued: Instant::now(),
         };
         self.sender
             .try_send(envelope)
@@ -287,6 +291,7 @@ where
                 reply: None,
                 _permits: permits,
                 arbiter: self.writer.arbiter.clone(),
+                queued: Instant::now(),
             })
             .is_ok()
     }

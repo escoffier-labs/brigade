@@ -1,6 +1,7 @@
 //! Lock-free writer observations for `/metrics`. Only the writer thread stores,
-//! scrapes only load, and every store is one relaxed atomic write per batch,
-//! never per command. The gauges hold the last batch the thread finished.
+//! scrapes only load, and every store is one relaxed atomic write. The batch
+//! gauges hold the last batch the thread finished. The backlog gauge is stored
+//! each time the thread takes a command, so queue depth stays exact mid-batch.
 use crate::telemetry::QueueProbe;
 use std::{
     sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed},
@@ -68,7 +69,7 @@ impl WriterStats {
             ..Self::default()
         }
     }
-    /// Stored once per batch start and end, like the other gauges.
+    /// Stored on every pick and after a batch closes.
     pub(super) fn backlog(&self, held: usize) {
         self.backlog.store(held, Relaxed);
     }
