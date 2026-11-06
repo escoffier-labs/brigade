@@ -183,7 +183,13 @@ impl Store {
     }
     /// Lexical mode ignores an unused embedder table, including credentials.
     pub fn configure_retrieval(&mut self, config: &Json) -> Result<(), String> {
-        match config["retrieval"].as_str().unwrap_or("lexical") {
+        // Absent means lexical. Present but not a string is a typo, never lexical.
+        let retrieval = match config.get("retrieval") {
+            None => "lexical",
+            Some(Json::String(mode)) => mode.as_str(),
+            Some(_) => return Err("memory.retrieval must be lexical or hybrid".into()),
+        };
+        match retrieval {
             "lexical" => {
                 self.retrieval = None;
                 if config.get("embedder").is_some() {
