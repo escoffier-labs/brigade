@@ -79,33 +79,68 @@ pre-push scanner and evidence redaction keep each rule's own severity from
 `guard/rules.py`. A version with any warning stays `flagged` and one with any
 blocking finding is refused, whatever private rules it also matches.
 
-Private text stays on the operator's machines. It is stored, searchable,
-replicated to the operator's nodes and loaded into local prompt recall. It is
-refused on every path that sends text elsewhere:
+The private class draws one boundary. Inside it are the operator's machines
+and the model providers behind the operator's own local harnesses, such as
+Claude Code and Codex running under the operator's accounts. A local prompt
+already sends the workspace to that provider, so private recall adds nothing
+new. Outside it are connector audiences: Grok Bot channels, connector relays,
+public scopes, an embedder on a non-loopback endpoint, and any other path that
+reaches people or services other than the operator's own harness providers.
+Private text is stored, searchable, replicated to the operator's nodes and
+loaded into local prompt recall. Every path to a connector audience refuses
+it:
 
-| Path | Private text |
-|---|---|
-| `Store::push` (connector push, S23) | Excluded. Only a clean scan receipt is eligible |
-| Push prompt-load scan | `{card_id, blocked: "<rule id>", code: "memory_content_private"}` |
-| Search with `query_source: "prompt"` (local recall) | Returned in full |
-| Grok Bot memory `memory_search` and `memory_card` | Placeholder with `code: "memory_content_private"` |
-| `memory_hits` on `inbox_list` and `fleet_digest` | Dropped and counted, as for any finding |
-| Dot and Duet `memory_search` and `memory_card` | Unchanged: these profiles return card text without a prompt-load scan |
+| Path | Audience | Private text |
+|---|---|---|
+| `Store::push` (connector push, S23) | Connector | Excluded. Only a clean scan receipt is eligible |
+| Push prompt-load scan | Connector | `{card_id, blocked: "<rule id>", code: "memory_content_private"}` |
+| Search with `query_source: "prompt"` (local recall in Claude Code and Codex hooks) | Operator's harness provider | Returned, with U+034F and U+200C removed from the rendered fields |
+| Grok Bot memory `memory_search` and `memory_card` | Connector | Placeholder with `code: "memory_content_private"` |
+| `memory_hits` on `inbox_list` and `fleet_digest` | Connector | Dropped and counted, as for any finding |
+| Dot and Duet `memory_search` and `memory_card` | Connector | Unchanged: these profiles return card text without a prompt-load scan, as before bundle v6 |
+| Embedder | Loopback only | Sent only to a loopback endpoint |
+| `brigade run` seat prompts | See below | The composed seat prompt holds no recall |
+
+`brigade run` builds no memory recall into a seat prompt. The dispatcher,
+briefs and remote transport forward the composed prompt only. A local Claude
+seat in a hook-wired worktree gets `UserPromptSubmit` recall from the
+operator's hub, the same as an interactive session, and runs under the
+operator's own account, so it sits inside the boundary. A seat on another
+fleet node does the same on that node. Cloud seats (`codex-cloud` and
+`cursor-cloud`, through `brigade run cloud launch` or a roster seat) receive
+only the composed prompt or the operator's `--prompt-file`, and no recall
+code reaches them. A cloud agent runs outside the operator's machines, so it
+counts as a connector audience: any future path that adds hub recall to a
+cloud seat must refuse private text there.
 
 `memory_content_private` appears only when the private class alone withholds
 the text. A placeholder for a warning or a blocking rule carries no code, and
 an egress refusal with a rule outside the private class is never reported as
 private.
 
-U+FE0F after an Extended_Pictographic character (U+2190 to U+21FF,
+U+FE0E or U+FE0F after an Extended_Pictographic character (U+2190 to U+21FF,
 U+2300 to U+23FF, U+25A0 to U+25FF, U+2600 to U+27BF, U+2B00 to U+2BFF,
-U+1F000 to U+1FAFF and the text-default symbols) and in a keycap sequence
-scans clean. U+034F and U+200C are private, not stripped: the stored bytes
-and their content hash stay exactly as written, and the scan copies already
-drop both characters, so neither can split a rule match. The `classic-injection`
-rule matches the verb "exfiltrate" only as an order, at the start of a line or
-sentence, addressed to the agent, or with a destination. Threat reports and
-policy text that name the verb scan clean.
+U+1F000 to U+1FAFF and the text-default symbols), and U+FE0F in a keycap
+sequence, scan clean. U+FE00 to U+FE0D still block after any character. U+034F
+and U+200C are private: the stored bytes and their content hash stay exactly
+as written, the scan copies drop both characters so neither can split a rule
+match, and local prompt recall removes both from the fields it renders, so a
+mix of the two cannot carry hidden bits into a prompt. The `classic-injection`
+rule matches the verb "exfiltrate" only as an order: at the start of a line
+or sentence, after up to four markdown or quote marks and two urgency words,
+or after a comma that follows a short address or an if/when clause
+("Assistant, ...", "If you are an AI agent, ..."), addressed to the agent ("you must now", "I need you to", "go
+ahead and"), or with a destination (a URL, an address or a bare domain).
+"Exfiltrating" counts with "start" or "keep" before it, or with a destination.
+Threat reports, policy text and verb lists in prose ("steal cookies,
+exfiltrate data") scan clean. The same pattern
+is `PROMPT_INJECTION_RE` in `untrusted.py`, so `scan_untrusted`, the handoff
+injection lint and every other caller use it too.
+
+Schema version 2 rebuilds `memory_card_revisions`, `memory_scans` and
+`memory_handoffs` to admit the `private` state. There is no down-migration:
+rolling back to a hub binary with schema version 1 means restoring a backup
+taken before the upgrade.
 
 The `memory-scan` Cargo feature is enabled by default. A build with
 `--no-default-features` has no scanner and serves pending writes and explicit
