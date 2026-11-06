@@ -153,6 +153,7 @@ class ConnectorProfile:
     # False skips the background Hub inbox poll for a profile that exposes no inbox tool.
     hub_inbox: bool = True
     # True runs the prompt-load scan over memory text before it is returned (see prompt_scan.py).
+    # Every profile serves a remote connector audience, so each one sets it.
     prompt_load_scan: bool = False
 
     @property
@@ -187,6 +188,7 @@ DOT = ConnectorProfile(
     watch_checks=frozenset(
         {"stale_inbox", "idle", "hub_sync_stale", "hub_credential_invalid", "route_down", "wake_unanswered"}
     ),
+    prompt_load_scan=True,
 )
 DUET = ConnectorProfile(
     pack_id="duet",
@@ -204,6 +206,7 @@ DUET = ConnectorProfile(
     watch_checks=frozenset({"stale_inbox", "idle", "route_down", "hub_credential_invalid", "hub_sync_stale"}),
     send_limit_per_hour=DUET_SEND_LIMIT_PER_HOUR,
     descriptions=DUET_DESCRIPTIONS,
+    prompt_load_scan=True,
 )
 GROKBOT_MEMORY = ConnectorProfile(
     pack_id="grokbot-memory",
