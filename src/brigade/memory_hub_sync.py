@@ -1267,6 +1267,7 @@ def status(target: Path, settings: hubc.HubSettings, client: hubc.MemoryHubClien
         "scan",
         "embedders",
         "default_mode",
+        "retrieval",
     )
     report["hub"] = {
         "available": True,

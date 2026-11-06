@@ -445,6 +445,13 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
                     f"hub: {hub.get('cards')} card(s), seq {hub.get('seq')}, indexed {hub.get('indexed_seq')}, "
                     f"retrieval {hub.get('default_mode')}, as {hub.get('principal')}"
                 )
+                retrieval = hubc.obj(hub.get("retrieval"))
+                if retrieval:
+                    lines.append(
+                        f"retrieval: {retrieval.get('mode')}, effective {retrieval.get('effective')}, "
+                        f"state {retrieval.get('state')}"
+                        + (f" ({retrieval['reason']})" if retrieval.get("reason") else "")
+                    )
             else:
                 lines.append(f"hub: unavailable ({hub.get('reason')})")
             replica = report["replica"]
