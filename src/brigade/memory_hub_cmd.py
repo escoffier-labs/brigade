@@ -99,7 +99,7 @@ def register(memory_sub: argparse._SubParsersAction) -> None:
             command.add_argument(
                 "--update",
                 action="store_true",
-                help="Overwrite a card whose id exists with other text (default: report it as changed and keep the hub's).",
+                help="Overwrite a card whose id exists with other text, and bring back a retired one (default: report changed or revive and keep the hub's).",
             )
             command.add_argument(
                 "--exclude",
@@ -111,7 +111,7 @@ def register(memory_sub: argparse._SubParsersAction) -> None:
             command.add_argument(
                 "--root",
                 type=Path,
-                help="Folder that derived card ids are relative to (default: each folder argument, a file's own folder).",
+                help="Folder that derived card ids are relative to (default: the nearest ancestor holding .obsidian, else the common ancestor of the arguments).",
             )
         if name == "card":
             command.add_argument("card_id", help="Card id, [a-z0-9][a-z0-9._-]{0,127}.")

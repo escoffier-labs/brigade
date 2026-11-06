@@ -36,6 +36,7 @@ class ImportHub(FakeHub):
         self.can_import = True
         self.import_down = False
         self.overrides: dict[str, tuple[int, dict]] = {}
+        self.hashless: set[int] = set()  # log seqs whose event carries no content_hash
 
     def do_status(self, body):
         status, reply = super().do_status(body)
@@ -46,7 +47,12 @@ class ImportHub(FakeHub):
     def do_log(self, body):
         status, reply = super().do_log(body)
         reply["events"] = [
-            {**event, "content_hash": self.revisions[(event["scope"], event["card_id"], event["revision"])]["hash"]}
+            event
+            if event["seq"] in self.hashless
+            else {
+                **event,
+                "content_hash": self.revisions[(event["scope"], event["card_id"], event["revision"])]["hash"],
+            }
             for event in reply["events"]
         ]
         return status, reply
@@ -153,14 +159,71 @@ def test_a_folder_that_is_itself_a_mirror_and_a_file_inside_one_are_never_import
     assert importer.discover([mirror / "a.md"], root=None, excludes=[]).sources == []
 
 
+def test_a_subfolder_or_file_below_a_mirror_folder_imports_nothing_and_says_why(tmp_path):
+    mirror = make_vault(tmp_path / "mirror", {"deep/er/a.md": "# a\n", "deep/b.md": "# b\n", MARKER: "{}"})
+    for argument in (mirror / "deep", mirror / "deep" / "er", mirror / "deep" / "er" / "a.md"):
+        found = importer.discover([argument], root=None, excludes=[])
+        assert found.sources == [] and found.stats["mirror_dirs"] == 1
+        found = importer.discover([argument], root=tmp_path, excludes=[])
+        assert found.sources == [] and found.stats["mirror_dirs"] == 1
+
+
 def test_a_file_argument_is_named_by_its_own_folder_unless_root_says_otherwise(tmp_path):
-    vault = make_vault(tmp_path / "vault", VAULT)
-    [(_, rel)] = importer.discover([vault / "Projects" / "alpha.md"], root=None, excludes=[]).sources
+    folder = make_vault(tmp_path / "plain", {"Projects/alpha.md": "# A\n", "Daily/d.md": "# D\n"})
+    [(_, rel)] = importer.discover([folder / "Projects" / "alpha.md"], root=None, excludes=[]).sources
     assert rel == "alpha.md"
-    [(_, rel)] = importer.discover([vault / "Projects" / "alpha.md"], root=vault, excludes=[]).sources
+    [(_, rel)] = importer.discover([folder / "Projects" / "alpha.md"], root=folder, excludes=[]).sources
     assert rel == "Projects/alpha.md"
     with pytest.raises(hubc.HubConfigError, match="outside the import root"):
-        importer.discover([vault], root=vault / "Projects", excludes=[])
+        importer.discover([folder], root=folder / "Projects", excludes=[])
+
+
+def test_the_same_vault_gives_the_same_ids_however_it_is_named(tmp_path, hub, capsys):
+    vault = make_vault(tmp_path / "vault", {".obsidian/app.json": "{}", "Daily/x.md": "# X\n", "Other/y.md": "# Y\n"})
+
+    def rel_of(*arguments: Path) -> dict[str, str]:
+        return {rel: path.name for path, rel in importer.discover(list(arguments), root=None, excludes=[]).sources}
+
+    assert rel_of(vault)["Daily/x.md"] == "x.md"
+    for arguments in ([vault], [vault / "Daily"], [vault / "Daily" / "x.md"]):
+        found = importer.discover(arguments, root=None, excludes=[])
+        assert found.root == str(vault) and "Daily/x.md" in [rel for _, rel in found.sources]
+    ids = []
+    for argument in (vault, vault / "Daily", vault / "Daily" / "x.md"):
+        _, rows, _, _ = import_cli(tmp_path, capsys, "--dry-run", str(argument))
+        ids.append(notes_of(rows)["Daily/x.md"]["card_id"])
+    assert len(set(ids)) == 1 and ids[0] == importer.derive_card_id("Daily/x.md")
+    first = importer.discover([vault, vault / "Daily" / "x.md"], root=None, excludes=[]).sources
+    second = importer.discover([vault / "Daily" / "x.md", vault], root=None, excludes=[]).sources
+    assert first == second and [rel for _, rel in first].count("Daily/x.md") == 1
+
+
+def test_without_a_vault_marker_the_common_ancestor_names_the_notes(tmp_path):
+    make_vault(tmp_path / "A", {"x.md": "# A\n"})
+    make_vault(tmp_path / "B", {"x.md": "# B\n"})
+    found = importer.discover([tmp_path / "A", tmp_path / "B"], root=None, excludes=[])
+    assert found.root == str(tmp_path)
+    assert [rel for _, rel in found.sources] == ["A/x.md", "B/x.md"]
+    found = importer.discover([tmp_path / "B" / "x.md", tmp_path / "A" / "x.md"], root=None, excludes=[])
+    assert [rel for _, rel in found.sources] == ["A/x.md", "B/x.md"]
+    [(_, rel)] = importer.discover([tmp_path / "A"], root=None, excludes=[]).sources
+    assert rel == "x.md"
+
+
+def test_arguments_from_different_vaults_need_an_explicit_root(hub, tmp_path, capsys):
+    make_vault(tmp_path / "one", {".obsidian/app.json": "{}", "x.md": "# 1\n"})
+    make_vault(tmp_path / "two", {".obsidian/app.json": "{}", "x.md": "# 2\n"})
+    with pytest.raises(hubc.HubConfigError, match="different Obsidian vaults"):
+        importer.discover([tmp_path / "one", tmp_path / "two"], root=None, excludes=[])
+    target = workspace(tmp_path / "ws", mode="read")
+    code, out, err = run(
+        ["memory", "hub", "import", "--target", str(target), "--scope", SCOPE, "--dry-run"]
+        + [str(tmp_path / "one"), str(tmp_path / "two")],
+        capsys,
+    )
+    assert code == 2 and "different Obsidian vaults" in err and out == "" and hub.calls == []
+    found = importer.discover([tmp_path / "one", tmp_path / "two"], root=tmp_path, excludes=[])
+    assert [rel for _, rel in found.sources] == ["one/x.md", "two/x.md"]
 
 
 def test_the_same_note_named_twice_is_planned_once(tmp_path):
@@ -262,9 +325,9 @@ def test_a_changed_note_is_kept_unless_update_names_the_hubs_revision(hub, tmp_p
     assert hub.cards[(SCOPE, "beta-plan")]["text"].endswith("new\n")
 
 
-def test_a_retired_card_comes_back_on_its_retired_revision(hub, tmp_path, capsys):
+def retire_beta(hub: ImportHub) -> int:
     revision = seed(hub, "beta-plan", "# Beta\nold\n")
-    retired = client(hub).call(
+    return client(hub).call(
         "retire",
         scope=SCOPE,
         card_id="beta-plan",
@@ -272,10 +335,30 @@ def test_a_retired_card_comes_back_on_its_retired_revision(hub, tmp_path, capsys
         base_epoch=hub.epoch,
         client_event_id=hubc.event_id(),
     )["event"]["revision"]
+
+
+def test_a_retired_card_is_kept_retired_unless_update_brings_it_back_on_its_retired_revision(hub, tmp_path, capsys):
+    retired = retire_beta(hub)
     vault = make_vault(tmp_path / "vault", {"beta.md": "---\nid: beta-plan\n---\n# Beta\nold\n"})
-    code, rows, _, _ = import_cli(tmp_path, capsys, "--yes", str(vault))
+    code, rows, out, _ = import_cli(tmp_path, capsys, "--yes", str(vault))
+    row = notes_of(rows)["beta.md"]
+    assert (code, row["action"], row["appends"], hub.imports()) == (0, "revive", False, [])
+    assert summary_of(rows)["counts"] == {"revive": 1} and summary_of(rows)["appends"] == 0
+    code, rows, _, _ = import_cli(tmp_path, capsys, "--update", "--yes", str(vault))
     assert code == 0 and notes_of(rows)["beta.md"]["result"]["status"] == "imported"
-    assert hub.imports()[0]["base_revision"] == retired
+    assert (hub.imports()[0]["base_revision"], hub.imports()[0]["base_epoch"]) == (retired, hub.epoch)
+
+
+def test_the_dry_run_shows_revive_and_what_update_would_do(hub, tmp_path, capsys):
+    retire_beta(hub)
+    vault = make_vault(tmp_path / "vault", {"beta.md": "---\nid: beta-plan\n---\n# Beta\nold\n"})
+    target = workspace(tmp_path / "ws", mode="read")
+    base = ["memory", "hub", "import", "--target", str(target), "--scope", SCOPE, "--dry-run"]
+    code, out, _ = run([*base, str(vault)], capsys)
+    assert code == 0 and "beta-plan  revive  kept, pass --update to revive" in out
+    assert f"  {'would append':<24}0" in out and f"  {'revive':<24}1" in out
+    code, out, _ = run([*base, "--update", str(vault)], capsys)
+    assert "beta-plan  revive  will revive" in out and f"  {'would append':<24}1" in out
 
 
 # --- visibility, scan, ruleset ---------------------------------------------------------------
@@ -317,6 +400,28 @@ def test_blocked_flagged_and_private_class_notes_report_rule_ids_and_never_their
         ["memory", "hub", "import", "--target", str(tmp_path / "ws"), "--scope", SCOPE, "--dry-run", str(vault)], capsys
     )
     assert code == 0 and word not in text + err and "blocked.md" in text and notes["blocked.md"]["rules"][0] in text
+
+
+def test_a_blocked_note_never_shows_its_frontmatter_id(hub, tmp_path, capsys):
+    sentinel = ".".join(["10", "1", "2", "3"])  # a valid card id that is itself a private-class finding
+    vault = make_vault(
+        tmp_path / "vault",
+        {
+            "tripped.md": f"---\nid: {sentinel}\n---\n# T\n‮\n",
+            "fine-id.md": "---\nid: clean-id\n---\n# F\n‮\n",
+        },
+    )
+    code, rows, out, err = import_cli(tmp_path, capsys, "--dry-run", str(vault))
+    notes = notes_of(rows)
+    assert code == 0 and sentinel not in out + err
+    assert (notes["tripped.md"]["action"], notes["tripped.md"]["card_id"]) == ("blocked", None)
+    assert (notes["fine-id.md"]["action"], notes["fine-id.md"]["card_id"]) == ("blocked", "clean-id")
+    target = workspace(tmp_path / "ws", mode="read")
+    code, text, err = run(
+        ["memory", "hub", "import", "--target", str(target), "--scope", SCOPE, "--dry-run", str(vault)], capsys
+    )
+    assert sentinel not in text + err and "clean-id" not in text
+    assert "- tripped.md  -  blocked  " in text and "- fine-id.md  -  blocked  " in text
 
 
 def test_a_different_scan_ruleset_refuses_before_anything_is_planned(hub, tmp_path, capsys):
@@ -398,7 +503,7 @@ def test_a_repeated_request_carries_one_client_event_id_and_the_hub_replays_it(h
     again = importer.run(client(hub), now_ms=day + 5_000, **args)
     assert [c["client_event_id"] for c in hub.imports()[len(sent) :]] == sent
     assert len(hub.events) == events and again["ok"]
-    assert len(set(sent)) == len(sent) and {hubc.event_id_ms(i) for i in sent} == {day}
+    assert len(set(sent)) == len(sent) and {hubc.event_id_ms(i) for i in sent} == {day - importer.FUTURE_MS}
 
 
 def test_a_first_import_into_a_scope_needs_yes(hub, tmp_path, capsys):
@@ -410,6 +515,22 @@ def test_a_first_import_into_a_scope_needs_yes(hub, tmp_path, capsys):
     code, text, _ = run(["memory", "hub", "import", "--target", str(target), "--scope", SCOPE, str(vault)], capsys)
     assert code == 1 and "would append 3 card(s). Run again with --yes." in text
     assert import_cli(tmp_path, capsys, "--yes", str(vault))[0] == 0 and len(hub.imports()) == 3
+
+
+def test_the_dry_run_says_the_real_run_needs_yes_and_both_headers_show_the_flags(hub, tmp_path, capsys):
+    vault = make_vault(tmp_path / "vault", {".obsidian/app.json": "{}", **VAULT})
+    target = workspace(tmp_path / "ws", mode="sync")
+    base = ["memory", "hub", "import", "--target", str(target), "--scope", SCOPE]
+    code, out, _ = run([*base, "--dry-run", str(vault)], capsys)
+    first = out.splitlines()[0]
+    assert code == 0 and first.endswith(f"(dry run, nothing written), --update off, root {vault}:")
+    assert f"the real run needs --yes: this would be the first import into {SCOPE}" in out
+    code, out, _ = run([*base, "--update", "--yes", str(vault)], capsys)
+    assert code == 0 and out.splitlines()[0] == f"memory hub import into {SCOPE}, --update on, root {vault}:"
+    code, out, _ = run([*base, "--dry-run", str(vault)], capsys)
+    assert "needs --yes" not in out
+    _, rows, _, _ = import_cli(tmp_path, capsys, "--dry-run", "--update", str(vault))
+    assert (summary_of(rows)["root"], summary_of(rows)["update"]) == (str(vault), True)
 
 
 def test_a_missing_import_grant_stops_the_run_once(hub, tmp_path, capsys):
@@ -454,6 +575,95 @@ def test_an_unserving_hub_stops_the_run_after_three_tries(hub, tmp_path, capsys)
     results = [r["result"]["status"] for r in rows if r["type"] == "note"]
     assert code == 1 and results == ["unavailable"] * 3 + ["not-sent"] * 3
     assert "stopped serving imports" in summary_of(rows)["stopped"]
+
+
+def test_a_dead_scanner_stops_the_run_after_three_retryable_refusals(hub, tmp_path, capsys):
+    vault = make_vault(tmp_path / "vault", {f"n{i}.md": f"# N{i}\n" for i in range(6)})
+    retry = {"error": "scan unavailable", "code": "memory_scan_unavailable", "retryable": True}
+    for i in range(6):
+        hub.overrides[importer.derive_card_id(f"n{i}.md")] = (503, retry)
+    code, rows, _, _ = import_cli(tmp_path, capsys, "--yes", str(vault))
+    results = [r["result"]["status"] for r in rows if r["type"] == "note"]
+    assert code == 1 and results == ["refused"] * 3 + ["not-sent"] * 3 and len(hub.imports()) == 3
+    assert "stopped serving imports (memory_scan_unavailable)" in summary_of(rows)["stopped"]
+
+
+def test_a_retryable_refusal_never_resets_the_count_but_a_plain_refusal_does(hub, tmp_path, capsys):
+    vault = make_vault(tmp_path / "vault", {f"n{i}.md": f"# N{i}\n" for i in range(5)})
+    retry = {"error": "scan unavailable", "code": "memory_scan_unavailable", "retryable": True}
+    plain = {"error": "stale", "code": "memory_base_mismatch"}
+    ids = [importer.derive_card_id(f"n{i}.md") for i in range(5)]
+    for index in (0, 2, 4):
+        hub.overrides[ids[index]] = (503, retry)
+    hub.overrides[ids[1]] = (409, plain)  # a plain refusal between retryable ones resets the count
+    code, rows, _, _ = import_cli(tmp_path, capsys, "--yes", str(vault))
+    results = [r["result"]["status"] for r in rows if r["type"] == "note"]
+    assert code == 1 and "not-sent" not in results and summary_of(rows)["stopped"] is None
+    hub.overrides[ids[1]] = (503, retry)
+    hub.overrides[ids[3]] = (503, retry)
+    hub.overrides.pop(ids[0])
+    code, rows, _, _ = import_cli(tmp_path, capsys, "--yes", str(vault))
+    assert "stopped serving imports" in summary_of(rows)["stopped"]
+
+
+def seed_twice_hashless_second(hub: ImportHub, card_id: str, text: str) -> None:
+    first = client(hub).call(
+        "put", scope=SCOPE, card_id=card_id, base_revision=None, text=text, client_event_id=hubc.event_id()
+    )["event"]["revision"]
+    second = client(hub).call(
+        "put",
+        scope=SCOPE,
+        card_id=card_id,
+        base_revision=first,
+        base_epoch=hub.epoch,
+        text=text,
+        client_event_id=hubc.event_id(),
+    )["event"]["seq"]
+    hub.hashless.add(second)
+
+
+def test_a_head_without_a_hash_uses_the_latest_hash_the_card_has(hub, tmp_path, capsys):
+    text = "---\nid: kept\n---\n# Kept\nbody\n"
+    seed_twice_hashless_second(hub, "kept", text)
+    vault = make_vault(tmp_path / "vault", {"kept.md": text})
+    code, rows, _, _ = import_cli(tmp_path, capsys, "--dry-run", str(vault))
+    assert code == 0 and notes_of(rows)["kept.md"]["action"] == "unchanged"
+    assert importer.read_heads(client(hub), SCOPE).head_hash["kept"] == hubc.content_hash(text)
+
+
+def test_a_head_with_no_hash_anywhere_is_unknown_and_never_changed_or_appended(hub, tmp_path, capsys):
+    seed(hub, "bare", "# Bare\nbody\n")
+    hub.hashless.add(hub.seq)
+    vault = make_vault(tmp_path / "vault", {"bare.md": "---\nid: bare\n---\n# Bare\nnew text\n"})
+    for args in (["--dry-run"], ["--yes"], ["--update", "--yes"]):
+        code, rows, out, _ = import_cli(tmp_path, capsys, *args, str(vault))
+        row = notes_of(rows)["bare.md"]
+        assert code == 0 and (row["action"], row["appends"], row["reason"]) == (
+            "unknown-head",
+            False,
+            "head-without-content-hash",
+        )
+    assert hub.imports() == []
+    assert summary_of(rows)["counts"] == {"unknown-head": 1}
+
+
+def test_collisions_that_share_a_frontmatter_id_get_a_summary_hint(hub, tmp_path, capsys):
+    vault = make_vault(
+        tmp_path / "vault",
+        {
+            "Templates/t.md": "---\nid: tpl\n---\n# T\n",
+            "a.md": "---\nid: tpl\n---\n# A\n",
+            "b.md": "---\nid: tpl\n---\n# B\n",
+            "ok.md": "# Ok\n",
+        },
+    )
+    code, rows, _, _ = import_cli(tmp_path, capsys, "--dry-run", str(vault))
+    assert summary_of(rows)["frontmatter_id_collisions"] == 3 and summary_of(rows)["counts"]["collision"] == 3
+    target = workspace(tmp_path / "ws", mode="read")
+    code, text, _ = run(
+        ["memory", "hub", "import", "--target", str(target), "--scope", SCOPE, "--dry-run", str(vault)], capsys
+    )
+    assert "hint: 3 collision(s) share a frontmatter id" in text
 
 
 def test_text_output_lists_each_note_and_a_summary(hub, tmp_path, capsys):

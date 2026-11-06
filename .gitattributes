@@ -5,3 +5,6 @@
 
 # Golden journal bytes use canonical LF framing on every platform.
 /tests/fixtures/run-lifecycle/golden-lifecycle.jsonl text eol=lf
+
+# The memory scan ruleset is identified by the SHA-256 of its bytes, so no checkout may rewrite its line endings.
+/src/brigade/guard/memory-rules.json -text

@@ -12,6 +12,9 @@ lower-cased ASCII form of its root-relative path without `.md` and the hex is
 the start of the SHA-256 of that NFC path, so the same path maps to the same
 card on every run. Two notes with one id are a collision and neither imports.
 
+The import root is the same for every way of naming the same vault: the nearest
+ancestor holding `.obsidian/`, else the common ancestor of the arguments.
+
 Dedupe uses `hubc.content_hash`, the hub's own `content_hash`: SHA-256 of the
 text with LF line endings and exactly one trailing newline.
 """
@@ -37,6 +40,8 @@ ACTIONS = (
     "unchanged",
     "duplicate",
     "changed",
+    "revive",
+    "unknown-head",
     "private",
     "visibility-unrecognized",
     "blocked",
@@ -48,8 +53,10 @@ MAX_TEXT_BYTES = 512 * 1024  # the hub's card size limit, after normalization
 LOG_PAGE = 500
 DAY_MS = 24 * 3600 * 1000
 TOP_RULES = 5
-# Consecutive "hub not serving" answers after which the real run stops.
+# Consecutive "hub not serving" answers (or retryable refusals) after which the real run stops.
 UNAVAILABLE_LIMIT = 3
+# The hub's `ids::FUTURE_MS`: how far ahead of its clock it accepts a client_event_id.
+FUTURE_MS = 5 * 60 * 1000
 # Memory hub heads whose log events replace the previous head, as in a pull.
 HEAD_KINDS = {"card.put", "card.import", "card.retire", "card.trust", "proposal.apply", "proposal.rollback"}
 _STOP_CODES = {"memory_epoch_changed"}
@@ -60,6 +67,7 @@ _SLUG_LIMIT = 100
 class Discovery:
     sources: list[tuple[Path, str]] = field(default_factory=list)  # (file, root-relative posix path)
     stats: Counter[str] = field(default_factory=Counter)
+    root: str = ""
 
 
 @dataclass
@@ -76,6 +84,7 @@ class Item:
     content_hash: str = ""
     base: dict[str, Any] | None = None
     result: dict[str, Any] | None = None
+    frontmatter_id: bool = field(default=False, repr=False)
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"type": "note", "path": self.path, "card_id": self.card_id, "action": self.action}
@@ -99,6 +108,8 @@ class Heads:
     retired: dict[str, dict[str, Any]]
     hashes: set[str]
     prior_imports: int
+    # card_id to the content_hash of its latest event that carries one (a head event may carry none).
+    head_hash: dict[str, str] = field(default_factory=dict)
 
 
 # --- discovery ------------------------------------------------------------------------------
@@ -122,6 +133,18 @@ def _mirror_dir(directory: str) -> bool:
     return os.path.lexists(os.path.join(directory, MARKER))
 
 
+def _in_mirror(start: str) -> bool:
+    """True when `start` or any ancestor up to the filesystem root holds the mirror's marker."""
+    current = start
+    while True:
+        if _mirror_dir(current):
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+
+
 def _relative(file: str, root: str) -> str:
     rel = os.path.relpath(file, root).replace(os.sep, "/")
     if rel == ".." or rel.startswith("../"):
@@ -129,33 +152,74 @@ def _relative(file: str, root: str) -> str:
     return rel
 
 
-def discover(paths: list[Path], *, root: Path | None, excludes: list[str]) -> Discovery:
-    """Markdown notes under `paths`, with paths relative to `root` (default: each directory argument's own folder).
+def _anchor(top: str) -> str:
+    """The folder an argument lives in: itself for a directory, else its parent."""
+    return top if os.path.isdir(top) else os.path.dirname(top)
 
-    Dot directories, folders holding the hub mirror's marker file, symlinks met
-    while walking and anything matching `excludes` are skipped and counted.
+
+def _vault_root(anchor: str) -> str | None:
+    """The nearest ancestor of `anchor` (itself included) that holds an `.obsidian` folder."""
+    current = anchor
+    while True:
+        if os.path.isdir(os.path.join(current, ".obsidian")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
+def resolve_root(paths: list[Path], root: Path | None) -> str:
+    """The folder derived card ids are relative to, the same however the vault is named.
+
+    `--root` wins. Otherwise each argument's nearest `.obsidian` ancestor, which
+    must be one folder for all arguments, else the common ancestor of the arguments.
+    """
+    if root is not None:
+        return os.path.abspath(root.expanduser())
+    anchors = [_anchor(os.path.abspath(given.expanduser())) for given in paths]
+    vaults = {vault for vault in (_vault_root(anchor) for anchor in anchors) if vault is not None}
+    if len(vaults) > 1:
+        raise hubc.HubConfigError(
+            "the arguments belong to different Obsidian vaults, so one root cannot name them all; "
+            "import them one at a time or pass --root"
+        )
+    if vaults:
+        return next(iter(vaults))
+    try:
+        return os.path.commonpath(anchors)
+    except ValueError:
+        raise hubc.HubConfigError("the arguments share no common folder; pass --root") from None
+
+
+def discover(paths: list[Path], *, root: Path | None, excludes: list[str]) -> Discovery:
+    """Markdown notes under `paths`, with paths relative to the resolved root (see `resolve_root`).
+
+    Dot directories, folders under a mirror marker (an argument's ancestors
+    included), symlinks met while walking and anything matching `excludes` are
+    skipped and counted.
     """
     found = Discovery()
     seen: set[str] = set()
-    fixed = os.path.abspath(root.expanduser()) if root is not None else None
+    base = resolve_root(paths, root)
+    found.root = base
 
-    def add(file: str, base: str) -> None:
+    def add(file: str) -> None:
         if file in seen:
             return
         seen.add(file)
-        found.sources.append((Path(file), _relative(file, fixed or base)))
+        found.sources.append((Path(file), _relative(file, base)))
 
     for given in paths:
         top = os.path.abspath(given.expanduser())
-        if os.path.isdir(top):
-            if _mirror_dir(top):
-                found.stats["mirror_dirs"] += 1
-                continue
+        if _in_mirror(_anchor(top)):
+            found.stats["mirror_dirs"] += 1
+        elif os.path.isdir(top):
             for directory, dirnames, filenames in os.walk(top):
                 keep = []
                 for name in sorted(dirnames):
                     full = os.path.join(directory, name)
-                    rel = _relative(full, fixed or top)
+                    rel = _relative(full, base)
                     if name.startswith("."):
                         found.stats["dot_dirs"] += 1
                     elif os.path.islink(full):
@@ -173,18 +237,14 @@ def discover(paths: list[Path], *, root: Path | None, excludes: list[str]) -> Di
                         continue
                     if os.path.islink(full):
                         found.stats["symlinks"] += 1
-                    elif _excluded(_relative(full, fixed or top), excludes):
+                    elif _excluded(_relative(full, base), excludes):
                         found.stats["excluded"] += 1
                     else:
-                        add(full, top)
+                        add(full)
+        elif _excluded(_relative(top, base), excludes):
+            found.stats["excluded"] += 1
         else:
-            parent = os.path.dirname(top)
-            if _mirror_dir(parent):
-                found.stats["mirror_dirs"] += 1
-            elif _excluded(_relative(top, fixed or parent), excludes):
-                found.stats["excluded"] += 1
-            else:
-                add(top, parent)  # a missing file is reported by the planner, not skipped
+            add(top)  # a missing file is reported by the planner, not skipped
     found.sources.sort(key=lambda item: item[1])
     found.stats["notes"] = len(found.sources)
     return found
@@ -202,8 +262,8 @@ def derive_card_id(rel: str) -> str:
     return f"{slug}-{hashlib.sha256(path.encode('utf-8')).hexdigest()[:10]}"
 
 
-def note_card_id(text: str, rel: str) -> str:
-    """The id the note's frontmatter holds when the hub accepts it as is, else the one derived from `rel`."""
+def frontmatter_card_id(text: str) -> str | None:
+    """The id the note's frontmatter holds when the hub accepts it as is, else None."""
     from . import card_identity, memory_cmd
 
     meta, _ = memory_cmd._parse_frontmatter(text.removeprefix("﻿").replace("\r\n", "\n"))
@@ -216,7 +276,12 @@ def note_card_id(text: str, rel: str) -> str:
             minted = card_identity.valid_card_id(candidate)
             if minted and hubc.valid_card_id(minted):
                 return minted
-    return derive_card_id(rel)
+    return None
+
+
+def note_card_id(text: str, rel: str) -> str:
+    """The frontmatter id when the hub accepts it as is, else the one derived from `rel`."""
+    return frontmatter_card_id(text) or derive_card_id(rel)
 
 
 # --- the hub's heads --------------------------------------------------------------------------
@@ -254,6 +319,7 @@ def read_heads(client: hubc.MemoryHubClient, scope: str) -> Heads:
     _local_ruleset_must_match(status)
     epoch, principal = str(status.get("log_epoch") or ""), str(status.get("principal") or "")
     latest: dict[str, dict[str, Any]] = {}
+    head_hash: dict[str, str] = {}
     prior, after = 0, 0
     while True:
         page = client.call("log", after_seq=after, limit=LOG_PAGE)
@@ -274,6 +340,8 @@ def read_heads(client: hubc.MemoryHubClient, scope: str) -> Heads:
                 and isinstance(event.get("revision"), int)
             ):
                 latest[event["card_id"]] = event
+                if event.get("content_hash"):
+                    head_hash[event["card_id"]] = str(event["content_hash"])
                 prior += event["kind"] == "card.import"
         following = page.get("next_seq")
         if not isinstance(following, int) or following <= after:
@@ -281,8 +349,8 @@ def read_heads(client: hubc.MemoryHubClient, scope: str) -> Heads:
         after = following
     live = {cid: e for cid, e in latest.items() if e["kind"] != "card.retire"}
     retired = {cid: e for cid, e in latest.items() if e["kind"] == "card.retire"}
-    hashes = {str(e.get("content_hash")) for e in live.values() if e.get("content_hash")}
-    return Heads(epoch, principal, live, retired, hashes, prior)
+    hashes = {head_hash[cid] for cid in live if cid in head_hash}
+    return Heads(epoch, principal, live, retired, hashes, prior, head_hash)
 
 
 # --- planning ---------------------------------------------------------------------------------
@@ -294,6 +362,7 @@ class _Note:
     card_id: str | None = None
     text: str = ""
     content_hash: str = ""
+    frontmatter_id: bool = False
     item: Item | None = None  # set when the note is settled before dedupe
 
 
@@ -324,7 +393,9 @@ def _read(path: Path, rel: str) -> _Note:
     elif len(normalized.encode("utf-8")) > MAX_TEXT_BYTES:
         note.item = Item(rel, None, "error", reason="too-large")
     else:
-        note.card_id, note.text, note.content_hash = note_card_id(text, rel), text, hubc.content_hash(text)
+        declared = frontmatter_card_id(text)
+        note.card_id, note.frontmatter_id = declared or derive_card_id(rel), declared is not None
+        note.text, note.content_hash = text, hubc.content_hash(text)
     return note
 
 
@@ -339,12 +410,16 @@ def build_plan(sources: list[tuple[Path, str]], heads: Heads, *, update: bool) -
             items.append(note.item)
             continue
         card_id, digest = str(note.card_id), note.content_hash
-        item = Item(note.rel, card_id, "import", content_hash=digest)
+        item = Item(note.rel, card_id, "import", content_hash=digest, frontmatter_id=note.frontmatter_id)
         items.append(item)
         head = heads.live.get(card_id)
+        retired = heads.retired.get(card_id)
         if owners[card_id] > 1:
             item.action = "collision"
-        elif head is not None and head.get("content_hash") == digest:
+        elif head is not None and card_id not in heads.head_hash:
+            # No event of this card carries a hash, so "changed" could not be told from "unchanged".
+            item.action, item.reason = "unknown-head", "head-without-content-hash"
+        elif head is not None and heads.head_hash[card_id] == digest:
             item.action = "unchanged"
             seen.add(digest)
         elif digest in heads.hashes or digest in seen:
@@ -352,11 +427,13 @@ def build_plan(sources: list[tuple[Path, str]], heads: Heads, *, update: bool) -
         else:
             if head is not None:
                 item.action = "changed"
-            if head is None or update:
+            elif retired is not None:
+                item.action = "revive"
+            if (head is None and retired is None) or update:
                 _scan(item, note.text)
-                if item.action in {"import", "changed"}:
+                if item.action in {"import", "changed", "revive"}:
                     item.text, item.appends = note.text, True
-                    item.base = head or heads.retired.get(card_id)
+                    item.base = head or retired
                     seen.add(digest)
     return items
 
@@ -365,6 +442,9 @@ def _scan(item: Item, text: str) -> None:
     verdict, rules = scanner.scan_verdict([hubc.normalize_text(text)])
     if verdict in {scanner.BLOCKED, scanner.FLAGGED}:
         item.action, item.rules = verdict, rules
+        # The id may be what tripped a rule, so report it only when it scans clean on its own.
+        if item.card_id and scanner.scan_verdict([item.card_id])[0] != scanner.CLEAN:
+            item.card_id = None
     elif verdict == scanner.PRIVATE:
         item.scan, item.rules = "private", rules
     else:
@@ -376,13 +456,17 @@ def import_event_id(scope: str, item: Item, epoch: str, *, now_ms: int) -> str:
 
     The hub replays a repeat of a committed request instead of appending, but
     only inside its 29-day acceptance window, so the time half is the start of
-    the UTC day. The 80 random bits come from the request itself, and the base
-    is part of it because the hub refuses one id sent with two different bases.
+    the UTC day, less the hub's future allowance. The hub refuses an id dated
+    ahead of its own clock by more than that allowance, so a client clock up to
+    twice the allowance ahead of the hub's still gets a day start the hub takes,
+    just after midnight UTC. The 80 random bits come from the request itself,
+    and the base is part of it because the hub refuses one id sent with two
+    different bases.
     """
     base = item.base.get("revision") if item.base else None
     seed = "\0".join(["brigade-memory-import.v1", scope, str(item.card_id), item.content_hash, str(base or ""), epoch])
     tail = int.from_bytes(hashlib.sha256(seed.encode("utf-8")).digest()[:10], "big")
-    return hubc.event_id_at(now_ms - now_ms % DAY_MS, tail)
+    return hubc.event_id_at(now_ms - now_ms % DAY_MS - FUTURE_MS, tail)
 
 
 # --- the run ----------------------------------------------------------------------------------
@@ -405,7 +489,6 @@ def _send(client: hubc.MemoryHubClient, scope: str, heads: Heads, items: list[It
             reply = client.call("import", **body)
         except hubc.HubRefusal as exc:
             item.result = {"status": "refused", "code": exc.code or "refused", "http": exc.status}
-            unavailable = 0
             if exc.denies_access:
                 return (
                     f"the hub refused the import ({exc.status} {exc.code or 'unauthorized'}): "
@@ -413,6 +496,14 @@ def _send(client: hubc.MemoryHubClient, scope: str, heads: Heads, items: list[It
                 )
             if exc.code in _STOP_CODES:
                 return f"the hub refused the import ({exc.code}): its log was restored since planning; run again"
+            if exc.body.get("retryable") is True:
+                # The hub cannot serve this right now, such as a scanner that dropped out. Count it like an
+                # unavailable answer and never reset the counter on it, so a dead scanner stops the run.
+                unavailable += 1
+                if unavailable >= UNAVAILABLE_LIMIT:
+                    return f"the hub stopped serving imports ({exc.code or exc.status}); run again to continue"
+            else:
+                unavailable = 0
         except hubc.HubUnavailable as exc:
             item.result = {"status": "unavailable", "reason": exc.reason}
             unavailable += 1
@@ -433,6 +524,7 @@ def summarize(items: list[Item], found: Discovery) -> dict[str, Any]:
         "appends": sum(item.appends for item in items),
         "private_class_imports": sum(item.appends and item.scan == "private" for item in items),
         "top_rules": [[rule, count] for rule, count in rules.most_common(TOP_RULES)],
+        "frontmatter_id_collisions": sum(item.action == "collision" and item.frontmatter_id for item in items),
         "discovery": {name: count for name, count in sorted(found.stats.items()) if count},
     }
 
@@ -457,6 +549,7 @@ def run(
         "scope": scope,
         "dry_run": dry_run,
         "update": update,
+        "root": found.root,
         "first_import": heads.prior_imports == 0,
         "items": items,
         "summary": summarize(items, found),
@@ -485,14 +578,16 @@ def run(
 
 def lines(report: dict[str, Any]) -> list[str]:
     summary = report["summary"]
-    out = [
-        f"memory hub import into {report['scope']}" + (" (dry run, nothing written)" if report["dry_run"] else "") + ":"
-    ]
+    mode = " (dry run, nothing written)" if report["dry_run"] else ""
+    flags = f"--update {'on' if report['update'] else 'off'}, root {report['root']}"
+    out = [f"memory hub import into {report['scope']}{mode}, {flags}:"]
     for item in report["items"]:
         detail = ",".join(item.rules) if item.action in {"blocked", "flagged"} else (item.reason or "")
-        if item.action == "changed":
-            detail = "will update" if report["update"] else "kept, pass --update to overwrite"
-        entry = f"- {item.path}  {item.card_id or '-'}  {item.action}" + (f"  {detail}" if detail else "")
+        if item.action in {"changed", "revive"}:
+            verb = "update" if item.action == "changed" else "revive"
+            detail = f"will {verb}" if report["update"] else f"kept, pass --update to {verb}"
+        shown = "-" if item.action in {"blocked", "flagged"} else (item.card_id or "-")
+        entry = f"- {item.path}  {shown}  {item.action}" + (f"  {detail}" if detail else "")
         if item.result:
             entry += "  -> " + " ".join(f"{k}={v}" for k, v in item.result.items())
         out.append(entry)
@@ -503,8 +598,15 @@ def lines(report: dict[str, Any]) -> list[str]:
         out.append(f"  of which with private-class content: {summary['private_class_imports']}")
     if summary["top_rules"]:
         out.append("top rules: " + ", ".join(f"{rule} x{count}" for rule, count in summary["top_rules"]))
+    if summary["frontmatter_id_collisions"]:
+        out.append(
+            f"hint: {summary['frontmatter_id_collisions']} collision(s) share a frontmatter id, often a template "
+            "copied into many notes: give each note its own id or --exclude the template folder"
+        )
     if summary["discovery"]:
         out.append("discovery: " + ", ".join(f"{name} {count}" for name, count in summary["discovery"].items()))
+    if report["dry_run"] and report["first_import"] and summary["appends"]:
+        out.append(f"the real run needs --yes: this would be the first import into {report['scope']}")
     if report["needs_confirmation"]:
         out.append(
             f"First import into {report['scope']} would append {summary['appends']} card(s). Run again with --yes."
@@ -517,6 +619,6 @@ def lines(report: dict[str, Any]) -> list[str]:
 def json_lines(report: dict[str, Any]) -> list[dict[str, Any]]:
     head = {
         key: report[key]
-        for key in ("scope", "dry_run", "update", "first_import", "needs_confirmation", "stopped", "ok")
+        for key in ("scope", "dry_run", "update", "root", "first_import", "needs_confirmation", "stopped", "ok")
     }
     return [*(item.as_dict() for item in report["items"]), {**report["summary"], **head}]
