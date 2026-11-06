@@ -1,4 +1,8 @@
-use super::{embedder::*, scan, tests::*};
+use super::{
+    embedder::*,
+    scan::{self, Scan},
+    tests::*,
+};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use serde_json::json;
@@ -8,13 +12,16 @@ use std::{
 };
 
 fn config(endpoint: String) -> Config {
+    config_with_mode(endpoint, 0o600)
+}
+fn config_with_mode(endpoint: String, _mode: u32) -> Config {
     let dir = temp_dir();
     let token = dir.join("token");
     std::fs::write(&token, "fake-embed-token").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(_mode)).unwrap();
     }
     Config {
         backend: "remote".into(),
@@ -40,13 +47,28 @@ async fn fake(
     Arc<Mutex<Vec<serde_json::Value>>>,
     tokio::task::JoinHandle<()>,
 ) {
+    let (url, requests, _, task) = fake_counting(digest).await;
+    (url, requests, task)
+}
+/// Also counts accepted TCP connections.
+async fn fake_counting(
+    digest: &str,
+) -> (
+    String,
+    Arc<Mutex<Vec<serde_json::Value>>>,
+    Arc<Mutex<usize>>,
+    tokio::task::JoinHandle<()>,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
+    let connections = Arc::new(Mutex::new(0));
     let seen = requests.clone();
+    let accepted = connections.clone();
     let digest = digest.to_string();
     let task = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
+            *accepted.lock().unwrap() += 1;
             let seen = seen.clone();
             let digest = digest.clone();
             tokio::spawn(async move {
@@ -81,7 +103,12 @@ async fn fake(
             });
         }
     });
-    (format!("http://{address}/api/embed"), requests, task)
+    (
+        format!("http://{address}/api/embed"),
+        requests,
+        connections,
+        task,
+    )
 }
 #[tokio::test]
 async fn http_token_digest_allowlist_and_vectors() {
@@ -389,4 +416,275 @@ async fn document_backoff_honors_retry_after_and_query_quiet_period() {
             .reason,
         "embedder-busy"
     );
+}
+
+fn flagged() -> Arc<dyn scan::Scanner> {
+    Arc::new(Fixed(Scan::Flagged {
+        ruleset: "test-rules".into(),
+        rules: vec!["test-warning".into()],
+    }))
+}
+fn clean() -> Arc<dyn scan::Scanner> {
+    Arc::new(Fixed(Scan::Clean {
+        ruleset: "test-rules".into(),
+    }))
+}
+#[tokio::test]
+async fn flagged_query_and_document_never_leave_the_host() {
+    let (url, seen, task) = fake("test-digest").await;
+    // A query the scanner flags is refused before any connection.
+    let runtime = Runtime::new(config(url.clone()), flagged()).unwrap();
+    assert_eq!(
+        runtime.query("flagged query").await.unwrap_err().reason,
+        "content-blocked"
+    );
+    assert!(!runtime.breaker_open());
+    // A document whose fresh scan flags it is refused at the transport.
+    let endpoint = HttpEmbedder::new(config(url.clone()), flagged()).unwrap();
+    assert_eq!(
+        endpoint
+            .embed(
+                Kind::Document,
+                vec!["flagged body".into()],
+                DOCUMENT_DEADLINE
+            )
+            .await
+            .unwrap_err()
+            .reason,
+        "content-blocked"
+    );
+    // A version stored as flagged is refused even when a fresh scan is clean.
+    let runtime = Runtime::new(config(url), clean()).unwrap();
+    assert_eq!(
+        runtime
+            .documents(vec![("body".into(), "flagged".into())])
+            .await
+            .unwrap_err()
+            .reason,
+        "scan-pending"
+    );
+    assert!(seen.lock().unwrap().is_empty());
+    // The same clean version goes out.
+    runtime
+        .documents(vec![("body".into(), "clean".into())])
+        .await
+        .unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    task.abort();
+}
+
+#[test]
+fn unscanned_text_needs_a_loopback_address_not_a_name() {
+    let url = |s: &str| url::Url::parse(s).unwrap();
+    let lan: std::net::IpAddr = "192.168.1.20".parse().unwrap();
+    let v4: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    let v6: std::net::IpAddr = "::1".parse().unwrap();
+    // `localhost` that resolves to a LAN address gets no exemption.
+    assert!(!unscanned_permitted(
+        &url("http://localhost:8080/api/embed"),
+        Some(lan)
+    ));
+    assert!(unscanned_permitted(
+        &url("http://localhost:8080/api/embed"),
+        Some(v4)
+    ));
+    assert!(unscanned_permitted(
+        &url("http://localhost:8080/api/embed"),
+        Some(v6)
+    ));
+    assert!(unscanned_permitted(
+        &url("http://localhost:8080/api/embed"),
+        None
+    ));
+    assert!(!unscanned_permitted(
+        &url("http://10.0.0.5/api/embed"),
+        None
+    ));
+    assert!(!unscanned_permitted(
+        &url("http://embed.example.com/api/embed"),
+        None
+    ));
+    // HTTPS resolves out of the hub's sight, so only a loopback literal passes.
+    assert!(!unscanned_permitted(
+        &url("https://localhost/v1/embeddings"),
+        None
+    ));
+    assert!(unscanned_permitted(
+        &url("https://127.0.0.1/v1/embeddings"),
+        None
+    ));
+    assert!(unscanned_permitted(
+        &url("https://[::1]/v1/embeddings"),
+        None
+    ));
+}
+
+#[tokio::test]
+async fn unscanned_query_to_https_localhost_is_refused_and_loopback_ip_is_sent() {
+    let endpoint = HttpEmbedder::new(
+        config("https://localhost:1/v1/embeddings".into()),
+        Arc::new(scan::Unavailable),
+    )
+    .unwrap();
+    assert_eq!(
+        endpoint
+            .embed(Kind::Query, vec!["text".into()], QUERY_DEADLINE)
+            .await
+            .unwrap_err()
+            .reason,
+        "scan-unavailable"
+    );
+    let (url, seen, task) = fake("test-digest").await;
+    HttpEmbedder::new(config(url), Arc::new(scan::Unavailable))
+        .unwrap()
+        .embed(Kind::Query, vec!["text".into()], QUERY_DEADLINE)
+        .await
+        .unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn token_file_must_be_owned_by_the_hub_user_with_0600_or_0400() {
+    let (url, _, task) = fake("test-digest").await;
+    let endpoint = HttpEmbedder::new(config_with_mode(url.clone(), 0o400), clean()).unwrap();
+    endpoint
+        .embed(Kind::Query, vec!["text".into()], QUERY_DEADLINE)
+        .await
+        .unwrap();
+    #[cfg(unix)]
+    for mode in [0o640, 0o604, 0o700, 0o644] {
+        assert!(HttpEmbedder::new(config_with_mode(url.clone(), mode), clean()).is_err());
+    }
+    assert!(token_file_permitted(0o100600, 1000, 1000));
+    assert!(token_file_permitted(0o100400, 1000, 1000));
+    // Another user's file is refused whatever its mode.
+    assert!(!token_file_permitted(0o100600, 0, 1000));
+    assert!(!token_file_permitted(0o100400, 1001, 1000));
+    task.abort();
+}
+
+#[tokio::test]
+async fn idle_connection_is_reused_for_the_pinned_address() {
+    let (url, seen, connections, task) = fake_counting("test-digest").await;
+    let endpoint = HttpEmbedder::new(config(url), clean()).unwrap();
+    for _ in 0..3 {
+        endpoint
+            .embed(Kind::Query, vec!["text".into()], QUERY_DEADLINE)
+            .await
+            .unwrap();
+    }
+    assert_eq!(seen.lock().unwrap().len(), 3);
+    assert_eq!(*connections.lock().unwrap(), 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn hybrid_search_sends_no_query_before_dense_retrieval() {
+    let (url, seen, task) = fake("test-digest").await;
+    let mut hub = Hub::with(clean(), None);
+    let c = config(url.clone());
+    hub.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&json!({"retrieval": "hybrid", "embedder": {
+            "backend": "remote", "endpoint": url, "allowlist": [url],
+            "token_file": c.token_file, "shape": "api/embed", "name": "test-model",
+            "model_digest": "test-digest", "dimensions": 2, "input_chars": 6000,
+            "query_prefix_version": 1}}))
+        .unwrap();
+    let reply = hub
+        .call(
+            ADMIN_TOKEN,
+            json!({"action": "search", "query": "release checklist"}),
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert!(seen.lock().unwrap().is_empty());
+    task.abort();
+}
+
+/// Query and probe answers come from scripted queues. A `None` probe panics.
+struct Scripted {
+    id: EmbedderId,
+    queries: Mutex<Vec<bool>>,
+    probes: Mutex<Vec<Option<bool>>>,
+    probe_calls: Mutex<usize>,
+}
+impl Scripted {
+    fn new(id: EmbedderId, queries: Vec<bool>, probes: Vec<Option<bool>>) -> Arc<Self> {
+        Arc::new(Self {
+            id,
+            queries: Mutex::new(queries),
+            probes: Mutex::new(probes),
+            probe_calls: Mutex::new(0),
+        })
+    }
+}
+impl Embedder for Scripted {
+    fn id(&self) -> &EmbedderId {
+        &self.id
+    }
+    fn embed(&self, kind: Kind, _: Vec<String>, _: Duration) -> Embedding {
+        let answer = match kind {
+            Kind::Probe => {
+                *self.probe_calls.lock().unwrap() += 1;
+                self.probes.lock().unwrap().remove(0)
+            }
+            _ => Some(self.queries.lock().unwrap().remove(0)),
+        };
+        Box::pin(async move {
+            match answer {
+                Some(true) => Ok(vec![vec![1.0, 0.0]]),
+                Some(false) => Err(EmbedError {
+                    reason: "embedder-unavailable",
+                    retry_after: None,
+                }),
+                None => panic!("scripted probe panic"),
+            }
+        })
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn breaker_recovers_after_a_failed_probe_and_status_returns() {
+    let mut hub = Hub::new();
+    let c = config("http://127.0.0.1:1/api/embed".into());
+    let scripted = Scripted::new(c.id.clone(), vec![false, true], vec![Some(false)]);
+    let runtime = Runtime::with(c, scripted.clone());
+    hub.store.as_mut().unwrap().retrieval = Some(runtime.clone());
+    let healthy = hub.store.as_ref().unwrap().retrieval_status();
+    assert!(runtime.query("text").await.is_err());
+    tokio::task::yield_now().await;
+    assert_eq!(*scripted.probe_calls.lock().unwrap(), 1);
+    assert!(runtime.breaker_open());
+    assert_eq!(
+        hub.store.as_ref().unwrap().retrieval_status()["state"],
+        json!("degraded")
+    );
+    // The probe failed. Once the window passes the breaker reads closed.
+    tokio::time::advance(BREAKER_WINDOW).await;
+    assert!(!runtime.breaker_open());
+    // A healthy query clears the fault and status returns to its healthy form.
+    runtime.query("text").await.unwrap();
+    assert!(runtime.reason().is_none());
+    assert_eq!(hub.store.as_ref().unwrap().retrieval_status(), healthy);
+}
+#[tokio::test(start_paused = true)]
+async fn panicking_probe_resets_the_probe_flag() {
+    let c = config("http://127.0.0.1:1/api/embed".into());
+    let scripted = Scripted::new(c.id.clone(), vec![false, false], vec![None, Some(true)]);
+    let runtime = Runtime::with(c, scripted.clone());
+    assert!(runtime.query("text").await.is_err());
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(*scripted.probe_calls.lock().unwrap(), 1);
+    tokio::time::advance(BREAKER_WINDOW).await;
+    assert!(runtime.query("text").await.is_err());
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    // Without the reset the first panic would leave `probe` set forever.
+    assert_eq!(*scripted.probe_calls.lock().unwrap(), 2);
+    assert!(!runtime.breaker_open());
 }

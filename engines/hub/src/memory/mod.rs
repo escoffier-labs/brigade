@@ -584,8 +584,9 @@ impl Store {
         };
         let credential = credential.clone();
         let scanner = self.scanner.clone();
-        let query = request.query.clone();
-        let lexical = map.get("mode").and_then(Json::as_str) == Some("lexical");
+        // S15a sends no query to the embedder: with no dense retrieval yet the
+        // vector would be discarded, so the call would be egress for nothing.
+        // S15b restores the call together with dense retrieval.
         match self
             .readers
             .submit(move |c| {
@@ -593,19 +594,7 @@ impl Store {
             })
             .await
         {
-            Ok(mut reply) => {
-                if reply.status == 200 && !lexical {
-                    if let Some(runtime) = &self.retrieval {
-                        if let Err(error) = runtime.query(&query).await {
-                            reply.body["retrieval"]["mode"] = json!("lexical-fallback");
-                            reply.body["retrieval"]["effective"] = json!("lexical-fallback");
-                            reply.body["retrieval"]["degraded"] = json!(true);
-                            reply.body["retrieval"]["reason"] = json!(error.reason);
-                        }
-                    }
-                }
-                reply
-            }
+            Ok(reply) => reply,
             Err(_) => Reply::new(
                 503,
                 json!({"error": "hub busy", "reason": "memory-reader-timeout"}),

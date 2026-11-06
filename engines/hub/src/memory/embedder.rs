@@ -24,6 +24,8 @@ pub const DOCUMENT_DEADLINE: Duration = Duration::from_secs(30);
 pub const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 pub const BREAKER_WINDOW: Duration = Duration::from_secs(30);
 const QUIET: Duration = Duration::from_secs(1);
+const POOL_IDLE: Duration = Duration::from_secs(30);
+const POOL_IDLE_PER_HOST: usize = 2;
 pub const BATCH_BYTES: usize = 32 * 1024;
 pub const BATCH_CARDS: usize = 4;
 
@@ -146,13 +148,31 @@ pub struct HttpEmbedder {
     client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
     scanner: Arc<dyn Scanner>,
 }
-fn loopback(url: &Url) -> bool {
+fn loopback_literal(url: &Url) -> bool {
     url.host_str().is_some_and(|h| {
-        h == "localhost"
-            || h.trim_matches(['[', ']'])
-                .parse::<IpAddr>()
-                .is_ok_and(|i| i.is_loopback())
+        h.trim_matches(['[', ']'])
+            .parse::<IpAddr>()
+            .is_ok_and(|i| i.is_loopback())
     })
+}
+/// Whether text the scanner could not check may go to this endpoint. Only a
+/// loopback address qualifies, never a name. Plain HTTP decides on the pinned
+/// address after resolution (`pinned`), so `localhost` mapped to a LAN host
+/// gets nothing. HTTPS connects through its own resolver, so only a loopback
+/// IP literal qualifies there. Before resolution (`pinned` is `None`) a plain
+/// HTTP name may still pass, and the pinned check runs before connecting.
+pub(crate) fn unscanned_permitted(url: &Url, pinned: Option<IpAddr>) -> bool {
+    match (url.scheme(), pinned) {
+        ("http", Some(ip)) => ip.is_loopback(),
+        ("http", None) => loopback_literal(url) || url.host_str() == Some("localhost"),
+        ("https", _) => loopback_literal(url),
+        _ => false,
+    }
+}
+/// The token file belongs to the hub's effective user and nobody else can
+/// read or write it.
+pub(crate) fn token_file_permitted(mode: u32, owner: u32, euid: u32) -> bool {
+    owner == euid && matches!(mode & 0o777, 0o600 | 0o400)
 }
 fn private(ip: IpAddr) -> bool {
     match ip {
@@ -192,9 +212,14 @@ impl HttpEmbedder {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            if meta.permissions().mode() & 0o777 != 0o600 {
-                return Err("embedder token file must have mode 0600".into());
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            let euid = unsafe { libc::geteuid() };
+            if !token_file_permitted(meta.permissions().mode(), meta.uid(), euid) {
+                return Err(
+                    "embedder token file must be owned by the hub user with mode 0600 or 0400"
+                        .into(),
+                );
             }
         }
         use std::io::Read;
@@ -214,9 +239,16 @@ impl HttpEmbedder {
             .https_or_http()
             .enable_http1()
             .build();
+        // A small idle pool keeps a TCP and TLS handshake out of most 250 ms
+        // query budgets. The pool keys on the request URI's scheme and
+        // authority. Plain HTTP rewrites that authority to the pinned address,
+        // so a pooled connection is reused only for the same checked address.
+        // A request on a pooled connection the server already closed is
+        // retried on a new one, inside the same deadline.
         let client = Client::builder(TokioExecutor::new())
-            .retry_canceled_requests(false)
-            .pool_max_idle_per_host(0)
+            .pool_timer(hyper_util::rt::TokioTimer::new())
+            .pool_idle_timeout(POOL_IDLE)
+            .pool_max_idle_per_host(POOL_IDLE_PER_HOST)
             .build(https);
         Ok(Arc::new(Self {
             config,
@@ -242,16 +274,20 @@ impl HttpEmbedder {
             return Err(EmbedError::new("embedder-batch-invalid"));
         }
         // Scan the exact prefixed/truncated payload, not an earlier representation.
+        // Flagged text is never pushed (S18), so only a clean scan leaves the host.
+        let mut unscanned = false;
         for text in &texts {
             match self.scanner.scan(text) {
-                Scan::Blocked { .. } | Scan::Failed => {
+                Scan::Clean { .. } => {}
+                Scan::Unavailable if kind != Kind::Document => unscanned = true,
+                Scan::Unavailable => return Err(EmbedError::new("scan-unavailable")),
+                Scan::Flagged { .. } | Scan::Blocked { .. } | Scan::Failed => {
                     return Err(EmbedError::new("content-blocked"));
                 }
-                Scan::Unavailable if kind == Kind::Document || !loopback(&self.url) => {
-                    return Err(EmbedError::new("scan-unavailable"));
-                }
-                _ => {}
             }
+        }
+        if unscanned && !unscanned_permitted(&self.url, None) {
+            return Err(EmbedError::new("scan-unavailable"));
         }
         let mut url = self.url.clone();
         if url.scheme() == "http" {
@@ -265,6 +301,9 @@ impl HttpEmbedder {
             .collect();
             if addresses.is_empty() || addresses.iter().any(|a| !private(a.ip())) {
                 return Err(EmbedError::new("endpoint-refused"));
+            }
+            if unscanned && !unscanned_permitted(&url, Some(addresses[0].ip())) {
+                return Err(EmbedError::new("scan-unavailable"));
             }
             url.set_ip_host(addresses[0].ip())
                 .map_err(|_| EmbedError::new("endpoint-refused"))?;
@@ -397,6 +436,16 @@ impl Drop for QueryGuard {
         s.quiet_until = Instant::now() + QUIET;
     }
 }
+struct ProbeGuard(Weak<Runtime>);
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.upgrade() {
+            if let Ok(mut s) = runtime.state.lock() {
+                s.probe = false;
+            }
+        }
+    }
+}
 struct DocumentGuard(Arc<Runtime>);
 impl Drop for DocumentGuard {
     fn drop(&mut self) {
@@ -427,8 +476,13 @@ impl Runtime {
     pub fn reason(&self) -> Option<&'static str> {
         self.state.lock().unwrap().reason
     }
+    /// An expired window counts as closed, whatever the probe did.
     pub fn breaker_open(&self) -> bool {
-        self.state.lock().unwrap().open_until.is_some()
+        self.state
+            .lock()
+            .unwrap()
+            .open_until
+            .is_some_and(|t| Instant::now() < t)
     }
     pub async fn query(self: &Arc<Self>, query: &str) -> Result<Vec<f32>, EmbedError> {
         let contention;
@@ -450,7 +504,13 @@ impl Runtime {
             .embed(Kind::Query, vec![text], QUERY_DEADLINE)
             .await;
         match result {
-            Ok(mut rows) => Ok(rows.remove(0)),
+            Ok(mut rows) => {
+                // A healthy answer ends any earlier fault, even if its probe failed.
+                let mut s = self.state.lock().unwrap();
+                s.open_until = None;
+                s.reason = None;
+                Ok(rows.remove(0))
+            }
             Err(e) => {
                 if !(matches!(e.reason, "content-blocked" | "scan-unavailable")
                     || e.reason == "embedder-timeout" && contention)
@@ -478,16 +538,15 @@ impl Runtime {
             let embedder = runtime.embedder.clone();
             let text = format!("{}health probe", runtime.config.query_prefix);
             drop(runtime);
+            // Resets the flag even if the embedder panics, so a later failure probes again.
+            let _reset = ProbeGuard(weak.clone());
             let result = embedder
                 .embed(Kind::Probe, vec![text], PROBE_DEADLINE)
                 .await;
-            if let Some(runtime) = weak.upgrade() {
+            if let (Ok(_), Some(runtime)) = (result, weak.upgrade()) {
                 let mut s = runtime.state.lock().unwrap();
-                s.probe = false;
-                if result.is_ok() {
-                    s.open_until = None;
-                    s.reason = None;
-                }
+                s.open_until = None;
+                s.reason = None;
             }
         });
     }
@@ -496,10 +555,8 @@ impl Runtime {
         texts: Vec<(String, String)>,
     ) -> Result<Vec<Vec<f32>>, EmbedError> {
         // The stored version's receipt is required even when a fresh scan would pass.
-        if texts
-            .iter()
-            .any(|(_, state)| !matches!(state.as_str(), "clean" | "flagged"))
-        {
+        // Only `clean` qualifies: S18 never pushes a `flagged` version.
+        if texts.iter().any(|(_, state)| state != "clean") {
             return Err(EmbedError::new("scan-pending"));
         }
         {
