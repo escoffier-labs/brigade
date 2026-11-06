@@ -296,7 +296,11 @@ def _prepare(
         # a card the hub no longer has. Drop them before anything else.
         store.discard_replica(target)
         report["rebuilt"] = True
-        report["warnings"].append("the hub's log_epoch changed; the old replica was discarded and is being rebuilt")
+        if live.meta.get("hub") != hub:
+            # Memory now talks to another hub: its log shares nothing with the old replica.
+            report["warnings"].append("memory now uses another hub; the old replica was discarded and is being rebuilt")
+        else:
+            report["warnings"].append("the hub's log_epoch changed; the old replica was discarded and is being rebuilt")
     elif forget_other_principal(target, hub, principal):
         # The replica was pulled with another credential's grants.
         report["rebuilt"] = True
@@ -1221,6 +1225,11 @@ def status(target: Path, settings: hubc.HubSettings, client: hubc.MemoryHubClien
         "read_scopes": list(settings.read_scopes),
         "warnings": [],
     }
+    if settings.enabled:
+        # Which hub memory uses and where that came from. Never the token.
+        report["hub_source"] = settings.source
+        if settings.hub_url:
+            report["hub_url"] = hubc.display_url(settings.hub_url)
     live = store.replica(target)
     rebuilding = store.building(target)
     keys = ("log_epoch", "seq", "cards", "bytes", "full", "principal", "read_scopes")
@@ -1237,7 +1246,7 @@ def status(target: Path, settings: hubc.HubSettings, client: hubc.MemoryHubClien
     if client is None:
         report["hub"] = {"available": False, "reason": "no-hub-configured"}
         return report
-    report["hub_url"] = client.hub_url
+    report["hub_url"] = hubc.display_url(client.hub_url)
     try:
         body = read_status(client, settings)
     except hubc.HubUnavailable as exc:

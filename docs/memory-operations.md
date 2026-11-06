@@ -42,7 +42,40 @@ replica_max_mb = 50            # cap on the replica's heads.json
 
 `read` and `sync` need `scope` or `read_scopes`. Every hub search and card read names the read scopes, so a credential that can read more, such as one with a `principal:` grant, still answers only from them. Dot and Duet read through the same commands and get the same limit.
 
-The hub URL comes from `[fleet] hub_url` and the credential is this machine's node token (`BRIGADE_FLEET_NODE_TOKEN` or `[fleet] node_token_file`). The client never reads the shared admin token: with only an admin token configured, the hub client reports `no-node-credential` and sends nothing. If the node-token slot holds the admin token by mistake, `status`, `pull`, `push`, `import`, `card` and `proposals drop` refuse with exit 2 as soon as the hub's `status` reports `credential: "admin"`. Dot and Duet `memory_card` run `card`, so they refuse too. Search (`memory search`, and Dot and Duet `memory_search`) makes no `status` call, to keep within its 800 ms budget, so it cannot tell: with the admin token in the node slot it returns any match the admin can read inside the read scopes, including a scope this node holds no grant for. Search writes and replicates nothing. The token is sent as a bearer header and is never printed or stored.
+By default the hub URL comes from `[fleet] hub_url` and the credential is this machine's node token (`BRIGADE_FLEET_NODE_TOKEN` or `[fleet] node_token_file`). Memory can use a different hub than fleet coordination. That choice is per user, in `~/.brigade/fleet.toml` (the file `[fleet]` lives in, or `$BRIGADE_HOME/fleet.toml` when `BRIGADE_HOME` is set), never in the workspace:
+
+```toml
+# ~/.brigade/fleet.toml
+[fleet]
+hub_url = "https://fleet-hub.example.test:3774"
+node_token_file = "~/.brigade/node-token"
+
+[memory_hub]
+hub_url = "https://memory-hub.example.test:3774"   # memory's own hub
+node_token_file = "~/.brigade/memory-node-token"   # this machine's node token on that hub
+```
+
+A workspace file never chooses where a credential goes. `[hub]` in `.brigade/memory-care.toml` refuses `hub_url` and `node_token_file` with a config error that points here, and keeps only `mode`, `scope`, `read_scopes` and `replica_max_mb`.
+
+The pair replaces both fleet values for hub memory only: `status`, `search`, `card`, `pull`, `push`, `import` and `proposals`, and the Dot and Duet memory tools, which run those commands. `brigade fleet` commands keep reading `[fleet]`. The keys go together, and setting one without the other is a config error that names the missing key. The checks:
+
+- `hub_url` follows the fleet hub URL rule (https, or http on loopback) and may not carry a user name or password.
+- `node_token_file` expands a leading `~` and must then be an absolute path. It must be a private regular file you own, with no group or other permission bits, holding 32 to 512 URL-safe characters (letters, digits, `_` and `-`). This is the check the message credentials get. The fleet `node_token_file` is read without it, so a fleet node token outside that range works through `[fleet]` but is refused here.
+- The override must not be a fleet credential. A token equal to the fleet node token or admin token is refused, and so is a file that is the same file as `[fleet] node_token_file` or `[fleet] token_file`. The error names the setting and never prints either token.
+
+In `off` mode the override is not read.
+
+Precedence, highest first:
+
+1. `BRIGADE_MEMORY_HUB_URL` and `BRIGADE_MEMORY_HUB_TOKEN_FILE`, set together. These follow the existing `BRIGADE_FLEET_*` and `BRIGADE_FLEET_MESSAGE_TOKEN_FILE` pattern. An empty value counts as unset, and the token file path must be absolute.
+2. `[memory_hub]` in `~/.brigade/fleet.toml`.
+3. The fleet settings.
+
+Dot and Duet run the CLI with a minimal environment that passes `HOME` and `BRIGADE_HOME` but no `BRIGADE_FLEET_*` or `BRIGADE_MEMORY_*` variable, so for them use `[memory_hub]`. Their child reads the same `fleet.toml` as you.
+
+`brigade memory hub status` prints `hub url: <url> (source: <source>)` with `env`, `[memory_hub]` or `fleet` as the source, and the JSON report carries `hub_url` and `hub_source`. It never shows the token, and drops any user name or password from the URL it prints. The replica records the hub identity it was pulled from, so switching memory to another hub never serves the old replica. The next `pull` discards it and rebuilds from empty instead of merging two logs. Spooled writes and proposals stay tied to the hub they were made for and are not sent to the new one.
+
+The client never reads the shared admin token: with only an admin token configured, the hub client reports `no-node-credential` and sends nothing. If the node-token slot holds the admin token by mistake, `status`, `pull`, `push`, `import`, `card` and `proposals drop` refuse with exit 2 as soon as the hub's `status` reports `credential: "admin"`. Dot and Duet `memory_card` run `card`, so they refuse too. Search (`memory search`, and Dot and Duet `memory_search`) makes no `status` call, to keep within its 800 ms budget, so it cannot tell: with the admin token in the node slot it returns any match the admin can read inside the read scopes, including a scope this node holds no grant for. Search writes and replicates nothing. The token is sent as a bearer header and is never printed or stored.
 
 ```bash
 brigade memory hub status --target . --json
