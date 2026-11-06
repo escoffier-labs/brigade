@@ -193,6 +193,7 @@ mod native {
     use super::*;
     use brigade_guard::Regex;
     use serde_json::Value;
+    use unicode_normalization::UnicodeNormalization;
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Class {
@@ -208,6 +209,8 @@ mod native {
     }
     pub struct Guard {
         version: String,
+        /// Code points Unicode 14.0.0 leaves unassigned, from the bundle.
+        unassigned: Vec<(u32, u32)>,
         injections: Vec<Rule>,
         rules: Vec<Rule>,
     }
@@ -266,52 +269,135 @@ mod native {
         matches!(c as u32, 0x9..=0xD | 0x1C..=0x20 | 0x85 | 0xA0 | 0x1680 |
             0x2000..=0x200A | 0x2028..=0x2029 | 0x202F | 0x205F | 0x3000)
     }
-    fn scan_copies(text: &str) -> (String, String, String) {
-        let lines: String = text
-            .replace("\r\n", "\n")
+    fn unassigned_table(spec: &str) -> Option<Vec<(u32, u32)>> {
+        let table: Vec<(u32, u32)> = spec
+            .split(',')
+            .map(|item| {
+                let (lo, hi) = item.split_once('-')?;
+                Some((
+                    u32::from_str_radix(lo, 16).ok()?,
+                    u32::from_str_radix(hi, 16).ok()?,
+                ))
+            })
+            .collect::<Option<_>>()?;
+        // Sorted and disjoint, or the binary search below would misjudge.
+        table
+            .iter()
+            .all(|(lo, hi)| lo <= hi)
+            .then_some(())
+            .filter(|()| table.windows(2).all(|w| w[0].1 < w[1].0))?;
+        Some(table)
+    }
+    /// NFKC over runs of code points Unicode 14.0.0 assigns. Stability keeps
+    /// their NFKC the same in this crate's newer Unicode data and in every
+    /// Python 3.11 or later. A code point the pin leaves unassigned passes
+    /// through and ends the run, as an older runtime treats it.
+    fn nfkc(unassigned: &[(u32, u32)], text: &str) -> String {
+        if text.is_ascii() {
+            return text.to_string();
+        }
+        let assigned = |c: char| {
+            let at = unassigned.partition_point(|&(_, hi)| hi < c as u32);
+            unassigned.get(at).is_none_or(|&(lo, _)| lo > c as u32)
+        };
+        let mut out = String::with_capacity(text.len());
+        let mut run = 0;
+        for (index, c) in text.char_indices() {
+            if !assigned(c) {
+                out.extend(text[run..index].nfkc());
+                out.push(c);
+                run = index + c.len_utf8();
+            }
+        }
+        out.extend(text[run..].nfkc());
+        out
+    }
+    /// Boundaries kept as newlines and ignorable code points removed.
+    fn base_lines(text: &str) -> String {
+        text.replace("\r\n", "\n")
             .chars()
             .filter(|c| !ignorable(*c))
             .map(|c| match c as u32 {
                 0xA..=0xD | 0x1C..=0x1E | 0x85 | 0x2028..=0x2029 => '\n',
+                _ => c,
+            })
+            .collect()
+    }
+    /// The v6 fold. It stays a scan copy beside NFKC: composition can absorb
+    /// a trailing ASCII letter and a compatibility symbol can become word
+    /// characters, which breaks `\b` and `(?!\w)` around a match. Scanning
+    /// both copies keeps every verdict at least as severe as v6.
+    fn fold_fullwidth(base: &str) -> String {
+        base.chars()
+            .map(|c| match c as u32 {
                 0xFF01..=0xFF5E => char::from_u32(c as u32 - 0xFEE0).unwrap(),
                 0x3000 => ' ',
                 _ => c,
             })
-            .collect();
-        let normalized = lines
-            .split(whitespace)
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let injection_lines = lines
-            .split('\n')
-            .map(|line| {
-                line.split(whitespace)
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect()
+    }
+    /// Words of `text` split on the shared whitespace set, joined by `sep`.
+    fn join_words(text: &str, sep: char) -> String {
+        let mut out = String::with_capacity(text.len());
+        for word in text.split(whitespace).filter(|s| !s.is_empty()) {
+            if !out.is_empty() {
+                out.push(sep);
+            }
+            out.push_str(word);
+        }
+        out
+    }
+    /// (lines, injection lines, normalized) for one line copy.
+    fn derive_copies(lines: String) -> (String, String, String) {
+        let normalized = join_words(&lines, ' ');
+        let mut injection_lines = String::with_capacity(lines.len());
+        for (index, line) in lines.split('\n').enumerate() {
+            if index > 0 {
+                injection_lines.push('\n');
+            }
+            injection_lines.push_str(&join_words(line, ' '));
+        }
         (lines, injection_lines, normalized)
+    }
+    /// The NFKC lines copy alone, as the Python fixture records it.
+    #[cfg(test)]
+    fn nfkc_lines(unassigned: &[(u32, u32)], text: &str) -> String {
+        nfkc(unassigned, &base_lines(text))
+    }
+    /// The v6 fold copies and the NFKC copies. Equal line copies are scanned
+    /// once, so ASCII text pays nothing extra.
+    fn scan_copies(unassigned: &[(u32, u32)], text: &str) -> Vec<(String, String, String)> {
+        let base = base_lines(text);
+        let fold = fold_fullwidth(&base);
+        let normalized = nfkc(unassigned, &base);
+        let mut copies = Vec::with_capacity(2);
+        if normalized != fold {
+            copies.push(derive_copies(normalized));
+        }
+        copies.insert(0, derive_copies(fold));
+        copies
     }
     impl Guard {
         pub fn new() -> Option<Self> {
+            Self::from_bundle(include_str!(
+                "../../../../src/brigade/guard/memory-rules.json"
+            ))
+        }
+        /// Refuses a bundle whose NFKC table is not the Unicode 14.0.0 one
+        /// this scanner's parity tests cover.
+        fn from_bundle(source: &str) -> Option<Self> {
             if !brigade_guard::pinned() {
                 return None;
             }
-            let bundle: Value = serde_json::from_str(include_str!(
-                "../../../../src/brigade/guard/memory-rules.json"
-            ))
-            .ok()?;
+            let bundle: Value = serde_json::from_str(source).ok()?;
+            (bundle["nfkc"]["unicode"].as_str()? == "14.0.0").then_some(())?;
             Some(Self {
                 version: format!(
                     "{}:{}",
                     bundle["version"].as_str()?,
-                    super::super::ids::sha256_hex(include_bytes!(
-                        "../../../../src/brigade/guard/memory-rules.json"
-                    ))
+                    super::super::ids::sha256_hex(source.as_bytes())
                 ),
+                unassigned: unassigned_table(bundle["nfkc"]["unassigned"].as_str()?)?,
                 injections: rules(bundle["injections"].as_array()?)?,
                 rules: rules(bundle["rules"].as_array()?)?,
             })
@@ -350,16 +436,18 @@ mod native {
                     }
                 }
             }
-            let (lines, injection_lines, normalized) = scan_copies(text);
+            let copies = scan_copies(&self.unassigned, text);
             let mut failed = false;
             for (rules, injection) in [(&self.injections, true), (&self.rules, false)] {
                 for rule in rules {
                     let mut matched = false;
-                    for copy in [text, &lines]
-                        .into_iter()
-                        .chain(injection.then_some(injection_lines.as_str()))
-                        .chain(injection.then_some(normalized.as_str()))
-                    {
+                    for copy in std::iter::once(text).chain(copies.iter().flat_map(
+                        |(lines, injection_lines, normalized)| {
+                            std::iter::once(lines.as_str())
+                                .chain(injection.then_some(injection_lines.as_str()))
+                                .chain(injection.then_some(normalized.as_str()))
+                        },
+                    )) {
                         for regex in [&rule.utf, &rule.ascii] {
                             match regex.is_match(copy.as_bytes()) {
                                 Ok(hit) => matched |= hit,
@@ -417,6 +505,89 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn nfkc_fixture() -> Value {
+            serde_json::from_str(include_str!(
+                "../../../../tests/fixtures/memory-scan-nfkc.json"
+            ))
+            .unwrap()
+        }
+
+        /// The crate's Unicode data is part of the scan verdict, so a bump
+        /// is a reviewed change: rerun the parity tests and bump the bundle.
+        #[test]
+        fn nfkc_crate_unicode_version_is_the_recorded_one() {
+            assert_eq!(unicode_normalization::UNICODE_VERSION, (18, 0, 0));
+        }
+
+        fn hex(bytes: &[u8]) -> String {
+            use std::fmt::Write;
+            bytes.iter().fold(String::new(), |mut out, b| {
+                write!(out, "{b:02x}").unwrap();
+                out
+            })
+        }
+
+        #[test]
+        fn nfkc_matches_python_on_every_code_point() {
+            use sha2::{Digest, Sha256};
+            let guard = Guard::new().unwrap();
+            let fixture = nfkc_fixture();
+            assert_eq!(fixture["unicode"], "14.0.0");
+            let mut digest = Sha256::new();
+            let mut changed = 0;
+            for code in 0..=0x10FFFFu32 {
+                let Some(c) = char::from_u32(code) else {
+                    continue;
+                };
+                let text = c.to_string();
+                let out = nfkc(&guard.unassigned, &text);
+                if out != text {
+                    digest.update(format!("{code:X}:{}\n", hex(out.as_bytes())));
+                    changed += 1;
+                }
+            }
+            assert_eq!(changed, fixture["changed_code_points"].as_u64().unwrap());
+            assert_eq!(
+                hex(&digest.finalize()),
+                fixture["changed_sha256"].as_str().unwrap()
+            );
+        }
+
+        #[test]
+        fn scan_copy_matches_python_for_compatibility_sequences() {
+            let guard = Guard::new().unwrap();
+            for pair in nfkc_fixture()["lines"].as_array().unwrap() {
+                let input = pair[0].as_str().unwrap();
+                let lines = nfkc_lines(&guard.unassigned, input);
+                assert_eq!(lines, pair[1].as_str().unwrap(), "{input:?}");
+            }
+        }
+
+        #[test]
+        fn bundle_with_another_unicode_version_is_refused() {
+            let source = include_str!("../../../../src/brigade/guard/memory-rules.json");
+            assert!(Guard::from_bundle(source).is_some());
+            for version in ["15.0.0", "14.0", ""] {
+                let edited = source.replacen(
+                    "\"unicode\": \"14.0.0\"",
+                    &format!("\"unicode\": \"{version}\""),
+                    1,
+                );
+                assert_ne!(edited, source, "bundle spelling of the pin changed");
+                assert!(Guard::from_bundle(&edited).is_none(), "{version}");
+            }
+        }
+
+        #[test]
+        fn unassigned_table_must_be_sorted_and_disjoint() {
+            assert!(unassigned_table("5-9,B-C").is_some());
+            assert!(unassigned_table("9-5").is_none());
+            assert!(unassigned_table("5-9,9-C").is_none());
+            assert!(unassigned_table("B-C,5-9").is_none());
+            assert!(unassigned_table("5-").is_none());
+            assert!(unassigned_table("").is_none());
+        }
 
         fn error_guard() -> (Guard, String) {
             let mut guard = Guard::new().unwrap();

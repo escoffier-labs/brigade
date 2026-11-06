@@ -11,7 +11,11 @@ from brigade.guard import Policy
 from brigade.untrusted import _LINE_RULES
 
 DEST = Path(__file__).resolve().parents[1] / "src/brigade/guard/memory-rules.json"
-VERSION = "brigade-memory-scan.v6"
+VERSION = "brigade-memory-scan.v7"
+# NFKC runs only on code points Unicode 14.0.0 assigns, so Python 3.11 and later
+# and the Rust crate normalize the same text the same way.
+NFKC_UNICODE = "14.0.0"
+UNASSIGNED = Path(__file__).resolve().parent / "memory_scan_unicode14_unassigned.ranges"
 
 # Hub memory only (S18 amendment, D24). These guard rules describe the
 # operator's own infrastructure and identity. Memory stores such text and loads
@@ -36,6 +40,12 @@ PRIVATE_RULES = frozenset(
         "example-phone-555",
     }
 )
+
+
+def unassigned_ranges() -> str:
+    """The source table as one `lo-hi,lo-hi` hex string, in order."""
+    lines = [line.strip() for line in UNASSIGNED.read_text(encoding="utf-8").splitlines()]
+    return ",".join(line for line in lines if line and not line.startswith("#"))
 
 
 def bundle() -> str:
@@ -65,7 +75,8 @@ def bundle() -> str:
             "action": "warn",
         },
     ]
-    return json.dumps({"version": VERSION, "injections": injections, "rules": rules}, indent=2) + "\n"
+    nfkc = {"unicode": NFKC_UNICODE, "unassigned": unassigned_ranges()}
+    return json.dumps({"version": VERSION, "nfkc": nfkc, "injections": injections, "rules": rules}, indent=2) + "\n"
 
 
 def main() -> int:

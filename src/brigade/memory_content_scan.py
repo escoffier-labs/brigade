@@ -10,6 +10,7 @@ import json
 import bisect
 import hashlib
 import re
+import unicodedata
 from importlib.resources import files
 from typing import Iterable, Iterator
 
@@ -60,6 +61,10 @@ _IGNORABLE_RANGES = (
 _IGNORABLE = frozenset(chr(code) for lo, hi in _IGNORABLE_RANGES for code in range(lo, hi + 1))
 _INVISIBLE = _IGNORABLE | frozenset("\ufff9\ufffa\ufffb")
 _STRIP_IGNORABLE = dict.fromkeys(map(ord, _IGNORABLE))
+# The v6 fold stays a scan copy beside NFKC. NFKC can absorb a trailing ASCII
+# letter into a composed letter (A + U+0301) and turn a compatibility symbol
+# into word characters (U+2122 to TM), which breaks `\b` and `(?!\w)` around
+# a match. Scanning both copies makes every verdict at least as severe as v6.
 _FOLD_FULLWIDTH = {code: code - 0xFEE0 for code in range(0xFF01, 0xFF5F)} | {0x3000: 0x20}
 _LINE_TRANSLATION = dict.fromkeys(map(ord, _BOUNDARIES), "\n")
 _SPACE_TRANSLATION = dict.fromkeys(map(ord, WHITESPACE), " ")
@@ -111,11 +116,43 @@ def _selector_exempt(text: str, index: int) -> bool:
 
 _BUNDLE_BYTES = files("brigade.guard").joinpath("memory-rules.json").read_bytes()
 _BUNDLE = json.loads(_BUNDLE_BYTES.decode("utf-8"))
+NFKC_UNICODE = "14.0.0"
+
+
+def _check_nfkc_pin(bundle: dict) -> None:
+    """Refuse a bundle whose NFKC table is not the Unicode version the parity tests cover."""
+    if bundle["nfkc"]["unicode"] != NFKC_UNICODE:
+        raise ValueError(f"memory scan bundle pins Unicode {bundle['nfkc']['unicode']}, expected {NFKC_UNICODE}")
+
+
+_check_nfkc_pin(_BUNDLE)
 
 
 def ruleset_version() -> str:
     """The bundle's `<version>:<sha256 of the rules file>`, as the hub reports it in `status.scan.ruleset_version`."""
     return f"{_BUNDLE['version']}:{hashlib.sha256(_BUNDLE_BYTES).hexdigest()}"
+
+
+def _assigned_run(spec: str) -> re.Pattern[str]:
+    """Runs of code points the bundle's pinned Unicode version assigns."""
+    unassigned = "".join(
+        "\\U%08X-\\U%08X" % tuple(int(part, 16) for part in item.split("-")) for item in spec.split(",")
+    )
+    return re.compile(f"[^{unassigned}]+")
+
+
+# NFKC applies only to code points the pinned Unicode version assigns (14.0.0,
+# the Unicode data of Python 3.11). The normalization stability policy keeps
+# their NFKC identical in every later Unicode version, so this runtime and the
+# native hub's crate agree. Code points the pin leaves unassigned pass through
+# unchanged, as an older runtime would treat them.
+_NFKC_ASSIGNED = _assigned_run(_BUNDLE["nfkc"]["unassigned"])
+
+
+def _nfkc(text: str) -> str:
+    if text.isascii():
+        return text
+    return _NFKC_ASSIGNED.sub(lambda run: unicodedata.normalize("NFKC", run.group()), text)
 
 
 def _compile(items: list[dict], ascii_mode: bool = False) -> list[tuple[str, str, re.Pattern[str]]]:
@@ -154,15 +191,29 @@ def invisible_rule(text: str) -> str | None:
     return None
 
 
-def _scan_copies(text: str) -> tuple[str, str, str]:
+def _base_lines(text: str) -> str:
     # Preserve all splitlines boundaries before applying MULTILINE line rules.
-    lines = text.replace("\r\n", "\n").translate(_LINE_TRANSLATION)
-    lines = lines.translate(_STRIP_IGNORABLE).translate(_FOLD_FULLWIDTH)
+    return text.replace("\r\n", "\n").translate(_LINE_TRANSLATION).translate(_STRIP_IGNORABLE)
+
+
+def _derive_copies(lines: str) -> tuple[str, str, str]:
     normalized = " ".join(part for part in lines.translate(_SPACE_TRANSLATION).split(" ") if part)
     injection_lines = "\n".join(
         " ".join(part for part in line.translate(_SPACE_TRANSLATION).split(" ") if part) for line in lines.split("\n")
     )
     return lines, injection_lines, normalized
+
+
+def _scan_copies(text: str) -> tuple[str, str, str]:
+    """The NFKC line, injection-line and normalized copies."""
+    return _derive_copies(_nfkc(_base_lines(text)))
+
+
+def _scan_copy_sets(text: str) -> tuple[tuple[str, str, str], ...]:
+    """The v6 full-width fold copies and the NFKC copies, equal sets merged."""
+    base = _base_lines(text)
+    # Derive once per distinct line copy: ASCII text costs nothing extra.
+    return tuple(_derive_copies(lines) for lines in dict.fromkeys((base.translate(_FOLD_FULLWIDTH), _nfkc(base))))
 
 
 # Necessary conditions only. These linear searches have no failing suffix on
@@ -240,12 +291,18 @@ def _findings(texts: Iterable[str], *, blocking_only: bool = False) -> Iterator[
         rule = invisible_rule(text)
         if rule:
             yield rule, "block"
-        lines, injection_lines, normalized = _scan_copies(text)
+        copy_sets = _scan_copy_sets(text)
         # Bundle patterns are ASCII. On an ASCII copy the earlier Unicode
         # pass finds a superset for these patterns, so only non-ASCII copies
         # need the ASCII pass. Bundle tests require review of inverse classes.
-        copies = tuple(dict.fromkeys((text, lines)))
-        extra_copies = tuple(copy for copy in dict.fromkeys((injection_lines, normalized)) if copy not in copies)
+        copies = tuple(dict.fromkeys((text, *(lines for lines, _, _ in copy_sets))))
+        extra_copies = tuple(
+            copy
+            for copy in dict.fromkeys(
+                copy for _, injection_lines, normalized in copy_sets for copy in (injection_lines, normalized)
+            )
+            if copy not in copies
+        )
         literal_copies = {copy: _BUNDLE_LITERAL.search(copy) is not None for copy in copies}
         possible: dict[tuple[str, str], bool] = {}
         for name, action, pattern in _RULES:

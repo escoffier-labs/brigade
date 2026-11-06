@@ -66,10 +66,10 @@ fn v6_fixture_parity_with_python() {
 
 #[cfg(feature = "memory-scan")]
 #[test]
-fn v6_bundle_version_and_private_ruleset() {
+fn v7_bundle_version_and_private_ruleset() {
     let (available, version) = scan::bundled().describe();
     assert!(available);
-    assert!(version.unwrap().starts_with("brigade-memory-scan.v6:"));
+    assert!(version.unwrap().starts_with("brigade-memory-scan.v7:"));
 }
 
 #[test]

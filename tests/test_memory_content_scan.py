@@ -540,7 +540,7 @@ def test_s18_round4_detection_bounds(rule, text):
 def test_s18_round4_bundle_version():
     from brigade import memory_content_scan as scan
 
-    assert scan._BUNDLE["version"] == "brigade-memory-scan.v6"
+    assert scan._BUNDLE["version"] == "brigade-memory-scan.v7"
 
 
 def test_s18_round4_base64_decode_window_is_bounded():
