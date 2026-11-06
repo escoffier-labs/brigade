@@ -28,7 +28,8 @@ BLOCKED, FLAGGED, PRIVATE, CLEAN = "blocked", "flagged", "private", "clean"
 # The refusal code when only the private class withholds text on egress.
 PRIVATE_CODE = "memory_content_private"
 # Explicit sets shared with the native scanner, independent of runtime Unicode.
-_WHITESPACE = (
+# `WHITESPACE` is public: `untrusted` folds the same set.
+WHITESPACE = (
     "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680"
     + "".join(map(chr, range(0x2000, 0x200B)))
     + "\u2028\u2029\u202f\u205f\u3000"
@@ -60,7 +61,7 @@ _INVISIBLE = _IGNORABLE | frozenset("\ufff9\ufffa\ufffb")
 _STRIP_IGNORABLE = dict.fromkeys(map(ord, _IGNORABLE))
 _FOLD_FULLWIDTH = {code: code - 0xFEE0 for code in range(0xFF01, 0xFF5F)} | {0x3000: 0x20}
 _LINE_TRANSLATION = dict.fromkeys(map(ord, _BOUNDARIES), "\n")
-_SPACE_TRANSLATION = dict.fromkeys(map(ord, _WHITESPACE), " ")
+_SPACE_TRANSLATION = dict.fromkeys(map(ord, WHITESPACE), " ")
 
 
 # Extended_Pictographic blocks whose characters take U+FE0F for emoji

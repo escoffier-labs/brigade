@@ -16,7 +16,7 @@ import secrets
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
-from .memory_content_scan import _WHITESPACE
+from .memory_content_scan import WHITESPACE
 
 # Parts of the exfil-tration order patterns below. Hub memory (bundle v6) and
 # every `scan_untrusted` and injection-lint caller share them.
@@ -211,7 +211,7 @@ _DISREGARD_SYSTEM_RE = next(pattern for rule_id, pattern in _LINE_RULES if rule_
 _SECRET_EXFIL_RE = re.compile(r"(?i)(?:" + "send (all )?(sec" + "rets|tok" + "ens)|" + "exfil" + "trat)")
 
 
-_SPACE_FOLD = dict.fromkeys(map(ord, _WHITESPACE), " ")
+_SPACE_FOLD = dict.fromkeys(map(ord, WHITESPACE), " ")
 
 
 def fold_whitespace(text: str) -> str:
