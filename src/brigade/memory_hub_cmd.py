@@ -426,6 +426,8 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
                 report["warnings"].append(NO_NODE_CREDENTIAL)
             hub = report["hub"]
             lines = [f"memory hub: mode {report['mode']}" + (f", scope {report['scope']}" if report["scope"] else "")]
+            if "hub_source" in report:
+                lines.append(f"hub url: {report.get('hub_url') or 'none'} (source: {report['hub_source']})")
             if hub.get("available"):
                 lines.append(
                     f"hub: {hub.get('cards')} card(s), seq {hub.get('seq')}, indexed {hub.get('indexed_seq')}, "
