@@ -65,6 +65,10 @@ pub const MIN_SEQ_WAIT: Duration = Duration::from_millis(500);
 /// when a second cause of an endpoint-wide refusal shows up. Until then `memory
 /// reindex` requeues the parked documents once the endpoint is fixed.
 const ALL_FAILED: &str = "all-embeddings-failed";
+/// The first dense load failed, so retrieval stays lexical until a retry works.
+const DENSE_LOAD_FAILED: &str = "dense-load-failed";
+/// No dense matrix has been installed yet for the active embedder.
+const DENSE_NOT_LOADED: &str = "dense-not-loaded";
 const IDLE_MIN: Duration = Duration::from_secs(1);
 const IDLE_MAX: Duration = Duration::from_secs(30);
 /// Actions in the route table that later slices build.
@@ -113,6 +117,10 @@ pub struct Store {
     embed_wake: Arc<tokio::sync::Notify>,
     embedding_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     pull_embeddings: bool,
+    /// The memory file, for the startup load's own connection.
+    memory_path: PathBuf,
+    /// Set while the last unbounded dense load failed and no matrix exists.
+    dense_fault: std::sync::atomic::AtomicBool,
 }
 
 impl Drop for Store {
@@ -204,6 +212,8 @@ impl Store {
             embed_wake: Arc::new(tokio::sync::Notify::new()),
             embedding_task: std::sync::Mutex::new(None),
             pull_embeddings: false,
+            memory_path: options.memory,
+            dense_fault: std::sync::atomic::AtomicBool::new(false),
         })
     }
     /// Lexical mode ignores an unused embedder table, including credentials.
@@ -423,6 +433,88 @@ impl Store {
         self.refresh_coverage().await;
         Ok(())
     }
+    /// The first matrix load, with no reader deadline. It walks every vector
+    /// row, so a large corpus can run past `READ_LIMIT`, and the pool would
+    /// reject that as a timeout. It runs on its own read-only connection in a
+    /// blocking task. A failure never stops the hub: retrieval reports
+    /// `degraded` and stays lexical, and the scheduler retries. Returns
+    /// whether a matrix is installed.
+    pub async fn load_dense(&self) -> bool {
+        let Some(runtime) = &self.retrieval else {
+            return true;
+        };
+        let id = runtime.config.id.key();
+        let dimensions = runtime.config.id.dimensions;
+        let dense = self.dense.clone();
+        let path = self.memory_path.clone();
+        let loaded = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let mut db = crate::schema::audit::open(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            db.execute_batch("PRAGMA query_only=ON; PRAGMA wal_autocheckpoint=0;")
+                .map_err(|e| e.to_string())?;
+            db.busy_timeout(Duration::from_secs(5))
+                .map_err(|e| e.to_string())?;
+            // One snapshot, so the heads and the rows agree.
+            let tx = db
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+                .map_err(|e| e.to_string())?;
+            dense
+                .refresh(&tx, &id, dimensions)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        let ok = loaded.is_ok();
+        if let Err(e) = loaded {
+            eprintln!("memory dense load failed: {e}");
+        }
+        self.dense_fault
+            .store(!ok, std::sync::atomic::Ordering::SeqCst);
+        self.refresh_coverage().await;
+        ok
+    }
+    /// Startup for hybrid mode: load the matrix, then start the scheduler.
+    /// Never fails. See [`Store::load_dense`].
+    pub async fn start_retrieval(self: &Arc<Self>) {
+        self.load_dense().await;
+        self.start_embeddings();
+    }
+    /// A failed first load, retried by the scheduler until a matrix exists.
+    /// Another commit's refresh may install one first, which ends the retry.
+    async fn retry_dense(&self) {
+        if !self.dense_fault.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let Some(runtime) = &self.retrieval else {
+            return;
+        };
+        if self.dense.current(&runtime.config.id.key()).is_some() {
+            self.dense_fault
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
+        self.load_dense().await;
+    }
+    /// The active embedder has no installed matrix. `Some` carries the reason
+    /// status and search report: a failed load is a fault, a load that has not
+    /// run yet is only `switching`.
+    fn dense_missing(&self) -> Option<&'static str> {
+        let runtime = self.retrieval.as_ref()?;
+        if self.dense.current(&runtime.config.id.key()).is_some() {
+            return None;
+        }
+        Some(
+            if self.dense_fault.load(std::sync::atomic::Ordering::SeqCst) {
+                DENSE_LOAD_FAILED
+            } else {
+                DENSE_NOT_LOADED
+            },
+        )
+    }
     /// One cancellable scheduler per store. Lexical mode creates no task.
     /// It queues missing vectors once, then leases only while work is
     /// queued. An empty lease doubles the idle wait up to [`IDLE_MAX`], and
@@ -447,10 +539,12 @@ impl Store {
                 let Some(store) = weak.upgrade() else {
                     return;
                 };
-                if store.pull_embeddings {
+                store.retry_dense().await;
+                let faulted = store.dense_fault.load(std::sync::atomic::Ordering::SeqCst);
+                if store.pull_embeddings && !faulted {
                     return;
                 }
-                let worked = store.embedding_tick().await;
+                let worked = !store.pull_embeddings && store.embedding_tick().await;
                 drop(store);
                 idle = if worked {
                     IDLE_MIN
@@ -531,7 +625,14 @@ impl Store {
                 }
                 None => {
                     let coverage = *self.coverage.read().unwrap();
-                    if coverage.all_failed() {
+                    if let Some(reason) = self.dense_missing() {
+                        // No matrix to rank with, so search answers lexically.
+                        if reason == DENSE_LOAD_FAILED {
+                            json!({"mode": "hybrid", "effective": "lexical-fallback", "state": "degraded", "reason": reason})
+                        } else {
+                            json!({"mode": "hybrid", "effective": "lexical", "state": "switching", "reason": reason})
+                        }
+                    } else if coverage.all_failed() {
                         // Every embeddable card parked and none has a vector.
                         json!({"mode": "hybrid", "effective": "lexical-fallback", "state": "degraded", "reason": ALL_FAILED})
                     } else {
@@ -971,7 +1072,12 @@ impl Store {
         }
         if let Some(runtime) = &self.retrieval {
             let all_failed = self.coverage.read().unwrap().all_failed();
-            if let Some(reason) = runtime.reason().or(all_failed.then_some(ALL_FAILED)) {
+            let load_failed = self.dense_missing().filter(|r| *r == DENSE_LOAD_FAILED);
+            if let Some(reason) = runtime
+                .reason()
+                .or(load_failed)
+                .or(all_failed.then_some(ALL_FAILED))
+            {
                 reply.body["retrieval"]["mode"] = json!("lexical-fallback");
                 reply.body["retrieval"]["effective"] = json!("lexical-fallback");
                 reply.body["retrieval"]["degraded"] = json!(true);

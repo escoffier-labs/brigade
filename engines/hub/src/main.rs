@@ -1436,8 +1436,9 @@ async fn start_and_serve(
                     Ok(mut store) => match store.configure_retrieval(&memory_config) {
                         Ok(()) => {
                             let store = Arc::new(store);
-                            store.refresh_dense().await?;
-                            store.start_embeddings();
+                            // A failed first load degrades retrieval to lexical.
+                            // It never stops the hub.
+                            store.start_retrieval().await;
                             memory_route::MemoryRoute::Store(store)
                         }
                         // A file the operator named stops startup. The

@@ -132,6 +132,9 @@ pub struct Index {
     completed: tokio::sync::Notify,
     #[cfg(test)]
     gate: Mutex<Option<Arc<Gate>>>,
+    /// Test only: the next refresh sleeps this long before it reads.
+    #[cfg(test)]
+    load_delay: Mutex<Option<Duration>>,
 }
 #[cfg(test)]
 pub struct Gate {
@@ -307,15 +310,23 @@ impl Index {
         id: &str,
         dimensions: usize,
     ) -> rusqlite::Result<Arc<Matrix>> {
+        #[cfg(test)]
+        if let Some(delay) = self.load_delay.lock().unwrap().take() {
+            std::thread::sleep(delay);
+        }
         let _publication = self.publication.lock().unwrap();
-        let old = self.current(id).unwrap_or_else(|| {
+        let current = self.current(id);
+        // The first load installs a matrix even when it holds no row, so
+        // "no matrix" always means "no load has succeeded yet".
+        let first = current.is_none();
+        let old = current.unwrap_or_else(|| {
             Arc::new(Matrix {
                 dimensions,
                 ..Matrix::default()
             })
         });
         let next = Self::delta(db, id, &old)?;
-        if next.log_seq == old.log_seq && next.indexed_seq == old.indexed_seq {
+        if !first && next.log_seq == old.log_seq && next.indexed_seq == old.indexed_seq {
             if old.needs_rebuild() {
                 self.rebuild(id, old.clone());
             }
@@ -418,6 +429,10 @@ impl Index {
         }
         self.rebuilding.store(false, Ordering::SeqCst);
         self.completed.notify_waiters();
+    }
+    #[cfg(test)]
+    pub fn delay_next_load(&self, delay: Duration) {
+        *self.load_delay.lock().unwrap() = Some(delay);
     }
     #[cfg(test)]
     pub fn rebuild_held(&self) -> bool {

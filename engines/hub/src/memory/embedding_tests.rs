@@ -1252,3 +1252,97 @@ async fn dropping_embedder_during_rebuild_cannot_resurrect_its_matrix() {
     assert_eq!(dropped.body["vectors"], 2);
     assert!(dense.current(&id).is_none());
 }
+
+/// Fills one vector, then reopens the store the way a restart does.
+async fn restarted_with_one_vector(h: &mut Hub) -> String {
+    let id = setup(h);
+    h.put(ADMIN_TOKEN, "fleet", "one", None, "searchable apple")
+        .await;
+    fill(h, &id).await;
+    drop(h.store.take());
+    h.open(scan::bundled(), None);
+    setup(h)
+}
+
+#[tokio::test]
+async fn slow_initial_dense_load_is_not_cut_off_by_the_reader_deadline() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = restarted_with_one_vector(&mut h).await;
+    let store = h.store.as_ref().unwrap();
+    // The reader pool rejects a load that outlasts READ_LIMIT. This is what
+    // startup used to run, and it would have aborted `start_and_serve`.
+    store
+        .dense
+        .delay_next_load(READ_LIMIT + Duration::from_millis(300));
+    assert!(store.refresh_dense().await.is_err());
+    store.dense.drop_id(&id);
+    // The startup load runs on its own connection and has no such limit.
+    store
+        .dense
+        .delay_next_load(READ_LIMIT + Duration::from_millis(300));
+    assert!(store.load_dense().await);
+    assert_eq!(store.dense.current(&id).unwrap().rows, 1);
+    assert_eq!(store.retrieval_status()["state"], "ok");
+}
+
+#[tokio::test]
+async fn failed_initial_dense_load_degrades_to_lexical_and_the_scheduler_retries() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = restarted_with_one_vector(&mut h).await;
+    // A vector row of the wrong length, as a corrupt file would hold.
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    db.execute("UPDATE memory_vectors SET vector=x'0102'", [])
+        .unwrap();
+    // `start_retrieval` is what main calls. It returns instead of failing.
+    let store_arc = Arc::new(h.store.take().unwrap());
+    store_arc.start_retrieval().await;
+    assert!(store_arc.dense.current(&id).is_none());
+    let status = store_arc.retrieval_status();
+    assert_eq!(status["state"], "degraded", "{status}");
+    assert_eq!(status["effective"], "lexical-fallback", "{status}");
+    assert_eq!(status["reason"], "dense-load-failed", "{status}");
+    h.store = Arc::into_inner(store_arc);
+    // Search keeps serving, lexically, and names the reason.
+    let search = h
+        .call(ADMIN_TOKEN, json!({"action": "search", "query": "apple"}))
+        .await;
+    assert_eq!(search.status, 200, "{search:?}");
+    assert_eq!(search.body["retrieval"]["mode"], "lexical-fallback");
+    assert_eq!(search.body["retrieval"]["reason"], "dense-load-failed");
+    assert!(
+        !search.body["matches"].as_array().unwrap().is_empty(),
+        "{search:?}"
+    );
+    // The row is repaired. The next scheduler pass loads the matrix.
+    db.execute("DELETE FROM memory_vectors", []).unwrap();
+    let store = h.store.as_ref().unwrap();
+    store.retry_dense().await;
+    assert!(store.dense.current(&id).is_some());
+    let status = store.retrieval_status();
+    assert_ne!(status["state"], "degraded", "{status}");
+    assert_ne!(status["reason"], "dense-load-failed", "{status}");
+}
+
+#[tokio::test]
+async fn status_is_not_hybrid_while_no_matrix_was_ever_installed() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = setup(&mut h);
+    let store = h.store.as_ref().unwrap();
+    // Nothing was written and nothing loaded, so search has no matrix.
+    assert!(store.dense.current(&id).is_none());
+    let status = store.retrieval_status();
+    assert_eq!(status["effective"], "lexical", "{status}");
+    assert_eq!(status["state"], "switching", "{status}");
+    assert_eq!(status["reason"], "dense-not-loaded", "{status}");
+    let search = h
+        .call(ADMIN_TOKEN, json!({"action": "search", "query": "apple"}))
+        .await;
+    assert_eq!(search.body["retrieval"]["mode"], "lexical", "{search:?}");
+    // The first load installs an empty matrix, and status agrees with search.
+    let store = h.store.as_ref().unwrap();
+    assert!(store.load_dense().await);
+    assert!(store.dense.current(&id).is_some());
+    let status = store.retrieval_status();
+    assert_eq!(status["effective"], "hybrid", "{status}");
+    assert_eq!(status["state"], "ok", "{status}");
+}
