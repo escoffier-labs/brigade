@@ -69,7 +69,7 @@ class MemoryTools:
             if self.profile.prompt_load_scan:
                 refusal = egress_refusal(_card_texts(item))
                 if refusal:
-                    matches.append({"card_id": _blocked_card_id(item), **refusal})
+                    matches.append(_refused_match(item, refusal))
                     continue
             item["content_trust"] = "untrusted"
             matches.append(item)
@@ -344,6 +344,22 @@ def _blocked_card_id(item: dict[str, Any]) -> str | None:
         if isinstance(value, str) and _SAFE_CARD_ID.fullmatch(value):
             return value
     return None
+
+
+def _refused_match(item: dict[str, Any], refusal: dict[str, str]) -> dict[str, Any]:
+    """The listing for a match whose text may not leave: id, rule id, and the hub scope.
+
+    The title, summary, tags and aliases are card-authored and may hold the very text
+    that was refused, so none of them is echoed. The scope is operator-set, and is kept
+    only when it is a valid scope that scans clean, so a reader can open the card locally.
+    """
+    from ..memory_hub_client import valid_scope
+
+    placeholder: dict[str, Any] = {"card_id": _blocked_card_id(item), **refusal}
+    scope = item.get("scope")
+    if isinstance(scope, str) and valid_scope(scope) and egress_refusal([scope]) is None:
+        placeholder["scope"] = scope
+    return placeholder
 
 
 def _skill_names(item: dict[str, Any]) -> set[str]:

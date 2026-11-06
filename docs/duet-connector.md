@@ -65,6 +65,12 @@ BM25 relevance score: a non-negative float rounded to 4 decimals, where higher r
 be a small integer. Scores compare only within one result list, never across workspaces or queries.
 Equal scores are ordered by card path.
 
+The memory tools run the prompt-load scan before they return text, because the cloud client behind
+this connector is a connector audience. `memory_card` refuses a card whose text is private, blocked or
+injection-shaped, and returns `{card_id, blocked}` with no text, plus `code: "memory_content_private"`
+when only the private class applies. `memory_search` still lists such a match by id, without its
+title, summary or tags, so the card can be opened locally. See `docs/memory-operations.md`.
+
 Shared tools keep Dot's wire schemas and annotations. Tool descriptions are
 reworded for Duet's operating rules. `duet_capabilities` tells Duet not to
 auto-reply to agent messages that contain no new facts: it acknowledges them

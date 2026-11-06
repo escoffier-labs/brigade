@@ -128,9 +128,8 @@ it:
 | `Store::push` (connector push, S23) | Connector | Excluded. Only a clean scan receipt is eligible |
 | Push prompt-load scan | Connector | `{card_id, blocked: "<rule id>", code: "memory_content_private"}` |
 | Search with `query_source: "prompt"` (local recall in Claude Code and Codex hooks) | Operator's harness provider | Returned, with U+034F and U+200C removed from the rendered fields |
-| Grok Bot memory `memory_search` and `memory_card` | Connector | Placeholder with `code: "memory_content_private"` |
+| Grok Bot, Dot and Duet `memory_search` and `memory_card` | Connector | Placeholder with `code: "memory_content_private"` |
 | `memory_hits` on `inbox_list` and `fleet_digest` | Connector | Dropped and counted, as for any finding |
-| Dot and Duet `memory_search` and `memory_card` | Connector | Unchanged: these profiles return card text without a prompt-load scan, as before bundle v6 |
 | Embedder (S15a query, document and probe sends) | Loopback only | Sent only when the pinned address is loopback. Any other endpoint, a private-network one included, refuses with reason `content-private` before any lookup or connection. A stored `private` version embeds only for a loopback endpoint |
 | Embedder, push mode (S15b, the hub embeds in process) | Loopback only | Same rule as the row above. A stored `private` version is queued and leased only for a loopback endpoint |
 | Embedder, pull mode (S15b, workers lease documents) | Workers holding the embed grant | Off by default: never queued or leased, counted as unembeddable. With `[memory.embedder] pull_private = true` the hub leases private text to every credential with the embed grant, so the operator is trusted to keep that grant on their own machines. The hub's query endpoint plays no part, and the worker still sends private text only to a numeric loopback endpoint |
@@ -147,6 +146,29 @@ only the composed prompt or the operator's `--prompt-file`, and no recall
 code reaches them. A cloud agent runs outside the operator's machines, so it
 counts as a connector audience: any future path that adds hub recall to a
 cloud seat must refuse private text there.
+
+The remote connector profiles (Dot, Duet and Grok Bot memory) all set
+`prompt_load_scan`, so a profile added later has to opt out on purpose. Their
+tools apply the scan like this:
+
+| Tool and input | Result |
+|---|---|
+| `memory_card`, clean card | The text, in chunks, with `content_trust: "untrusted"` |
+| `memory_card`, private card | `{card_id, blocked: "<rule id>", code: "memory_content_private"}` and no text |
+| `memory_card`, blocked or injection card | `{card_id, blocked: "<rule id>"}` and no text |
+| `memory_search`, clean match | The match with its title, summary, tags and `content_trust: "untrusted"` |
+| `memory_search`, any refused match | Still listed, in rank order, as `{card_id, blocked, code?, scope?}`. The reader sees that the card exists and opens it locally by id |
+
+`memory_card` scans the whole card before it cuts a chunk, so a hit past the
+first chunk refuses every offset. A hub card is scanned the same way. A search
+match is scanned over its id, title, summary, tags and aliases together, and a
+refused match echoes none of them, because a title can carry the refused text
+itself, such as an email address. The id is kept only when it is a plain slug,
+and `scope` only when it is a valid scope that scans clean. Search scans the
+returned snippets, not the cards. Measured on one host, the scan costs about
+1 ms per result for a 700-character summary, so 20 results add about 21 ms, and
+about 3.4 ms per result at 3,000 characters, so 20 add about 67 ms. Both sit well
+inside the 800 ms search budget.
 
 `memory_content_private` appears only when the private class alone withholds
 the text. A placeholder for a warning or a blocking rule carries no code, and
