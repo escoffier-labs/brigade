@@ -60,6 +60,8 @@ FUTURE_MS = 5 * 60 * 1000
 # Memory hub heads whose log events replace the previous head, as in a pull.
 HEAD_KINDS = {"card.put", "card.import", "card.retire", "card.trust", "proposal.apply", "proposal.rollback"}
 _STOP_CODES = {"memory_epoch_changed"}
+# Head event kinds that leave a card's text as it was, so the last hash the card carried still holds.
+_KEEPS_CONTENT = {"card.trust"}
 _SLUG_LIMIT = 100
 
 
@@ -68,6 +70,7 @@ class Discovery:
     sources: list[tuple[Path, str]] = field(default_factory=list)  # (file, root-relative posix path)
     stats: Counter[str] = field(default_factory=Counter)
     root: str = ""
+    root_source: str = ""  # "option", "obsidian" or "common"
 
 
 @dataclass
@@ -169,14 +172,15 @@ def _vault_root(anchor: str) -> str | None:
         current = parent
 
 
-def resolve_root(paths: list[Path], root: Path | None) -> str:
+def resolve_root(paths: list[Path], root: Path | None) -> tuple[str, str]:
     """The folder derived card ids are relative to, the same however the vault is named.
 
     `--root` wins. Otherwise each argument's nearest `.obsidian` ancestor, which
     must be one folder for all arguments, else the common ancestor of the arguments.
+    Returns the root and where it came from: "option", "obsidian" or "common".
     """
     if root is not None:
-        return os.path.abspath(root.expanduser())
+        return os.path.abspath(root.expanduser()), "option"
     anchors = [_anchor(os.path.abspath(given.expanduser())) for given in paths]
     vaults = {vault for vault in (_vault_root(anchor) for anchor in anchors) if vault is not None}
     if len(vaults) > 1:
@@ -185,9 +189,9 @@ def resolve_root(paths: list[Path], root: Path | None) -> str:
             "import them one at a time or pass --root"
         )
     if vaults:
-        return next(iter(vaults))
+        return next(iter(vaults)), "obsidian"
     try:
-        return os.path.commonpath(anchors)
+        return os.path.commonpath(anchors), "common"
     except ValueError:
         raise hubc.HubConfigError("the arguments share no common folder; pass --root") from None
 
@@ -201,7 +205,7 @@ def discover(paths: list[Path], *, root: Path | None, excludes: list[str]) -> Di
     """
     found = Discovery()
     seen: set[str] = set()
-    base = resolve_root(paths, root)
+    base, found.root_source = resolve_root(paths, root)
     found.root = base
 
     def add(file: str) -> None:
@@ -212,7 +216,8 @@ def discover(paths: list[Path], *, root: Path | None, excludes: list[str]) -> Di
 
     for given in paths:
         top = os.path.abspath(given.expanduser())
-        if _in_mirror(_anchor(top)):
+        # The real folder as well, so a symlinked argument into a mirror's subfolder is caught.
+        if _in_mirror(_anchor(top)) or _in_mirror(_anchor(os.path.realpath(top))):
             found.stats["mirror_dirs"] += 1
         elif os.path.isdir(top):
             for directory, dirnames, filenames in os.walk(top):
@@ -342,6 +347,9 @@ def read_heads(client: hubc.MemoryHubClient, scope: str) -> Heads:
                 latest[event["card_id"]] = event
                 if event.get("content_hash"):
                     head_hash[event["card_id"]] = str(event["content_hash"])
+                elif event["kind"] not in _KEEPS_CONTENT:
+                    # This event may have changed the text without saying what it became.
+                    head_hash.pop(event["card_id"], None)
                 prior += event["kind"] == "card.import"
         following = page.get("next_seq")
         if not isinstance(following, int) or following <= after:
@@ -416,6 +424,8 @@ def build_plan(sources: list[tuple[Path, str]], heads: Heads, *, update: bool) -
         retired = heads.retired.get(card_id)
         if owners[card_id] > 1:
             item.action = "collision"
+            if note.frontmatter_id:
+                _show_id_if_clean(item)
         elif head is not None and card_id not in heads.head_hash:
             # No event of this card carries a hash, so "changed" could not be told from "unchanged".
             item.action, item.reason = "unknown-head", "head-without-content-hash"
@@ -438,13 +448,17 @@ def build_plan(sources: list[tuple[Path, str]], heads: Heads, *, update: bool) -
     return items
 
 
+def _show_id_if_clean(item: Item) -> None:
+    """Keep the id in the report only when it scans clean on its own, since the id itself may be a finding."""
+    if item.card_id and scanner.scan_verdict([item.card_id])[0] != scanner.CLEAN:
+        item.card_id = None
+
+
 def _scan(item: Item, text: str) -> None:
     verdict, rules = scanner.scan_verdict([hubc.normalize_text(text)])
     if verdict in {scanner.BLOCKED, scanner.FLAGGED}:
         item.action, item.rules = verdict, rules
-        # The id may be what tripped a rule, so report it only when it scans clean on its own.
-        if item.card_id and scanner.scan_verdict([item.card_id])[0] != scanner.CLEAN:
-            item.card_id = None
+        _show_id_if_clean(item)
     elif verdict == scanner.PRIVATE:
         item.scan, item.rules = "private", rules
     else:
@@ -550,6 +564,14 @@ def run(
         "dry_run": dry_run,
         "update": update,
         "root": found.root,
+        "warnings": (
+            [
+                "no .obsidian folder found above the arguments, so card ids depend on the folders you pass: "
+                "import the same folder every time or pass --root"
+            ]
+            if found.root_source == "common"
+            else []
+        ),
         "first_import": heads.prior_imports == 0,
         "items": items,
         "summary": summarize(items, found),
@@ -581,6 +603,7 @@ def lines(report: dict[str, Any]) -> list[str]:
     mode = " (dry run, nothing written)" if report["dry_run"] else ""
     flags = f"--update {'on' if report['update'] else 'off'}, root {report['root']}"
     out = [f"memory hub import into {report['scope']}{mode}, {flags}:"]
+    out += [f"warning: {warning}" for warning in report["warnings"]]
     for item in report["items"]:
         detail = ",".join(item.rules) if item.action in {"blocked", "flagged"} else (item.reason or "")
         if item.action in {"changed", "revive"}:
@@ -619,6 +642,16 @@ def lines(report: dict[str, Any]) -> list[str]:
 def json_lines(report: dict[str, Any]) -> list[dict[str, Any]]:
     head = {
         key: report[key]
-        for key in ("scope", "dry_run", "update", "root", "first_import", "needs_confirmation", "stopped", "ok")
+        for key in (
+            "scope",
+            "dry_run",
+            "update",
+            "root",
+            "warnings",
+            "first_import",
+            "needs_confirmation",
+            "stopped",
+            "ok",
+        )
     }
     return [*(item.as_dict() for item in report["items"]), {**report["summary"], **head}]

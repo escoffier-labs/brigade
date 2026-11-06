@@ -168,14 +168,43 @@ def test_a_subfolder_or_file_below_a_mirror_folder_imports_nothing_and_says_why(
         assert found.sources == [] and found.stats["mirror_dirs"] == 1
 
 
-def test_a_file_argument_is_named_by_its_own_folder_unless_root_says_otherwise(tmp_path):
+def test_a_symlink_into_a_mirror_subfolder_is_caught_by_its_real_path(tmp_path):
+    mirror = make_vault(tmp_path / "data" / "mirror", {"sub/a.md": "# a\n", MARKER: "{}"})
+    vault = make_vault(tmp_path / "vault", {".obsidian/app.json": "{}", "keep.md": "# k\n"})
+    (vault / "linked").symlink_to(mirror / "sub", target_is_directory=True)
+    (vault / "linked-note.md").symlink_to(mirror / "sub" / "a.md")
+    for argument in (vault / "linked", vault / "linked-note.md"):
+        found = importer.discover([argument], root=vault, excludes=[])
+        assert found.sources == [] and found.stats["mirror_dirs"] == 1
+
+
+def test_without_a_vault_marker_or_root_the_run_warns_that_ids_depend_on_the_arguments(hub, tmp_path, capsys):
+    plain = make_vault(tmp_path / "plain", {"x.md": "# X\n"})
+    vault = make_vault(tmp_path / "vault", {".obsidian/app.json": "{}", "x.md": "# X\n"})
+    target = workspace(tmp_path / "ws", mode="read")
+    base = ["memory", "hub", "import", "--target", str(target), "--scope", SCOPE, "--dry-run"]
+    code, out, _ = run([*base, str(plain)], capsys)
+    warnings = [line for line in out.splitlines() if line.startswith("warning:")]
+    assert code == 0 and len(warnings) == 1 and "--root" in warnings[0] and "card ids depend" in warnings[0]
+    _, rows, _, _ = import_cli(tmp_path, capsys, "--dry-run", str(plain))
+    assert len(summary_of(rows)["warnings"]) == 1
+    for quiet in ([str(vault)], ["--root", str(plain), str(plain)]):
+        code, out, _ = run([*base, *quiet], capsys)
+        assert code == 0 and "warning:" not in out
+
+
+def test_a_file_argument_without_a_vault_marker_is_named_by_its_own_folder_and_root_overrides(tmp_path):
     folder = make_vault(tmp_path / "plain", {"Projects/alpha.md": "# A\n", "Daily/d.md": "# D\n"})
-    [(_, rel)] = importer.discover([folder / "Projects" / "alpha.md"], root=None, excludes=[]).sources
+    note = folder / "Projects" / "alpha.md"
+    [(_, rel)] = importer.discover([note], root=None, excludes=[]).sources
     assert rel == "alpha.md"
-    [(_, rel)] = importer.discover([folder / "Projects" / "alpha.md"], root=folder, excludes=[]).sources
+    [(_, rel)] = importer.discover([note], root=folder, excludes=[]).sources
     assert rel == "Projects/alpha.md"
     with pytest.raises(hubc.HubConfigError, match="outside the import root"):
         importer.discover([folder], root=folder / "Projects", excludes=[])
+    (folder / ".obsidian").mkdir()  # now the folder is a vault, so the file is named from the vault root
+    [(_, rel)] = importer.discover([note], root=None, excludes=[]).sources
+    assert rel == "Projects/alpha.md"
 
 
 def test_the_same_vault_gives_the_same_ids_however_it_is_named(tmp_path, hub, capsys):
@@ -404,24 +433,48 @@ def test_blocked_flagged_and_private_class_notes_report_rule_ids_and_never_their
 
 def test_a_blocked_note_never_shows_its_frontmatter_id(hub, tmp_path, capsys):
     sentinel = ".".join(["10", "1", "2", "3"])  # a valid card id that is itself a private-class finding
+    shared = ".".join(["10", "9", "8", "7"])  # the same, shared by notes that collide
     vault = make_vault(
         tmp_path / "vault",
         {
             "tripped.md": f"---\nid: {sentinel}\n---\n# T\n‮\n",
             "fine-id.md": "---\nid: clean-id\n---\n# F\n‮\n",
+            "dup-a.md": f"---\nid: {shared}\n---\n# A\n‮\n",  # a blocked body
+            "dup-b.md": f"---\nid: {shared}\n---\n# B\n",
+            "tpl-a.md": "---\nid: tpl\n---\n# A\n",
+            "tpl-b.md": "---\nid: tpl\n---\n# B\n",
         },
     )
     code, rows, out, err = import_cli(tmp_path, capsys, "--dry-run", str(vault))
     notes = notes_of(rows)
-    assert code == 0 and sentinel not in out + err
+    assert code == 0 and sentinel not in out + err and shared not in out + err
     assert (notes["tripped.md"]["action"], notes["tripped.md"]["card_id"]) == ("blocked", None)
     assert (notes["fine-id.md"]["action"], notes["fine-id.md"]["card_id"]) == ("blocked", "clean-id")
+    for name in ("dup-a.md", "dup-b.md"):  # collisions are decided before the scan, so the id is checked on its own
+        assert (notes[name]["action"], notes[name]["card_id"]) == ("collision", None)
+    for name in ("tpl-a.md", "tpl-b.md"):  # a clean shared id is still shown
+        assert (notes[name]["action"], notes[name]["card_id"]) == ("collision", "tpl")
     target = workspace(tmp_path / "ws", mode="read")
     code, text, err = run(
         ["memory", "hub", "import", "--target", str(target), "--scope", SCOPE, "--dry-run", str(vault)], capsys
     )
-    assert sentinel not in text + err and "clean-id" not in text
+    assert sentinel not in text + err and shared not in text + err and "clean-id" not in text
     assert "- tripped.md  -  blocked  " in text and "- fine-id.md  -  blocked  " in text
+    assert "- dup-a.md  -  collision" in text and "- dup-b.md  -  collision" in text
+    assert "- tpl-a.md  tpl  collision" in text
+
+
+def test_an_import_with_only_a_private_class_id_shows_it_because_the_card_will_exist_under_it(hub, tmp_path, capsys):
+    private_id = ".".join(["10", "4", "5", "6"])  # the id is the note's only finding: private class, so it imports
+    vault = make_vault(tmp_path / "vault", {"n.md": f"---\nid: {private_id}\n---\n# N\n"})
+    code, rows, _, _ = import_cli(tmp_path, capsys, "--dry-run", str(vault))
+    row = notes_of(rows)["n.md"]
+    assert code == 0 and (row["action"], row["scan"], row["card_id"], row["appends"]) == (
+        "import",
+        "private",
+        private_id,
+        True,
+    )
 
 
 def test_a_different_scan_ruleset_refuses_before_anything_is_planned(hub, tmp_path, capsys):
@@ -606,29 +659,44 @@ def test_a_retryable_refusal_never_resets_the_count_but_a_plain_refusal_does(hub
     assert "stopped serving imports" in summary_of(rows)["stopped"]
 
 
-def seed_twice_hashless_second(hub: ImportHub, card_id: str, text: str) -> None:
-    first = client(hub).call(
-        "put", scope=SCOPE, card_id=card_id, base_revision=None, text=text, client_event_id=hubc.event_id()
-    )["event"]["revision"]
-    second = client(hub).call(
-        "put",
-        scope=SCOPE,
-        card_id=card_id,
-        base_revision=first,
-        base_epoch=hub.epoch,
-        text=text,
-        client_event_id=hubc.event_id(),
-    )["event"]["seq"]
-    hub.hashless.add(second)
+KINDS_THAT_MAY_CHANGE_TEXT = ("card.put", "proposal.apply", "proposal.rollback")
 
 
-def test_a_head_without_a_hash_uses_the_latest_hash_the_card_has(hub, tmp_path, capsys):
+def put_again_without_hash(hub: ImportHub, card_id: str, text: str, kind: str) -> None:
+    """A second head event for the card, of `kind`, whose log entry carries no content_hash."""
+    first = seed(hub, card_id, text)
+    body = {
+        "scope": SCOPE,
+        "card_id": card_id,
+        "base_revision": first,
+        "base_epoch": hub.epoch,
+        "text": text,
+        "client_event_id": hubc.event_id(),
+    }
+    _, reply = hub.do_put(body, kind=kind)
+    hub.hashless.add(reply["event"]["seq"])
+
+
+def test_a_trust_event_without_a_hash_keeps_the_last_hash_the_card_had(hub, tmp_path, capsys):
     text = "---\nid: kept\n---\n# Kept\nbody\n"
-    seed_twice_hashless_second(hub, "kept", text)
+    put_again_without_hash(hub, "kept", text, "card.trust")
     vault = make_vault(tmp_path / "vault", {"kept.md": text})
     code, rows, _, _ = import_cli(tmp_path, capsys, "--dry-run", str(vault))
     assert code == 0 and notes_of(rows)["kept.md"]["action"] == "unchanged"
     assert importer.read_heads(client(hub), SCOPE).head_hash["kept"] == hubc.content_hash(text)
+
+
+def test_a_latest_head_event_without_a_hash_that_may_change_text_is_unknown(hub, tmp_path, capsys):
+    notes = {}
+    for index, kind in enumerate(KINDS_THAT_MAY_CHANGE_TEXT):
+        card_id = f"card-{index}"
+        text = f"---\nid: {card_id}\n---\n# Card {index}\n"
+        put_again_without_hash(hub, card_id, text, kind)
+        notes[f"n{index}.md"] = text
+    vault = make_vault(tmp_path / "vault", notes)
+    code, rows, _, _ = import_cli(tmp_path, capsys, "--yes", "--update", str(vault))
+    assert code == 0 and hub.imports() == []
+    assert {n["action"] for n in notes_of(rows).values()} == {"unknown-head"}
 
 
 def test_a_head_with_no_hash_anywhere_is_unknown_and_never_changed_or_appended(hub, tmp_path, capsys):
