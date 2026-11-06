@@ -1433,13 +1433,27 @@ async fn start_and_serve(
                     },
                     readers.clone(),
                 ) {
-                    Ok(mut store) => {
-                        store.configure_retrieval(&memory_config)?;
-                        let store = Arc::new(store);
-                        store.refresh_dense().await?;
-                        store.start_embeddings();
-                        memory_route::MemoryRoute::Store(store)
-                    }
+                    Ok(mut store) => match store.configure_retrieval(&memory_config) {
+                        Ok(()) => {
+                            let store = Arc::new(store);
+                            store.refresh_dense().await?;
+                            store.start_embeddings();
+                            memory_route::MemoryRoute::Store(store)
+                        }
+                        // A file the operator named stops startup. The
+                        // default file leaves memory unavailable and the
+                        // rest of the hub serving, as an unreadable one does.
+                        Err(e) if config.memory_config.is_some() => {
+                            return Err(format!(
+                                "memory configuration {}: {e}",
+                                memory_config_path.display()
+                            ));
+                        }
+                        Err(e) => {
+                            eprintln!("memory unavailable: {e}");
+                            memory_route::MemoryRoute::Unavailable
+                        }
+                    },
                     Err(e) => {
                         eprintln!("memory unavailable: {e}");
                         memory_route::MemoryRoute::Unavailable

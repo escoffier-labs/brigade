@@ -206,6 +206,22 @@ fn private(ip: IpAddr) -> bool {
         IpAddr::V6(v) => v.is_loopback() || (v.segments()[0] & 0xfe00 == 0xfc00),
     }
 }
+/// Where the `local` backend may send text: the hub host or an internal
+/// service beside it. Plain HTTP passes here and is held to a private or
+/// loopback address by the pinned check before every connect. HTTPS connects
+/// through its own resolver, so only a loopback or private IP literal passes.
+/// A name over HTTPS, an allowlisted public one included, is refused.
+pub(crate) fn local_destination_permitted(url: &Url) -> bool {
+    match url.scheme() {
+        "http" => true,
+        "https" => url.host_str().is_some_and(|h| {
+            h.trim_matches(['[', ']'])
+                .parse::<IpAddr>()
+                .is_ok_and(private)
+        }),
+        _ => false,
+    }
+}
 impl HttpEmbedder {
     pub fn new(config: Config, scanner: Arc<dyn Scanner>) -> Result<Arc<Self>, String> {
         let url = Url::parse(&config.endpoint).map_err(|_| "invalid embedder endpoint")?;
@@ -226,7 +242,20 @@ impl HttpEmbedder {
                 "embedder endpoint is outside the allowlist or has forbidden URL fields".into(),
             );
         }
-        let file = std::fs::File::open(&config.token_file)
+        if config.backend == "local" && !local_destination_permitted(&url) {
+            return Err("the local embedder backend needs a loopback or internal service endpoint: plain HTTP to a private address, or HTTPS to a loopback or private IP literal".into());
+        }
+        let mut open = std::fs::OpenOptions::new();
+        open.read(true);
+        // Nonblocking, so a FIFO with no writer fails the regular-file check
+        // below instead of holding startup in open(2).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = open
+            .open(&config.token_file)
             .map_err(|_| "embedder token file unavailable")?;
         let meta = file
             .metadata()
@@ -463,7 +492,7 @@ pub struct Runtime {
 struct QueryGuard(Arc<Runtime>);
 impl Drop for QueryGuard {
     fn drop(&mut self) {
-        let mut s = self.0.state.lock().unwrap();
+        let mut s = self.0.lock();
         s.queries -= 1;
         s.quiet_until = Instant::now() + QUIET;
     }
@@ -472,16 +501,14 @@ struct ProbeGuard(Weak<Runtime>);
 impl Drop for ProbeGuard {
     fn drop(&mut self) {
         if let Some(runtime) = self.0.upgrade() {
-            if let Ok(mut s) = runtime.state.lock() {
-                s.probe = false;
-            }
+            runtime.lock().probe = false;
         }
     }
 }
 struct DocumentGuard(Arc<Runtime>);
 impl Drop for DocumentGuard {
     fn drop(&mut self) {
-        self.0.state.lock().unwrap().document = false;
+        self.0.lock().document = false;
     }
 }
 impl Runtime {
@@ -518,24 +545,25 @@ impl Runtime {
             }),
         })
     }
+    /// The state holds counters and timestamps only, and nothing panics while
+    /// holding it, so a poisoned lock still holds consistent state.
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
     pub fn reason(&self) -> Option<&'static str> {
         if self.config.endpoint.is_empty() {
             return Some("embedder-unavailable");
         }
-        self.state.lock().unwrap().reason
+        self.lock().reason
     }
     /// An expired window counts as closed, whatever the probe did.
     pub fn breaker_open(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap()
-            .open_until
-            .is_some_and(|t| Instant::now() < t)
+        self.lock().open_until.is_some_and(|t| Instant::now() < t)
     }
     pub async fn query(self: &Arc<Self>, query: &str) -> Result<Vec<f32>, EmbedError> {
         let contention;
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = self.lock();
             if s.open_until.is_some_and(|t| Instant::now() < t) {
                 return Err(EmbedError::new(s.reason.unwrap_or("embedder-unavailable")));
             }
@@ -547,17 +575,24 @@ impl Runtime {
         }
         let _guard = QueryGuard(self.clone());
         let text = format!("{}{}", self.config.query_prefix, query);
+        // An embedder supplied through `with` may answer any number of rows.
+        // Only exactly one row counts as a healthy answer, checked before the
+        // state lock is taken.
         let result = self
             .embedder
             .embed(Kind::Query, vec![text], QUERY_DEADLINE)
-            .await;
+            .await
+            .and_then(|mut rows| match (rows.pop(), rows.is_empty()) {
+                (Some(row), true) => Ok(row),
+                _ => Err(EmbedError::new("vector-invalid")),
+            });
         match result {
-            Ok(mut rows) => {
+            Ok(row) => {
                 // A healthy answer ends any earlier fault, even if its probe failed.
-                let mut s = self.state.lock().unwrap();
+                let mut s = self.lock();
                 s.open_until = None;
                 s.reason = None;
-                Ok(rows.remove(0))
+                Ok(row)
             }
             Err(e) => {
                 if !(matches!(e.reason, "content-blocked" | "scan-unavailable")
@@ -570,7 +605,7 @@ impl Runtime {
         }
     }
     fn fail(self: &Arc<Self>, reason: &'static str) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.lock();
         s.reason = Some(reason);
         s.open_until = Some(Instant::now() + BREAKER_WINDOW);
         if s.probe {
@@ -591,8 +626,8 @@ impl Runtime {
             let result = embedder
                 .embed(Kind::Probe, vec![text], PROBE_DEADLINE)
                 .await;
-            if let (Ok(_), Some(runtime)) = (result, weak.upgrade()) {
-                let mut s = runtime.state.lock().unwrap();
+            if let (Ok(1), Some(runtime)) = (result.map(|rows| rows.len()), weak.upgrade()) {
+                let mut s = runtime.lock();
                 s.open_until = None;
                 s.reason = None;
             }
@@ -621,7 +656,7 @@ impl Runtime {
             return Err(EmbedError::new("scan-pending"));
         }
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = self.lock();
             if s.document
                 || s.probe
                 || s.queries > 0
@@ -633,7 +668,8 @@ impl Runtime {
             s.document = true;
         }
         let _guard = DocumentGuard(self.clone());
-        let result = self
+        let count = texts.len();
+        let result = match self
             .embedder
             .embed(
                 Kind::Document,
@@ -643,8 +679,12 @@ impl Runtime {
                     .collect(),
                 DOCUMENT_DEADLINE,
             )
-            .await;
-        let mut s = self.state.lock().unwrap();
+            .await
+        {
+            Ok(rows) if rows.len() != count => Err(EmbedError::new("vector-invalid")),
+            other => other,
+        };
+        let mut s = self.lock();
         if let Err(e) = &result {
             if matches!(
                 e.reason,

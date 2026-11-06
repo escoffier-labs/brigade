@@ -745,3 +745,143 @@ async fn panicking_probe_resets_the_probe_flag() {
     assert_eq!(*scripted.probe_calls.lock().unwrap(), 2);
     assert!(!runtime.breaker_open());
 }
+
+#[tokio::test]
+async fn retrieval_that_is_present_but_not_a_string_is_a_config_error() {
+    let mut hub = Hub::new();
+    let store = hub.store.as_mut().unwrap();
+    for retrieval in [json!(1), json!(true), json!(["hybrid"]), json!({})] {
+        let error = store
+            .configure_retrieval(&json!({"retrieval": retrieval}))
+            .unwrap_err();
+        assert!(error.contains("lexical or hybrid"), "{retrieval}: {error}");
+    }
+    // Absent still means lexical.
+    store.configure_retrieval(&json!({})).unwrap();
+    assert_eq!(store.retrieval_status()["mode"], json!("lexical"));
+}
+
+#[tokio::test]
+async fn local_backend_refuses_a_public_https_endpoint_even_when_allowlisted() {
+    let local = |endpoint: &str| {
+        let mut c = config(endpoint.into());
+        c.backend = "local".into();
+        HttpEmbedder::new(c, clean())
+    };
+    for public in [
+        "https://embed.example.com/v1/embeddings",
+        "https://192.0.2.1/v1/embeddings",
+        "https://localhost:1/v1/embeddings",
+    ] {
+        let error = local(public).err().expect(public);
+        assert!(
+            error.contains("local embedder backend"),
+            "{public}: {error}"
+        );
+    }
+    for on_host in [
+        "https://127.0.0.1:1/v1/embeddings",
+        "https://[::1]:1/v1/embeddings",
+        "http://127.0.0.1:1/api/embed",
+        "http://localhost:1/api/embed",
+    ] {
+        assert!(local(on_host).is_ok(), "{on_host}");
+    }
+    // An internal service address over HTTPS, built so no private literal sits in the source.
+    let internal = format!(
+        "https://{}/v1/embeddings",
+        std::net::Ipv4Addr::new(10, 0, 0, 1)
+    );
+    assert!(local(&internal).is_ok(), "{internal}");
+    // The same public URL is the documented `remote` case.
+    assert!(
+        HttpEmbedder::new(
+            config("https://embed.example.com/v1/embeddings".into()),
+            clean()
+        )
+        .is_ok()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_token_file_fails_fast_instead_of_blocking_startup() {
+    use std::os::unix::ffi::OsStrExt;
+    let c = config("http://127.0.0.1:1/api/embed".into());
+    std::fs::remove_file(&c.token_file).unwrap();
+    let name = std::ffi::CString::new(c.token_file.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `name` is a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(HttpEmbedder::new(c, clean()).err());
+    });
+    let outcome = receive.recv_timeout(Duration::from_secs(5));
+    if outcome.is_err() {
+        // Release a blocked open so the thread ends, then fail.
+        // SAFETY: `name` is a valid NUL-terminated path.
+        let fd = unsafe { libc::open(name.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
+        if fd >= 0 {
+            // SAFETY: `fd` was just opened and is closed once.
+            unsafe { libc::close(fd) };
+        }
+        panic!("opening a FIFO token file blocked startup");
+    }
+    let error = outcome.unwrap().expect("a FIFO token file is refused");
+    assert!(error.contains("invalid embedder token file"), "{error}");
+}
+
+/// Answers every call with `rows` copies of a valid vector.
+struct Rows {
+    id: EmbedderId,
+    rows: usize,
+}
+impl Embedder for Rows {
+    fn id(&self) -> &EmbedderId {
+        &self.id
+    }
+    fn embed(&self, _: Kind, _: Vec<String>, _: Duration) -> Embedding {
+        let rows = vec![vec![1.0, 0.0]; self.rows];
+        Box::pin(async move { Ok(rows) })
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn a_query_with_the_wrong_row_count_is_an_error_not_a_panic() {
+    for rows in [0, 2] {
+        let c = config("http://127.0.0.1:1/api/embed".into());
+        let runtime = Runtime::with(
+            c.clone(),
+            Arc::new(Rows {
+                id: c.id.clone(),
+                rows,
+            }),
+        );
+        assert_eq!(
+            runtime.query("text").await.unwrap_err().reason,
+            "vector-invalid",
+            "{rows} rows"
+        );
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        // The probe got the same bad answer, so the fault stays and the
+        // state is still usable.
+        assert_eq!(runtime.reason(), Some("vector-invalid"));
+        assert!(runtime.breaker_open());
+        tokio::time::advance(BREAKER_WINDOW).await;
+        assert_eq!(
+            runtime.query("text").await.unwrap_err().reason,
+            "vector-invalid"
+        );
+        // Documents check their row count too.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            runtime
+                .documents(vec![("body".into(), "clean".into())])
+                .await
+                .unwrap_err()
+                .reason,
+            "vector-invalid"
+        );
+    }
+}

@@ -5,9 +5,15 @@ The native hub reads `[memory]` from `hub.toml` beside its database. Use
 reads TOML at startup, in isolated mode (`python3 -I`), and only when the
 memory route is native. A missing default file means lexical mode. If the
 default file cannot be read (no `python3`, Python older than 3.11, or bad
-TOML), memory answers as unavailable and the rest of the hub starts. A file
-named with `--memory-config` that cannot be read stops startup with the
-cause. Token values stay in the hub process.
+TOML), memory answers as unavailable and the rest of the hub starts. The
+same holds for hybrid settings in the default file that do not validate,
+such as a missing token file or an unknown `retrieval` value, and the hub
+log names the reason. A file named with `--memory-config` that cannot be
+read or does not validate stops startup with the cause. The lookup has a
+10 s deadline covering the existence check and the Python child, so a FIFO
+or a stalled mount cannot hold startup. On timeout the child is killed. A
+`retrieval` key that is present must be a string. Only an absent key means
+lexical. Token values stay in the hub process.
 
 ```toml
 [memory]
@@ -39,12 +45,18 @@ query_prefix_version = 1
 ```
 
 The token file must be a regular file owned by the hub's effective user with
-mode 0600 or 0400 on Unix. A relative path is relative to the configuration
+mode 0600 or 0400 on Unix. The hub opens it nonblocking, so a FIFO fails
+that check instead of holding startup. A relative path is relative to the configuration
 file. The allowlist names exact URLs.
 Redirects are refused. Plain HTTP resolves once per request and connects
 only to the checked private or loopback address. Public endpoints require
 HTTPS with certificate verification through rustls. `local` uses the same
-HTTP contract for a loopback server or an allowlisted internal service.
+HTTP contract for a loopback server or an allowlisted internal service, and
+the hub holds it to those destinations. Plain HTTP passes the pinned check
+for a private or loopback address. HTTPS needs a loopback or private IP
+literal, because its resolver connects on its own. A name over HTTPS is
+refused for `local`, an allowlisted public URL included. Use `remote` for
+that endpoint.
 The operator owns the endpoint bind, private-network ACL and server-side
 token enforcement. On `http://`, which the hub accepts only for private
 ranges, the bearer token crosses the LAN in cleartext. The allowlist lives
