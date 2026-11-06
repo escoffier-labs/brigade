@@ -150,6 +150,31 @@ A shared host's variable results do not establish quiet-hardware acceptance.
 
 The measured runs and slower exploratory results are recorded in [S6.md](S6.md).
 
+### Claim latency behind 1,000-event bodies
+
+This profile measures claim p99 while the writer queue holds ordinary batch
+work. `--batch-events 1000` posts unique 1,000-event arrays. `--nodes 256`
+enrolls one node per client and gives each load process its own slice, so a
+single credential's 64-request allowance does not cap the flood. `--targets
+rust-native` skips the Python hub, which has no shared writer queue to
+measure. The summary's `mixed_claims` field holds the claim attempts, OK count,
+statuses and latency percentiles from `mixed.json`.
+
+```sh
+python engines/hub/bench/heartbeat.py --binary /tmp/hub-build/release/brigade-hub \
+  --output /tmp/s6-claims-behind-batches --clients 256 --nodes 256 \
+  --batch-events 1000 --mixed --targets rust-native --repetitions 2 \
+  --seconds 30 --warmup 5
+```
+
+Claim p99 must stay under the S6 row's 250 ms and well inside the v1 claim
+client's 2.5 s timeout from [Authority across the two
+files](../../../docs/phase-v2-hub-architecture.md#authority-across-the-two-files).
+Heartbeat `writer-queue-full` answers are expected here. They show the
+ordinary allocation saturated while claims used the durable reserve.
+`tests/heartbeat_native.py` carries the CI form of this check with the 2.5 s
+bound.
+
 ## Conductor procedure for the dogfood deployment
 
 This procedure is written for the conductor. It was not executed by S6 and

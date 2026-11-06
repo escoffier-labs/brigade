@@ -58,6 +58,17 @@ def background(url, stop, output, claim_token, admin_token):
         output.write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
 
 
+def claim_summary(path):
+    """Claim latency from the mixed background lane, beside the heartbeat load."""
+    records = [r for r in json.loads(path.read_text(encoding="utf-8")) if r["path"] == "/claims"]
+    return {
+        "attempts": len(records),
+        "ok": sum(r["status"] == 200 for r in records),
+        "statuses": sorted({str(r["status"]) for r in records}),
+        "latency_ms": load.percentiles([r["latency_ms"] for r in records if "latency_ms" in r]),
+    }
+
+
 def commit_p99(first, last):
     """Bucket upper bound from every COMMIT in a window, never gauge samples."""
     prefix = 'brigade_hub_writer_commit_duration_seconds_bucket{le="'
@@ -90,8 +101,14 @@ def drive(url, db, env, output, target, args, clients):
     first_metrics = metrics(url, (env.get("BRIGADE_BENCH_METRICS_TOKEN") or env.get("BRIGADE_FLEET_TOKEN", "")))
     initial = load.db_info(str(db))
     processes = min(args.processes, clients)
+    node_tokens = json.loads(env.get("BRIGADE_BENCH_NODE_TOKENS") or "{}")
     children = []
     for number in range(processes):
+        child_env = dict(env)
+        if node_tokens:
+            # Each load process posts as its own slice of the enrolled nodes.
+            names = sorted(node_tokens)[number::processes] or sorted(node_tokens)
+            child_env["BRIGADE_BENCH_NODE_TOKENS"] = json.dumps({n: node_tokens[n] for n in names})
         path = output / f"client-{number}.json"
         command = [
             sys.executable,
@@ -118,6 +135,8 @@ def drive(url, db, env, output, target, args, clients):
             "10",
             "--connection",
             args.connection,
+            "--batch-events",
+            str(args.batch_events),
             "--sample-interval",
             ".1",
             "--database",
@@ -131,7 +150,7 @@ def drive(url, db, env, output, target, args, clients):
         ]
         if getattr(args, "client_cpus", None):
             command = ["taskset", "-c", args.client_cpus, *command]
-        children.append((subprocess.Popen(command, env=env, stdout=subprocess.DEVNULL), path))
+        children.append((subprocess.Popen(command, env=child_env, stdout=subprocess.DEVNULL), path))
     reports = []
     for child, path in children:
         if child.wait() != 0:
@@ -157,6 +176,8 @@ def drive(url, db, env, output, target, args, clients):
         "seconds": args.seconds,
         "warmup": args.warmup,
         "connection": args.connection,
+        "batch_events": args.batch_events,
+        "nodes": args.nodes,
         "initial_database": initial,
         "cgroup_limits": json.loads((Path(db).parent / "limits.json").read_text(encoding="utf-8"))
         if db is not None and (Path(db).parent / "limits.json").exists()
@@ -191,13 +212,16 @@ def main():
     p.add_argument("--server-cpus", help="Server CPU affinity, inherited by the managed upstream")
     p.add_argument("--client-cpus", help="Client CPU affinity outside the server allocation")
     p.add_argument("--mixed", action="store_true")
+    p.add_argument("--batch-events", type=int, default=1, help="Unique events per heartbeat POST, 1 to 1000")
+    p.add_argument("--nodes", type=int, default=1, help="Enrolled heartbeat nodes the load clients share")
+    p.add_argument("--targets", nargs="+", choices=("python", "rust-native"), default=["python", "rust-native"])
     args = p.parse_args()
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     results = []
     for clients in args.clients:
         for repetition in range(1, args.repetitions + 1):
-            for target in ("python", "rust-native"):
+            for target in args.targets:
                 output = args.output / f"{target}-{clients}-{repetition}"
                 output.mkdir()
                 with tempfile.TemporaryDirectory(prefix="s6-bench-") as work:
@@ -212,7 +236,8 @@ def main():
                         tokens = {}
                         admin_client = load.Client(url, admin_token, "close", 10)
                         try:
-                            for node in ("bench-node", "bench-claims"):
+                            nodes = [f"bench-node-{n}" for n in range(args.nodes)] if args.nodes > 1 else ["bench-node"]
+                            for node in (*nodes, "bench-claims"):
                                 status, raw, _ = admin_client.request(
                                     "POST", "/nodes", json.dumps({"action": "add", "node_id": node}).encode()
                                 )
@@ -221,7 +246,10 @@ def main():
                                 tokens[node] = json.loads(raw)["token"]
                         finally:
                             admin_client.close()
-                        env["BRIGADE_BENCH_TOKEN"] = tokens["bench-node"]
+                        env["BRIGADE_BENCH_TOKEN"] = tokens[nodes[0]]
+                        env.pop("BRIGADE_BENCH_NODE_TOKENS", None)
+                        if args.nodes > 1:
+                            env["BRIGADE_BENCH_NODE_TOKENS"] = json.dumps({n: tokens[n] for n in nodes})
                         env["BRIGADE_BENCH_METRICS_TOKEN"] = admin_token
                         stop = threading.Event()
                         mixed = None
@@ -237,6 +265,8 @@ def main():
                             stop.set()
                             if mixed:
                                 mixed.join()
+                        if mixed:
+                            results[-1]["mixed_claims"] = claim_summary(output / "mixed.json")
                 print(json.dumps(results[-1]), flush=True)
     (args.output / "summary.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
 

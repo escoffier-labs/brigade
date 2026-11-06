@@ -152,6 +152,9 @@ class Client:
 def run(args):
     endpoint(args.url)
     token = os.environ.get("BRIGADE_BENCH_TOKEN", "")
+    # Optional {"node id": "token"} map. Worker i posts as node i modulo its size,
+    # so a flood is not capped by one credential's in-flight and byte shares.
+    nodes = sorted(json.loads(os.environ.get("BRIGADE_BENCH_NODE_TOKENS") or "{}").items()) or [("bench-node", token)]
     payload = Path(args.payload).read_bytes() if args.payload else None
     started = time.time()
     load_start = os.getloadavg()
@@ -162,25 +165,27 @@ def run(args):
     finish = start + args.warmup + args.seconds
     run_id = f"bench-{time.time_ns()}"
 
-    def attempt(client, number, due):
+    def attempt(client, node, number, due):
         body = payload
         if body is None and args.method == "GET":
             body = b""
         if body is None:
-            body = json.dumps(
+            events = [
                 {
-                    "node_id": "bench-node",
+                    "node_id": node,
                     "run_id": run_id,
                     "repo": "bench-repo",
                     "seat": "worker",
                     "harness": "codex",
                     "state": "run.created",
                     "ts": "2026-01-01T00:00:00Z",
-                    "sequence": number,
-                    "digest": f"bench-{number}",
-                },
-                sort_keys=True,
-            ).encode("utf-8")
+                    "sequence": sequence,
+                    "digest": f"bench-{sequence}",
+                }
+                for sequence in range(number * args.batch_events, (number + 1) * args.batch_events)
+            ]
+            # One event keeps the original single-object body. Batches stay unique.
+            body = json.dumps(events[0] if args.batch_events == 1 else events, sort_keys=True).encode("utf-8")
         begin = time.monotonic()
         record = {
             "attempt": number,
@@ -221,9 +226,10 @@ def run(args):
 
     counter = 0
 
-    def worker():
+    def worker(index):
         nonlocal counter
-        client = Client(args.url, token, args.connection, args.timeout)
+        node, node_token = nodes[index % len(nodes)]
+        client = Client(args.url, node_token, args.connection, args.timeout)
         try:
             if args.mode == "closed":
                 time.sleep(max(0, start - time.monotonic()))
@@ -231,7 +237,7 @@ def run(args):
                     with lock:
                         number = counter
                         counter += 1
-                    attempt(client, number, time.monotonic())
+                    attempt(client, node, number, time.monotonic())
                     time.sleep(min(1 / args.rate, max(0, finish - time.monotonic())))
             else:
                 while True:
@@ -239,7 +245,7 @@ def run(args):
                     try:
                         if job is None:
                             return
-                        attempt(client, *job)
+                        attempt(client, node, *job)
                     finally:
                         jobs.task_done()
         finally:
@@ -276,7 +282,7 @@ def run(args):
 
     sampler = threading.Thread(target=sample)
     sampler.start()
-    workers = [threading.Thread(target=worker) for _ in range(args.clients)]
+    workers = [threading.Thread(target=worker, args=(index,)) for index in range(args.clients)]
     for thread in workers:
         thread.start()
     if args.mode == "open":
@@ -352,6 +358,8 @@ def run(args):
             "path": args.path,
             "payload": {
                 "kind": "file" if payload is not None else "unique-event-v1",
+                "events_per_post": None if payload is not None else args.batch_events,
+                "nodes": len(nodes),
                 "sha256": hashlib.sha256(payload).hexdigest() if payload is not None else None,
             },
             "database": db_info(args.database),
@@ -408,6 +416,7 @@ def parser():
     p.add_argument("--path", default="/events")
     p.add_argument("--method", choices=("GET", "POST"), default="POST")
     p.add_argument("--payload")
+    p.add_argument("--batch-events", type=int, default=1, help="Unique events per generated POST body, 1 to 1000")
     p.add_argument("--database")
     p.add_argument("--flags", default="unspecified")
     return p
@@ -419,6 +428,8 @@ def main():
     for name in ("seconds", "rate", "clients", "backlog", "timeout", "sample_interval"):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
             p.error(f"{name} must be finite and positive")
+    if not 1 <= args.batch_events <= 1000:
+        p.error("batch-events must be between 1 and 1000")
     if not math.isfinite(args.warmup) or args.warmup < 0:
         p.error("warmup must be finite and nonnegative")
     args.output.write_text(json.dumps(run(args), indent=2) + "\n", encoding="utf-8")

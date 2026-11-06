@@ -223,6 +223,22 @@ class Driver(unittest.TestCase):
         self.assertGreater(result["summary"]["attempts"], 0)
         self.assertIsNone(result["conditions"]["offered_rate"])
 
+    def test_batch_events_post_unique_lists(self):
+        bodies = []
+
+        def request(client, method, path, body):
+            if path != "/metrics":
+                bodies.append(json.loads(body))
+            return 200, b"{}", None
+
+        with patch.object(load.Client, "request", request):
+            result = self.run_load("http://127.0.0.1:9", "--batch-events", "3")
+        self.assertEqual(result["conditions"]["payload"]["events_per_post"], 3)
+        self.assertTrue(bodies and all(isinstance(b, list) and len(b) == 3 for b in bodies))
+        sequences = [event["sequence"] for body in bodies for event in body]
+        self.assertEqual(len(sequences), len(set(sequences)))
+        self.assertEqual(len({event["digest"] for body in bodies for event in body}), len(sequences))
+
     def test_scope_has_both_limits_and_checks_effective_values(self):
         with patch("shutil.which", return_value="/usr/bin/systemd-run"):
             command = matrix.scoped(["fake-hub"], True)
