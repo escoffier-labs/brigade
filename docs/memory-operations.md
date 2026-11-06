@@ -61,12 +61,51 @@ baselines and allow comments do not apply. `status.scan.ruleset_version` and
 | Input or operation | Result |
 |---|---|
 | Blocking guard rule, bidi control, invisible operator, embedded BOM or tag character | `422 memory_content_blocked` with rule ids only. No bytes are stored |
-| Warning, role override, U+200C or U+200D | `put` stores `flagged`, with a Tier 2 floor and rule ids attached to the content hash |
-| Clean `put`, including combining marks or a leading BOM | Stores `agent-unreviewed`. Scanning never raises trust |
-| `import` with any finding | Refused with `422`. Imports keep their clean-scan requirement |
+| Warning, role override or U+200D | `put` stores `flagged`, with a Tier 2 floor and rule ids attached to the content hash |
+| Private rule only: a network address, port, local host name, root, home or Windows home path, email address, phone number, U+034F or U+200C | `put` stores scan state `private` as `agent-unreviewed`. `import` stores it as `imported` |
+| Clean `put`, including combining marks, a leading BOM or an emoji's U+FE0F | Stores `agent-unreviewed`. Scanning never raises trust |
+| `import` with a warning or a blocking finding | Refused with `422`. Imports need a clean or private scan |
 | Engine missing, pin mismatch or rule compilation failure | `put` and `handoff` store `pending`. `import` returns `503 memory_scan_unavailable` with `retryable: true` |
 | Input-specific engine failure | `503 memory_scan_failed` with `retryable: false`. No bytes are stored |
 | Invalid UTF-8 or an unpaired surrogate in the JSON request | `400 memory_request_invalid` before normalization |
+
+Bundle `brigade-memory-scan.v6` adds the private class for hub memory only.
+It covers the guard's `loopback-ipv4`, `private-ipv4`, `port-reference`,
+`localhost-bare`, `localhost-port`, `private-hostname`, `ssh-private-target`,
+`root-path`, `home-path`, `windows-home-path`, `email`,
+`example-email-reserved`, `us-phone` and `example-phone-555` rules. These
+describe the operator's own machines and contacts. The repository guard, the
+pre-push scanner and evidence redaction keep each rule's own severity from
+`guard/rules.py`. A version with any warning stays `flagged` and one with any
+blocking finding is refused, whatever private rules it also matches.
+
+Private text stays on the operator's machines. It is stored, searchable,
+replicated to the operator's nodes and loaded into local prompt recall. It is
+refused on every path that sends text elsewhere:
+
+| Path | Private text |
+|---|---|
+| `Store::push` (connector push, S23) | Excluded. Only a clean scan receipt is eligible |
+| Push prompt-load scan | `{card_id, blocked: "<rule id>", code: "memory_content_private"}` |
+| Search with `query_source: "prompt"` (local recall) | Returned in full |
+| Grok Bot memory `memory_search` and `memory_card` | Placeholder with `code: "memory_content_private"` |
+| `memory_hits` on `inbox_list` and `fleet_digest` | Dropped and counted, as for any finding |
+| Dot and Duet `memory_search` and `memory_card` | Unchanged: these profiles return card text without a prompt-load scan |
+
+`memory_content_private` appears only when the private class alone withholds
+the text. A placeholder for a warning or a blocking rule carries no code, and
+an egress refusal with a rule outside the private class is never reported as
+private.
+
+U+FE0F after an Extended_Pictographic character (U+2190 to U+21FF,
+U+2300 to U+23FF, U+25A0 to U+25FF, U+2600 to U+27BF, U+2B00 to U+2BFF,
+U+1F000 to U+1FAFF and the text-default symbols) and in a keycap sequence
+scans clean. U+034F and U+200C are private, not stripped: the stored bytes
+and their content hash stay exactly as written, and the scan copies already
+drop both characters, so neither can split a rule match. The `classic-injection`
+rule matches the verb "exfiltrate" only as an order, at the start of a line or
+sentence, addressed to the agent, or with a destination. Threat reports and
+policy text that name the verb scan clean.
 
 The `memory-scan` Cargo feature is enabled by default. A build with
 `--no-default-features` has no scanner and serves pending writes and explicit
@@ -74,14 +113,15 @@ searches only. Restarting with the scanner does not promote or rescan old
 versions automatically. A later authorized write scans its exact bytes.
 
 Searches with `query_source: "prompt"` scan the returned fields and card bytes
-again. Any finding replaces the match with `{card_id, blocked: "<rule id>"}`.
+again. Any finding except a private one replaces the match with
+`{card_id, blocked: "<rule id>"}`.
 The response carries `content_trust: "untrusted"`. Explicit searches can still
 inspect flagged versions. Local connector prompt loads share the same rule
-bundle and placeholder. Every finding, including a warning, withholds prompt
-text. Leading BOM handling applies to each field separately.
+bundle and placeholder. Every finding on a connector, including a warning or
+a private rule, withholds prompt text. Leading BOM handling applies to each field separately.
 
 The internal `Store::push` boundary requires a current, live, trusted head with
-a clean scan under the current bundle. It then applies the prompt-load scan.
+a clean scan under the current bundle. A private scan is not eligible. It then applies the prompt-load scan.
 An unavailable scanner, a pending scan or an old rule-set receipt produces no
 push hits. S23 connects this boundary to native tool responses. The public
 search API continues to reject `query_source: "push"`.
