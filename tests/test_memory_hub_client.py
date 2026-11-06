@@ -799,7 +799,8 @@ def test_dot_memory_search_keeps_hub_labels_only_when_hub_memory_answered(tmp_pa
     }
     got = _dot_memory(tmp_path, hub_reply).memory_search("a")
     assert got["matches"][0]["source"] == "replica" and got["retrieval"]["degraded"] is True
-    assert got["warning"].startswith("hub search unavailable")
+    # The CLI text embeds the hub reason, so only a code leaves.
+    assert got["warning"] == "hub_search_unavailable"
     plain = _dot_memory(tmp_path, {"match_count": 1, "matches": [match]}).memory_search("a")
     assert "source" not in plain["matches"][0] and "retrieval" not in plain
 

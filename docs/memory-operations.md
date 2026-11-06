@@ -167,7 +167,24 @@ itself, such as an email address. The id is kept only when it is a plain slug
 that scans clean on its own, and `scope` only when it is a valid scope that
 scans clean. The returned `path` and `scope` are scanned with the card fields. A
 match whose id, title, summary, path or scope is not text, or whose tags or
-aliases are not a list of text, is refused as `malformed-match`. Search scans the
+aliases are not a list of text, is refused as `malformed-match`.
+
+The remaining payload fields are not card text, and a remote connector gets them
+in a reduced form:
+
+| Field | What the connector receives |
+|---|---|
+| `memory_search` `workspace` | The workspace directory name only, never the absolute path. It is dropped if the name itself scans as private |
+| `memory_search` match `path` | Relative to the workspace. An absolute path inside the workspace is made relative. Any other absolute path, a drive or backslash path, an empty path or one that climbs out with `..` refuses the match as `malformed-match` |
+| `memory_card` `path` | Relative to the workspace, as in `memory/cards/<name>.md` |
+| match `source`, `trust` | Only `local`, `hub` or `replica`, and only `reviewed`, `policy-promoted`, `imported`, `agent-unreviewed` or `flagged`. Any other value comes back as `null` |
+| match `revision`, hub card `revision` | A non-negative integer, else `null` |
+| match `scope`, hub card `scope` | A valid hub scope, else `null`. A hub card's scope is scanned with its text |
+| hub card `sha256` | 64 lowercase hex digits, else `null` |
+| `retrieval` | Only the keys `hub`, `degraded`, `stale`, `effective`, `reason`, `status`, `hub_limit`, `replica_incomplete` and `fallback`, each with its documented values. `reason` is one of the client's reason codes, a coded hub refusal such as `memory_grant_missing`, or `http-<status>`. An unknown key or value is dropped |
+| `warning` | One code, never the CLI's text, because that text embeds the hub's reason. In priority order: `hub_search_refused`, `hub_search_unavailable`, `replica_incomplete`, `hub_limit_capped`. It is left out when the checked `retrieval` shows none of them |
+
+Search scans the
 returned snippets, not the cards. Measured on one host, the scan costs about
 1 ms per result for a 700-character summary, so 20 results add about 21 ms, and
 about 3.4 ms per result at 3,000 characters, so 20 add about 67 ms. Both sit well

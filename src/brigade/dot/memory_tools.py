@@ -71,11 +71,18 @@ class MemoryTools:
                 if not _well_formed(item):
                     matches.append(_refused_match(item, {"blocked": MALFORMED_MATCH}))
                     continue
+                # A path that cannot be shown as a workspace-relative one is refused the same way.
+                relative = _relative_path(item.get("path"), self.workspace)
+                if relative is None and item.get("path") is not None:
+                    matches.append(_refused_match(item, {"blocked": MALFORMED_MATCH}))
+                    continue
+                item["path"] = relative
                 # The returned path and hub scope are scanned too: a file name or scope can carry the text.
                 refusal = egress_refusal([*_card_texts(item), *_location_texts(item)])
                 if refusal:
                     matches.append(_refused_match(item, refusal))
                     continue
+                _keep_known_hub_labels(item)
             item["content_trust"] = "untrusted"
             matches.append(item)
         payload = dict(
@@ -85,14 +92,26 @@ class MemoryTools:
             workspace=str(self.workspace),
             next="Read a card with memory_card(name=<path basename without .md>).",
         )
+        if self.profile.prompt_load_scan:
+            # The directory name only: the absolute path is local configuration, and a home path is private text.
+            name = self.workspace.name
+            payload["workspace"] = name if egress_refusal([name]) is None else None
         if isinstance(value.get("retrieval"), dict):
             payload["next"] = (
                 "Read a card with memory_card(name=<path basename without .md>); "
                 "for a hub or replica match, also pass scope=<its scope>."
             )
-            payload["retrieval"] = value["retrieval"]
-            if isinstance(value.get("warning"), str):
-                payload["warning"] = value["warning"]
+            if self.profile.prompt_load_scan:
+                # Hub JSON passes through the search CLI, so only known keys and values leave.
+                retrieval = _known_retrieval(value["retrieval"])
+                payload["retrieval"] = retrieval
+                code = _warning_code(value.get("warning"), retrieval)
+                if code:
+                    payload["warning"] = code
+            else:
+                payload["retrieval"] = value["retrieval"]
+                if isinstance(value.get("warning"), str):
+                    payload["warning"] = value["warning"]
         return payload
 
     def _hub_card(self, name: str, offset: int, scope: str | None = None) -> dict[str, Any] | None:
@@ -106,7 +125,7 @@ class MemoryTools:
         the hub refused is never served from the replica. The CLI reads the
         hub's `status` first and refuses an admin token in the node slot.
         """
-        from ..memory_hub_client import HubConfigError, hub_mode
+        from ..memory_hub_client import HubConfigError, hub_mode, valid_scope
 
         try:
             if hub_mode(self.workspace) == "off":
@@ -122,9 +141,15 @@ class MemoryTools:
         if error or not isinstance(card, dict) or not isinstance(card.get("text"), str):
             return None
         text = card["text"]
+        scope, revision, sha256 = card.get("scope"), card.get("revision"), card.get("content_hash")
         if self.profile.prompt_load_scan:
+            # Hub JSON is returned beside the text, so each label is checked: a scope must be a valid
+            # one that scans with the card, a revision an integer and a hash 64 hex digits.
+            scope = scope if valid_scope(scope) else None
+            revision = revision if _is_revision(revision) else None
+            sha256 = sha256 if isinstance(sha256, str) and _SHA256.fullmatch(sha256) else None
             # The whole card is scanned, as for a local card.
-            refusal = egress_refusal([text])
+            refusal = egress_refusal([text, *([scope] if scope else [])])
             if refusal:
                 return {"card_id": name, **refusal}
         chunk = text[offset : offset + CARD_CHUNK_CHARS]
@@ -133,9 +158,9 @@ class MemoryTools:
         return dict(
             name=name,
             source=source,
-            scope=card.get("scope"),
-            revision=card.get("revision"),
-            sha256=card.get("content_hash"),
+            scope=scope,
+            revision=revision,
+            sha256=sha256,
             chars=len(text),
             offset=offset,
             next_offset=following if following < len(text) else None,
@@ -183,9 +208,15 @@ class MemoryTools:
                 return {"card_id": name, **refusal}
         chunk = text[offset : offset + CARD_CHUNK_CHARS]
         following = offset + len(chunk)
+        # A remote connector sees the path under the workspace, never the local absolute one.
+        path = (
+            (self.cards.relative_to(self.workspace) / (name + ".md")).as_posix()
+            if self.profile.prompt_load_scan
+            else str(Path(self.cards) / (name + ".md"))
+        )
         return dict(
             name=name,
-            path=str(Path(self.cards) / (name + ".md")),
+            path=path,
             bytes=len(data),
             chars=len(text),
             sha256=hashlib.sha256(data).hexdigest(),
@@ -357,6 +388,116 @@ def _well_formed(item: dict[str, Any]) -> bool:
 def _location_texts(item: dict[str, Any]) -> list[str]:
     # Where a search match lives: returned beside the card fields, so it is scanned with them.
     return [value for value in (item.get("path"), item.get("scope")) if isinstance(value, str)]
+
+
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+# The hub's trust levels, its search sources and retrieval modes (docs/phase-v2-hub-architecture.md).
+_TRUST_LEVELS = frozenset({"reviewed", "policy-promoted", "imported", "agent-unreviewed", "flagged"})
+_SOURCES = frozenset({"local", "hub", "replica"})
+_RETRIEVAL_HUB = frozenset({"ok", "unavailable", "refused"})
+_RETRIEVAL_MODES = frozenset({"lexical", "hybrid", "lexical-fallback"})
+_RETRIEVAL_REASONS = frozenset(
+    {
+        "no-hub-configured",
+        "no-node-credential",
+        "timeout",
+        "unreachable",
+        "no-hub-memory",
+        "hub-busy",
+        "hub-config-invalid",
+        "unauthorized",
+        "memory_grant_missing",
+        "memory_card_not_found",
+        "memory_card_ambiguous",
+        "memory_request_invalid",
+        "memory_query_invalid",
+        "memory_method_invalid",
+        "memory_action_unavailable",
+        "memory_unavailable",
+        "memory_epoch_changed",
+        "memory_scan_unavailable",
+        "memory_scan_failed",
+    }
+)
+_HTTP_REASON = re.compile(r"http-[1-5][0-9]{2}")
+# A search warning leaves only as one of these codes, never the CLI's text (it embeds a hub reason).
+WARNING_HUB_REFUSED = "hub_search_refused"
+WARNING_HUB_UNAVAILABLE = "hub_search_unavailable"
+WARNING_REPLICA_INCOMPLETE = "replica_incomplete"
+WARNING_HUB_LIMIT = "hub_limit_capped"
+
+
+def _is_revision(value: object) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _relative_path(path: object, workspace: Path) -> str | None:
+    """A match path as a workspace-relative POSIX path, or None when it cannot be shown as one.
+
+    An absolute path inside the workspace is made relative. Anything else absolute, a drive or
+    backslash path, or a path that climbs out with `..` is not shown.
+    """
+    if not isinstance(path, str) or not path or "\\" in path or "\0" in path:
+        return None
+    candidate = PurePath(path)
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.relative_to(workspace)
+        except ValueError:
+            return None
+    parts = candidate.parts
+    if not parts or any(part in ("", ".", "..") for part in parts) or ":" in parts[0]:
+        return None
+    return candidate.as_posix()
+
+
+def _keep_known_hub_labels(item: dict[str, Any]) -> None:
+    # `source`, `trust`, `revision` and `scope` come from hub JSON unchanged: an unknown value is dropped, not echoed.
+    from ..memory_hub_client import valid_scope
+
+    if item.get("scope") is not None and not valid_scope(item["scope"]):
+        item["scope"] = None
+    for key, known in (("source", _SOURCES), ("trust", _TRUST_LEVELS)):
+        if key in item and not (isinstance(item[key], str) and item[key] in known):
+            item[key] = None
+    if "revision" in item and not _is_revision(item["revision"]):
+        item["revision"] = None
+
+
+def _known_retrieval(retrieval: dict[str, Any]) -> dict[str, Any]:
+    """The hub's retrieval report cut to the keys and values the CLI documents; the rest is dropped."""
+    known: dict[str, Any] = {}
+    if retrieval.get("hub") in _RETRIEVAL_HUB:
+        known["hub"] = retrieval["hub"]
+    for key in ("degraded", "stale", "replica_incomplete"):
+        if isinstance(retrieval.get(key), bool):
+            known[key] = retrieval[key]
+    if retrieval.get("effective") in _RETRIEVAL_MODES:
+        known["effective"] = retrieval["effective"]
+    reason = retrieval.get("reason")
+    if isinstance(reason, str) and (reason in _RETRIEVAL_REASONS or _HTTP_REASON.fullmatch(reason)):
+        known["reason"] = reason
+    for key in ("status", "hub_limit"):
+        value = retrieval.get(key)
+        if type(value) is int and 0 <= value <= 599:
+            known[key] = value
+    fallback = retrieval.get("fallback")
+    if isinstance(fallback, list):
+        known["fallback"] = [source for source in fallback if source in _SOURCES]
+    return known
+
+
+def _warning_code(warning: object, retrieval: dict[str, Any]) -> str | None:
+    """The one code for a search warning, read from the checked retrieval report, or None."""
+    if not isinstance(warning, str):
+        return None
+    if retrieval.get("hub") == "refused":
+        return WARNING_HUB_REFUSED
+    if retrieval.get("hub") == "unavailable":
+        return WARNING_HUB_UNAVAILABLE
+    if retrieval.get("replica_incomplete") is True:
+        return WARNING_REPLICA_INCOMPLETE
+    return WARNING_HUB_LIMIT if "hub_limit" in retrieval else None
 
 
 def _blocked_card_id(item: dict[str, Any]) -> str | None:
