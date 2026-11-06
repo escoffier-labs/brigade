@@ -126,7 +126,7 @@ def test_discovery_skips_dot_dirs_mirror_dirs_excludes_and_symlinks(tmp_path):
         {
             **VAULT,
             ".obsidian/workspace.md": "# cfg\n",
-            ".graphtrail/index.md": "# gt\n",
+            ".trash/gone.md": "# gone\n",
             "Hub Memory/card.md": "# mirrored\n",
             "Hub Memory/" + MARKER: "{}",
             "Templates/daily.md": "# tpl\n",
