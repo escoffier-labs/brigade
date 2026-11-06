@@ -23,6 +23,22 @@ import hub_contract_memory as hm  # noqa: E402
 BINARY = Path(os.environ.get("BRIGADE_HUB_BINARY", ROOT / "engines/hub/target/debug/brigade-hub"))
 BASE = f"{BINARY} --host {{host}} --port {{port}} --db {{db}} --token-file {{token_file}} --route-mode registration=native"
 UNAVAILABLE = {"error": "hub busy", "reason": "memory-unavailable"}
+# Valid apart from its token file, which does not exist.
+HYBRID_MISSING_TOKEN = """[memory]
+retrieval = "hybrid"
+
+[memory.embedder]
+backend = "local"
+endpoint = "http://127.0.0.1:9/api/embed"
+allowlist = ["http://127.0.0.1:9/api/embed"]
+token_file = "no-such.token"
+shape = "api/embed"
+name = "test-model"
+model_digest = "test-digest"
+dimensions = 2
+input_chars = 6000
+query_prefix_version = 1
+"""
 
 
 def launch(state: Path, extra: str = "") -> hc.Hub:
@@ -192,6 +208,30 @@ class Memory(unittest.TestCase):
         state.mkdir()
         (state / "named.toml").write_text("[memory\n")
         with self.assertRaisesRegex(hc.ContractError, "could not be read"):
+            hub = launch(state, f"--route-mode memory=native --memory-config {state / 'named.toml'}")
+            self.addCleanup(hc.stop_hub, hub)
+
+    def test_bad_hybrid_settings_in_default_hub_toml_leave_memory_unavailable(self):
+        # A hybrid table whose token file is missing, and a retrieval mode
+        # that does not exist. Each leaves memory unavailable with the reason
+        # in the hub log, and the rest of the hub serving.
+        cases = {
+            "missing-token": (HYBRID_MISSING_TOKEN, b"memory unavailable: embedder token file unavailable"),
+            "bad-mode": ('[memory]\nretrieval = "dense"\n', b"memory unavailable: memory.retrieval must be"),
+        }
+        for name, (text, logged) in cases.items():
+            with self.subTest(name):
+                hub = self.run_hub(name, "--route-mode memory=native", lambda s, t=text: (s / "hub.toml").write_text(t))
+                response = status(hub)
+                self.assertEqual((response.status, response.json), (503, UNAVAILABLE))
+                self.assertEqual(hc.request(hub.url, "GET", "/health").status, 200)
+                self.assertIn(logged, (self.work / name / "hub.log").read_bytes())
+
+    def test_bad_hybrid_settings_in_a_named_memory_config_stop_startup(self):
+        state = self.work / "named-hybrid"
+        state.mkdir()
+        (state / "named.toml").write_text(HYBRID_MISSING_TOKEN)
+        with self.assertRaisesRegex(hc.ContractError, "embedder token file unavailable"):
             hub = launch(state, f"--route-mode memory=native --memory-config {state / 'named.toml'}")
             self.addCleanup(hc.stop_hub, hub)
 
