@@ -139,3 +139,12 @@ dimensions. These are isolated matrix-process measurements, including test
 runtime overhead, without a lexical index, SQLite corpus or embedding model.
 The larger rebuild exceeds the reference 512 MiB allotment. Production
 memory planning must include those other components and any second model.
+
+A fresh private lexical run used the retained 1,891-card fixture and three
+complete label sets. S18 admitted 1,344 cards, blocked 546, and one card id
+was invalid. Native prompt hit@5 was 0.483871, 0.612903 and 0.531250 over
+62, 62 and 64 labelled cases. Python BM25 on the imported corpus agreed
+with every native top-five list. The full-corpus Python reference was
+0.661290, 0.741935 and 0.703125. The import run therefore does not establish
+full-corpus end-to-end quality parity. Receipt:
+`20261105-235600-work-verify-0119a4`. No model server was contacted.
