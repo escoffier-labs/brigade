@@ -163,8 +163,11 @@ tools apply the scan like this:
 first chunk refuses every offset. A hub card is scanned the same way. A search
 match is scanned over its id, title, summary, tags and aliases together, and a
 refused match echoes none of them, because a title can carry the refused text
-itself, such as an email address. The id is kept only when it is a plain slug,
-and `scope` only when it is a valid scope that scans clean. Search scans the
+itself, such as an email address. The id is kept only when it is a plain slug
+that scans clean on its own, and `scope` only when it is a valid scope that
+scans clean. The returned `path` and `scope` are scanned with the card fields. A
+match whose id, title, summary, path or scope is not text, or whose tags or
+aliases are not a list of text, is refused as `malformed-match`. Search scans the
 returned snippets, not the cards. Measured on one host, the scan costs about
 1 ms per result for a 700-character summary, so 20 results add about 21 ms, and
 about 3.4 ms per result at 3,000 characters, so 20 add about 67 ms. Both sit well

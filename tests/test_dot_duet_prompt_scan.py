@@ -206,6 +206,36 @@ class TestRemoteProfiles(Scan):
             assert PRIVATE_EMAIL not in serialized and PRIVATE_IP not in serialized
 
     @requires_local_state
+    def test_a_slug_shaped_id_or_stem_that_is_the_refused_text_is_not_echoed(self):
+        self.search_reply(
+            self.match(f"relay-{PRIVATE_IP}"),
+            self.match("", path=f"memory/cards/relay-{PRIVATE_IP}.md"),
+        )
+        for profile in REMOTE:
+            payload = self.memory(profile).memory_search("release")
+            for match in payload["matches"]:
+                assert match == {"card_id": None, **_expected("private-ipv4", PRIVATE_CODE)}
+            assert PRIVATE_IP not in json.dumps(payload)
+
+    @requires_local_state
+    def test_a_match_with_a_non_text_field_is_refused(self):
+        self.search_reply(
+            self.match("list-title", title=[PRIVATE_EMAIL]),
+            self.match("dict-summary", summary={"note": PRIVATE_IP}),
+            self.match("nested-tags", tags=[[PRIVATE_EMAIL]]),
+            self.match("clean-card"),
+            retrieval={"mode": "lexical"},
+        )
+        for profile in REMOTE:
+            payload = self.memory(profile).memory_search("release")
+            *malformed, clean = payload["matches"]
+            assert [match["card_id"] for match in malformed] == ["list-title", "dict-summary", "nested-tags"]
+            assert all(match["blocked"] == "malformed-match" and "code" not in match for match in malformed)
+            assert clean["content_trust"] == "untrusted"
+            serialized = json.dumps(payload)
+            assert PRIVATE_EMAIL not in serialized and PRIVATE_IP not in serialized
+
+    @requires_local_state
     def test_twenty_results_are_each_scanned(self):
         # Latency is measured in the PR (about 1 to 3.4 ms per result against an 800 ms budget).
         # This test checks behavior only, so a loaded runner cannot fail it.

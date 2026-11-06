@@ -67,6 +67,10 @@ class MemoryTools:
                 continue
             item = {key: match.get(key) for key in keys}
             if self.profile.prompt_load_scan:
+                # A field the scan cannot read as text (a hub match passes its JSON through) is refused.
+                if not _well_formed(item):
+                    matches.append(_refused_match(item, {"blocked": MALFORMED_MATCH}))
+                    continue
                 # The returned path and hub scope are scanned too: a file name or scope can carry the text.
                 refusal = egress_refusal([*_card_texts(item), *_location_texts(item)])
                 if refusal:
@@ -334,6 +338,22 @@ def _card_texts(item: dict[str, Any]) -> list[str]:
     return [text for text in texts if isinstance(text, str)]
 
 
+MALFORMED_MATCH = "malformed-match"
+_TEXT_KEYS = ("card_id", "title", "summary", "path", "scope")
+_LIST_KEYS = ("tags", "card_aliases")
+
+
+def _well_formed(item: dict[str, Any]) -> bool:
+    # Every field the scan reads must be text (or absent), so nothing returned goes out unscanned.
+    if any(item.get(key) is not None and not isinstance(item.get(key), str) for key in _TEXT_KEYS):
+        return False
+    for key in _LIST_KEYS:
+        values = item.get(key)
+        if values is not None and not (isinstance(values, list) and all(isinstance(v, str) for v in values)):
+            return False
+    return True
+
+
 def _location_texts(item: dict[str, Any]) -> list[str]:
     # Where a search match lives: returned beside the card fields, so it is scanned with them.
     return [value for value in (item.get("path"), item.get("scope")) if isinstance(value, str)]
@@ -347,7 +367,8 @@ def _blocked_card_id(item: dict[str, Any]) -> str | None:
     """
     path = item.get("path")
     for value in (item.get("card_id"), PurePath(path).stem if isinstance(path, str) else None):
-        if isinstance(value, str) and _SAFE_CARD_ID.fullmatch(value):
+        # A slug can still be the refused text itself (a private address is slug-shaped), so it must scan clean.
+        if isinstance(value, str) and _SAFE_CARD_ID.fullmatch(value) and egress_refusal([value]) is None:
             return value
     return None
 
