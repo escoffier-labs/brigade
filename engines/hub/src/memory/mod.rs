@@ -496,11 +496,12 @@ impl Store {
                     .map(|(h, v)| (h, v.iter().flat_map(|f| f.to_le_bytes()).collect()))
                     .collect(),
             },
+            // A batch failure names every document, and the next lease retries each alone.
             Err(e) => embedding::Command::Failed {
                 lease: lease_id,
                 failures: hashes
                     .into_iter()
-                    .map(|h| (h, e.reason.to_string()))
+                    .map(|h| (h, e.reason.to_string(), false))
                     .collect(),
             },
         };
@@ -606,8 +607,9 @@ impl Store {
         }
     }
     async fn write(&self, prepared: Prepared) -> Reply {
-        // A lease changes no coverage, and the scheduler sends one per tick.
-        let counts = !matches!(
+        // A lease changes no coverage unless it parks text (the reply says so),
+        // and the scheduler sends one per tick.
+        let lease = matches!(
             prepared.action,
             Action::Embedding {
                 command: embedding::Command::Lease { .. },
@@ -622,7 +624,7 @@ impl Store {
         {
             Ok(reply) => {
                 if reply.status < 300 {
-                    if counts {
+                    if !lease || reply.body["parked"].as_u64().unwrap_or(0) > 0 {
                         self.refresh_coverage().await;
                     }
                     if queued {

@@ -62,8 +62,9 @@ pub enum Command {
     },
     Failed {
         lease: String,
-        /// `(content_hash, reason)` for each document the holder gives back.
-        failures: Vec<(String, String)>,
+        /// `(content_hash, reason, alone)` for each document the holder gives back.
+        /// `alone` says the holder already embedded that document by itself.
+        failures: Vec<(String, String, bool)>,
     },
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -145,10 +146,15 @@ pub fn parse(action: &str, raw: &Json, config: &Config) -> Result<Command, Reply
                             && r.bytes().all(|c| c.is_ascii_lowercase() || c == b'-')
                     })
                     .ok_or_else(invalid)?;
-                if failures.iter().any(|(h, _)| h == hash) {
+                if failures.iter().any(|(h, _, _)| h == hash) {
                     return Err(invalid());
                 }
-                failures.push((hash.to_string(), reason.to_string()));
+                let alone = match &row["alone"] {
+                    Json::Null => false,
+                    Json::Bool(b) => *b,
+                    _ => return Err(invalid()),
+                };
+                failures.push((hash.to_string(), reason.to_string(), alone));
             }
             Ok(Command::Failed { lease, failures })
         }
@@ -343,6 +349,7 @@ pub fn apply(
             let lease = ids::mint(p.now_ms);
             let mut jobs = Vec::new();
             let mut bytes = 0;
+            let mut parked_now = 0;
             for row in rows {
                 // A document that has failed before is retried alone, so it
                 // cannot hold back the documents batched with it.
@@ -365,6 +372,7 @@ pub fn apply(
                 if let Some(reason) = parked {
                     // Counted as unembeddable. `memory reindex` requeues it.
                     tx.execute("UPDATE memory_embed_jobs SET state='failed',last_error=?3,finished_ms=?4 WHERE content_hash=?1 AND embedder_id=?2", &[t(&hash), t(&id), t(reason), Value::Integer(p.now_ms)])?;
+                    parked_now += 1;
                     continue;
                 }
                 if bytes + text.len() > 32 * 1024 {
@@ -379,7 +387,7 @@ pub fn apply(
             }
             Ok(Reply::new(
                 200,
-                json!({"lease_id": lease, "embedder_id": id, "model_digest": config.id.model_digest, "dimensions": config.id.dimensions, "jobs": jobs, "expires_ms": p.now_ms+LEASE_MS}),
+                json!({"lease_id": lease, "embedder_id": id, "model_digest": config.id.model_digest, "dimensions": config.id.dimensions, "jobs": jobs, "parked": parked_now, "expires_ms": p.now_ms+LEASE_MS}),
             ))
         }
         Command::Submit {
@@ -414,10 +422,9 @@ pub fn apply(
         }
         Command::Failed { lease, failures } => {
             let owner = [t(lease), t(p.credential.principal()), t(&id)];
-            let held = n(&tx.query("SELECT count(*) FROM memory_embed_jobs WHERE lease_id=?1 AND holder=?2 AND embedder_id=?3 AND state='leased'", &owner)?[0][0]);
             let mut released = 0;
             let mut parked = 0;
-            for (hash, reason) in failures {
+            for (hash, reason, alone) in failures {
                 let row = tx.query("SELECT attempts FROM memory_embed_jobs WHERE content_hash=?4 AND lease_id=?1 AND holder=?2 AND embedder_id=?3 AND state='leased'", &[owner[0].clone(), owner[1].clone(), owner[2].clone(), t(hash)])?;
                 let Some(row) = row.first() else {
                     continue;
@@ -435,11 +442,13 @@ pub fn apply(
                     continue;
                 }
                 // A batch failure only proves one of its documents bad: each is
-                // retried alone at once. A document failing alone backs off.
-                let wait = if held > 1 {
-                    0
-                } else {
+                // retried alone at once. A row the holder reports as already
+                // tried alone backs off, and so does the only row of a report.
+                // The decision reads the report, not how many jobs are still leased.
+                let wait = if *alone || failures.len() == 1 {
                     (BACKOFF_MS << (attempts - 1)).min(3_600_000)
+                } else {
+                    0
                 };
                 tx.execute("UPDATE memory_embed_jobs SET state='pending',attempts=attempts+1,lease_id=NULL,holder=NULL,expires_ms=NULL,last_error=?3,not_before=?4+?5 WHERE content_hash=?1 AND embedder_id=?2", &[key[0].clone(), key[1].clone(), key[2].clone(), key[3].clone(), Value::Integer(wait)])?;
                 released += 1;

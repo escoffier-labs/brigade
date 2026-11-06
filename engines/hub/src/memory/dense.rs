@@ -280,6 +280,7 @@ impl Index {
             .as_ref()
             .is_some_and(|k| removed.iter().any(|h| k.contains(h.as_str())));
         if removes || base.live.is_some() {
+            // O(N) clone per commit after a deletion; `needs_rebuild` bounds how long it lasts.
             let mut live: HashSet<String> = match &base.live {
                 Some(live) => (**live).clone(),
                 None => known

@@ -171,8 +171,11 @@ little-endian float32 rows with the lease id. The hub checks ownership,
 expiry, dimensions and digest again. When a batch is refused, the worker
 embeds each document alone, submits the vectors it got, and reports the rest
 with `embed_failed` (`lease_id` and up to four `content_hash` and `reason`
-pairs). It keeps leasing after per-document and endpoint failures, and
-sleeps only when a lease is empty. `--once` processes at most one lease. A
+pairs, plus `alone: true` on a document it already tried by itself, which
+gets the solo-failure backoff). A lease reply carries `parked`, the number
+of texts the lease-time scan parked. It keeps leasing after per-document
+failures. While the endpoint is down it sleeps 1 s, doubling to 60 s, and a
+good step resets that. It also sleeps 1 s when a lease is empty. `--once` processes at most one lease. A
 worker that stops leaves the lease available for recovery after expiry.
 
 For reachable query embedding, configure `query_endpoint` or `endpoint` on

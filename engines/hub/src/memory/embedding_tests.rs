@@ -525,6 +525,115 @@ async fn pending_and_flagged_cards_are_unembeddable_and_do_not_hold_hybrid() {
 }
 
 #[tokio::test]
+async fn lease_that_parks_the_last_job_refreshes_coverage_without_a_later_write() {
+    let mut h = Hub::new();
+    drop(h.store.take());
+    let rules = Arc::new(Rules(std::sync::atomic::AtomicBool::new(false)));
+    h.open(rules.clone(), None);
+    let id = setup(&mut h);
+    h.put(ADMIN_TOKEN, "fleet", "later", None, "changed rules later")
+        .await;
+    let before = h.store.as_ref().unwrap().retrieval_status();
+    assert_eq!(before["state"], "switching", "{before}");
+    // The ruleset now flags the only queued text. The lease parks it and
+    // offers nothing. No submit follows and nothing calls refresh_dense.
+    rules.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    let lease = command(&h, json!({"action": "embed_lease", "embedder_id": id})).await;
+    assert_eq!(lease.body["jobs"], json!([]), "{lease:?}");
+    assert_eq!(lease.body["parked"], 1);
+    let status = h.store.as_ref().unwrap().retrieval_status();
+    assert_eq!(status["state"], "ok", "{status}");
+    assert_eq!(status["effective"], "hybrid");
+    assert_eq!(
+        status["coverage"],
+        json!({"cards": 0, "eligible": 0, "unembeddable": 1, "total": 1})
+    );
+    // A lease that parks nothing reports zero and leaves coverage alone.
+    let quiet = command(&h, json!({"action": "embed_lease", "embedder_id": id})).await;
+    assert_eq!(quiet.body["parked"], 0);
+}
+
+#[tokio::test]
+async fn a_reported_batch_backs_off_each_document_the_worker_already_tried_alone() {
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = setup(&mut h);
+    async fn leased_pair(h: &Hub, id: &str) -> Json {
+        let lease = command(
+            h,
+            json!({"action": "embed_lease", "embedder_id": id, "max": 4}),
+        )
+        .await;
+        assert_eq!(lease.body["jobs"].as_array().unwrap().len(), 2, "{lease:?}");
+        lease.body
+    }
+    for (card, text) in [("a", "first refused"), ("b", "second refused")] {
+        h.put(ADMIN_TOKEN, "fleet", card, None, text).await;
+    }
+    let lease = leased_pair(&h, &id).await;
+    let rows_of = |alone: Option<bool>| -> Vec<Json> {
+        lease["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|j| {
+                let mut row =
+                    json!({"content_hash": j["content_hash"], "reason": "embedder-rejected"});
+                if let Some(alone) = alone {
+                    row["alone"] = json!(alone);
+                }
+                row
+            })
+            .collect()
+    };
+    // The worker retried both alone and reports two refusals: each backs off.
+    let reply = command(&h, json!({"action": "embed_failed", "lease_id": lease["lease_id"], "failures": rows_of(Some(true))})).await;
+    assert_eq!(reply.body["released"], 2, "{reply:?}");
+    let waits = |h: &Hub, lease: &Json| {
+        let db = rusqlite::Connection::open(h.memory()).unwrap();
+        lease["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|j| {
+                db.query_row(
+                    "SELECT not_before-?1 FROM memory_embed_jobs WHERE content_hash=?2",
+                    rusqlite::params![h.now(), j["content_hash"].as_str().unwrap()],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(waits(&h, &lease), vec![embedding::BACKOFF_MS; 2]);
+    assert_eq!(
+        command(&h, json!({"action": "embed_lease", "embedder_id": id}))
+            .await
+            .body["jobs"],
+        json!([])
+    );
+    // A whole batch reported without the flag is still retried at once.
+    for (card, text) in [("c", "third refused"), ("d", "fourth refused")] {
+        h.put(ADMIN_TOKEN, "fleet", card, None, text).await;
+    }
+    let lease = leased_pair(&h, &id).await;
+    let rows: Vec<Json> = lease["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| json!({"content_hash": j["content_hash"], "reason": "embedder-rejected"}))
+        .collect();
+    command(
+        &h,
+        json!({"action": "embed_failed", "lease_id": lease["lease_id"], "failures": rows}),
+    )
+    .await;
+    assert_eq!(waits(&h, &lease), vec![0; 2]);
+    // The flag must be a boolean.
+    let bad = command(&h, json!({"action": "embed_failed", "lease_id": "x", "failures": [{"content_hash": "0".repeat(64), "reason": "embedder-rejected", "alone": "yes"}]})).await;
+    assert_eq!(bad.status, 422);
+}
+
+#[tokio::test]
 async fn lease_filters_scope_rights_and_duplicate_hashes_before_the_limit() {
     let mut h = Hub::with(scan::bundled(), None);
     let id = setup(&mut h);
