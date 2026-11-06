@@ -1287,11 +1287,11 @@ fn reads<T: ReadTx + ?Sized>(
             let params = [Value::Text(scope.clone()), Value::Text(card_id.into())];
             let row = match revision {
                 Some(rev) => tx.query(
-                    "SELECT r.revision,r.content_hash,r.trust,r.state,b.bytes FROM memory_card_revisions r JOIN memory_blobs b ON b.content_hash=r.content_hash WHERE r.scope=?1 AND r.card_id=?2 AND r.revision=?3",
+                    "SELECT r.revision,r.content_hash,r.trust,r.state,b.bytes,r.scan_state,r.writer,r.created_at FROM memory_card_revisions r JOIN memory_blobs b ON b.content_hash=r.content_hash WHERE r.scope=?1 AND r.card_id=?2 AND r.revision=?3",
                     &[params[0].clone(), params[1].clone(), Value::Integer(rev)],
                 )?,
                 None => tx.query(
-                    "SELECT c.revision,c.content_hash,c.trust,c.state,b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2",
+                    "SELECT c.revision,c.content_hash,c.trust,c.state,b.bytes,r.scan_state,r.writer,r.created_at FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2",
                     &params,
                 )?,
             };
@@ -1314,6 +1314,9 @@ fn reads<T: ReadTx + ?Sized>(
                     "next_offset": next_offset,
                     "trust": text(&row[2]),
                     "state": text(&row[3]),
+                    "scan_state": text(&row[5]),
+                    "writer": text(&row[6]),
+                    "updated_at": text(&row[7]),
                     "seq": revision,
                 }, "log_epoch": epoch}),
             ))

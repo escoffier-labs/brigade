@@ -1343,6 +1343,32 @@ def test_drop_refuses_a_replica_from_an_old_epoch_or_without_one(hub, tmp_path, 
     assert code == 0 and "over hub revision 2" in out
 
 
+def test_offline_card_json_carries_the_replica_scan_metadata(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "fleet", "theirs", "replicated text")
+    _put(hub, "fleet", "older", "an older replica")
+    sync.pull(target, client(hub), settings(target))
+    held = store.replica(target)
+    held.heads[store.Replica.key("fleet", "theirs")].update(
+        scan_state="clean", writer="node-a", updated_at="2026-11-05T00:00:00Z"
+    )
+    for name in ("scan_state", "writer", "updated_at"):
+        held.heads[store.Replica.key("fleet", "older")].pop(name, None)
+    held.save()
+    hub.mode = "down"
+    code, out, _ = run(["memory", "hub", "card", "--target", str(target), "--all", "--json", "theirs"], capsys)
+    card = json.loads(out)["card"]
+    assert code == 0 and (card["scan_state"], card["writer"], card["updated_at"]) == (
+        "clean",
+        "node-a",
+        "2026-11-05T00:00:00Z",
+    )
+    # An older replica lacks them: the read still answers, without the keys.
+    code, out, _ = run(["memory", "hub", "card", "--target", str(target), "--all", "--json", "older"], capsys)
+    card = json.loads(out)["card"]
+    assert code == 0 and not {"scan_state", "writer", "updated_at"} & set(card)
+
+
 def test_card_reads_fall_back_to_the_replica_only_when_the_hub_is_unavailable(hub, tmp_path, capsys):
     target = workspace(tmp_path, mode="read")
     _put(hub, "fleet", "theirs", "replicated text that spans several chunks")
