@@ -1,8 +1,7 @@
-//! `search` (S13b): BM25 over the caller's visible corpus, answered from one
-//! published index snapshot. Steps 1 to 3 and 8 of the retrieval pipeline:
-//! normalize the query, take live cards in the readable scopes, score them as
-//! `memory_bm25.py` does and return the page. Dense retrieval, fusion,
-//! lineage collapsing and automation demotion belong to later slices.
+//! Search over one lexical snapshot and an optional immutable dense matrix.
+//! Queries authorize visible scopes, fuse lexical and dense ranks with RRF,
+//! and apply the S18 prompt-load boundary. Lineage collapse and source
+//! demotion follow in S17.
 use super::{
     Credential, Reply, auth,
     index::{Snapshot, TOP},
@@ -38,6 +37,7 @@ pub struct Request {
     pub min_seq: Option<i64>,
     pub prompt: bool,
     pub push: bool,
+    pub dense: Option<(std::sync::Arc<super::dense::Matrix>, Vec<f32>)>,
 }
 
 fn invalid(message: &str) -> Reply {
@@ -147,6 +147,7 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
             Some("prompt")
         ),
         push: false,
+        dense: None,
     })
 }
 
@@ -265,7 +266,10 @@ pub fn run<T: ReadTx + ?Sized>(
     };
     // Push revalidates the exact snapshot head and its current scan receipt.
     // Unavailable, pending, flagged, retired and stale versions never leave here.
-    let hits = if request.push {
+    let eligible = |hits: Vec<(u32, f64)>| -> rusqlite::Result<Vec<(u32, f64)>> {
+        if !request.push {
+            return Ok(hits);
+        }
         let mut eligible = Vec::new();
         let (available, ruleset) = scanner.describe();
         if available {
@@ -282,11 +286,26 @@ pub fn run<T: ReadTx + ?Sized>(
                 }
             }
         }
-        eligible
+        Ok(eligible)
+    };
+    let hits = eligible(hits)?;
+    // `match_count` and `truncated` keep their lexical meaning in hybrid mode.
+    let total = hits.len();
+    let mut ranks = std::collections::HashMap::new();
+    let hits = if let Some((matrix, query)) = &request.dense {
+        let lexical = snap.top(hits, TOP);
+        let dense = snap.top(eligible(matrix.score(snap, &allowed, query))?, TOP);
+        let mut scores = std::collections::HashMap::new();
+        for (source, list) in [("lexical", lexical), ("dense", dense)] {
+            for (rank, (n, _)) in list.into_iter().enumerate() {
+                *scores.entry(n).or_insert(0.0) += 1.0 / (60 + rank + 1) as f64;
+                ranks.entry(n).or_insert_with(|| json!({}))[source] = json!(rank + 1);
+            }
+        }
+        scores.into_iter().collect()
     } else {
         hits
     };
-    let total = hits.len();
     let matches: Vec<Json> = snap
         .top(hits, TOP)
         .into_iter()
@@ -306,7 +325,7 @@ pub fn run<T: ReadTx + ?Sized>(
                 "score": score,
                 "content_hash": &*d.content_hash,
                 "trust": &*d.trust,
-                "ranks": {"lexical": rank + 1},
+                "ranks": ranks.get(&n).cloned().unwrap_or_else(|| json!({"lexical": rank + 1})),
             });
             if request.prompt {
                 let Some(body) = blob(tx, &d.content_hash)? else {
@@ -331,7 +350,7 @@ pub fn run<T: ReadTx + ?Sized>(
         })
         .collect::<rusqlite::Result<_>>()?;
     let stale = snap.stale || request.min_seq.is_some_and(|m| snap.indexed_seq < m);
-    let mut retrieval = json!({"mode": "lexical", "degraded": false, "stale": stale});
+    let mut retrieval = json!({"mode": if request.dense.is_some() { "hybrid" } else { "lexical" }, "degraded": false, "stale": stale});
     if !complete {
         retrieval["truncated"] = json!(true);
     }

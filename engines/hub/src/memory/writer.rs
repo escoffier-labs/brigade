@@ -55,6 +55,7 @@ pub struct Config {
     pub hook: Option<Hook>,
     /// The lexical index this writer publishes after each committed batch.
     pub index: Option<Arc<index::Index>>,
+    pub dense: Option<Arc<super::dense::Index>>,
 }
 impl Config {
     pub fn new(memory: PathBuf, hub: PathBuf, admin_digest: String) -> Self {
@@ -72,6 +73,7 @@ impl Config {
             apply_budget: Duration::from_millis(10),
             hook: None,
             index: None,
+            dense: None,
         }
     }
 }
@@ -103,9 +105,12 @@ pub enum Job {
         reply: oneshot::Sender<Answer>,
     },
     /// Bounded retention, run on this writer and never under the hub lock.
-    Sweep { now_ms: i64 },
+    Sweep {
+        now_ms: i64,
+    },
     /// A background index build finished; this writer replays its tail.
     Rebuilt(Box<index::Rebuilt>),
+    DenseRebuilt(Box<super::dense::Rebuilt>),
 }
 
 /// The only handle on the memory writer's hub connection.
@@ -195,6 +200,9 @@ impl Writer {
         if let Some(index) = &config.index {
             index.attach(sender.downgrade());
         }
+        if let Some(dense) = &config.dense {
+            dense.attach(sender.downgrade());
+        }
         let metrics = Arc::new(Mutex::new(Metrics::default()));
         let m = metrics.clone();
         let thread = std::thread::Builder::new()
@@ -254,6 +262,12 @@ pub(super) fn sweep(db: &Connection, now_ms: i64) -> rusqlite::Result<usize> {
         "DELETE FROM memory_idempotency WHERE (principal,client_event_id) IN (SELECT principal,client_event_id FROM memory_idempotency WHERE created_ms < ?1 ORDER BY created_ms LIMIT ?2)",
         rusqlite::params![now_ms - super::ids::RETENTION_MS, SWEEP_BATCH as i64],
     );
+    let deleted = deleted.and_then(|n| {
+        let jobs = db.execute("DELETE FROM memory_embed_jobs WHERE (content_hash,embedder_id) IN (SELECT content_hash,embedder_id FROM memory_embed_jobs WHERE state='done' AND finished_ms < ?1 LIMIT ?2)", rusqlite::params![now_ms - 7*24*3600*1000, (SWEEP_BATCH-n) as i64])?;
+        // Keep the newest log rows. A matrix further behind reloads in full.
+        let log = db.execute("DELETE FROM memory_vector_log WHERE seq IN (SELECT seq FROM memory_vector_log WHERE seq <= (SELECT max(seq) FROM memory_vector_log) - ?1 ORDER BY seq LIMIT ?2)", rusqlite::params![super::dense::LOG_KEEP, (SWEEP_BATCH - n - jobs) as i64])?;
+        Ok(n + jobs + log)
+    });
     let _ = db.progress_handler(0, None::<fn() -> bool>);
     match deleted {
         Ok(n) => match db.execute_batch("COMMIT") {
@@ -280,12 +294,19 @@ fn apply_one(
     p: &Prepared,
     authority: &Authority,
     scanner: &dyn super::scan::Scanner,
+    embedder: Option<&str>,
 ) -> Answer {
     if db.execute_batch("SAVEPOINT command").is_err() {
         return Err(storage("storage-error"));
     }
     let result = catch_unwind(AssertUnwindSafe(|| {
-        ops::apply(&worker::Tx(db) as &dyn WriteTx, p, authority, scanner)
+        ops::apply(
+            &worker::Tx(db) as &dyn WriteTx,
+            p,
+            authority,
+            scanner,
+            embedder,
+        )
     }));
     if db.is_autocommit() {
         return Err(storage("storage-error"));
@@ -326,13 +347,15 @@ pub(crate) fn run(
     let mut writes: VecDeque<Pending> = VecDeque::new();
     let mut sweeps: VecDeque<i64> = VecDeque::new();
     let mut rebuilt: Vec<Box<index::Rebuilt>> = Vec::new();
+    let mut dense_rebuilt: Vec<Box<super::dense::Rebuilt>> = Vec::new();
     let mut directory_synced = false;
     // Index publication runs on this thread after step 5, never under a lock.
     let mut publisher = config.index.as_ref().and_then(|i| i.publisher());
     let accept = |job: Job,
                   writes: &mut VecDeque<Pending>,
                   sweeps: &mut VecDeque<i64>,
-                  rebuilt: &mut Vec<Box<index::Rebuilt>>| match job {
+                  rebuilt: &mut Vec<Box<index::Rebuilt>>,
+                  dense_rebuilt: &mut Vec<Box<super::dense::Rebuilt>>| match job {
         Job::Write {
             command,
             deadline,
@@ -348,6 +371,7 @@ pub(crate) fn run(
             }
         }
         Job::Rebuilt(r) => rebuilt.push(r),
+        Job::DenseRebuilt(r) => dense_rebuilt.push(r),
     };
     loop {
         // Take from the channel only what the next batch can use, so overload
@@ -356,11 +380,22 @@ pub(crate) fn run(
             let Ok(job) = receiver.try_recv() else {
                 break;
             };
-            accept(job, &mut writes, &mut sweeps, &mut rebuilt);
+            accept(
+                job,
+                &mut writes,
+                &mut sweeps,
+                &mut rebuilt,
+                &mut dense_rebuilt,
+            );
         }
         for r in rebuilt.drain(..) {
             if let Some(p) = publisher.as_mut() {
                 p.installed(*r, &db);
+            }
+        }
+        for rebuilt in dense_rebuilt.drain(..) {
+            if let Some(dense) = &config.dense {
+                dense.installed(*rebuilt, &db);
             }
         }
         {
@@ -381,7 +416,13 @@ pub(crate) fn run(
             }
             match receiver.blocking_recv() {
                 Some(job) => {
-                    accept(job, &mut writes, &mut sweeps, &mut rebuilt);
+                    accept(
+                        job,
+                        &mut writes,
+                        &mut sweeps,
+                        &mut rebuilt,
+                        &mut dense_rebuilt,
+                    );
                     continue;
                 }
                 None => return,
@@ -479,7 +520,14 @@ pub(crate) fn run(
                     p.command.action.needs_policy(),
                 ) {
                     Ok(authority) => {
-                        apply_one(&db, &p.command, &authority, config.scanner.as_ref())
+                        let embedder = config.dense.as_ref().and_then(|d| d.active_id());
+                        apply_one(
+                            &db,
+                            &p.command,
+                            &authority,
+                            config.scanner.as_ref(),
+                            embedder.as_deref(),
+                        )
                     }
                     Err(refusal) => refusal,
                 };
@@ -521,6 +569,9 @@ pub(crate) fn run(
             }
         }
         if committed {
+            if let Some(dense) = &config.dense {
+                dense.after_commit(&db);
+            }
             for (p, result) in results {
                 answer(p, result);
             }

@@ -77,9 +77,10 @@ pub trait Embedder: Send + Sync {
     fn embed(&self, kind: Kind, texts: Vec<String>, deadline: Duration) -> Embedding;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Config {
     pub backend: String,
+    pub pull: bool,
     pub endpoint: String,
     pub allowlist: Vec<String>,
     pub token_file: PathBuf,
@@ -102,12 +103,40 @@ impl Config {
                 .map(|n| n as usize)
                 .ok_or_else(|| format!("invalid memory.embedder.{k}"))
         };
+        // Like `retrieval`, a value of the wrong type is a typo, never a default.
+        let pull = match v.get("pull") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err("memory.embedder.pull must be true or false".into()),
+        };
+        let endpoint = v["query_endpoint"]
+            .as_str()
+            .or_else(|| v["endpoint"].as_str())
+            .unwrap_or("")
+            .to_string();
+        if endpoint.is_empty() && !pull {
+            return Err("memory.embedder.endpoint is required".into());
+        }
+        let empty = Vec::new();
         Ok(Self {
             backend: s("backend")?,
-            endpoint: s("endpoint")?,
-            token_file: s("token_file")?.into(),
-            allowlist: v["allowlist"]
-                .as_array()
+            pull,
+            endpoint: endpoint.clone(),
+            token_file: if endpoint.is_empty() {
+                PathBuf::new()
+            } else {
+                s("token_file")?.into()
+            },
+            allowlist: v
+                .get("allowlist")
+                .and_then(Value::as_array)
+                .or({
+                    if endpoint.is_empty() {
+                        Some(&empty)
+                    } else {
+                        None
+                    }
+                })
                 .ok_or("embedder allowlist is required")?
                 .iter()
                 .map(|x| {
@@ -355,18 +384,26 @@ impl HttpEmbedder {
             .map_err(|_| EmbedError::new("embedder-unavailable"))?;
         let status = response.status().as_u16();
         if status != 200 {
-            let mut err = EmbedError::new(if status == 401 || status == 403 {
-                "embedder-refused"
-            } else {
-                "embedder-unavailable"
+            // 400, 413 and 422 refuse this input, not the endpoint. The job
+            // layer retries such a batch one document at a time.
+            let mut err = EmbedError::new(match status {
+                401 | 403 => "embedder-refused",
+                400 | 413 | 422 => "embedder-rejected",
+                _ => "embedder-unavailable",
             });
             if status == 429 || status == 503 {
                 err.retry_after = response
                     .headers()
                     .get("Retry-After")
                     .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(|s| Duration::from_secs(s.clamp(1, 60)));
+                    .and_then(|s| {
+                        s.parse::<u64>().ok().map(Duration::from_secs).or_else(|| {
+                            httpdate::parse_http_date(s)
+                                .ok()
+                                .and_then(|t| t.duration_since(std::time::SystemTime::now()).ok())
+                        })
+                    })
+                    .map(|d| d.clamp(Duration::from_secs(1), Duration::from_secs(60)));
             }
             return Err(err);
         }
@@ -481,6 +518,19 @@ impl Drop for DocumentGuard {
 }
 impl Runtime {
     pub fn new(config: Config, scanner: Arc<dyn Scanner>) -> Result<Arc<Self>, String> {
+        if config.pull && config.endpoint.is_empty() {
+            struct Disabled(EmbedderId);
+            impl Embedder for Disabled {
+                fn id(&self) -> &EmbedderId {
+                    &self.0
+                }
+                fn embed(&self, _: Kind, _: Vec<String>, _: Duration) -> Embedding {
+                    Box::pin(async { Err(EmbedError::new("embedder-unavailable")) })
+                }
+            }
+            let disabled = Arc::new(Disabled(config.id.clone()));
+            return Ok(Self::with(config, disabled));
+        }
         let http = HttpEmbedder::new(config.clone(), scanner)?;
         Ok(Self::with(config, Arc::new(http)))
     }
@@ -506,6 +556,9 @@ impl Runtime {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
     pub fn reason(&self) -> Option<&'static str> {
+        if self.config.endpoint.is_empty() {
+            return Some("embedder-unavailable");
+        }
         self.lock().reason
     }
     /// An expired window counts as closed, whatever the probe did.
@@ -585,6 +638,19 @@ impl Runtime {
             }
         });
     }
+    #[cfg(test)]
+    pub fn reset_backoff(&self) {
+        let mut s = self.lock();
+        s.retry_at = Instant::now();
+        s.quiet_until = Instant::now();
+    }
+    /// Whether a document request could start now. The scheduler checks
+    /// this before it leases, so no lease waits out a backoff.
+    pub fn documents_ready(&self) -> bool {
+        let s = self.lock();
+        let now = Instant::now();
+        !(s.document || s.probe || s.queries > 0 || now < s.quiet_until || now < s.retry_at)
+    }
     pub async fn documents(
         self: &Arc<Self>,
         texts: Vec<(String, String)>,
@@ -597,6 +663,7 @@ impl Runtime {
         {
             let mut s = self.lock();
             if s.document
+                || s.probe
                 || s.queries > 0
                 || Instant::now() < s.quiet_until
                 || Instant::now() < s.retry_at
@@ -624,10 +691,23 @@ impl Runtime {
         };
         let mut s = self.lock();
         if let Err(e) = &result {
+            if matches!(
+                e.reason,
+                "embedder-unavailable"
+                    | "embedder-timeout"
+                    | "embedder-refused"
+                    | "digest-mismatch"
+                    | "endpoint-refused"
+            ) {
+                s.reason = Some(e.reason);
+            }
             s.retry_at = Instant::now() + e.retry_after.unwrap_or(Duration::from_secs(s.backoff));
             s.backoff = (s.backoff * 2).min(60);
         } else {
             s.backoff = 1;
+            if s.open_until.is_none() {
+                s.reason = None;
+            }
         }
         result
     }

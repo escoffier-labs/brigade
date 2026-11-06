@@ -2,7 +2,7 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 1;
+pub const USER_VERSION: i64 = 2;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
@@ -109,7 +109,9 @@ CREATE TABLE memory_idempotency(
   PRIMARY KEY(principal, client_event_id)
 ) WITHOUT ROWID;
 CREATE INDEX memory_idempotency_age ON memory_idempotency(created_ms);
-"
+{}
+",
+        super::embedding::DDL
     )
 }
 
@@ -123,6 +125,9 @@ pub const TABLES: &[&str] = &[
     "memory_handoffs",
     "memory_grants",
     "memory_idempotency",
+    "memory_vectors",
+    "memory_lineage",
+    "memory_embed_jobs",
 ];
 
 /// Create a fresh file's schema, or check an existing one. Never downgrades,
@@ -172,6 +177,17 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
         return Err(format!(
             "memory schema version {version} is newer than this hub ({USER_VERSION})"
         ));
+    }
+    if version == 1 {
+        c.execute_batch("BEGIN IMMEDIATE").map_err(err)?;
+        let upgraded = c
+            .execute_batch(super::embedding::DDL)
+            .and_then(|()| c.pragma_update(None, "user_version", USER_VERSION))
+            .and_then(|()| c.execute_batch("COMMIT"));
+        if let Err(e) = upgraded {
+            let _ = c.execute_batch("ROLLBACK");
+            return Err(e.to_string());
+        }
     }
     for table in TABLES {
         let present: Option<i64> = c

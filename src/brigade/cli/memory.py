@@ -20,6 +20,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .. import memory_hub_cmd
 
     memory_hub_cmd.register(memory_sub)
+    from .. import memory_embed
+
+    memory_embed.register(memory_sub)
     proposal = memory_sub.add_parser("proposal", help="Preview, review and apply bounded memory edits.")
     commands = proposal.add_subparsers(dest="memory_proposal_command", required=True)
     for name in ("create", "show", "review", "reject", "apply"):
@@ -381,6 +384,11 @@ def register(sub: argparse._SubParsersAction) -> None:
 
 
 def dispatch(args) -> int:
+    if args.memory_command in {"embed-worker", "reindex"}:
+        from .. import memory_embed
+
+        return memory_embed.dispatch(args)
+
     from .. import memory_cmd
     from .. import memory_operations
 
