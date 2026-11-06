@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import work_cmd
-from .untrusted import PROMPT_INJECTION_RE, scan_untrusted
+from .untrusted import PROMPT_INJECTION_RE, fold_whitespace, scan_untrusted
 from .localio import read_json_dict as _read_json, slugify, utc_now as _now, write_json as _write_json
 
 OK = "ok"
@@ -90,6 +90,11 @@ def _redact_text(value: str) -> str:
 def _safe_learning_text(value: Any, *, limit: int | None = None) -> str:
     rendered = _redact_text(str(value or ""))
     rendered = PROMPT_INJECTION_RE.sub("<prompt-injection-marker>", rendered)
+    # Then per line on the folded copy, as the hub scans it: `^` anchors each
+    # line and Unicode spaces count as spaces. The join below collapses lines.
+    rendered = "\n".join(
+        PROMPT_INJECTION_RE.sub("<prompt-injection-marker>", fold_whitespace(line)) for line in rendered.splitlines()
+    )
     rendered = " ".join(rendered.split())
     if limit is not None:
         return _short(rendered, limit)

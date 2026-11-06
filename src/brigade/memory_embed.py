@@ -107,13 +107,18 @@ def secret(path: Path) -> str:
     return token
 
 
+def _loopback(endpoint: str) -> bool:
+    """A numeric loopback listener: the only endpoint that may receive private text."""
+    try:
+        return ipaddress.ip_address(urlsplit(endpoint).hostname or "").is_loopback
+    except ValueError:
+        return False
+
+
 def local_embed(config: dict, texts: list[str], token: str) -> list[list[float]]:
     endpoint = config["endpoint"]
     url = urlsplit(endpoint)
-    try:
-        local = ipaddress.ip_address(url.hostname or "").is_loopback
-    except ValueError:
-        local = False
+    local = _loopback(endpoint)
     # Pull mode executes on the model host. Only its numeric loopback listener is admitted.
     if not local or endpoint not in config["allowlist"] or url.username or url.password or url.query or url.fragment:
         raise ValueError("embed-worker requires an allowlisted loopback endpoint")
@@ -244,18 +249,25 @@ def step(client: hubc.MemoryHubClient, config: dict, token: str) -> tuple[int, i
         return 0, 0, False
     if lease.get("model_digest") != config["model_digest"] or lease.get("dimensions") != config["dimensions"]:
         raise ValueError("lease identity mismatch")
-    # Only clean receipts may leave the host. Anything else goes back unsent. A
-    # pending scan is transient, while a flagged or blocked receipt is reported
-    # as content-blocked so the hub parks it instead of releasing it forever.
-    failures = [
-        {
-            "content_hash": job["content_hash"],
-            "reason": "scan-pending" if job.get("scan_state") in (None, "pending") else "content-blocked",
-        }
-        for job in jobs
-        if job.get("scan_state") != "clean"
-    ]
-    clean = [job for job in jobs if job.get("scan_state") == "clean"]
+    # Only clean receipts may leave the host, and private ones only to a
+    # loopback endpoint (S18). Anything else goes back unsent. A pending scan is
+    # transient. A private receipt for an endpoint that is not loopback is
+    # content-private, and a flagged or blocked receipt is content-blocked, so
+    # the hub parks them instead of releasing them forever.
+    private_ok = _loopback(config["endpoint"])
+
+    def sendable(job: dict) -> bool:
+        state = job.get("scan_state")
+        return state == "clean" or (state == "private" and private_ok)
+
+    def refusal(job: dict) -> str:
+        state = job.get("scan_state")
+        if state in (None, "pending"):
+            return "scan-pending"
+        return "content-private" if state == "private" else "content-blocked"
+
+    failures = [{"content_hash": job["content_hash"], "reason": refusal(job)} for job in jobs if not sendable(job)]
+    clean = [job for job in jobs if sendable(job)]
     stored, refused = _embed_each(config, clean, token) if clean else ([], [])
     failures += refused
     if stored:

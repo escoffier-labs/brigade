@@ -714,6 +714,15 @@ def test_rendered_fields_are_printable_physical_lines_without_field_truncation()
     assert "SECRET_BODY" not in text
 
 
+def test_rendered_recall_drops_the_private_joiners():
+    match = {"title": "release\u034f check\u200clist", "tags": ["a\u200c\u034fb"], "path": "cards/x\u034f.md"}
+    payload = {"query": "release", "query_source": "prompt", "matches": [match]}
+    text = memory_hooks.format_recall_text(payload)
+    assert text.splitlines()[1] == "- release checklist | tags: ab | cards/x.md"
+    assert "\u034f" not in text and "\u200c" not in text
+    assert match["title"] == "release\u034f check\u200clist"
+
+
 @pytest.mark.parametrize("shadow", ["brigade.py", "brigade/__init__.py"])
 def test_recall_child_excludes_workspace_imports(tmp_path, monkeypatch, shadow):
     hub = tmp_path / "hub"

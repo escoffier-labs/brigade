@@ -265,7 +265,8 @@ pub fn run<T: ReadTx + ?Sized>(
         (snap.score(&allowed, &request.tokens), true)
     };
     // Push revalidates the exact snapshot head and its current scan receipt.
-    // Unavailable, pending, flagged, retired and stale versions never leave here.
+    // Unavailable, pending, private, flagged, retired and stale versions never
+    // leave here: only a clean receipt may reach a connector.
     let eligible = |hits: Vec<(u32, f64)>| -> rusqlite::Result<Vec<(u32, f64)>> {
         if !request.push {
             return Ok(hits);
@@ -343,6 +344,9 @@ pub fn run<T: ReadTx + ?Sized>(
                         &d.fields.tags.join("\n"),
                         &body,
                     ],
+                    // A push hit goes to a connector's remote model. A local
+                    // prompt load may carry private text.
+                    request.push,
                 ))
             } else {
                 Ok(hit)

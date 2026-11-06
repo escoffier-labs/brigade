@@ -234,7 +234,9 @@ def _select(heads: list[dict]) -> tuple[list[tuple[dict, dict]], dict[str, int]]
             reason = "visibility-private"
         elif withheld := sync.withheld(str(head.get("text", ""))):
             reason = withheld
-        elif head.get("scan_state") != "clean":
+        elif head.get("scan_state") not in ("clean", "private"):
+            # Private scans name the operator's own machines and contacts. The
+            # mirror writes to a local folder, so they are exported (S18).
             reason = "scan-unknown"
         elif (head["scope"], head["card_id"]) in superseded or meta.get("superseded_by"):
             reason = "superseded"

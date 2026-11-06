@@ -31,6 +31,8 @@ mod lexical_tests;
 #[cfg(test)]
 mod powercut;
 #[cfg(test)]
+mod private_tests;
+#[cfg(test)]
 mod tests;
 
 use crate::{
@@ -232,6 +234,7 @@ impl Store {
                 }
                 self.retrieval = None;
                 self.dense.configure(None);
+                self.dense.set_private_ok(false);
                 if config.get("embedder").is_some() {
                     eprintln!("INFO memory.embedder unused in lexical mode");
                 }
@@ -249,6 +252,8 @@ impl Store {
                 runtime.config.id.key(),
                 runtime.config.id.dimensions,
             )));
+            self.dense
+                .set_private_ok(embedding::private_ok(&runtime.config));
         }
         let live = self
             .index
@@ -410,9 +415,10 @@ impl Store {
     async fn refresh_coverage(&self) {
         if let Some(runtime) = &self.retrieval {
             let id = runtime.config.id.key();
+            let private = embedding::private_ok(&runtime.config);
             if let Ok(pair) = self
                 .readers
-                .submit(move |c| embedding::coverage(&Conn(c), &id))
+                .submit(move |c| embedding::coverage(&Conn(c), &id, private))
                 .await
             {
                 *self.coverage.write().unwrap() = pair;
@@ -649,6 +655,11 @@ impl Store {
                     .and_then(|u| u.host_str().map(String::from))
             );
             status["breaker_open"] = json!(runtime.breaker_open());
+            status["pull"] = json!(runtime.config.pull);
+            if runtime.config.pull {
+                // Whether the hub leases private cards to its pull workers.
+                status["pull_private"] = json!(runtime.config.pull_private);
+            }
             status["coverage"] = self.coverage.read().unwrap().json();
             status["embedder_id"] = json!(runtime.config.id.key());
         }

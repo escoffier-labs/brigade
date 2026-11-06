@@ -371,7 +371,7 @@ pub fn apply(
     p: &Prepared,
     authority: &Authority,
     scanner: &dyn super::scan::Scanner,
-    embedder: Option<&str>,
+    embedder: Option<(&str, bool)>,
 ) -> rusqlite::Result<Reply> {
     let (scope, right) = p.action.requirement();
     if !auth::has_right(tx, &p.credential, scope, right)? {
@@ -422,8 +422,8 @@ pub fn apply(
         match &p.action {
             Action::Put { scope, card_id, .. } | Action::Retire { scope, card_id, .. } => {
                 super::embedding::cleanup_card(tx, scope, card_id)?;
-                if let Some(id) = embedder {
-                    super::embedding::queue_card(tx, scope, card_id, id)?;
+                if let Some((id, private)) = embedder {
+                    super::embedding::queue_card(tx, scope, card_id, id, private)?;
                 }
             }
             _ => (),

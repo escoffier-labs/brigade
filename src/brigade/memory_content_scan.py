@@ -10,13 +10,26 @@ import json
 import bisect
 import re
 from importlib.resources import files
-from typing import Iterable
+from typing import Iterable, Iterator
 
 BIDI_RULE = "bidi-control"
 INVISIBLE_RULE = "invisible-character"
 JOINER_RULE = "zero-width-joiner"
+# U+034F and U+200C arrive in pasted text and carry no payload of their own.
+# The scan copies already remove them, so they cannot split a rule match.
+# Stored bytes keep them, so they scan private. Prompt recall renders without
+# them (memory_hooks and the native prompt_hit).
+GRAPHEME_JOINER_RULE = "combining-grapheme-joiner"
+NON_JOINER_RULE = "zero-width-non-joiner"
+_PRIVATE_CHARACTERS = {"\u034f": GRAPHEME_JOINER_RULE, "\u200c": NON_JOINER_RULE}
+# Verdicts, most severe first. Private sits between clean and flagged: it is
+# stored, searchable and loaded into local prompts, and refused on egress.
+BLOCKED, FLAGGED, PRIVATE, CLEAN = "blocked", "flagged", "private", "clean"
+# The refusal code when only the private class withholds text on egress.
+PRIVATE_CODE = "memory_content_private"
 # Explicit sets shared with the native scanner, independent of runtime Unicode.
-_WHITESPACE = (
+# `WHITESPACE` is public: `untrusted` folds the same set.
+WHITESPACE = (
     "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680"
     + "".join(map(chr, range(0x2000, 0x200B)))
     + "\u2028\u2029\u202f\u205f\u3000"
@@ -48,12 +61,51 @@ _INVISIBLE = _IGNORABLE | frozenset("\ufff9\ufffa\ufffb")
 _STRIP_IGNORABLE = dict.fromkeys(map(ord, _IGNORABLE))
 _FOLD_FULLWIDTH = {code: code - 0xFEE0 for code in range(0xFF01, 0xFF5F)} | {0x3000: 0x20}
 _LINE_TRANSLATION = dict.fromkeys(map(ord, _BOUNDARIES), "\n")
-_SPACE_TRANSLATION = dict.fromkeys(map(ord, _WHITESPACE), " ")
+_SPACE_TRANSLATION = dict.fromkeys(map(ord, WHITESPACE), " ")
+
+
+# Extended_Pictographic blocks whose characters take U+FE0F for emoji
+# presentation, plus the text-default singletons. Shared with the native hub.
+_EMOJI_BASE_RANGES = (
+    (0xA9, 0xA9),
+    (0xAE, 0xAE),
+    (0x203C, 0x203C),
+    (0x2049, 0x2049),
+    (0x2122, 0x2122),
+    (0x2139, 0x2139),
+    (0x2190, 0x21FF),
+    (0x2300, 0x23FF),
+    (0x24C2, 0x24C2),
+    (0x25A0, 0x25FF),
+    (0x2600, 0x27BF),
+    (0x2934, 0x2935),
+    (0x2B00, 0x2BFF),
+    (0x3030, 0x3030),
+    (0x303D, 0x303D),
+    (0x3297, 0x3297),
+    (0x3299, 0x3299),
+    (0x1F000, 0x1F2FF),
+    (0x1F300, 0x1FAFF),
+)
 
 
 def _emoji_base(char: str) -> bool:
-    # Conservative explicit allowlist: sun, heart, rocket and emoticons.
-    return char in "☀❤🚀" or 0x1F600 <= ord(char) <= 0x1F64F
+    code = ord(char)
+    return any(lo <= code <= hi for lo, hi in _EMOJI_BASE_RANGES)
+
+
+def _selector_exempt(text: str, index: int) -> bool:
+    """U+FE0E or U+FE0F right after an emoji base, or a keycap's U+FE0F.
+
+    U+FE00 to U+FE0D never pick a text or emoji presentation, so after a base
+    they would hide data after every visible symbol. They block.
+    """
+    if not index or text[index] not in "\ufe0e\ufe0f":
+        return False
+    previous = text[index - 1]
+    if _emoji_base(previous):
+        return True
+    return text[index] == "\ufe0f" and previous in "#*0123456789" and text[index + 1 : index + 2] == "\u20e3"
 
 
 _BUNDLE = json.loads(files("brigade.guard").joinpath("memory-rules.json").read_text(encoding="utf-8"))
@@ -71,6 +123,12 @@ def _compile(items: list[dict], ascii_mode: bool = False) -> list[tuple[str, str
 
 
 _INJECTIONS = _compile(_BUNDLE["injections"]) + _compile(_BUNDLE["injections"], True)
+_ACTIONS = {item["id"]: item["action"] for item in _BUNDLE["injections"] + _BUNDLE["rules"]} | {
+    BIDI_RULE: "block",
+    INVISIBLE_RULE: "block",
+    JOINER_RULE: "warn",
+    **{rule: "private" for rule in _PRIVATE_CHARACTERS.values()},
+}
 _RULES = _INJECTIONS + _compile(_BUNDLE["rules"]) + _compile(_BUNDLE["rules"], True)
 
 
@@ -80,9 +138,9 @@ def invisible_rule(text: str) -> str | None:
     for index, char in enumerate(text):
         if char == "\ufeff" and index == 0:
             continue
-        if char in "\u200c\u200d":
+        if char in "\u200c\u200d" or char in _PRIVATE_CHARACTERS:
             continue
-        if "\ufe00" <= char <= "\ufe0f" and index and _emoji_base(text[index - 1]):
+        if "\ufe00" <= char <= "\ufe0f" and _selector_exempt(text, index):
             continue
         if char in _INVISIBLE:
             return INVISIBLE_RULE
@@ -160,18 +218,21 @@ def _rule_possible(name: str, text: str) -> bool:
     return True
 
 
-def blocked_rule(texts: Iterable[str], *, blocking_only: bool = False) -> str | None:
-    """Return an id only. Prompts withhold warnings. Embedding may pass warnings."""
+def _findings(texts: Iterable[str], *, blocking_only: bool = False) -> Iterator[tuple[str, str]]:
+    """Every (rule id, action) in the order prompt loads report the first one.
+
+    ``blocking_only`` yields block findings alone: embedding may pass warnings.
+    """
     # Scan each field independently too: a leading BOM exemption belongs to one
     # field, and concatenation must not hide a field's role directive at line start.
     values = [value for value in texts if isinstance(value, str)]
     # Equal fields and an equal joined value cannot add a finding. Keep the
     # BOM-stripped joined copy when it differs, and preserve field order.
     for text in dict.fromkeys([*values, "\n".join(value.removeprefix("\ufeff") for value in values)]):
+        # One character finding decides the verdict: both of them block.
         rule = invisible_rule(text)
         if rule:
-            return rule
-        joiner = "\u200c" in text or "\u200d" in text
+            yield rule, "block"
         lines, injection_lines, normalized = _scan_copies(text)
         # Bundle patterns are ASCII. On an ASCII copy the earlier Unicode
         # pass finds a superset for these patterns, so only non-ASCII copies
@@ -194,12 +255,59 @@ def blocked_rule(texts: Iterable[str], *, blocking_only: bool = False) -> str | 
                 if possible[key] and (
                     _assignment_search(pattern, copy) if name == "api-key-assignment" else pattern.search(copy)
                 ):
-                    return name
+                    yield name, action
+                    break
         for name, action, pattern in _INJECTIONS:
             if blocking_only and action != "block":
                 continue
             if any(pattern.search(copy) for copy in extra_copies if not (pattern.flags & re.ASCII and copy.isascii())):
-                return name
-        if joiner and not blocking_only:
-            return JOINER_RULE
-    return None
+                yield name, action
+        if blocking_only:
+            continue
+        if "\u200d" in text:
+            yield JOINER_RULE, "warn"
+        for char, rule in _PRIVATE_CHARACTERS.items():
+            if char in text:
+                yield rule, "private"
+
+
+def blocked_rule(texts: Iterable[str], *, blocking_only: bool = False) -> str | None:
+    """Return an id only. Every finding withholds egress text, private included.
+
+    Embedding passes ``blocking_only`` to let warnings and the private class through.
+    """
+    return next((name for name, _action in _findings(texts, blocking_only=blocking_only)), None)
+
+
+def scan_verdict(texts: Iterable[str]) -> tuple[str, tuple[str, ...]]:
+    """The hub's verdict for these texts: blocked, flagged, private or clean, with rule ids.
+
+    Rule ids are distinct and ordered by severity, then by first finding.
+    """
+    found: dict[str, str] = {}
+    for name, action in _findings(texts):
+        found.setdefault(name, action)
+    rank = {"block": 0, "warn": 1, "private": 2}
+    if not found:
+        return CLEAN, ()
+    worst = min(found.values(), key=rank.__getitem__)
+    verdict = {"block": BLOCKED, "warn": FLAGGED, "private": PRIVATE}[worst]
+    return verdict, tuple(sorted(found, key=lambda name: rank[found[name]]))
+
+
+def egress_refusal(texts: Iterable[str]) -> dict[str, str] | None:
+    """The placeholder fields for text that must not reach a connector audience.
+
+    None means the text may leave. A refusal names one rule id and never the
+    text. A refusal for the private class alone carries ``PRIVATE_CODE``.
+    """
+    values = list(texts)
+    rule = blocked_rule(values)
+    if rule is None:
+        return None
+    if _ACTIONS.get(rule) != "private":
+        return {"blocked": rule}
+    verdict, rules = scan_verdict(values)
+    if verdict == PRIVATE:
+        return {"blocked": rules[0], "code": PRIVATE_CODE}
+    return {"blocked": rules[0]}

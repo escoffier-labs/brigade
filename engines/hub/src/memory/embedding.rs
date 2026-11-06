@@ -32,9 +32,12 @@ pub const LEASE_MS: i64 = 60_000;
 pub const DROP_BATCH: i64 = 512;
 // The hub's own document request must finish inside the lease it holds.
 const _: () = assert!((super::embedder::DOCUMENT_DEADLINE.as_millis() as i64) < LEASE_MS - 5_000);
+/// Verdicts about one document's text. A worker that reports one has already
+/// seen the text, so the job parks at once instead of re-leasing it.
+pub(super) const PARK_AT_ONCE: &[&str] = &["content-private", "content-blocked"];
 /// Failures of the endpoint or the hub, not of one document. They release
 /// the job without counting an attempt.
-const TRANSIENT: &[&str] = &[
+pub(super) const TRANSIENT: &[&str] = &[
     "embedder-busy",
     "embedder-unavailable",
     "embedder-timeout",
@@ -75,7 +78,7 @@ pub struct Coverage {
     pub eligible: usize,
     pub total: usize,
     /// Clean live cards with no vector whose job parked on an embedding
-    /// failure. A scan verdict (`content-flagged`, `content-blocked`) is a
+    /// failure. A scan verdict (`content-flagged`, `content-blocked`, `content-private`) is a
     /// policy decision about one card and is not counted here.
     pub failed: usize,
 }
@@ -240,13 +243,41 @@ pub fn cleanup_card(tx: &dyn WriteTx, scope: &str, card: &str) -> rusqlite::Resu
     tx.execute("INSERT OR IGNORE INTO memory_lineage SELECT c.scope,c.card_id,c.revision,'vector',v.embedder_id,c.content_hash FROM memory_cards c JOIN memory_vectors v ON v.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.state='live'", &[t(scope),t(card)])?;
     Ok(())
 }
+/// Whether this embedder may be handed text that scans private (S18).
+///
+/// Push mode embeds in the hub process, so the hub's own endpoint is the
+/// destination: loopback only. In pull mode the documents go to whichever
+/// worker leases them, and `endpoint` is only the hub's query embedder, so it
+/// decides nothing. Pull mode leases private text only when the operator set
+/// `pull_private`, asserting that every worker with the embed grant runs on
+/// their own machines. Otherwise a private card is neither queued nor leased,
+/// and coverage counts it as unembeddable.
+pub fn private_ok(config: &Config) -> bool {
+    if config.pull {
+        return config.pull_private;
+    }
+    url::Url::parse(&config.endpoint)
+        .is_ok_and(|url| super::embedder::private_permitted(&url, None))
+}
+/// The scan receipt that a private-capable endpoint accepts beside `clean`.
+/// `clean` twice when it is not, so one SQL text serves both cases.
+fn second_state(private: bool) -> Value {
+    t(if private { "private" } else { "clean" })
+}
 /// Queue the card's live head for the active embedder inside the same
 /// transaction as its `put` or `retire`, so the scheduler never scans the
-/// corpus to find new work. Only text whose stored scan receipt is `clean`
-/// is queued. Jobs left for text no live card holds any more are removed.
-pub fn queue_card(tx: &dyn WriteTx, scope: &str, card: &str, id: &str) -> rusqlite::Result<()> {
+/// corpus to find new work. Only text whose stored scan receipt is `clean`,
+/// or `private` when the endpoint is loopback, is queued. Jobs left for text
+/// no live card holds any more are removed.
+pub fn queue_card(
+    tx: &dyn WriteTx,
+    scope: &str,
+    card: &str,
+    id: &str,
+    private: bool,
+) -> rusqlite::Result<()> {
     tx.execute("DELETE FROM memory_embed_jobs WHERE state IN ('pending','failed') AND content_hash IN (SELECT content_hash FROM memory_card_revisions WHERE scope=?1 AND card_id=?2) AND NOT EXISTS(SELECT 1 FROM memory_cards c WHERE c.content_hash=memory_embed_jobs.content_hash AND c.state='live')", &[t(scope), t(card)])?;
-    tx.execute("INSERT INTO memory_embed_jobs(content_hash,embedder_id,state) SELECT c.content_hash,?3,'pending' FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.scope=?1 AND c.card_id=?2 AND c.state='live' AND r.scan_state='clean' AND NOT EXISTS(SELECT 1 FROM memory_vectors v WHERE v.content_hash=c.content_hash AND v.embedder_id=?3 AND v.normalizer_version=1) ON CONFLICT(content_hash,embedder_id) DO UPDATE SET state='pending',finished_ms=NULL WHERE state='done'", &[t(scope), t(card), t(id)])?;
+    tx.execute("INSERT INTO memory_embed_jobs(content_hash,embedder_id,state) SELECT c.content_hash,?3,'pending' FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.scope=?1 AND c.card_id=?2 AND c.state='live' AND r.scan_state IN ('clean',?4) AND NOT EXISTS(SELECT 1 FROM memory_vectors v WHERE v.content_hash=c.content_hash AND v.embedder_id=?3 AND v.normalizer_version=1) ON CONFLICT(content_hash,embedder_id) DO UPDATE SET state='pending',finished_ms=NULL WHERE state='done'", &[t(scope), t(card), t(id), second_state(private)])?;
     Ok(())
 }
 /// Normalizer 1 is content-addressed. Card aliases and frontmatter unrelated to
@@ -327,6 +358,7 @@ pub fn apply(
         ));
     };
     let id = config.id.key();
+    let private = private_ok(config);
     match command {
         Command::Reindex { explicit, .. } => {
             cleanup(tx)?;
@@ -338,8 +370,9 @@ pub fn apply(
             };
             let resumed = tx.execute("UPDATE memory_embed_jobs SET state='pending',finished_ms=NULL WHERE embedder_id=?1 AND state='done' AND NOT EXISTS(SELECT 1 FROM memory_vectors v WHERE v.content_hash=memory_embed_jobs.content_hash AND v.embedder_id=?1) AND EXISTS(SELECT 1 FROM memory_cards c WHERE c.content_hash=memory_embed_jobs.content_hash AND c.state='live')", &[t(&id)])?;
             // Queue in bounded pages. Existing jobs and vectors make repeats idempotent.
-            // Flagged text never leaves the host, so only clean receipts are queued.
-            let rows = tx.query("SELECT DISTINCT c.content_hash FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.state='live' AND r.scan_state='clean' AND NOT EXISTS(SELECT 1 FROM memory_vectors v WHERE v.content_hash=c.content_hash AND v.embedder_id=?1 AND v.normalizer_version=1) AND NOT EXISTS(SELECT 1 FROM memory_embed_jobs j WHERE j.content_hash=c.content_hash AND j.embedder_id=?1) LIMIT 256", &[t(&id)])?;
+            // Flagged text never leaves the host, so only clean receipts are
+            // queued, and private ones when the endpoint is loopback.
+            let rows = tx.query("SELECT DISTINCT c.content_hash FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.state='live' AND r.scan_state IN ('clean',?2) AND NOT EXISTS(SELECT 1 FROM memory_vectors v WHERE v.content_hash=c.content_hash AND v.embedder_id=?1 AND v.normalizer_version=1) AND NOT EXISTS(SELECT 1 FROM memory_embed_jobs j WHERE j.content_hash=c.content_hash AND j.embedder_id=?1) LIMIT 256", &[t(&id), second_state(private)])?;
             for r in &rows {
                 tx.execute("INSERT INTO memory_embed_jobs(content_hash,embedder_id,state) VALUES(?1,?2,'pending')", &[r[0].clone(), t(&id)])?;
             }
@@ -357,7 +390,7 @@ pub fn apply(
             // embed right and the backoff, before the limit applies.
             let scopes = embed_scopes(tx, p)?;
             let scopes = scopes.map_or(Value::Null, Value::Text);
-            let rows = tx.query("SELECT j.content_hash,j.attempts,(SELECT b.bytes FROM memory_blobs b WHERE b.content_hash=j.content_hash) FROM memory_embed_jobs j WHERE j.embedder_id=?1 AND (j.state='pending' OR (j.state='leased' AND j.expires_ms<=?2)) AND j.not_before<=?2 AND EXISTS(SELECT 1 FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.content_hash=j.content_hash AND c.state='live' AND r.scan_state='clean' AND (?3 IS NULL OR c.scope IN (SELECT value FROM json_each(?3)))) ORDER BY j.attempts>0,j.content_hash LIMIT ?4", &[t(&id), Value::Integer(p.now_ms), scopes, Value::Integer(4 * *max as i64)])?;
+            let rows = tx.query("SELECT j.content_hash,j.attempts,(SELECT b.bytes FROM memory_blobs b WHERE b.content_hash=j.content_hash) FROM memory_embed_jobs j WHERE j.embedder_id=?1 AND (j.state='pending' OR (j.state='leased' AND j.expires_ms<=?2)) AND j.not_before<=?2 AND EXISTS(SELECT 1 FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.content_hash=j.content_hash AND c.state='live' AND r.scan_state IN ('clean',?5) AND (?3 IS NULL OR c.scope IN (SELECT value FROM json_each(?3)))) ORDER BY j.attempts>0,j.content_hash LIMIT ?4", &[t(&id), Value::Integer(p.now_ms), scopes, Value::Integer(4 * *max as i64), second_state(private)])?;
             let lease = ids::mint(p.now_ms);
             let mut jobs = Vec::new();
             let mut bytes = 0;
@@ -375,10 +408,15 @@ pub fn apply(
                     other => s(other),
                 };
                 let text = document_text(&body, config.input_chars);
-                let parked = match scanner.scan(&text) {
-                    Scan::Clean { .. } => None,
-                    Scan::Flagged { .. } => Some("content-flagged"),
-                    Scan::Blocked { .. } => Some("content-blocked"),
+                // The rescan decides, not the stored receipt: newer rules may
+                // call old text private. Private text goes only to a loopback
+                // endpoint, and otherwise parks like a flagged document.
+                let (parked, scan_state) = match scanner.scan(&text) {
+                    Scan::Clean { .. } => (None, "clean"),
+                    Scan::Private { .. } if private => (None, "private"),
+                    Scan::Private { .. } => (Some("content-private"), "private"),
+                    Scan::Flagged { .. } => (Some("content-flagged"), "flagged"),
+                    Scan::Blocked { .. } => (Some("content-blocked"), "blocked"),
                     Scan::Unavailable | Scan::Failed => continue,
                 };
                 if let Some(reason) = parked {
@@ -392,7 +430,7 @@ pub fn apply(
                 }
                 bytes += text.len();
                 tx.execute("UPDATE memory_embed_jobs SET state='leased',lease_id=?3,holder=?4,expires_ms=?5 WHERE content_hash=?1 AND embedder_id=?2", &[t(&hash),t(&id),t(&lease),t(p.credential.principal()),Value::Integer(p.now_ms+LEASE_MS)])?;
-                jobs.push(json!({"content_hash": hash, "text": text, "scan_state": "clean"}));
+                jobs.push(json!({"content_hash": hash, "text": text, "scan_state": scan_state}));
                 if retry {
                     break;
                 }
@@ -448,7 +486,7 @@ pub fn apply(
                     continue;
                 }
                 let attempts = n(&row[0]) + 1;
-                if attempts >= MAX_ATTEMPTS {
+                if attempts >= MAX_ATTEMPTS || PARK_AT_ONCE.contains(&reason.as_str()) {
                     tx.execute("UPDATE memory_embed_jobs SET state='failed',attempts=attempts+1,lease_id=NULL,holder=NULL,expires_ms=NULL,last_error=?3,finished_ms=?4 WHERE content_hash=?1 AND embedder_id=?2", &key)?;
                     parked += 1;
                     continue;
@@ -472,8 +510,10 @@ pub fn apply(
         }
     }
 }
-pub fn coverage(tx: &dyn ReadTx, id: &str) -> rusqlite::Result<Coverage> {
-    let rows = tx.query("SELECT count(*),COALESCE(sum(v),0),COALESCE(sum(v OR (scan_state='clean' AND NOT parked)),0),COALESCE(sum(NOT v AND scan_state='clean' AND broken),0) FROM (SELECT r.scan_state,EXISTS(SELECT 1 FROM memory_vectors x WHERE x.content_hash=c.content_hash AND x.embedder_id=?1 AND x.normalizer_version=1) AS v,EXISTS(SELECT 1 FROM memory_embed_jobs j WHERE j.content_hash=c.content_hash AND j.embedder_id=?1 AND j.state='failed') AS parked,EXISTS(SELECT 1 FROM memory_embed_jobs j WHERE j.content_hash=c.content_hash AND j.embedder_id=?1 AND j.state='failed' AND COALESCE(j.last_error,'') NOT IN ('content-flagged','content-blocked')) AS broken FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.state='live')", &[t(id)])?;
+/// Private cards count as embeddable only for a loopback endpoint (`private`).
+/// A card parked on `content-private` is unembeddable, not failed.
+pub fn coverage(tx: &dyn ReadTx, id: &str, private: bool) -> rusqlite::Result<Coverage> {
+    let rows = tx.query("SELECT count(*),COALESCE(sum(v),0),COALESCE(sum(v OR (scan_state IN ('clean',?2) AND NOT parked)),0),COALESCE(sum(NOT v AND scan_state IN ('clean',?2) AND broken),0) FROM (SELECT r.scan_state,EXISTS(SELECT 1 FROM memory_vectors x WHERE x.content_hash=c.content_hash AND x.embedder_id=?1 AND x.normalizer_version=1) AS v,EXISTS(SELECT 1 FROM memory_embed_jobs j WHERE j.content_hash=c.content_hash AND j.embedder_id=?1 AND j.state='failed') AS parked,EXISTS(SELECT 1 FROM memory_embed_jobs j WHERE j.content_hash=c.content_hash AND j.embedder_id=?1 AND j.state='failed' AND COALESCE(j.last_error,'') NOT IN ('content-flagged','content-blocked','content-private')) AS broken FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision WHERE c.state='live')", &[t(id), second_state(private)])?;
     Ok(Coverage {
         covered: n(&rows[0][1]) as usize,
         eligible: n(&rows[0][2]) as usize,

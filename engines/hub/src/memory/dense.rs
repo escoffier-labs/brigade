@@ -122,6 +122,9 @@ pub struct Index {
     publication: Mutex<()>,
     matrices: RwLock<HashMap<String, Arc<Matrix>>>,
     active: RwLock<Option<(String, usize)>>,
+    /// Whether the active endpoint may receive text that scans private
+    /// (S18). Set with `configure`, read by the writer when it queues jobs.
+    private_ok: AtomicBool,
     sender: Mutex<Option<tokio::sync::mpsc::WeakSender<writer::Job>>>,
     epoch: AtomicU64,
     rebuilding: AtomicBool,
@@ -152,6 +155,13 @@ impl Index {
             .unwrap()
             .as_ref()
             .map(|(id, _)| id.clone())
+    }
+    /// Private text is queued for the active embedder only when its endpoint is loopback.
+    pub fn private_ok(&self) -> bool {
+        self.private_ok.load(Ordering::SeqCst)
+    }
+    pub fn set_private_ok(&self, allowed: bool) {
+        self.private_ok.store(allowed, Ordering::SeqCst);
     }
     pub fn attach(&self, sender: tokio::sync::mpsc::WeakSender<writer::Job>) {
         *self.sender.lock().unwrap() = Some(sender);

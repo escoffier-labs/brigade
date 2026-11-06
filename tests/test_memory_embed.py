@@ -104,6 +104,31 @@ def test_worker_pending_and_blocked_never_send(endpoint):
     assert seen == []
 
 
+def test_worker_sends_private_text_only_to_a_loopback_endpoint(endpoint):
+    config, seen = endpoint
+    # The fixture endpoint is numeric loopback, so a private receipt is embedded.
+    client = Client("private", texts=("the gateway is at the home lab",))
+    assert embed.step(client, config, "fake-token") == (1, 1, False)
+    assert client.calls[-1][0] == "embed_submit"
+    assert len(seen) == 1
+    # Any other endpoint gets nothing. The job goes back as content-private,
+    # which the hub parks, so the worker does not count it as an endpoint fault.
+    remote = {**config, "endpoint": "http://192.0.2.1/api/embed", "allowlist": ["http://192.0.2.1/api/embed"]}
+    client = Client("private")
+    assert embed.step(client, remote, "fake-token") == (1, 0, False)
+    action, fields = client.calls[-1]
+    assert action == "embed_failed"
+    assert fields["failures"] == [{"content_hash": "0" * 64, "reason": "content-private"}]
+    assert len(seen) == 1
+
+
+def test_content_private_is_not_transient_in_either_list():
+    source = (Path(__file__).resolve().parents[1] / "engines/hub/src/memory/embedding.rs").read_text(encoding="utf-8")
+    block = source.split("const TRANSIENT: &[&str] = &[", 1)[1].split("];", 1)[0]
+    assert "content-private" not in re.findall(r'"([a-z-]+)"', block)
+    assert "content-private" not in embed.TRANSIENT_REASONS
+
+
 def test_transient_reasons_match_the_hub():
     source = (Path(__file__).resolve().parents[1] / "engines/hub/src/memory/embedding.rs").read_text(encoding="utf-8")
     block = source.split("const TRANSIENT: &[&str] = &[", 1)[1].split("];", 1)[0]

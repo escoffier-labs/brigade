@@ -294,7 +294,7 @@ fn apply_one(
     p: &Prepared,
     authority: &Authority,
     scanner: &dyn super::scan::Scanner,
-    embedder: Option<&str>,
+    embedder: Option<(&str, bool)>,
 ) -> Answer {
     if db.execute_batch("SAVEPOINT command").is_err() {
         return Err(storage("storage-error"));
@@ -520,13 +520,18 @@ pub(crate) fn run(
                     p.command.action.needs_policy(),
                 ) {
                     Ok(authority) => {
-                        let embedder = config.dense.as_ref().and_then(|d| d.active_id());
+                        let embedder = config
+                            .dense
+                            .as_ref()
+                            .and_then(|d| d.active_id().map(|id| (id, d.private_ok())));
                         apply_one(
                             &db,
                             &p.command,
                             &authority,
                             config.scanner.as_ref(),
-                            embedder.as_deref(),
+                            embedder
+                                .as_ref()
+                                .map(|(id, private)| (id.as_str(), *private)),
                         )
                     }
                     Err(refusal) => refusal,

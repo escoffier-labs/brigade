@@ -127,6 +127,17 @@ def test_skip_reasons(setup, extra, reason):
     assert list(out.glob("*.md")) == [out / mirror.INDEX]
 
 
+def test_private_scan_heads_are_exported(setup):
+    # A private scan stays on the operator's machines, and the mirror folder is local.
+    *_, out, replica = setup
+    card(replica, scan_state="private", trust="imported", text="---\ntitle: Ops notes\n---\nlocal paths\n")
+    report = run(setup)
+    assert report["skipped"] == {}
+    [note] = [path for path in out.glob("*.md") if path.name != mirror.INDEX]
+    [line] = [line for line in note.read_text(encoding="utf-8").splitlines() if line.startswith("scan_state:")]
+    assert "private" in line
+
+
 def test_supersession_chain_and_stable_names(setup):
     *_, out, replica = setup
     card(replica, "alpha")

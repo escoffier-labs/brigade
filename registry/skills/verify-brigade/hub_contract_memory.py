@@ -302,19 +302,27 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         status=201 if scan_available else 503,
         shape=event("imported") if scan_available else {**err("memory_scan_unavailable"), "retryable": hc.Eq(True)},
     )
-    # The explicit JIT stack permits this nested path to reach its warning.
+    # The explicit JIT stack permits this nested path to reach its rule. A
+    # Windows home path is private since bundle v6: stored, and importable.
     if scan_available:
+        nested = "C:" + chr(92) + "Users" + chr(92) + "a/" * 1000 + "!"
         mem(
-            "memory-nested-path-flagged",
+            "memory-nested-path-private",
             {
                 **imported,
                 "action": "put",
                 "card_id": card("scan-failed"),
-                "text": "C:" + chr(92) + "Users" + chr(92) + "a/" * 1000 + "!",
+                "text": nested,
                 "client_event_id": event_id(),
             },
             status=201,
-            shape=event("flagged"),
+            shape=event("agent-unreviewed"),
+        )
+        mem(
+            "memory-import-private",
+            {**imported, "card_id": card("scan-private"), "text": nested, "client_event_id": event_id()},
+            status=201,
+            shape=event("imported"),
         )
         for index, text in enumerate(
             [

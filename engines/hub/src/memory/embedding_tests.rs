@@ -6,6 +6,14 @@ use serde_json::json;
 use std::sync::Arc;
 
 fn setup(h: &mut Hub) -> String {
+    setup_at(h, "http://127.0.0.1:1/api/embed")
+}
+fn setup_at(h: &mut Hub, endpoint: &str) -> String {
+    setup_with(h, Some(endpoint), json!({"pull": true}))
+}
+/// Configure hybrid retrieval. `extra` overrides keys such as `pull` and
+/// `pull_private`. No endpoint means pull mode without a query embedder.
+fn setup_with(h: &mut Hub, endpoint: Option<&str>, extra: Json) -> String {
     let token = h.dir.join("embed.token");
     std::fs::write(&token, "fake-embed-token").unwrap();
     #[cfg(unix)]
@@ -13,7 +21,20 @@ fn setup(h: &mut Hub) -> String {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    h.store.as_mut().unwrap().configure_retrieval(&json!({"retrieval": "hybrid", "embedder": {"backend": "remote", "endpoint": "http://127.0.0.1:1/api/embed", "allowlist": ["http://127.0.0.1:1/api/embed"], "token_file": token, "shape": "api/embed", "name": "fake-model", "model_digest": "fake-digest", "dimensions": 2, "input_chars": 6000, "query_prefix_version": 1, "pull": true}})).unwrap();
+    let mut embedder = json!({"backend": "remote", "shape": "api/embed", "name": "fake-model", "model_digest": "fake-digest", "dimensions": 2, "input_chars": 6000, "query_prefix_version": 1});
+    if let Some(endpoint) = endpoint {
+        embedder["endpoint"] = json!(endpoint);
+        embedder["allowlist"] = json!([endpoint]);
+        embedder["token_file"] = json!(token);
+    }
+    for (key, value) in extra.as_object().unwrap() {
+        embedder[key] = value.clone();
+    }
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&json!({"retrieval": "hybrid", "embedder": embedder}))
+        .unwrap();
     h.store
         .as_ref()
         .unwrap()
@@ -1409,4 +1430,300 @@ async fn an_empty_matrix_never_sends_query_text_to_the_endpoint() {
     let status = store.retrieval_status();
     assert_ne!(status["state"], "degraded", "{status}");
     assert_ne!(status["reason"], "embedder-unavailable", "{status}");
+}
+
+/// Clean, except text with `labhost` scans private, and text with `shifted`
+/// scans private once the rules change.
+struct Tiers(std::sync::atomic::AtomicBool);
+impl scan::Scanner for Tiers {
+    fn scan(&self, text: &str) -> scan::Scan {
+        let moved = text.contains("shifted") && self.0.load(std::sync::atomic::Ordering::SeqCst);
+        if text.contains("labhost") || moved {
+            scan::Scan::Private {
+                ruleset: "r1".into(),
+                rules: vec!["private-ipv4".into()],
+            }
+        } else {
+            scan::Scan::Clean {
+                ruleset: "r1".into(),
+            }
+        }
+    }
+    fn describe(&self) -> (bool, Option<String>) {
+        (true, Some("r1".into()))
+    }
+}
+fn tiers() -> Arc<Tiers> {
+    Arc::new(Tiers(std::sync::atomic::AtomicBool::new(false)))
+}
+
+#[tokio::test]
+async fn push_mode_loopback_endpoint_queues_and_leases_private_cards() {
+    let mut h = Hub::with(tiers(), None);
+    let id = setup_with(
+        &mut h,
+        Some("http://127.0.0.1:1/api/embed"),
+        json!({"pull": false}),
+    );
+    h.put(ADMIN_TOKEN, "fleet", "clean", None, "clean apple")
+        .await;
+    h.put(ADMIN_TOKEN, "fleet", "lab", None, "labhost notes")
+        .await;
+    assert_eq!(rows(&h, "SELECT count(*) FROM memory_embed_jobs").await, 2);
+    // Reindex finds nothing more to queue: both were queued by their puts.
+    assert_eq!(
+        command(&h, json!({"action": "reindex"})).await.body["queued"],
+        0
+    );
+    let lease = command(&h, json!({"action": "embed_lease", "embedder_id": id})).await;
+    let jobs = lease.body["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 2, "{lease:?}");
+    let mut states: Vec<&str> = jobs
+        .iter()
+        .map(|j| j["scan_state"].as_str().unwrap())
+        .collect();
+    states.sort();
+    assert_eq!(states, ["clean", "private"]);
+    let vectors: Vec<_> = jobs
+        .iter()
+        .map(|j| json!({"content_hash": j["content_hash"], "vector": encoded(&[1.0, 0.0])}))
+        .collect();
+    assert_eq!(command(&h, json!({"action": "embed_submit", "lease_id": lease.body["lease_id"], "model_digest": "fake-digest", "vectors": vectors})).await.status, 200);
+    h.store.as_ref().unwrap().refresh_dense().await.unwrap();
+    let status = h.store.as_ref().unwrap().retrieval_status();
+    assert_eq!(status["state"], "ok", "{status}");
+    assert_eq!(
+        status["coverage"],
+        json!({"cards": 2, "eligible": 2, "unembeddable": 0, "total": 2})
+    );
+}
+
+#[tokio::test]
+async fn push_mode_non_loopback_endpoint_never_queues_or_leases_private_cards() {
+    let mut h = Hub::with(tiers(), None);
+    // A private-network address is not loopback, so private text stays home.
+    let id = setup_with(
+        &mut h,
+        Some("http://10.0.0.5:1/api/embed"), // <!-- content-guard: allow private-ipv4 -->
+        json!({"pull": false}),
+    ); // <!-- content-guard: allow private-ipv4 -->
+    assert!(!embedding::private_ok(
+        &h.store.as_ref().unwrap().retrieval.as_ref().unwrap().config
+    ));
+    h.put(ADMIN_TOKEN, "fleet", "clean", None, "clean apple")
+        .await;
+    h.put(ADMIN_TOKEN, "fleet", "lab", None, "labhost notes")
+        .await;
+    assert_eq!(rows(&h, "SELECT count(*) FROM memory_embed_jobs").await, 1);
+    assert_eq!(
+        command(&h, json!({"action": "reindex"})).await.body["queued"],
+        0
+    );
+    let lease = command(&h, json!({"action": "embed_lease", "embedder_id": id})).await;
+    let jobs = lease.body["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1, "{lease:?}");
+    assert!(jobs[0]["text"].as_str().unwrap().contains("apple"));
+    let vectors =
+        json!([{"content_hash": jobs[0]["content_hash"], "vector": encoded(&[1.0, 0.0])}]);
+    assert_eq!(command(&h, json!({"action": "embed_submit", "lease_id": lease.body["lease_id"], "model_digest": "fake-digest", "vectors": vectors})).await.status, 200);
+    h.store.as_ref().unwrap().refresh_dense().await.unwrap();
+    let status = h.store.as_ref().unwrap().retrieval_status();
+    // Unembeddable, not failed: hybrid stays healthy.
+    assert_eq!(status["effective"], "hybrid", "{status}");
+    assert_eq!(status["state"], "ok");
+    assert_eq!(
+        status["coverage"],
+        json!({"cards": 1, "eligible": 1, "unembeddable": 1, "total": 2})
+    );
+    assert_eq!(
+        rows(
+            &h,
+            "SELECT count(*) FROM memory_embed_jobs WHERE state='failed'"
+        )
+        .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn push_mode_lease_rescan_treats_private_by_endpoint() {
+    for (endpoint, loopback) in [
+        ("http://127.0.0.1:1/api/embed", true),
+        ("http://10.0.0.5:1/api/embed", false), // <!-- content-guard: allow private-ipv4 -->
+    ] {
+        let rules = tiers();
+        let mut h = Hub::with(rules.clone(), None);
+        let id = setup_with(&mut h, Some(endpoint), json!({"pull": false}));
+        h.store.as_ref().unwrap().load_dense().await;
+        // Clean when stored, so the job is queued. New rules call it private.
+        h.put(ADMIN_TOKEN, "fleet", "later", None, "shifted body")
+            .await;
+        rules.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        let lease = command(&h, json!({"action": "embed_lease", "embedder_id": id})).await;
+        if loopback {
+            let jobs = lease.body["jobs"].as_array().unwrap();
+            assert_eq!(jobs.len(), 1, "{lease:?}");
+            assert_eq!(jobs[0]["scan_state"], "private");
+            assert_eq!(lease.body["parked"], 0);
+        } else {
+            assert_eq!(lease.body["jobs"], json!([]), "{lease:?}");
+            assert_eq!(lease.body["parked"], 1);
+            assert_eq!(
+                rows(&h, "SELECT count(*) FROM memory_embed_jobs WHERE state='failed' AND last_error='content-private'").await,
+                1
+            );
+            let status = h.store.as_ref().unwrap().retrieval_status();
+            // The parked card counts as unembeddable and does not degrade hybrid.
+            assert_eq!(status["state"], "ok", "{status}");
+            assert_eq!(
+                status["coverage"],
+                json!({"cards": 0, "eligible": 0, "unembeddable": 1, "total": 1})
+            );
+            // `content-private` is a verdict about one card, not an endpoint fault.
+            assert!(!super::embedding::TRANSIENT.contains(&"content-private"));
+        }
+    }
+}
+
+/// Every pull-mode shape: no query endpoint, a loopback one, and a
+/// private-network one. The query endpoint never decides where documents go.
+const PULL_SHAPES: [Option<&str>; 3] = [
+    None,
+    Some("http://127.0.0.1:1/api/embed"),
+    Some("http://192.0.2.7:1/api/embed"),
+];
+
+#[tokio::test]
+async fn pull_mode_never_queues_or_leases_private_cards_unless_pull_private_is_set() {
+    for endpoint in PULL_SHAPES {
+        let rules = tiers();
+        let mut h = Hub::with(rules.clone(), None);
+        let id = setup_with(&mut h, endpoint, json!({"pull": true}));
+        assert!(!embedding::private_ok(
+            &h.store.as_ref().unwrap().retrieval.as_ref().unwrap().config
+        ));
+        h.put(ADMIN_TOKEN, "fleet", "clean", None, "clean apple")
+            .await;
+        h.put(ADMIN_TOKEN, "fleet", "lab", None, "labhost notes")
+            .await;
+        // Clean when stored, private under newer rules: the lease rescan parks it.
+        h.put(ADMIN_TOKEN, "fleet", "later", None, "shifted body")
+            .await;
+        assert_eq!(
+            rows(&h, "SELECT count(*) FROM memory_embed_jobs").await,
+            2,
+            "{endpoint:?}"
+        );
+        assert_eq!(
+            command(&h, json!({"action": "reindex"})).await.body["queued"],
+            0
+        );
+        rules.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        let lease = command(&h, json!({"action": "embed_lease", "embedder_id": id})).await;
+        let jobs = lease.body["jobs"].as_array().unwrap();
+        assert_eq!(jobs.len(), 1, "{endpoint:?} {lease:?}");
+        assert!(jobs[0]["text"].as_str().unwrap().contains("apple"));
+        assert_eq!(lease.body["parked"], 1);
+        assert_eq!(
+            rows(&h, "SELECT count(*) FROM memory_embed_jobs WHERE state='failed' AND last_error='content-private'").await,
+            1
+        );
+        h.store.as_ref().unwrap().refresh_coverage().await;
+        let status = h.store.as_ref().unwrap().retrieval_status();
+        assert_eq!(status["pull_private"], false, "{status}");
+        assert_eq!(
+            status["coverage"],
+            json!({"cards": 0, "eligible": 1, "unembeddable": 2, "total": 3}),
+            "{endpoint:?} {status}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pull_private_leases_private_cards_to_workers() {
+    for endpoint in PULL_SHAPES {
+        let rules = tiers();
+        let mut h = Hub::with(rules.clone(), None);
+        let id = setup_with(
+            &mut h,
+            endpoint,
+            json!({"pull": true, "pull_private": true}),
+        );
+        h.put(ADMIN_TOKEN, "fleet", "clean", None, "clean apple")
+            .await;
+        h.put(ADMIN_TOKEN, "fleet", "lab", None, "labhost notes")
+            .await;
+        h.put(ADMIN_TOKEN, "fleet", "later", None, "shifted body")
+            .await;
+        assert_eq!(rows(&h, "SELECT count(*) FROM memory_embed_jobs").await, 3);
+        rules.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        let lease = command(&h, json!({"action": "embed_lease", "embedder_id": id})).await;
+        let jobs = lease.body["jobs"].as_array().unwrap();
+        assert_eq!(jobs.len(), 3, "{endpoint:?} {lease:?}");
+        let mut states: Vec<&str> = jobs
+            .iter()
+            .map(|j| j["scan_state"].as_str().unwrap())
+            .collect();
+        states.sort();
+        assert_eq!(states, ["clean", "private", "private"]);
+        assert_eq!(lease.body["parked"], 0);
+        h.store.as_ref().unwrap().refresh_coverage().await;
+        let status = h.store.as_ref().unwrap().retrieval_status();
+        assert_eq!(status["pull_private"], true, "{status}");
+        assert_eq!(
+            status["coverage"],
+            json!({"cards": 0, "eligible": 3, "unembeddable": 0, "total": 3})
+        );
+    }
+}
+
+#[tokio::test]
+async fn pull_private_must_be_a_bool_and_needs_pull() {
+    let mut h = Hub::with(tiers(), None);
+    let store = h.store.as_mut().unwrap();
+    let embedder = |extra: Json| {
+        let mut e = json!({"backend": "remote", "shape": "api/embed", "name": "m", "model_digest": "d", "dimensions": 2, "input_chars": 6000, "query_prefix_version": 1, "pull": true});
+        for (k, v) in extra.as_object().unwrap() {
+            e[k] = v.clone();
+        }
+        json!({"retrieval": "hybrid", "embedder": e})
+    };
+    for bad in [json!("yes"), json!(1), json!(null)] {
+        let error = store
+            .configure_retrieval(&embedder(json!({"pull_private": bad})))
+            .unwrap_err();
+        assert!(
+            error.contains("pull_private must be true or false"),
+            "{error}"
+        );
+    }
+    let error = store
+        .configure_retrieval(&embedder(json!({"pull": false, "pull_private": true})))
+        .unwrap_err();
+    assert!(error.contains("requires memory.embedder.pull"), "{error}");
+}
+
+#[tokio::test]
+async fn a_worker_reported_content_verdict_parks_the_job_at_once() {
+    for reason in ["content-private", "content-blocked"] {
+        let mut h = Hub::with(tiers(), None);
+        let id = setup(&mut h);
+        h.put(ADMIN_TOKEN, "fleet", "doc", None, "clean apple")
+            .await;
+        let lease = command(&h, json!({"action": "embed_lease", "embedder_id": id}))
+            .await
+            .body;
+        let reply = command(&h, json!({"action": "embed_failed", "lease_id": lease["lease_id"], "failures": [{"content_hash": lease["jobs"][0]["content_hash"], "reason": reason}]})).await;
+        assert_eq!(reply.status, 200, "{reply:?}");
+        assert_eq!(reply.body["parked"], 1, "{reason}");
+        assert_eq!(reply.body["released"], 0, "{reason}");
+        assert_eq!(
+            rows(&h, &format!("SELECT count(*) FROM memory_embed_jobs WHERE state='failed' AND last_error='{reason}' AND lease_id IS NULL")).await,
+            1
+        );
+        // Parked, so it is never leased again, however long the wait.
+        h.set_clock(h.now() + 7_200_000);
+        let again = command(&h, json!({"action": "embed_lease", "embedder_id": id})).await;
+        assert_eq!(again.body["jobs"], json!([]), "{reason}");
+    }
 }

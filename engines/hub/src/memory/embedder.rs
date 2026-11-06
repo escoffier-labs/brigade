@@ -81,6 +81,10 @@ pub trait Embedder: Send + Sync {
 pub struct Config {
     pub backend: String,
     pub pull: bool,
+    /// Pull mode only: the operator asserts that every worker holding the
+    /// embed grant runs on their own machines, so the hub may lease private
+    /// text to it. The query endpoint says nothing about where documents go.
+    pub pull_private: bool,
     pub endpoint: String,
     pub allowlist: Vec<String>,
     pub token_file: PathBuf,
@@ -109,6 +113,14 @@ impl Config {
             Some(Value::Bool(b)) => *b,
             Some(_) => return Err("memory.embedder.pull must be true or false".into()),
         };
+        let pull_private = match v.get("pull_private") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err("memory.embedder.pull_private must be true or false".into()),
+        };
+        if pull_private && !pull {
+            return Err("memory.embedder.pull_private requires memory.embedder.pull = true".into());
+        }
         let endpoint = v["query_endpoint"]
             .as_str()
             .or_else(|| v["endpoint"].as_str())
@@ -121,6 +133,7 @@ impl Config {
         Ok(Self {
             backend: s("backend")?,
             pull,
+            pull_private,
             endpoint: endpoint.clone(),
             token_file: if endpoint.is_empty() {
                 PathBuf::new()
@@ -197,6 +210,15 @@ pub(crate) fn unscanned_permitted(url: &Url, pinned: Option<IpAddr>) -> bool {
         ("https", _) => loopback_literal(url),
         _ => false,
     }
+}
+/// Whether text that scans private (S18, D24 amendment) may go to this
+/// endpoint. The private class guards connector audiences, and an embedder
+/// counts as one unless its pinned address is loopback. The rule matches
+/// [`unscanned_permitted`]: a loopback literal, or plain HTTP `localhost`
+/// until the pinned address is known. A private-network address, a public
+/// name and HTTPS to any name are refused.
+pub(crate) fn private_permitted(url: &Url, pinned: Option<IpAddr>) -> bool {
+    unscanned_permitted(url, pinned)
 }
 /// The token file belongs to the hub's effective user and nobody else can
 /// read or write it.
@@ -333,10 +355,13 @@ impl HttpEmbedder {
         }
         // Scan the exact prefixed/truncated payload, not an earlier representation.
         // Flagged text is never pushed (S18), so only a clean scan leaves the host.
+        // Private text goes only to a loopback endpoint.
         let mut unscanned = false;
+        let mut private_text = false;
         for text in &texts {
             match self.scanner.scan(text) {
                 Scan::Clean { .. } => {}
+                Scan::Private { .. } => private_text = true,
                 Scan::Unavailable if kind != Kind::Document => unscanned = true,
                 Scan::Unavailable => return Err(EmbedError::new("scan-unavailable")),
                 Scan::Flagged { .. } | Scan::Blocked { .. } | Scan::Failed => {
@@ -346,6 +371,10 @@ impl HttpEmbedder {
         }
         if unscanned && !unscanned_permitted(&self.url, None) {
             return Err(EmbedError::new("scan-unavailable"));
+        }
+        // Before any lookup or connection.
+        if private_text && !private_permitted(&self.url, None) {
+            return Err(EmbedError::new("content-private"));
         }
         let mut url = self.url.clone();
         if url.scheme() == "http" {
@@ -362,6 +391,10 @@ impl HttpEmbedder {
             }
             if unscanned && !unscanned_permitted(&url, Some(addresses[0].ip())) {
                 return Err(EmbedError::new("scan-unavailable"));
+            }
+            // `localhost` mapped to a LAN host gets no private text.
+            if private_text && !private_permitted(&url, Some(addresses[0].ip())) {
+                return Err(EmbedError::new("content-private"));
             }
             url.set_ip_host(addresses[0].ip())
                 .map_err(|_| EmbedError::new("endpoint-refused"))?;
@@ -600,8 +633,10 @@ impl Runtime {
                 Ok(row)
             }
             Err(e) => {
-                if !(matches!(e.reason, "content-blocked" | "scan-unavailable")
-                    || e.reason == "embedder-timeout" && contention)
+                if !(matches!(
+                    e.reason,
+                    "content-blocked" | "content-private" | "scan-unavailable"
+                ) || e.reason == "embedder-timeout" && contention)
                 {
                     self.fail(e.reason);
                 }
@@ -656,9 +691,19 @@ impl Runtime {
         texts: Vec<(String, String)>,
     ) -> Result<Vec<Vec<f32>>, EmbedError> {
         // The stored version's receipt is required even when a fresh scan would pass.
-        // Only `clean` qualifies: S18 never pushes a `flagged` version.
-        if texts.iter().any(|(_, state)| state != "clean") {
+        // `clean` qualifies anywhere: S18 never pushes a `flagged` version.
+        // `private` qualifies only for a loopback endpoint, and `send` checks
+        // the pinned address again before it connects.
+        if texts
+            .iter()
+            .any(|(_, state)| !matches!(state.as_str(), "clean" | "private"))
+        {
             return Err(EmbedError::new("scan-pending"));
+        }
+        if texts.iter().any(|(_, state)| state == "private")
+            && !Url::parse(&self.config.endpoint).is_ok_and(|url| private_permitted(&url, None))
+        {
+            return Err(EmbedError::new("content-private"));
         }
         {
             let mut s = self.lock();

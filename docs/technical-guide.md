@@ -2626,7 +2626,11 @@ to sync a folder (some FUSE, SMB and 9p mounts) runs without that sync. A folder
 and `.brigade-mirror-*.tmp` files, left by a first run killed before its marker,
 counts as empty, so the next run needs no `--init`.
 
-Only live, scan-clean, non-private heads are exported. Flagged, pending,
+Only live heads with a `clean` or `private` scan and no `visibility: private`
+front matter are exported. A `private` scan (bundle v6) names the operator's
+own addresses, paths or contacts, which may live in a local folder. If that
+folder syncs to a service off the operator's machines, the mirror cannot tell,
+so point it at a folder that does not. Flagged, pending,
 unknown-scan and superseded cards are counted by reason. The client's privacy
 withholding rules apply, including malformed visibility declarations.
 A head without scan metadata is never treated as skippable, because that

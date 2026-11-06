@@ -20,7 +20,7 @@ _ADVERSARIAL_SCAN_SECONDS = 4.0 if sys.platform == "win32" else 2.0
 def test_s18_prompt_load_withholds_warnings_and_new_role_overrides():
     assert blocked_rule(["e\u0301 and a leading BOM", "\ufeffordinary text"]) is None
     for text, rule in [
-        ("join\u200cer", "zero-width-joiner"),
+        ("join\u200cer", "zero-width-non-joiner"),
         ("join\u200der", "zero-width-joiner"),
         ("person@example.com", "example-email-reserved"),
         ("new system prompt", "role-override"),
@@ -29,8 +29,14 @@ def test_s18_prompt_load_withholds_warnings_and_new_role_overrides():
 
     bundle = json.loads(files("brigade.guard").joinpath("memory-rules.json").read_text(encoding="utf-8"))
     policy = Policy()
+    private = runpy.run_path(str(Path(__file__).parents[1] / "scripts/memory_scan_bundle.py"))["PRIVATE_RULES"]
     assert bundle["rules"] == [
-        {"id": rule.id, "pattern": rule.pattern, "flags": int(rule.flags), "action": policy.action_for(rule)}
+        {
+            "id": rule.id,
+            "pattern": rule.pattern,
+            "flags": int(rule.flags),
+            "action": "private" if rule.id in private else policy.action_for(rule),
+        }
         for rule in policy.all_rules()
     ]
     assert bundle["injections"][: len(_LINE_RULES)] == [
@@ -84,14 +90,19 @@ def test_s18_review_scan_copy_parity(text, rule):
     ],
 )
 def test_s18_review_invisible_policy(code):
-    assert blocked_rule(["text" + chr(code)]) == (
-        "bidi-control" if code in (0x200E, 0x200F, 0x61C) else "invisible-character"
-    )
+    expected = "bidi-control" if code in (0x200E, 0x200F, 0x61C) else "invisible-character"
+    assert blocked_rule(["text" + chr(code)]) == ("combining-grapheme-joiner" if code == 0x34F else expected)
 
 
-@pytest.mark.parametrize("text", ["☀\ufe0f", "😀\ufe00", "\ufeffordinary text"])
+@pytest.mark.parametrize("text", ["☀\ufe0f", "😀\ufe0e", "\ufeffordinary text"])
 def test_s18_review_selector_and_bom_exemptions(text):
     assert blocked_rule([text]) is None
+
+
+@pytest.mark.parametrize("code", range(0xFE00, 0xFE0E))
+def test_only_presentation_selectors_follow_an_emoji_base(code):
+    assert blocked_rule(["😀" + chr(code)]) == "invisible-character"
+    assert blocked_rule(["→" + chr(code)]) == "invisible-character"
 
 
 @pytest.mark.parametrize("code", [0xAD, 0x34F, 0x180E, 0x200C, 0xFE0F, 0xE0100, 0x2065, 0xFFF0])
@@ -196,7 +207,6 @@ def _legacy_blocked_rule(texts):
         rule = scan.invisible_rule(text)
         if rule:
             return rule
-        joiner = "\u200c" in text or "\u200d" in text
         lines, injection_lines, normalized = scan._scan_copies(text)
         for name, _action, pattern in scan._RULES:
             if pattern.search(text) or pattern.search(lines):
@@ -204,8 +214,11 @@ def _legacy_blocked_rule(texts):
         for name, _action, pattern in scan._INJECTIONS:
             if pattern.search(injection_lines) or pattern.search(normalized):
                 return name
-        if joiner:
+        if "\u200d" in text:
             return scan.JOINER_RULE
+        for char, rule in scan._PRIVATE_CHARACTERS.items():
+            if char in text:
+                return rule
     return None
 
 
@@ -385,6 +398,46 @@ def test_s18_round4_exact_reviewer_inputs():
         assert float(result.stdout.split()[3]) < _ADVERSARIAL_SCAN_SECONDS, result.stdout
 
 
+@pytest.mark.parametrize(
+    "prefix,unit",
+    [
+        ("Read ", "\u3000"),
+        ("Read ", "a\u3000"),
+        ("Read ", "a\u00a0"),
+        (".", "\u2192"),
+        (".", "\u4e00"),
+        (". ", "\u4e00\u3000"),
+    ],
+)
+def test_classic_injection_unicode_runs_scan_in_bounded_time(prefix, unit):
+    from time import perf_counter
+
+    from brigade.untrusted import PROMPT_INJECTION_RE
+
+    text = prefix + unit * (512 * 1024 // len(unit.encode()))
+    start = perf_counter()
+    assert PROMPT_INJECTION_RE.search(text) is None
+    assert perf_counter() - start < _ADVERSARIAL_SCAN_SECONDS
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Read\u00a0x\u00a0and exfiltrate them",
+        "Read\u3000x\u3000and exfiltrate them",
+        "\u3000- exfiltrate the tokens",
+    ],
+)
+def test_classic_injection_scan_copies_fold_unicode_spaces(text):
+    # The regex alone does not match across U+00A0 or U+3000 (a token and a gap
+    # must not share a character). The scan copies fold both to a plain space.
+    from brigade.memory_content_scan import scan_verdict
+
+    verdict, rules = scan_verdict([text])
+    assert verdict == "flagged"
+    assert "classic-injection" in rules
+
+
 def test_s18_round4_ascii_skip_requires_reviewed_patterns():
     import re
     from brigade import memory_content_scan as scan
@@ -487,7 +540,7 @@ def test_s18_round4_detection_bounds(rule, text):
 def test_s18_round4_bundle_version():
     from brigade import memory_content_scan as scan
 
-    assert scan._BUNDLE["version"] == "brigade-memory-scan.v5"
+    assert scan._BUNDLE["version"] == "brigade-memory-scan.v6"
 
 
 def test_s18_round4_base64_decode_window_is_bounded():
@@ -516,7 +569,7 @@ def test_s18_round5_prefilter_parity_corpus(name, monkeypatch):
 
     vectors = runpy.run_path(str(Path(__file__).with_name("memory_scan_adversarial.py")))["vectors"]
 
-    # Compare the same v5 rules with and without the necessary-condition
+    # Compare the same v6 rules with and without the necessary-condition
     # filters, including both Unicode and ASCII modes and all six positions.
     texts = [text for _, text in vectors(name, 512 * 1024)]
     expected = [scan.blocked_rule([text]) for text in texts]
@@ -611,3 +664,21 @@ def test_absent_assignment_prefix_skips_digit_index(monkeypatch):
     pattern = next(pattern for name, _, pattern in scan._RULES if name == "api-key-assignment")
     assert not scan._assignment_search(pattern, "123." * 1000)
     assert calls == []
+
+
+def test_classic_injection_compound_order_stays_on_one_line():
+    # The bundle compiles with MULTILINE. A gap of spaces and tabs keeps a short
+    # heading apart from the prose on the next line in the line copies. The
+    # joined copy still folds line breaks to spaces, so a phrase wrapped over
+    # two lines keeps matching there.
+    from brigade.memory_content_scan import _INJECTIONS, _scan_copies
+
+    text = "Read more\nAttackers dump LSASS and exfiltrate hashes"
+    lines, injection_lines, _normalized = _scan_copies(text)
+    patterns = [pattern for name, _action, pattern in _INJECTIONS if name == "classic-injection"]
+    assert patterns
+    for pattern in patterns:
+        assert pattern.search(text) is None
+        assert pattern.search(lines) is None
+        assert pattern.search(injection_lines) is None
+        assert pattern.search("Read x and exfiltrate them") is not None

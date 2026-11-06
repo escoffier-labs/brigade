@@ -26,6 +26,7 @@ fn config_with_mode(endpoint: String, _mode: u32) -> Config {
     Config {
         backend: "remote".into(),
         pull: false,
+        pull_private: false,
         allowlist: vec![endpoint.clone()],
         endpoint,
         token_file: token,
@@ -528,6 +529,97 @@ async fn flagged_query_and_document_never_leave_the_host() {
         .unwrap();
     assert_eq!(seen.lock().unwrap().len(), 1);
     task.abort();
+}
+
+fn private_scan() -> Arc<dyn scan::Scanner> {
+    Arc::new(Fixed(Scan::Private {
+        ruleset: "test-rules".into(),
+        rules: vec!["home-path".into()],
+    }))
+}
+
+/// S18: private text may reach an embedder only at a loopback address.
+#[tokio::test]
+async fn private_text_goes_only_to_a_loopback_endpoint() {
+    let (url, seen, task) = fake("test-digest").await;
+    let endpoint = HttpEmbedder::new(config(url.clone()), private_scan()).unwrap();
+    endpoint
+        .embed(Kind::Query, vec!["query".into()], QUERY_DEADLINE)
+        .await
+        .unwrap();
+    endpoint
+        .embed(Kind::Document, vec!["body".into()], DOCUMENT_DEADLINE)
+        .await
+        .unwrap();
+    let runtime = Runtime::new(config(url), private_scan()).unwrap();
+    runtime
+        .documents(vec![("body".into(), "private".into())])
+        .await
+        .unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 3);
+    task.abort();
+    // A private-network address on either backend, and a remote name over
+    // HTTP or HTTPS, are refused before any lookup or connection. A lookup or
+    // connect attempt would end as embedder-unavailable or endpoint-refused.
+    let lan = "http://10.0.0.5:9/api/embed".to_string(); // <!-- content-guard: allow private-ipv4 -->
+    for (backend, endpoint_url) in [
+        ("local", lan.clone()),
+        ("remote", lan),
+        ("remote", "http://embed.example.com/api/embed".to_string()),
+        (
+            "remote",
+            "https://embed.example.com/v1/embeddings".to_string(),
+        ),
+    ] {
+        let mut c = config(endpoint_url.clone());
+        c.backend = backend.into();
+        let endpoint = HttpEmbedder::new(c.clone(), private_scan()).unwrap();
+        for kind in [Kind::Query, Kind::Document] {
+            let reason = endpoint
+                .embed(kind, vec!["text".into()], QUERY_DEADLINE)
+                .await
+                .unwrap_err()
+                .reason;
+            assert_eq!(reason, "content-private", "{backend} {endpoint_url}");
+        }
+        let runtime = Runtime::new(c.clone(), private_scan()).unwrap();
+        assert_eq!(
+            runtime.query("text").await.unwrap_err().reason,
+            "content-private"
+        );
+        assert!(!runtime.breaker_open(), "{backend} {endpoint_url}");
+        // A stored private version is refused without reaching the embedder,
+        // even when a fresh scan would pass.
+        let runtime = Runtime::new(c, clean()).unwrap();
+        assert_eq!(
+            runtime
+                .documents(vec![("body".into(), "private".into())])
+                .await
+                .unwrap_err()
+                .reason,
+            "content-private"
+        );
+    }
+}
+
+#[test]
+fn private_text_needs_a_pinned_loopback_address() {
+    let url = |s: &str| url::Url::parse(s).unwrap();
+    let lan: std::net::IpAddr = "192.168.1.20".parse().unwrap(); // <!-- content-guard: allow private-ipv4 -->
+    let v4: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    let local = url("http://localhost:8080/api/embed");
+    assert!(private_permitted(&local, None));
+    assert!(private_permitted(&local, Some(v4)));
+    assert!(!private_permitted(&local, Some(lan)));
+    assert!(!private_permitted(
+        &url("http://10.0.0.5/api/embed"), // <!-- content-guard: allow private-ipv4 -->
+        None
+    ));
+    assert!(!private_permitted(
+        &url("https://localhost/v1/embeddings"),
+        None
+    ));
+    assert!(private_permitted(&url("https://[::1]/v1/embeddings"), None));
 }
 
 #[test]
