@@ -363,3 +363,103 @@ def test_identity_requires_the_keys_the_hub_requires():
             embed.identity({k: v for k, v in config.items() if k != key})
     with pytest.raises(ValueError, match="query_prefix_version is required"):
         embed.identity({**config, "query_prefix_version": 0})
+
+
+@pytest.fixture
+def scripted_reply():
+    """An endpoint whose reply body and status the test sets per request."""
+    reply = {"status": 200, "body": b""}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(reply["status"])
+            self.send_header("Content-Length", str(len(reply["body"])))
+            self.end_headers()
+            self.wfile.write(reply["body"])
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/api/embed"
+    config = {
+        "name": "test-model",
+        "model_digest": "digest",
+        "dimensions": 2,
+        "query_prefix_version": 1,
+        "endpoint": url,
+        "allowlist": [url],
+        "shape": "api/embed",
+    }
+    yield config, reply
+    server.shutdown()
+    server.server_close()
+    thread.join()
+
+
+MALFORMED_REPLIES = [
+    pytest.param("api/embed", {"model_digest": "digest"}, id="missing-embeddings"),
+    pytest.param("api/embed", {"model_digest": "digest", "embeddings": 7}, id="embeddings-not-a-list"),
+    pytest.param("api/embed", {"model_digest": "digest", "embeddings": [7]}, id="row-not-a-list"),
+    pytest.param("api/embed", {"model_digest": "digest", "embeddings": [None]}, id="row-null"),
+    pytest.param("api/embed", ["not", "an", "object"], id="body-is-a-list"),
+    pytest.param("api/embed", "text", id="body-is-a-string"),
+    pytest.param("v1/embeddings", {"model_digest": "digest"}, id="missing-data"),
+    pytest.param("v1/embeddings", {"model_digest": "digest", "data": [7]}, id="entry-not-a-dict"),
+    pytest.param("v1/embeddings", {"model_digest": "digest", "data": [{"embedding": [3.0, 4.0]}]}, id="no-index"),
+    pytest.param(
+        "v1/embeddings",
+        {
+            "model_digest": "digest",
+            "data": [{"index": 0, "embedding": [3.0, 4.0]}, {"index": "1", "embedding": [3.0, 4.0]}],
+        },
+        id="mixed-index-types",
+    ),
+    pytest.param("v1/embeddings", {"model_digest": "digest", "data": [{"index": 0}]}, id="no-embedding"),
+]
+
+
+@pytest.mark.parametrize(("shape", "body"), MALFORMED_REPLIES)
+def test_worker_malformed_reply_is_an_endpoint_fault_not_a_crash(scripted_reply, shape, body):
+    config, reply = scripted_reply
+    reply["body"] = json.dumps(body).encode()
+    client = Client()
+    # One bad reply is an endpoint fault for that step: the job is released
+    # with a transient reason and step returns instead of raising.
+    assert embed.step(client, {**config, "shape": shape}, "fake-token") == (1, 0, True)
+    action, fields = client.calls[-1]
+    assert action == "embed_failed"
+    assert [f["reason"] for f in fields["failures"]] == ["embedder-unavailable"]
+    assert "embed_submit" not in dict(client.calls)
+
+
+def test_worker_loop_keeps_running_after_a_malformed_reply(scripted_reply):
+    config, reply = scripted_reply
+    reply["body"] = json.dumps(["not", "an", "object"]).encode()
+    sleeps = []
+
+    class Stop(Exception):
+        pass
+
+    class StopAfterSubmit(Client):
+        def call(self, action, **fields):
+            result = super().call(action, **fields)
+            if action == "embed_submit":
+                raise Stop
+            return result
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            # The endpoint recovers between the second backoff and the next lease.
+            reply["body"] = json.dumps({"model_digest": "digest", "embeddings": [[3.0, 4.0]]}).encode()
+
+    client = StopAfterSubmit()
+    with pytest.raises(Stop):
+        embed.serve(client, config, "fake-token", sleep=sleep)
+    # Two malformed replies back off 1 s then 2 s and the loop leases again.
+    assert sleeps == [1.0, 2.0]
+    assert [a for a, _ in client.calls].count("embed_failed") == 2

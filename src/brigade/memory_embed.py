@@ -173,9 +173,19 @@ def _exchange(conn: Any, path: str, payload: bytes, token: str, config: dict, co
     body = b"".join(chunks)
     if len(body) > config["dimensions"] * count * 32 + 8192:
         raise EndpointError("embedding response too large")
+    try:
+        return _parse_reply(body, response.getheader("x-model-digest"), config, count)
+    except (DocumentRefused, EndpointError):
+        raise
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        # A body of the wrong shape or type says the endpoint is wrong, not one
+        # document. It must not escape the step and stop the worker.
+        raise EndpointError("malformed embedding reply") from exc
+
+
+def _parse_reply(body: bytes, header: str | None, config: dict, count: int) -> list:
     data = json.loads(body)
-    digest = data.get("model_digest", response.getheader("x-model-digest"))
-    header = response.getheader("x-model-digest")
+    digest = data.get("model_digest", header)
     if digest != config["model_digest"] or (header is not None and header != digest):
         raise EndpointError("digest-mismatch", "digest-mismatch")
     # A reply whose rows do not match the inputs one for one is refused as
