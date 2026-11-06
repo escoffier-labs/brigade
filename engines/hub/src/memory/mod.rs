@@ -480,7 +480,17 @@ impl Store {
         }
         self.dense_fault
             .store(!ok, std::sync::atomic::Ordering::SeqCst);
-        self.refresh_coverage().await;
+        if ok {
+            // The load read one snapshot, so a vector committed during the
+            // scan skipped `after_commit` (no matrix yet) and is not in it.
+            // Replay that tail on a fresh reader now. A failure here keeps
+            // the installed matrix, and the next commit replays the same tail.
+            if self.refresh_dense().await.is_err() {
+                self.refresh_coverage().await;
+            }
+        } else {
+            self.refresh_coverage().await;
+        }
         ok
     }
     /// Startup for hybrid mode: load the matrix, then start the scheduler.
@@ -643,7 +653,17 @@ impl Store {
                         json!({"mode": "hybrid", "effective": "lexical-fallback", "state": "degraded", "reason": ALL_FAILED})
                     } else {
                         let complete = coverage.complete();
-                        json!({"mode": "hybrid", "effective": if complete { "hybrid" } else { "lexical" }, "state": if complete { "ok" } else { "switching" }})
+                        // Search answers lexically while no matrix row can
+                        // score, so status says so. Covered cards with an
+                        // empty matrix mean it lags the table (`switching`).
+                        // With no covered card there is nothing to rank (`ok`).
+                        let ranks = self
+                            .dense
+                            .current(&runtime.config.id.key())
+                            .is_some_and(|m| m.has_live_rows());
+                        let hybrid = complete && ranks;
+                        let idle = complete && !ranks && coverage.covered == 0;
+                        json!({"mode": "hybrid", "effective": if hybrid { "hybrid" } else { "lexical" }, "state": if hybrid || idle { "ok" } else { "switching" }})
                     }
                 }
             },
@@ -1103,10 +1123,11 @@ impl Store {
             if !self.coverage.read().unwrap().complete() {
                 return reply;
             }
-            // An empty corpus has nothing to rank. Sending the query text to
-            // the endpoint would cost a call, and a down endpoint would flip
-            // an empty hub to degraded.
-            if matrix.rows == 0 {
+            // A matrix with no live row has nothing to rank (an empty corpus,
+            // all cards unembeddable, or every vector collected). Sending the
+            // query text to the endpoint would cost a call, and a down
+            // endpoint would flip such a hub to degraded.
+            if !matrix.has_live_rows() {
                 return reply;
             }
             match runtime.query(&query).await {
