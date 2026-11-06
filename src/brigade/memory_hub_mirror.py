@@ -33,8 +33,6 @@ STALE_TEMP_SECONDS = 10 * 60
 # Temp files carry a prefix that belongs to this tool, so a user's own `.mirror-*` file is never touched.
 TEMP_PREFIX = ".brigade-mirror-"
 _TEMP = re.compile(r"\.brigade-mirror-[a-z0-9_]{8}\.tmp")
-# The first release named them `.mirror-<8 random>.tmp`. Cleaned only inside a folder with a valid marker.
-_LEGACY_TEMP = re.compile(r"\.mirror-[a-z0-9_]{8}\.tmp")
 INDEX = "Hub Memory Index.md"
 KIND = "brigade.memory-mirror.v1"
 # Windows has no O_NOFOLLOW; _read then checks is_symlink before it opens.
@@ -93,13 +91,25 @@ def _read(path: Path) -> bytes | None:
         return stream.read()
 
 
+# Some FUSE, SMB, 9p and vboxsf mounts refuse fsync on a directory. Such a folder gets no sync, as on Windows.
+_NO_DIRECTORY_SYNC = {errno.EINVAL, errno.EBADF, errno.ENOTSUP, errno.EOPNOTSUPP}
+
+
 def _sync_directory(directory: Path) -> None:
     """Make a rename in `directory` durable. POSIX only: Windows cannot open a directory to fsync it."""
     if os.name == "nt":
         return
-    fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError as exc:
+        if exc.errno in _NO_DIRECTORY_SYNC:
+            return
+        raise
     try:
         os.fsync(fd)
+    except OSError as exc:
+        if exc.errno not in _NO_DIRECTORY_SYNC:
+            raise
     finally:
         os.close(fd)
 
@@ -316,13 +326,13 @@ def _foreign_entries(out: Path) -> bool:
 def _drop_stale_temps(out: Path) -> None:
     """Remove temp files a killed run left behind. Call only for a folder with a valid marker.
 
-    A live run holds the lock, so none is in use. Both the current prefix and
-    the first release's `.mirror-<8 random>.tmp` names go, so files from earlier
-    runs are not stranded. Any other name, such as a user's `.mirror-backup.tmp`, stays.
+    A live run holds the lock, so none is in use. Only this tool's own
+    `.brigade-mirror-<random>.tmp` names go. Any other name, such as a user's
+    `.mirror-backup.tmp`, stays.
     """
     cutoff = time.time() - STALE_TEMP_SECONDS
     for path in out.iterdir():
-        if not (_TEMP.fullmatch(path.name) or _LEGACY_TEMP.fullmatch(path.name)):
+        if not _TEMP.fullmatch(path.name):
             continue
         try:
             info = path.lstat()
@@ -457,6 +467,9 @@ def _transact(
             _atomic(out / name, desired[name])
         for name in deleted:
             (out / name).unlink(missing_ok=True)
+        if deleted:
+            # Unlinks are durable before the marker stops naming them, or a crash could leave an unowned note.
+            _sync_directory(out)
         value = _marker_value(dict.fromkeys(desired, True), notes, identity)
         if current != value:
             _atomic(out / MARKER, value.decode("utf-8"))

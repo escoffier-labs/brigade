@@ -264,7 +264,7 @@ def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: 
                     "Increase [hub] replica_max_mb and run memory hub pull"
                 )
             live.heads.update(updated)
-            if fetched:
+            if updated:
                 live.save()
     return len(fetched)
 

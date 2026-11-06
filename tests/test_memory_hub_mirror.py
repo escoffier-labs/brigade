@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import json
 import os
 import stat
@@ -1056,7 +1057,8 @@ def test_final_marker_write_is_synced(setup, monkeypatch):
     replica.save()
     events = _trace_writes(monkeypatch)
     assert run(setup)["deleted"]
-    assert events[-2:] == [f"write {mirror.MARKER}", "sync"]
+    # The unlink is synced before the marker stops naming the file, and the marker after its write.
+    assert events[-3:] == ["sync", f"write {mirror.MARKER}", "sync"]
 
 
 def test_directory_sync_fsyncs_the_folder(tmp_path, monkeypatch):
@@ -1065,6 +1067,32 @@ def test_directory_sync_fsyncs_the_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(stat.S_ISDIR(os.fstat(fd).st_mode)), real_fsync(fd))[1])
     mirror._sync_directory(tmp_path)
     assert synced == [True]
+
+
+@pytest.mark.parametrize("code", ["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EBADF"])
+@pytest.mark.parametrize("step", ["open", "fsync"])
+def test_directory_sync_skips_filesystems_that_refuse_it(tmp_path, monkeypatch, code, step):
+    real = getattr(os, step)
+
+    def refuse(*args, **kwargs):
+        if step == "open" and not stat.S_ISDIR(os.stat(args[0]).st_mode):
+            return real(*args, **kwargs)
+        raise OSError(getattr(errno, code), code)
+
+    monkeypatch.setattr(mirror.os, "name", "posix")
+    monkeypatch.setattr(os, step, refuse)
+    mirror._sync_directory(tmp_path)
+
+
+def test_directory_sync_raises_other_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(mirror.os, "name", "posix")
+
+    def broken(fd):
+        raise OSError(errno.EIO, "EIO")
+
+    monkeypatch.setattr(os, "fsync", broken)
+    with pytest.raises(OSError):
+        mirror._sync_directory(tmp_path)
 
 
 def test_directory_sync_is_skipped_on_windows(tmp_path, monkeypatch):
@@ -1089,20 +1117,23 @@ def test_users_mirror_backup_tmp_survives_init_and_later_runs(setup):
     assert keep.read_text(encoding="utf-8") == "mine"
 
 
-def test_stale_temps_of_both_prefixes_go_only_with_a_valid_marker(setup):
+def test_stale_temps_go_only_with_a_valid_marker(setup):
     *_, out, replica = setup
     card(replica)
     out.mkdir()
     old = time.time() - 11 * 60
-    names = [".brigade-mirror-abcd1234.tmp", ".mirror-abcd1234.tmp"]
-    for name in names:
-        (out / name).write_text("partial", encoding="utf-8")
-        os.utime(out / name, (old, old))
+    ours = out / ".brigade-mirror-abcd1234.tmp"
+    users = [out / ".mirror-abcd1234.tmp", out / ".mirror-backup01.tmp"]
+    for path in (ours, *users):
+        path.write_text("partial", encoding="utf-8")
+        os.utime(path, (old, old))
     # No marker yet (a first run on an existing folder): nothing is deleted.
     run(setup, init=True)
-    assert all((out / name).exists() for name in names)
+    assert ours.exists() and all(path.exists() for path in users)
     run(setup)
-    assert not any((out / name).exists() for name in names)
+    # Only this tool's own prefix goes. Names a user could pick stay, however old.
+    assert not ours.exists()
+    assert all(path.read_text(encoding="utf-8") == "partial" for path in users)
 
 
 def test_first_run_killed_before_its_marker_reruns_without_init(setup):

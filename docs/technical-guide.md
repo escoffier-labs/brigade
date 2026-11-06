@@ -2620,9 +2620,9 @@ deletes it or counts it as a foreign file.
 A run that cannot get the lock exits busy with code 75. Temp files are named
 `.brigade-mirror-<random>.tmp`. A real run removes those older than 10 minutes,
 which a killed run leaves behind, and only in a folder that already has a valid
-marker. It also removes files from the first release's `.mirror-<8 random>.tmp`
-names in such a folder, so earlier runs strand nothing. Any other name, such as
-a user's `.mirror-backup.tmp`, is never touched. A folder holding only the lock
+marker. Any other name, such as a user's `.mirror-backup.tmp` or
+`.mirror-backup01.tmp`, is never touched. A destination filesystem that refuses
+to sync a folder (some FUSE, SMB and 9p mounts) runs without that sync. A folder holding only the lock
 and `.brigade-mirror-*.tmp` files, left by a first run killed before its marker,
 counts as empty, so the next run needs no `--init`.
 
