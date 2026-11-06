@@ -109,8 +109,9 @@ def _refusal(exc: hubc.HubRefusal, *, json_output: bool) -> int:
 
 
 NO_NODE_CREDENTIAL = (
-    "no node token is configured (BRIGADE_FLEET_NODE_TOKEN or [fleet] node_token_file); "
-    "hub memory never reads the shared admin token (BRIGADE_FLEET_TOKEN)"
+    "no node token is configured (BRIGADE_FLEET_NODE_TOKEN or [fleet] node_token_file, or a memory hub "
+    "override: [memory_hub] in ~/.brigade/fleet.toml, or BRIGADE_MEMORY_HUB_URL with "
+    "BRIGADE_MEMORY_HUB_TOKEN_FILE); hub memory never reads the shared admin token (BRIGADE_FLEET_TOKEN)"
 )
 
 
@@ -427,7 +428,9 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
             hub = report["hub"]
             lines = [f"memory hub: mode {report['mode']}" + (f", scope {report['scope']}" if report["scope"] else "")]
             if "hub_source" in report:
-                lines.append(f"hub url: {report.get('hub_url') or 'none'} (source: {report['hub_source']})")
+                lines.append(
+                    f"hub url: {hubc.display_url(report.get('hub_url') or '') or 'none'} (source: {report['hub_source']})"
+                )
             if hub.get("available"):
                 lines.append(
                     f"hub: {hub.get('cards')} card(s), seq {hub.get('seq')}, indexed {hub.get('indexed_seq')}, "

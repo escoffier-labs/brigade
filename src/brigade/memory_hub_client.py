@@ -7,25 +7,36 @@ A workspace opts in through a `[hub]` table in `.brigade/memory-care.toml`:
     scope = "repo:me/app"               # where `sync` publishes; fleet, repo:<id> or principal:<id>
     read_scopes = ["repo:me/app"]       # what search, card reads and the replica may use; default [scope]
     replica_max_mb = 50                 # cap on the replica's heads.json
-    hub_url = "https://hub.example.test:3774"      # optional: memory's own hub, with node_token_file
-    node_token_file = "~/.brigade/memory-node-token"  # optional: needs hub_url
+
+A workspace file never chooses where a credential goes, so `[hub]` refuses
+`hub_url` and `node_token_file`. Memory can still use its own hub, set per user
+in `~/.brigade/fleet.toml` (the file `[fleet]` lives in, under `BRIGADE_HOME`
+when that is set):
+
+    [memory_hub]
+    hub_url = "https://hub.example.test:3774"
+    node_token_file = "~/.brigade/memory-node-token"
 
 Which hub memory talks to, from highest precedence:
 
 1. `BRIGADE_MEMORY_HUB_URL` and `BRIGADE_MEMORY_HUB_TOKEN_FILE`, set together.
-2. `[hub] hub_url` and `[hub] node_token_file`, set together, in the workspace.
+   The token file path must be absolute.
+2. `[memory_hub] hub_url` and `node_token_file`, set together. A leading `~`
+   expands, and the path must then be absolute.
 3. The fleet settings: `[fleet] hub_url` (or `BRIGADE_FLEET_HUB_URL`) and this
    machine's node token (`BRIGADE_FLEET_NODE_TOKEN` or `[fleet] node_token_file`).
 
 A memory override replaces both fleet values for hub memory only, so fleet
 coordination can stay on one hub while memory lives on another. `brigade fleet`
 commands never read it. The override's token file must be a private, owned
-regular file (the check the message credentials use), a relative path resolves
-against the workspace, and the URL gets the fleet hub URL's scheme rule: https,
-or http on loopback. The replica is keyed by hub identity, so pointing memory at
-another hub discards the old replica and rebuilds it. `HubSettings.source` says
-which of the three won (`env`, `[hub]` or `fleet`), and `memory hub status`
-reports it.
+regular file holding 32 to 512 URL-safe characters (the check the message
+credentials use), and it must not be a fleet credential: a token equal to the
+fleet node or admin token, or a file that is `[fleet] node_token_file` or
+`token_file`, is refused. The URL gets the fleet hub URL's scheme rule (https,
+or http on loopback) and may not carry a user name or password. The replica is
+keyed by hub identity, so pointing memory at another hub discards the old
+replica and rebuilds it. `HubSettings.source` says which of the three won
+(`env`, `[memory_hub]` or `fleet`), and `memory hub status` reports it.
 
 The client never reads the shared admin token (`BRIGADE_FLEET_TOKEN`): without a
 node token the hub client is unavailable. The node-token slot can still hold
@@ -64,7 +75,9 @@ CALL_TIMEOUT_SECONDS = 10.0
 DEFAULT_REPLICA_MAX_MB = 50
 ENV_HUB_URL = "BRIGADE_MEMORY_HUB_URL"
 ENV_HUB_TOKEN_FILE = "BRIGADE_MEMORY_HUB_TOKEN_FILE"
-SOURCE_ENV, SOURCE_TABLE, SOURCE_FLEET = "env", "[hub]", "fleet"
+SOURCE_ENV, SOURCE_TABLE, SOURCE_FLEET = "env", "[memory_hub]", "fleet"
+MEMORY_HUB_TABLE = "memory_hub"
+_OVERRIDE_KEYS = ("hub_url", "node_token_file")
 READ_SCOPES_MAX = 64
 # Answers that say "not now" rather than "no": they spool and use the replica.
 _UNAVAILABLE_STATUSES = {408, 429}
@@ -110,7 +123,7 @@ class HubSettings:
     replica_max_bytes: int = DEFAULT_REPLICA_MAX_MB * 1024 * 1024
     hub_url: str = ""
     token: str = field(default="", repr=False)
-    source: str = SOURCE_FLEET  # where hub_url and token came from: env, [hub] or fleet
+    source: str = SOURCE_FLEET  # where hub_url and token came from: env, [memory_hub] or fleet
 
     @property
     def enabled(self) -> bool:
@@ -119,8 +132,8 @@ class HubSettings:
 
 ADMIN_CREDENTIAL_REFUSAL = (
     "the hub says this credential is its admin token; hub memory runs only as a node or principal "
-    "credential, so set BRIGADE_FLEET_NODE_TOKEN or [fleet] node_token_file (or the memory hub override's "
-    "node_token_file) to this machine's node token"
+    "credential, so set BRIGADE_FLEET_NODE_TOKEN or [fleet] node_token_file (or the memory hub override, "
+    "[memory_hub] node_token_file or BRIGADE_MEMORY_HUB_TOKEN_FILE) to this machine's node token"
 )
 
 
@@ -191,33 +204,117 @@ def _read_scopes(table: dict[str, Any], scope: str | None) -> tuple[str, ...]:
     return tuple(dict.fromkeys(raw))
 
 
-def _table_override(table: dict[str, Any]) -> tuple[str, str] | None:
-    """`[hub] hub_url` and `node_token_file` as given, or None when neither is set. Reads no file."""
+def display_url(url: str) -> str:
+    """`url` without a user name or password, for anything that prints it."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.username is None and parts.password is None:
+        return url
+    host = parts.netloc.rpartition("@")[2]
+    return urllib.parse.urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+
+
+def _user_config() -> dict[str, Any]:
+    """`~/.brigade/fleet.toml` (under `BRIGADE_HOME` when set), or {} when absent."""
+    from . import fleet_client
+
+    path = fleet_client.brigade_home() / fleet_client.FLEET_CONFIG_REL_PATH.name
+    try:
+        if not path.is_file():
+            return {}
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        raise HubConfigError(f"{path} could not be read") from None
+    return payload if isinstance(payload, dict) else {}
+
+
+def _table_override(config: dict[str, Any]) -> tuple[str, str] | None:
+    """`[memory_hub] hub_url` and `node_token_file` as given, or None when the table sets neither.
+
+    The table names one hub. If a workspace ever needs to choose among hubs, the
+    workspace could name one of several user-level tables; it must never carry
+    a URL or a token path itself.
+    """
+    table = config.get(MEMORY_HUB_TABLE)
+    if table is None:
+        return None
+    if not isinstance(table, dict):
+        raise HubConfigError(f"[{MEMORY_HUB_TABLE}] must be a table")
+    unknown = sorted(set(table) - set(_OVERRIDE_KEYS))
+    if unknown:
+        raise HubConfigError(f"[{MEMORY_HUB_TABLE}] has unknown keys: {', '.join(unknown)}")
     values: dict[str, str] = {}
-    for key in ("hub_url", "node_token_file"):
+    for key in _OVERRIDE_KEYS:
         if key not in table:
             continue
         raw = table[key]
         if not isinstance(raw, str) or not raw.strip():
-            raise HubConfigError(f"[hub] {key} must be a non-empty string")
+            raise HubConfigError(f"[{MEMORY_HUB_TABLE}] {key} must be a non-empty string")
         values[key] = raw.strip()
     if not values:
         return None
     for key, other in (("hub_url", "node_token_file"), ("node_token_file", "hub_url")):
         if key in values and other not in values:
-            raise HubConfigError(f"[hub] {other} is missing: hub_url and node_token_file must be set together")
+            raise HubConfigError(
+                f"[{MEMORY_HUB_TABLE}] {other} is missing: hub_url and node_token_file must be set together"
+            )
     return values["hub_url"], values["node_token_file"]
 
 
-def _memory_hub_override(table: dict[str, Any], target: Path) -> tuple[str, str, str] | None:
+def _same_file(first: Path, raw_second: str) -> bool:
+    """Whether `raw_second` (a `[fleet]` token path, as `brigade fleet` reads it) names the file `first`."""
+    candidates = [raw_second.strip()]
+    if "\\" in raw_second:
+        candidates.append(raw_second.strip().replace("\\", "/"))
+    for candidate in candidates:
+        second = Path(candidate).expanduser()
+        try:
+            if os.path.samefile(first, second):
+                return True
+        except (OSError, ValueError):
+            # samefile needs both files to exist; compare the resolved paths instead.
+            try:
+                if os.path.normcase(os.path.realpath(first)) == os.path.normcase(os.path.realpath(second)):
+                    return True
+            except (OSError, ValueError):
+                continue
+    return False
+
+
+def _refuse_fleet_credential(
+    token: str, path: Path, file_name: str, config: dict[str, Any], fleet: dict[str, str] | None
+) -> None:
+    """Refuse an override that would send a fleet credential to the memory hub. Never prints either token."""
+    from . import fleet_client
+
+    values = dict(fleet) if fleet is not None else dict(fleet_client.load_fleet_settings())
+    refusal = (
+        f"{file_name} {path}: the memory hub override must not use a fleet credential; "
+        "give memory its own node token on its own hub"
+    )
+    for key in ("node_token", "admin_token"):
+        other = str(values.get(key) or "")
+        if other and secrets.compare_digest(token.encode(), other.encode()):
+            raise HubConfigError(refusal)
+    section = config.get("fleet")
+    if isinstance(section, dict):
+        for key in ("node_token_file", "token_file"):
+            raw = section.get(key)
+            if isinstance(raw, str) and raw.strip() and _same_file(path, raw):
+                raise HubConfigError(refusal)
+
+
+def _memory_hub_override(fleet: dict[str, str] | None) -> tuple[str, str, str] | None:
     """`(hub_url, token, source)` when memory has its own hub, else None to use the fleet settings.
 
-    The environment pair outranks the `[hub]` pair. Each pair is all or nothing,
+    The environment pair outranks `[memory_hub]`. Each pair is all or nothing,
     and an empty environment value counts as unset, as for the fleet variables.
     """
     from . import fleet_client
     from .fleet_client_message_credentials import FleetMessageHubError, read_message_token_file
 
+    config = _user_config()
     env_url = os.environ.get(ENV_HUB_URL, "").strip()
     env_file = os.environ.get(ENV_HUB_TOKEN_FILE, "").strip()
     if env_url or env_file:
@@ -227,38 +324,47 @@ def _memory_hub_override(table: dict[str, Any], target: Path) -> tuple[str, str,
         ):
             if not value:
                 raise HubConfigError(f"{other} is set but {name} is missing: set both or neither")
-        url, token_file, source, url_name, file_name = env_url, env_file, SOURCE_ENV, ENV_HUB_URL, ENV_HUB_TOKEN_FILE
+        url, path, source, url_name, file_name = env_url, Path(env_file), SOURCE_ENV, ENV_HUB_URL, ENV_HUB_TOKEN_FILE
     else:
-        pair = _table_override(table)
+        pair = _table_override(config)
         if pair is None:
             return None
-        url, token_file = pair
-        source, url_name, file_name = SOURCE_TABLE, "[hub] hub_url", "[hub] node_token_file"
+        url, path = pair[0], Path(pair[1]).expanduser()
+        source = SOURCE_TABLE
+        url_name, file_name = f"[{MEMORY_HUB_TABLE}] hub_url", f"[{MEMORY_HUB_TABLE}] node_token_file"
     try:
         fleet_client._require_encrypted_or_loopback_hub(url)
     except fleet_client.FleetClientError as exc:
         raise HubConfigError(f"{url_name}: {exc}") from exc
-    if not urllib.parse.urlsplit(url).hostname:
+    parts = urllib.parse.urlsplit(url)
+    if parts.username is not None or parts.password is not None:
+        raise HubConfigError(f"{url_name} must not carry a user name or password")
+    if not parts.hostname:
         raise HubConfigError(f"{url_name} names no host")
-    path = Path(token_file).expanduser()
     if not path.is_absolute():
-        path = target / path
+        raise HubConfigError(f"{file_name} must be an absolute path")
     try:
         token = read_message_token_file(str(path), label="memory hub node")
     except FleetMessageHubError as exc:
         raise HubConfigError(f"{file_name} {path}: {exc}") from exc
+    _refuse_fleet_credential(token, path, file_name, config, fleet)
     return url.rstrip("/"), token, source
 
 
 def load_settings(target: Path, *, fleet: dict[str, str] | None = None) -> HubSettings:
-    """Settings for `target`. `fleet` stands in for the fleet settings: `hub_url` and `node_token`.
+    """Settings for `target`. `fleet` stands in for the fleet settings: `hub_url`, `node_token`, `admin_token`.
 
-    A memory override (see the module docstring) replaces the fleet values, and
-    the fleet settings are then not read at all. In `off` mode neither the
-    environment pair nor a token file is consulted.
+    A memory override (see the module docstring) replaces the fleet values. In
+    `off` mode neither the environment pair nor the user-level file is read.
     """
     table = read_hub_table(target)
-    unknown = sorted(set(table) - {"mode", "scope", "read_scopes", "replica_max_mb", "hub_url", "node_token_file"})
+    moved = [key for key in _OVERRIDE_KEYS if key in table]
+    if moved:
+        raise HubConfigError(
+            f"[hub] {moved[0]} is not read from the workspace: set hub_url and node_token_file in "
+            f"[{MEMORY_HUB_TABLE}] in ~/.brigade/fleet.toml, or set {ENV_HUB_URL} and {ENV_HUB_TOKEN_FILE}"
+        )
+    unknown = sorted(set(table) - {"mode", "scope", "read_scopes", "replica_max_mb"})
     if unknown:
         raise HubConfigError(f"[hub] has unknown keys: {', '.join(unknown)}")
     mode = hub_mode(target)
@@ -273,10 +379,9 @@ def load_settings(target: Path, *, fleet: dict[str, str] | None = None) -> HubSe
     max_mb = table.get("replica_max_mb", DEFAULT_REPLICA_MAX_MB)
     if not isinstance(max_mb, int) or isinstance(max_mb, bool) or max_mb < 1:
         raise HubConfigError("[hub] replica_max_mb must be a positive integer")
-    _table_override(table)  # a half-set pair is a config error even while memory is off
     if mode == "off":
         return HubSettings(mode=mode, scope=scope, read_scopes=read_scopes, replica_max_bytes=max_mb * 1024 * 1024)
-    override = _memory_hub_override(table, target)
+    override = _memory_hub_override(fleet)
     if override is not None:
         hub_url, token, source = override
     else:
