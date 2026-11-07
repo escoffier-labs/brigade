@@ -132,6 +132,26 @@ impl Telemetry {
                 None => format!("# HELP brigade_hub_{name} {none}\nbrigade_hub_{name} NaN\n"),
             };
         }
+        if let Some(writer) = self.writer.lock().unwrap().as_ref() {
+            let (bounds, counts) = writer.commit_histogram();
+            text += "# HELP brigade_hub_writer_commit_duration_seconds Every FULL COMMIT attempt, failures included.\n# TYPE brigade_hub_writer_commit_duration_seconds histogram\n";
+            let mut total = 0;
+            for (bound, count) in bounds.into_iter().zip(counts) {
+                total += count;
+                let bound = if bound.is_infinite() {
+                    "+Inf".into()
+                } else {
+                    bound.to_string()
+                };
+                text += &format!(
+                    "brigade_hub_writer_commit_duration_seconds_bucket{{le=\"{bound}\"}} {total}\n"
+                );
+            }
+            text += &format!(
+                "brigade_hub_writer_commit_duration_seconds_count {total}\nbrigade_hub_writer_commit_duration_seconds_sum {}\n",
+                writer.commit_sum_seconds()
+            );
+        }
         for (name, help, missing, probes) in [
             (
                 "reader_queue_depth",
