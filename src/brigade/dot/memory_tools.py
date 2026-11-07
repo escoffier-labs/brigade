@@ -8,8 +8,11 @@ import os
 from pathlib import Path, PurePath
 import re
 import stat
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator
 from uuid import uuid4
+from ..fleet_client import FleetClientError
+from ..fleet_client_message_credentials import MessageAuthority
 from .contracts import MAX_CARD_FILE_BYTES, DotError, require
 from .hub_tools import BRIGADE_TIMEOUT, MAX_SMALL_CAPTURE
 from .process import CommandRunner, child_environment, child_path, parse_json_bytes
@@ -30,14 +33,26 @@ HANDOFF_REFUSAL_CODES = frozenset(
         "memory_client_event_expired",
         "memory_client_event_conflict",
         "memory_card_too_large",
+        # Rewrite the text (blocked), or try again later (scan failed): the caller needs to tell them apart.
+        "memory_content_blocked",
+        "memory_scan_failed",
     }
 )
 POLICY_PATHS = (Path(".codex/AGENTS.md"), Path("AGENTS.md"), Path("ai-tools/AGENTS.md"))
 
 
 class MemoryTools:
-    def __init__(self, runtime: Runtime, *, commands: CommandRunner, profile: ConnectorProfile = DOT) -> None:
+    def __init__(
+        self,
+        runtime: Runtime,
+        *,
+        commands: CommandRunner,
+        profile: ConnectorProfile = DOT,
+        authority: Callable[[], MessageAuthority] | None = None,
+    ) -> None:
         self.runtime, self.commands, self.profile = runtime, commands, profile
+        # A principal profile reads and files handoffs under the authority the listener pinned at startup.
+        self._authority = authority
         self.workspace = runtime.paths.workspace
         self.cards = self.workspace / "memory" / "cards"
         self.handoff_inbox = self.workspace / profile.handoff_inbox
@@ -45,44 +60,74 @@ class MemoryTools:
         self._path = child_path(runtime.paths.bin)
         self.environment = child_environment(self._path)
 
-    def _child_environment(self) -> dict[str, str] | None:
-        """The child's environment, or None when a principal profile has no credential to give it.
+    def _principal_authority(self) -> MessageAuthority:
+        """The authority a principal profile's memory calls use, refused when it drifted from startup.
 
-        A principal profile (Grok Bot) reads hub memory as its own message principal, so the hub
-        override points at that principal's token file. Without it the child would fall back to the
-        host's node credential and its wider default scopes, so with hub memory on, a missing hub
-        URL fails closed. A workspace with hub memory off reads only its own local cards.
+        The listener's inbox pins the credential it authenticated at startup. Asking it for the current
+        authority rechecks the token file and hub URL against that pin, so a swapped file or a moved hub
+        is refused here, before any transport, instead of being adopted silently.
         """
+        if self._authority is not None:
+            return self._authority()
+        try:
+            return MessageAuthority.capture(str(self.runtime.hub.message_token_file))
+        except FleetClientError:
+            raise DotError("hub_credential_invalid") from None
+
+    @contextmanager
+    def _pinned_token_file(self, authority: MessageAuthority) -> Iterator[str]:
+        """A private copy of the pinned token, so a child reads exactly the authority that was just checked."""
+        state_fd = private_directory(self.runtime.paths.state_dir, create=True)
+        name = f".memory-token-{uuid4().hex}"
+        try:
+            descriptor = os.open(
+                name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=state_fd
+            )
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(authority.token.encode())
+            yield str(Path(self.runtime.paths.state_dir) / name)
+        finally:
+            try:
+                os.unlink(name, dir_fd=state_fd)
+            except OSError:
+                pass
+            os.close(state_fd)
+
+    def _run_brigade(self, tail: list[str], *, timeout: float, max_output: int) -> tuple[Any, str | None]:
+        argv = [self.runtime.paths.bin.brigade, *tail]
         if not self.profile.principal_memory:
-            return self.environment
-        from .. import fleet_client
-        from ..memory_hub_client import ENV_HUB_TOKEN_FILE, ENV_HUB_URL, HubConfigError, hub_mode
+            return self._parsed(self.commands.run(argv, timeout=timeout, max_output=max_output, env=self.environment))
+        from ..memory_hub_client import (
+            ENV_HUB_TOKEN_FILE,
+            ENV_HUB_URL,
+            ENV_REPLICA_PRINCIPAL,
+            HubConfigError,
+            hub_mode,
+        )
 
+        # Local cards are never served to this profile, so hub memory must be on, and a mode that cannot
+        # be read is never answered from the host's node credential.
         try:
-            if hub_mode(self.workspace) == "off":
-                return self.environment
+            mode = hub_mode(self.workspace)
         except (HubConfigError, ValueError, OSError):
-            return self.environment
-
-        try:
-            hub_url = fleet_client.load_fleet_settings()["hub_url"]
-        except (OSError, ValueError, fleet_client.FleetClientError):
-            return None
-        if not hub_url:
-            return None
-        return child_environment(
-            self._path, {ENV_HUB_URL: hub_url, ENV_HUB_TOKEN_FILE: str(self.runtime.hub.message_token_file)}
-        )
-
-    def _brigade_json(
-        self, tail: list[str], *, timeout: float = BRIGADE_TIMEOUT, max_output: int = MAX_SMALL_CAPTURE
-    ) -> tuple[Any, str | None]:
-        environment = self._child_environment()
-        if environment is None:
             return None, "hub_credential_unavailable"
-        result = self.commands.run(
-            [self.runtime.paths.bin.brigade, *tail], timeout=timeout, max_output=max_output, env=environment
-        )
+        if mode == "off":
+            return None, "hub_memory_required"
+        authority = self._principal_authority()
+        with self._pinned_token_file(authority) as token_file:
+            environment = child_environment(
+                self._path,
+                {
+                    ENV_HUB_URL: authority.hub,
+                    ENV_HUB_TOKEN_FILE: token_file,
+                    # Offline retrieval serves only a replica this principal pulled itself.
+                    ENV_REPLICA_PRINCIPAL: self.runtime.hub.principal,
+                },
+            )
+            return self._parsed(self.commands.run(argv, timeout=timeout, max_output=max_output, env=environment))
+
+    @staticmethod
+    def _parsed(result: Any) -> tuple[Any, str | None]:
         if result.timed_out:
             return None, "brigade_timeout"
         if result.overflow:
@@ -91,6 +136,11 @@ class MemoryTools:
         if value is None:
             return None, "brigade_unavailable"
         return value, None
+
+    def _brigade_json(
+        self, tail: list[str], *, timeout: float = BRIGADE_TIMEOUT, max_output: int = MAX_SMALL_CAPTURE
+    ) -> tuple[Any, str | None]:
+        return self._run_brigade(tail, timeout=timeout, max_output=max_output)
 
     def memory_search(self, query: str, limit: int = 10) -> dict[str, Any]:
         """`brigade memory search`. With hub memory on, it makes no hub `status` call, so an admin
@@ -107,8 +157,13 @@ class MemoryTools:
             # Hub memory is on for this workspace (S14): keep where each match came from.
             keys += ("source", "scope", "revision", "trust")
         matches = []
+        dropped_local = False
         for match in value["matches"][:limit]:
             if not isinstance(match, dict):
+                continue
+            if self.profile.principal_memory and match.get("source") not in {"hub", "replica"}:
+                # Only what this principal's own grants opened: a local workspace card is never served.
+                dropped_local = True
                 continue
             item = {key: match.get(key) for key in keys}
             if self.profile.prompt_load_scan:
@@ -140,7 +195,11 @@ class MemoryTools:
         match_count = value.get("match_count")
         payload = dict(
             query=query,
-            match_count=match_count if not self.profile.prompt_load_scan or _is_count(match_count) else None,
+            match_count=(
+                match_count
+                if not dropped_local and (not self.profile.prompt_load_scan or _is_count(match_count))
+                else None
+            ),
             matches=matches,
             workspace=str(self.workspace),
             next="Read a card with memory_card(name=<path basename without .md>).",
@@ -222,7 +281,21 @@ class MemoryTools:
             content_trust="untrusted",
         )
 
+    def _principal_card(self, name: str, offset: int, scope: str | None) -> dict[str, Any]:
+        from ..memory_hub_client import HubConfigError, hub_mode
+
+        try:
+            mode = hub_mode(self.workspace)
+        except (HubConfigError, ValueError, OSError):
+            return {"error": "hub_credential_unavailable"}
+        if mode == "off":
+            return {"error": "hub_memory_required"}
+        return self._hub_card(name, offset, scope) or {"error": "card_not_found", "name": name}
+
     def memory_card(self, name: str, offset: int = 0, scope: str | None = None) -> dict[str, Any]:
+        if self.profile.principal_memory:
+            # A principal profile never opens a local card: the hub, under its own grants, is the only source.
+            return self._principal_card(name, offset, scope)
         if scope is not None:
             # A hub match's scope: read that hub card, never a local file of the same name.
             return self._hub_card(name, offset, scope) or {"error": "card_not_found", "name": name}
@@ -282,21 +355,17 @@ class MemoryTools:
 
     def _hub_handoff(self, slug: str, content: str) -> dict[str, Any]:
         """Submit one handoff to hub `memory_handoffs` as the connector principal. Nothing else is written."""
-        from ..memory_hub_client import (
-            HubConfigError,
-            HubRefusal,
-            HubUnavailable,
-            MemoryHubClient,
-            event_id_at,
-        )
-        from ..fleet_client import FleetClientError, load_fleet_settings
-        from ..fleet_client_message_credentials import FleetMessageHubError, read_message_token_file
+        from ..memory_hub_client import HubConfigError, HubRefusal, HubUnavailable, MemoryHubClient, event_id_at
 
+        # The same structure and instruction-override lint the file path runs, before anything leaves the host.
+        _, refusal = self._lint_handoff(content.encode("utf-8"))
+        if refusal is not None:
+            return refusal
+        # The pinned authority is checked last, then used as is: no second read of the file or the hub URL.
+        authority = self._principal_authority()
         try:
-            hub_url = load_fleet_settings()["hub_url"]
-            token = read_message_token_file(str(self.runtime.hub.message_token_file), label="handoff principal")
-            client = MemoryHubClient(hub_url, token)
-        except (HubUnavailable, HubConfigError, FleetClientError, FleetMessageHubError, OSError, ValueError):
+            client = MemoryHubClient(authority.hub, authority.token)
+        except (HubUnavailable, HubConfigError):
             return {"error": "handoff_unavailable", "reason": "hub_credential_unavailable"}
         now_ms = int(self.clock().timestamp() * 1000)
         digest = hashlib.sha256(f"{slug}\n{content}".encode()).digest()
@@ -306,37 +375,20 @@ class MemoryTools:
             answer = client.call("handoff", text=content, kind=slug, client_event_id=event)
         except HubUnavailable:
             return {"error": "handoff_unavailable", "reason": "hub_unavailable"}
-        except HubRefusal as refusal:
-            code = refusal.body.get("code")
+        except HubRefusal as hub_refusal:
+            code = hub_refusal.body.get("code")
             return {"error": "handoff_refused", "code": code if code in HANDOFF_REFUSAL_CODES else "refused"}
         handoff_id = answer.get("handoff_id")
         if type(handoff_id) is not int and not isinstance(handoff_id, str):
             return {"error": "handoff_unavailable", "reason": "hub_unavailable"}
         return dict(ok=True, handoff_id=handoff_id, destination="memory_handoffs", state="pending_review")
 
-    def handoff_write(self, slug: str, content: str) -> dict[str, Any]:
-        if redact_credentials(content) != content:
-            return {"error": "content_rejected", "reason": "credential-shaped text"}
-        if self.profile.principal_memory:
-            return self._hub_handoff(slug, content)
-        moment = self.clock()
-        require(isinstance(moment, datetime) and moment.utcoffset() is not None, "clock_unavailable")
-        prefix = self.profile.handoff_prefix
-        filename = f"{moment.astimezone():%Y-%m-%d-%H%M}-{prefix}-{slug}.md"
-        inbox = trusted_directory(self.handoff_inbox, code="handoff_unavailable")
+    def _lint_handoff(self, encoded: bytes) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """`brigade handoff lint` over a private copy: `(entry, None)` when valid, else `(None, refusal)`."""
         lint_name = f"handoff-lint-{uuid4().hex}.md"
-        temporary = f".{prefix}-{uuid4().hex}.tmp"
-        lint_written = temporary_written = False
-        state_fd = None
+        state_fd = private_directory(self.runtime.paths.state_dir, create=True)
+        lint_written = False
         try:
-            state_fd = private_directory(self.runtime.paths.state_dir, create=True)
-            try:
-                os.stat(filename, dir_fd=inbox, follow_symlinks=False)
-                return {"error": "handoff_exists", "filename": filename}
-            except FileNotFoundError:
-                pass
-            encoded = content.encode("utf-8")
-            # Lint a private copy before anything appears in the ingested inbox.
             descriptor = os.open(
                 lint_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=state_fd
             )
@@ -357,19 +409,53 @@ class MemoryTools:
                 max_output=MAX_SMALL_CAPTURE,
                 env=self.environment,
             )
-            report = parse_json_bytes(result.stdout) if not (result.timed_out or result.overflow) else None
-            entries = report.get("results") if isinstance(report, dict) else None
-            if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
-                return {"error": "handoff_unavailable", "reason": "lint_unavailable"}
-            assert isinstance(report, dict)
-            entry = entries[0]
-            if entry.get("valid") is not True or report.get("valid") is not True:
-                return {
-                    "error": "handoff_invalid",
-                    "lint_errors": entry.get("errors"),
-                    "lint_warnings": entry.get("warnings"),
-                    "hints": entry.get("hints"),
-                }
+        except OSError:
+            return None, {"error": "handoff_unavailable"}
+        finally:
+            if lint_written:
+                try:
+                    os.unlink(lint_name, dir_fd=state_fd)
+                except OSError:
+                    pass
+            os.close(state_fd)
+        report = parse_json_bytes(result.stdout) if not (result.timed_out or result.overflow) else None
+        entries = report.get("results") if isinstance(report, dict) else None
+        if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+            return None, {"error": "handoff_unavailable", "reason": "lint_unavailable"}
+        assert isinstance(report, dict)
+        entry = entries[0]
+        if entry.get("valid") is not True or report.get("valid") is not True:
+            return None, {
+                "error": "handoff_invalid",
+                "lint_errors": entry.get("errors"),
+                "lint_warnings": entry.get("warnings"),
+                "hints": entry.get("hints"),
+            }
+        return entry, None
+
+    def handoff_write(self, slug: str, content: str) -> dict[str, Any]:
+        if redact_credentials(content) != content:
+            return {"error": "content_rejected", "reason": "credential-shaped text"}
+        if self.profile.principal_memory:
+            return self._hub_handoff(slug, content)
+        moment = self.clock()
+        require(isinstance(moment, datetime) and moment.utcoffset() is not None, "clock_unavailable")
+        prefix = self.profile.handoff_prefix
+        filename = f"{moment.astimezone():%Y-%m-%d-%H%M}-{prefix}-{slug}.md"
+        inbox = trusted_directory(self.handoff_inbox, code="handoff_unavailable")
+        temporary = f".{prefix}-{uuid4().hex}.tmp"
+        temporary_written = False
+        try:
+            try:
+                os.stat(filename, dir_fd=inbox, follow_symlinks=False)
+                return {"error": "handoff_exists", "filename": filename}
+            except FileNotFoundError:
+                pass
+            encoded = content.encode("utf-8")
+            # Lint a private copy before anything appears in the ingested inbox.
+            entry, refusal = self._lint_handoff(encoded)
+            if refusal is not None or entry is None:
+                return refusal or {"error": "handoff_unavailable"}
             # Publish atomically and never overwrite: write a hidden temp file, then
             # hard-link it to the final name (link fails if the name exists).
             descriptor = os.open(
@@ -406,13 +492,6 @@ class MemoryTools:
                     os.unlink(temporary, dir_fd=inbox)
                 except OSError:
                     pass
-            if lint_written:
-                try:
-                    os.unlink(lint_name, dir_fd=state_fd)
-                except OSError:
-                    pass
-            if state_fd is not None:
-                os.close(state_fd)
             os.close(inbox)
 
     def fleet_policy(self, since_hash: str | None = None) -> dict[str, Any]:

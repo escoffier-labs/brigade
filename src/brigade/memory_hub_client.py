@@ -75,6 +75,8 @@ CALL_TIMEOUT_SECONDS = 10.0
 DEFAULT_REPLICA_MAX_MB = 50
 ENV_HUB_URL = "BRIGADE_MEMORY_HUB_URL"
 ENV_HUB_TOKEN_FILE = "BRIGADE_MEMORY_HUB_TOKEN_FILE"
+# A connector that reads as its own principal sets this, so a replica pulled by any other credential never answers.
+ENV_REPLICA_PRINCIPAL = "BRIGADE_MEMORY_REPLICA_PRINCIPAL"
 SOURCE_ENV, SOURCE_TABLE, SOURCE_FLEET = "env", "[memory_hub]", "fleet"
 MEMORY_HUB_TABLE = "memory_hub"
 _OVERRIDE_KEYS = ("hub_url", "node_token_file")
@@ -163,6 +165,15 @@ def valid_scope(scope: object) -> bool:
 
 def valid_card_id(card_id: object) -> bool:
     return isinstance(card_id, str) and _CARD_ID.fullmatch(card_id) is not None
+
+
+def replica_principal_allowed(recorded: object) -> bool:
+    """False when a pinned principal is set and the replica was pulled by a different one.
+
+    Unset means no pin, the behavior of every ordinary memory command.
+    """
+    expected = os.environ.get(ENV_REPLICA_PRINCIPAL, "").strip()
+    return not expected or recorded == expected
 
 
 def read_config_text(target: Path) -> str | None:

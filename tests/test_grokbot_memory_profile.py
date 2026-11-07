@@ -346,7 +346,7 @@ class MemoryOutput(Fixture):
     def test_clean_card_and_match_carry_untrusted(self):
         (self.cards / "clean-card.md").write_text("---\ntitle: Release notes\n---\nShip on Tuesdays.\n")
         self.search_reply(self.match("clean-card", summary="Ship on Tuesdays."))
-        for profile in (GROKBOT_MEMORY, DOT, DUET):
+        for profile in (DOT, DUET):
             memory = self.memory(profile)
             card = memory.memory_card("clean-card")
             assert card["content_trust"] == "untrusted"
@@ -357,7 +357,7 @@ class MemoryOutput(Fixture):
 
     @requires_local_state
     def test_scan_hit_returns_only_the_card_id_and_rule(self):
-        memory = self.memory(GROKBOT_MEMORY)
+        memory = self.memory(DUET)
         for name, (text, rule) in BLOCKED_CARDS.items():
             (self.cards / f"{name}.md").write_text(text)
             for offset in (0, 5):
@@ -373,7 +373,7 @@ class MemoryOutput(Fixture):
             self.match("alias-hit", card_aliases=[PRIVATE_IP]),
             self.match("clean"),
         )
-        matches = self.memory(GROKBOT_MEMORY).memory_search("release")["matches"]
+        matches = self.memory(DUET).memory_search("release")["matches"]
         assert matches[:4] == [
             {"card_id": "title-hit", "blocked": "bidi-control"},
             {"card_id": "summary-hit", "blocked": "role-override"},
@@ -388,17 +388,17 @@ class MemoryOutput(Fixture):
             {**self.match("legacy-card"), "card_id": ROLE_OVERRIDE},
             {**self.match("odd-card", summary=ROLE_OVERRIDE), "card_id": "a b", "path": "memory/cards/c d.md"},
         )
-        matches = self.memory(GROKBOT_MEMORY).memory_search("release")["matches"]
+        matches = self.memory(DUET).memory_search("release")["matches"]
         assert matches == [
             {"card_id": "legacy-card", "blocked": "role-override"},
             {"card_id": None, "blocked": "role-override"},
         ]
 
     @requires_local_state
-    def test_dot_and_duet_refuse_a_scan_hit_like_the_grok_profile(self):
+    def test_dot_and_duet_refuse_a_scan_hit(self):
         text, rule = BLOCKED_CARDS["guard-card"]
         (self.cards / "guard-card.md").write_text(text)
-        for profile in (GROKBOT_MEMORY, DOT, DUET):
+        for profile in (DOT, DUET):
             assert self.memory(profile).memory_card("guard-card") == {
                 "card_id": "guard-card",
                 "blocked": rule,

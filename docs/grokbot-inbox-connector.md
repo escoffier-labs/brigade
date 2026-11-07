@@ -7,6 +7,10 @@ Dot's, Duet's or the [memory pack's](grokbot-memory-connector.md) identity,
 state or Access application. Grok Bot does X work only, so it holds no
 dispatch authority.
 
+The listener refuses to start, and `pack doctor` fails the `isolation` check, when
+the runtime shares a principal, token, state directory, Access audience or Access
+resource with any other installed Dot-family pack.
+
 The default bind is `127.0.0.1:8782`. The registry `public_route` is empty.
 Configure a dedicated public host and route `/mcp` through its own Cloudflare
 Access application to this listener.
@@ -38,6 +42,12 @@ send to a recipient the grants do not name gets the hub's v1
 that is not one of the runtime's `hub.recipients` aliases is refused the same
 way before it reaches the hub. `message_send` and `inbox_reply` share an hourly
 limit of 20.
+
+The alias check covers `message_send` only. `inbox_reply` has no local recipient
+check: it answers whoever sent the parent message, and the hub's `may_send_to`
+grants bound it. Name exact recipients in `--may-send-to` for `agent:grokbot-inbox`
+and never use a wildcard such as `*` or `agent:*`. With a wildcard grant, any agent
+that messages Grok Bot can be replied to.
 
 Enroll the principal with its grants as a runbook step. A principal enrolled
 with no `--may-send-to` can send nothing. Replace the grants later with the

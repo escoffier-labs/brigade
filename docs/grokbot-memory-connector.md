@@ -7,6 +7,10 @@ verification, wire schemas and state handling. It shares none of Dot's or
 Duet's identity, state or Access application. Its inbox side is a separate
 principal and pack: see the [Grok Bot inbox pack](grokbot-inbox-connector.md).
 
+The listener refuses to start, and `pack doctor` fails the `isolation` check, when
+the runtime shares a principal, token, state directory, Access audience or Access
+resource with any other installed Dot-family pack.
+
 The default bind is `127.0.0.1:8781`. The registry `public_route` is empty.
 Configure a dedicated public host and route `/mcp` through its own Cloudflare
 Access application to this listener.
@@ -24,20 +28,30 @@ claim, fleet, skill, messaging or capabilities tool is reachable from it.
 | `handoff_write` | Submit one Memory Handoff to the hub review queue. | Hub `memory_handoffs` only |
 
 `memory_search` and `memory_card` run the same `brigade memory` commands Dot
-and Duet use, with the prompt-load scan on. The difference is the credential.
-The connector points those commands at this pack's own message token
-(`hub.message_token_file`) instead of the host's node credential, so the
-principal's grants are the boundary, not the node's wider defaults. Set the
-workspace `[hub]` table to `mode = "read"` with `read_scopes`, and keep the
-workspace dedicated to this pack with no local cards: a local card is served
-without any hub grant. With hub memory on and no hub URL the tools fail closed
-with `hub_credential_unavailable` and never fall back to the node credential.
+and Duet use, with the prompt-load scan on. The difference is the credential
+and the source. The connector points those commands at a private copy of the
+token its listener pinned at startup (`hub.message_token_file`), not the host's
+node credential, so the principal's grants are the boundary. A token file or
+hub URL that changes after startup is refused with `hub_credential_changed`
+before any call leaves the host. Offline retrieval serves only a replica this
+principal pulled itself, never one another credential pulled.
+
+The profile never serves a local card in any mode. `memory_card` goes to the
+hub, and `memory_search` drops matches whose source is `local`. Set the
+workspace `[hub]` table to `mode = "read"` with `read_scopes`. With hub memory
+off both tools answer `hub_memory_required`, and a mode that cannot be read
+answers `hub_credential_unavailable`. `pack doctor` fails the `hub-memory` check
+when hub memory is off and the `local-cards` check when the workspace holds
+`memory/cards/*.md`.
 
 `handoff_write` posts the handoff to the hub's `handoff` action as the
 principal. The text lands in `memory_handoffs` in the `pending` state for
 review. It never writes a card, a local file or a file inbox. A credential-shaped
-value is refused before anything leaves the host, and the hub scans the text
-again. The same content inside a ten-minute window carries one idempotency id,
+value, and any text the handoff lint refuses (structure or instruction-override
+heuristics), is refused before anything leaves the host, and the hub scans the
+text again. A hub refusal comes back as `handoff_refused` with its code, so
+`memory_content_blocked` (rewrite the text) differs from `memory_scan_failed`
+(try again later). The same content inside a ten-minute window carries one idempotency id,
 so a retry after a lost answer does not file it twice. The tool answers
 `{ok, handoff_id, destination: "memory_handoffs", state: "pending_review"}`.
 

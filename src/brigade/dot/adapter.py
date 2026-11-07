@@ -386,7 +386,8 @@ def build_tools(runtime: Runtime, profile: ConnectorProfile = DOT) -> tuple[DotT
         )
         inbox = InboxTools(runtime, state, hub_inbox)
         hub = HubTools(runtime, state, commands=commands, fleet=fleet, inbox=inbox)
-        memory = MemoryTools(runtime, commands=commands, profile=profile)
+        # A principal profile's memory calls use the credential the listener pinned at startup.
+        memory = MemoryTools(runtime, commands=commands, profile=profile, authority=hub_inbox.capture)
         tools = DotTools(runtime, state, fleet=fleet, hub=hub, memory=memory, inbox=inbox, profile=profile)
         return tools, state, hub_inbox
     except Exception:

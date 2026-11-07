@@ -1118,11 +1118,14 @@ def _dispatch_grokbot(args, target: Path) -> int:
                         **({} if args.pack == "dot" else {"pack_id": args.pack}),
                     )
                     dot.run_listener(dot_config, dot_tools, dot_runtime)
-                else:
+                elif args.pack == "t3-dispatch":
                     from .. import grokbot_t3
 
                     t3_config, t3_tools = grokbot_t3.build_listener_from_target(target, **listener_kwargs)
                     grokbot_t3.run_listener(t3_config, t3_tools)
+                else:
+                    # A pack added to the choices without its own branch must not serve another pack's tools.
+                    raise grokbot_mcp.ConfigurationError("invalid")
             else:
                 config = grokbot_mcp.build_listener_config(
                     target=target,

@@ -33,7 +33,9 @@ CARDS = {
     "injection-card": ("Release notes.\n\n" + INJECTION, "classic-injection", None),
 }
 REMOTE = (DOT, DUET)
-EVERY_PROFILE = (DOT, DUET, GROKBOT_MEMORY)
+# The Grok memory profile serves hub memory only, so its scan is tested on hub shaped answers in
+# test_grokbot_s26_profiles.py. These cases use local cards, which it never serves.
+EVERY_PROFILE = (DOT, DUET)
 SHA = "ab" * 32
 
 

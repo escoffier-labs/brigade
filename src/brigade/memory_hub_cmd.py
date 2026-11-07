@@ -403,6 +403,8 @@ def _replica_card(
     replica = store.replica(target)
     if replica.watermark(client.identity) is None or not replica.meta.get("principal"):
         return None
+    if not hubc.replica_principal_allowed(replica.meta.get("principal")):
+        return None
     if unavailable.principal is not None and not replica.belongs_to(client.identity, unavailable.principal):
         return None
     if any(epoch != replica.meta.get("log_epoch") for epoch in unavailable.epochs):
