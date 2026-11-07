@@ -214,6 +214,24 @@ fn snapshot<T: ReadTx + ?Sized>(tx: &T, op: &Json) -> rusqlite::Result<Result<Js
         json!({"scope":scope,"card_id":id,"base_revision":h.revision,"before_hash":h.hash,"before_text":text,"before_trust":h.trust,"before_state":h.state,"after_text":text,"after_state":"live","pins":[]}),
     ))
 }
+fn card_diff(card: &Json) -> String {
+    let scope = string(card, "scope");
+    let id = string(card, "card_id");
+    let mut diff = blocks::diff(
+        scope,
+        id,
+        string(card, "before_text"),
+        string(card, "after_text"),
+    );
+    if card["before_state"] != card["after_state"] {
+        diff += &format!(
+            "--- a/{scope}/{id}/@state\n+++ b/{scope}/{id}/@state\n@@ -1 +1 @@\n-{}\n+{}\n",
+            string(card, "before_state"),
+            string(card, "after_state")
+        );
+    }
+    diff
+}
 /// Read-only dry run of every op. Errors carry one indexed result per op,
 /// including those that validated. No partial proposal is retained.
 fn submit<T: ReadTx + ?Sized>(
@@ -330,7 +348,7 @@ fn submit<T: ReadTx + ?Sized>(
                     return Ok(Err(format!("{}", r.body["code"])));
                 }
             }
-            if text == string(card, "after_text") {
+            if text == string(card, "after_text") && op["type"] != "merge_exact_duplicates" {
                 return Ok(Err("op has no delta".into()));
             }
             card["after_text"] = json!(text);
@@ -363,12 +381,7 @@ fn submit<T: ReadTx + ?Sized>(
     let mut diff = String::new();
     for card in by_card.values_mut() {
         card["after_hash"] = json!(ids::sha256_hex(string(card, "after_text").as_bytes()));
-        diff += &blocks::diff(
-            string(card, "scope"),
-            string(card, "card_id"),
-            string(card, "before_text"),
-            string(card, "after_text"),
-        );
+        diff += &card_diff(card);
     }
     Ok(Ok(
         json!({"base_epoch":epoch,"cards":by_card.into_values().collect::<Vec<_>>(),"ops":ops,"diff":diff,"tier":2,"rollback_of":null}),
@@ -423,7 +436,7 @@ fn stale_reason<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<Opt
 }
 fn metadata(body: &Json) -> Json {
     json!({"proposal_id":body["proposal_id"],"rollback_of":body["rollback_of"],"tier":2,"state":body["state"],"decision":body["decision"],"reason":body["reason"],
-        "cards":cards(body).iter().map(|c|json!({"scope":c["scope"],"card_id":c["card_id"],"base_revision":c["base_revision"],"before_hash":c["before_hash"],"after_hash":c["after_hash"],"pins":c["pins"].as_array().unwrap().iter().map(|p|json!({"block_id":p["block_id"],"hash":p["hash"]})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+        "cards":cards(body).iter().map(|c|json!({"scope":c["scope"],"card_id":c["card_id"],"base_revision":c["base_revision"],"before_hash":c["before_hash"],"after_hash":c["after_hash"],"before_state":c["before_state"],"after_state":c["after_state"],"pins":c["pins"].as_array().unwrap().iter().map(|p|json!({"block_id":p["block_id"],"hash":p["hash"]})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
 }
 fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::Result<()> {
     for card in cards(body) {
@@ -452,7 +465,7 @@ fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::R
 fn reply(body: &Json, status: u16) -> Reply {
     Reply::new(
         status,
-        json!({"proposal_id":body["proposal_id"],"state":body["state"],"tier":2,"diff":body["diff"],"reason":body["reason"],"log_epoch":body["base_epoch"]}),
+        json!({"proposal_id":body["proposal_id"],"state":body["state"],"tier":2,"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"log_epoch":body["base_epoch"]}),
     )
 }
 fn update(tx: &dyn WriteTx, body: &Json, p: &Prepared) -> rusqlite::Result<()> {
@@ -610,12 +623,7 @@ fn rollback(body: &Json) -> Json {
         // The exact whole-version hash pins even a removed block. Retained
         // anchors are separately checked when present in the applied bytes.
         card["pins"] = json!(blocks::pins(string(&old, "after_text")));
-        diff += &blocks::diff(
-            string(card, "scope"),
-            string(card, "card_id"),
-            string(card, "before_text"),
-            string(card, "after_text"),
-        );
+        diff += &card_diff(card);
         card.as_object_mut().unwrap().remove("applied_revision");
     }
     inverse["diff"] = json!(diff);

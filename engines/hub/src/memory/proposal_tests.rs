@@ -508,3 +508,33 @@ async fn policy_change_since_open_stales_the_decision() {
     assert_eq!(r.body["reason"], "policy_changed");
     assert_eq!(card(&h, "fleet", "a").await, before);
 }
+
+#[tokio::test]
+async fn duplicate_merge_can_retire_a_source_when_keeper_metadata_already_matches() {
+    let h = Hub::with(clean(), None);
+    let a = h
+        .put(
+            ADMIN_TOKEN,
+            "fleet",
+            "a",
+            None,
+            &format!("---\naliases: [\"fleet/b\"]\nevidence: []\n---\n{OLD}\n"),
+        )
+        .await;
+    let b = h.put(ADMIN_TOKEN, "fleet", "b", None, OLD).await;
+    let mut merge = op("fleet", "a", rev(&a));
+    merge["type"] = json!("merge_exact_duplicates");
+    merge.as_object_mut().unwrap().remove("text");
+    merge["other_card"] = json!({"scope":"fleet","card_id":"b","base_revision":rev(&b)});
+    let opened = submit(&h, ADMIN_TOKEN, vec![merge]).await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    assert!(opened.body["diff"].as_str().unwrap().contains("+retired"));
+    assert_eq!(
+        decide(&h, ADMIN_TOKEN, &opened.body["proposal_id"])
+            .await
+            .body["state"],
+        "applied"
+    );
+    assert_eq!(card(&h, "fleet", "b").await["state"], "retired");
+    assert_eq!(card(&h, "fleet", "a").await["revision"], rev(&a));
+}

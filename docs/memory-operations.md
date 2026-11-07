@@ -516,7 +516,8 @@ proof counts or authorize auto-apply. Attestation arrives in S19e. Duplicate
 merges retire the other card and retain its content in revision history.
 
 A submission contains 1 to 64 ops over at most eight cards. The hub computes a
-unified diff against the base bytes and scans op text and resulting card text
+unified diff against the base bytes, with `/@state` hunks for retirement or
+revival, and scans op text and resulting card text
 with the same current rules as `put`. Any invalid op refuses the whole request
 with `422 memory_proposal_invalid` and indexed validation results. Nothing is
 stored. A valid submission returns `201` with `proposal_id`, `state: pending`,
