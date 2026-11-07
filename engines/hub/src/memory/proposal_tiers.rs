@@ -78,7 +78,7 @@ pub fn classify<T: ReadTx + ?Sized>(
             "SELECT scan_state FROM memory_card_revisions WHERE scope=?1 AND card_id=?2 AND revision=?3",
             &[ops::t(string(card, "scope")), ops::t(string(card, "card_id")), rusqlite::types::Value::Integer(head.revision)],
         )?;
-        if !rows.first().is_some_and(|r| ops::s(&r[0]) == "clean")
+        if rows.first().is_none_or(|r| ops::s(&r[0]) != "clean")
             || !clean(scanner, string(card, "before_text"))
             || !clean(scanner, string(card, "after_text"))
         {
