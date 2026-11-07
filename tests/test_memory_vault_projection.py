@@ -148,6 +148,9 @@ def test_project_vault_redacts_basic_authorization_credentials(tmp_path: Path, v
     text = (vault / "Brigade Memory" / "Cards" / "Alpha.md").read_text(encoding="utf-8")
     assert "should-not-escape" not in text
     assert "Authorization: [redacted]" in text
+    marker = vault / "Brigade Memory" / obsidian_vault.PROJECTION_MARKER
+    assert json.loads(marker.read_text(encoding="utf-8")) == {"version": 1, "writer": "obsidian-vault"}
+    assert text == (vault / "Brigade Memory" / "Cards" / "Alpha.md").read_text(encoding="utf-8")
 
 
 def test_project_vault_restores_the_vault_when_a_transaction_fails(

@@ -136,11 +136,29 @@ def _mirror_dir(directory: str) -> bool:
     return os.path.lexists(os.path.join(directory, MARKER))
 
 
+def _projection_dir(directory: str) -> bool:
+    from .obsidian_vault import PROJECTION_MARKER
+
+    return os.path.lexists(os.path.join(directory, PROJECTION_MARKER))
+
+
 def _in_mirror(start: str) -> bool:
     """True when `start` or any ancestor up to the filesystem root holds the mirror's marker."""
     current = start
     while True:
         if _mirror_dir(current):
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+
+
+def _in_projection(start: str) -> bool:
+    """True when `start` or an ancestor holds the vault projection marker."""
+    current = start
+    while True:
+        if _projection_dir(current):
             return True
         parent = os.path.dirname(current)
         if parent == current:
@@ -219,6 +237,8 @@ def discover(paths: list[Path], *, root: Path | None, excludes: list[str]) -> Di
         # The real folder as well, so a symlinked argument into a mirror's subfolder is caught.
         if _in_mirror(_anchor(top)) or _in_mirror(_anchor(os.path.realpath(top))):
             found.stats["mirror_dirs"] += 1
+        elif _in_projection(_anchor(top)) or _in_projection(_anchor(os.path.realpath(top))):
+            found.stats["projection_dirs"] += 1
         elif os.path.isdir(top):
             for directory, dirnames, filenames in os.walk(top):
                 keep = []
@@ -231,6 +251,8 @@ def discover(paths: list[Path], *, root: Path | None, excludes: list[str]) -> Di
                         found.stats["symlinks"] += 1
                     elif _mirror_dir(full):
                         found.stats["mirror_dirs"] += 1
+                    elif _projection_dir(full):
+                        found.stats["projection_dirs"] += 1
                     elif _excluded(rel, excludes):
                         found.stats["excluded"] += 1
                     else:
