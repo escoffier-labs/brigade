@@ -878,3 +878,133 @@ Safe targeted handoffs may auto-file under owner policy. `brigade ingest` stages
 The Center dashboard Memory Operations view reads `memory topology --json` and paginated `memory inventory --json`. It does not perform filesystem writes, cron installs, or card body reads beyond the inventory contract.
 
 Related: [memory care](memory-care.md), [handoff promotion](handoff-promotion.md), [outcome scoring](outcome-scoring.md), [comparison](comparison.md).
+
+### Scheduled hub reflection (S19d)
+
+For a workspace with `[hub] mode = "read"` or `"sync"`, `brigade memory reflect
+run --target <workspace>` pulls the hub log from the replica's sequence
+watermark and opens reviewed proposals. The current deterministic hub pass
+finds exact duplicate claim bodies within each configured read scope. It keeps
+opaque bytes such as code indentation, requires an existing claim anchor on
+the keeper, and pins both card revisions and the keeper's block hash. It drops
+candidates it cannot translate. A whole duplicate group must have clean scan
+states and one known trust class. Mixed-trust groups are skipped, and non-clean
+cards wait for S19e evidence attestation. The keeper is the lowest card id in
+an eligible group. Skipped ops are counted by reason without card text.
+A group missing pins or valid metadata is also skipped. A pass with no
+translatable candidates is a successful no-op. Legacy replicas refresh missing
+scan metadata from the hub before deriving candidates. Any heads still missing
+scan state after the refresh stay skipped.
+
+This pass does not invent anchors or evidence. Local reflection still derives
+its existing evidence and review candidates when hub mode is off. Hub evidence
+attestation and automatic apply remain S19e work. A hub proposal always needs
+a separate explicit `decide` before any card changes.
+
+`brigade memory reflect run --dry-run --target <workspace>` performs only hub
+reads. It can refresh the local replica, but sends no `propose`, `decide`,
+`rollback` or card write. It reports the proposed ops and current pause state,
+and leaves the failure counter and pause unchanged.
+A real run saves each proposal request id before submission, retries a lost
+response with that id, and remembers acknowledged proposals to avoid opening
+them again while their base revisions stay the same. Remembered submissions
+survive runs with a narrower scope or smaller limit under the same hub,
+principal, log epoch and configured read scopes. Ops with a recorded proposal
+id or a stored non-retryable refusal are skipped before applying the limit,
+so old submissions do not block new candidates. Stored refusals appear in
+`skipped_reasons.refused` and a card revision change makes a new op eligible.
+An expired or conflicting request id is discarded, then the op is retried once
+with a fresh id in the same run. If that retry also has an expired or
+conflicting id, the next run starts with another fresh id.
+After a lost response, replacing an expired id can open a duplicate proposal
+that a reviewer should reject.
+
+An op refusal is recorded by digest and code only. Non-auth 4xx proposal
+refusals, including `memory_content_blocked`, `memory_proposal_invalid` and
+`memory_base_mismatch`, are stored under the binding and op digest. They are
+skipped on later runs. Exceptions are 408, 429, expired or conflicting ids,
+and replies marked `retryable: true`. All 5xx replies and unavailable responses
+remain retryable. A stored refusal contains only the event id and refusal code,
+with no hub text.
+
+Other ops continue unless the error is an authorization refusal or the hub is
+unavailable. A run fails for transport, configuration or authorization errors,
+or when every op attempted in that run is newly refused after any id retry.
+Stored refusals do not count toward that rule. Mixed successful and refused
+ops count as a successful run.
+
+Install the optional daily entry with:
+
+```bash
+brigade memory care install --target <workspace> --entry memory-reflect
+brigade care status --target <workspace> --entry memory-reflect
+```
+
+The entry runs at 10:00 local time and uses the existing care installer:
+a user systemd timer on Linux, a LaunchAgent on macOS, or a printed Task
+Scheduler plan on Windows. Follow the installer's activation commands.
+Reflection retains the local reflect command's safe directory-descriptor
+requirement and refuses to run where those operations are unavailable.
+`--schedule memory-reflect=<value>` uses the selected backend's existing
+schedule syntax. The isolated launcher pins the installed Brigade package,
+passes an absolute workspace target, and invokes `memory reflect run --hub
+--scheduled`. It never invokes a decision or apply command. `--hub` refuses
+disabled hub settings rather than switching to local cards.
+
+A failure means a non-dry reflect run exits non-zero. For runs that can safely write
+workspace state, `.brigade/memory/reflect/schedule.json` records consecutive
+failures. Three failures pause scheduled reflection. While paused, scheduler
+triggers return `paused` without reading or writing the hub. The scheduler
+registration stays installed. Both `memory reflect status` and `memory care
+status` show the counter and pause. `care status` also shows them on the
+`memory-reflect` entry. Unsafe or unreadable state fails closed.
+
+To resume, fix the reported fault and run `brigade memory reflect run --hub
+--target <workspace>` manually. Only a successful non-dry manual run clears a
+pause. A scheduled success before the pause threshold resets the consecutive
+failure count. Dry runs, status queries, timer reinstalls and skipped triggers
+do not clear a pause. If state cannot be written safely, the command fails and cannot
+record that failure. Lock contention also refuses the concurrent run without
+changing the active run's counter.
+
+If `memory reflect status` reports invalid schedule state, stop concurrent
+reflect runs, inspect `.brigade/memory/reflect/schedule.json`, then remove that
+file and run reflect manually. This discards the pause counter and remembered
+submission ids, so inspect existing hub proposals before resuming to avoid
+opening duplicates. Invalid JSON, malformed bindings and malformed submission
+entries are refused cleanly without contacting the hub.
+
+Credentials use the existing hub client. Configure `[memory_hub] hub_url` and
+`node_token_file` in the user's `~/.brigade/fleet.toml`, or set both
+`BRIGADE_MEMORY_HUB_URL` and `BRIGADE_MEMORY_HUB_TOKEN_FILE`. The environment
+pair takes precedence. Reflect requires one of these explicit memory settings
+and refuses fleet node-token fallback before contacting the hub. A workspace
+may choose scopes and hub mode, but never the hub URL or credential path.
+Reflect refuses admin credentials.
+
+The installed timer sets only `PATH`. Configure `[memory_hub]` in the user's
+`fleet.toml` for scheduled jobs unless you import the environment pair into the
+user service manager. A custom `BRIGADE_HOME` must also be available there if
+the settings live outside the default user directory. The installer does not
+copy credentials or shell environment variables into unit files.
+
+An operator adds a scoped grant on the hub, for example:
+
+```json
+{"action":"grant","principal":"node:example","scope":"repo:example","rights":["read","reflect"],"client_event_id":"<26-character time-ordered id>"}
+```
+
+Use the enrolled credential's actual principal id. A grant replaces its rights
+on that scope, so retain other rights only when that principal needs them.
+The scheduled job needs `read` plus `reflect` on each target scope. It needs
+neither `write` nor `review`. Collections require their own exact scope grant.
+Read access alone allows a dry run, but never proposal submission.
+Partial `reflect` grants across configured `read_scopes` will pause the job
+after repeated authorization failures.
+
+`brigade memory reflect rollback <proposal-id> --target <workspace>` requests
+the hub's compensating proposal. This separate operator action requires `read`
+plus `review` on every original target scope. It sends the observed log epoch
+and never restores card text directly. The compensation waits for another
+explicit decision, with the same hub scope, self-review, revision and pin
+checks as S19a.

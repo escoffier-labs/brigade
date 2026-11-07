@@ -2307,8 +2307,8 @@ Local state: #1856 is open. Reflect candidates and proposal v2 ops exist
 review-only and Tier 0 otherwise. S19a added reviewed Rust hub proposals.
 S19b adds the hub classifier, Tier 1, and the policy `memory` section with
 digest binding. S19c adds diagnostic gates, including a one-card blast cap
-and a 24-hour per-card cooldown from hub proposal history. Calibration records
-and the `care install` entry remain later work. #2187 adds `brigade memory reflect preflight`, a diagnostic
+and a 24-hour per-card cooldown from hub proposal history. S19d adds the optional `memory-reflect` care entry and hub rollback requests.
+Calibration records remain later work. #2187 adds `brigade memory reflect preflight`, a diagnostic
 Tier 0 report (`brigade.memory-tier0-preflight.v1`) that always says
 `eligible=false`. S19a to S19e build the tier rules on hub memory in five PRs,
 and the local implementation of #1856 can reuse their tests.
@@ -2376,8 +2376,8 @@ constructed from the writer-loaded applied body and opens with a null decision.
 Blocked and input-specific failed scans at decide persist `held` with a reason
 and no card changes. The new `memory_proposals.decided_by` column records the
 deciding principal. The hub exposes no separate or automatic apply route.
-The Python client additions for submitting and deciding hub proposals remain a
-later slice. Its existing `memory hub proposals` commands manage local conflict
+S19d adds Python submission from scheduled reflection and a hub rollback
+command. Explicit decisions still use the hub API. Its existing `memory hub proposals` commands manage local conflict
 proposals only.
 
 S19b classifies under the memory writer lock on open and again on decide.
