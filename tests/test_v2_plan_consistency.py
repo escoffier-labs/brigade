@@ -15,7 +15,7 @@ from pathlib import Path
 
 PLAN_PATH = Path(__file__).resolve().parents[1] / "docs" / "phase-v2-hub-architecture.md"
 
-SLICE_ID = r"S\d+[a-z]?"
+SLICE_ID = r"S\d+[a-z]?(?:-\d+)?"
 SLICE_RE = re.compile(rf"\b{SLICE_ID}\b")
 RANGE_RE = re.compile(rf"\b({SLICE_ID})\s*(?:\bto\b|\.\.)\s*({SLICE_ID})\b")
 EXTERNAL_RE = re.compile(r"#\d+|phase-3|connectivity-pr")
@@ -633,3 +633,14 @@ def test_ranges_expand_in_every_position() -> None:
     problems: list[Failure] = []
     assert slice_ids("S1 to S2b", problems) == ["S1", "S2b"]
     assert problems and problems[0].kind == PARSE
+
+
+def test_split_slice_ids_remain_distinct_and_dependencies_are_checked():
+    assert slice_ids("S19e-1 S19e-2 S19e") == ["S19e-1", "S19e-2", "S19e"]
+    document = make_doc(
+        rows={"S1": ("none", "Ready."), "S19e-1": ("S1", "Ready."), "S19e-2": ("S19e-1", "Ready.")},
+        waves=["wave 0: S1", "wave 1: S19e-1", "wave 2: S19e-2"],
+        dep_list=["S1: none", "S19e-1: S1", "S19e-2: S19e-1"],
+        gate=["- Hub: S1, S19e-1 and S19e-2."],
+    )
+    assert not check_plan(parse_plan(document))

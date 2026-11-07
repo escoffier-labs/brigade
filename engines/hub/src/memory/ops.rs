@@ -15,6 +15,7 @@ pub struct Base {
 #[derive(Clone, Debug)]
 pub enum Action {
     AutoApplySwitch(bool),
+    EvidencePurge(String),
     Evidence(super::attestation::Attachment),
     Rescan {
         limit: usize,
@@ -65,6 +66,7 @@ impl Action {
     pub fn name(&self) -> &'static str {
         match self {
             Action::AutoApplySwitch(_) => "auto_apply_switch",
+            Action::EvidencePurge(_) => "evidence.purge",
             Action::Evidence(_) => "evidence.attach",
             Action::Rescan { .. } => "rescan",
             Action::Proposal(c) => c.name(),
@@ -87,7 +89,7 @@ impl Action {
     /// The grant an action needs, and the scope it needs it on.
     fn requirement(&self) -> (Option<&str>, &'static str) {
         match self {
-            Action::AutoApplySwitch(_) => (None, "admin"),
+            Action::AutoApplySwitch(_) | Action::EvidencePurge(_) => (None, "admin"),
             Action::Evidence(a) => (
                 Some(super::proposals::string(&a.request, "scope")),
                 "reflect",
@@ -127,7 +129,7 @@ impl Action {
     /// New blob bytes this command may add, for the per-batch bound.
     pub fn new_bytes(&self) -> usize {
         match self {
-            Action::AutoApplySwitch(_) => 0,
+            Action::AutoApplySwitch(_) | Action::EvidencePurge(_) => 0,
             Action::Evidence(a) => a.bytes.len(),
             Action::Proposal(c) => c.new_bytes(),
             Action::Put { text, .. } | Action::Handoff { text, .. } => text.len(),
@@ -530,7 +532,22 @@ pub fn apply(
         // Checked before compare-and-set, so a retry of a committed write gets
         // its original answer even after the card moved.
         if s(&row[0]) == p.request_digest {
-            let body = serde_json::from_str(&s(&row[2])).unwrap_or(Json::Null);
+            let mut body: Json = serde_json::from_str(&s(&row[2])).unwrap_or(Json::Null);
+            if let Action::Proposal(c) = &p.action {
+                if c.name() == "auto_apply" {
+                    if let Some(proposal) = super::proposals::load(
+                        tx,
+                        super::proposals::string(&c.request, "proposal_id"),
+                    )? {
+                        super::proposals::redact_auto_reply(
+                            tx,
+                            &p.credential,
+                            &proposal,
+                            &mut body,
+                        )?;
+                    }
+                }
+            }
             return Ok(Reply::new(int(&row[1]) as u16, body));
         }
         return Ok(error(
@@ -621,7 +638,7 @@ fn run(
                 tx,
                 p,
                 NewEvent {
-                    kind: "grant.change",
+                    kind: "memory.auto_apply_switch",
                     scope: None,
                     card_id: None,
                     changes_head: false,
@@ -635,6 +652,7 @@ fn run(
             )?;
             Ok(Reply::new(200, payload))
         }
+        Action::EvidencePurge(id) => super::attestation::purge(tx, p, id),
         Action::Evidence(a) => super::attestation::attach(tx, p, a, _authority, scanner),
         Action::Rescan {
             limit,

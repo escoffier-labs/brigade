@@ -2429,8 +2429,8 @@ required before that route can apply in production.
 | Tier 0 gate | Source of truth on the hub |
 |---|---|
 | Policy enables the op class | `memory` section of the current fleet policy revision. Its digest is bound into the proposal and re-read under the authority lock |
-| Proof: at least 3 distinct evidence ids from at least 2 sources, no contrary ids | attested evidence (S19e): distinct namespaced ids, with sources counted as distinct attesting credentials, never as names written in the proposal |
-| Sources trusted and scan-clean | the attesting credentials appear in the policy's reflect principals, and every touched version scans clean |
+| Proof: at least 3 distinct evidence ids from at least 2 sources, no contrary ids | attested evidence (S19e): distinct namespaced ids, with sources counted as distinct attesting principals other than the proposer, never as names written in the proposal |
+| Sources trusted and scan-clean | the attesting principals appear in the policy's reflect principals, and every touched version scans clean |
 | Retrieval eval gate passed | the latest R0 or R1 record for the active mode, bound to `indexed_seq`, index format, scorer version and policy revision |
 | Blast cap and per-card cooldown | `memory_events` history (`proposal.apply` and `proposal.rollback`), read inside the apply transaction |
 | Brigade is the configured memory owner | the policy's curation section names the hub. With an external owner or a handoff-only policy, reflect emits proposals and never applies |
@@ -2465,8 +2465,8 @@ Tier 0 eligibility while an explicit reviewer can accept a reviewed edit.
 The stored decision body retains this report. The reviewed apply boundary
 requires `decide: accept` for every tier. S19e-1 adds a separate `auto_apply`
 action that requires every gate, including retrieval evaluation, to pass.
-A failed automatic attempt stays pending for human review. It changes no card
-or vector. Automatic writes preserve the existing trusted class and reject
+A failed automatic attempt returns its held report without rewriting the
+proposal or appending a decision event. It changes no card or vector. Automatic writes preserve the existing trusted class and reject
 `agent-unreviewed`, flagged and non-clean inputs. Tier 1 and Tier 2 remain
 review-only. Calibration records are outside S19e-1.
 
@@ -2480,19 +2480,21 @@ Its fields are `scope`, `card_id`, `workspace_id`, `evidence_id`,
 default), `contrary` or `negative`. The principal and credential audit id come
 from authentication. A caller cannot supply either identity. The SHA-256 is
 checked against the decoded raw bytes, with no text normalization. This slice
-accepts artifacts up to 64 KiB and refuses larger artifacts. Binary artifacts
-remain stored as scan-pending and supply no proof. Blocked artifacts are refused.
+accepts artifacts up to 64 KiB and refuses larger artifacts. Only UTF-8 artifacts with a current clean scan and a nonempty ruleset are
+accepted. Binary, private, flagged and unscanned artifacts are refused.
 Events carry metadata, never artifact bytes.
 
 Proof resolves only complete ids in the proposal's `workspace_id` and the
 record's target scope and card. Suffixes and aliases never resolve. The hub
 checks credential validity, read and reflect grants, the policy principal
 allowlist, freshness, artifact digest and a current clean scan. Revocation or
-credential rotation stops earlier attestations from counting. Distinct ids
-supply the evidence count and distinct credential audit ids supply the source
-count. A live contrary or negative record on any target holds apply even when
-the proposal omits that reference. Evaluation is bounded to 64 records per
-target, with an incomplete-proof hold beyond that bound.
+credential rotation stops earlier attestations from counting. Only ids added to a changed card supply the evidence count. Distinct
+attesting principal ids other than the proposer supply the source count.
+Credential audit ids remain in the audit record. A live contrary or negative
+record on any target holds apply across every workspace, even when the
+proposal omits that reference. Supporting records remain workspace-bound.
+Evaluation reads metadata first and fetches only qualifying artifact payloads.
+More than 64 selected metadata rows hold evaluation until an admin purges records.
 
 The digest-bound `memory` policy accepts `curation_owner` as `hub`, `external`
 or `handoff-only`, and `evidence_freshness_seconds` as an integer from 1 through
@@ -2509,9 +2511,25 @@ report. Automatic apply events identify the decision mode, evaluated gates,
 policy digest and attesting credential audit ids without card text. They use
 the same compensating-proposal rollback path as reviewed applies.
 
+Attachments are refused at 64 active records per scope, card and workspace,
+or eight active records per principal per scoped card across all workspaces.
+Eight limits one principal to one eighth of a full workspace bucket.
+An admin can send `evidence.purge` with `evidence_id` and `client_event_id`.
+It tombstones the record, clears its stored artifact bytes and appends an
+`evidence.purge` audit event. Purged records supply no proof or contrary hold
+and free capacity. Their ids cannot be reused. Physical deletion remains
+blocked, and all other attestation fields remain immutable.
+
+Automatic replies require review on every target to expose proposed diffs,
+after-hashes, evidence hashes, credential audit ids, candidate and delta hashes
+or reflect principals. The hub redacts these fields before caching a reply
+and rechecks permissions on replay. It rebinds the visible evaluation digest.
+Compensating proposals are refused with 409 on the automatic route.
+
 An admin can send `auto_apply_switch` with `enabled: false` and a client event
 id. This persistent memory flag takes effect on the next automatic transaction
-without editing policy. Re-enabling it does not clear any other gate.
+without editing policy. The switch emits `memory.auto_apply_switch`.
+Re-enabling it does not clear any other gate.
 
 S19e-2 adds the trusted R0/R1 retrieval-evaluation record bound to active mode,
 `indexed_seq`, index format, scorer version and policy revision. Until then,
@@ -3551,7 +3569,7 @@ next number.
 | S19c | Tier 0 gate engine: the hub `preflight` action, blockers re-verified inside the apply transaction, the invariant tests, and auto-apply refused until S19e | S19b, #2187 | Every invariant in [Reflect](#reflect-proposals-and-promotion-on-hub-memory) that does not need attestation passes, including the Tier 1 mutation test and the test that auto-apply cannot be enabled. No op can target anything but a card block | S20, S26 |
 | S19d | Scheduled reflect on hub memory: the `memory-reflect` entry in `care install`, pause after repeated failures, `memory reflect rollback` against the hub | S19c, S14 | `memory reflect run --dry-run` writes nothing to the hub. Three failures in a row pause the timer until a success | S19e, S27 |
 | S19e-1 | Evidence attestation, curation ownership and the gated hub Tier 0 auto-apply route | S19c | Fabricated, unresolved, cross-workspace aliased and revoked evidence never counts. All gates block automatic apply, including tier, allowlists, blast cap, cooldown, trust and scans. The admin kill switch persists. Audit and compensating rollback pass through a unit-test-only retrieval seam. Production retains `retrieval_eval_unbound` | S19e-2, S27 |
-| S19e-2 | Bound retrieval evaluation record (R0/R1 bound to `indexed_seq`, index format, scorer version and policy revision) | S17 | The final retrieval gate is satisfied only by a trusted record matching the active mode, index and policy. This is the last gate before automatic apply can succeed in production | S27 |
+| S19e-2 | Bound retrieval evaluation record (R0/R1 bound to `indexed_seq`, index format, scorer version and policy revision) | S19e-1, S17 | The final retrieval gate is satisfied only by a trusted record matching the active mode, index and policy. This is the last gate before automatic apply can succeed in production | S27 |
 | S20 | Card import: dry run, idempotent, keeps card ids, deduplicates by content hash, skips `visibility: private` | S14, S18 | A second import appends nothing. The dry run lists exactly what the real run appends. Imported versions need a clean scan and the `import` grant | S16b, S17, S19b |
 | S21 | `memory answer`: client-side rerank through a read-only seat | S17 | R2 report. Off by default unless R2 passes | after 0.31.0 |
 
@@ -3582,7 +3600,8 @@ wave 5:  S10  S13b  S18
 wave 6:  S14  S15  S19a
 wave 7:  S17  S20  S19b  S23  S24  S25
 wave 8:  S16b  S19c  S26  S21
-wave 9:  S19d  S19e-1  S19e-2  S27
+wave 9:  S19d  S19e-1  S27
+wave 10: S19e-2
 after phase 3:  S11, then S12a to S12i one family per PR, S28 after S12g
 gated, outside the release:  S32 after S31, S6 and S16b, with the maintainer's go-ahead
 
@@ -3645,7 +3664,7 @@ S19b: S19a
 S19c: S19b #2187
 S19d: S19c S14
 S19e-1: S19c
-S19e-2: S17
+S19e-2: S19e-1 S17
 S20: S14 S18
 S21: S17
 S22a: none

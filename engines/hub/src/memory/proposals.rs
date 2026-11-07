@@ -509,6 +509,23 @@ fn reply(body: &Json, status: u16) -> Reply {
         json!({"proposal_id":body["proposal_id"],"state":body["state"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"rules":body["rules"],"preflight":body["preflight"],"log_epoch":body["base_epoch"]}),
     )
 }
+/// Automatic calls may be made by reflect-only callers, including replays.
+pub(super) fn redact_auto_reply<T: ReadTx + ?Sized>(
+    tx: &T,
+    who: &auth::Credential,
+    proposal: &Json,
+    response: &mut Json,
+) -> rusqlite::Result<()> {
+    if super::preflight::redact(tx, who, proposal, &mut response["preflight"])? {
+        response["diff"] = Json::Null;
+        if let Some(targets) = response["targets"].as_array_mut() {
+            for target in targets {
+                target["after_hash"] = Json::Null;
+            }
+        }
+    }
+    Ok(())
+}
 fn update(tx: &dyn WriteTx, body: &Json, p: &Prepared) -> rusqlite::Result<()> {
     tx.execute(
         "UPDATE memory_proposals SET state=?2,body=?3,decided_by=?4 WHERE proposal_id=?1",
@@ -840,6 +857,13 @@ pub fn run(
         return open(tx, p, inverse, authority, "proposal.rollback", scanner);
     }
     if cmd.name() == "auto_apply" {
+        if !body["rollback_of"].is_null() {
+            return Ok(error(
+                409,
+                "memory_rollback_review_required",
+                "compensating proposals require a reviewed decision",
+            ));
+        }
         if body["state"] != "pending" {
             return Ok(error(
                 409,
@@ -855,10 +879,12 @@ pub fn run(
             body["decision_mode"] = json!("automatic");
             body["decision_policy_revision"] = json!(authority.policy.as_ref().map(|a| a.0));
             body["decision_policy_digest"] = json!(authority.policy.as_ref().map(|a| &a.1));
+            update(tx, &body, p)?;
+            event(tx, p, "proposal.decide", &body)?;
         }
-        update(tx, &body, p)?;
-        event(tx, p, "proposal.decide", &body)?;
-        return Ok(reply(&body, 200));
+        let mut response = reply(&body, 200);
+        redact_auto_reply(tx, &p.credential, &body, &mut response.body)?;
+        return Ok(response);
     }
     let redecide = body["state"] == "stale" && body["reason"] == "policy_changed";
     if !matches!(string(&body, "state"), "pending" | "held") && !redecide {

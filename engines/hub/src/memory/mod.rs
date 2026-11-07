@@ -10,6 +10,8 @@
 //! Reviewed proposals, atomic decisions and rollback use [`proposals`] (S19a).
 mod attestation;
 #[cfg(test)]
+mod attestation_review_tests;
+#[cfg(test)]
 mod attestation_tests;
 pub mod auth;
 pub mod dense;
@@ -767,7 +769,7 @@ impl Store {
                 self.proposal_request(credential, action, map, &raw).await
             }
             "put" | "import" | "retire" | "handoff" | "capture" | "grant" | "rescan"
-            | "evidence.attach" | "auto_apply_switch" => {
+            | "evidence.attach" | "evidence.purge" | "auto_apply_switch" => {
                 match self.prepare(credential, action, map, &raw) {
                     Ok(prepared) => self.write(prepared).await,
                     Err(reply) => reply,
@@ -900,6 +902,7 @@ impl Store {
             ],
             "auto_apply" => &["action", "proposal_id", "base_epoch", "client_event_id"],
             "auto_apply_switch" => &["action", "enabled", "client_event_id"],
+            "evidence.purge" => &["action", "evidence_id", "client_event_id"],
             "evidence.attach" => &[
                 "action",
                 "scope",
@@ -962,8 +965,10 @@ impl Store {
         if let Some(k) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
             return Err(invalid(&format!("unknown field {k:?} for {action}")));
         }
-        if matches!(action, "grant" | "rescan" | "auto_apply_switch")
-            && *credential != Credential::Admin
+        if matches!(
+            action,
+            "grant" | "rescan" | "auto_apply_switch" | "evidence.purge"
+        ) && *credential != Credential::Admin
         {
             return Err(error(
                 403,
@@ -1047,6 +1052,7 @@ impl Store {
             }
         };
         let action = match action {
+            "evidence.purge" => Action::EvidencePurge(short("evidence_id", 1024, true)?.unwrap()),
             "auto_apply_switch" => Action::AutoApplySwitch(
                 map.get("enabled")
                     .and_then(Json::as_bool)

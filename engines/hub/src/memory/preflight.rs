@@ -166,7 +166,7 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         if !proof.complete {
             Some("proof_binding_incomplete")
         } else {
-            (proof.credentials.len() < 2).then_some("source_group_floor_unmet")
+            (proof.principals.len() < 2).then_some("source_group_floor_unmet")
         },
         "held",
     );
@@ -272,7 +272,7 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         "policy_limits":{"enabled_classes":memory["tier0_op_classes"].as_array().cloned().unwrap_or_default(),"reflect_principals":memory["reflect_principals"].as_array().cloned().unwrap_or_default(),"minimum_evidence_ids":3,"minimum_source_groups":2,"max_changed_paths":1,"cooldown_seconds":86400},
         "candidate_sha256":candidate,"source_sha256":sources,"config_digests":{},
         "workspace_fingerprint":null,"evidence_log_sha256":"incomplete","delta_sha256":delta,"changed_path_count":changed.len(),
-        "proof_evidence_count":if proof.complete{json!(proof.hashes.len())}else{Json::Null},"proof_source_group_count":if proof.complete{json!(proof.credentials.len())}else{Json::Null},"attesting_credentials":proof.credentials,"evidence_sha256":proof.hashes,"evaluation_sha256":null,"checks":checks
+        "proof_evidence_count":if proof.complete{json!(proof.hashes.len())}else{Json::Null},"proof_source_group_count":if proof.complete{json!(proof.principals.len())}else{Json::Null},"attesting_credentials":proof.credentials,"evidence_sha256":proof.hashes,"evaluation_sha256":null,"checks":checks
     });
     // Bind the diagnostic facts, not an unverified proof or promotion permit.
     bind_evaluation(&mut report);
@@ -334,7 +334,18 @@ pub fn read<T: ReadTx + ?Sized>(
     }
     let body = proposals::load(tx, string(request, "proposal_id"))?.unwrap();
     let mut report = evaluate(tx, &body, authority, scanner, now)?;
-    for card in proposals::cards(&body) {
+    redact(tx, who, &body, &mut report)?;
+    Ok(Reply::new(200, report))
+}
+
+/// Bind only visible diagnostics on both fresh replies and cached replays.
+pub(super) fn redact<T: ReadTx + ?Sized>(
+    tx: &T,
+    who: &Credential,
+    body: &Json,
+    report: &mut Json,
+) -> rusqlite::Result<bool> {
+    for card in proposals::cards(body) {
         if !proposals::scoped_right(tx, who, string(card, "scope"), "review")? {
             report["evidence_sha256"] = Json::Null;
             report["attesting_credentials"] = Json::Null;
@@ -342,9 +353,9 @@ pub fn read<T: ReadTx + ?Sized>(
             report["delta_sha256"] = Json::Null;
             report["policy_limits"]["reflect_principals"] = Json::Null;
             // The evaluation fingerprint must bind only the visible report.
-            bind_evaluation(&mut report);
-            break;
+            bind_evaluation(report);
+            return Ok(true);
         }
     }
-    Ok(Reply::new(200, report))
+    Ok(false)
 }

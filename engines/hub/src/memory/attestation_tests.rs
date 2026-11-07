@@ -3,7 +3,7 @@ use super::{proposal_tests::*, tests::*, *};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rusqlite::Connection;
 
-fn policy(h: &Hub) {
+pub(super) fn policy(h: &Hub) {
     let memory = json!({"auto_apply":true,"curation_owner":"hub","evidence_freshness_seconds":86400,
         "tier0_op_classes":["append_evidence"],"reflect_principals":["hub:admin","agent:dot","node-1"]});
     Connection::open(&h.hub)
@@ -14,19 +14,19 @@ fn policy(h: &Hub) {
         )
         .unwrap();
 }
-async fn attach(h: &Hub, token: &str, id: &str) -> Reply {
+pub(super) async fn attach(h: &Hub, token: &str, id: &str) -> Reply {
     h.call(token, json!({"action":"evidence.attach","scope":"fleet","card_id":"a","workspace_id":"workspace-a",
         "evidence_id":id,"artifact_kind":"verification","artifact_sha256":ids::sha256_hex(b"fixture evidence"),
         "observed_at":h.now(),"artifact_base64":STANDARD.encode(b"fixture evidence"),"client_event_id":h.id()})).await
 }
-async fn proposal(h: &Hub, revision: i64, evidence: Json) -> Reply {
+pub(super) async fn proposal(h: &Hub, revision: i64, evidence: Json) -> Reply {
     let mut o = op("fleet", "a", revision);
     o["type"] = json!("append_evidence");
     o.as_object_mut().unwrap().remove("text");
     o["evidence_ids"] = evidence;
     h.call(ADMIN_TOKEN,json!({"action":"propose","workspace_id":"workspace-a","base_epoch":h.epoch().await,"ops":[o],"client_event_id":h.id()})).await
 }
-async fn report(h: &Hub, id: &Json) -> Reply {
+pub(super) async fn report(h: &Hub, id: &Json) -> Reply {
     h.call(ADMIN_TOKEN, json!({"action":"preflight","proposal_id":id}))
         .await
 }
@@ -58,7 +58,7 @@ async fn attachments_resolve_but_revocation_and_cross_workspace_aliases_do_not_c
     assert_eq!(p.status, 201, "{p:?}");
     let r = report(&h, &p.body["proposal_id"]).await;
     assert_eq!(r.body["proof_evidence_count"], 3, "{r:?}");
-    assert_eq!(r.body["proof_source_group_count"], 2);
+    assert_eq!(r.body["proof_source_group_count"], 1);
     Connection::open(&h.hub)
         .unwrap()
         .execute(
@@ -68,19 +68,21 @@ async fn attachments_resolve_but_revocation_and_cross_workspace_aliases_do_not_c
         .unwrap();
     let r = report(&h, &p.body["proposal_id"]).await;
     assert_eq!(r.body["proof_evidence_count"], 2);
-    assert_eq!(r.body["proof_source_group_count"], 1);
+    assert_eq!(r.body["proof_source_group_count"], 0);
 }
 
-const REFS: [&str; 3] = [
-    "hub:admin/workspace-a/one",
-    "hub:admin/workspace-a/two",
+pub(super) const REFS: [&str; 3] = [
+    "node-1/workspace-a/one",
+    "node-1/workspace-a/two",
     "agent:dot/workspace-a/three",
 ];
-async fn ready() -> (Hub, Json) {
+pub(super) async fn ready() -> (Hub, Json) {
     let h = Hub::with(clean(), None);
     policy(&h);
     grant(&h, "fleet", &["read", "reflect"]).await;
     h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let r=h.call(ADMIN_TOKEN,json!({"action":"grant","principal":"node-1","scope":"fleet","rights":["read","reflect"],"client_event_id":h.id()})).await;
+    assert_eq!(r.status, 200);
     // Explicit human review establishes the trusted starting version.
     let initial = card(&h, "fleet", "a").await;
     let p = submit(
@@ -97,7 +99,7 @@ async fn ready() -> (Hub, Json) {
     h.set_clock(h.now() + 86_401_000);
     for (i, id) in REFS.iter().enumerate() {
         assert_eq!(
-            attach(&h, if i == 2 { AGENT_TOKEN } else { ADMIN_TOKEN }, id)
+            attach(&h, if i == 2 { AGENT_TOKEN } else { NODE_TOKEN }, id)
                 .await
                 .status,
             201
@@ -125,12 +127,12 @@ async fn ready() -> (Hub, Json) {
         .unwrap();
     (h, p.body["proposal_id"].clone())
 }
-async fn auto_request(h: &Hub, id: &Json) -> Json {
+pub(super) async fn auto_request(h: &Hub, id: &Json) -> Json {
     json!({"action":"auto_apply","proposal_id":id,"base_epoch":h.epoch().await,"client_event_id":h.id()})
 }
 // This seam is compiled only in the unit-test crate. Production always returns
 // retrieval_eval_unbound. There is no config, environment or wire bypass.
-async fn apply_with_eval(h: &Hub, request: Json, bound: bool) -> Reply {
+pub(super) async fn apply_with_eval(h: &Hub, request: Json, bound: bool) -> Reply {
     let store = h.store.as_ref().unwrap();
     let who = store.authenticate(ADMIN_TOKEN).await.unwrap();
     let mut p = store
@@ -236,7 +238,7 @@ async fn kill_switch_is_admin_only_and_blocks_the_next_apply() {
     );
 }
 
-fn mutate_body(h: &Hub, id: &Json, change: impl FnOnce(&mut Json)) {
+pub(super) fn mutate_body(h: &Hub, id: &Json, change: impl FnOnce(&mut Json)) {
     let db = Connection::open(h.memory()).unwrap();
     let text: String = db
         .query_row(
@@ -268,7 +270,7 @@ fn change_policy(h: &Hub, key: &str, value: Json) {
     )
     .unwrap();
 }
-fn bytes_snapshot(h: &Hub) -> Vec<String> {
+pub(super) fn bytes_snapshot(h: &Hub) -> Vec<String> {
     let db = Connection::open(h.memory()).unwrap();
     [
         "memory_cards",

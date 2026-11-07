@@ -894,16 +894,32 @@ is 64 KiB. Observation times in the future, mismatched hashes, namespace
 substitution and duplicate ids are refused. Retrying the identical client
 event id replays the original response. Artifacts are immutable and never
 returned through the log. The optional `stance` is `support`, `contrary` or
-`negative`. Contrary and negative records hold automatic apply even when
-omitted from a proposal's evidence references.
+`negative`. Contrary and negative records hold automatic apply across every
+workspace for that scoped card, even when omitted from the proposal references.
 
-Proposals may supply `workspace_id`. Only evidence resolved under that exact
-workspace, scope and card counts. Supporting proof needs three distinct ids
-and two currently valid attesting credentials named in `reflect_principals`.
+Proposals may supply `workspace_id`. Supporting evidence must resolve under
+that exact workspace, scope and card. Proof needs three newly added ids on changed cards and two
+distinct currently valid attesting principals named in `reflect_principals`,
+excluding the proposer from the source count.
 The hub rechecks grants, raw bytes, current scans, freshness and credential
 revocation at preflight and apply. Credential rotation invalidates old proof.
-The bounded reader holds when a target has more than 64 evidence records.
-Binary and other non-clean artifacts supply no proof.
+Only clean UTF-8 evidence is accepted. Attach refuses 64 active records per
+scoped card and workspace, and eight per principal per scoped card across
+workspaces. The principal cap reserves the remaining workspace slots for
+other attesters. The bounded evaluator reads metadata first and holds beyond
+64 selected rows. Artifact bytes are fetched only after cheap checks pass.
+
+An admin can tombstone an attestation and clear its payload through the API:
+
+```json
+{"action": "evidence.purge", "evidence_id": "agent:example/workspace-a/receipt", "client_event_id": "<fresh-event-id>"}
+```
+
+The `evidence.purge` event retains the record identity. Purged records cannot
+count as proof or hold a card through contrary evidence. They free quota,
+but their ids cannot be reused. Other record fields remain immutable and
+physical deletion remains blocked. The same client event id replays the
+original result. This is a logical purge, with no claim of forensic erasure.
 
 The fleet policy `memory` section supports these additional fields:
 
@@ -925,10 +941,19 @@ off, with their original digests when the new fields are omitted.
 The `auto_apply` memory action takes `proposal_id`, `base_epoch` and
 `client_event_id`, with read and reflect required on every target. Every gate
 is a blocker inside the transaction. A blocked attempt leaves the proposal
-pending for a human decision and changes no card or vector. Only Tier 0,
+pending for a human decision and changes no card or vector. The attempt
+returns its held report without rewriting the proposal or appending a
+`proposal.decide` event. Only Tier 0,
 clean cards in a previously trusted class are eligible. Automatic writes
 preserve that class. They never raise trust on `agent-unreviewed` cards.
 The one-card blast cap and 24-hour cooldown remain fixed.
+
+Automatic replies expose proposed diffs and after-hashes only to callers with
+review on every target. The same check protects evidence hashes, credential
+audit ids, candidate and delta hashes and reflect principals. Redaction runs
+before storing the idempotent reply and again on replay, with the evaluation
+digest rebound to visible fields. The automatic route refuses compensating
+proposals with 409, so rollback continues through a reviewed decision.
 
 An admin can disable automatic apply immediately through the memory API:
 
@@ -937,6 +962,7 @@ An admin can disable automatic apply immediately through the memory API:
 ```
 
 The switch persists across restarts and the next apply transaction reads it.
+Its audit event kind is `memory.auto_apply_switch`.
 `enabled: true` clears only this switch. Policy and every other gate still
 apply. Successful automatic decisions record their mode, gates, policy digest
 and credential audit ids without card text. `rollback` opens the existing
@@ -966,9 +992,9 @@ scan metadata from the hub before deriving candidates. Any heads still missing
 scan state after the refresh stay skipped.
 
 This pass does not invent anchors or evidence. Local reflection still derives
-its existing evidence and review candidates when hub mode is off. Hub evidence
-attestation and automatic apply remain S19e work. A hub proposal always needs
-a separate explicit `decide` before any card changes.
+its existing evidence and review candidates when hub mode is off. S19e-1 adds
+attestation and the gated automatic route. Production automatic apply remains
+held for S19e-2. Scheduled reflection only proposes.
 
 `brigade memory reflect run --dry-run --target <workspace>` performs only hub
 reads. It can refresh the local replica, but sends no `propose`, `decide`,
