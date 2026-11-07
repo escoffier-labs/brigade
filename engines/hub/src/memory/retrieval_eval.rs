@@ -74,9 +74,9 @@ fn member_pairs(members: &BTreeMap<String, String>) -> Vec<(&str, &str)> {
 fn identity(members: &BTreeMap<String, String>) -> Json {
     json!({"live_count":members.len(),"digest":ids::sha256_hex(ids::canonical(&json!(member_pairs(members))).as_bytes())})
 }
-fn drift_budget(live_count: usize) -> usize {
-    // Integer division floors 2%, including zero for fewer than 50 live cards.
-    (live_count / 50).min(5)
+fn drift_budget(member_count: usize) -> usize {
+    // Use the smaller snapshot/live count. Integer division floors 2%.
+    (member_count / 50).min(5)
 }
 
 #[derive(Clone, Debug)]
@@ -377,16 +377,24 @@ pub fn hold<T: ReadTx + ?Sized>(
         Err(_) => return Ok(Some("retrieval_eval_record_invalid")),
     };
     let live_members = members(tx, string(b, "scope"))?;
-    let changed: BTreeSet<_> = snapshot
+    let mut changed: BTreeSet<_> = snapshot
         .keys()
         .chain(live_members.keys())
-        .map(String::as_str)
         .filter(|id| snapshot.get(*id) != live_members.get(*id))
+        .cloned()
         .collect();
+    // Default ranking also depends on trust-gated lineage, head recency and
+    // source demotion. Hash equality cannot account for those changes. Raw
+    // ranking uses only content and membership, so unrelated trust is free.
+    if b["ranking"] == "default" {
+        let head_changes = tx.query("SELECT DISTINCT card_id FROM memory_events WHERE scope=?1 AND revision IS NOT NULL AND seq>?2",
+            &[ops::t(string(b, "scope")), Value::Integer(seq)])?;
+        changed.extend(head_changes.iter().map(|row| ops::s(&row[0])));
+    }
     for card in super::proposals::cards(proposal) {
         let id = string(card, "card_id");
         // Any target head change since indexing holds, even a content revert or
-        // a trust-only edit. Unrelated trust-only edits spend no drift budget.
+        // a trust-only edit, regardless of ranking mode.
         let revisions = tx.query("SELECT 1 FROM memory_events WHERE scope=?1 AND card_id=?2 AND revision IS NOT NULL AND seq>?3 LIMIT 1",
             &[ops::t(string(card, "scope")), ops::t(id), Value::Integer(seq)])?;
         if changed.contains(id) || !revisions.is_empty() {
@@ -395,8 +403,10 @@ pub fn hold<T: ReadTx + ?Sized>(
     }
     // Snapshot::score filters IDF and length statistics to allowed scopes.
     // The bound single-scope corpus is unaffected by writes outside it.
-    Ok((changed.len() > drift_budget(live_members.len()))
-        .then_some("retrieval_eval_drift_exceeded"))
+    Ok(
+        (changed.len() > drift_budget(snapshot.len().min(live_members.len())))
+            .then_some("retrieval_eval_drift_exceeded"),
+    )
 }
 
 /// Only review-capable diagnostics expose the selected trust-bearing record.

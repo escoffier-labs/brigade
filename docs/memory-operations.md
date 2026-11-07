@@ -1018,11 +1018,25 @@ approved fixture's 64-character lowercase SHA-256 digest. It is included in
 the policy digest and must match the report at apply. Omitting it leaves
 fixture selection to the admin. Invalid policy pins hold the gate.
 
-The drift budget allows at most `min(5, floor(live_count / 50))` changed
-cards in the bound scope. Additions, removals and content-hash changes each
-count one per card. The denominator is the current live count. Scopes with
-fewer than 50 live cards allow zero drift. Trust-only changes consume no
-budget. The existing blast cap and per-card cooldown still apply.
+The drift budget allows at most
+`min(5, floor(min(snapshot_count, live_count) / 50))` changed cards in the
+bound scope. The denominator is the smaller of the evaluated snapshot count
+and current live count, so additions cannot raise the limit. If either count
+is below 50, the budget is zero.
+
+For raw lexical R0 ranking, additions, removals and content-hash changes each
+count once per card. Unrelated trust-only changes consume no budget. For
+default R1-public ranking, the counted set also includes every in-scope card
+with a head-changing event since `indexed_seq`. Trust flips, content reverts
+and same-bytes recreates therefore spend budget even when their hashes still
+match the snapshot. A card in both sets counts once. Default ranking uses
+trust-gated lineage, head sequence and source demotion. The existing blast
+cap and per-card cooldown still apply.
+
+The budget bounds how much the corpus changes. It does not bound how much
+ranking changes. Even an allowed change can move a target out of retrieval
+results. Each replacement record used to authorize apply needs a fresh
+passing evaluation. Budgets do not stack across records.
 
 A proposal's touched cards must be outside that difference and have no
 head-changing event after `indexed_seq`, including a trust-only change or a
@@ -1036,7 +1050,7 @@ totals and document frequency use only the query's allowed scopes, so BM25
 IDF and length normalization for a single-scope evaluation are unaffected.
 The newest record per mode still binds one scope. Recording scope B replaces
 scope A's record for that mode. Multiple independent applies can share one
-record while their content changes stay within the budget.
+record while their counted changes stay within the budget.
 
 The evaluated sequence must be covered by the live index and must not
 exceed the committed log. Audit events, evidence attachments and proposal

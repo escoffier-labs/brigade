@@ -795,7 +795,7 @@ async fn retrieval_eval_snapshot_must_match_at_record_and_remains_immutable() {
 async fn retrieval_eval_budget_counts_added_removed_and_changed_once_with_live_floor_and_cap() {
     // Each case reaches its inclusive limit, then exceeds it by one card.
     for (initial, limit, kind) in [
-        (49, 1, "add"),
+        (50, 1, "add"),
         (51, 1, "remove"),
         (50, 1, "content"),
         (300, 5, "content"),
@@ -1092,4 +1092,182 @@ async fn retrieval_eval_one_record_allows_two_independent_applies_within_budget(
             .unwrap(),
         1
     );
+}
+
+/// Synthetic passing R1 metrics exercise the production hybrid record boundary
+/// without a remote embedder. The live index still drives lineage assertions.
+async fn hybrid_gate_report(h: &mut Hub) -> Json {
+    let mut r = gate_report(h).await;
+    let config = json!({"retrieval":"hybrid","embedder":{"backend":"remote","pull":true,"shape":"api/embed","name":"fixture","model_digest":ids::sha256_hex(b"model"),"dimensions":4,"input_chars":1000,"query_prefix_version":1}});
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&config)
+        .unwrap();
+    let mut candidate = r["adapters"]["hub-lexical"].clone();
+    let metrics = json!({"query_count":1,"hit_rate":0.75,"mrr":0.75,"precision_at_k":0.75,"recall_at_k":0.75});
+    candidate["overall"] = metrics.clone();
+    candidate["by_category"] = json!({"paraphrase":metrics});
+    candidate["binding"]["mode"] = json!("hybrid");
+    candidate["binding"]["ranking"] = json!("default");
+    candidate["binding"]["embedder_id"] =
+        json!(h.store.as_ref().unwrap().dense.active_id().unwrap());
+    r["adapters"].as_object_mut().unwrap().remove("hub-lexical");
+    r["adapters"]["hub-hybrid"] = candidate;
+    r["gate"]["name"] = json!("R1-public");
+    r
+}
+
+async fn default_ranked_gate_search(h: &Hub) -> Reply {
+    let r = h.call(ADMIN_TOKEN, json!({"action":"search","query":"gate","mode":"lexical","ranking":"default","scopes":["fleet"],"min_seq":h.events()})).await;
+    assert_eq!(r.status, 200);
+    r
+}
+
+async fn default_ranking_change_spends_budget(kind: &str) {
+    let (mut h, id) = ready().await;
+    let text = "---\nsupersedes: a\n---\nUse the scoped gate.";
+    let b = h.put(ADMIN_TOKEN, "fleet", "b", None, text).await;
+    assert_eq!(b.status, 201);
+    pad(&h, 48).await;
+    let r = hybrid_gate_report(&mut h).await;
+    assert_eq!(record(&h, &r).await.status, 201);
+    assert_check(&report(&h, &id).await, "retrieval_eval_satisfied");
+    let before = default_ranked_gate_search(&h).await;
+    assert!(
+        before.body["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["card_id"] == "a")
+    );
+    // Even default ranking ignores head changes outside the bound scope.
+    h.put(ADMIN_TOKEN, "repo:other", "b", None, text).await;
+    assert_check(&report(&h, &id).await, "retrieval_eval_satisfied");
+    match kind {
+        "trust" => {
+            let imported = h.call(ADMIN_TOKEN, json!({"action":"import","scope":"fleet","card_id":"b","base_revision":rev(&b),"base_epoch":h.epoch().await,"text":text,"client_event_id":h.id()})).await;
+            assert_eq!(imported.status, 201);
+            assert_eq!(imported.body["event"]["trust"], "imported");
+            // Same bytes now assert a trusted supersedes edge and hide target a.
+            let after = default_ranked_gate_search(&h).await;
+            assert!(
+                !after.body["matches"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|c| c["card_id"] == "a")
+            );
+            assert!(
+                after.body["matches"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|c| c["card_id"] == "b")
+            );
+        }
+        "recreate" => {
+            let retired = h.call(ADMIN_TOKEN, json!({"action":"retire","scope":"fleet","card_id":"b","base_revision":rev(&b),"base_epoch":h.epoch().await,"reason":"obsolete","client_event_id":h.id()})).await;
+            assert_eq!(retired.status, 200);
+            assert_eq!(
+                h.put(ADMIN_TOKEN, "fleet", "b", Some(rev(&retired)), text)
+                    .await
+                    .status,
+                201
+            );
+        }
+        _ => {
+            let edit = h
+                .put(ADMIN_TOKEN, "fleet", "b", Some(rev(&b)), "Changed.")
+                .await;
+            assert_eq!(edit.status, 201);
+            if kind == "revert" {
+                assert_eq!(
+                    h.put(ADMIN_TOKEN, "fleet", "b", Some(rev(&edit)), text)
+                        .await
+                        .status,
+                    201
+                );
+            }
+        }
+    }
+    let current = card(&h, "fleet", "b").await;
+    assert!(current["revision"].as_i64().unwrap() > rev(&b));
+    if kind != "content" {
+        assert_eq!(current["content_hash"], b.body["event"]["content_hash"]);
+    }
+    // One card spends exactly one slot, including multiple events or both a
+    // content difference and an event. A second card must exceed the budget.
+    assert_check(&report(&h, &id).await, "retrieval_eval_satisfied");
+    let other = card(&h, "fleet", "padding-000").await;
+    assert_eq!(
+        h.put(
+            ADMIN_TOKEN,
+            "fleet",
+            "padding-000",
+            other["revision"].as_i64(),
+            "Changed."
+        )
+        .await
+        .status,
+        201
+    );
+    assert_check(&report(&h, &id).await, "retrieval_eval_drift_exceeded");
+    let held = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
+    assert_eq!(held.body["state"], "pending");
+    assert!(
+        held.body["preflight"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "retrieval_eval_drift_exceeded")
+    );
+}
+
+#[tokio::test]
+async fn retrieval_eval_default_ranking_charges_non_target_trust_flip_with_new_lineage() {
+    default_ranking_change_spends_budget("trust").await;
+}
+#[tokio::test]
+async fn retrieval_eval_default_ranking_charges_non_target_revert_once() {
+    default_ranking_change_spends_budget("revert").await;
+}
+#[tokio::test]
+async fn retrieval_eval_default_ranking_charges_non_target_same_bytes_recreate_once() {
+    default_ranking_change_spends_budget("recreate").await;
+}
+#[tokio::test]
+async fn retrieval_eval_default_ranking_unions_content_and_event_changes() {
+    default_ranking_change_spends_budget("content").await;
+}
+
+#[tokio::test]
+async fn retrieval_eval_adding_card_at_249_does_not_raise_budget_to_five() {
+    let (h, id) = ready().await;
+    pad(&h, 248).await;
+    record_current(&h).await;
+    for n in 0..4 {
+        let name = format!("padding-{n:03}");
+        let c = card(&h, "fleet", &name).await;
+        assert_eq!(
+            h.put(
+                ADMIN_TOKEN,
+                "fleet",
+                &name,
+                c["revision"].as_i64(),
+                "Changed."
+            )
+            .await
+            .status,
+            201
+        );
+    }
+    assert_check(&report(&h, &id).await, "retrieval_eval_satisfied");
+    assert_eq!(
+        h.put(ADMIN_TOKEN, "fleet", "new", None, "New.")
+            .await
+            .status,
+        201
+    );
+    assert_check(&report(&h, &id).await, "retrieval_eval_drift_exceeded");
 }

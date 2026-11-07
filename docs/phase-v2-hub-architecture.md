@@ -2460,7 +2460,7 @@ required before that route can apply in production.
 | Policy enables the op class | `memory` section of the current fleet policy revision. Its digest is bound into the proposal and re-read under the authority lock |
 | Proof: at least 3 distinct evidence ids from at least 2 sources, no contrary ids | attested evidence (S19e): distinct namespaced ids, with sources counted as distinct attesting principals other than the proposer, never as names written in the proposal |
 | Sources trusted and scan-clean | the attesting principals appear in the policy's reflect principals, and every touched version scans clean |
-| Retrieval eval gate passed | the latest admin-recorded R0 or R1-public report for the configured mode, bound to `indexed_seq`, index format, scorer version, policy revision and digest, epoch, scope, corpus and weights, plus hybrid embedder identity. At most min(5, floor(live_count / 50)) content or membership changes, unchanged targets since indexing, and a 24-hour run expiry apply |
+| Retrieval eval gate passed | the latest admin-recorded R0 or R1-public report for the configured mode, bound to `indexed_seq`, index format, scorer version, policy revision and digest, epoch, scope, corpus and weights, plus hybrid embedder identity. At most min(5, floor(min(snapshot_count, live_count) / 50)) changed cards, with head events also counted for default ranking, unchanged targets since indexing, and a 24-hour run expiry apply |
 | Blast cap and per-card cooldown | `memory_events` history (`proposal.apply` and `proposal.rollback`), read inside the apply transaction |
 | Brigade is the configured memory owner | the policy's curation section names the hub. With an external owner or a handoff-only policy, reflect emits proposals and never applies |
 | Preflight agrees | the hub `preflight` action returns the #2187 report schema, filled from hub facts, read-only |
@@ -2595,16 +2595,25 @@ including when runtime search falls back to lexical. R1-public establishes no
 private model qualification. Inside the apply transaction under the hub lock,
 the sequence must be no newer than the live index or committed log. The
 scoped member difference from the stored snapshot may contain at most
-`min(5, floor(live_count / 50))` added, removed or content-changed cards, with
-each changed card counted once. Current live membership sets the denominator
-and fewer than 50 live cards allow zero drift. Excess drift holds with
+`min(5, floor(min(snapshot_count, live_count) / 50))` changed cards. The
+smaller snapshot/live count sets the denominator, so additions cannot raise
+the limit. Either count below 50 allows zero drift. For raw lexical R0,
+additions, removals and content-hash changes count. For default R1-public,
+union that difference with every in-scope card having a head-changing event
+since `indexed_seq`, including trust flips, reverts and same-bytes recreates.
+Each card counts once even if it appears in both sets. Default ranking uses
+trust-gated lineage, head sequence and source demotion. Excess drift holds with
 `retrieval_eval_drift_exceeded`. Every touched card must be outside that
 difference and have no head-changing event since `indexed_seq`, including a
 content revert or trust-only edit. Otherwise the gate holds with
 `retrieval_eval_target_drifted`.
 
-Unrelated trust-only changes spend no budget. Blast cap and cooldown remain
-in force. Cross-scope writes spend no budget either. `Snapshot::score` in
+Unrelated trust-only changes spend no budget for raw ranking. Blast cap and
+cooldown remain in force. The budget bounds how much the corpus changes.
+It does not bound how much ranking changes, and even an allowed change can
+remove a target from retrieval results. Each replacement record used to
+authorize apply needs a fresh passing evaluation. Budgets do not stack
+across records. Cross-scope writes spend no budget. `Snapshot::score` in
 `engines/hub/src/memory/index.rs` filters document frequency and sums document
 counts and token totals over only the allowed scopes. `search::run` in
 `engines/hub/src/memory/search.rs` builds that mask from requested scopes.
