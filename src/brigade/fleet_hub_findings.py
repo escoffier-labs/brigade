@@ -123,8 +123,8 @@ def _secret_key(path: Path) -> bytes:
 def _key(conn: sqlite3.Connection) -> bytes:
     """Load or create a private key under the database's writer lock."""
     explicit = os.environ.get(KEY_FILE_ENV)
-    if explicit:
-        return _secret_key(Path(explicit))
+    if explicit and explicit.strip():
+        return _secret_key(Path(explicit).expanduser())
     db = conn.execute("PRAGMA database_list").fetchone()[2]
     if not db:
         raise FindingError("findings require a persistent database", "finding_unavailable", 503)

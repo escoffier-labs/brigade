@@ -76,6 +76,7 @@ def _assert_clean_audit(payload: dict) -> None:
     audit = payload["audit"]
     assert audit["problems"] == []
     assert audit["hooks_live"] is True and audit["sweepers_paused"] is True
+    assert audit["isolated"] is True
     assert audit["instrumented_pids"] and audit["uninstrumented_holders"] == []
     assert audit["open_evidence"] == {"complete": True, "reason": None, "outside_opens": []}
     assert audit["certified"] is True
@@ -493,3 +494,22 @@ def test_autocheckpoint_setting_is_local_but_checkpoint_is_a_write():
         assert records[0][1]["target"] == "wal_checkpoint"
     finally:
         conn.close()
+
+
+@requires_inotify
+def test_prod_readonly_rejects_a_launcher_without_isolation(tmp_path):
+    state = tmp_path / "audit"
+    state.mkdir()
+    hub, result = hr.audit(
+        brigade=[sys.executable, "-m", "brigade"],
+        state_dir=state,
+        hub_cmd=hr.DEFAULT_HUB_CMD.replace("{python} -I ", "{python} "),
+        startup_timeout=30,
+        mutation=None,
+        only=["GET /health"],
+    )
+    audit = result["audit"]
+    assert audit["hooks_live"] is True
+    assert audit["isolated"] is False
+    assert audit["certified"] is False
+    assert "the audited hub did not report isolated Python startup" in audit["problems"]

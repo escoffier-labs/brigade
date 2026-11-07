@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import tempfile
+import subprocess
 import threading
 import time
 import unittest
@@ -222,6 +223,18 @@ class Driver(unittest.TestCase):
         self.assertTrue(any(r["phase"] == "warmup" for r in result["attempts"]))
         self.assertGreater(result["summary"]["attempts"], 0)
         self.assertIsNone(result["conditions"]["offered_rate"])
+
+    def test_benchmark_requires_the_matching_isolated_install(self):
+        installed = matrix.ROOT / "src/brigade/__init__.py"
+        with patch.object(matrix.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(str(installed)))) as run:
+            matrix.check_install("test-python")
+            self.assertEqual(run.call_args.args[0][:2], ["test-python", "-I"])
+        with patch.object(matrix.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, '"/tmp/other/brigade/__init__.py"')):
+            with self.assertRaisesRegex(RuntimeError, "editable Brigade install"):
+                matrix.check_install("test-python")
+        with patch.object(matrix.subprocess, "run", side_effect=subprocess.CalledProcessError(1, [])):
+            with self.assertRaisesRegex(RuntimeError, "editable Brigade install"):
+                matrix.check_install("test-python")
 
     def test_scope_has_both_limits_and_checks_effective_values(self):
         with patch("shutil.which", return_value="/usr/bin/systemd-run"):
