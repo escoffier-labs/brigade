@@ -399,6 +399,12 @@ class Memory(unittest.TestCase):
         self.assertEqual((stale.json["state"], stale.json["reason"]), ("stale", "policy_changed"))
         self.assertEqual(stale.json["decision_policy_digest"], saved.json["digest"])
         decision["client_event_id"] = hm.event_id()
+        refused = call("/memory", decision)
+        self.assertEqual((refused.status, refused.json["code"]), (409, "memory_policy_digest_mismatch"))
+        decision["expected_policy_digest"] = policy["digest"]
+        refused = call("/memory", decision)
+        self.assertEqual((refused.status, refused.json["code"]), (409, "memory_policy_digest_mismatch"))
+        decision["expected_policy_digest"] = saved.json["digest"]
         applied = call("/memory", decision)
         self.assertEqual(applied.json["state"], "applied", applied.json)
         self.assertEqual(applied.json["decision_policy_digest"], saved.json["digest"])

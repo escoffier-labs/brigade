@@ -851,6 +851,7 @@ impl Store {
                 "base_epoch",
                 "decision",
                 "client_event_id",
+                "expected_policy_digest",
             ],
             "rollback" => &["action", "proposal_id", "base_epoch", "client_event_id"],
             "put" | "import" => &[

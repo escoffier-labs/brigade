@@ -2380,10 +2380,13 @@ later slice. Its existing `memory hub proposals` commands manage local conflict
 proposals only.
 
 S19b classifies under the memory writer lock on open and again on decide.
-Submitted `tier` fields at the request and op levels are ignored. Scan-clean
+Submitted `tier` fields at the request and op levels are ignored. Op-level
+keys are stripped before storage. Scan-clean
 `append_evidence` and `merge_exact_duplicates` ops can be Tier 0 when all
-inputs have one scope and one known trust class. Replacements that only
-change ASCII spaces in plain prose are Tier 1. Other claim changes stay
+inputs have one scope and one known trust class. A duplicate merge also
+requires byte-identical front matter after excluding `aliases` and `evidence`.
+Any other differing metadata, including `status`, `expires` or `visibility`,
+forces Tier 2. Replacements that only change ASCII spaces in plain prose are Tier 1. Other claim changes stay
 Tier 2 because their meaning is not proven safe. Cross-scope or mixed-trust
 inputs, flagged content or op text, unknown trust, non-clean scans and any
 newer edit, including human edits, force Tier 2. Rollback compensations also
@@ -2393,9 +2396,10 @@ apply authority, and every proposal still requires explicit review.
 The fleet policy's optional `memory` object accepts `auto_apply` (false only),
 `tier0_op_classes` (a bounded list of `append_evidence` or
 `merge_exact_duplicates`) and `reflect_principals` (a bounded list of
-principal ids). The lists default to empty and reserve inputs for later
-gates. Unknown fields and invalid values are refused. Saving auto-apply as
-true returns 422 without storing a policy revision. Omitting the section
+principal ids). Both lists are stored and digest-bound but are not enforced
+until S19c. Setting them does not narrow Tier 0 classification today, even
+when a list is empty. The lists default to empty. Unknown fields and invalid
+values are refused. Saving auto-apply as true returns 422 without storing a policy revision. Omitting the section
 preserves older digests. A present section enters the canonical fleet policy
 digest, so edits invalidate pending acceptances.
 
@@ -2405,10 +2409,17 @@ its body, reply and event metadata, with the same digest in the event's
 `policy_digest` column. This uses the current policy under the authority lock
 for accept, reject, held and stale outcomes. No configured policy is a null
 binding. A policy change returns `stale` with `policy_changed` and changes no
-card. A fresh explicit decision may rebind a policy-stale proposal and retry
-all checks. Idempotent replay retains the first stale response. Other stale
-reasons still require a new proposal. S19c owns preflight and the remaining
-gates, S19d owns scheduling, and S19e owns attestation and auto-apply.
+card. Re-deciding a policy-stale proposal requires `expected_policy_digest`
+equal to the current authority policy digest before rebinding, for both
+accept and reject. A missing or mismatched expectation returns
+`409 memory_policy_digest_mismatch` and changes nothing. The refusal includes
+the current `policy_revision` and `policy_digest`. With no configured policy,
+explicit JSON null acknowledges absence. Normal decisions may omit the field,
+but a supplied expectation must match there too. Acceptance then retries all
+checks, including self-review, target grants and moved heads. A moved head
+leaves the proposal stale with `memory_base_mismatch`. Idempotent replay
+retains the first stale response. Other stale reasons still require a new
+proposal. S19c owns preflight and the remaining gates, S19d owns scheduling, and S19e owns attestation and auto-apply.
 
 | Tier 0 gate | Source of truth on the hub |
 |---|---|
@@ -3459,7 +3470,7 @@ next number.
 | S19b | Tier classifier and the policy `memory` section with digest binding | S19a | Implemented: claimed tiers are ignored. Flagged, cross-scope, mixed-trust, newer-human-edit and unproven cases are Tier 2. Each decision binds the current policy digest. A policy edit requires a fresh decision. Auto-apply stays disabled | S16b, S20 |
 | S19c | Tier 0 gate engine: the hub `preflight` action, blockers re-verified inside the apply transaction, the invariant tests, and auto-apply refused until S19e | S19b, #2187 | Every invariant in [Reflect](#reflect-proposals-and-promotion-on-hub-memory) that does not need attestation passes, including the Tier 1 mutation test and the test that auto-apply cannot be enabled. No op can target anything but a card block | S20, S26 |
 | S19d | Scheduled reflect on hub memory: the `memory-reflect` entry in `care install`, pause after repeated failures, `memory reflect rollback` against the hub | S19c, S14 | `memory reflect run --dry-run` writes nothing to the hub. Three failures in a row pause the timer until a success | S19e, S27 |
-| S19e | Evidence attestation and hub Tier 0 auto-apply under policy | S19c | Fabricated, unresolved and cross-workspace aliased evidence never counts. A revoked credential's attestations stop counting. Auto-apply runs only when every gate holds | S19d, S27 |
+| S19e | Evidence attestation and hub Tier 0 auto-apply under policy | S19c | Fabricated, unresolved and cross-workspace aliased evidence never counts. A revoked credential's attestations stop counting. Auto-apply runs only when every gate holds and must not raise trust on `agent-unreviewed` heads without a trust gate | S19d, S27 |
 | S20 | Card import: dry run, idempotent, keeps card ids, deduplicates by content hash, skips `visibility: private` | S14, S18 | A second import appends nothing. The dry run lists exactly what the real run appends. Imported versions need a clean scan and the `import` grant | S16b, S17, S19b |
 | S21 | `memory answer`: client-side rerank through a read-only seat | S17 | R2 report. Off by default unless R2 passes | after 0.31.0 |
 

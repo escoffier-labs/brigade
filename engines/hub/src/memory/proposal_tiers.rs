@@ -40,6 +40,27 @@ fn cosmetic(op: &Json, card: &Json) -> bool {
             .eq(new.split(' ').filter(|s| !s.is_empty()))
 }
 
+/// Compare every non-union metadata byte, including spacing and field order.
+/// Keep each line's newline so aliases/evidence position does not change the
+/// retained bytes. Only their validated, single-line fields may be excluded.
+fn merge_metadata(text: &str) -> Option<Vec<&str>> {
+    let Some(rest) = text.strip_prefix("---\n") else {
+        return Some(Vec::new());
+    };
+    let end = rest.find("\n---\n")?;
+    Some(
+        rest[..=end]
+            .split_inclusive('\n')
+            .filter(|line| {
+                !matches!(
+                    line.split_once(':').map(|(key, _)| key),
+                    Some("aliases" | "evidence")
+                )
+            })
+            .collect(),
+    )
+}
+
 pub fn classify<T: ReadTx + ?Sized>(
     tx: &T,
     body: &Json,
@@ -102,7 +123,21 @@ pub fn classify<T: ReadTx + ?Sized>(
             return Ok(2);
         };
         match string(op, "type") {
-            "append_evidence" | "merge_exact_duplicates" => (),
+            "append_evidence" => (),
+            "merge_exact_duplicates" => {
+                let Some(other) = cards.iter().find(|c| {
+                    c["scope"] == op["other_card"]["scope"]
+                        && c["card_id"] == op["other_card"]["card_id"]
+                }) else {
+                    return Ok(2);
+                };
+                if !matches!(
+                    (merge_metadata(string(card, "before_text")), merge_metadata(string(other, "before_text"))),
+                    (Some(keeper), Some(source)) if keeper == source
+                ) {
+                    return Ok(2);
+                }
+            }
             "replace_block" if cosmetic(op, card) => tier = 1,
             _ => return Ok(2),
         }

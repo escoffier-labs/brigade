@@ -407,6 +407,15 @@ fn submit<T: ReadTx + ?Sized>(
         card["after_hash"] = json!(ids::sha256_hex(string(card, "after_text").as_bytes()));
         diff += &card_diff(card);
     }
+    // Tier claims are accepted as input but never retained for later readers.
+    let ops: Vec<Json> = ops
+        .iter()
+        .cloned()
+        .map(|mut op| {
+            op.as_object_mut().unwrap().remove("tier");
+            op
+        })
+        .collect();
     Ok(Ok(
         json!({"base_epoch":epoch,"cards":by_card.into_values().collect::<Vec<_>>(),"ops":ops,"diff":diff,"tier":2,"rollback_of":null}),
     ))
@@ -756,12 +765,29 @@ pub fn run(
             "proposal already decided",
         ));
     }
-    body["tier"] = json!(super::proposal_tiers::classify(tx, &body, scanner)?);
+    if cmd.request["decision"] == "accept" {
+        if let Some(r) = self_review(p, &body) {
+            return Ok(r);
+        }
+    }
     let policy = authority.policy.as_ref();
+    let current_digest = json!(policy.map(|a| &a.1));
+    let expected = cmd.request.get("expected_policy_digest");
+    if (redecide && expected.is_none()) || expected.is_some_and(|v| *v != current_digest) {
+        let mut r = error(
+            409,
+            "memory_policy_digest_mismatch",
+            "expected_policy_digest must match the current policy and is required for a policy-stale decision",
+        );
+        r.body["policy_digest"] = current_digest;
+        r.body["policy_revision"] = json!(policy.map(|a| a.0));
+        return Ok(r);
+    }
+    body["tier"] = json!(super::proposal_tiers::classify(tx, &body, scanner)?);
     body["decision_policy_revision"] = json!(policy.map(|a| a.0));
     body["decision_policy_digest"] = json!(policy.map(|a| &a.1));
     if redecide {
-        // Only a fresh explicit request may rebind a policy-stale proposal.
+        // A fresh explicit request must acknowledge the current policy digest.
         // Idempotent replay has already returned before reaching this code.
         body["policy_revision"] = body["decision_policy_revision"].clone();
         body["policy_digest"] = body["decision_policy_digest"].clone();
@@ -770,19 +796,13 @@ pub fn run(
         body["state"] = json!("rejected");
         body["reason"] = Json::Null;
         body["rules"] = json!([]);
-    } else {
-        if let Some(r) = self_review(p, &body) {
-            return Ok(r);
-        }
-        let policy = authority.policy.as_ref();
-        if body["policy_revision"] != json!(policy.map(|a| a.0))
-            || body["policy_digest"] != json!(policy.map(|a| &a.1))
-        {
-            body["state"] = json!("stale");
-            body["reason"] = json!("policy_changed");
-        } else if let Some(r) = apply_cards(tx, p, &mut body, scanner)? {
-            return Ok(r);
-        }
+    } else if body["policy_revision"] != json!(policy.map(|a| a.0))
+        || body["policy_digest"] != json!(policy.map(|a| &a.1))
+    {
+        body["state"] = json!("stale");
+        body["reason"] = json!("policy_changed");
+    } else if let Some(r) = apply_cards(tx, p, &mut body, scanner)? {
+        return Ok(r);
     }
     body["decision"] = cmd.request["decision"].clone();
     update(tx, &body, p)?;
