@@ -23,6 +23,9 @@ mod proposal_metadata;
 mod proposal_tiers;
 pub mod proposals;
 mod pytables;
+mod ranking;
+#[cfg(test)]
+mod ranking_tests;
 mod rescan;
 #[cfg(test)]
 mod rescan_tests;
@@ -127,6 +130,7 @@ pub struct Store {
     last_sweep: std::sync::atomic::AtomicI64,
     index: Arc<index::Index>,
     retrieval: Option<Arc<embedder::Runtime>>,
+    rrf: ranking::Weights,
     dense: Arc<dense::Index>,
     coverage: std::sync::RwLock<embedding::Coverage>,
     /// Woken by a committed `put`, so an idle scheduler starts at once.
@@ -223,6 +227,7 @@ impl Store {
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
             index,
             retrieval: None,
+            rrf: ranking::Weights::default(),
             dense,
             coverage: std::sync::RwLock::new(embedding::Coverage::default()),
             embed_wake: Arc::new(tokio::sync::Notify::new()),
@@ -234,6 +239,7 @@ impl Store {
     }
     /// Lexical mode ignores an unused embedder table, including credentials.
     pub fn configure_retrieval(&mut self, config: &Json) -> Result<(), String> {
+        self.rrf = ranking::Weights::parse(config.get("rrf"))?;
         self.pull_embeddings = config["embedder"]["pull"].as_bool().unwrap_or(false);
         // Absent means lexical. Present but not a string is a typo, never lexical.
         let retrieval = match config.get("retrieval") {
@@ -1218,10 +1224,27 @@ impl Store {
         map: &Map<String, Json>,
         push: bool,
     ) -> Reply {
+        let mut reply = self.search_ranked(credential, map, push).await;
+        if reply.status == 200 {
+            if let Ok(authority) = self.hub.submit(|db| ops::Authority::read(&Conn(db))).await {
+                reply.body["policy_revision"] = json!(authority.policy.as_ref().map(|p| p.0));
+                reply.body["policy_digest"] = json!(authority.policy.as_ref().map(|p| &p.1));
+            }
+        }
+        reply
+    }
+
+    async fn search_ranked(
+        &self,
+        credential: &Credential,
+        map: &Map<String, Json>,
+        push: bool,
+    ) -> Reply {
         let mut request = match search::parse(map) {
             Ok(r) => r,
             Err(reply) => return reply,
         };
+        request.weights = self.rrf;
         request.push = push;
         request.prompt |= push;
         let snapshot = match request.min_seq {
@@ -1290,7 +1313,7 @@ impl Store {
                     request.dense = Some((matrix, vector));
                     let credential = credential.clone();
                     let scanner = self.scanner.clone();
-                    if let Ok(hybrid) = self
+                    if let Ok(mut hybrid) = self
                         .readers
                         .submit(move |db| {
                             search::run(
@@ -1303,6 +1326,7 @@ impl Store {
                         })
                         .await
                     {
+                        hybrid.body["embedder_id"] = json!(runtime.config.id.key());
                         return hybrid;
                     }
                     reply.body["retrieval"]["mode"] = json!("lexical-fallback");

@@ -1930,7 +1930,9 @@ Measured so far, with untuned RRF weights (#2217): only the 8B hybrid passes
 both private halves of R1, with hit@5 gains of 0.20 to 0.26 over BM25 under
 the three judges and keyword R@5 0.034 below BM25, inside the 0.05 limit. The
 0.6B hybrid gains 0.13 to 0.24 on hit@5 but loses 0.075 on keyword R@5. S17
-tunes the weights and runs the public-fixture half. Until R1 passes for a
+tunes the weights and runs the public-fixture half. The code runner and its
+metadata bindings are documented in [the eval harness](../evals/memory-retrieval/README.md#hub-adapters-and-s17-runner).
+The S17 code slice leaves candidate R1 runs and the S16b decision to operations. Until R1 passes for a
 model, setup does not offer it for `hybrid`, and an install without such a
 model starts in BM25 mode ([Retrieval modes](#retrieval-modes)).
 

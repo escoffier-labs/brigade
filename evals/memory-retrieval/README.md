@@ -88,3 +88,73 @@ Semantic retrieval ships only if it beats **grep** by a margin that survives the
 `paraphrase` and `cross_tag` breakdowns. An aggregate-only win that collapses
 once exact matches are removed is not enough. If it ties, keep the keyword
 scorer and skip the dependency.
+
+## Hub adapters and S17 runner
+
+`hub-lexical` and `hub-hybrid` reuse this harness and its public fixture.
+They start a temporary hub with an isolated child home, load the fixture with
+`put`, and stop the process group on exit. The fixture uses file stems as hub
+ids, matching the existing S13b R0 drive. Results map back to canonical gold ids.
+No ambient fleet credentials or hub settings are read.
+
+```sh
+python -m brigade.memory_retrieval_eval --gate R0 --hub-binary /path/to/brigade-hub --json
+python -m brigade.memory_retrieval_eval --adapters bm25,hub-lexical --hub-binary /path/to/brigade-hub --json
+```
+
+R0 requests `ranking: raw` and compares all returned candidate ids, up to the
+hub's 20-result limit. Normal search defaults to lineage collapse and source
+demotion. MRR uses reciprocal first-gold rank, counting misses as zero.
+Comparisons including a hub adapter use the same depth of 20 for every adapter.
+
+For a later candidate run, configure the disposable hub with an explicit
+`[memory]` TOML file. This is an opt-in embedding call and may send the selected
+fixture to the configured endpoint. It is separate from S17's offline checks.
+
+```sh
+python -m brigade.memory_retrieval_eval --gate R1 --hub-binary /path/to/brigade-hub \
+  --hub-memory-config /path/to/candidate.toml --candidate-embedder '<full-embedder-id>' --json
+```
+
+`R1-public` checks the public half only. Private prompt judges, synthetic
+keyword queries and the model default decision remain separate operations.
+Neither a passing public half nor a skipped adapter qualifies a model for R1.
+A gate exits nonzero when a required adapter is skipped. Missing binaries or
+embedders are reported as unavailable, and fallback or stale search responses
+cannot pass. A disposable candidate hub gets 30 seconds for initial coverage.
+An operator can instead prepare an isolated fixture hub before running:
+
+```sh
+python -m brigade.memory_retrieval_eval --gate R1 --hub-url https://hub.example.test \
+  --hub-token-file /path/to/private-token --hub-scope collection:eval \
+  --candidate-embedder '<full-embedder-id>' --fixture-root /path/to/fixture --aggregate-only --json
+```
+
+External-hub mode reads only. It verifies fixture content hashes and never
+imports cards, reconfigures retrieval or calls an embedder directly. Use a
+scope containing exactly the selected fixture. Search metadata binds
+`indexed_seq`, `index_format`, `scorer_version`, mode, ranking policy, RRF
+weights, embedder identity and the current policy revision and digest. Any change during the run fails the evaluation.
+The report also carries a fixture digest and a SHA-256 digest over its canonical
+JSON without the `digest` field. `--aggregate-only` removes per-query data before
+that report digest is calculated. It changes no S19e evidence record format.
+
+RRF weights are positive finite numbers up to 100, under `[memory.rrf]` in the
+hub's TOML file. `lexical = 1.0` and `dense = 1.0` remain the defaults, with
+rank constant 60. A restart applies tuning. Lineage links use scoped
+`superseded_by`, `supersedes`, `merged_from` and merge `aliases` metadata.
+Each collapsed hit includes readable chain members with revisions for `card`
+lookup. Flagged cards and unreviewed automation cannot assert links that
+absorb interactive results. Reviewed proposal relations remain effective.
+Terminal heads win, with newest revision breaking branches and cycles.
+The registered principal credential class is capped at automation, regardless
+of an `interactive` hint. Node and admin writes use `scheduled` and `worker`
+hints. Only `agent-unreviewed` automation is demoted, and
+`sources: ["automation"]` disables that demotion without filtering results.
+
+The bounded before/after script is `engines/hub/bench/retrieval.py`. Run it
+inside a Brigade verification script with `--before`, `--after` and `--output`.
+It runs twice per binary over the public fixture, then twice over the same
+fixture with deterministic predecessor and scheduled-source copies. It records
+hit@5, MRR at depth 20, elapsed query time and load averages. It accepts no
+external hub or embedder settings.

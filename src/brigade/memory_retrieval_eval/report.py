@@ -98,6 +98,10 @@ def format_table(report: dict[str, Any]) -> str:
             bad = block.get("violation_count", block.get("divergent_count", 0))
             lines.append(f"{name:<28} {_fmt_float(block.get('rate')):>8} {sample:>8} {bad:>8}")
 
+    if report.get("gate"):
+        gate = report["gate"]
+        lines.append(f"{gate['name']}: {'PASS' if gate['passed'] else 'FAIL'}")
+        lines.extend(gate["failures"])
     lines.append("")
     lines.append(
         "Gate reminder: semantic lands only if it beats grep on paraphrase/cross_tag, "

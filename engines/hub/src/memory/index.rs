@@ -82,6 +82,8 @@ pub struct Doc {
     pub content_hash: Arc<str>,
     pub trust: Arc<str>,
     pub fields: Arc<Fields>,
+    pub links: Arc<super::ranking::Links>,
+    pub automated: bool,
     /// Tokens in the card's single BM25 field.
     pub length: u32,
 }
@@ -367,6 +369,7 @@ pub struct Card {
     pub content_hash: String,
     pub trust: String,
     pub text: String,
+    pub automated: bool,
 }
 /// What the tail replay found for one changed card.
 #[derive(Debug)]
@@ -436,6 +439,8 @@ impl Builder {
                 revision: card.revision,
                 content_hash: card.content_hash.into(),
                 trust: card.trust.into(),
+                links: Arc::new(super::ranking::Links::parse(&card.text)),
+                automated: card.automated,
                 fields: Arc::new(fields),
                 length: tokens.len() as u32,
             });
@@ -518,6 +523,7 @@ fn card_row(r: &rusqlite::Row) -> rusqlite::Result<Card> {
         content_hash: r.get(3)?,
         trust: r.get(4)?,
         text: String::from_utf8_lossy(&bytes).into_owned(),
+        automated: r.get(6)?,
     })
 }
 /// A main segment over every live head, at the watermark it is consistent
@@ -531,7 +537,7 @@ pub fn load(db: &Connection) -> rusqlite::Result<Builder> {
                 r.get(0)
             })?;
         let mut s = db.prepare(
-            "SELECT c.scope,c.card_id,c.revision,c.content_hash,c.trust,b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.state='live' ORDER BY c.scope,c.card_id",
+            "SELECT c.scope,c.card_id,c.revision,c.content_hash,c.trust,b.bytes,(c.writer_class='principal' OR COALESCE((SELECT e.origin IN ('scheduled','worker') FROM memory_events e WHERE e.scope=c.scope AND e.card_id=c.card_id AND e.revision<=c.revision AND e.kind IN ('card.put','card.import') ORDER BY e.seq DESC LIMIT 1),0)) FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.state='live' ORDER BY c.scope,c.card_id",
         )?;
         let mut failed = None;
         let rows = s
@@ -584,7 +590,7 @@ fn tail(db: &Connection, after: i64) -> rusqlite::Result<(Vec<(String, String)>,
 }
 fn heads(db: &Connection, keys: Vec<(String, String)>) -> rusqlite::Result<Vec<Change>> {
     let mut s = db.prepare_cached(
-        "SELECT c.scope,c.card_id,c.revision,c.content_hash,c.trust,b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.state='live'",
+        "SELECT c.scope,c.card_id,c.revision,c.content_hash,c.trust,b.bytes,(c.writer_class='principal' OR COALESCE((SELECT e.origin IN ('scheduled','worker') FROM memory_events e WHERE e.scope=c.scope AND e.card_id=c.card_id AND e.revision<=c.revision AND e.kind IN ('card.put','card.import') ORDER BY e.seq DESC LIMIT 1),0)) FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.state='live'",
     )?;
     let mut out = Vec::with_capacity(keys.len());
     for (scope, card_id) in keys {

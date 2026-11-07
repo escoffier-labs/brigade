@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .adapters import build_adapters
+from .hub import HubAdapter, HubOptions, hub_client, stable_digest
 from .corpus import (
     corpus_stats,
     default_fixture_root,
@@ -19,15 +20,17 @@ from .metrics import aggregate_scores, ceiling_for_queries, score_query
 
 DEFAULT_FIXTURE_ROOT = default_fixture_root()
 DEFAULT_K = 5
-KNOWN_ADAPTERS = frozenset({"current", "bm25", "substring", "grep", "semantic"})
+KNOWN_ADAPTERS = frozenset({"current", "bm25", "substring", "grep", "semantic", "hub-lexical", "hub-hybrid"})
 DEFAULT_ADAPTERS = ("current", "bm25", "substring", "grep", "semantic")
 
 
-def run_eval(
+def _run_eval(
     *,
     fixture_root: Path | None = None,
     k: int | None = None,
     adapters: list[str] | None = None,
+    hub: Any = None,
+    hub_options: HubOptions | None = None,
 ) -> dict[str, Any]:
     """Run the retrieval eval and return a JSON-serializable report.
 
@@ -56,7 +59,11 @@ def run_eval(
     if unknown:
         raise ValueError(f"unknown adapters: {', '.join(unknown)}")
 
-    built = build_adapters(root, cards, wanted=wanted)
+    built = (
+        build_adapters(root, cards, wanted=wanted, hub=hub, hub_options=hub_options)
+        if any(name.startswith("hub-") for name in wanted)
+        else build_adapters(root, cards, wanted=wanted)
+    )
 
     per_adapter: dict[str, Any] = {}
     for name in wanted:
@@ -70,7 +77,7 @@ def run_eval(
             continue
 
         search = meta["search"]
-        corpus_limit = len(cards)
+        corpus_limit = min(len(cards), 20) if any(n.startswith("hub-") for n in wanted) else len(cards)
         per_query: list[dict[str, Any]] = []
         for query in queries:
             ranked_pairs = search(query.query, corpus_limit)
@@ -83,9 +90,14 @@ def run_eval(
                     "category": query.category,
                     "gold": list(query.gold),
                     **metrics,
+                    "ranked_candidates": ranked_ids,
                 }
             )
 
+        if isinstance(search, HubAdapter):
+            # Re-run the first query after the last to fence a concurrent write
+            # or configuration switch at the end of a measurement.
+            search(queries[0].query, corpus_limit)
         by_category: dict[str, Any] = {}
         for category in sorted({q.category for q in queries}):
             subset = [row for row in per_query if row["category"] == category]
@@ -98,6 +110,7 @@ def run_eval(
             "overall": aggregate_scores(per_query),
             "by_category": by_category,
             "queries": per_query,
+            **({"binding": search.binding} if isinstance(search, HubAdapter) else {}),
         }
 
     return {
@@ -105,7 +118,36 @@ def run_eval(
         "issue": 722,
         "fixture_root": fixture_root_label(fixture_root, root),
         "k": k_eff,
+        "ranking_depth": min(20, len(cards)) if any(n.startswith("hub-") for n in wanted) else len(cards),
         "corpus": corpus_stats(cards, queries),
         "ceiling": ceiling_for_queries(queries, k_eff),
         "adapters": per_adapter,
     }
+
+
+def run_eval(
+    *,
+    fixture_root: Path | None = None,
+    k: int | None = None,
+    adapters: list[str] | None = None,
+    hub_options: HubOptions | None = None,
+    aggregate_only: bool = False,
+) -> dict[str, Any]:
+    wanted = adapters or list(DEFAULT_ADAPTERS)
+    root = (fixture_root or DEFAULT_FIXTURE_ROOT).expanduser().resolve()
+    if any(name.startswith("hub-") for name in wanted):
+        with hub_client(hub_options or HubOptions(), load_cards(root)) as client:
+            report = _run_eval(fixture_root=fixture_root, k=k, adapters=wanted, hub=client, hub_options=hub_options)
+    else:
+        report = _run_eval(fixture_root=fixture_root, k=k, adapters=wanted)
+    report["fixture_digest"] = stable_digest(
+        {
+            "cards": [(c.card_id, c.body) for c in load_cards(root)],
+            "queries": (root / "queries.json").read_text(encoding="utf-8"),
+        }
+    )
+    if aggregate_only:
+        for block in report["adapters"].values():
+            block.pop("queries", None)
+    report["digest"] = stable_digest(report)
+    return report
