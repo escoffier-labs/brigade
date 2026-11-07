@@ -48,9 +48,16 @@ fn merge_metadata(text: &str) -> Option<Vec<&str>> {
         return Some(Vec::new());
     };
     let end = rest.find("\n---\n")?;
+    let meta = &rest[..=end];
+    // Reject reader boundary disagreements before excluding any field.
+    if !super::text::py_splitlines(meta)
+        .into_iter()
+        .eq(meta.split_terminator('\n'))
+    {
+        return None;
+    }
     Some(
-        rest[..=end]
-            .split_inclusive('\n')
+        meta.split_inclusive('\n')
             .filter(|line| {
                 !matches!(
                     line.split_once(':').map(|(key, _)| key),
@@ -131,10 +138,14 @@ pub fn classify<T: ReadTx + ?Sized>(
                 }) else {
                     return Ok(2);
                 };
-                if !matches!(
-                    (merge_metadata(string(card, "before_text")), merge_metadata(string(other, "before_text"))),
-                    (Some(keeper), Some(source)) if keeper == source
-                ) {
+                // JSON serialization can turn escaped separators into raw
+                // reader boundaries, so check the resulting metadata as well.
+                if merge_metadata(string(card, "after_text")).is_none()
+                    || !matches!(
+                        (merge_metadata(string(card, "before_text")), merge_metadata(string(other, "before_text"))),
+                        (Some(keeper), Some(source)) if keeper == source
+                    )
+                {
                     return Ok(2);
                 }
             }

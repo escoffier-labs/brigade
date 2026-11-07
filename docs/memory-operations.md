@@ -592,6 +592,9 @@ return `409 memory_policy_digest_mismatch` and change nothing. The refusal
 includes the current `policy_revision` and `policy_digest`. With no configured
 policy, an explicit JSON null acknowledges its absence. A normal decision can
 omit the field. When supplied, it must match on that path too.
+Clients must set `expected_policy_digest` only from a policy digest they
+actually showed the reviewer. Never fill it by copying `policy_digest` from
+a 409 refusal.
 
 After this digest check, acceptance still rechecks all bases, pins, scans and
 grants, and forbids self-review. A moved head leaves the proposal stale with

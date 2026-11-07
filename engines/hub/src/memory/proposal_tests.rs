@@ -1054,3 +1054,34 @@ async fn s19b_security_normal_decide_checks_digest_when_supplied() {
     let r = decide_expected(&h, ADMIN_TOKEN, id, json!("policy-digest-1")).await;
     assert_eq!(r.body["state"], "applied");
 }
+
+#[tokio::test]
+async fn s19b_security_merge_rejects_hidden_python_metadata_lines() {
+    for separator in ["\u{2028}", "\\u2028"] {
+        for hidden in ["expires: 2020-01-01", "status: superseded"] {
+            for hidden_on_keeper in [true, false] {
+                let h = Hub::with(clean(), None);
+                let hidden_text =
+                    format!("---\naliases: [\"{separator}{hidden}{separator}\"]\n---\n{OLD}\n");
+                let normal_text = format!("---\naliases: []\n---\n{OLD}\n");
+                let (keeper, other) = if hidden_on_keeper {
+                    (&hidden_text, &normal_text)
+                } else {
+                    (&normal_text, &hidden_text)
+                };
+                let a = h.put(ADMIN_TOKEN, "fleet", "a", None, keeper).await;
+                let b = h.put(ADMIN_TOKEN, "fleet", "b", None, other).await;
+                assert_eq!((a.status, b.status), (201, 201));
+                let mut merge = op("fleet", "a", rev(&a));
+                merge["type"] = json!("merge_exact_duplicates");
+                merge.as_object_mut().unwrap().remove("text");
+                merge["other_card"] =
+                    json!({"scope":"fleet","card_id":"b","base_revision":rev(&b)});
+                let r = submit(&h, ADMIN_TOKEN, vec![merge]).await;
+                assert_eq!(r.status, 201);
+                assert_eq!(r.body["tier"], 2);
+                assert_eq!(r.body["state"], "pending");
+            }
+        }
+    }
+}
