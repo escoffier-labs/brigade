@@ -102,7 +102,7 @@ def test_run_submits_pinned_proposals_only(setup, capsys):
 
 def test_three_failures_pause_scheduled_calls_until_success(setup, capsys):
     target, hub, _ = setup
-    hub.reject = True
+    hub.mode = "down"
     for count in (1, 2, 3):
         assert run(target, capsys, "run", "--hub", "--scheduled")[0] != 0
         schedule = run(target, capsys, "status")[1]["schedule"]
@@ -115,7 +115,7 @@ def test_three_failures_pause_scheduled_calls_until_success(setup, capsys):
     assert care_cmd._entry_status(target, entry)["paused"]
     assert cli.main(["memory", "care", "status", "--target", str(target), "--json"]) in (0, 1)
     assert json.loads(capsys.readouterr().out)["reflect"]["paused"]
-    hub.reject = False
+    hub.mode = "up"
     assert run(target, capsys, "run", "--dry-run")[0] == 0
     assert run(target, capsys, "status")[1]["schedule"]["consecutive_failures"] == 3
     assert run(target, capsys, "run")[0] == 0
@@ -187,11 +187,15 @@ def test_workspace_cannot_redirect_credentials(setup, capsys):
     assert hub.calls == []
 
 
-def test_no_valid_pins_fails_without_proposing(setup, capsys):
+def test_no_valid_pins_is_successful_skip(setup, capsys):
     target, hub, _ = setup
     for ident in ("a", "b"):
         hub._commit("card.put", "fleet", ident, "Same claim.\n", "live", hubc.event_id())
-    assert run(target, capsys, "run")[0] == 1
+    for _ in range(4):
+        code, report = run(target, capsys, "run")
+        assert code == 0
+        assert report["skipped_reasons"] == {"missing_pin": 1}
+        assert not report["schedule"]["paused"]
     assert writes(hub) == []
 
 
@@ -324,7 +328,7 @@ def test_recorded_proposals_do_not_consume_limit(setup, capsys):
 
 
 @pytest.mark.parametrize("code", ["memory_client_event_expired", "memory_client_event_conflict"])
-def test_bad_event_id_is_replaced_on_next_run(setup, capsys, monkeypatch, code):
+def test_bad_event_id_is_replaced_in_same_run(setup, capsys, monkeypatch, code):
     target, hub, _ = setup
     original = hub.do_propose
     attempts = []
@@ -337,10 +341,13 @@ def test_bad_event_id_is_replaced_on_next_run(setup, capsys, monkeypatch, code):
 
     monkeypatch.setattr(hub, "do_propose", refuse_once)
     result, report = run(target, capsys, "run")
-    assert result == 1
+    assert result == 0
     assert report["refused_ops"][0]["code"] == code
     state = json.loads((target / ".brigade/memory/reflect/schedule.json").read_text())
-    assert state["submissions"] == {}
+    [pending] = state["submissions"].values()
+    assert pending["client_event_id"] == attempts[-1]
+    assert "proposal_id" in pending
+    assert len(report["proposals"]) == 1
     assert run(target, capsys, "run")[0] == 0
     assert len(attempts) == 2 and attempts[0] != attempts[1]
 
@@ -441,7 +448,7 @@ def test_partial_group_validation_drops_all_group_ops(setup, capsys):
         "card.put", "fleet", "c", "---\nevidence: invalid\n---\nSame claim. ^c-cccccc\n", "live", hubc.event_id()
     )
     code, report = run(target, capsys, "run")
-    assert code == 1
+    assert code == 0
     assert writes(hub) == []
     assert report["skipped_reasons"] == {"invalid_metadata": 2}
 
@@ -462,9 +469,10 @@ def test_fleet_only_credentials_are_refused_before_hub_call(setup, capsys, monke
 
 def test_dry_run_text_reports_paused_state(setup, capsys):
     target, hub, _ = setup
-    hub.reject = True
+    hub.mode = "down"
     for _ in range(3):
         assert run(target, capsys, "run")[0] == 1
+    hub.mode = "up"
     code = cli.main(["memory", "reflect", "run", "--dry-run", "--target", str(target)])
     assert code == 0
     assert "paused=true" in capsys.readouterr().out
@@ -526,3 +534,240 @@ def test_clean_group_keeps_lowest_id_with_matching_trust(setup, capsys):
         ("a", "b"),
         ("a", "c"),
     ]
+
+
+@pytest.mark.parametrize("code", ["memory_content_blocked", "memory_proposal_invalid", "memory_base_mismatch"])
+def test_permanent_refusal_is_skipped_on_later_runs(setup, capsys, monkeypatch, code):
+    target, hub, _ = setup
+    add_group(hub)
+    original = hub.do_propose
+
+    def refuse_one(body):
+        if body["ops"][0]["card_id"] == "a":
+            return 422, {"code": code, "error": "do not retain card text"}
+        return original(body)
+
+    monkeypatch.setattr(hub, "do_propose", refuse_one)
+    result, report = run(target, capsys, "run")
+    assert result == 0 and len(report["proposals"]) == 1
+    state = json.loads((target / ".brigade/memory/reflect/schedule.json").read_text())
+    saved = [entry for entry in state["submissions"].values() if "refused" in entry]
+    assert len(saved) == 1 and saved[0]["refused"] == code
+    assert set(saved[0]) == {"client_event_id", "refused"}
+    assert "do not retain" not in json.dumps(state)
+    for _ in range(3):
+        result, report = run(target, capsys, "run")
+        assert result == 0 and report["candidate_count"] == 0
+        assert report["refused_ops"] == []
+        assert report["skipped_reasons"] == {"already_proposed": 1, "refused": 1}
+        assert not report["schedule"]["paused"]
+    assert len(writes(hub)) == 2
+
+
+def test_remembered_refusal_does_not_consume_limit(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    add_group(hub)
+    original = hub.do_propose
+
+    def refuse_one(body):
+        if body["ops"][0]["card_id"] == "a":
+            return 422, {"code": "memory_proposal_invalid"}
+        return original(body)
+
+    monkeypatch.setattr(hub, "do_propose", refuse_one)
+    result, report = run(target, capsys, "run", "--limit", "1")
+    assert result == 1 and report["error"] == "all_ops_refused"
+    result, report = run(target, capsys, "run", "--limit", "1")
+    assert result == 0 and len(report["proposals"]) == 1
+    assert report["skipped_reasons"] == {"refused": 1}
+    assert [c["ops"][0]["card_id"] for c in writes(hub)] == ["a", "xa"]
+    assert not report["schedule"]["paused"]
+
+
+def test_card_revision_change_reenables_refused_op(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    original = hub.do_propose
+    attempts = []
+
+    def refuse_once(body):
+        attempts.append(body)
+        if len(attempts) == 1:
+            return 422, {"code": "memory_content_blocked"}
+        return original(body)
+
+    monkeypatch.setattr(hub, "do_propose", refuse_once)
+    assert run(target, capsys, "run")[0] == 1
+    text = hub.cards[("fleet", "a")]["text"]
+    hub._commit("card.put", "fleet", "a", text, "live", hubc.event_id())
+    assert run(target, capsys, "run")[0] == 0
+    assert len(attempts) == 2
+    assert attempts[0]["ops"][0]["base_revision"] != attempts[1]["ops"][0]["base_revision"]
+
+
+@pytest.mark.parametrize("status, retryable", [(500, False), (503, False), (422, True)])
+def test_retryable_refusals_are_not_persisted(setup, capsys, monkeypatch, status, retryable):
+    target, hub, _ = setup
+    monkeypatch.setattr(
+        hub,
+        "do_propose",
+        lambda body: (status, {"code": "memory_scan_unavailable", "error": "private", "retryable": retryable}),
+    )
+    for count in (1, 2, 3):
+        result, report = run(target, capsys, "run")
+        assert result == 1 and report["error"] == "all_ops_refused"
+        assert report["schedule"]["consecutive_failures"] == count
+        state = json.loads((target / ".brigade/memory/reflect/schedule.json").read_text())
+        assert all("refused" not in entry for entry in state["submissions"].values())
+    assert report["schedule"]["paused"]
+    assert len(writes(hub)) == 3
+    assert len({c["client_event_id"] for c in writes(hub)}) == 1
+
+
+@pytest.mark.parametrize("code", ["memory_client_event_expired", "memory_client_event_conflict"])
+def test_event_id_recovery_is_bounded_to_one_retry(setup, capsys, monkeypatch, code):
+    target, hub, _ = setup
+    monkeypatch.setattr(hub, "do_propose", lambda body: (409, {"code": code}))
+    result, report = run(target, capsys, "run")
+    assert result == 1 and report["error"] == "all_ops_refused"
+    assert len(writes(hub)) == 2
+    assert writes(hub)[0]["client_event_id"] != writes(hub)[1]["client_event_id"]
+    assert report["schedule"]["consecutive_failures"] == 1
+    state = json.loads((target / ".brigade/memory/reflect/schedule.json").read_text())
+    assert state["submissions"] == {}
+
+
+@pytest.mark.parametrize("refused", [[], None, 42, "not a code"])
+def test_invalid_persisted_refusal_is_reported(setup, capsys, refused):
+    from brigade import memory_reflect_hub as reflect
+
+    target, hub, _ = setup
+    reflect._save(
+        target,
+        {
+            "consecutive_failures": 0,
+            "paused": False,
+            "binding": "a" * 64,
+            "submissions": {"b" * 64: {"client_event_id": hubc.event_id(), "refused": refused}},
+        },
+    )
+    assert "state_error" in run(target, capsys, "status")[1]["schedule"]
+    assert run(target, capsys, "run")[0] == 2
+    assert hub.calls == []
+
+
+def legacy_replica(target):
+    from brigade import memory_hub_store as store, memory_hub_sync as sync
+
+    settings = hubc.load_settings(target)
+    sync.pull(target, hubc.client_for(settings), settings)
+    with store.locked(target):
+        replica = store.replica(target)
+        for head in replica.heads.values():
+            head.pop("scan_state", None)
+        replica.save()
+
+
+def test_legacy_replica_refreshes_clean_metadata_before_proposing(setup, capsys):
+    target, hub, _ = setup
+    legacy_replica(target)
+    before = len(hub.calls)
+    code, report = run(target, capsys, "run")
+    assert code == 0 and len(report["proposals"]) == 1
+    reads = [c for c in hub.calls[before:] if c["action"] == "card"]
+    assert {c["card_id"] for c in reads} == {"a", "b"}
+    assert all(c["offset"] == 0 for c in reads)
+    assert [c["action"] for c in writes(hub)] == ["propose"]
+
+
+def test_legacy_refresh_still_skips_non_clean_group(setup, capsys):
+    target, hub, _ = setup
+    legacy_replica(target)
+    hub.scan_states = {("fleet", "b"): "flagged"}
+    before = len(hub.calls)
+    code, report = run(target, capsys, "run")
+    assert code == 0 and report["skipped_reasons"] == {"non_clean": 1}
+    assert any(c["action"] == "card" for c in hub.calls[before:])
+    assert writes(hub) == []
+
+
+def test_missing_metadata_after_refresh_stays_skipped(setup, capsys, monkeypatch):
+    from brigade import memory_hub_sync as sync
+
+    target, hub, _ = setup
+    legacy_replica(target)
+    refreshed = []
+
+    def unchanged(*args):
+        refreshed.append(True)
+        return 0
+
+    monkeypatch.setattr(sync, "refresh_scan_metadata", unchanged)
+    code, report = run(target, capsys, "run")
+    assert refreshed == [True]
+    assert code == 0 and report["skipped_reasons"] == {"non_clean": 1}
+    assert writes(hub) == []
+
+
+@pytest.mark.parametrize("failure", ["auth", "unavailable"])
+def test_refresh_failures_do_not_propose(setup, capsys, monkeypatch, failure):
+    target, hub, _ = setup
+    legacy_replica(target)
+
+    def refuse(body):
+        if failure == "auth":
+            return 403, {"code": "memory_grant_missing", "error": "private"}
+        raise ConnectionRefusedError("unavailable")
+
+    monkeypatch.setattr(hub, "do_card", refuse)
+    code, report = run(target, capsys, "run")
+    assert code == 1 and report["schedule"]["consecutive_failures"] == 1
+    assert "private" not in json.dumps(report)
+    assert writes(hub) == []
+
+
+@pytest.mark.parametrize("status", [408, 429])
+def test_unavailable_client_responses_are_not_persisted(setup, capsys, monkeypatch, status):
+    target, hub, _ = setup
+    monkeypatch.setattr(hub, "do_propose", lambda body: (status, {"code": "memory_rate_limited"}))
+    for count in (1, 2):
+        result, report = run(target, capsys, "run")
+        assert result == 1 and report["error"] == "hub_unavailable"
+        assert report["schedule"]["consecutive_failures"] == count
+        state = json.loads((target / ".brigade/memory/reflect/schedule.json").read_text())
+        assert all("refused" not in entry for entry in state["submissions"].values())
+    assert len(writes(hub)) == 2
+    assert writes(hub)[0]["client_event_id"] == writes(hub)[1]["client_event_id"]
+
+
+def test_legacy_replica_dry_run_refreshes_without_hub_writes(setup, capsys):
+    target, hub, _ = setup
+    legacy_replica(target)
+    code, report = run(target, capsys, "run", "--dry-run")
+    assert code == 0 and report["candidate_count"] == 1
+    assert writes(hub) == []
+    assert run(target, capsys, "run")[0] == 0
+    assert len(writes(hub)) == 1
+
+
+def test_conflicting_terminal_submission_state_is_invalid(setup, capsys):
+    from brigade import memory_reflect_hub as reflect
+
+    target, hub, _ = setup
+    reflect._save(
+        target,
+        {
+            "consecutive_failures": 0,
+            "paused": False,
+            "binding": "a" * 64,
+            "submissions": {
+                "b" * 64: {
+                    "client_event_id": hubc.event_id(),
+                    "proposal_id": hubc.event_id(),
+                    "refused": "memory_proposal_invalid",
+                }
+            },
+        },
+    )
+    assert "state_error" in run(target, capsys, "status")[1]["schedule"]
+    assert run(target, capsys, "run")[0] == 2
+    assert hub.calls == []

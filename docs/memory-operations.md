@@ -891,8 +891,10 @@ candidates it cannot translate. A whole duplicate group must have clean scan
 states and one known trust class. Mixed-trust groups are skipped, and non-clean
 cards wait for S19e evidence attestation. The keeper is the lowest card id in
 an eligible group. Skipped ops are counted by reason without card text.
-If translation fails for every candidate, the run fails. An empty candidate
-set, including groups skipped for scan state or trust, is a successful no-op.
+A group missing pins or valid metadata is also skipped. A pass with no
+translatable candidates is a successful no-op. Legacy replicas refresh missing
+scan metadata from the hub before deriving candidates. Any heads still missing
+scan state after the refresh stay skipped.
 
 This pass does not invent anchors or evidence. Local reflection still derives
 its existing evidence and review candidates when hub mode is off. Hub evidence
@@ -908,14 +910,27 @@ response with that id, and remembers acknowledged proposals to avoid opening
 them again while their base revisions stay the same. Remembered submissions
 survive runs with a narrower scope or smaller limit under the same hub,
 principal, log epoch and configured read scopes. Ops with a recorded proposal
-id are skipped before applying the limit, so pending or rejected proposals do
-not block new candidates. An expired or conflicting request id is discarded
-for that op. The next run mints a fresh id.
+id or a stored non-retryable refusal are skipped before applying the limit,
+so old submissions do not block new candidates. Stored refusals appear in
+`skipped_reasons.refused` and a card revision change makes a new op eligible.
+An expired or conflicting request id is discarded, then the op is retried once
+with a fresh id in the same run. If that retry also has an expired or
+conflicting id, the next run starts with another fresh id.
+After a lost response, replacing an expired id can open a duplicate proposal
+that a reviewer should reject.
 
-An op refusal is recorded by digest and code only. Other ops continue unless
-the error is an authorization refusal. A run fails for transport,
-configuration or authorization errors, or when every attempted op is refused.
-The last rule pauses a job making no progress. Mixed successful and refused
+An op refusal is recorded by digest and code only. Non-auth 4xx proposal
+refusals, including `memory_content_blocked`, `memory_proposal_invalid` and
+`memory_base_mismatch`, are stored under the binding and op digest. They are
+skipped on later runs. Exceptions are 408, 429, expired or conflicting ids,
+and replies marked `retryable: true`. All 5xx replies and unavailable responses
+remain retryable. A stored refusal contains only the event id and refusal code,
+with no hub text.
+
+Other ops continue unless the error is an authorization refusal or the hub is
+unavailable. A run fails for transport, configuration or authorization errors,
+or when every op attempted in that run is newly refused after any id retry.
+Stored refusals do not count toward that rule. Mixed successful and refused
 ops count as a successful run.
 
 Install the optional daily entry with:
@@ -984,6 +999,8 @@ on that scope, so retain other rights only when that principal needs them.
 The scheduled job needs `read` plus `reflect` on each target scope. It needs
 neither `write` nor `review`. Collections require their own exact scope grant.
 Read access alone allows a dry run, but never proposal submission.
+Partial `reflect` grants across configured `read_scopes` will pause the job
+after repeated authorization failures.
 
 `brigade memory reflect rollback <proposal-id> --target <workspace>` requests
 the hub's compensating proposal. This separate operator action requires `read`

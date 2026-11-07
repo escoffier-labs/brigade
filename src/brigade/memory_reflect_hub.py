@@ -36,6 +36,10 @@ def _event_id(value: object) -> bool:
     return isinstance(value, str) and hubc.event_id_ms(value) is not None
 
 
+def _code(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value) is not None
+
+
 def schedule_status(target: Path) -> dict[str, Any]:
     try:
         state = io.read_object(target / STATE, private=True)
@@ -56,9 +60,11 @@ def schedule_status(target: Path) -> dict[str, Any]:
             if (
                 not _digest(digest)
                 or not isinstance(pending, dict)
-                or set(pending) - {"client_event_id", "proposal_id"}
+                or set(pending) - {"client_event_id", "proposal_id", "refused"}
                 or not _event_id(pending.get("client_event_id"))
                 or ("proposal_id" in pending and not _event_id(pending["proposal_id"]))
+                or ("refused" in pending and not _code(pending["refused"]))
+                or ("proposal_id" in pending and "refused" in pending)
             ):
                 raise ValueError(STATE_ERROR)
         if "last_status" in state and state["last_status"] not in ("completed", "failed"):
@@ -207,21 +213,27 @@ def _reflect(
     report = sync.pull(target, client, settings)
     if report["warnings"] or report.get("seq") is None:
         raise ValueError("hub reflect requires a complete fresh replica")
-    with store.locked(target):
-        replica = store.replica(target)
-        if (
-            not replica.belongs_to(client.identity, report["principal"])
-            or replica.meta.get("log_epoch") != report["log_epoch"]
-            or replica.meta.get("seq") != report["seq"]
-        ):
-            raise ValueError("hub reflect replica changed during the run")
-        heads = list(replica.readable_heads(settings.read_scopes).values())
+
+    def read_heads() -> list[dict[str, Any]]:
+        with store.locked(target):
+            replica = store.replica(target)
+            if (
+                not replica.belongs_to(client.identity, report["principal"])
+                or replica.meta.get("log_epoch") != report["log_epoch"]
+                or replica.meta.get("seq") != report["seq"]
+            ):
+                raise ValueError("hub reflect replica changed during the run")
+            return list(replica.readable_heads(settings.read_scopes).values())
+
+    heads = read_heads()
+    if any("scan_state" not in head for head in heads):
+        sync.refresh_scan_metadata(target, client, settings)
+        heads = read_heads()
     if len(heads) > io.MAX_FILES or sum(len(h["text"].encode()) for h in heads) > io.MAX_CORPUS_BYTES:
         raise ValueError("hub reflect corpus limit exceeded")
     if scope:
         heads = [h for h in heads if h["scope"] == scope]
     ops, skipped = _ops(heads)
-    translation_failed = not ops and bool(set(skipped) & {"missing_pin", "invalid_metadata"})
     binding = io.sha256(
         io.json_bytes([client.identity, report["principal"], report["log_epoch"], list(settings.read_scopes)])
     )
@@ -229,46 +241,64 @@ def _reflect(
     remaining = []
     for op in ops:
         digest = io.sha256(io.json_bytes(op))
-        if previous.get(digest, {}).get("proposal_id"):
+        remembered = previous.get(digest, {})
+        if remembered.get("proposal_id"):
             skipped["already_proposed"] = skipped.get("already_proposed", 0) + 1
+        elif remembered.get("refused"):
+            skipped["refused"] = skipped.get("refused", 0) + 1
         else:
             remaining.append((digest, op))
     selected = remaining[:limit]
     proposals = []
     refused = []
-    error = "no_valid_ops" if translation_failed else None
+    error = None
+    failed_ops = 0
     if not dry_run:
         # Preserve unprocessed submissions under this binding across scope and limit changes.
         state.update(binding=binding, submissions=previous)
         for digest, op in selected:
-            pending = dict(previous.get(digest) or {"client_event_id": hubc.event_id()})
-            previous[digest] = pending
-            # Publish the id before the call so a lost response replays the same request.
-            _save(target, state)
-            try:
-                opened = client.call(
-                    "propose", base_epoch=report["log_epoch"], client_event_id=pending["client_event_id"], ops=[op]
-                )
-            except hubc.HubRefusal as exc:
-                code = exc.code if re.fullmatch(r"[a-z][a-z0-9_]{0,127}", exc.code) else "hub_refused"
-                refused.append({"op_digest": digest, "code": code})
-                if exc.denies_access:
-                    error = code
-                    break
-                if code in ("memory_client_event_expired", "memory_client_event_conflict"):
-                    previous.pop(digest)
+            for attempt in range(2):
+                pending = dict(previous.get(digest) or {"client_event_id": hubc.event_id()})
+                previous[digest] = pending
+                # Publish the id before the call so a lost response replays the same request.
                 _save(target, state)
-                continue
-            except hubc.HubUnavailable:
-                error = "hub_unavailable"
+                try:
+                    opened = client.call(
+                        "propose", base_epoch=report["log_epoch"], client_event_id=pending["client_event_id"], ops=[op]
+                    )
+                except hubc.HubRefusal as exc:
+                    code = exc.code if _code(exc.code) else "hub_refused"
+                    refused.append({"op_digest": digest, "code": code})
+                    if exc.denies_access:
+                        error = code
+                        break
+                    if code in ("memory_client_event_expired", "memory_client_event_conflict"):
+                        previous.pop(digest)
+                        _save(target, state)
+                        if attempt == 0:
+                            continue  # Re-mint and retry this op once, within this run.
+                    elif (
+                        400 <= exc.status < 500
+                        and exc.status not in (408, 429)
+                        and exc.body.get("retryable") is not True
+                    ):
+                        pending["refused"] = code
+                        _save(target, state)
+                    failed_ops += 1
+                    break
+                except hubc.HubUnavailable:
+                    error = "hub_unavailable"
+                    break
+                if not _event_id(opened.get("proposal_id")) or opened.get("state") not in ("pending", "held"):
+                    raise ValueError("hub returned no open reflect proposal")
+                pending["proposal_id"] = opened["proposal_id"]
+                _save(target, state)
+                proposals.append({"proposal_id": pending["proposal_id"]})
                 break
-            if not _event_id(opened.get("proposal_id")) or opened.get("state") not in ("pending", "held"):
-                raise ValueError("hub returned no open reflect proposal")
-            pending["proposal_id"] = opened["proposal_id"]
-            _save(target, state)
-            proposals.append({"proposal_id": pending["proposal_id"]})
-        # All refused attempts mean no progress. Mixed results do not pause healthy work.
-        if selected and len(refused) == len(selected) and error is None:
+            if error is not None:
+                break
+        # Only final refusals of ops attempted this run count, never cached skips or recovered ids.
+        if selected and failed_ops == len(selected) and error is None:
             error = "all_ops_refused"
     payload = {
         "status": "failed" if error else "completed",
