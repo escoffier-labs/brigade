@@ -62,12 +62,19 @@ def test_acceptance_and_attempt_replay_survive_module_reload(task_run):
     assert first.attempt_id is None
     attempt = tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one")
     before = (run_dir / "events/lifecycle.jsonl").read_bytes()
-    importlib.reload(tasks)
-    assert asdict(accepted(task_run)) == asdict(attempt)
-    assert asdict(tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one")) == asdict(attempt)
-    assert (run_dir / "events/lifecycle.jsonl").read_bytes() == before
-    with pytest.raises(FrozenInstanceError):
-        first.request_id = "changed"
+    # reload mutates the existing module, including classes imported by other tests.
+    # Restore its namespace even if a replay assertion fails.
+    original_namespace = vars(tasks).copy()
+    try:
+        importlib.reload(tasks)
+        assert asdict(accepted(task_run)) == asdict(attempt)
+        assert asdict(tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one")) == asdict(attempt)
+        assert (run_dir / "events/lifecycle.jsonl").read_bytes() == before
+        with pytest.raises(FrozenInstanceError):
+            first.request_id = "changed"
+    finally:
+        vars(tasks).clear()
+        vars(tasks).update(original_namespace)
 
 
 def test_acceptance_conflicts_and_same_seat_distinct_tasks(task_run):
