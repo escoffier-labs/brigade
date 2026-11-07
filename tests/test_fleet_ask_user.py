@@ -759,35 +759,37 @@ def test_kdialog_native_plain_label_preserves_literal_question(station, hub, tmp
     )
 
 
-def test_zenity_native_timeout_uses_ceil_remaining_budget(station, hub, tmp_path, monkeypatch):
+@pytest.mark.parametrize(("elapsed", "native_timeout"), [(1.2, "1"), (0.8, "2"), (1.0, "1")])
+def test_zenity_native_timeout_uses_ceil_remaining_budget(monkeypatch, elapsed, native_timeout):
     from brigade import fleet_ask_user
 
-    record = tmp_path / "argv.json"
-    binary = executable(
-        tmp_path,
-        "zenity",
-        "import json,sys\nfrom pathlib import Path\n"
-        f"Path({str(record)!r}).write_text(json.dumps(sys.argv))\nprint('Local answer')\n",
-    )
+    # Exercise rounding with a stepped clock. Process startup and hub transport
+    # have their own tests and must not consume this calculation's budget.
+    now = 100.0
+    deadline = now + 2
     monkeypatch.setenv("DISPLAY", ":99")
-    monkeypatch.setattr(fleet_ask_user.shutil, "which", lambda name: binary if name == "zenity" else None)
-    original = fleet_client_messages._request
-    clock = time.monotonic
-    offset = 0.0
+    monkeypatch.setattr(fleet_ask_user.shutil, "which", lambda name: "zenity" if name == "zenity" else None)
+    monkeypatch.setattr(fleet_ask_user, "monotonic", lambda: now)
+    calls = []
 
-    def delayed_create(*args, **kwargs):
-        nonlocal offset
-        result = original(*args, **kwargs)
-        if args[2]["action"] == "question_create":
-            offset = 1.2
-        return result
+    def answer(argv, *, deadline, stop):
+        calls.append((argv, deadline, stop))
+        return "Local answer"
 
-    monkeypatch.setattr(fleet_ask_user, "monotonic", lambda: clock() + offset)
-    monkeypatch.setattr(fleet_client_messages, "_request", delayed_create)
-    result, error = invoke(station, timeout_secs=2)
-    assert not error and result["status"] == "answered"
-    argv = json.loads(record.read_text())
-    assert argv[argv.index("--timeout") + 1] == "1"
+    monkeypatch.setattr(fleet_ask_user, "_process", answer)
+    now += elapsed
+
+    def stop():
+        return False
+
+    result = fleet_ask_user._desktop(
+        "Proceed?", {"caller": NODE_A, "question_id": "example-question"}, deadline=deadline, stop=stop
+    )
+    assert result == "Local answer"
+    [(argv, passed_deadline, passed_stop)] = calls
+    assert argv[argv.index("--timeout") + 1] == native_timeout
+    assert passed_deadline == deadline
+    assert passed_stop is stop
 
 
 @pytest.mark.parametrize(

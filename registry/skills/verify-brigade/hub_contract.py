@@ -481,8 +481,11 @@ def _await_hub(hub: Hub, deadline: float) -> str:
         if process.poll() is not None:
             return "exited"
         if request(hub.url, "GET", "/health", timeout=1.0).status is not None:
-            # Another worker's hub can take the port and answer; ours must still be running.
-            return "healthy" if process.poll() is None else "exited"
+            # A competing hub can answer health before our child reports its
+            # bind failure. Prove this is our hub using the per-launch token.
+            authenticated = request(hub.url, "GET", "/nodes", token=hub.admin_token, timeout=1.0)
+            if authenticated.status == 200:
+                return "healthy" if process.poll() is None else "exited"
         time.sleep(0.1)
     return "timeout"
 
@@ -1606,6 +1609,7 @@ def drive_keys_and_sealed(d: Drive, x: Ctx) -> None:
         token=x.b,
         shape={"key": {**KEY_ENTRY, "principal_id": Eq(x.node_a), "kid": Eq(x.kid_a)}},
     )
+    body: dict[str, Any]
     for case, body, token, status, shape in (
         (
             "messages keys_get an unknown key",

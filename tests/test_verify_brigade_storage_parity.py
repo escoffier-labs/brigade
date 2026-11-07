@@ -505,3 +505,23 @@ def test_storage_parity_launch_does_not_retry_another_early_exit(sp, tmp_path, m
     with pytest.raises(sp.ParityError, match="the a hub exited with 3: .*boom"):
         _parity_launch(sp, tmp_path, "die")
     assert len(ports) == 1
+
+
+def test_storage_parity_launch_rejects_foreign_hub_health(sp, tmp_path, monkeypatch):
+    """A competing hub can answer health before our process reports its bind failure."""
+    from types import SimpleNamespace
+
+    probes = []
+
+    def request(_base, _method, path, **kwargs):
+        probes.append((path, kwargs.get("token")))
+        return SimpleNamespace(status=200 if path == "/health" else 401)
+
+    # Our process is still starting when the foreign health response arrives.
+    # It reports its address-in-use failure after the next probe.
+    process = SimpleNamespace(poll=lambda: 1 if len(probes) >= 2 else None)
+    hub = SimpleNamespace(url="http://127.0.0.1:12345", admin_token="example-admin", process=process)
+    monkeypatch.setattr(sp.hc, "request", request)
+    monkeypatch.setattr(sp.hc.time, "sleep", lambda _seconds: None)
+    assert sp.hc._await_hub(hub, sp.hc.time.monotonic() + 10) == "exited"
+    assert probes == [("/health", None), ("/nodes", "example-admin")]
