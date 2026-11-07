@@ -18,6 +18,7 @@ def response(mode="lexical"):
     return {
         "matches": [{"card_id": "one", "score": 1}],
         "indexed_seq": 3,
+        "corpus_identity": {"fleet": {"live_count": 1, "digest": "fixture-corpus"}},
         "policy_revision": 1,
         "policy_digest": "fixture-policy",
         "index_format": "1",
@@ -29,15 +30,16 @@ def response(mode="lexical"):
     }
 
 
-def adapter(reply, mode="lexical", **options):
+def adapter(reply, mode="lexical", cards=(), **options):
     def transport(url, token, body, timeout):
         assert body["scopes"] == ["fleet"]
         assert body["mode"] == mode
         assert body["limit"] == 20
+        assert body["eval"] is True
         return 200, reply
 
     client = MemoryHubClient("https://hub.example.test", "fake-token", transport=transport)
-    return HubAdapter(client, mode, HubOptions(**options))
+    return HubAdapter(client, mode, HubOptions(**options), cards)
 
 
 def test_binding_stable_and_rejects_index_or_config_change():
@@ -117,3 +119,81 @@ def test_public_r1_requires_each_category_and_a_strict_hard_category_gain():
     assert evaluate_gate(report, "R1")["passed"]
     hybrid["by_category"]["exact"]["mrr"] = 0
     assert not evaluate_gate(report, "R1")["passed"]
+
+
+def test_external_scope_identity_rejects_extra_cards_and_binds_changes():
+    from brigade.memory_retrieval_eval.corpus import CardDoc
+    from brigade.memory_retrieval_eval.hub import corpus_identity
+
+    card = CardDoc("one", "memory/cards/one.md", "one", (), "", "fixture text\n")
+    reply = response()
+    reply["corpus_identity"]["fleet"] = corpus_identity([card])
+    search = adapter(reply, cards=[card])
+    assert search("words", 40) == [("one", 1.0)]
+    reply["corpus_identity"]["fleet"] = {"live_count": 2, "digest": "extra-card"}
+    with pytest.raises(ValueError, match="extra cards"):
+        search("words", 40)
+    reply = response()
+    search = adapter(reply)
+    search("words", 40)
+    reply["corpus_identity"]["fleet"]["digest"] = "changed-corpus"
+    with pytest.raises(ValueError, match="changed"):
+        search("words", 40)
+
+
+def test_switching_timeout_is_explicit_and_healthy_state_does_not_wait():
+    from brigade.memory_retrieval_eval.hub import wait_switching
+
+    def transport(url, token, body, timeout):
+        return 200, {"retrieval": {"state": "switching"}}
+
+    client = MemoryHubClient("https://hub.example.test", "fake-token", transport=transport)
+    with pytest.raises(ValueError, match="coverage timed out while switching"):
+        wait_switching(client, timeout=0)
+
+
+def test_report_identifies_hub_clamp_for_every_adapter(tmp_path):
+    report = run_eval(adapters=["bm25", "hub-lexical"], hub_options=HubOptions(binary=tmp_path / "missing"))
+    assert report["ranking_depth"] == 20
+    assert report["ranking_limit"] == {"hub_clamped": True, "applies_to": ["bm25", "hub-lexical"], "corpus_limit": 20}
+    assert run_eval(adapters=["bm25"])["ranking_limit"]["hub_clamped"] is False
+
+
+def test_sync_spool_preserves_scheduled_and_worker_origin():
+    from brigade.memory_hub_sync import _entry, _request
+
+    entry = _entry("fleet", {"card_id": "one", "text": "fixture", "rel": "memory/cards/one.md"}, "fixture-hub")
+    assert _request(entry)["origin"] == "interactive"
+    for origin in ("scheduled", "worker"):
+        entry["origin"] = origin
+        assert _request(entry)["origin"] == origin
+
+
+def test_external_url_mode_refuses_extra_corpus_without_writing(tmp_path, monkeypatch):
+    from brigade.memory_retrieval_eval import DEFAULT_FIXTURE_ROOT
+    from brigade.memory_retrieval_eval import hub
+    from brigade.memory_retrieval_eval.corpus import load_cards
+    import hashlib
+
+    cards = load_cards(DEFAULT_FIXTURE_ROOT)
+    hashes = {Path(c.path).stem: hashlib.sha256((c.body.rstrip("\n") + "\n").encode()).hexdigest() for c in cards}
+    actions = []
+
+    def transport(url, token, body, timeout):
+        actions.append(body["action"])
+        assert body["action"] in ("card", "search")
+        if body["action"] == "card":
+            return 200, {"card": {"content_hash": hashes[body["card_id"]]}}
+        reply = response()
+        reply["corpus_identity"]["fleet"] = {"live_count": len(cards) + 1, "digest": "extra"}
+        return 200, reply
+
+    monkeypatch.setattr(hub, "MemoryHubClient", lambda url, token: MemoryHubClient(url, token, transport=transport))
+    token_file = tmp_path / "token"
+    token_file.write_text("fake-token")
+    with pytest.raises(ValueError, match="extra cards"):
+        run_eval(
+            adapters=["hub-lexical"], hub_options=HubOptions(url="https://hub.example.test", token_file=token_file)
+        )
+    assert actions.count("card") == len(cards)
+    assert actions.count("search") == 1

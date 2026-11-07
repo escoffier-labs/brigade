@@ -121,7 +121,9 @@ keyword queries and the model default decision remain separate operations.
 Neither a passing public half nor a skipped adapter qualifies a model for R1.
 A gate exits nonzero when a required adapter is skipped. Missing binaries or
 embedders are reported as unavailable, and fallback or stale search responses
-cannot pass. A disposable candidate hub gets 30 seconds for initial coverage.
+cannot pass. A disposable candidate hub gets 30 seconds for initial coverage. Remaining
+in `switching` raises an explicit coverage timeout instead of an unavailable
+adapter result.
 An operator can instead prepare an isolated fixture hub before running:
 
 ```sh
@@ -132,23 +134,44 @@ python -m brigade.memory_retrieval_eval --gate R1 --hub-url https://hub.example.
 
 External-hub mode reads only. It verifies fixture content hashes and never
 imports cards, reconfigures retrieval or calls an embedder directly. Use a
-scope containing exactly the selected fixture. Search metadata binds
+scope containing exactly the selected fixture. Each eval response binds the
+scope's live count and SHA-256 digest of sorted `(card_id, content_hash)` pairs.
+Extra live cards are refused, and a changing corpus fails the run. Search metadata binds
 `indexed_seq`, `index_format`, `scorer_version`, mode, ranking policy, RRF
 weights, embedder identity and the current policy revision and digest. Any change during the run fails the evaluation.
 The report also carries a fixture digest and a SHA-256 digest over its canonical
 JSON without the `digest` field. `--aggregate-only` removes per-query data before
 that report digest is calculated. It changes no S19e evidence record format.
 
-RRF weights are positive finite numbers up to 100, under `[memory.rrf]` in the
-hub's TOML file. `lexical = 1.0` and `dense = 1.0` remain the defaults, with
+RRF weights are operator-only and hub-wide. They are positive finite numbers
+up to 100, under `[memory.rrf]` in the operator's `hub.toml` or the explicit
+`--memory-config` file. Workspace files and search requests cannot set them.
+Invalid weights in the default file make the memory route unavailable, even
+in lexical mode. An explicitly named invalid configuration stops hub startup. `lexical = 1.0` and `dense = 1.0` remain the defaults, with
 rank constant 60. A restart applies tuning. Lineage links use scoped
 `superseded_by`, `supersedes`, `merged_from` and merge `aliases` metadata.
-Each collapsed hit includes readable chain members with revisions for `card`
-lookup. Flagged cards and unreviewed automation cannot assert links that
-absorb interactive results. Reviewed proposal relations remain effective.
-Terminal heads win, with newest revision breaking branches and cycles.
-The registered principal credential class is capped at automation, regardless
-of an `interactive` hint. Node and admin writes use `scheduled` and `worker`
+Links accept bare ids, workspace paths and `scope/card_id` references, with
+scope-qualified references restricted to the source card's own scope. Only
+`reviewed`, `policy-promoted` and `imported` cards may assert lineage.
+Unreviewed interactive cards, unreviewed automation and flagged cards cannot
+create links. Each collapsed hit includes chain members and revisions for
+`card` lookup. Distinct live terminal successors remain separate results.
+Cycles select the newest head event seq. Flagged cards never replace another
+card as a lineage head. In push mode the head, members and relation owners
+must all pass the current push eligibility checks. If a successor is withheld,
+the eligible predecessor remains a result.
+
+A collapsed head's `revision` and `content_hash` describe that head. Its `score`
+and `ranks` belong to the matched chain member that supplied the hit.
+
+Lineage neighbours are resolved when the index publishes a snapshot. Queries
+walk only hit components, and an empty hit list does no lineage work. Ordinary
+searches skip the policy lookup and corpus digest. Eval adapters explicitly
+request `eval: true` to obtain both bindings. `lineage_visited` reports the
+number of documents visited by collapse.
+
+Principal credentials are treated as automated until principals have a
+registered writer class, regardless of an `interactive` hint. Node and admin writes use `scheduled` and `worker`
 hints. Only `agent-unreviewed` automation is demoted, and
 `sources: ["automation"]` disables that demotion without filtering results.
 
@@ -156,5 +179,8 @@ The bounded before/after script is `engines/hub/bench/retrieval.py`. Run it
 inside a Brigade verification script with `--before`, `--after` and `--output`.
 It runs twice per binary over the public fixture, then twice over the same
 fixture with deterministic predecessor and scheduled-source copies. It records
-hit@5, MRR at depth 20, elapsed query time and load averages. It accepts no
+hit@5, MRR at depth 20, elapsed query time and load averages. It also runs a
+5,000-card padding case and records the visited-document count, including a
+zero-hit query. The report's `ranking_limit` explicitly identifies the clamp
+to 20 for `corpus_limit` and `ranking_depth` across every selected adapter. It accepts no
 external hub or embedder settings.

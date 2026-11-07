@@ -1871,20 +1871,35 @@ hub copies its semantics from `src/brigade/memory_bm25.py` and
    for its current content is left out of the dense list and stays findable
    lexically.
 5. Fuse with reciprocal rank fusion: score = sum over lists of
-   weight / (60 + rank), weights 1.0 until the eval says otherwise.
+   weight / (60 + rank), weights 1.0 until the eval says otherwise. The
+   `[memory.rrf]` setting is operator-only and hub-wide. Workspace files and
+   search requests cannot change it. Bad weights in the default `hub.toml`
+   make the memory route unavailable, including in lexical mode. Bad weights
+   in an explicit `--memory-config` stop startup.
 6. Collapse lineage: cards linked by `supersede_card` or
    `merge_exact_duplicates`, and handoff-derived items from one chain, appear
-   once, as the newest live head.
+   once per live terminal head. Only reviewed, policy-promoted or imported
+   cards can assert links. References written as `scope/card_id` must name
+   the source card's scope. Separate live successors are preserved. Cycles
+   use the newest head event seq, and flagged cards never replace another
+   head. Push collapse uses only eligible heads, members and assertion owners,
+   preserving an eligible predecessor when its successor is withheld.
+   Resolved forward and reverse neighbours live on immutable index snapshots.
+   A query walks only components reached from its top hits.
 7. Demote repetitive automated sources: versions that are still
    `agent-unreviewed` and came from a `scheduled` or `worker` writer sort after
    every other match, unless the query sets `sources: ["automation"]`.
    Reviewed, promoted and imported cards are never demoted. The writer class
-   comes from the credential's registered class. The `origin` hint on an event
+   comes from the credential's registered class. Until principals have a
+   registered writer class, every Principal credential is treated as automated.
+   The `origin` hint on an event
    can lower it and never raise it. Node tokens serve people and timers on one
    machine, so a node write's class comes from its hint, which affects ranking
    only.
 8. Return at most 20 matches with `scope`, `card_id`, `revision`, `title`,
    `summary`, `tags`, `score`, `content_hash`, `trust` and each list's rank.
+   A collapsed head's revision and hash identify the head. Its score and list
+   ranks come from the matched chain member that supplied the hit.
    The response says which mode ran (`lexical`, `hybrid`, or
    `lexical-fallback` when a configured embedder could not answer) and why a
    hybrid query degraded (`embedder-timeout`, `embedder-unavailable`,
@@ -1915,7 +1930,10 @@ adapters: `hub-lexical` and `hub-hybrid`. Each starts a `brigade-hub` on a
 loopback port with a temporary memory database loaded from the fixture. They
 report "skipped" when the binary or an embedding server is missing, like the
 `semantic` adapter does today. A gate run requires them. Private gold sets run
-through `--fixture-root` and report aggregate numbers only. Every gate record
+through `--fixture-root` and report aggregate numbers only. Eval requests explicitly set `eval: true` for policy and corpus bindings.
+Ordinary searches do neither read. A scope's live count and a digest of its
+sorted `(card_id, content_hash)` pairs bind the exact evaluated corpus, and
+external runs reject extra cards. Every gate record
 names the `indexed_seq`, index format version, scorer version and policy
 revision it ran against, so a Tier 0 gate can tell whether its eval record
 still applies.

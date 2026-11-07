@@ -6,6 +6,7 @@ embedder is configured on the disposable hub with an explicit memory TOML file.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -41,6 +42,7 @@ class HubAdapter:
 
     def __init__(self, client: MemoryHubClient, mode: str, options: HubOptions, cards: Sequence[CardDoc] = ()) -> None:
         self.ids = {Path(card.path).stem: card.card_id for card in cards}
+        self.expected_corpus = corpus_identity(cards) if cards else None
         self.client = client
         self.mode = mode
         self.options = options
@@ -52,6 +54,7 @@ class HubAdapter:
             query=query,
             limit=min(limit, 20),
             mode=self.mode,
+            eval=True,
             scopes=[self.options.scope],
             ranking="raw" if self.options.raw else "default",
         )
@@ -66,6 +69,12 @@ class HubAdapter:
             raise ValueError("hub eval response lacks policy binding")
         binding["policy_revision"] = reply["policy_revision"]
         binding["policy_digest"] = reply["policy_digest"]
+        identity = reply.get("corpus_identity", {}).get(self.options.scope)
+        if not identity:
+            raise ValueError("hub eval response lacks scope corpus identity")
+        if self.expected_corpus is not None and identity != self.expected_corpus:
+            raise ValueError("hub eval scope corpus differs from the fixture, including extra cards")
+        binding["corpus_identity"] = identity
         binding["mode"] = self.mode
         binding["embedder_id"] = reply.get("embedder_id")
         if self.mode == "hybrid" and not binding["embedder_id"]:
@@ -78,7 +87,7 @@ class HubAdapter:
             raise ValueError("hub eval candidate embedder does not match")
         if self.binding is not None and binding != self.binding:
             raise ValueError("hub index or retrieval configuration changed during eval")
-        self.binding = binding
+        self.binding = copy.deepcopy(binding)
         return [
             (self.ids.get(str(hit["card_id"]), str(hit["card_id"])), float(hit["score"])) for hit in reply["matches"]
         ]
@@ -88,6 +97,29 @@ def stable_digest(payload: Any) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     ).hexdigest()
+
+
+def corpus_identity(cards: Sequence[CardDoc]) -> dict[str, Any]:
+    members = sorted(
+        (
+            Path(c.path).stem,
+            hashlib.sha256((c.body.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n").encode()).hexdigest(),
+        )
+        for c in cards
+    )
+    encoded = json.dumps(members, ensure_ascii=False, separators=(",", ":")).encode()
+    return {"live_count": len(members), "digest": hashlib.sha256(encoded).hexdigest()}
+
+
+def wait_switching(client: MemoryHubClient, *, timeout: float = 30) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        status = client.call("status").get("retrieval", {})
+        if status.get("state") != "switching":
+            return
+        if time.monotonic() >= deadline:
+            raise ValueError("disposable hub embedding coverage timed out while switching")
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
 
 
 @contextmanager
@@ -149,12 +181,7 @@ def hub_client(options: HubOptions, cards: Sequence[CardDoc]) -> Iterator[Memory
             if cards:
                 client.call("search", query="fixture readiness", mode="lexical", scopes=[options.scope], min_seq=seq)
             if options.memory_config:
-                deadline = time.monotonic() + 30
-                while time.monotonic() < deadline:
-                    status = client.call("status").get("retrieval", {})
-                    if status.get("state") != "switching":
-                        break
-                    time.sleep(0.1)
+                wait_switching(client)
             yield client
         finally:
             hc.stop_hub(hub)

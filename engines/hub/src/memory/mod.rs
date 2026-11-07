@@ -1225,7 +1225,7 @@ impl Store {
         push: bool,
     ) -> Reply {
         let mut reply = self.search_ranked(credential, map, push).await;
-        if reply.status == 200 {
+        if reply.status == 200 && map.get("eval").and_then(Json::as_bool) == Some(true) {
             if let Ok(authority) = self.hub.submit(|db| ops::Authority::read(&Conn(db))).await {
                 reply.body["policy_revision"] = json!(authority.policy.as_ref().map(|p| p.0));
                 reply.body["policy_digest"] = json!(authority.policy.as_ref().map(|p| &p.1));

@@ -37,6 +37,7 @@ pub struct Request {
     pub prompt: bool,
     pub push: bool,
     pub raw: bool,
+    pub eval: bool,
     pub automation: bool,
     pub weights: super::ranking::Weights,
     pub dense: Option<(std::sync::Arc<super::dense::Matrix>, Vec<f32>)>,
@@ -58,6 +59,7 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
         "sources",
         "min_seq",
         "ranking",
+        "eval",
     ];
     if let Some(k) = map.keys().find(|k| !ALLOWED.contains(&k.as_str())) {
         return Err(invalid(&format!("unknown field {k:?} for search")));
@@ -139,6 +141,9 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
                 .ok_or_else(|| invalid("min_seq must be a non-negative integer"))?,
         ),
     };
+    if map.get("eval").is_some_and(|v| !v.is_boolean()) {
+        return Err(invalid("eval must be a boolean"));
+    }
     let tokens = text::tokenize(&query);
     Ok(Request {
         query,
@@ -151,6 +156,7 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
             Some("prompt")
         ),
         push: false,
+        eval: map.get("eval").and_then(Json::as_bool).unwrap_or(false),
         raw: map.get("ranking").and_then(Json::as_str) == Some("raw"),
         automation: map
             .get("sources")
@@ -331,9 +337,12 @@ pub fn run<T: ReadTx + ?Sized>(
             hits: ordered,
             chains: std::collections::HashMap::new(),
             sources: std::collections::HashMap::new(),
+            visited: 0,
         }
     } else {
-        super::ranking::collapse(snap, &allowed, ordered)
+        super::ranking::collapse_eligible(snap, &allowed, ordered, |n| {
+            Ok(!eligible(vec![(n, 0.0)])?.is_empty())
+        })?
     };
     let mut ordered = eligible(collapsed.hits)?;
     if !request.raw && !request.automation {
@@ -394,13 +403,14 @@ pub fn run<T: ReadTx + ?Sized>(
     if !complete {
         retrieval["truncated"] = json!(true);
     }
-    Ok(Reply::new(
+    let mut reply = Reply::new(
         200,
         json!({
             "content_trust": "untrusted",
             "query": request.query,
             "matches": matches,
             "match_count": total,
+            "lineage_visited": collapsed.visited,
             "retrieval": retrieval,
             "indexed_seq": snap.indexed_seq,
             "index_format": super::index::FORMAT_VERSION,
@@ -408,5 +418,27 @@ pub fn run<T: ReadTx + ?Sized>(
             "rrf_weights": request.weights.json(),
             "ranking": if request.raw { "raw" } else { "default" },
         }),
-    ))
+    );
+    if request.eval {
+        let mut corpus: std::collections::BTreeMap<String, Vec<(String, String)>> =
+            std::collections::BTreeMap::new();
+        for (scope, ok) in scopes.iter().zip(&allowed) {
+            if *ok {
+                corpus.entry(scope.clone()).or_default();
+            }
+        }
+        for n in snap.live(&allowed) {
+            let d = snap.doc(n);
+            corpus
+                .entry(scopes[d.scope as usize].clone())
+                .or_default()
+                .push((d.card_id.to_string(), d.content_hash.to_string()));
+        }
+        let identity: serde_json::Map<String, Json> = corpus.into_iter().map(|(scope, mut members)| {
+            members.sort();
+            (scope, json!({"live_count":members.len(),"digest":super::ids::sha256_hex(super::ids::canonical(&json!(members)).as_bytes())}))
+        }).collect();
+        reply.body["corpus_identity"] = json!(identity);
+    }
+    Ok(reply)
 }

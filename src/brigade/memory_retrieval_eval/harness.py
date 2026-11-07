@@ -118,6 +118,11 @@ def _run_eval(
         "issue": 722,
         "fixture_root": fixture_root_label(fixture_root, root),
         "k": k_eff,
+        "ranking_limit": {
+            "hub_clamped": any(n.startswith("hub-") for n in wanted),
+            "applies_to": list(wanted),
+            "corpus_limit": min(20, len(cards)) if any(n.startswith("hub-") for n in wanted) else len(cards),
+        },
         "ranking_depth": min(20, len(cards)) if any(n.startswith("hub-") for n in wanted) else len(cards),
         "corpus": corpus_stats(cards, queries),
         "ceiling": ceiling_for_queries(queries, k_eff),
