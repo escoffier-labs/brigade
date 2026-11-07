@@ -1,7 +1,6 @@
 //! Search over one lexical snapshot and an optional immutable dense matrix.
 //! Queries authorize visible scopes, fuse lexical and dense ranks with RRF,
-//! and apply the S18 prompt-load boundary. Lineage collapse and source
-//! demotion follow in S17.
+//! collapse scoped lineage, demote unreviewed automation and apply S18.
 use super::{
     Credential, Reply, auth,
     index::{Snapshot, TOP},
@@ -37,6 +36,10 @@ pub struct Request {
     pub min_seq: Option<i64>,
     pub prompt: bool,
     pub push: bool,
+    pub raw: bool,
+    pub eval: bool,
+    pub automation: bool,
+    pub weights: super::ranking::Weights,
     pub dense: Option<(std::sync::Arc<super::dense::Matrix>, Vec<f32>)>,
 }
 
@@ -55,6 +58,8 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
         "scopes",
         "sources",
         "min_seq",
+        "ranking",
+        "eval",
     ];
     if let Some(k) = map.keys().find(|k| !ALLOWED.contains(&k.as_str())) {
         return Err(invalid(&format!("unknown field {k:?} for search")));
@@ -96,6 +101,7 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
         }
     };
     // With no embedder configured every mode is answered by BM25 (D30).
+    one_of("ranking", &["default", "raw"])?;
     one_of("mode", &["auto", "lexical", "hybrid"])?;
     one_of("query_source", &["prompt", "cwd", "explicit"])?;
     match map.get("sources") {
@@ -135,6 +141,9 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
                 .ok_or_else(|| invalid("min_seq must be a non-negative integer"))?,
         ),
     };
+    if map.get("eval").is_some_and(|v| !v.is_boolean()) {
+        return Err(invalid("eval must be a boolean"));
+    }
     let tokens = text::tokenize(&query);
     Ok(Request {
         query,
@@ -147,6 +156,13 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
             Some("prompt")
         ),
         push: false,
+        eval: map.get("eval").and_then(Json::as_bool).unwrap_or(false),
+        raw: map.get("ranking").and_then(Json::as_str) == Some("raw"),
+        automation: map
+            .get("sources")
+            .and_then(Json::as_array)
+            .is_some_and(|v| !v.is_empty()),
+        weights: super::ranking::Weights::default(),
         dense: None,
     })
 }
@@ -297,9 +313,12 @@ pub fn run<T: ReadTx + ?Sized>(
         let lexical = snap.top(hits, TOP);
         let dense = snap.top(eligible(matrix.score(snap, &allowed, query))?, TOP);
         let mut scores = std::collections::HashMap::new();
-        for (source, list) in [("lexical", lexical), ("dense", dense)] {
+        for (source, list, weight) in [
+            ("lexical", lexical, request.weights.lexical),
+            ("dense", dense, request.weights.dense),
+        ] {
             for (rank, (n, _)) in list.into_iter().enumerate() {
-                *scores.entry(n).or_insert(0.0) += 1.0 / (60 + rank + 1) as f64;
+                *scores.entry(n).or_insert(0.0) += weight / (60 + rank + 1) as f64;
                 ranks.entry(n).or_insert_with(|| json!({}))[source] = json!(rank + 1);
             }
         }
@@ -307,9 +326,35 @@ pub fn run<T: ReadTx + ?Sized>(
     } else {
         hits
     };
-    let matches: Vec<Json> = snap
-        .top(hits, TOP)
-        .into_iter()
+    let ordered = snap.top(hits, TOP);
+    if request.dense.is_none() {
+        for (rank, (n, _)) in ordered.iter().enumerate() {
+            ranks.insert(*n, json!({"lexical":rank + 1}));
+        }
+    }
+    let collapsed = if request.raw {
+        super::ranking::Collapsed {
+            hits: ordered,
+            chains: std::collections::HashMap::new(),
+            sources: std::collections::HashMap::new(),
+            visited: 0,
+            overflow: false,
+            uncollapsed: 0,
+        }
+    } else {
+        super::ranking::collapse_eligible(snap, &allowed, ordered, |n| {
+            Ok(!eligible(vec![(n, 0.0)])?.is_empty())
+        })?
+    };
+    let mut ordered = eligible(collapsed.hits)?;
+    if !request.raw && !request.automation {
+        // Stable partition preserves scorer order within each source class.
+        ordered.sort_by_key(|(n, _)| {
+            let d = snap.doc(*n);
+            d.automated && &*d.trust == "agent-unreviewed"
+        });
+    }
+    let matches: Vec<Json> = ordered.into_iter()
         .take(request.limit)
         .enumerate()
         .map(|(rank, (n, score))| {
@@ -320,13 +365,15 @@ pub fn run<T: ReadTx + ?Sized>(
                 "card_id": &*d.card_id,
                 "card_aliases": [],
                 "revision": d.revision,
+                "lineage": collapsed.chains.get(&n).cloned().unwrap_or_default(),
+                "source_demoted": !request.raw && !request.automation && d.automated && &*d.trust == "agent-unreviewed",
                 "title": d.fields.title,
                 "summary": d.fields.summary,
                 "tags": d.fields.tags,
                 "score": score,
                 "content_hash": &*d.content_hash,
                 "trust": &*d.trust,
-                "ranks": ranks.get(&n).cloned().unwrap_or_else(|| json!({"lexical": rank + 1})),
+                "ranks": ranks.get(collapsed.sources.get(&n).unwrap_or(&n)).cloned().unwrap_or_else(|| json!({"lexical": rank + 1})),
             });
             if request.prompt {
                 let Some(body) = blob(tx, &d.content_hash)? else {
@@ -358,15 +405,44 @@ pub fn run<T: ReadTx + ?Sized>(
     if !complete {
         retrieval["truncated"] = json!(true);
     }
-    Ok(Reply::new(
+    let mut reply = Reply::new(
         200,
         json!({
             "content_trust": "untrusted",
             "query": request.query,
             "matches": matches,
             "match_count": total,
+            "lineage_visited": collapsed.visited,
+            "lineage_overflow": collapsed.overflow,
+            "lineage_uncollapsed": collapsed.uncollapsed,
             "retrieval": retrieval,
             "indexed_seq": snap.indexed_seq,
+            "index_format": super::index::FORMAT_VERSION,
+            "scorer_version": super::ranking::SCORER_VERSION,
+            "rrf_weights": request.weights.json(),
+            "ranking": if request.raw { "raw" } else { "default" },
         }),
-    ))
+    );
+    if request.eval {
+        let mut corpus: std::collections::BTreeMap<String, Vec<(String, String)>> =
+            std::collections::BTreeMap::new();
+        for (scope, ok) in scopes.iter().zip(&allowed) {
+            if *ok {
+                corpus.entry(scope.clone()).or_default();
+            }
+        }
+        for n in snap.live(&allowed) {
+            let d = snap.doc(n);
+            corpus
+                .entry(scopes[d.scope as usize].clone())
+                .or_default()
+                .push((d.card_id.to_string(), d.content_hash.to_string()));
+        }
+        let identity: serde_json::Map<String, Json> = corpus.into_iter().map(|(scope, mut members)| {
+            members.sort();
+            (scope, json!({"live_count":members.len(),"digest":super::ids::sha256_hex(super::ids::canonical(&json!(members)).as_bytes())}))
+        }).collect();
+        reply.body["corpus_identity"] = json!(identity);
+    }
+    Ok(reply)
 }

@@ -1871,20 +1871,42 @@ hub copies its semantics from `src/brigade/memory_bm25.py` and
    for its current content is left out of the dense list and stays findable
    lexically.
 5. Fuse with reciprocal rank fusion: score = sum over lists of
-   weight / (60 + rank), weights 1.0 until the eval says otherwise.
+   weight / (60 + rank), weights 1.0 until the eval says otherwise. The
+   `[memory.rrf]` setting is operator-only and hub-wide. Workspace files and
+   search requests cannot change it. Bad weights in the default `hub.toml`
+   make the memory route unavailable, including in lexical mode. Bad weights
+   in an explicit `--memory-config` stop startup.
 6. Collapse lineage: cards linked by `supersede_card` or
    `merge_exact_duplicates`, and handoff-derived items from one chain, appear
-   once, as the newest live head.
+   once per live terminal head. Only reviewed, policy-promoted or imported
+   cards can assert links, and both endpoints must retain one of those trust
+   levels. An unreviewed successor rewrite or revival cannot replace its
+   reviewed predecessor. References written as `scope/card_id` must name
+   the source card's scope. Separate live successors are preserved. Cycles
+   resolve each terminal strongly connected component independently using its
+   newest non-flagged head event seq, and flagged cards never replace another
+   head. Push collapse uses only eligible heads, members and assertion owners,
+   preserving an eligible predecessor when its successor is withheld.
+   Resolved forward and reverse neighbours live on immutable index snapshots.
+   A query walks only components reached from its top hits, probing at most
+   512 nodes including its initial candidates. Overflow returns the eligible
+   input hits uncollapsed and reports the overflow and uncollapsed-hit count.
+   Bare and scoped ids retain filename-like suffixes. Only workspace file
+   paths strip the file extension.
 7. Demote repetitive automated sources: versions that are still
    `agent-unreviewed` and came from a `scheduled` or `worker` writer sort after
    every other match, unless the query sets `sources: ["automation"]`.
    Reviewed, promoted and imported cards are never demoted. The writer class
-   comes from the credential's registered class. The `origin` hint on an event
+   comes from the credential's registered class. Until principals have a
+   registered writer class, every Principal credential is treated as automated.
+   The `origin` hint on an event
    can lower it and never raise it. Node tokens serve people and timers on one
    machine, so a node write's class comes from its hint, which affects ranking
    only.
 8. Return at most 20 matches with `scope`, `card_id`, `revision`, `title`,
    `summary`, `tags`, `score`, `content_hash`, `trust` and each list's rank.
+   A collapsed head's revision and hash identify the head. Its score and list
+   ranks come from the matched chain member that supplied the hit.
    The response says which mode ran (`lexical`, `hybrid`, or
    `lexical-fallback` when a configured embedder could not answer) and why a
    hybrid query degraded (`embedder-timeout`, `embedder-unavailable`,
@@ -1915,7 +1937,10 @@ adapters: `hub-lexical` and `hub-hybrid`. Each starts a `brigade-hub` on a
 loopback port with a temporary memory database loaded from the fixture. They
 report "skipped" when the binary or an embedding server is missing, like the
 `semantic` adapter does today. A gate run requires them. Private gold sets run
-through `--fixture-root` and report aggregate numbers only. Every gate record
+through `--fixture-root` and report aggregate numbers only. Eval requests explicitly set `eval: true` for policy and corpus bindings.
+Ordinary searches do neither read. A scope's live count and a digest of its
+sorted `(card_id, content_hash)` pairs bind the exact evaluated corpus, and
+external runs reject extra cards. Every gate record
 names the `indexed_seq`, index format version, scorer version and policy
 revision it ran against, so a Tier 0 gate can tell whether its eval record
 still applies.
@@ -1930,7 +1955,9 @@ Measured so far, with untuned RRF weights (#2217): only the 8B hybrid passes
 both private halves of R1, with hit@5 gains of 0.20 to 0.26 over BM25 under
 the three judges and keyword R@5 0.034 below BM25, inside the 0.05 limit. The
 0.6B hybrid gains 0.13 to 0.24 on hit@5 but loses 0.075 on keyword R@5. S17
-tunes the weights and runs the public-fixture half. Until R1 passes for a
+tunes the weights and runs the public-fixture half. The code runner and its
+metadata bindings are documented in [the eval harness](../evals/memory-retrieval/README.md#hub-adapters-and-s17-runner).
+The S17 code slice leaves candidate R1 runs and the S16b decision to operations. Until R1 passes for a
 model, setup does not offer it for `hybrid`, and an install without such a
 model starts in BM25 mode ([Retrieval modes](#retrieval-modes)).
 

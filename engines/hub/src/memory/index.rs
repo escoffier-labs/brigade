@@ -79,9 +79,13 @@ pub struct Doc {
     pub scope: u32,
     pub card_id: Arc<str>,
     pub revision: i64,
+    /// Memory revisions equal the globally increasing head event seq, never a per-card counter.
+    pub head_seq: i64,
     pub content_hash: Arc<str>,
     pub trust: Arc<str>,
     pub fields: Arc<Fields>,
+    pub links: Arc<super::ranking::Links>,
+    pub automated: bool,
     /// Tokens in the card's single BM25 field.
     pub length: u32,
 }
@@ -238,8 +242,16 @@ pub struct Snapshot {
     pub stale: bool,
     main_docs: usize,
     delta_docs: usize,
+    forward: Arc<HashMap<u32, Vec<super::ranking::Neighbour>>>,
+    reverse: Arc<HashMap<u32, Vec<super::ranking::Neighbour>>>,
 }
 impl Snapshot {
+    pub fn forward(&self, n: u32) -> &[super::ranking::Neighbour] {
+        self.forward.get(&n).map(Vec::as_slice).unwrap_or_default()
+    }
+    pub fn reverse(&self, n: u32) -> &[super::ranking::Neighbour] {
+        self.reverse.get(&n).map(Vec::as_slice).unwrap_or_default()
+    }
     pub fn scopes(&self) -> &[String] {
         &self.scopes
     }
@@ -367,6 +379,7 @@ pub struct Card {
     pub content_hash: String,
     pub trust: String,
     pub text: String,
+    pub automated: bool,
 }
 /// What the tail replay found for one changed card.
 #[derive(Debug)]
@@ -380,6 +393,7 @@ pub struct Builder {
     snap: Snapshot,
     heads: HashMap<(u32, Arc<str>), u32>,
     scope_ids: HashMap<String, u32>,
+    lineage_sources: HashSet<u32>,
     /// [`MERGE_FAN_IN`]; tests raise it to reach the segment cap.
     pub(super) fan_in: usize,
 }
@@ -389,6 +403,7 @@ impl Builder {
             snap: Snapshot::default(),
             heads: HashMap::new(),
             scope_ids: HashMap::new(),
+            lineage_sources: HashSet::new(),
             fan_in: MERGE_FAN_IN,
         }
     }
@@ -399,6 +414,7 @@ impl Builder {
         b.snap.segments = vec![Arc::new(postings.finish())];
         b.snap.main_docs = added;
         b.snap.indexed_seq = watermark;
+        b.resolve_lineage();
         b
     }
     fn scope_id(&mut self, scope: &str) -> u32 {
@@ -415,6 +431,7 @@ impl Builder {
         if let Some(old) = self.heads.remove(&(scope, Arc::from(card_id))) {
             let length = self.snap.docs.get(old).length as u64;
             self.snap.docs.kill(old);
+            self.lineage_sources.remove(&old);
             let s = &mut Arc::make_mut(&mut self.snap.stats)[scope as usize];
             s.docs -= 1;
             s.tokens -= length;
@@ -434,14 +451,23 @@ impl Builder {
                 scope,
                 card_id: card_id.clone(),
                 revision: card.revision,
+                head_seq: card.revision,
                 content_hash: card.content_hash.into(),
                 trust: card.trust.into(),
+                links: Arc::new(super::ranking::Links::parse(&card.text, &card.scope)),
+                automated: card.automated,
                 fields: Arc::new(fields),
                 length: tokens.len() as u32,
             });
             let s = &mut Arc::make_mut(&mut self.snap.stats)[scope as usize];
             s.docs += 1;
             s.tokens += tokens.len() as u64;
+            let d = self.snap.doc(doc);
+            if super::ranking::trusted(&d.trust)
+                && (d.links.successor.is_some() || !d.links.predecessors.is_empty())
+            {
+                self.lineage_sources.insert(doc);
+            }
             self.heads.insert((scope, card_id), doc);
             postings.add(doc, tokens);
             added += 1;
@@ -468,6 +494,47 @@ impl Builder {
             self.merge_deltas();
         }
         self.snap.indexed_seq = seq;
+        self.resolve_lineage();
+    }
+    /// Resolve trusted assertions once per publication. Ordinary cards require
+    /// no graph work. Old snapshots retain their own immutable adjacency lists.
+    // Switch to incremental key patching if trusted-owner rebuilds dominate publication cost.
+    fn resolve_lineage(&mut self) {
+        let mut forward: HashMap<u32, Vec<super::ranking::Neighbour>> = HashMap::new();
+        let mut reverse: HashMap<u32, Vec<super::ranking::Neighbour>> = HashMap::new();
+        for &owner in &self.lineage_sources {
+            let d = self.snap.doc(owner);
+            let mut link = |from, to| {
+                if from != to
+                    && super::ranking::trusted(&self.snap.doc(from).trust)
+                    && super::ranking::trusted(&self.snap.doc(to).trust)
+                {
+                    forward
+                        .entry(from)
+                        .or_default()
+                        .push(super::ranking::Neighbour { doc: to, owner });
+                    reverse
+                        .entry(to)
+                        .or_default()
+                        .push(super::ranking::Neighbour { doc: from, owner });
+                }
+            };
+            if let Some(to) = d
+                .links
+                .successor
+                .as_ref()
+                .and_then(|id| self.heads.get(&(d.scope, Arc::from(id.as_str()))))
+            {
+                link(owner, *to);
+            }
+            for id in &d.links.predecessors {
+                if let Some(from) = self.heads.get(&(d.scope, Arc::from(id.as_str()))) {
+                    link(*from, owner);
+                }
+            }
+        }
+        self.snap.forward = Arc::new(forward);
+        self.snap.reverse = Arc::new(reverse);
     }
     /// The tiered merge described at the top of this module. The main
     /// segment, at index 0, is never part of it.
@@ -509,6 +576,8 @@ impl Builder {
     }
 }
 
+const AUTOMATED_SQL: &str = "(c.writer_class='principal' OR COALESCE((SELECT e.origin IN ('scheduled','worker') FROM memory_events e WHERE e.scope=c.scope AND e.card_id=c.card_id AND e.revision<=c.revision AND e.kind IN ('card.put','card.import') ORDER BY e.seq DESC LIMIT 1),0))";
+
 fn card_row(r: &rusqlite::Row) -> rusqlite::Result<Card> {
     let bytes: Vec<u8> = r.get(5)?;
     Ok(Card {
@@ -518,6 +587,7 @@ fn card_row(r: &rusqlite::Row) -> rusqlite::Result<Card> {
         content_hash: r.get(3)?,
         trust: r.get(4)?,
         text: String::from_utf8_lossy(&bytes).into_owned(),
+        automated: r.get(6)?,
     })
 }
 /// A main segment over every live head, at the watermark it is consistent
@@ -531,7 +601,7 @@ pub fn load(db: &Connection) -> rusqlite::Result<Builder> {
                 r.get(0)
             })?;
         let mut s = db.prepare(
-            "SELECT c.scope,c.card_id,c.revision,c.content_hash,c.trust,b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.state='live' ORDER BY c.scope,c.card_id",
+            &format!("SELECT c.scope,c.card_id,c.revision,c.content_hash,c.trust,b.bytes,{AUTOMATED_SQL} FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.state='live' ORDER BY c.scope,c.card_id"),
         )?;
         let mut failed = None;
         let rows = s
@@ -584,7 +654,7 @@ fn tail(db: &Connection, after: i64) -> rusqlite::Result<(Vec<(String, String)>,
 }
 fn heads(db: &Connection, keys: Vec<(String, String)>) -> rusqlite::Result<Vec<Change>> {
     let mut s = db.prepare_cached(
-        "SELECT c.scope,c.card_id,c.revision,c.content_hash,c.trust,b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.state='live'",
+        &format!("SELECT c.scope,c.card_id,c.revision,c.content_hash,c.trust,b.bytes,{AUTOMATED_SQL} FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.state='live'"),
     )?;
     let mut out = Vec::with_capacity(keys.len());
     for (scope, card_id) in keys {
