@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 
 import pytest
@@ -12,6 +13,11 @@ from tests._home import set_home
 from tests.test_memory_hub_client import FakeHub, HUB_URL, NODE_CREDENTIAL
 
 ORIGINAL_OVERRIDE = hubc._memory_hub_override
+
+pytestmark = pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 
 
 class ReflectHub(FakeHub):

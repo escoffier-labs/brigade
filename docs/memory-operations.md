@@ -912,6 +912,8 @@ brigade care status --target <workspace> --entry memory-reflect
 The entry runs at 10:00 local time and uses the existing care installer:
 a user systemd timer on Linux, a LaunchAgent on macOS, or a printed Task
 Scheduler plan on Windows. Follow the installer's activation commands.
+Reflection retains the local reflect command's safe directory-descriptor
+requirement and refuses to run where those operations are unavailable.
 `--schedule memory-reflect=<value>` uses the selected backend's existing
 schedule syntax. The isolated launcher pins the installed Brigade package,
 passes an absolute workspace target, and invokes `memory reflect run --hub
