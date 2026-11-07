@@ -939,3 +939,41 @@ def test_desktop_question_preview_is_bounded_with_identity_first(station, hub, t
     assert "TAIL" not in display
     with sqlite3.connect(hub[3]) as conn:
         assert conn.execute("SELECT question FROM fleet_questions").fetchone() == (question,)
+
+
+def test_desktop_deadline_is_anchored_before_question_create(station, monkeypatch):
+    from brigade import fleet_ask_user
+
+    t0 = now = 100.0
+    timeout_secs = 2
+    deadlines = []
+    actions = []
+
+    def request(_url, _token, body, **_kwargs):
+        nonlocal now
+        actions.append(body["action"])
+        assert body["action"] == "question_create"
+        now += 1.2
+        return 201, {
+            "question_id": "a" * 32,
+            "request_id": body["request_id"],
+            "message_id": "1",
+            "deadline": "2026-01-01T00:00:02+00:00",
+            "status": "pending",
+            "created": True,
+        }
+
+    def desktop(_question, record, *, deadline, stop):
+        deadlines.append(deadline)
+        # End the fake question without polling a live hub or waiting for time.
+        record["status"] = "timeout"
+        return None
+
+    monkeypatch.setattr(fleet_ask_user, "monotonic", lambda: now)
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+    monkeypatch.setattr(fleet_ask_user, "_desktop", desktop)
+    result, error = invoke(station, timeout_secs=timeout_secs)
+    assert not error and result["status"] == "timeout"
+    assert actions == ["question_create"]
+    assert now == t0 + 1.2
+    assert deadlines == [t0 + timeout_secs]

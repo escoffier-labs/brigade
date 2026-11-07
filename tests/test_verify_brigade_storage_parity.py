@@ -525,3 +525,48 @@ def test_storage_parity_launch_rejects_foreign_hub_health(sp, tmp_path, monkeypa
     monkeypatch.setattr(sp.hc.time, "sleep", lambda _seconds: None)
     assert sp.hc._await_hub(hub, sp.hc.time.monotonic() + 10) == "exited"
     assert probes == [("/health", None), ("/nodes", "example-admin")]
+
+
+@pytest.mark.parametrize("launcher", ["contract", "parity"])
+@pytest.mark.parametrize(
+    ("statuses", "detail"),
+    [
+        (None, "no /health answer"),
+        ([401, 503], "/health answered but authenticated /nodes returned status 503"),
+        ([503, 401], "/health answered but authenticated /nodes returned status 401"),
+        ([None], "/health answered but authenticated /nodes gave no response"),
+    ],
+)
+def test_launch_timeout_reports_last_readiness_probe(sp, tmp_path, monkeypatch, launcher, statuses, detail):
+    from types import SimpleNamespace
+
+    now = 0.0
+    probes = 0
+
+    def request(_base, _method, path, **_kwargs):
+        nonlocal probes
+        if path == "/health":
+            return SimpleNamespace(status=None if statuses is None else 200)
+        status = statuses[min(probes, len(statuses) - 1)]
+        probes += 1
+        return SimpleNamespace(status=status)
+
+    def advance(seconds):
+        nonlocal now
+        now += seconds
+
+    monkeypatch.setattr(sp.hc.time, "monotonic", lambda: now)
+    monkeypatch.setattr(sp.hc.time, "sleep", advance)
+    monkeypatch.setattr(sp.hc, "request", request)
+    monkeypatch.setattr(sp.hc, "free_port", lambda: 12345)
+    monkeypatch.setattr(sp.hc.subprocess, "Popen", lambda *_args, **_kwargs: SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr(sp.hc, "stop_hub", lambda hub: hub.log_handle.close())
+    error = sp.hc.ContractError if launcher == "contract" else sp.ParityError
+    with pytest.raises(error) as caught:
+        if launcher == "contract":
+            sp.hc.launch_hub("example-hub --port {port}", brigade=["brigade"], state_dir=tmp_path, startup_timeout=1)
+        else:
+            _parity_launch(sp, tmp_path, "serve")
+    assert detail in str(caught.value)
+    if statuses is not None:
+        assert "no /health answer" not in str(caught.value)
