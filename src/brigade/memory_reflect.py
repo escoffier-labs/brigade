@@ -277,11 +277,11 @@ def inspect_payload(*, target: Path, command: str, candidate_id: str | None = No
         raise ValueError("invalid candidate id")
     runs, invalid = _runs(target)
     if command == "status":
-        from .memory_reflect_hub import schedule_status
+        from .memory_reflect_hub import schedule_summary
 
-        schedule = schedule_status(target)
+        schedule = schedule_summary(target)
         return {
-            "schedule": {k: schedule[k] for k in ("consecutive_failures", "paused")},
+            "schedule": schedule,
             "status": "ok",
             "run_count": len(runs),
             "invalid_runs": invalid,
@@ -363,6 +363,14 @@ def dispatch(args: argparse.Namespace) -> int:
             print(_terminal_text(payload["diff"]))
         if payload.get("backend") == "hub":
             print(f"hub candidates: {payload['candidate_count']}, proposals: {len(payload['proposals'])}")
+            schedule = payload["schedule"]
+            print(
+                f"schedule: paused={str(schedule['paused']).lower()}, consecutive_failures={schedule['consecutive_failures']}"
+            )
+            for refused in payload.get("refused_ops", []):
+                print(_terminal_text(f"refused: {refused['op_digest']} {refused['code']}"))
+            for reason, count in sorted(payload.get("skipped_reasons", {}).items()):
+                print(_terminal_text(f"skipped: {reason}={count}"))
             for proposal in payload["proposals"]:
                 print(_terminal_text(f"proposal: {proposal['proposal_id']} (separate decision required)"))
         if payload.get("status") == "paused":

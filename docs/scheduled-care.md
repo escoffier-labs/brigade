@@ -766,6 +766,8 @@ Three consecutive non-zero reflect runs pause the job in workspace state.
 Scheduled triggers then skip hub work. Inspect `memory reflect status`,
 `memory care status`, or `care status --entry memory-reflect`. Fix the fault
 and run `memory reflect run --hub --target <workspace>` manually. A successful
-run resumes scheduled work, including a dry run. Reinstalls leave the pause set.
+non-dry manual run resumes scheduled work. Dry runs and reinstalls leave the
+pause set. The timer sets only `PATH`, so configure user-level `[memory_hub]`
+settings or import the memory hub environment pair into the user service manager.
 See [Scheduled hub reflection](memory-operations.md#scheduled-hub-reflection-s19d)
 for grants, credentials, rollback and scheduler activation.
