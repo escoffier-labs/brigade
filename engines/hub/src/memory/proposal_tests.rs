@@ -3,32 +3,32 @@ use super::{tests::*, *};
 use rusqlite::Connection;
 use serde_json::{Value as Json, json};
 
-const OLD: &str = "Use the focused gate. ^c-abcdef";
+pub(super) const OLD: &str = "Use the focused gate. ^c-abcdef";
 const NEW: &str = "Use the scoped gate.";
-fn clean() -> Arc<dyn Scanner> {
+pub(super) fn clean() -> Arc<dyn Scanner> {
     Arc::new(Fixed(Scan::Clean {
         ruleset: "test-v7".into(),
     }))
 }
-async fn grant(h: &Hub, scope: &str, rights: &[&str]) {
+pub(super) async fn grant(h: &Hub, scope: &str, rights: &[&str]) {
     let r = h.call(ADMIN_TOKEN, json!({"action":"grant", "principal":"agent:dot", "scope":scope,"rights":rights,"client_event_id":h.id()})).await;
     assert_eq!(r.status, 200, "{r:?}");
 }
-fn op(scope: &str, card: &str, revision: i64) -> Json {
+pub(super) fn op(scope: &str, card: &str, revision: i64) -> Json {
     json!({"type":"replace_block", "scope":scope, "card_id":card,
            "base_revision":revision,"block_id":"c-abcdef", "expected_block_hash":ids::sha256_hex(OLD.as_bytes()), "text":NEW})
 }
-async fn submit(h: &Hub, token: &str, ops: Vec<Json>) -> Reply {
+pub(super) async fn submit(h: &Hub, token: &str, ops: Vec<Json>) -> Reply {
     h.call(
         token,
         json!({"action":"propose","base_epoch":h.epoch().await,"ops":ops,"client_event_id":h.id()}),
     )
     .await
 }
-async fn decide(h: &Hub, token: &str, id: &Json) -> Reply {
+pub(super) async fn decide(h: &Hub, token: &str, id: &Json) -> Reply {
     h.call(token, json!({"action":"decide","proposal_id":id,"decision":"accept","base_epoch":h.epoch().await,"client_event_id":h.id()})).await
 }
-async fn card(h: &Hub, scope: &str, id: &str) -> Json {
+pub(super) async fn card(h: &Hub, scope: &str, id: &str) -> Json {
     h.call(
         ADMIN_TOKEN,
         json!({"action":"card","scope":scope,"card_id":id}),
@@ -201,7 +201,7 @@ async fn target_scope_grants_guard_propose_decide_apply_and_rollback_including_c
                 .status,
             403
         );
-        grant(&h, scope, &["reflect"]).await;
+        grant(&h, scope, &["read", "reflect"]).await;
         assert_eq!(
             submit(&h, AGENT_TOKEN, vec![op(scope, "a", rev(&a))])
                 .await
@@ -214,13 +214,13 @@ async fn target_scope_grants_guard_propose_decide_apply_and_rollback_including_c
                 .status,
             403
         );
-        grant(&h, scope, &["review"]).await;
+        grant(&h, scope, &["read", "review"]).await;
         let apply = decide(&h, AGENT_TOKEN, &opened.body["proposal_id"]).await;
         assert_eq!(apply.body["state"], "applied", "{apply:?}");
         grant(&h, scope, &[]).await;
         let rb = json!({"action":"rollback","proposal_id":opened.body["proposal_id"],"base_epoch":h.epoch().await,"client_event_id":h.id()});
         assert_eq!(h.call(AGENT_TOKEN, rb.clone()).await.status, 403);
-        grant(&h, scope, &["review"]).await;
+        grant(&h, scope, &["read", "review"]).await;
         let pending = h.call(AGENT_TOKEN, rb).await;
         assert_eq!(pending.body["state"], "pending", "{pending:?}");
         grant(&h, scope, &[]).await;
@@ -242,6 +242,9 @@ async fn schema_v3_upgrades_without_changing_epoch_or_cards() {
     let epoch = h.epoch().await;
     h.store.take();
     let db = Connection::open(h.memory()).unwrap();
+    let old_max: i64 = db
+        .query_row("SELECT max(seq) FROM memory_events", [], |r| r.get(0))
+        .unwrap();
     db.execute_batch("DROP TABLE IF EXISTS memory_proposals; PRAGMA user_version=3;")
         .unwrap();
     drop(db);
@@ -255,6 +258,11 @@ async fn schema_v3_upgrades_without_changing_epoch_or_cards() {
             .unwrap(),
         4
     );
+    let next = h
+        .put(ADMIN_TOKEN, "fleet", "after-upgrade", None, "Next card.")
+        .await;
+    assert_eq!(next.status, 201, "{next:?}");
+    assert!(rev(&next) > old_max);
 }
 
 #[tokio::test]
@@ -266,7 +274,7 @@ async fn metadata_ops_are_reviewed_and_other_card_needs_its_own_scope_grant() {
     merge["type"] = json!("merge_exact_duplicates");
     merge.as_object_mut().unwrap().remove("text");
     merge["other_card"] = json!({"scope":"collection:notes","card_id":"b","base_revision":rev(&b)});
-    grant(&h, "fleet", &["reflect"]).await;
+    grant(&h, "fleet", &["read", "reflect"]).await;
     assert_eq!(
         submit(&h, AGENT_TOKEN, vec![merge.clone()]).await.status,
         403
@@ -467,7 +475,7 @@ async fn writer_rechecks_target_grants_after_authorized_preparation() {
             if action == "rollback" {
                 decide(&h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
             }
-            grant(&h, scope, &["reflect", "review"]).await;
+            grant(&h, scope, &["read", "reflect", "review"]).await;
             let raw = if action == "propose" {
                 json!({"action":action,"base_epoch":h.epoch().await,"ops":[op(scope,"a",rev(&a))],"client_event_id":h.id()})
             } else {
@@ -486,7 +494,7 @@ async fn writer_rechecks_target_grants_after_authorized_preparation() {
             let command = proposals::prepare(&Conn(&db), &who, raw, clean().as_ref()).unwrap();
             assert!(command.draft.is_ok());
             prepared.action = Action::Proposal(command);
-            grant(&h, scope, &[]).await;
+            grant(&h, scope, &["reflect", "review"]).await;
             let events = h.events();
             let before = card(&h, scope, "a").await;
             assert_eq!(store.write(prepared).await.status, 403);

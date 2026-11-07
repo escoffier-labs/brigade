@@ -21,8 +21,11 @@ fn get(text: &str, key: &str) -> Result<Option<String>, &'static str> {
         if let Some((k, value)) = line.split_once(':') {
             if k == key {
                 if found.is_some()
+                    || value.trim_start().starts_with(['|', '>'])
                     || meta
-                        .get(i + 1)
+                        .iter()
+                        .skip(i + 1)
+                        .find(|s| !s.trim().is_empty())
                         .is_some_and(|s| s.starts_with(char::is_whitespace) || s.starts_with("- "))
                 {
                     return Err("ambiguous or multiline metadata field");
@@ -70,7 +73,9 @@ fn claims(text: &str) -> Result<String, &'static str> {
     let (_, body) = front(text)?;
     // Remove only supported anchor suffixes, retaining opaque syntax as bytes.
     let result = proposal_blocks::strip_anchors(body);
-    Ok(result.split_whitespace().collect::<Vec<_>>().join(" "))
+    // Normalization has already fixed line endings. Preserve every other byte,
+    // including indentation and spacing inside opaque Markdown and code.
+    Ok(result)
 }
 pub fn apply(text: &str, op: &Json, other: Option<(&str, &str)>) -> Result<String, &'static str> {
     match op["type"].as_str() {
@@ -140,7 +145,7 @@ mod tests {
     fn duplicate_comparison_strips_only_the_addressable_anchor() {
         assert_eq!(
             claims("> Claim. ^c-abcdef\n\nClaim. ^c-abcdef\n").unwrap(),
-            "> Claim. ^c-abcdef Claim."
+            "> Claim. ^c-abcdef\n\nClaim.\n"
         );
     }
 }

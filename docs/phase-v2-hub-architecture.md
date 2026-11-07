@@ -2350,7 +2350,7 @@ Reflect stays a batch job (#1856). On a hub-backed workspace:
    negative outcomes attached after the proposal opened, cooldown and blast
    cap from proposal history, and the scan state of every resulting version.
    Any blocker marks the proposal `stale` or `held` and changes nothing.
-8. `rollback` requires the review grant on every target scope, or admin. It
+8. `rollback` requires read and review grants on every target scope, or admin. It
    appends a compensating proposal containing the previous revision's content
    and trust, pinned to the applied revision as its base. It changes no card
    immediately, even for a reviewer. The compensation waits for a separate
@@ -2360,12 +2360,20 @@ Reflect stays a batch job (#1856). On a hub-backed workspace:
    ends `stale` and changes no card. The reviewer sees the reason.
 
 S19a authorizes each target with `has_right` under the authority lock:
-`reflect` for `propose`, and `review` for `decide`, its atomic apply, and
-`rollback`. Every card referenced by a cross-card op is a target, including
+`read` plus `reflect` for `propose`, and `read` plus `review` for `decide`,
+its atomic apply, and `rollback`. Reflect and review do not imply read.
+Missing read access gets the same `403 memory_grant_missing` before card
+validation or a stored diff can expose existence, revisions or content. Every card referenced by a cross-card op is a target, including
 retained source cards. An unscoped right never substitutes for a target-scope
 right. Collections require an exact grant, since neither `*` nor `repo:*`
 matches a `collection:` scope. Replays repeat these authorization checks before
-returning a stored diff. The hub exposes no separate or automatic apply route.
+returning a stored diff. A non-admin proposer cannot accept their own proposal
+(`403 memory_self_review`). This also applies to compensations, whose proposer
+is the rollback requester. The admin token is exempt. The compensation is
+constructed from the writer-loaded applied body and opens with a null decision.
+Blocked and input-specific failed scans at decide persist `held` with a reason
+and no card changes. The new `memory_proposals.decided_by` column records the
+deciding principal. The hub exposes no separate or automatic apply route.
 The Python client additions for submitting and deciding hub proposals remain a
 later slice. Its existing `memory hub proposals` commands manage local conflict
 proposals only.

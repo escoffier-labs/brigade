@@ -488,14 +488,22 @@ Authorization is checked again before a stored diff is returned.
 
 | Action | Request fields in addition to `action` and `client_event_id` | Target-scope grant |
 |---|---|---|
-| `propose` | `base_epoch`, `ops` | `reflect` on every addressed card, including `other_card` |
-| `decide` | `proposal_id`, `base_epoch`, `decision` (`accept` or `reject`) | `review` on every addressed card |
-| `rollback` | `proposal_id` of an applied proposal, `base_epoch` | `review` on every addressed card |
+| `propose` | `base_epoch`, `ops` | `read` and `reflect` on every addressed card, including `other_card` |
+| `decide` | `proposal_id`, `base_epoch`, `decision` (`accept` or `reject`) | `read` and `review` on every addressed card |
+| `rollback` | `proposal_id` of an applied proposal, `base_epoch` | `read` and `review` on every addressed card |
 
 The admin token holds these grants. A right on another scope does not open a
 proposal's targets. Collections need grants naming the exact `collection:`
 scope. Neither `*` nor `repo:*` matches collections. There is no standalone
-apply action and no automatic decision or apply path.
+apply action and no automatic decision or apply path. Reflect and review
+rights do not imply read access. Missing read access returns the same
+`403 memory_grant_missing` before validation or a stored diff can expose card
+existence, revisions or content.
+
+A principal cannot accept its own proposal: `decide accept` returns
+`403 memory_self_review`. The admin token is exempt. A compensation belongs
+to its rollback requester, so that principal also needs another reviewer to
+accept it. Rejecting one's own proposal is permitted.
 
 An op names `type`, `scope`, `card_id`, `base_revision`, `block_id` and
 `expected_block_hash`. The block id uses the existing `c-abcdef` claim-anchor
@@ -510,23 +518,28 @@ Supported typed ops are `replace_block` and `add_previously` with `text`,
 `remove_block`, `append_evidence` with `evidence_ids`, and `supersede_card` or
 `merge_exact_duplicates` with `other_card`. The latter is an object naming
 `scope`, `card_id` and `base_revision`. Metadata edits require simple scalar
-fields or JSON string lists and refuse ambiguous or multiline fields. Evidence
+fields or JSON string lists and refuse ambiguous or multiline fields,
+including YAML block scalars even when a blank line precedes their continuation. Evidence
 ids must be namespaced. They remain unverified citations and never increment
 proof counts or authorize auto-apply. Attestation arrives in S19e. Duplicate
-merges retire the other card and retain its content in revision history.
+merges compare the body bytes exactly after stripping addressable anchors,
+retire the other card and retain its content in revision history. Whitespace in
+opaque blocks, including Python code indentation, is preserved in comparison.
 
 A submission contains 1 to 64 ops over at most eight cards. The hub computes a
 unified diff against the base bytes, with `/@state` hunks for retirement or
 revival, and scans op text and resulting card text
 with the same current rules as `put`. Any invalid op refuses the whole request
-with `422 memory_proposal_invalid` and indexed validation results. Nothing is
-stored. A valid submission returns `201` with `proposal_id`, `state: pending`,
+with `422 memory_proposal_invalid`, a top-level `reason` and indexed `ops`
+validation results. A malformed, empty or oversized ops packet has an empty
+`ops` result list. Nothing is stored. A valid submission returns `201` with `proposal_id`, `state: pending`,
 `diff`, `tier` and `log_epoch`. S19a conservatively holds every proposal at
 Tier 2 until S19b supplies classification.
 
 An accepted decision checks all revisions and exact pins before changing any
-head. A stale base or changed policy produces `state: stale`. A flagged result
-is held. An unavailable scanner refuses the trust raise with
+head. A stale base or changed policy produces `state: stale`. A blocked,
+flagged or input-specific failed scan produces `state: held`, records its reason
+and changes no card. A later explicit decision can retry a held proposal. An unavailable scanner refuses the trust raise with
 `503 memory_scan_unavailable`. A clean or private result can become `reviewed`
 only through this explicit decision. All card revisions, proposal state,
 events and idempotency commit together. A failure changes no card. Rejection
@@ -539,7 +552,8 @@ It restores the previous content, state and trust only after its own accepted
 before rollback or before its decision leaves the compensation `stale` and
 changes no card. Compensation writes new revisions rather than rewinding the
 append-only log. Memory schema v4 adds `memory_proposals` and preserves v3
-cards, revisions and `log_epoch` during migration.
+cards, revisions, `log_epoch` and sequence continuity during migration.
+The new table's `decided_by` column records the deciding principal.
 
 ## Evidence projection and identity audit
 

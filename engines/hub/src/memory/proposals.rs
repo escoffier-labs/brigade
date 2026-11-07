@@ -17,7 +17,7 @@ pub const DDL: &str = "CREATE TABLE memory_proposals(
  body TEXT NOT NULL,
  principal TEXT NOT NULL,
  created_at TEXT NOT NULL,
- decision TEXT
+ decided_by TEXT
 ) WITHOUT ROWID;";
 const MAX_OPS: usize = 64;
 const MAX_CARDS: usize = 8;
@@ -57,19 +57,23 @@ impl Command {
     }
 }
 fn invalid(reason: &str) -> Reply {
-    error(422, "memory_proposal_invalid", reason)
+    let mut reply = error(422, "memory_proposal_invalid", reason);
+    reply.body["reason"] = json!(reason);
+    reply.body["ops"] = json!([]);
+    reply
 }
 fn missing() -> Reply {
     error(404, "memory_proposal_not_found", "proposal not found")
 }
 fn load<T: ReadTx + ?Sized>(tx: &T, id: &str) -> rusqlite::Result<Option<Json>> {
     let rows = tx.query(
-        "SELECT state,body FROM memory_proposals WHERE proposal_id=?1",
+        "SELECT state,body,principal FROM memory_proposals WHERE proposal_id=?1",
         &[t(id)],
     )?;
     Ok(rows.first().map(|r| {
         let mut body: Json = serde_json::from_str(&s(&r[1])).unwrap_or(Json::Null);
         body["state"] = json!(s(&r[0]));
+        body["proposer"] = json!(s(&r[2]));
         body
     }))
 }
@@ -83,8 +87,28 @@ fn denied(right: &str) -> Reply {
     error(
         403,
         "memory_grant_missing",
-        &format!("this credential has no {right} grant on every target scope"),
+        &format!("this credential needs read and {right} grants on every target scope"),
     )
+}
+fn scoped_right<T: ReadTx + ?Sized>(
+    tx: &T,
+    who: &auth::Credential,
+    scope: &str,
+    right: &str,
+) -> rusqlite::Result<bool> {
+    Ok(auth::has_right(tx, who, Some(scope), "read")?
+        && auth::has_right(tx, who, Some(scope), right)?)
+}
+fn self_review(p: &Prepared, body: &Json) -> Option<Reply> {
+    (p.credential != auth::Credential::Admin
+        && string(body, "proposer") == p.credential.principal())
+    .then(|| {
+        error(
+            403,
+            "memory_self_review",
+            "a proposer cannot accept their own proposal",
+        )
+    })
 }
 /// This check is also called before the idempotency lookup. Replays cannot
 /// disclose a collection's stored diff after the caller loses its exact grant.
@@ -103,7 +127,7 @@ pub fn authorize<T: ReadTx + ?Sized>(
             for op in ops {
                 for target in [op, &op["other_card"]] {
                     if let Some(scope) = target["scope"].as_str().filter(|s| ids::valid_scope(s)) {
-                        if !auth::has_right(tx, who, Some(scope), right)? {
+                        if !scoped_right(tx, who, scope, right)? {
                             return Ok(Some(denied(right)));
                         }
                     }
@@ -115,7 +139,7 @@ pub fn authorize<T: ReadTx + ?Sized>(
             return Ok(Some(missing()));
         };
         for card in cards(&proposal) {
-            if !auth::has_right(tx, who, Some(string(card, "scope")), right)? {
+            if !scoped_right(tx, who, string(card, "scope"), right)? {
                 return Ok(Some(denied(right)));
             }
         }
@@ -401,9 +425,6 @@ pub fn prepare<T: ReadTx + ?Sized>(
         submit(tx, &request, scanner)?
     } else {
         match load(tx, string(&request, "proposal_id"))? {
-            Some(body) if request["action"] == "rollback" && body["state"] == "applied" => {
-                Ok(rollback(&body))
-            }
             Some(body) => Ok(body),
             None => Err(missing()),
         }
@@ -470,7 +491,7 @@ fn reply(body: &Json, status: u16) -> Reply {
 }
 fn update(tx: &dyn WriteTx, body: &Json, p: &Prepared) -> rusqlite::Result<()> {
     tx.execute(
-        "UPDATE memory_proposals SET state=?2,body=?3,decision=?4 WHERE proposal_id=?1",
+        "UPDATE memory_proposals SET state=?2,body=?3,decided_by=?4 WHERE proposal_id=?1",
         &[
             t(string(body, "proposal_id")),
             t(string(body, "state")),
@@ -488,6 +509,7 @@ fn open(
     kind: &str,
 ) -> rusqlite::Result<Reply> {
     body["proposal_id"] = json!(ids::mint(p.now_ms));
+    body["proposer"] = json!(p.credential.principal());
     if body["state"].is_null() {
         body["state"] = json!("pending");
     }
@@ -516,9 +538,12 @@ fn apply_cards(
     scanner: &dyn Scanner,
 ) -> rusqlite::Result<Option<Reply>> {
     for card in cards(body) {
-        if !auth::has_right(tx, &p.credential, Some(string(card, "scope")), "review")? {
+        if !scoped_right(tx, &p.credential, string(card, "scope"), "review")? {
             return Ok(Some(denied("review")));
         }
+    }
+    if let Some(r) = self_review(p, body) {
+        return Ok(Some(r));
     }
     if let Some(reason) = stale_reason(tx, body)? {
         body["state"] = json!("stale");
@@ -529,6 +554,15 @@ fn apply_cards(
     let mut scans = Vec::new();
     for card in cards(body) {
         let scan = scanner.scan(string(card, "after_text"));
+        if matches!(scan, Scan::Blocked { .. } | Scan::Failed) {
+            body["state"] = json!("held");
+            body["reason"] = json!(if matches!(scan, Scan::Failed) {
+                "memory_scan_failed"
+            } else {
+                "memory_content_blocked"
+            });
+            return Ok(None);
+        }
         if let Some(r) = scan_refusal(&scan, true) {
             return Ok(Some(r));
         }
@@ -600,6 +634,7 @@ fn rollback(body: &Json) -> Json {
     inverse["rollback_of"] = body["proposal_id"].clone();
     inverse["state"] = Json::Null;
     inverse["reason"] = Json::Null;
+    inverse["decision"] = Json::Null;
     inverse["cards"]
         .as_array_mut()
         .unwrap()
@@ -688,7 +723,7 @@ pub fn run(
                 "only an applied proposal can be rolled back",
             ));
         }
-        let mut inverse = cmd.draft.as_ref().unwrap().clone();
+        let mut inverse = rollback(&body);
         if let Some(reason) = stale_reason(tx, &inverse)? {
             inverse["state"] = json!("stale");
             inverse["reason"] = json!(reason);
@@ -710,6 +745,9 @@ pub fn run(
     if cmd.request["decision"] == "reject" {
         body["state"] = json!("rejected");
     } else {
+        if let Some(r) = self_review(p, &body) {
+            return Ok(r);
+        }
         let policy = authority.policy.as_ref();
         if body["policy_revision"] != json!(policy.map(|a| a.0))
             || body["policy_digest"] != json!(policy.map(|a| &a.1))
@@ -731,61 +769,68 @@ mod tests {
     use super::super::{ops::Action, tests::*};
     use super::*;
     #[tokio::test]
-    async fn apply_boundary_itself_requires_review_on_each_target_scope() {
+    async fn apply_boundary_requires_read_and_review_on_each_target_scope() {
         for scope in ["repo:restricted", "collection:notes"] {
-            let h = Hub::with(
-                std::sync::Arc::new(Fixed(Scan::Clean {
-                    ruleset: "test-v7".into(),
-                })),
-                None,
-            );
-            let a = h
-                .put(ADMIN_TOKEN, scope, "a", None, "Claim. ^c-abcdef")
-                .await;
-            let opened=h.call(ADMIN_TOKEN,json!({"action":"propose","base_epoch":h.epoch().await,"client_event_id":h.id(),"ops":[{"type":"remove_block","scope":scope,"card_id":"a","base_revision":rev(&a),"block_id":"c-abcdef","expected_block_hash":ids::sha256_hex(b"Claim. ^c-abcdef")}]})).await;
-            assert_eq!(opened.status, 201, "{opened:?}");
-            let db = rusqlite::Connection::open(h.memory()).unwrap();
-            db.execute(
+            for right in ["read", "review"] {
+                let h = Hub::with(
+                    std::sync::Arc::new(Fixed(Scan::Clean {
+                        ruleset: "test-v7".into(),
+                    })),
+                    None,
+                );
+                let a = h
+                    .put(ADMIN_TOKEN, scope, "a", None, "Claim. ^c-abcdef")
+                    .await;
+                let opened=h.call(ADMIN_TOKEN,json!({"action":"propose","base_epoch":h.epoch().await,"client_event_id":h.id(),"ops":[{"type":"remove_block","scope":scope,"card_id":"a","base_revision":rev(&a),"block_id":"c-abcdef","expected_block_hash":ids::sha256_hex(b"Claim. ^c-abcdef")}]})).await;
+                assert_eq!(opened.status, 201, "{opened:?}");
+                let db = rusqlite::Connection::open(h.memory()).unwrap();
+                db.execute(
                 "INSERT INTO memory_grants VALUES('agent:dot','repo:other','review','t','admin')",
                 [],
             )
             .unwrap();
-            if scope.starts_with("collection:") {
+                if scope.starts_with("collection:") {
+                    db.execute(
+                        "INSERT INTO memory_grants VALUES('agent:dot','*','review','t','admin')",
+                        [],
+                    )
+                    .unwrap();
+                }
                 db.execute(
-                    "INSERT INTO memory_grants VALUES('agent:dot','*','review','t','admin')",
-                    [],
+                    "INSERT INTO memory_grants VALUES('agent:dot',?1,?2,'t','admin')",
+                    [scope, right],
                 )
                 .unwrap();
-            }
-            let tx = crate::writer::worker::Tx(&db);
-            let mut body = load(&tx, opened.body["proposal_id"].as_str().unwrap())
+                let tx = crate::writer::worker::Tx(&db);
+                let mut body = load(&tx, opened.body["proposal_id"].as_str().unwrap())
+                    .unwrap()
+                    .unwrap();
+                let p = Prepared {
+                    credential: auth::Credential::Principal {
+                        id: "agent:dot".into(),
+                        digest: "fake".into(),
+                    },
+                    action: Action::Capture { payload: json!({}) },
+                    client_event_id: h.id(),
+                    request_digest: String::new(),
+                    now_ms: h.now(),
+                };
+                let r = apply_cards(
+                    &tx,
+                    &p,
+                    &mut body,
+                    &Fixed(Scan::Clean {
+                        ruleset: "test-v7".into(),
+                    }),
+                )
                 .unwrap()
                 .unwrap();
-            let p = Prepared {
-                credential: auth::Credential::Principal {
-                    id: "agent:dot".into(),
-                    digest: "fake".into(),
-                },
-                action: Action::Capture { payload: json!({}) },
-                client_event_id: h.id(),
-                request_digest: String::new(),
-                now_ms: h.now(),
-            };
-            let r = apply_cards(
-                &tx,
-                &p,
-                &mut body,
-                &Fixed(Scan::Clean {
-                    ruleset: "test-v7".into(),
-                }),
-            )
-            .unwrap()
-            .unwrap();
-            assert_eq!(r.status, 403, "{r:?}");
-            assert_eq!(
-                ops::head(&tx, scope, "a").unwrap().unwrap().revision,
-                rev(&a)
-            );
+                assert_eq!(r.status, 403, "{r:?}");
+                assert_eq!(
+                    ops::head(&tx, scope, "a").unwrap().unwrap().revision,
+                    rev(&a)
+                );
+            }
         }
     }
 }

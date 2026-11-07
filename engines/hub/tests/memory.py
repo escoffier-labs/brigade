@@ -370,6 +370,9 @@ class Memory(unittest.TestCase):
         for attempt in (1, 2):
             result = hm.run_memory(hub)
             self.assertEqual(result["mismatches"], [], attempt)
+            covered = {case["case"] for case in result["cases"] if case["ok"]}
+            self.assertTrue({"memory-propose", "memory-decide", "memory-rollback", "memory-rollback-decide", "memory-rollback-restored"} <= covered, covered)
+
 
     def test_drive_profile_passes_after_a_full_scan_window_of_earlier_events(self):
         # The log reader scans 5,000 events per page before it filters by

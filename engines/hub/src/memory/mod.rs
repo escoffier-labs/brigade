@@ -38,6 +38,8 @@ mod powercut;
 #[cfg(test)]
 mod private_tests;
 #[cfg(test)]
+mod proposal_review_tests;
+#[cfg(test)]
 mod proposal_tests;
 #[cfg(test)]
 mod tests;
