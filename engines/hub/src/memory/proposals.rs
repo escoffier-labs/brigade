@@ -90,7 +90,7 @@ fn denied(right: &str) -> Reply {
         &format!("this credential needs read and {right} grants on every target scope"),
     )
 }
-fn scoped_right<T: ReadTx + ?Sized>(
+pub(super) fn scoped_right<T: ReadTx + ?Sized>(
     tx: &T,
     who: &auth::Credential,
     scope: &str,
@@ -146,7 +146,7 @@ pub fn authorize<T: ReadTx + ?Sized>(
     }
     Ok(None)
 }
-fn op_schema(op: &Json) -> Result<(), &'static str> {
+pub(super) fn op_schema(op: &Json) -> Result<(), &'static str> {
     let map = op.as_object().ok_or("op must be an object")?;
     let extras: &[&str] = match string(op, "type") {
         "replace_block" | "add_previously" => &["text"],
@@ -533,6 +533,7 @@ fn open(
     body["decision_policy_revision"] = Json::Null;
     body["decision_policy_digest"] = Json::Null;
     body["tier"] = json!(super::proposal_tiers::classify(tx, &body, scanner)?);
+    body["opened_tier"] = body["tier"].clone();
     if body["state"].is_null() {
         body["state"] = json!("pending");
     }
@@ -586,6 +587,8 @@ fn apply_cards(
         )));
     }
     body["tier"] = json!(super::proposal_tiers::classify(tx, body, scanner)?);
+    // Keep diagnostics before blocker returns. Reusing the later apply-loop
+    // scans would move scan work before those checks or need a second report path.
     body["preflight"] = super::preflight::evaluate(tx, body, authority, scanner, p.now_ms)?;
     body["rules"] = json!([]);
     if body["policy_revision"] != json!(authority.policy.as_ref().map(|a| a.0))

@@ -43,6 +43,9 @@ pub fn input_blocker<T: ReadTx + ?Sized>(
     body: &Json,
 ) -> rusqlite::Result<Option<&'static str>> {
     for card in proposals::cards(body) {
+        let Some(before_scan) = card["before_scan"].as_str() else {
+            return Ok(Some("memory_input_scan_unbound"));
+        };
         let Some(head) = ops::head(tx, string(card, "scope"), string(card, "card_id"))? else {
             return Ok(Some("card_missing"));
         };
@@ -53,10 +56,7 @@ pub fn input_blocker<T: ReadTx + ?Sized>(
         let rows = tx.query("SELECT scan_state FROM memory_card_revisions WHERE scope=?1 AND card_id=?2 AND revision=?3", &[
             ops::t(string(card, "scope")), ops::t(string(card, "card_id")), rusqlite::types::Value::Integer(head.revision)
         ])?;
-        if rows
-            .first()
-            .is_none_or(|r| Some(ops::s(&r[0]).as_str()) != card["before_scan"].as_str())
-        {
+        if rows.first().is_none_or(|r| ops::s(&r[0]) != before_scan) {
             return Ok(Some("memory_input_scan_held"));
         }
     }
@@ -131,7 +131,15 @@ pub fn evaluate<T: ReadTx + ?Sized>(
             "not_evaluated",
         );
     }
-    check(&mut checks, "host", None, "satisfied"); // All ops were validated as card blocks.
+    let valid_targets = body["ops"]
+        .as_array()
+        .is_some_and(|ops| ops.iter().all(|op| proposals::op_schema(op).is_ok()));
+    check(
+        &mut checks,
+        "host",
+        (!valid_targets).then_some("card_target_invalid"),
+        "held",
+    );
     let trust = input_blocker(tx, body)?;
     let mut known_trust = true;
     let mut clean = true;
@@ -218,8 +226,12 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         "proof_evidence_count":null,"proof_source_group_count":null,"evaluation_sha256":null,"checks":checks
     });
     // Bind the diagnostic facts, not an unverified proof or promotion permit.
-    report["evaluation_sha256"] = json!(ids::sha256_hex(ids::canonical(&report).as_bytes()));
+    bind_evaluation(&mut report);
     Ok(report)
+}
+fn bind_evaluation(report: &mut Json) {
+    report["evaluation_sha256"] = Json::Null;
+    report["evaluation_sha256"] = json!(ids::sha256_hex(ids::canonical(report).as_bytes()));
 }
 pub fn read<T: ReadTx + ?Sized>(
     tx: &T,
@@ -233,8 +245,16 @@ pub fn read<T: ReadTx + ?Sized>(
         return Ok(r);
     }
     let body = proposals::load(tx, string(request, "proposal_id"))?.unwrap();
-    Ok(Reply::new(
-        200,
-        evaluate(tx, &body, authority, scanner, now)?,
-    ))
+    let mut report = evaluate(tx, &body, authority, scanner, now)?;
+    for card in proposals::cards(&body) {
+        if !proposals::scoped_right(tx, who, string(card, "scope"), "review")? {
+            report["candidate_sha256"] = Json::Null;
+            report["delta_sha256"] = Json::Null;
+            report["policy_limits"]["reflect_principals"] = Json::Null;
+            // The evaluation fingerprint must bind only the visible report.
+            bind_evaluation(&mut report);
+            break;
+        }
+    }
+    Ok(Reply::new(200, report))
 }

@@ -387,3 +387,163 @@ async fn policy_document_is_reread_under_hub_lock_after_preflight_and_preparatio
     let report = Reply::new(200, r.body["preflight"].clone());
     assert_eq!(check(&report, "policy"), "reflect_principal_disabled");
 }
+
+fn stored_body(h: &Hub, id: &Json) -> Json {
+    let text: String = Connection::open(h.memory())
+        .unwrap()
+        .query_row(
+            "SELECT body FROM memory_proposals WHERE proposal_id=?1",
+            [id.as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&text).unwrap()
+}
+fn save_body(h: &Hub, id: &Json, body: &Json) {
+    Connection::open(h.memory())
+        .unwrap()
+        .execute(
+            "UPDATE memory_proposals SET body=?1 WHERE proposal_id=?2",
+            [body.to_string(), id.as_str().unwrap().to_string()],
+        )
+        .unwrap();
+}
+#[tokio::test]
+async fn preflight_disclosure_requires_review_on_every_target() {
+    let h = Hub::with(clean(), None);
+    policy(
+        &h,
+        json!({"tier0_op_classes":["append_evidence"],"reflect_principals":["hub:admin"]}),
+    );
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let b = h.put(ADMIN_TOKEN, "collection:notes", "b", None, OLD).await;
+    let opened = submit(
+        &h,
+        ADMIN_TOKEN,
+        vec![evidence(rev(&a)), op("collection:notes", "b", rev(&b))],
+    )
+    .await;
+    let id = &opened.body["proposal_id"];
+    grant(&h, "fleet", &["read"]).await;
+    grant(&h, "collection:notes", &["read"]).await;
+    for review_first_target in [false, true] {
+        if review_first_target {
+            grant(&h, "collection:notes", &["read", "review"]).await;
+        }
+        for token in [AGENT_TOKEN, ADMIN_TOKEN] {
+            let before = snapshot(&h);
+            let r = preflight(&h, token, id).await;
+            assert_eq!(r.status, 200, "{r:?}");
+            for value in [
+                &r.body["candidate_sha256"],
+                &r.body["delta_sha256"],
+                &r.body["policy_limits"]["reflect_principals"],
+            ] {
+                assert_eq!(value.is_null(), token == AGENT_TOKEN);
+            }
+            // A digest over hidden values would still disclose guesses indirectly.
+            let mut visible = r.body.clone();
+            visible["evaluation_sha256"] = Json::Null;
+            assert_eq!(
+                r.body["evaluation_sha256"],
+                ids::sha256_hex(ids::canonical(&visible).as_bytes())
+            );
+            assert_eq!(before, snapshot(&h));
+        }
+    }
+    grant(&h, "fleet", &["read", "review"]).await;
+    let r = preflight(&h, AGENT_TOKEN, id).await;
+    assert!(r.body["candidate_sha256"].is_string());
+    assert!(r.body["delta_sha256"].is_string());
+    assert_eq!(
+        r.body["policy_limits"]["reflect_principals"],
+        json!(["hub:admin"])
+    );
+}
+#[tokio::test]
+async fn legacy_scan_binding_stays_unbound_until_rejected_and_reproposed() {
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![evidence(rev(&a))]).await;
+    let id = &opened.body["proposal_id"];
+    let mut body = stored_body(&h, id);
+    body["cards"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("before_scan");
+    save_body(&h, id, &body);
+    let before = card(&h, "fleet", "a").await;
+    let snapshot_before = snapshot(&h);
+    let r = preflight(&h, ADMIN_TOKEN, id).await;
+    assert_eq!(check(&r, "card_trust"), "memory_input_scan_unbound");
+    assert_eq!(snapshot(&h), snapshot_before);
+    for _ in 0..2 {
+        let held = decide(&h, ADMIN_TOKEN, id).await;
+        assert_eq!(held.body["state"], "held");
+        assert_eq!(held.body["reason"], "memory_input_scan_unbound");
+        assert_eq!(card(&h, "fleet", "a").await, before);
+        assert!(stored_body(&h, id)["cards"][0].get("before_scan").is_none());
+    }
+    let rejected = h.call(ADMIN_TOKEN, json!({"action":"decide","proposal_id":id,"decision":"reject","base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
+    assert_eq!(rejected.body["state"], "rejected");
+    assert_eq!(card(&h, "fleet", "a").await, before);
+    let fresh = submit(&h, ADMIN_TOKEN, vec![evidence(rev(&a))]).await;
+    assert_eq!(
+        stored_body(&h, &fresh.body["proposal_id"])["cards"][0]["before_scan"],
+        "clean"
+    );
+    assert_eq!(
+        decide(&h, ADMIN_TOKEN, &fresh.body["proposal_id"])
+            .await
+            .body["state"],
+        "applied"
+    );
+}
+#[tokio::test]
+async fn preflight_revalidates_stored_op_target_schema() {
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![evidence(rev(&a))]).await;
+    let id = &opened.body["proposal_id"];
+    assert_eq!(
+        check(&preflight(&h, ADMIN_TOKEN, id).await, "host"),
+        "host_satisfied"
+    );
+    let valid = stored_body(&h, id);
+    for invalid in [json!({"type":"edit_skill","path":"AGENTS.md"}), {
+        let mut o = valid["ops"][0].clone();
+        o["path"] = json!("policy.json");
+        o
+    }] {
+        let mut body = valid.clone();
+        body["ops"][0] = invalid;
+        save_body(&h, id, &body);
+        let before = snapshot(&h);
+        assert_eq!(
+            check(&preflight(&h, ADMIN_TOKEN, id).await, "host"),
+            "card_target_invalid"
+        );
+        assert_eq!(snapshot(&h), before);
+    }
+}
+#[tokio::test]
+async fn opened_tier_survives_apply_time_reclassification() {
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![evidence(rev(&a))]).await;
+    let id = &opened.body["proposal_id"];
+    assert_eq!(stored_body(&h, id)["opened_tier"], 0);
+    h.put(
+        ADMIN_TOKEN,
+        "fleet",
+        "a",
+        Some(rev(&a)),
+        "New fact. ^c-abcdef",
+    )
+    .await;
+    let r = decide(&h, ADMIN_TOKEN, id).await;
+    assert_eq!(r.body["state"], "stale");
+    let body = stored_body(&h, id);
+    assert_eq!(body["tier"], 2);
+    assert_eq!(body["opened_tier"], 0);
+}

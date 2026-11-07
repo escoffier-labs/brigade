@@ -662,7 +662,10 @@ scoped card ids to their base content hashes. Local run and workspace fields
 are null or empty. `evaluation_sha256` hashes the diagnostic facts. It is
 never a promotion permit. The hub reports actual pins, revisions, trust,
 scan state and computed tier. Policy allowlists are checked against stored
-ops and the authenticated proposer recorded at submit.
+ops and the authenticated proposer recorded at submit. `candidate_sha256`,
+`delta_sha256` and `policy_limits.reflect_principals` are null unless the caller
+also has `review` on every target scope. The evaluation fingerprint binds only
+the visible report.
 
 | Gate | Hold reasons on the hub |
 |---|---|
@@ -671,13 +674,15 @@ ops and the authenticated proposer recorded at submit.
 | `snapshot` | `policy_changed`, `memory_epoch_changed`, `card_missing`, `memory_base_mismatch`, `pinned_content_changed`, `pinned_block_changed` |
 | `delta` | `delta_requires_review`, `blast_cap_exceeded` |
 | `evidence_floor`, `source_group_floor` | `proof_binding_incomplete` |
-| `card_trust` | `memory_trust_changed`, `memory_input_scan_held`, `card_trust_denied` |
+| `card_trust` | `memory_trust_changed`, `memory_input_scan_unbound`, `memory_input_scan_held`, `card_trust_denied` |
 | `scan` | `scan_not_clean` |
+| `host` | `card_target_invalid` |
 | `evidence_authority`, `owner_authority`, `retrieval_eval` | The corresponding `*_unbound` reason |
 | `cooldown_history` | `cooldown_active` |
 
-A satisfied gate uses `<gate>_satisfied`. `host` checks the already validated
-card-block target boundary. Diagnostic limits match local preflight defaults:
+A satisfied gate uses `<gate>_satisfied`. `host` reruns the typed op schema
+against stored ops to check the card-block target boundary. Diagnostic limits
+match local preflight defaults:
 at least three evidence ids from two sources, at most one changed card, and a
 24-hour per-card cooldown from head-changing apply and rollback events. The
 current fleet policy has no limit overrides. S19e owns attested proof, so the
@@ -694,6 +699,15 @@ any card changes. The policy allowlists and diagnostic promotion limits do not
 prevent an explicit reviewer from accepting an otherwise valid reviewed edit.
 The apply boundary requires `decide: accept` at every tier. Auto-apply remains
 unavailable, even for Tier 0. Scheduling and attestation remain later slices.
+The stored `opened_tier` keeps the tier computed when the proposal opened,
+while `tier` records the latest decision-time classification.
+
+A proposal opened before S19c may have no `before_scan` binding. Acceptance
+holds it with `memory_input_scan_unbound`, without changing any card or filling
+in a binding. Repeated acceptance stays held. A reviewer can reject the old
+proposal with `decide: reject`, then submit a new `propose` against the current
+card heads. The new proposal records the input scan binding and still requires
+a separate reviewed acceptance. No scan state is backfilled into the old proposal.
 
 ## Evidence projection and identity audit
 
