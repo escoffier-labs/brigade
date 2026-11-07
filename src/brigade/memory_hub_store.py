@@ -366,13 +366,15 @@ def propose(target: Path, entry: dict[str, Any], *, reason: str, hub_reply: dict
     """Keep a write the hub cannot take as-is for review. Returns the proposal id."""
     ensure_root(target)
     proposal_id = f"hub-{entry['client_event_id'].lower()}"
-    record = {
+    record: dict[str, Any] = {
         "proposal_id": proposal_id,
         "kind": "brigade.memory-hub-conflict.v1",
         "reason": reason,
         "entry": entry,
         "hub": {key: value for key, value in (hub_reply or {}).items() if key != "error"},
     }
+    if entry.get("derived_id") and entry.get("base_revision") is None:
+        record["derived_create"] = True
     write_json(root(target) / PROPOSALS / f"{proposal_id}.json", record)
     return proposal_id
 
