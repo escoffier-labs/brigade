@@ -993,8 +993,11 @@ stays failed even if its metrics meet the thresholds.
 The hub requires the run's `evaluation_id`, fixture digest, complete adapter
 binding and a well-formed gate result. It stores valid failed reports too.
 Records are append-only and emit `retrieval_eval.record` audit events without
-report text. Evaluation times must be strictly increasing per mode, checked
-in the write transaction. Older or equal times return
+report text. Each record stores its evaluated time in `evaluated_ms`. New
+evaluation times must be strictly greater than `MAX(evaluated_ms)` for the
+mode, checked in the write transaction without parsing older report bytes.
+An unreadable newest report holds apply but can be replaced by a newer valid
+report. Older or equal times return
 `409 memory_retrieval_eval_superseded` without appending a record or audit
 event. Replaying an identical client event id remains idempotent.
 The newest record for the configured mode wins. A failed newest
@@ -1003,7 +1006,10 @@ public harness gate. Recording it does not establish private model qualification
 
 The apply transaction rechecks the record under the hub authority lock. Its
 mode, log epoch, index format, scorer version, policy revision and digest,
-RRF weights, scope and exact corpus identity must match. Hybrid also requires
+RRF weights and scope must match. At record time the hub verifies the exact
+scoped corpus identity and stores its sorted `(card_id, content_hash)` member
+set with the append-only record. At apply time it compares that snapshot
+with the live corpus using the drift budget below. Hybrid also requires
 the same configured embedder identity, even during lexical fallback. A lexical
 record never authorizes a configured hybrid hub.
 
@@ -1012,27 +1018,63 @@ approved fixture's 64-character lowercase SHA-256 digest. It is included in
 the policy digest and must match the report at apply. Omitting it leaves
 fixture selection to the admin. Invalid policy pins hold the gate.
 
-Treat retrieval evaluation as a one-shot arm. The fixed sequence tolerance is
-zero head-changing writes since `indexed_seq`, globally across all scopes.
-A write to an unrelated scope invalidates it. A successful automatic apply
-consumes its own record by writing a new card head. The newest record per
-mode binds one scope, so recording scope B replaces scope A's arm for that
-mode. Rerun and record before another automatic apply.
+The drift budget allows at most
+`min(5, floor(min(snapshot_count, live_count) / 50))` changed cards in the
+bound scope. The denominator is the smaller of the evaluated snapshot count
+and current live count, so additions cannot raise the limit. If either count
+is below 50, the budget is zero.
 
-The evaluated sequence must be covered by the live index and cover every
-committed head change. Audit events, evidence attachments and proposal opens
-may advance the log without invalidating the record. This lets recording and
-switch audit events complete without authorizing a changed corpus.
+For raw lexical R0 ranking, additions, removals and content-hash changes each
+count once per card. Unrelated trust-only changes consume no budget. For
+default R1-public ranking, the counted set also includes every in-scope card
+with a head-changing event since `indexed_seq`. Trust flips, content reverts
+and same-bytes recreates therefore spend budget even when their hashes still
+match the snapshot. A card in both sets counts once. Default ranking uses
+trust-gated lineage, head sequence and source demotion. The existing blast
+cap and per-card cooldown still apply.
+
+The budget bounds how much the corpus changes. It does not bound how much
+ranking changes. Even an allowed change can move a target out of retrieval
+results. Each replacement record used to authorize apply needs a fresh
+passing evaluation. Budgets do not stack across records.
+
+A proposal's touched cards must be outside that difference and have no
+head-changing event after `indexed_seq`, including a trust-only change or a
+content change later reverted. Violations hold with
+`retrieval_eval_target_drifted`. Other drift above the budget holds with
+`retrieval_eval_drift_exceeded`. The checks repeat inside the apply
+transaction under the hub authority lock.
+
+Writes outside the bound scope do not count. Lexical document counts, token
+totals and document frequency use only the query's allowed scopes, so BM25
+IDF and length normalization for a single-scope evaluation are unaffected.
+The newest record per mode still binds one scope. Recording scope B replaces
+scope A's record for that mode. Multiple independent applies can share one
+record while their counted changes stay within the budget.
+
+The evaluated sequence must be covered by the live index and must not
+exceed the committed log. Audit events, evidence attachments and proposal
+opens may advance the log without consuming drift budget. Schema 8 preserves
+old report bytes and evaluated times. Legacy records have no evaluated
+member snapshot and hold with `retrieval_eval_snapshot_missing` until a
+new run is recorded. The upgrade never reconstructs a snapshot from current
+heads. An unreadable legacy evaluation id gets a conservative ordering floor
+of its recording time plus the five-minute admission allowance.
 The run expires 24 hours after the timestamp in its harness `evaluation_id`,
 even with no writes. Record admission rejects already-expired runs and times
 more than five minutes in the future. The five-minute allowance matches
 client-event-id admission and bounds clock skew. An admitted future run
-still holds apply until its evaluation time arrives. Recording the same old
-bytes again cannot extend expiry or replace a newer failed run. Rerun after
-a card write, retrieval change, policy revision or expiry.
-Specific `retrieval_eval_*` reason codes identify failed, expired, future,
-stale sequence, epoch, format, scorer, policy, embedder, weights, scope or
-corpus mismatches. Missing records retain `retrieval_eval_unbound`.
+still holds apply until its evaluation time arrives. It also sets the
+ordering floor for its mode. An accurate-clock run inside that window is
+refused as superseded until its evaluation time exceeds that floor. The
+future-skew window lasts at most five minutes. Recording the same old
+bytes again cannot extend expiry or replace a newer failed run. Rerun when
+drift exceeds the budget, a target changes, retrieval configuration or policy
+changes, or the run expires.
+Specific `retrieval_eval_*` reason codes identify failed, expired, future-dated,
+future sequence, target drift, excess corpus drift, missing snapshot, epoch,
+format, scorer, policy, embedder, weights, scope or corpus mismatches. Missing
+records retain `retrieval_eval_unbound`.
 
 Operator procedure:
 
