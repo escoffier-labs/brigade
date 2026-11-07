@@ -25,6 +25,7 @@ pub mod ops;
 mod preflight;
 mod proposal_blocks;
 mod proposal_metadata;
+mod proposal_reads;
 mod proposal_tiers;
 pub mod proposals;
 mod pytables;
@@ -180,7 +181,7 @@ pub fn read_only(body: &[u8]) -> bool {
     serde_json::from_slice::<Json>(body).is_ok_and(|v| {
         matches!(
             v.get("action").and_then(Json::as_str),
-            Some("card" | "log" | "search" | "status")
+            Some("card" | "log" | "search" | "status" | "proposal_list" | "proposal_show")
         )
     })
 }
@@ -773,7 +774,9 @@ impl Store {
         };
         let action = map.get("action").and_then(Json::as_str).unwrap_or("");
         match action {
-            "card" | "log" | "status" => self.read(credential, action, map).await,
+            "card" | "log" | "status" | "proposal_list" | "proposal_show" => {
+                self.read(credential, action, map).await
+            }
             "search" => self.search(credential, map).await,
             "preflight" => self.preflight(credential, map).await,
             "reindex" | "embed_lease" | "embed_submit" | "embed_failed" => {
@@ -1496,6 +1499,8 @@ fn reads<T: ReadTx + ?Sized>(
         "card" => &["action", "card_id", "scope", "revision", "offset"],
         "log" => &["action", "after_seq", "limit"],
         "status" => &["action", "scopes"],
+        "proposal_list" => &["action", "all", "limit", "after"],
+        "proposal_show" => &["action", "proposal_id"],
         _ => &["action"],
     };
     if let Some(k) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
@@ -1513,6 +1518,9 @@ fn reads<T: ReadTx + ?Sized>(
         .first()
         .map(|r| text(&r[0]))
         .unwrap_or_default();
+    if matches!(action, "proposal_list" | "proposal_show") {
+        return proposal_reads::read(tx, credential, action, map, &epoch);
+    }
     let int_field = |key: &str, min: i64, max: i64, default: i64| -> Result<i64, Reply> {
         match map.get(key) {
             None | Some(Json::Null) => Ok(default),

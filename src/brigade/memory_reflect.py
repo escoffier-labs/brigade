@@ -358,6 +358,8 @@ def dispatch(args: argparse.Namespace) -> int:
         print(f"memory reflect: {payload.get('status', payload.get('kind', 'ok'))}")
         if "error" in payload:
             print(_terminal_text(f"error: {payload['error']}"))
+            if "reason" in payload:
+                print(_terminal_text(f"reason: {payload['reason']}"))
         if args.memory_reflect_command == "propose" and "id" in payload:
             print(_terminal_text(f"{payload['id']} digest: {payload['digest']}"))
             print(_terminal_text(payload["diff"]))

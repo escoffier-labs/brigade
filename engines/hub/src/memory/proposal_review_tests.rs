@@ -331,3 +331,123 @@ async fn self_accept_is_refused_for_forward_and_compensation_proposers_except_ad
         );
     }
 }
+
+#[tokio::test]
+async fn operator_proposal_reads_redact_diffs_and_recheck_all_target_grants() {
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let b = h
+        .put(ADMIN_TOKEN, "collection:example", "b", None, OLD)
+        .await;
+    let opened = submit(
+        &h,
+        ADMIN_TOKEN,
+        vec![
+            op("fleet", "a", rev(&a)),
+            op("collection:example", "b", rev(&b)),
+        ],
+    )
+    .await;
+    let id = &opened.body["proposal_id"];
+    grant(&h, "fleet", &["read", "reflect"]).await;
+    let denied = h
+        .call(
+            AGENT_TOKEN,
+            json!({"action":"proposal_show","proposal_id":id}),
+        )
+        .await;
+    assert_eq!(denied.status, 403, "{denied:?}");
+    let hidden = h.call(AGENT_TOKEN, json!({"action":"proposal_list"})).await;
+    assert_eq!(hidden.status, 200, "{hidden:?}");
+    assert_eq!(hidden.body["proposals"], json!([]));
+    grant(&h, "collection:example", &["read"]).await;
+    let before = h.events();
+    let redacted = h
+        .call(
+            AGENT_TOKEN,
+            json!({"action":"proposal_show","proposal_id":id}),
+        )
+        .await;
+    assert_eq!(redacted.status, 200, "{redacted:?}");
+    assert!(redacted.body["diff"].is_null());
+    assert!(redacted.body["targets"][0]["after_hash"].is_null());
+    for scope in ["fleet", "collection:example"] {
+        grant(&h, scope, &["read", "review"]).await;
+    }
+    let shown = h
+        .call(
+            AGENT_TOKEN,
+            json!({"action":"proposal_show","proposal_id":id}),
+        )
+        .await;
+    assert!(shown.body["diff"].as_str().unwrap().contains(OLD));
+    let event_count = h.events();
+    assert!(event_count >= before);
+    grant(&h, "collection:example", &[]).await;
+    let revoked = h
+        .call(
+            AGENT_TOKEN,
+            json!({"action":"proposal_show","proposal_id":id}),
+        )
+        .await;
+    assert_eq!(revoked.status, 403, "{revoked:?}");
+    assert_eq!(stored(&h, id)["state"], "pending");
+}
+
+#[tokio::test]
+async fn operator_proposal_list_defaults_pending_and_pages_without_diffs() {
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let one = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    let two = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    let rejected = h.call(ADMIN_TOKEN, json!({"action":"decide","proposal_id":one.body["proposal_id"],"decision":"reject","base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
+    assert_eq!(rejected.body["state"], "rejected");
+    let before = h.events();
+    let pending = h.call(ADMIN_TOKEN, json!({"action":"proposal_list"})).await;
+    assert_eq!(pending.status, 200, "{pending:?}");
+    assert_eq!(pending.body["proposals"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        pending.body["proposals"][0]["proposal_id"],
+        two.body["proposal_id"]
+    );
+    assert!(pending.body["proposals"][0].get("diff").is_none());
+    let first = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"proposal_list","all":true,"limit":1}),
+        )
+        .await;
+    let cursor = &first.body["next_after"];
+    assert!(cursor.is_string(), "{first:?}");
+    let next = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"proposal_list","all":true,"limit":1,"after":cursor}),
+        )
+        .await;
+    assert_eq!(next.body["proposals"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        first.body["proposals"][0]["proposal_id"],
+        next.body["proposals"][0]["proposal_id"]
+    );
+    assert_eq!(h.events(), before);
+}
+
+#[tokio::test]
+async fn operator_proposal_reads_validate_fields_and_use_read_admission() {
+    let h = Hub::with(clean(), None);
+    let before = h.events();
+    for request in [
+        json!({"action":"proposal_list","all":"yes"}),
+        json!({"action":"proposal_list","limit":0}),
+        json!({"action":"proposal_list","limit":101}),
+        json!({"action":"proposal_list","after":"invalid"}),
+        json!({"action":"proposal_list","unexpected":true}),
+        json!({"action":"proposal_show","proposal_id":"invalid"}),
+    ] {
+        assert!(read_only(&serde_json::to_vec(&request).unwrap()));
+        let reply = h.call(ADMIN_TOKEN, request).await;
+        assert_eq!(reply.status, 400, "{reply:?}");
+    }
+    assert_eq!(h.events(), before);
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -41,7 +42,7 @@ def explicit_workspace(body: str) -> str | None:
 
 def entry_argv(entry: CareEntry, workspace: Path) -> list[str]:
     if entry.entry_id == "memory-reflect":
-        return module_argv(
+        argv = module_argv(
             "brigade",
             "memory",
             "reflect",
@@ -51,5 +52,53 @@ def entry_argv(entry: CareEntry, workspace: Path) -> list[str]:
             "--target",
             str(workspace.expanduser().resolve()),
         )
+        if entry.reflect_scope is not None:
+            argv.extend(["--scope", entry.reflect_scope])
+        return argv
     assert entry.runbook_rel is not None
     return runbook_argv(entry.runbook_rel, workspace)
+
+
+def scoped_entries(target: Path, entries: tuple[CareEntry, ...], scope: str | None) -> tuple[CareEntry, ...]:
+    """Scopes select data, never a destination or credential."""
+    if scope is None:
+        return entries
+    from . import memory_hub_client as hubc
+
+    try:
+        table = hubc.read_hub_table(target)
+        scopes = hubc._read_scopes(table, table.get("scope"))
+        if not any(entry.kind == "reflect" for entry in entries) or not hubc.valid_scope(scope) or scope not in scopes:
+            raise ValueError("invalid care scope")
+    except (OSError, ValueError):
+        raise ValueError("--scope requires memory-reflect and a configured hub read scope") from None
+    return tuple(replace(entry, reflect_scope=scope) if entry.kind == "reflect" else entry for entry in entries)
+
+
+def persisted_scope(entry: CareEntry, path: Path, backend: str) -> CareEntry:
+    """Retain a managed reflect scope on reinstall and status rendering."""
+    if entry.kind != "reflect" or entry.reflect_scope is not None:
+        return entry
+    from . import managed_block, memory_hub_client as hubc
+
+    try:
+        raw = managed_block.read_text_nofollow(path)
+        if backend == "systemd":
+            parsed = managed_block.parse_blocks(raw, kind="CARE", style=managed_block.MARKER_STYLE_HASH)
+            if parsed.status != "ok" or parsed.meta is None or parsed.actual_hash != parsed.meta.recorded_hash:
+                return entry
+            argv = shlex.split(next(line[10:] for line in parsed.body.splitlines() if line.startswith("ExecStart=")))
+            argv = [arg.replace("%%", "%").replace("$$", "$") for arg in argv]
+        else:
+            import plistlib
+
+            argv = plistlib.loads(raw.encode())["ProgramArguments"]
+        if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
+            return entry
+        if argv.count("--scope") == 1:
+            scope = argv[argv.index("--scope") + 1]
+            if hubc.valid_scope(scope):
+                return replace(entry, reflect_scope=scope)
+    except (OSError, ValueError, IndexError, KeyError, StopIteration):
+        pass
+    return entry

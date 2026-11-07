@@ -503,7 +503,7 @@ fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::R
     Ok(())
 }
 
-fn reply(body: &Json, status: u16) -> Reply {
+pub(super) fn reply(body: &Json, status: u16) -> Reply {
     Reply::new(
         status,
         json!({"proposal_id":body["proposal_id"],"state":body["state"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"rules":body["rules"],"preflight":body["preflight"],"log_epoch":body["base_epoch"]}),

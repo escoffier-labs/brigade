@@ -6,6 +6,7 @@ import json
 import os
 import re
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,10 @@ from .inbox_lock import held_file_lock
 
 STATE = ".brigade/memory/reflect/schedule.json"
 FAILURES = 3
+MAX_SCOPE_CARDS = 50_000
+MAX_SCOPE_BYTES = 64 * 1024 * 1024
+# Also bound the replica before loading candidate heads, independently of workspace settings.
+MAX_REPLICA_BYTES = 64 * 1024 * 1024
 
 
 STATE_ERROR = "invalid reflect schedule state. Inspect and remove .brigade/memory/reflect/schedule.json to recover"
@@ -26,6 +31,14 @@ STATE_ERROR = "invalid reflect schedule state. Inspect and remove .brigade/memor
 
 class ReflectConfigError(ValueError):
     """A fixed diagnostic that carries no credential or hub-supplied text."""
+
+
+class ReflectError(ValueError):
+    """A local, fixed reason that is safe for scheduled logs."""
+
+    def __init__(self, code: str, reason: str) -> None:
+        super().__init__(reason)
+        self.code = code
 
 
 def _digest(value: object) -> bool:
@@ -126,7 +139,7 @@ def _ops(heads: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, i
     for head in sorted(heads, key=lambda h: (h["scope"], h["card_id"])):
         text = head["text"]
         if hubc.content_hash(text) != head["content_hash"]:
-            raise ValueError("hub reflect snapshot hash mismatch")
+            raise ReflectError("hub_reflect_hash_mismatch", "hub reflect snapshot hash mismatch")
         body = delta.claim_body(text)
         if body.strip():
             groups.setdefault((head["scope"], body), []).append(head)
@@ -207,12 +220,31 @@ def _reflect(
     dry_run: bool,
 ) -> dict[str, Any]:
     if not 1 <= limit <= 100:
-        raise ValueError("--limit must be from 1 to 100")
+        raise ReflectError("hub_reflect_limit_invalid", "--limit must be from 1 to 100")
     if scope is not None and scope not in settings.read_scopes:
-        raise ValueError("--scope must be a configured hub read scope")
+        raise ReflectError("hub_reflect_scope_invalid", "--scope must be a configured hub read scope")
+    configured_scopes = settings.read_scopes
+    settings = replace(
+        settings,
+        read_scopes=(scope,) if scope else configured_scopes,
+        replica_max_bytes=min(settings.replica_max_bytes, MAX_REPLICA_BYTES),
+    )
     report = sync.pull(target, client, settings)
-    if report["warnings"] or report.get("seq") is None:
-        raise ValueError("hub reflect requires a complete fresh replica")
+    # A scoped pull intentionally evicts other scopes from this dedicated replica.
+    # All other warnings, including missing selected grants and capped heads, fail closed.
+    warnings = list(report["warnings"])
+    if scope and report.get("dropped"):
+        dropped = f"dropped {report['dropped']} replicated card(s) in scopes this credential can no longer read"
+        warnings = [warning for warning in warnings if warning != dropped]
+    if report.get("bytes", 0) > settings.replica_max_bytes or any(
+        "not replicated yet" in warning for warning in warnings
+    ):
+        raise ReflectError(
+            "hub_reflect_replica_limit",
+            f"hub reflect replica byte cap exceeded ({settings.replica_max_bytes} bytes). Narrow read_scopes or adjust replica_max_mb within the 64 MiB reflect ceiling",
+        )
+    if warnings or report.get("seq") is None:
+        raise ReflectError("hub_reflect_replica_incomplete", "hub reflect requires a complete fresh replica")
 
     def read_heads() -> list[dict[str, Any]]:
         with store.locked(target):
@@ -222,20 +254,40 @@ def _reflect(
                 or replica.meta.get("log_epoch") != report["log_epoch"]
                 or replica.meta.get("seq") != report["seq"]
             ):
-                raise ValueError("hub reflect replica changed during the run")
+                raise ReflectError("hub_reflect_replica_changed", "hub reflect replica changed during the run")
+            if not set(settings.read_scopes) <= set(replica.meta.get("read_scopes") or []):
+                raise ReflectError("hub_reflect_scope_unreadable", "hub reflect cannot read every selected scope")
             return list(replica.readable_heads(settings.read_scopes).values())
 
     heads = read_heads()
+
+    def check_bounds() -> None:
+        counts: dict[str, int] = {}
+        sizes: dict[str, int] = {}
+        for head in heads:
+            name = head["scope"]
+            counts[name] = counts.get(name, 0) + 1
+            sizes[name] = sizes.get(name, 0) + len(head["text"].encode())
+            if counts[name] > MAX_SCOPE_CARDS or sizes[name] > MAX_SCOPE_BYTES:
+                raise ReflectError(
+                    "hub_reflect_scope_limit",
+                    f"hub reflect per-scope bound exceeded ({MAX_SCOPE_CARDS} cards or {MAX_SCOPE_BYTES} text bytes)",
+                )
+
+    check_bounds()
     if any("scan_state" not in head for head in heads):
         sync.refresh_scan_metadata(target, client, settings)
         heads = read_heads()
-    if len(heads) > io.MAX_FILES or sum(len(h["text"].encode()) for h in heads) > io.MAX_CORPUS_BYTES:
-        raise ValueError("hub reflect corpus limit exceeded")
-    if scope:
-        heads = [h for h in heads if h["scope"] == scope]
-    ops, skipped = _ops(heads)
+        check_bounds()
+    ops = []
+    skipped: dict[str, int] = {}
+    for name in settings.read_scopes:
+        scope_ops, scope_skips = _ops([head for head in heads if head["scope"] == name])
+        ops.extend(scope_ops)
+        for reason, count in scope_skips.items():
+            skipped[reason] = skipped.get(reason, 0) + count
     binding = io.sha256(
-        io.json_bytes([client.identity, report["principal"], report["log_epoch"], list(settings.read_scopes)])
+        io.json_bytes([client.identity, report["principal"], report["log_epoch"], list(configured_scopes)])
     )
     previous = dict(state.get("submissions", {})) if state.get("binding") == binding else {}
     remaining = []
@@ -290,7 +342,7 @@ def _reflect(
                     error = "hub_unavailable"
                     break
                 if not _event_id(opened.get("proposal_id")) or opened.get("state") not in ("pending", "held"):
-                    raise ValueError("hub returned no open reflect proposal")
+                    raise ReflectError("hub_reflect_proposal_invalid", "hub returned no open reflect proposal")
                 pending["proposal_id"] = opened["proposal_id"]
                 _save(target, state)
                 proposals.append({"proposal_id": pending["proposal_id"]})
@@ -330,14 +382,27 @@ def run_payload(*, target: Path, scope: str | None, limit: int, dry_run: bool, s
             payload = _reflect(target, settings, client, state, scope=scope, limit=limit, dry_run=dry_run)
         except (hubc.HubConfigError, hubc.HubUnavailable, hubc.HubRefusal, OSError, ValueError) as exc:
             # Never retain hub-supplied text, card bytes or credential-bearing errors.
-            error = (
-                str(exc)
-                if isinstance(exc, ReflectConfigError)
-                else exc.code
-                if isinstance(exc, hubc.HubRefusal)
-                else "hub reflect run failed"
-            )
-            payload = {"status": "failed", "error": error}
+            if isinstance(exc, ReflectError):
+                code, reason = exc.code, str(exc)
+            elif isinstance(exc, ReflectConfigError):
+                code, reason = "hub_reflect_config", str(exc)
+            elif isinstance(exc, hubc.HubRefusal):
+                code = exc.code if _code(exc.code) else "hub_refused"
+                reason = "hub refused the reflect request"
+            elif isinstance(exc, hubc.HubUnavailable):
+                code, reason = "hub_unavailable", "hub reflection could not reach the hub"
+            elif isinstance(exc, hubc.HubConfigError):
+                code, reason = "hub_reflect_config", "invalid hub memory configuration or replica metadata"
+            elif isinstance(exc, OSError):
+                code, reason = "hub_reflect_io", "hub reflect could not safely read or write local state"
+            else:
+                code, reason = "hub_reflect_invalid", "hub reflect received invalid state or data"
+            payload = {
+                "status": "failed",
+                "code": code,
+                "error": reason if isinstance(exc, ReflectConfigError) else code,
+                "reason": reason,
+            }
         if not dry_run:
             count = state["consecutive_failures"] + 1 if payload["status"] == "failed" else 0
             state.update(consecutive_failures=count, paused=count >= FAILURES, last_status=payload["status"])
