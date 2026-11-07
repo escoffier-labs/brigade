@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -14,9 +15,18 @@ def evaluate_gate(report: dict[str, Any], gate: str) -> dict[str, Any]:
     elif gate == "R0":
         if candidate["binding"]["ranking"] != "raw":
             failures.append("R0 requires raw lexical ranking")
-        if [r["ranked_candidates"] for r in baseline["queries"]] != [
-            r["ranked_candidates"] for r in candidate["queries"]
-        ]:
+        if "queries" in baseline and "queries" in candidate:
+            parity = [r["ranked_candidates"] for r in baseline["queries"]] == [
+                r["ranked_candidates"] for r in candidate["queries"]
+            ]
+        else:
+            digest = baseline.get("ranking_sha256")
+            parity = (
+                isinstance(digest, str)
+                and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+                and digest == candidate.get("ranking_sha256")
+            )
+        if not parity:
             failures.append("lexical order differs")
     else:
         if report["k"] != 5:

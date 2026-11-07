@@ -626,3 +626,34 @@ def test_external_memory_owners_cannot_enable_auto_apply(owner):
 def test_memory_evidence_freshness_is_bounded(window):
     with pytest.raises(fleet_policy.FleetPolicyError):
         fleet_policy.parse_memory({"evidence_freshness_seconds": window})
+
+
+def test_memory_retrieval_fixture_pin_is_optional_and_digest_bound():
+    baseline = fleet_policy.parse_memory({})
+    assert "retrieval_eval" not in baseline
+    pin = {"fixture_digest": "a" * 64}
+    parsed = fleet_policy.parse_memory({"retrieval_eval": pin})
+    assert parsed["retrieval_eval"] == pin
+    assert fleet_policy.parse_memory(parsed) == parsed
+    document = {**_document(), "memory": {}}
+    before = fleet_policy.document_digest(document)
+    assert fleet_policy.document_digest({**document, "memory": {"retrieval_eval": pin}}) != before
+    assert fleet_policy.parse_memory({"retrieval_eval": {}})["retrieval_eval"] == {}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        [],
+        True,
+        {"other": "x"},
+        {"fixture_digest": None},
+        {"fixture_digest": "A" * 64},
+        {"fixture_digest": "a" * 63},
+        {"fixture_digest": "sha256:" + "a" * 64},
+    ],
+)
+def test_memory_retrieval_fixture_pin_rejects_invalid_values(value):
+    with pytest.raises(fleet_policy.FleetPolicyError):
+        fleet_policy.parse_memory({"retrieval_eval": value})

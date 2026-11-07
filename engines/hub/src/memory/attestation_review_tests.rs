@@ -198,13 +198,35 @@ async fn principal_cap_spans_workspaces_and_admin_purge_frees_capacity() {
     let (tombstone,bytes):(i64,Vec<u8>)=db.query_row("SELECT tombstoned,artifact_bytes FROM memory_evidence WHERE evidence_id='hub:admin/workspace-a/r0'",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
     assert_eq!(tombstone, 1);
     assert!(bytes.is_empty());
-    for sql in [
-        "UPDATE memory_evidence SET tombstoned=0 WHERE tombstoned=1",
-        "UPDATE memory_evidence SET artifact_bytes=x'61' WHERE tombstoned=1",
-        "UPDATE memory_evidence SET tombstoned=1,artifact_bytes=x'',principal='forged' WHERE tombstoned=0",
-        "UPDATE memory_evidence SET tombstoned=1,artifact_bytes=x'',workspace_id='forged' WHERE tombstoned=0",
-    ] {
-        assert!(db.execute(sql, []).is_err(), "{sql}");
+    let columns: Vec<(String, String)> = db
+        .prepare("PRAGMA table_info(memory_evidence)")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    for (column, kind) in columns {
+        let sql = match column.as_str() {
+            "tombstoned" => "UPDATE memory_evidence SET tombstoned=0 WHERE tombstoned=1".into(),
+            "artifact_bytes" => {
+                "UPDATE memory_evidence SET artifact_bytes=x'61' WHERE tombstoned=1".into()
+            }
+            _ => {
+                let value = if kind == "INTEGER" {
+                    format!("COALESCE({column},0)+1")
+                } else {
+                    format!("COALESCE({column},'')||'_changed'")
+                };
+                format!(
+                    "UPDATE memory_evidence SET tombstoned=1,artifact_bytes=x'',{column}={value} WHERE tombstoned=0"
+                )
+            }
+        };
+        let error = db.execute(&sql, []).unwrap_err().to_string();
+        assert!(
+            error.contains("memory_evidence is immutable"),
+            "{column}: {error}"
+        );
     }
     assert!(db.execute("DELETE FROM memory_evidence", []).is_err());
     let n: i64 = db

@@ -2564,7 +2564,20 @@ S19e-2 is done. The admin-only `retrieval_eval.record` memory action accepts
 the exact S17 digest preimage in `report_json` and the harness digest in
 `report_sha256`. It verifies raw bytes and complete bindings, stores failed
 reports too, and appends an audit event without report text. Schema 7 adds an
-append-only record table. The unit-test retrieval seam is removed.
+append-only record table. The unit-test retrieval seam is removed. The digest
+checks integrity, not authentication. The admin credential is the trust root.
+Rust rechecks R0 ordered-ranking digests and score parity, and R1-public's
+k=5, non-regression and strict paraphrase or abbreviation improvement from
+the reported metrics. Compact reports retain ranking digests without query
+text or card ids. Full query rows must match those digests when present.
+The optional digest-bound `memory.retrieval_eval.fixture_digest` pins the
+approved fixture. Invalid or mismatched pins hold apply.
+
+Recording requires a strictly newer evaluation time than the latest record
+for that mode. Older or equal times return `memory_retrieval_eval_superseded`
+with 409. Admission also refuses expired runs and times beyond five minutes
+of future skew, matching the client-event-id skew allowance. An admitted
+future run still holds apply until its evaluation time.
 
 The latest record for the configured mode must pass R0 or R1-public and match
 the log epoch, index format, scorer, policy revision and digest, scope, corpus
@@ -2572,17 +2585,19 @@ identity and RRF weights. Hybrid requires the configured embedder identity,
 including when runtime search falls back to lexical. R1-public establishes no
 private model qualification. Inside the apply transaction the sequence must
 be no newer than the live index and at or after the last committed
-head-changing event. The fixed tolerance is zero head-changing writes.
+head-changing event. The fixed tolerance is zero head-changing writes globally across scopes.
+This is a one-shot arm. A head change in any scope invalidates it, including
+its own successful apply. The newest record per mode binds only one scope.
 Non-head audit events may advance `indexed_seq`, so recording does not
 invalidate itself. A run expires after 24 hours from the timestamp in its
 harness `evaluation_id`. Re-recording old report bytes never refreshes it.
 Each mismatch returns a specific `retrieval_eval_*` hold code.
 
-Automatic apply stays off by default. Operators run the S17 harness against
-the target hub and matching scope fixture, record the report, then enable
-policy. The policy edit invalidates the initial record. Keep the persistent
-switch off while rerunning and recording against the final policy revision,
-then clear the switch. The full procedure and byte envelope are in
+Automatic apply stays off by default. A missing persistent switch row means
+enabled, so operators first send `auto_apply_switch` with `enabled: false`.
+Then enable policy, run the S17 harness against that final revision, record
+the report, inspect preflight and explicitly switch on. The full procedure
+and byte envelope are in
 [memory operations](memory-operations.md#bound-retrieval-evaluation-s19e-2).
 
 Contrary holds intentionally need fresh read and reflect grants without

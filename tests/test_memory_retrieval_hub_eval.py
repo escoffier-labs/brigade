@@ -271,7 +271,7 @@ def test_native_s17_report_records_without_reserializing_digest(tmp_path, monkey
         with urllib.request.urlopen(request, timeout=10) as response:
             assert response.status == 200
         monkeypatch.setattr(harness, "hub_client", lambda *args: nullcontext(client))
-        report = run_eval(adapters=["bm25", "hub-lexical"], hub_options=options)
+        report = run_eval(adapters=["bm25", "hub-lexical"], hub_options=options, aggregate_only=True)
         report.pop("digest")
         report["gate"] = evaluate_gate(report, "R0")
         report["evaluation_id"] = event_id()
@@ -280,3 +280,29 @@ def test_native_s17_report_records_without_reserializing_digest(tmp_path, monkey
         reply = record_report(client, report)
         assert reply["passed"] is True
         assert reply["report_sha256"] == report["digest"]
+
+
+def test_ranking_hash_survives_aggregate_only_reports():
+    full = run_eval(adapters=["bm25"])
+    compact = run_eval(adapters=["bm25"], aggregate_only=True)
+    expected = stable_digest([row["ranked_candidates"] for row in full["adapters"]["bm25"]["queries"]])
+    assert full["adapters"]["bm25"]["ranking_sha256"] == expected
+    assert compact["adapters"]["bm25"]["ranking_sha256"] == expected
+    assert "queries" not in compact["adapters"]["bm25"]
+
+
+def test_r0_compact_gate_requires_matching_ranking_hashes():
+    from brigade.memory_retrieval_eval.gates import evaluate_gate
+
+    report = {
+        "adapters": {
+            "bm25": {"available": True, "ranking_sha256": "a" * 64},
+            "hub-lexical": {"available": True, "ranking_sha256": "a" * 64, "binding": {"ranking": "raw"}},
+        }
+    }
+    assert evaluate_gate(report, "R0")["passed"]
+    report["adapters"]["hub-lexical"]["ranking_sha256"] = "b" * 64
+    assert not evaluate_gate(report, "R0")["passed"]
+    for block in report["adapters"].values():
+        block.pop("ranking_sha256")
+    assert not evaluate_gate(report, "R0")["passed"]

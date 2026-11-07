@@ -11,15 +11,21 @@ pub(super) async fn gate_report(h: &Hub) -> Json {
     binding["corpus_identity"] = search.body["corpus_identity"]["fleet"].clone();
     binding["ranking"] = json!("raw");
     binding["embedder_id"] = Json::Null;
-    json!({"evaluation_id":h.id(),"fixture_digest":ids::sha256_hex(b"fixture"),
+    let metrics =
+        json!({"query_count":1,"hit_rate":0.5,"mrr":0.5,"precision_at_k":0.5,"recall_at_k":0.5});
+    let baseline = json!({"available":true,"overall":metrics,"by_category":{"paraphrase":metrics},"ranking_sha256":ids::sha256_hex(b"[[\"a\"]]"),"queries":[{"id":"q","ranked_candidates":["a"]}]});
+    let mut candidate = baseline.clone();
+    candidate["binding"] = binding;
+    json!({"evaluation_id":h.id(),"k":5,"fixture_digest":ids::sha256_hex(b"fixture"),
         "gate":{"name":"R0","passed":true,"failures":[],"private_qualification":"not_evaluated"},
-        "adapters":{"bm25":{"available":true},"hub-lexical":{"available":true,"binding":binding}}})
+        "adapters":{"bm25":baseline,"hub-lexical":candidate}})
 }
 pub(super) async fn record(h: &Hub, report: &Json) -> Reply {
     let raw = ids::canonical(report);
     h.call(ADMIN_TOKEN,json!({"action":"retrieval_eval.record","report_json":raw,"report_sha256":ids::sha256_hex(raw.as_bytes()),"client_event_id":h.id()})).await
 }
 pub(super) async fn record_current(h: &Hub) {
+    h.set_clock(h.now() + 1);
     let r = record(h, &gate_report(h).await).await;
     assert_eq!(r.status, 201, "{r:?}");
 }
@@ -84,7 +90,9 @@ async fn retrieval_eval_admin_digest_append_only_and_latest_failure() {
         .unwrap(),
         1
     );
+    h.set_clock(h.now() + 1);
     let mut failed = report.clone();
+    failed["evaluation_id"] = json!(h.id());
     failed["gate"]["passed"] = json!(false);
     failed["gate"]["failures"] = json!(["lexical order differs"]);
     failed["adapters"]["hub-lexical"]["binding"]["ranking"] = json!("default");
@@ -241,7 +249,9 @@ async fn retrieval_eval_expiry_cannot_be_refreshed_by_recording_old_bytes_and_re
     record(&h, &report).await;
     let request = auto_request(&h, &id).await;
     h.set_clock(h.now() + retrieval_eval::MAX_AGE_MS + 1);
-    assert_eq!(record(&h, &report).await.status, 201);
+    let refused = record(&h, &report).await;
+    assert_eq!(refused.status, 409);
+    assert_eq!(code(&refused), "memory_retrieval_eval_superseded");
     let held = h.call(ADMIN_TOKEN, request.clone()).await;
     assert!(
         held.body["preflight"]["checks"]
@@ -297,6 +307,14 @@ async fn retrieval_eval_hybrid_identity_is_checked_and_records_survive_restart()
         .unwrap();
     let embedder = h.store.as_ref().unwrap().dense.active_id().unwrap();
     let mut adapter = r["adapters"]["hub-lexical"].clone();
+    for block in ["overall", "by_category"] {
+        let metrics = json!({"query_count":1,"hit_rate":0.75,"mrr":0.75,"precision_at_k":0.75,"recall_at_k":0.75});
+        adapter[block] = if block == "overall" {
+            metrics.clone()
+        } else {
+            json!({"paraphrase":metrics})
+        };
+    }
     adapter["binding"]["mode"] = json!("hybrid");
     adapter["binding"]["ranking"] = json!("default");
     adapter["binding"]["embedder_id"] = json!(ids::sha256_hex(b"wrong-embedder"));
@@ -312,6 +330,8 @@ async fn retrieval_eval_hybrid_identity_is_checked_and_records_survive_restart()
             .iter()
             .any(|c| c["code"] == "retrieval_eval_embedder_mismatch")
     );
+    h.set_clock(h.now() + 1);
+    r["evaluation_id"] = json!(h.id());
     r["adapters"]["hub-hybrid"]["binding"]["embedder_id"] = json!(embedder);
     assert_eq!(record(&h, &r).await.status, 201);
     h.store.take();
@@ -446,4 +466,268 @@ async fn retrieval_eval_late_stale_reply_never_claims_an_unpersisted_transition(
     assert_eq!(r.body["state"], stored["state"]);
     db.execute_batch("ROLLBACK").unwrap();
     hub.execute_batch("ROLLBACK").unwrap();
+}
+
+#[tokio::test]
+async fn retrieval_eval_review_fix_old_pass_cannot_supersede_new_failure() {
+    let (h, id) = ready().await;
+    let pass = gate_report(&h).await;
+    assert_eq!(record(&h, &pass).await.status, 201);
+    h.set_clock(h.now() + 1);
+    let mut failed = gate_report(&h).await;
+    failed["gate"]["passed"] = json!(false);
+    failed["gate"]["failures"] = json!(["lexical order differs"]);
+    assert_eq!(record(&h, &failed).await.status, 201);
+    for older in [&pass, &failed] {
+        let before = h.events();
+        let refused = record(&h, older).await;
+        assert_eq!(refused.status, 409, "{refused:?}");
+        assert_eq!(code(&refused), "memory_retrieval_eval_superseded");
+        assert_eq!(h.events(), before);
+    }
+    let attempt = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
+    assert!(
+        attempt.body["preflight"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "retrieval_eval_failed")
+    );
+    assert_eq!(attempt.body["state"], "pending");
+}
+
+#[tokio::test]
+async fn retrieval_eval_review_fix_admission_time_bounds() {
+    for (offset, status, code_expected) in [
+        (-86_400_001, 422, "memory_retrieval_eval_expired"),
+        (-86_400_000, 201, ""),
+        (300_001, 422, "memory_retrieval_eval_future"),
+        (300_000, 201, ""),
+    ] {
+        let (h, id) = ready().await;
+        let mut r = gate_report(&h).await;
+        r["evaluation_id"] = json!(ids::mint(h.now() + offset));
+        let before = h.events();
+        let reply = record(&h, &r).await;
+        assert_eq!(reply.status, status, "offset {offset}: {reply:?}");
+        assert_eq!(code(&reply), code_expected);
+        if status == 422 {
+            assert_eq!(h.events(), before);
+        }
+        if offset > 0 && status == 201 {
+            let held = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
+            assert!(
+                held.body["preflight"]["checks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|c| c["code"] == "retrieval_eval_future")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn retrieval_eval_review_fix_rust_rechecks_r0_metrics() {
+    for mutation in [
+        "order",
+        "score",
+        "missing_metric",
+        "missing_digest",
+        "missing_queries",
+        "bad_rows",
+        "count",
+        "category",
+    ] {
+        let (h, id) = ready().await;
+        let mut r = gate_report(&h).await;
+        let c = &mut r["adapters"]["hub-lexical"];
+        match mutation {
+            "order" => c["ranking_sha256"] = json!(ids::sha256_hex(b"different order")),
+            "score" => c["overall"]["mrr"] = json!(0.4),
+            "missing_metric" => {
+                c["overall"].as_object_mut().unwrap().remove("mrr");
+            }
+            "missing_digest" => {
+                c.as_object_mut().unwrap().remove("ranking_sha256");
+            }
+            "missing_queries" => {
+                c["queries"] = json!([]);
+            }
+            "bad_rows" => c["queries"][0]["ranked_candidates"] = json!(["b"]),
+            "count" => c["overall"]["query_count"] = json!(0),
+            "category" => c["by_category"] = json!({}),
+            _ => unreachable!(),
+        }
+        let reply = record(&h, &r).await;
+        assert_eq!(reply.status, 201, "{mutation}: {reply:?}");
+        assert_eq!(reply.body["passed"], false, "{mutation}: {reply:?}");
+        let held = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
+        assert!(
+            held.body["preflight"]["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["code"] == "retrieval_eval_failed")
+        );
+    }
+}
+
+#[tokio::test]
+async fn retrieval_eval_review_fix_rust_rechecks_r1_thresholds() {
+    for mutation in [
+        "pass",
+        "k",
+        "overall",
+        "category",
+        "equal",
+        "missing_category",
+        "negative",
+        "non_numeric",
+        "over_one",
+    ] {
+        let (h, _) = ready().await;
+        let mut r = gate_report(&h).await;
+        let mut c = r["adapters"]["hub-lexical"].clone();
+        c["binding"]["mode"] = json!("hybrid");
+        c["binding"]["ranking"] = json!("default");
+        c["binding"]["embedder_id"] = json!(ids::sha256_hex(b"model"));
+        let metrics = json!({"query_count":1,"hit_rate":0.75,"mrr":0.75,"precision_at_k":0.75,"recall_at_k":0.75});
+        c["overall"] = metrics.clone();
+        c["by_category"] = json!({"paraphrase":metrics});
+        r["adapters"].as_object_mut().unwrap().remove("hub-lexical");
+        r["adapters"]["hub-hybrid"] = c;
+        r["gate"]["name"] = json!("R1-public");
+        let c = &mut r["adapters"]["hub-hybrid"];
+        match mutation {
+            "pass" => {}
+            "k" => r["k"] = json!(10),
+            "overall" => c["overall"]["mrr"] = json!(0.4),
+            "category" => c["by_category"]["paraphrase"]["recall_at_k"] = json!(0.4),
+            "equal" => {
+                let metrics = json!({"query_count":1,"hit_rate":0.5,"mrr":0.5,"precision_at_k":0.5,"recall_at_k":0.5});
+                c["overall"] = metrics.clone();
+                c["by_category"] = json!({"paraphrase":metrics});
+            }
+            "missing_category" => c["by_category"] = json!({}),
+            "negative" => c["overall"]["hit_rate"] = json!(-1),
+            "non_numeric" => c["overall"]["hit_rate"] = json!(true),
+            "over_one" => c["overall"]["hit_rate"] = json!(1.1),
+            _ => unreachable!(),
+        }
+        let reply = record(&h, &r).await;
+        assert_eq!(reply.status, 201, "{mutation}: {reply:?}");
+        assert_eq!(
+            reply.body["passed"],
+            mutation == "pass",
+            "{mutation}: {reply:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn retrieval_eval_review_fix_fixture_pin_matches_live_policy() {
+    let (h, id) = ready().await;
+    record_current(&h).await;
+    change_policy(
+        &h,
+        "retrieval_eval",
+        json!({"fixture_digest":ids::sha256_hex(b"other fixture")}),
+    );
+    let held = report(&h, &id).await;
+    assert!(
+        held.body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "retrieval_eval_fixture_mismatch")
+    );
+    change_policy(
+        &h,
+        "retrieval_eval",
+        json!({"fixture_digest":ids::sha256_hex(b"fixture")}),
+    );
+    assert!(
+        report(&h, &id).await.body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "retrieval_eval_satisfied")
+    );
+    for bad in [
+        Json::Null,
+        json!({"fixture_digest":"bad"}),
+        json!({"unknown":true}),
+    ] {
+        change_policy(&h, "retrieval_eval", bad);
+        assert!(
+            report(&h, &id).await.body["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["code"] == "retrieval_eval_policy_invalid")
+        );
+    }
+}
+
+#[tokio::test]
+async fn retrieval_eval_zero_head_tolerance_is_global_and_consumed_by_apply() {
+    let (h, id) = ready().await;
+    record_current(&h).await;
+    h.put(ADMIN_TOKEN, "repo:other", "b", None, "other scope")
+        .await;
+    let held = report(&h, &id).await;
+    assert!(
+        held.body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "retrieval_eval_seq_stale")
+    );
+    let db = Connection::open(h.memory()).unwrap();
+    let body = proposals::load(&crate::writer::worker::Tx(&db), id.as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    let another=h.call(ADMIN_TOKEN,json!({"action":"propose","workspace_id":"workspace-a","base_epoch":h.epoch().await,"ops":body["ops"],"client_event_id":h.id()})).await;
+    assert_eq!(another.status, 201);
+    record_current(&h).await;
+    let applied = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
+    assert_eq!(applied.body["state"], "applied");
+    let next = report(&h, &another.body["proposal_id"]).await;
+    assert!(
+        next.body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "retrieval_eval_seq_stale")
+    );
+}
+
+#[tokio::test]
+async fn retrieval_eval_newest_record_per_mode_binds_only_its_scope() {
+    let (h, id) = ready().await;
+    h.put(ADMIN_TOKEN, "repo:other", "b", None, "other scope")
+        .await;
+    record_current(&h).await;
+    assert!(
+        report(&h, &id).await.body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "retrieval_eval_satisfied")
+    );
+    h.set_clock(h.now() + 1);
+    let mut other = gate_report(&h).await;
+    let search=h.call(ADMIN_TOKEN,json!({"action":"search","query":"other","mode":"lexical","eval":true,"scopes":["repo:other"],"min_seq":h.events()})).await;
+    other["adapters"]["hub-lexical"]["binding"]["scope"] = json!("repo:other");
+    other["adapters"]["hub-lexical"]["binding"]["corpus_identity"] =
+        search.body["corpus_identity"]["repo:other"].clone();
+    assert_eq!(record(&h, &other).await.status, 201);
+    assert!(
+        report(&h, &id).await.body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "retrieval_eval_scope_mismatch")
+    );
 }

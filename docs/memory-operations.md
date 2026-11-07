@@ -978,13 +978,26 @@ through `POST /memory`, action `retrieval_eval.record`, with `report_json`,
 UTF-8 digest preimage: the harness report without its `digest` field, serialized
 with sorted keys, compact separators and ASCII escaping. `report_sha256` is
 the harness `digest`. The hub hashes these raw bytes without normalization.
+This digest is an integrity check, not authentication. The admin credential
+is the trust root for the submitted fixture, results and evaluation time.
 Use `record_report` below to preserve Python float and Unicode serialization.
 Reports are limited to 512 KiB. Use `--aggregate-only` for larger fixtures.
+The harness retains an ordered-ranking digest per adapter in compact reports.
+Rust compares those digests for R0 parity, checks them against query rows when
+present, and rechecks score parity. R1-public requires k=5, no regression
+overall or in any category, and strict improvement in paraphrase or
+abbreviation across hit rate, MRR, precision or recall. Missing, nonnumeric,
+out-of-range or incomplete metric slices cannot pass. A submitted failure
+stays failed even if its metrics meet the thresholds.
 
 The hub requires the run's `evaluation_id`, fixture digest, complete adapter
 binding and a well-formed gate result. It stores valid failed reports too.
 Records are append-only and emit `retrieval_eval.record` audit events without
-report text. The newest record for the configured mode wins. A failed newest
+report text. Evaluation times must be strictly increasing per mode, checked
+in the write transaction. Older or equal times return
+`409 memory_retrieval_eval_superseded` without appending a record or audit
+event. Replaying an identical client event id remains idempotent.
+The newest record for the configured mode wins. A failed newest
 record holds automatic apply even if an older record passed. R1-public is the
 public harness gate. Recording it does not establish private model qualification.
 
@@ -994,31 +1007,59 @@ RRF weights, scope and exact corpus identity must match. Hybrid also requires
 the same configured embedder identity, even during lexical fallback. A lexical
 record never authorizes a configured hybrid hub.
 
-The fixed sequence tolerance is zero head-changing writes since `indexed_seq`.
+The optional policy field `memory.retrieval_eval.fixture_digest` pins an
+approved fixture's 64-character lowercase SHA-256 digest. It is included in
+the policy digest and must match the report at apply. Omitting it leaves
+fixture selection to the admin. Invalid policy pins hold the gate.
+
+Treat retrieval evaluation as a one-shot arm. The fixed sequence tolerance is
+zero head-changing writes since `indexed_seq`, globally across all scopes.
+A write to an unrelated scope invalidates it. A successful automatic apply
+consumes its own record by writing a new card head. The newest record per
+mode binds one scope, so recording scope B replaces scope A's arm for that
+mode. Rerun and record before another automatic apply.
+
 The evaluated sequence must be covered by the live index and cover every
 committed head change. Audit events, evidence attachments and proposal opens
 may advance the log without invalidating the record. This lets recording and
-policy-switch audit events complete without authorizing a changed corpus.
+switch audit events complete without authorizing a changed corpus.
 The run expires 24 hours after the timestamp in its harness `evaluation_id`,
-even with no writes. Recording the same old bytes again cannot extend that
-window. Rerun after a card write, retrieval change, policy revision or expiry.
+even with no writes. Record admission rejects already-expired runs and times
+more than five minutes in the future. The five-minute allowance matches
+client-event-id admission and bounds clock skew. An admitted future run
+still holds apply until its evaluation time arrives. Recording the same old
+bytes again cannot extend expiry or replace a newer failed run. Rerun after
+a card write, retrieval change, policy revision or expiry.
 Specific `retrieval_eval_*` reason codes identify failed, expired, future,
 stale sequence, epoch, format, scorer, policy, embedder, weights, scope or
 corpus mismatches. Missing records retain `retrieval_eval_unbound`.
 
 Operator procedure:
 
-1. Keep policy automatic apply off while running the initial gate. Use an
-   explicit read credential and a fixture snapshot matching the selected live
-   scope. Run R0 for lexical, or R1 for hybrid with `--candidate-embedder`.
-   A disposable fixture hub report cannot authorize another hub.
+1. Explicitly switch automatic apply off before enabling policy:
+
+   ```json
+   {"action":"auto_apply_switch","enabled":false,"client_event_id":"<fresh-event-id>"}
+   ```
+
+   A missing switch row means enabled. Policy still defaults off, but an
+   absent row is not a persistent hold.
+
+2. Enable the policy with explicit hub ownership, evidence freshness and both
+   nonempty allowlists. Set the optional approved fixture pin here. Every
+   policy edit invalidates earlier evaluation bindings.
+
+3. Run the S17 gate against that final policy revision, using an explicit read
+   credential and a fixture snapshot matching the selected live scope. Run R0
+   for lexical, or R1 for hybrid with `--candidate-embedder`. A disposable
+   fixture hub report cannot authorize another hub.
 
    ```bash
    python -m brigade.memory_retrieval_eval --gate R0 --hub-url "$HUB_URL" --hub-token-file "$READ_TOKEN_FILE" --hub-scope fleet --fixture-root "$FIXTURE_ROOT" --aggregate-only --json > retrieval-report.json
    ```
 
-2. Record the report using an explicit admin client. The helper verifies the
-   existing digest before sending and never substitutes a new digest.
+4. Record the report using an explicit admin client. The helper verifies its
+   existing integrity digest before sending and never substitutes a new one.
 
    ```python
    import json
@@ -1030,11 +1071,17 @@ Operator procedure:
    record_report(client, json.loads(Path("retrieval-report.json").read_text()))
    ```
 
-3. Hold the persistent admin switch off, then enable the policy with explicit
-   hub ownership, freshness and both allowlists. A policy edit invalidates the
-   earlier record by design. Rerun and record against the final enabled policy
-   revision while the switch remains off. Inspect proposal preflight, then
-   clear the switch when ready. Clearing it changes no policy revision.
+5. Inspect proposal preflight under the final policy. The switch remains a
+   blocker until cleared. Repair any other hold before continuing. A proposal
+   opened under an older policy retains its policy-change hold.
+
+6. Clear the persistent switch when ready, with a fresh client event id:
+
+   ```json
+   {"action":"auto_apply_switch","enabled":true,"client_event_id":"<fresh-event-id>"}
+   ```
+
+   Clearing it changes no policy revision and overrides no other gate.
 
 A failed automatic attempt returns the persisted pending proposal state and
 its attempt reason. It never claims an unpersisted terminal transition.

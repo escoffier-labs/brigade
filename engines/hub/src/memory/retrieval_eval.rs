@@ -14,6 +14,9 @@ use serde_json::{Value as Json, json};
 /// events do not invalidate a run. The timestamp of the harness evaluation id
 /// expires it after 24 hours even when the corpus never changes.
 pub const MAX_AGE_MS: i64 = 86_400_000;
+/// Match event-id admission: tolerate five minutes of client clock skew.
+/// A future run still cannot arm the gate until its evaluated time arrives.
+pub const MAX_FUTURE_MS: i64 = ids::FUTURE_MS;
 pub const MAX_REPORT_BYTES: usize = 512 * 1024;
 pub const DDL: &str = "CREATE TABLE memory_retrieval_evals(
  record_seq INTEGER PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('lexical','hybrid')),
@@ -38,6 +41,7 @@ pub struct Report {
     body: Json,
     mode: &'static str,
     evaluated_ms: i64,
+    passed: bool,
 }
 fn hex(v: &Json) -> bool {
     v.as_str().is_some_and(|s| {
@@ -67,7 +71,7 @@ pub fn prepare(request: &Json) -> Result<Report, Reply> {
         ops::error(
             422,
             "memory_retrieval_eval_invalid",
-            "a digest-verified S17 R0 or R1-public report with complete bindings is required",
+            "an integrity-checked S17 R0 or R1-public report with complete bindings is required",
         )
     };
     let raw = request["report_json"].as_str().ok_or_else(invalid)?;
@@ -100,12 +104,14 @@ pub fn prepare(request: &Json) -> Result<Report, Reply> {
     };
     let (_, evaluated_ms) =
         ids::parse_event_id(string(&body, "evaluation_id")).ok_or_else(invalid)?;
+    let passed = body["gate"]["passed"] == true && super::retrieval_eval_gates::passed(&body, mode);
     let report = Report {
         raw: raw.into(),
         digest: digest.into(),
         body,
         mode,
         evaluated_ms,
+        passed,
     };
     let b = binding(&report);
     let available = report.body["adapters"][if mode == "lexical" {
@@ -167,7 +173,43 @@ pub fn record(
         Err(r) => return Ok(r),
     };
     let r = &checked;
-    let payload = json!({"report_sha256":r.digest,"mode":r.mode,"gate":r.body["gate"]["name"],"passed":r.body["gate"]["passed"]});
+    let latest=tx.query("SELECT report_json,report_sha256 FROM memory_retrieval_evals WHERE mode=?1 ORDER BY record_seq DESC LIMIT 1",&[ops::t(r.mode)])?;
+    if let Some(row) = latest.first() {
+        let previous = match prepare(
+            &json!({"report_json":ops::s(&row[0]),"report_sha256":ops::s(&row[1])}),
+        ) {
+            Ok(previous) => previous,
+            Err(_) => {
+                return Ok(ops::error(
+                    409,
+                    "memory_retrieval_eval_record_invalid",
+                    "the latest retrieval record is invalid, no record was appended",
+                ));
+            }
+        };
+        if r.evaluated_ms <= previous.evaluated_ms {
+            return Ok(ops::error(
+                409,
+                "memory_retrieval_eval_superseded",
+                "evaluation time must be strictly newer than the latest record for this mode",
+            ));
+        }
+    }
+    if r.evaluated_ms > p.now_ms.saturating_add(MAX_FUTURE_MS) {
+        return Ok(ops::error(
+            422,
+            "memory_retrieval_eval_future",
+            "evaluation time exceeds the five-minute clock skew allowance",
+        ));
+    }
+    if p.now_ms.saturating_sub(r.evaluated_ms) > MAX_AGE_MS {
+        return Ok(ops::error(
+            422,
+            "memory_retrieval_eval_expired",
+            "evaluation time is more than 24 hours old",
+        ));
+    }
+    let payload = json!({"report_sha256":r.digest,"mode":r.mode,"gate":r.body["gate"]["name"],"passed":r.passed});
     let seq = ops::append(
         tx,
         p,
@@ -189,7 +231,7 @@ pub fn record(
         Value::Integer(seq),ops::t(r.mode),ops::t(&r.digest),ops::t(&r.raw),ops::t(p.credential.principal()),ops::t(credential),Value::Integer(p.now_ms)])?;
     Ok(Reply::new(
         201,
-        json!({"record_seq":seq,"report_sha256":r.digest,"mode":r.mode,"passed":r.body["gate"]["passed"]}),
+        json!({"record_seq":seq,"report_sha256":r.digest,"mode":r.mode,"passed":r.passed}),
     ))
 }
 /// Called from preflight and again under the hub lock in the apply transaction.
@@ -217,9 +259,25 @@ pub fn hold<T: ReadTx + ?Sized>(
         Err(_) => return Ok(Some("retrieval_eval_record_invalid")),
     };
     let b = binding(&r);
+    if let Some(policy) = a.policy_document["memory"].get("retrieval_eval") {
+        let Some(policy) = policy.as_object() else {
+            return Ok(Some("retrieval_eval_policy_invalid"));
+        };
+        if policy.keys().any(|k| k != "fixture_digest") {
+            return Ok(Some("retrieval_eval_policy_invalid"));
+        }
+        if let Some(pin) = policy.get("fixture_digest") {
+            if !hex(pin) {
+                return Ok(Some("retrieval_eval_policy_invalid"));
+            }
+            if *pin != r.body["fixture_digest"] {
+                return Ok(Some("retrieval_eval_fixture_mismatch"));
+            }
+        }
+    }
     let reason = if r.mode != mode {
         Some("retrieval_eval_mode_mismatch")
-    } else if r.body["gate"]["passed"] != true {
+    } else if !r.passed {
         Some("retrieval_eval_failed")
     } else if r.evaluated_ms > now {
         Some("retrieval_eval_future")

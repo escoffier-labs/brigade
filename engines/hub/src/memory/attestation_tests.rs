@@ -224,7 +224,7 @@ pub(super) fn mutate_body(h: &Hub, id: &Json, change: impl FnOnce(&mut Json)) {
     )
     .unwrap();
 }
-fn change_policy(h: &Hub, key: &str, value: Json) {
+pub(super) fn change_policy(h: &Hub, key: &str, value: Json) {
     let db = Connection::open(&h.hub).unwrap();
     let text: String = db
         .query_row("SELECT document FROM fleet_policy_revisions", [], |r| {

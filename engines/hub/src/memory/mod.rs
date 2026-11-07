@@ -35,6 +35,7 @@ mod rescan;
 #[cfg(test)]
 mod rescan_tests;
 pub mod retrieval_eval;
+mod retrieval_eval_gates;
 #[cfg(test)]
 mod retrieval_eval_tests;
 pub mod scan;
