@@ -1,0 +1,1 @@
+- Add repeatable `brigade memory hub mirror --exclude-scope` to omit exact scopes and remove their previously generated notes and index sections. Dry-run and JSON reports include excluded scopes and skipped card counts.
