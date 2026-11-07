@@ -754,3 +754,20 @@ Commit the runbook JSON when you want CI to execute the same pinned steps as you
 ## More recipes
 
 Add new sections here as adapters land. Future candidates include a beads reconcile pass once a `bd` adapter ships. Follow the same crontab, systemd, and GitHub Actions shape as the recipes above.
+
+### Hub memory reflection
+
+`brigade memory care install --entry memory-reflect --target <workspace>`
+installs an optional daily 10:00 hub reflection entry through the existing
+care scheduler. It runs `memory reflect run --hub --scheduled` and submits
+proposals only. A reviewer must decide each proposal separately.
+
+Three consecutive non-zero reflect runs pause the job in workspace state.
+Scheduled triggers then skip hub work. Inspect `memory reflect status`,
+`memory care status`, or `care status --entry memory-reflect`. Fix the fault
+and run `memory reflect run --hub --target <workspace>` manually. A successful
+non-dry manual run resumes scheduled work. Dry runs and reinstalls leave the
+pause set. The timer sets only `PATH`, so configure user-level `[memory_hub]`
+settings or import the memory hub environment pair into the user service manager.
+See [Scheduled hub reflection](memory-operations.md#scheduled-hub-reflection-s19d)
+for grants, credentials, rollback and scheduler activation.

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from . import care_patrol, care_schedules, managed_block, memory_cmd, runbook_cmd
-from .care_launchers import explicit_workspace, runbook_argv
+from .care_launchers import entry_argv, explicit_workspace, runbook_argv
 from .care_windows import create_command as _windows_create_command, task_run as _schtasks_task_run
 from .isolated_exec import trusted_cwd
 
@@ -72,7 +72,7 @@ class CareEntry:
     schedule: str  # crontab five-field expression
     on_calendar: str  # systemd OnCalendar=
     description: str
-    kind: Literal["runbook", "shell"]
+    kind: Literal["runbook", "shell", "reflect"]
     runbook_rel: str | None = None
     shell: str | None = None  # multi-command shell body without cd/PATH
     runbook_id: str | None = None
@@ -152,6 +152,14 @@ MEMORY_CLOSEOUT_RUNBOOK_PAYLOAD: dict[str, Any] = {
         {"id": "closeout", "run": "brigade memory care closeout --target ."},
     ],
 }
+MEMORY_REFLECT_ENTRY = CareEntry(
+    entry_id="memory-reflect",
+    schedule="0 10 * * *",
+    on_calendar="*-*-* 10:00:00",
+    description="Brigade hub memory reflection proposals",
+    kind="reflect",
+)
+
 MEMORY_JOB_ENTRIES: tuple[CareEntry, ...] = (
     CareEntry(
         entry_id="handoff-ingest",
@@ -209,7 +217,10 @@ REPEATED_FAILURE_THRESHOLD = 2
 
 
 def _catalog_by_id() -> dict[str, CareEntry]:
-    return {entry.entry_id: entry for entry in (*CARE_ENTRIES, *MEMORY_JOB_ENTRIES, care_patrol.entry(CareEntry))}
+    return {
+        entry.entry_id: entry
+        for entry in (*CARE_ENTRIES, *MEMORY_JOB_ENTRIES, MEMORY_REFLECT_ENTRY, care_patrol.entry(CareEntry))
+    }
 
 
 def _runbook_identity_key(entry: CareEntry) -> str:
@@ -531,11 +542,10 @@ def _cron_escape_path(value: str) -> str:
 
 
 def _cron_command(entry: CareEntry, *, workspace: Path) -> str:
-    if entry.kind == "runbook":
-        assert entry.runbook_rel is not None
+    if entry.kind in ("runbook", "reflect"):
         workspace = workspace.expanduser().resolve()
         cwd = trusted_cwd()
-        body = " ".join(f'"{_cron_escape_path(arg)}"' for arg in runbook_argv(entry.runbook_rel, workspace))
+        body = " ".join(f'"{_cron_escape_path(arg)}"' for arg in entry_argv(entry, workspace))
     else:
         assert entry.shell is not None
         cwd = workspace
@@ -709,6 +719,17 @@ def _entry_status(target: Path, entry: CareEntry) -> dict[str, Any]:
         "kind": entry.kind,
         "description": entry.description,
     }
+    if entry.kind == "reflect":
+        from .memory_reflect_hub import schedule_status
+
+        try:
+            state = schedule_status(target)
+            payload.update({k: state[k] for k in ("consecutive_failures", "paused")})
+            payload["last_receipt"] = {"status": state.get("last_status")} if "last_status" in state else None
+            payload["repeated_failure"] = state["paused"]
+        except (OSError, ValueError):
+            payload.update(paused=True, state_error="reflect schedule state is unreadable")
+        return payload
     assert entry.kind == "runbook"
     assert entry.runbook_rel is not None
     path = target / entry.runbook_rel
@@ -921,6 +942,7 @@ def _print_payload(payload: dict[str, Any], *, json_output: bool) -> None:
                 print(
                     f"  - {entry.get('id')}: schedule={entry.get('schedule')} "
                     f"last_receipt={receipt_bit}{present_bit}{fail_bit}"
+                    + (" paused=true" if entry.get("paused") else "")
                 )
             continue
         if key == "units" and isinstance(value, list):
@@ -963,11 +985,10 @@ def _launchd_plists(
     selected = entries if entries is not None else CARE_ENTRIES
     result: dict[str, bytes] = {}
     for entry in selected:
-        assert entry.runbook_rel is not None
         label = f"dev.brigade.care.{identity}.{entry.entry_id}"
         payload: dict[str, Any] = {
             "Label": label,
-            "ProgramArguments": runbook_argv(entry.runbook_rel, workspace),
+            "ProgramArguments": entry_argv(entry, workspace),
             "WorkingDirectory": str(trusted_cwd()),
             "EnvironmentVariables": {"PATH": _path_prefix(home)},
         }
@@ -1358,8 +1379,9 @@ def _systemd_unit_bodies(
     for entry in selected:
         service_name = f"brigade-care-{identity}-{entry.entry_id}.service"
         timer_name = f"brigade-care-{identity}-{entry.entry_id}.timer"
-        assert entry.kind == "runbook" and entry.runbook_rel is not None
-        exec_start = _systemd_exec_start_runbook(entry.runbook_rel, workspace)
+        exec_start = "ExecStart=" + " ".join(
+            _systemd_quote_value(arg.replace("$", "$$")) for arg in entry_argv(entry, workspace)
+        )
         calendar_lines = [f"OnCalendar={value}" for value in entry.on_calendar.splitlines() if value.strip()]
         service_body = "\n".join(
             [
