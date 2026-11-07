@@ -101,13 +101,18 @@ def _replica_matches(
 
 
 def _local_matches(target: Path, query: str) -> tuple[list[dict[str, Any]], int]:
-    from . import memory_cmd
+    from . import memory_cmd, memory_hub_sync
 
     payload = memory_cmd.search_cards_payload(target, query, limit=WIDE)
     matches = payload["matches"]
     for match in matches:
         try:
-            match["content_hash"] = hubc.content_hash((target / match["path"]).read_text(encoding="utf-8"))
+            text = (target / match["path"]).read_text(encoding="utf-8")
+            match["content_hash"] = hubc.content_hash(text)
+            legacy_id = match["card_id"]
+            match["card_id"] = memory_hub_sync.publication_card_id(text, match["path"], legacy_id)
+            if match["card_id"] != legacy_id:
+                match["card_aliases"] = list(dict.fromkeys([legacy_id, *match.get("card_aliases", [])]))
         except (OSError, UnicodeDecodeError):
             match["content_hash"] = None
     return matches, int(payload["match_count"])
@@ -141,12 +146,22 @@ def fuse(lists: dict[str, list[dict[str, Any]]], limit: int, *, home_scope: str 
                 entry = {**match, "source": source, "ranks": {}, "rrf": 0.0, "best": (rank, source)}
                 entries.append(entry)
                 by_content.setdefault(content, []).append(entry)
+            aliases = list(
+                dict.fromkeys(
+                    alias
+                    for values in (entry.get("card_aliases"), match.get("card_aliases"))
+                    if isinstance(values, list)
+                    for alias in values
+                    if isinstance(alias, str)
+                )
+            )
             entry["ranks"][source] = rank
             entry["rrf"] += 1.0 / (RRF_K + rank)
             scope = entry.get("scope") or match.get("scope")
             if (rank, _SOURCE_ORDER[source]) < (entry["best"][0], _SOURCE_ORDER[entry["best"][1]]):
                 entry["best"] = (rank, source)
                 entry.update({k: v for k, v in match.items() if k != "ranks"}, source=source)
+            entry["card_aliases"] = aliases
             if scope:
                 entry["scope"] = scope
     ordered = sorted(entries, key=lambda m: (-m["rrf"], _SOURCE_ORDER[m["source"]], str(m.get("path"))))

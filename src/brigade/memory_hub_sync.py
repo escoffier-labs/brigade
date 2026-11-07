@@ -530,6 +530,13 @@ def withheld(text: str) -> str | None:
     return None
 
 
+def publication_card_id(text: str, rel: str, legacy_id: str) -> str:
+    """Share push's accepted legacy key or import fallback with hub search."""
+    from . import memory_hub_import
+
+    return legacy_id if hubc.valid_card_id(legacy_id) else memory_hub_import.note_card_id(text, rel)
+
+
 def _local_cards(target: Path) -> list[dict[str, Any]]:
     from . import card_identity, memory_cmd, memory_hub_import
 
@@ -544,9 +551,7 @@ def _local_cards(target: Path) -> list[dict[str, Any]]:
         identity = card_identity.card_identity(meta, fields["rel"])
         # Keep accepted legacy keys, including those already published. Only
         # invalid keys need S20's shared frontmatter/path derivation.
-        card_id = identity.card_id
-        if not hubc.valid_card_id(card_id):
-            card_id = memory_hub_import.note_card_id(text, fields["rel"])
+        card_id = publication_card_id(text, fields["rel"], identity.card_id)
         derived = card_id != identity.card_id and memory_hub_import.frontmatter_card_id(text) is None
         reason = withheld(text)
         cards.append(
@@ -717,6 +722,8 @@ def _record_published(target: Path, hub: str, entry: dict[str, Any], event: dict
         "content_hash": event.get("content_hash") or hubc.content_hash(entry["text"]),
         "log_epoch": epoch,
         "path": entry.get("path"),
+        # Adopted and rebased heads do not prove an acknowledged local write.
+        "written": True,
     }
     store.save_published(target, state)
 
@@ -1017,11 +1024,6 @@ def drop_proposal(
         record = store.read_proposal(target, proposal_id)
         if record is None:
             return None
-        if keep == DROP_KEEP_LOCAL and record.get("reason") == "card-id-collision":
-            raise DropRefused(
-                "a card-id-collision cannot use --keep-local to replace an existing hub card. "
-                "Use --keep-hub or give the local card a distinct frontmatter id and push again"
-            )
         entry = record.get("entry") or {}
         scope, card_id = entry.get("scope"), entry.get("card_id")
         if entry.get("hub") != hub:
@@ -1054,6 +1056,22 @@ def drop_proposal(
         epoch = replica.meta.get("log_epoch")
         retired = _require_current_head(client, scope, card_id, head, epoch)
         holder = _single_holder(target, card_id)
+        if keep == DROP_KEEP_LOCAL and holder is not None:
+            published = store.published(target).get(hub, {}).get(scope, {}).get(card_id)
+            current = head if head is not None else retired
+            owns_revision = (
+                isinstance(published, dict)
+                and published.get("written") is True
+                and current is not None
+                and published.get("revision") == current.get("revision")
+                and published.get("log_epoch") == epoch
+                and published.get("path") == holder["rel"]
+            )
+            if record.get("reason") == "card-id-collision" or (record.get("derived_create") and not owns_revision):
+                raise DropRefused(
+                    "this proposal cannot use --keep-local to replace an unowned hub revision. "
+                    "Use --keep-hub or give the local card a distinct frontmatter id and push again"
+                )
         extra: dict[str, Any] = {}
         local_card = "present"
         local_path = holder["rel"] if holder is not None else None
@@ -1088,7 +1106,12 @@ def drop_proposal(
         state = store.published(target)
         cards = state.setdefault(hub, {}).setdefault(scope, {})
         base = head if head is not None else retired
-        if head is not None:
+        if keep == DROP_KEEP_LOCAL and holder is None:
+            # The card was removed or re-identified. Closing its proposal
+            # grants no authority to overwrite the abandoned hub identity.
+            cards.pop(card_id, None)
+            base = None
+        elif head is not None:
             cards[card_id] = {
                 "revision": head.get("revision"),
                 "content_hash": head.get("content_hash"),

@@ -2432,8 +2432,10 @@ def test_push_derived_collision_cannot_reuse_an_old_published_base(hub, tmp_path
     assert len(hub.puts()) == 1
 
 
-@pytest.mark.parametrize("keep", [sync.DROP_KEEP_LOCAL, sync.DROP_KEEP_HUB])
-def test_derived_conflict_drop_preserves_path_for_later_pushes(hub, tmp_path, capsys, keep):
+@pytest.mark.parametrize(
+    "keep,retired", [(sync.DROP_KEEP_LOCAL, False), (sync.DROP_KEEP_HUB, False), (sync.DROP_KEEP_LOCAL, True)]
+)
+def test_derived_conflict_drop_preserves_path_for_later_pushes(hub, tmp_path, capsys, keep, retired):
     from brigade import memory_hub_import as importer
 
     target = workspace(tmp_path, mode="sync", **{"My Card": "initial fixture\n"})
@@ -2450,6 +2452,15 @@ def test_derived_conflict_drop_preserves_path_for_later_pushes(hub, tmp_path, ca
     )
     (target / "memory/cards/My Card.md").write_text("local fixture\n")
     [proposal] = sync.push(target, client(hub), settings(target))["proposals"]
+    if retired:
+        client(hub).call(
+            "retire",
+            scope="repo:test/app",
+            card_id=card_id,
+            base_revision=2,
+            base_epoch=hub.epoch,
+            client_event_id=hubc.event_id(),
+        )
     sync.pull(target, client(hub), settings(target))
     code, _, err = run(
         ["memory", "hub", "proposals", "drop", proposal["proposal_id"], "--" + keep, "--target", str(target)], capsys
@@ -2528,3 +2539,85 @@ def test_private_card_collision_with_public_card_fails_closed(hub, tmp_path):
     assert report["ok"] is False
     assert [r["code"] for r in report["refused"]] == ["card-id-collision"]
     assert not hub.puts()
+
+
+def test_search_fuses_derived_publication_id_and_retains_old_name(hub, tmp_path):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"My Card": "# My Card\nkoala fixture\n"})
+    sync.push(target, client(hub), settings(target), yes=True)
+    payload = hub_search.search_payload(target, "koala", settings=settings(target))
+    assert payload["match_count"] == 1
+    [match] = payload["matches"]
+    assert match["card_id"] == importer.derive_card_id("memory/cards/My Card.md")
+    assert set(match["ranks"]) == {"hub", "local"}
+    assert "My Card" in match["card_aliases"]
+    for directory in (target, target / "memory", target / "memory/cards"):
+        directory.chmod(0o755)
+    if os.name == "posix":
+        assert _dot_memory(target, {}).memory_card("My Card")["content"] == "# My Card\nkoala fixture\n"
+
+
+def test_collision_can_close_after_giving_local_card_a_frontmatter_id(hub, tmp_path):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"My Card": "local fixture\n"})
+    card_id = importer.derive_card_id("memory/cards/My Card.md")
+    _put(hub, "repo:test/app", card_id, "existing fixture\n")
+    [proposal] = sync.push(target, client(hub), settings(target), yes=True)["proposals"]
+    (target / "memory/cards/My Card.md").write_text("---\nid: distinct-card\n---\nlocal fixture\n")
+    assert sync.push(target, client(hub), settings(target))["ok"] is True
+    sync.pull(target, client(hub), settings(target))
+    closed = sync.drop_proposal(
+        target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_LOCAL
+    )
+    assert closed["rebased_on"] is None
+    assert not list(store.proposals(target, client(hub).identity))
+    assert card_id not in store.published(target)[client(hub).identity]["repo:test/app"]
+    assert hub.cards[("repo:test/app", card_id)]["text"] == "existing fixture\n"
+    assert ("repo:test/app", "distinct-card") in hub.cards
+
+
+@pytest.mark.parametrize("retired", [False, True])
+@pytest.mark.parametrize("ownership", ["none", "written", "adopted"])
+def test_identical_derived_create_needs_acknowledged_revision_to_keep_local(hub, tmp_path, retired, ownership):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"My Card": "identical fixture\n"})
+    card_id = importer.derive_card_id("memory/cards/My Card.md")
+    if ownership == "written":
+        sync.push(target, client(hub), settings(target), yes=True)
+    else:
+        _put(hub, "repo:test/app", card_id, "identical fixture\n")
+        if ownership == "adopted":
+            sync.pull(target, client(hub), settings(target))
+            sync.push(target, client(hub), settings(target), yes=True)
+    if retired:
+        client(hub).call(
+            "retire",
+            scope="repo:test/app",
+            card_id=card_id,
+            base_revision=1,
+            base_epoch=hub.epoch,
+            client_event_id=hubc.event_id(),
+        )
+    # A fresh create attempt reports the existing head, even with identical bytes.
+    card = sync._local_cards(target)[0]
+    attempt = sync._Push(target, client(hub), hub.epoch, reachable=True)
+    attempt.send(sync._entry("repo:test/app", card, client(hub).identity), spooled=False)
+    [proposal] = attempt.report["proposals"]
+    record = store.read_proposal(target, proposal["proposal_id"])
+    assert record["derived_create"] is True
+    (target / "memory/cards/My Card.md").write_text("edited fixture\n")
+    sync.pull(target, client(hub), settings(target))
+    if ownership == "written" and not retired:
+        sync.drop_proposal(target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_LOCAL)
+        assert sync.push(target, client(hub), settings(target))["ok"] is True
+        assert hub.cards[("repo:test/app", card_id)]["text"] == "edited fixture\n"
+    else:
+        with pytest.raises(sync.DropRefused, match="--keep-hub.*frontmatter id"):
+            sync.drop_proposal(
+                target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_LOCAL
+            )
+        assert hub.cards[("repo:test/app", card_id)]["text"] == "identical fixture\n"
+        assert hub.cards[("repo:test/app", card_id)]["state"] == ("retired" if retired else "live")
