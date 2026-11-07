@@ -8,6 +8,9 @@
 //! Writes and prompt loads use the versioned guard scanner (S18).
 //! Embedding and dense retrieval use the S18 scan gate (S15).
 //! Reviewed proposals, atomic decisions and rollback use [`proposals`] (S19a).
+mod attestation;
+#[cfg(test)]
+mod attestation_tests;
 pub mod auth;
 pub mod dense;
 pub mod embedder;
@@ -208,6 +211,7 @@ impl Store {
         );
         config.hook = options.hook;
         config.scanner = options.scanner.clone();
+        config.clock = options.clock.clone();
         config.index = Some(index.clone());
         config.dense = Some(dense.clone());
         let writer = writer::Writer::start(config, db, options.arbiter.clone())
@@ -759,10 +763,11 @@ impl Store {
             "reindex" | "embed_lease" | "embed_submit" | "embed_failed" => {
                 self.embedding_request(credential, action, &raw).await
             }
-            "propose" | "decide" | "rollback" => {
+            "propose" | "decide" | "rollback" | "auto_apply" => {
                 self.proposal_request(credential, action, map, &raw).await
             }
-            "put" | "import" | "retire" | "handoff" | "capture" | "grant" | "rescan" => {
+            "put" | "import" | "retire" | "handoff" | "capture" | "grant" | "rescan"
+            | "evidence.attach" | "auto_apply_switch" => {
                 match self.prepare(credential, action, map, &raw) {
                     Ok(prepared) => self.write(prepared).await,
                     Err(reply) => reply,
@@ -782,7 +787,12 @@ impl Store {
         {
             return invalid("preflight requires only a proposal_id");
         }
-        let authority = match self.hub.submit(|db| ops::Authority::read(&Conn(db))).await {
+        let admin = self.admin.clone();
+        let authority = match self
+            .hub
+            .submit(move |db| ops::Authority::with_credentials(&Conn(db), &admin))
+            .await
+        {
             Ok(a) => a,
             Err(_) => return error(503, "memory_action_unavailable", "policy read unavailable"),
         };
@@ -880,7 +890,29 @@ impl Store {
         raw: &Json,
     ) -> Result<Prepared, Reply> {
         let allowed: &[&str] = match action {
-            "propose" => &["action", "base_epoch", "ops", "client_event_id", "tier"],
+            "propose" => &[
+                "action",
+                "base_epoch",
+                "ops",
+                "client_event_id",
+                "tier",
+                "workspace_id",
+            ],
+            "auto_apply" => &["action", "proposal_id", "base_epoch", "client_event_id"],
+            "auto_apply_switch" => &["action", "enabled", "client_event_id"],
+            "evidence.attach" => &[
+                "action",
+                "scope",
+                "card_id",
+                "workspace_id",
+                "evidence_id",
+                "artifact_kind",
+                "artifact_sha256",
+                "observed_at",
+                "artifact_base64",
+                "stance",
+                "client_event_id",
+            ],
             "decide" => &[
                 "action",
                 "proposal_id",
@@ -930,7 +962,9 @@ impl Store {
         if let Some(k) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
             return Err(invalid(&format!("unknown field {k:?} for {action}")));
         }
-        if matches!(action, "grant" | "rescan") && *credential != Credential::Admin {
+        if matches!(action, "grant" | "rescan" | "auto_apply_switch")
+            && *credential != Credential::Admin
+        {
             return Err(error(
                 403,
                 "memory_grant_missing",
@@ -1013,6 +1047,12 @@ impl Store {
             }
         };
         let action = match action {
+            "auto_apply_switch" => Action::AutoApplySwitch(
+                map.get("enabled")
+                    .and_then(Json::as_bool)
+                    .ok_or_else(|| invalid("enabled must be a boolean"))?,
+            ),
+            "evidence.attach" => Action::Evidence(attestation::prepare(raw, credential, now_ms)?),
             "rescan" => {
                 let limit = match map.get("limit") {
                     None => 4,
@@ -1045,7 +1085,7 @@ impl Store {
                     after,
                 }
             }
-            "propose" | "decide" | "rollback" => {
+            "propose" | "decide" | "rollback" | "auto_apply" => {
                 if action != "propose"
                     && str_field("proposal_id")
                         .and_then(ids::parse_event_id)
@@ -1059,6 +1099,15 @@ impl Store {
                         422,
                         "memory_auto_apply_disabled",
                         "a reviewer must explicitly accept or reject the proposal",
+                    ));
+                }
+                if action == "propose"
+                    && map
+                        .get("workspace_id")
+                        .is_some_and(|v| v.as_str().is_none_or(|s| !attestation::component(s)))
+                {
+                    return Err(invalid(
+                        "workspace_id must be a bounded namespace component",
                     ));
                 }
                 Action::Proposal(proposals::Command {

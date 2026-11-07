@@ -621,8 +621,9 @@ Supported typed ops are `replace_block` and `add_previously` with `text`,
 `scope`, `card_id` and `base_revision`. Metadata edits require simple scalar
 fields or JSON string lists and refuse ambiguous or multiline fields,
 including YAML block scalars even when a blank line precedes their continuation. Evidence
-ids must be namespaced. They remain unverified citations and never increment
-proof counts or authorize auto-apply. Attestation arrives in S19e. Duplicate
+ids must be namespaced. Strings alone never increment proof counts or
+authorize automatic apply. S19e-1 resolves them against credential-attested
+records. Duplicate
 merges compare the body bytes exactly after stripping addressable anchors,
 retire the other card and retain its content in revision history. Whitespace in
 opaque blocks, including Python code indentation, is preserved in comparison.
@@ -662,7 +663,8 @@ Flagged versions or op text, cross-scope targets, mixed trust, unknown trust,
 private or unavailable scans and any edit newer than the base revision force
 Tier 2. This includes newer human edits. A changed head still fails the
 compare-and-set and never applies. Tier 0 describes an edit only. Every tier
-waits for an explicit reviewer decision and there is no Tier 0 apply path.
+waits for an explicit reviewer decision or the fully gated Tier 0 route.
+Production automatic apply remains held by unbound retrieval evaluation.
 
 Fleet policy accepts an optional top-level `memory` object:
 
@@ -677,8 +679,8 @@ Fleet policy accepts an optional top-level `memory` object:
 ```
 
 Both lists default to empty. Unknown fields, invalid list entries and
-non-boolean `auto_apply` values are refused. Saving `auto_apply: true` returns
-422 and stores no revision. `tier0_op_classes` and `reflect_principals` are
+non-boolean `auto_apply` values are refused. Saving `auto_apply: true` requires
+the explicit ownership and evidence contract described in S19e-1 below. `tier0_op_classes` and `reflect_principals` are
 enforced by the Tier 0 gate. Every op class and the proposer must appear in
 their respective lists. Empty lists deny Tier 0 eligibility. The lists do not
 change an edit's computed tier or restrict an explicit reviewer decision.
@@ -768,10 +770,10 @@ against stored ops to check the card-block target boundary. Diagnostic limits
 match local preflight defaults:
 at least three evidence ids from two sources, at most one changed card, and a
 24-hour per-card cooldown from head-changing apply and rollback events. The
-current fleet policy has no limit overrides. S19e owns attested proof, so the
-proof counts stay null and the evidence authority stays unbound. The current
-policy has no curation-owner contract and the hub has no bound retrieval eval
-record. Those gates also stay unbound. Every report remains held,
+current fleet policy has no limit overrides. S19e-1 resolves attested proof and
+curation ownership. Older proposals without workspace or freshness bindings
+retain null proof counts and an evidence-authority hold. Missing ownership
+retains its unbound hold. Retrieval evaluation remains unbound. Every report remains held,
 `diagnostic_only=true` and `eligible=false`.
 
 At reviewed apply the hub reruns these checks inside the memory transaction
@@ -781,7 +783,8 @@ Changed trust or an input scan state change holds it. Every output scans before
 any card changes. The policy allowlists and diagnostic promotion limits do not
 prevent an explicit reviewer from accepting an otherwise valid reviewed edit.
 The apply boundary requires `decide: accept` at every tier. Auto-apply remains
-unavailable, even for Tier 0. Scheduling and attestation remain later slices.
+unavailable in production while retrieval evaluation remains unbound.
+S19e-1 supplies attestation and the gated route described below.
 The stored `opened_tier` keeps the tier computed when the proposal opened,
 while `tier` records the latest decision-time classification.
 
@@ -878,3 +881,68 @@ Safe targeted handoffs may auto-file under owner policy. `brigade ingest` stages
 The Center dashboard Memory Operations view reads `memory topology --json` and paginated `memory inventory --json`. It does not perform filesystem writes, cron installs, or card body reads beyond the inventory contract.
 
 Related: [memory care](memory-care.md), [handoff promotion](handoff-promotion.md), [outcome scoring](outcome-scoring.md), [comparison](comparison.md).
+
+
+### Attestation and automatic-apply holds (S19e-1)
+
+The native memory API accepts `evidence.attach` for a scoped card with read
+and reflect grants. Supply `workspace_id`, the full
+`<authenticated-principal>/<workspace_id>/<local_id>` as `evidence_id`,
+`artifact_kind`, lowercase raw-byte `artifact_sha256`, `observed_at` in Unix
+milliseconds, `artifact_base64` and a fresh `client_event_id`. The byte limit
+is 64 KiB. Observation times in the future, mismatched hashes, namespace
+substitution and duplicate ids are refused. Retrying the identical client
+event id replays the original response. Artifacts are immutable and never
+returned through the log. The optional `stance` is `support`, `contrary` or
+`negative`. Contrary and negative records hold automatic apply even when
+omitted from a proposal's evidence references.
+
+Proposals may supply `workspace_id`. Only evidence resolved under that exact
+workspace, scope and card counts. Supporting proof needs three distinct ids
+and two currently valid attesting credentials named in `reflect_principals`.
+The hub rechecks grants, raw bytes, current scans, freshness and credential
+revocation at preflight and apply. Credential rotation invalidates old proof.
+The bounded reader holds when a target has more than 64 evidence records.
+Binary and other non-clean artifacts supply no proof.
+
+The fleet policy `memory` section supports these additional fields:
+
+```json
+{
+  "auto_apply": false,
+  "curation_owner": "hub",
+  "evidence_freshness_seconds": 86400,
+  "tier0_op_classes": ["append_evidence"],
+  "reflect_principals": ["agent:example"]
+}
+```
+
+`curation_owner` is `hub`, `external` or `handoff-only`. Freshness is an integer
+from 1 through 31536000 seconds. Enabling automatic apply requires explicit
+hub ownership, freshness and both nonempty allowlists. Older policies remain
+off, with their original digests when the new fields are omitted.
+
+The `auto_apply` memory action takes `proposal_id`, `base_epoch` and
+`client_event_id`, with read and reflect required on every target. Every gate
+is a blocker inside the transaction. A blocked attempt leaves the proposal
+pending for a human decision and changes no card or vector. Only Tier 0,
+clean cards in a previously trusted class are eligible. Automatic writes
+preserve that class. They never raise trust on `agent-unreviewed` cards.
+The one-card blast cap and 24-hour cooldown remain fixed.
+
+An admin can disable automatic apply immediately through the memory API:
+
+```json
+{"action": "auto_apply_switch", "enabled": false, "client_event_id": "<fresh-event-id>"}
+```
+
+The switch persists across restarts and the next apply transaction reads it.
+`enabled: true` clears only this switch. Policy and every other gate still
+apply. Successful automatic decisions record their mode, gates, policy digest
+and credential audit ids without card text. `rollback` opens the existing
+compensating proposal, which still needs a separate reviewed decision.
+
+Production automatic apply remains blocked by `retrieval_eval_unbound`.
+S19e-2 will supply the trusted retrieval evaluation bound to the active mode,
+index and policy. S19e-1 tests the successful path through a unit-test-only
+seam that is absent from production builds and has no API or config setting.

@@ -14,6 +14,8 @@ pub struct Base {
 }
 #[derive(Clone, Debug)]
 pub enum Action {
+    AutoApplySwitch(bool),
+    Evidence(super::attestation::Attachment),
     Rescan {
         limit: usize,
         retry_failed: bool,
@@ -62,6 +64,8 @@ pub enum Action {
 impl Action {
     pub fn name(&self) -> &'static str {
         match self {
+            Action::AutoApplySwitch(_) => "auto_apply_switch",
+            Action::Evidence(_) => "evidence.attach",
             Action::Rescan { .. } => "rescan",
             Action::Proposal(c) => c.name(),
             Action::Embedding { command, .. } => match command {
@@ -83,6 +87,11 @@ impl Action {
     /// The grant an action needs, and the scope it needs it on.
     fn requirement(&self) -> (Option<&str>, &'static str) {
         match self {
+            Action::AutoApplySwitch(_) => (None, "admin"),
+            Action::Evidence(a) => (
+                Some(super::proposals::string(&a.request, "scope")),
+                "reflect",
+            ),
             Action::Proposal(c) => (None, c.right()),
             Action::Embedding {
                 command: super::embedding::Command::Reindex { .. },
@@ -113,11 +122,13 @@ impl Action {
         if matches!(self, Action::PolicyProbe) {
             return true;
         }
-        matches!(self, Action::Proposal(_))
+        matches!(self, Action::Proposal(_) | Action::Evidence(_))
     }
     /// New blob bytes this command may add, for the per-batch bound.
     pub fn new_bytes(&self) -> usize {
         match self {
+            Action::AutoApplySwitch(_) => 0,
+            Action::Evidence(a) => a.bytes.len(),
             Action::Proposal(c) => c.new_bytes(),
             Action::Put { text, .. } | Action::Handoff { text, .. } => text.len(),
             _ => 0,
@@ -137,9 +148,61 @@ pub struct Prepared {
 pub struct Authority {
     pub policy: Option<(i64, String)>,
     pub policy_document: serde_json::Value,
+    pub valid_credentials: std::collections::BTreeSet<String>,
+    pub admin_credential: String,
+    #[cfg(test)]
+    pub retrieval_eval_bound: bool,
 }
 
 impl Authority {
+    pub fn with_credentials<T: ReadTx + ?Sized>(tx: &T, admin: &str) -> rusqlite::Result<Self> {
+        let mut authority = Self::read(tx)?;
+        authority.admin_credential =
+            super::attestation::credential_id("admin", super::ADMIN, admin);
+        authority
+            .valid_credentials
+            .insert(authority.admin_credential.clone());
+        for (table, id_column, column, class) in [
+            ("nodes", "node_id", "token_sha256", "node"),
+            (
+                "fleet_message_principals",
+                "principal_id",
+                "token_hash",
+                "principal",
+            ),
+        ] {
+            for row in tx.query(
+                &format!("SELECT {id_column},{column} FROM {table} WHERE revoked_at IS NULL"),
+                &[],
+            )? {
+                let id = s(&row[0]);
+                let digest = s(&row[1]);
+                let credential = if class == "node" {
+                    Credential::Node {
+                        id,
+                        digest: digest.clone(),
+                    }
+                } else {
+                    Credential::Principal {
+                        id,
+                        digest: digest.clone(),
+                    }
+                };
+                // Authentication precedence, including shadowed or admin hashes,
+                // is defined in auth rather than duplicated in a validity query.
+                if auth::still_valid(tx, &credential, admin)?.is_ok() {
+                    authority
+                        .valid_credentials
+                        .insert(super::attestation::credential_id(
+                            class,
+                            credential.principal(),
+                            &digest,
+                        ));
+                }
+            }
+        }
+        Ok(authority)
+    }
     /// Called under the hub authority lock by the writer. Diagnostics use the
     /// same read, without acquiring a write lock or trusting caller policy.
     pub fn read<T: ReadTx + ?Sized>(tx: &T) -> rusqlite::Result<Self> {
@@ -155,6 +218,7 @@ impl Authority {
                 Ok(Self {
                     policy: Some((*rev, digest.clone())),
                     policy_document: document,
+                    ..Self::default()
                 })
             }
             _ => Err(rusqlite::Error::InvalidQuery),
@@ -434,6 +498,20 @@ pub fn apply(
             return Ok(r);
         }
     }
+    if let Action::Evidence(a) = &p.action {
+        if !super::proposals::scoped_right(
+            tx,
+            &p.credential,
+            super::proposals::string(&a.request, "scope"),
+            "reflect",
+        )? {
+            return Ok(error(
+                403,
+                "memory_grant_missing",
+                "evidence requires read and reflect on the target scope",
+            ));
+        }
+    }
     let principal = p.credential.principal();
     // Embedding commands keep no idempotency row. A lease reply carries card
     // text, and a stored copy would outlive the card's retirement and answer
@@ -479,7 +557,10 @@ pub fn apply(
                     super::embedding::queue_card(tx, scope, card_id, id, private)?;
                 }
             }
-            Action::Proposal(c) if c.name() == "decide" && reply.body["state"] == "applied" => {
+            Action::Proposal(c)
+                if matches!(c.name(), "decide" | "auto_apply")
+                    && reply.body["state"] == "applied" =>
+            {
                 for row in tx.query(
                     "SELECT scope,card_id FROM memory_card_revisions WHERE proposal_id=?1",
                     &[t(reply.body["proposal_id"].as_str().unwrap())],
@@ -533,6 +614,28 @@ fn run(
         )
     };
     match &p.action {
+        Action::AutoApplySwitch(enabled) => {
+            tx.execute("INSERT INTO memory_meta(key,value) VALUES('auto_apply_enabled',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",&[t(if *enabled {"true"}else{"false"})])?;
+            let payload = json!({"auto_apply_enabled":enabled});
+            append(
+                tx,
+                p,
+                NewEvent {
+                    kind: "grant.change",
+                    scope: None,
+                    card_id: None,
+                    changes_head: false,
+                    base_revision: None,
+                    content_hash: None,
+                    trust: None,
+                    origin: None,
+                    payload: payload.clone(),
+                    policy_digest: None,
+                },
+            )?;
+            Ok(Reply::new(200, payload))
+        }
+        Action::Evidence(a) => super::attestation::attach(tx, p, a, _authority, scanner),
         Action::Rescan {
             limit,
             retry_failed,

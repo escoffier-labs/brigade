@@ -2356,7 +2356,7 @@ Reflect stays a batch job (#1856). On a hub-backed workspace:
    appends a compensating proposal containing the previous revision's content
    and trust, pinned to the applied revision as its base. It changes no card
    immediately, even for a reviewer. The compensation waits for a separate
-   `decide`, like every proposal until S19e (D25, Q6), and goes through the same
+   `decide`, including after S19e-1 (D25, Q6), and goes through the same
    compare-and-set and block-pin checks at apply. If a card moved after the
    original apply or while the compensation waited for review, the compensation
    ends `stale` and changes no card. The reviewer sees the reason.
@@ -2422,7 +2422,9 @@ checks, including self-review, target grants and moved heads. A moved head
 leaves the proposal stale with `memory_base_mismatch`. Idempotent replay
 retains the first stale response. Other stale reasons still require a new
 proposal. S19c adds read-only preflight and rechecks its hub facts inside the
-apply transaction. S19d owns scheduling and S19e owns attestation and auto-apply.
+apply transaction. S19d owns scheduling. S19e-1 adds attestation, ownership and the gated
+automatic route. S19e-2 supplies the bound retrieval evaluation that remains
+required before that route can apply in production.
 
 | Tier 0 gate | Source of truth on the hub |
 |---|---|
@@ -2441,42 +2443,89 @@ memory writer. It returns the #2187 report fields with the proposal id as
 hashes as `source_sha256`. Local-only run and workspace fields are null or
 empty. `evaluation_sha256` binds the reported diagnostic facts. It grants no
 authority. The report remains `diagnostic_only=true`, `eligible=false` and
-`status=held` until the missing authority contracts exist.
+`status=held`. The automatic route recomputes every gate inside its transaction.
+It cannot succeed while `retrieval_eval_unbound` remains, through S19e-1.
 
 The report checks the op and proposer allowlists, computed tier, exact pins,
 base revisions, policy binding, trust and scan state. Its diagnostic limits
 match #2187: three evidence ids, two source groups, one changed card and a
 24-hour cooldown. The blast count includes actual content and state changes.
 Cooldown reads head-changing apply and rollback events from hub history. The
-fleet policy does not yet expose overrides for these limits. Unattested strings
-supply no proof count. Evidence, curation owner and bound retrieval evaluation
-remain explicit `*_unbound` holds. The current policy has no curation-owner
-contract and the hub has no bound retrieval-evaluation record yet.
+fleet policy does not expose overrides for these limits. Unattested strings
+supply no proof count. S19e-1 resolves evidence from immutable, scoped records
+and checks `memory.curation_owner`. Missing legacy workspace or freshness
+bindings retain `evidence_authority_unbound`. Missing ownership retains
+`owner_authority_unbound`. Retrieval evaluation remains unbound until S19e-2.
 
 Reviewed apply recomputes the report under both writer locks before changing a
 card. A moved base or pin returns `stale`. Changed trust or an input scan state
 change returns `held`. Result scans still run before the first write.
 Policy allowlists, blast caps, cooldown and missing promotion authority hold
 Tier 0 eligibility while an explicit reviewer can accept a reviewed edit.
-The stored decision body retains this report. The apply boundary itself
-requires `decide: accept` for every tier. S19c adds no automatic apply route,
-calibration records, timer or evidence attachment API.
+The stored decision body retains this report. The reviewed apply boundary
+requires `decide: accept` for every tier. S19e-1 adds a separate `auto_apply`
+action that requires every gate, including retrieval evaluation, to pass.
+A failed automatic attempt stays pending for human review. It changes no card
+or vector. Automatic writes preserve the existing trusted class and reject
+`agent-unreviewed`, flagged and non-clean inputs. Tier 1 and Tier 2 remain
+review-only. Calibration records are outside S19e-1.
 
-Evidence attestation (S19e). An `evidence.attach` event carries a namespaced
-id, the artifact kind, the SHA-256 of the artifact bytes and its observation
-time, plus the bytes themselves for artifacts up to 64 KiB. The attesting
-principal comes from the credential. Proof counts distinct ids attested by
-distinct credentials within the policy's freshness window. When a credential
-is revoked, its attestations stop counting. Until S19e lands, the hub refuses
-a policy whose `memory` section enables auto-apply (422), and every proposal
-waits for review (D25, Q6).
+Evidence attestation (S19e-1). The `evidence.attach` memory action requires
+read and reflect on its target scope. Reflect already authorizes supplying
+proposal inputs, so it also authorizes attesting evidence. The action binds an
+immutable full id `<principal>/<workspace_id>/<local_id>` to one scoped card.
+Its fields are `scope`, `card_id`, `workspace_id`, `evidence_id`,
+`artifact_kind`, `artifact_sha256`, `observed_at` (Unix milliseconds),
+`artifact_base64` and `client_event_id`. Optional `stance` is `support` (the
+default), `contrary` or `negative`. The principal and credential audit id come
+from authentication. A caller cannot supply either identity. The SHA-256 is
+checked against the decoded raw bytes, with no text normalization. This slice
+accepts artifacts up to 64 KiB and refuses larger artifacts. Binary artifacts
+remain stored as scan-pending and supply no proof. Blocked artifacts are refused.
+Events carry metadata, never artifact bytes.
+
+Proof resolves only complete ids in the proposal's `workspace_id` and the
+record's target scope and card. Suffixes and aliases never resolve. The hub
+checks credential validity, read and reflect grants, the policy principal
+allowlist, freshness, artifact digest and a current clean scan. Revocation or
+credential rotation stops earlier attestations from counting. Distinct ids
+supply the evidence count and distinct credential audit ids supply the source
+count. A live contrary or negative record on any target holds apply even when
+the proposal omits that reference. Evaluation is bounded to 64 records per
+target, with an incomplete-proof hold beyond that bound.
+
+The digest-bound `memory` policy accepts `curation_owner` as `hub`, `external`
+or `handoff-only`, and `evidence_freshness_seconds` as an integer from 1 through
+31536000. Automatic apply defaults off. Enabling `auto_apply` requires explicit
+hub ownership, freshness and nonempty op-class and reflect-principal allowlists.
+External ownership and handoff-only allow proposals but never automatic apply.
+Omitted new fields preserve older policy digests and behavior.
+
+The `auto_apply` action takes a proposal id, base epoch and client event id.
+It requires read and reflect on every target. Under both writer locks it
+re-reads the policy and all active attesting credentials, then evaluates every
+gate inside the apply transaction. It never accepts a caller-supplied preflight
+report. Automatic apply events identify the decision mode, evaluated gates,
+policy digest and attesting credential audit ids without card text. They use
+the same compensating-proposal rollback path as reviewed applies.
+
+An admin can send `auto_apply_switch` with `enabled: false` and a client event
+id. This persistent memory flag takes effect on the next automatic transaction
+without editing policy. Re-enabling it does not clear any other gate.
+
+S19e-2 adds the trusted R0/R1 retrieval-evaluation record bound to active mode,
+`indexed_seq`, index format, scorer version and policy revision. Until then,
+`retrieval_eval_unbound` is a hard production hold. The successful automatic
+path is exercised only through a field compiled into the unit-test crate.
+No configuration, environment setting or API field can enable that seam.
 
 Invariant tests, in S19a to S19e:
 
 - A Tier 1 op never auto-applies without a calibration record. A mutation
   test removes the check and must fail.
 - Tier 2 always waits for review.
-- Auto-apply cannot be enabled before S19e.
+- Auto-apply policy enablement requires the S19e-1 ownership and proof contract.
+  Production application remains held until S19e-2.
 - A failed worker call, invalid ops, a failed eval gate or a failed write
   leaves every card revision and every vector byte-identical and records
   `failed`. Repeated failures pause the scheduled job until a success.
@@ -3501,7 +3550,8 @@ next number.
 | S19b | Tier classifier and the policy `memory` section with digest binding | S19a | Implemented: claimed tiers are ignored. Flagged, cross-scope, mixed-trust, newer-human-edit and unproven cases are Tier 2. Each decision binds the current policy digest. A policy edit requires a fresh decision. Auto-apply stays disabled | S16b, S20 |
 | S19c | Tier 0 gate engine: the hub `preflight` action, blockers re-verified inside the apply transaction, the invariant tests, and auto-apply refused until S19e | S19b, #2187 | Every invariant in [Reflect](#reflect-proposals-and-promotion-on-hub-memory) that does not need attestation passes, including the Tier 1 mutation test and the test that auto-apply cannot be enabled. No op can target anything but a card block | S20, S26 |
 | S19d | Scheduled reflect on hub memory: the `memory-reflect` entry in `care install`, pause after repeated failures, `memory reflect rollback` against the hub | S19c, S14 | `memory reflect run --dry-run` writes nothing to the hub. Three failures in a row pause the timer until a success | S19e, S27 |
-| S19e | Evidence attestation and hub Tier 0 auto-apply under policy | S19c | Fabricated, unresolved and cross-workspace aliased evidence never counts. A revoked credential's attestations stop counting. Auto-apply runs only when every gate holds and must not raise trust on `agent-unreviewed` heads without a trust gate. Tier eligibility, op-class and proposer allowlists, blast cap and cooldown must become blockers for auto-apply | S19d, S27 |
+| S19e-1 | Evidence attestation, curation ownership and the gated hub Tier 0 auto-apply route | S19c | Fabricated, unresolved, cross-workspace aliased and revoked evidence never counts. All gates block automatic apply, including tier, allowlists, blast cap, cooldown, trust and scans. The admin kill switch persists. Audit and compensating rollback pass through a unit-test-only retrieval seam. Production retains `retrieval_eval_unbound` | S19e-2, S27 |
+| S19e-2 | Bound retrieval evaluation record (R0/R1 bound to `indexed_seq`, index format, scorer version and policy revision) | S17 | The final retrieval gate is satisfied only by a trusted record matching the active mode, index and policy. This is the last gate before automatic apply can succeed in production | S27 |
 | S20 | Card import: dry run, idempotent, keeps card ids, deduplicates by content hash, skips `visibility: private` | S14, S18 | A second import appends nothing. The dry run lists exactly what the real run appends. Imported versions need a clean scan and the `import` grant | S16b, S17, S19b |
 | S21 | `memory answer`: client-side rerank through a read-only seat | S17 | R2 report. Off by default unless R2 passes | after 0.31.0 |
 
@@ -3532,7 +3582,7 @@ wave 5:  S10  S13b  S18
 wave 6:  S14  S15  S19a
 wave 7:  S17  S20  S19b  S23  S24  S25
 wave 8:  S16b  S19c  S26  S21
-wave 9:  S19d  S19e  S27
+wave 9:  S19d  S19e-1  S19e-2  S27
 after phase 3:  S11, then S12a to S12i one family per PR, S28 after S12g
 gated, outside the release:  S32 after S31, S6 and S16b, with the maintainer's go-ahead
 
@@ -3594,7 +3644,8 @@ S19a: S13a S18
 S19b: S19a
 S19c: S19b #2187
 S19d: S19c S14
-S19e: S19c
+S19e-1: S19c
+S19e-2: S17
 S20: S14 S18
 S21: S17
 S22a: none
@@ -3652,7 +3703,7 @@ The questions this gate depended on, Q1, Q2 and Q6, are decided (2026-11-04):
 | The WAL grows without bound | The disk fills | Maintenance checkpoints, upstream mode, capped read transactions, disk-pressure admission |
 | Pushed memory carries prompt injection between agents | One agent's text steers another | Trust rule (D24), push only reviewed, promoted or imported versions with a clean scan, invisible and bidi characters blocked, role-override text flagged, a second scan at prompt load, `content_trust: "untrusted"`, summaries only within size caps |
 | The scanner is unavailable | Nothing can be promoted or pushed | Fails closed by design, and S18a and S18 are on the release path |
-| Fabricated evidence drives a promotion | A bad card reaches every agent | Hub auto-apply off until attestation (S19e), Tier 0 limits, blast cap, cooldown, compensating rollback |
+| Fabricated evidence drives a promotion | A bad card reaches every agent | Hub auto-apply held until attestation and bound retrieval evaluation (S19e-1, S19e-2), Tier 0 limits, blast cap, cooldown, compensating rollback |
 | Query and card text reach an embedding server on another host or a provider | A privacy boundary outside the hub | Loopback, allowlisted private endpoints or an allowlisted HTTPS endpoint the operator names, a bearer token, only normalized query text and normalizer-1 card text, embed jobs only for scanned versions, guard-blocked queries never sent, nothing sent while the scanner is unavailable, and status naming the endpoint's host (D30) |
 | The hub becomes a single point of failure for memory | Agents lose recall when it is down | Local replica and labeled fallback, spooled writes, `off` mode unchanged |
 | Index memory under the 512 MB allotment | Out of memory during an embedder change or a rebuild at 20,000 cards | Measured in S13b, S15 and S16a. Today's corpus is far below the limit: a 4,096-dimension matrix is about 31 MB at 1,891 cards. At 20,000 cards two such matrices pass the allotment, so the runbook raises the production container's memory from S15's measured peaks before the card count gets there |
@@ -3717,7 +3768,7 @@ Q4 from the first draft
    on the hub file.
 - **Q6, hub reflect scope (D25).** Closed 2026-11-04. The maintainer decided:
    0.31.0 ships with hub reflect limited to proposals and review, and Tier 0
-   auto-apply on the hub stays off until evidence attestation (S19e) lands
+   auto-apply on the hub stays held until evidence attestation and bound retrieval evaluation (S19e-1, S19e-2) land
    after the release. Local evidence ids cannot be checked on the hub, and a
    promoted card reaches every agent.
 - **Q7, #2210 timing (D27).** Build hub work dependency edges and the ready

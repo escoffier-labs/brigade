@@ -75,7 +75,7 @@ pub fn evaluate<T: ReadTx + ?Sized>(
     let mut checks = Vec::new();
     let policy_reason = if authority.policy.is_none() {
         Some("policy_missing")
-    } else if memory.get("auto_apply").is_some_and(|v| v != false) {
+    } else if memory.get("auto_apply").is_some_and(|v| !v.is_boolean()) {
         Some("policy_invalid")
     } else if ops.is_empty()
         || ops
@@ -89,6 +89,34 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         None
     };
     check(&mut checks, "policy", policy_reason, "held");
+    check(
+        &mut checks,
+        "auto_apply_enabled",
+        (memory["auto_apply"] != true).then_some("auto_apply_disabled"),
+        "held",
+    );
+    let switched_off = tx
+        .query(
+            "SELECT value FROM memory_meta WHERE key='auto_apply_enabled'",
+            &[],
+        )?
+        .first()
+        .is_some_and(|r| ops::s(&r[0]) != "true");
+    check(
+        &mut checks,
+        "kill_switch",
+        switched_off.then_some("auto_apply_killed"),
+        "held",
+    );
+    check(
+        &mut checks,
+        "proposer_credential",
+        (!authority
+            .valid_credentials
+            .contains(string(body, "proposer_credential")))
+        .then_some("proposer_credential_invalid"),
+        "held",
+    );
     let tier = super::proposal_tiers::classify(tx, body, scanner)?;
     check(
         &mut checks,
@@ -112,7 +140,7 @@ pub fn evaluate<T: ReadTx + ?Sized>(
     check(
         &mut checks,
         "delta",
-        if tier != 0 {
+        if tier != 0 || changed.is_empty() {
             Some("delta_requires_review")
         } else if changed.len() > 1 {
             Some("blast_cap_exceeded")
@@ -121,16 +149,27 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         },
         "held",
     );
-    // S19e owns attestation. Do not count strings, their prefixes, or submitted
-    // source names. There is no contrary-evidence authority to query yet either.
-    for gate in ["evidence_floor", "source_group_floor"] {
-        check(
-            &mut checks,
-            gate,
-            Some("proof_binding_incomplete"),
-            "not_evaluated",
-        );
-    }
+    let proof = super::attestation::resolve(tx, body, authority, scanner, now)?;
+    check(
+        &mut checks,
+        "evidence_floor",
+        if !proof.complete {
+            Some("proof_binding_incomplete")
+        } else {
+            (proof.hashes.len() < 3).then_some("evidence_floor_unmet")
+        },
+        "held",
+    );
+    check(
+        &mut checks,
+        "source_group_floor",
+        if !proof.complete {
+            Some("proof_binding_incomplete")
+        } else {
+            (proof.credentials.len() < 2).then_some("source_group_floor_unmet")
+        },
+        "held",
+    );
     let valid_targets = body["ops"]
         .as_array()
         .is_some_and(|ops| ops.iter().all(|op| proposals::op_schema(op).is_ok()));
@@ -146,7 +185,7 @@ pub fn evaluate<T: ReadTx + ?Sized>(
     for card in cards {
         known_trust &= matches!(
             string(card, "before_trust"),
-            "agent-unreviewed" | "reviewed" | "imported" | "policy-promoted"
+            "reviewed" | "imported" | "policy-promoted"
         );
         let rows = tx.query("SELECT scan_state FROM memory_card_revisions WHERE scope=?1 AND card_id=?2 AND revision=?3", &[
             ops::t(string(card,"scope")), ops::t(string(card,"card_id")), rusqlite::types::Value::Integer(card["base_revision"].as_i64().unwrap_or(0))
@@ -171,19 +210,29 @@ pub fn evaluate<T: ReadTx + ?Sized>(
     check(
         &mut checks,
         "evidence_authority",
-        Some("evidence_authority_unbound"),
-        "unverifiable",
+        if !proof.complete {
+            Some("evidence_authority_unbound")
+        } else {
+            proof.contrary.then_some("contrary_evidence")
+        },
+        "held",
     );
     check(
         &mut checks,
         "owner_authority",
-        Some("owner_authority_unbound"),
-        "unverifiable",
+        if memory["curation_owner"] == "hub" {
+            None
+        } else if memory.get("curation_owner").is_none() {
+            Some("owner_authority_unbound")
+        } else {
+            Some("owner_not_hub")
+        },
+        "held",
     );
     check(
         &mut checks,
         "retrieval_eval",
-        Some("retrieval_eval_unbound"),
+        retrieval_hold(authority),
         "unverifiable",
     );
     // Match #2187's diagnostic defaults. History is read in the same snapshot
@@ -221,13 +270,52 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         "schema":"brigade.memory-tier0-preflight.v1","status":"held","eligible":false,"diagnostic_only":true,
         "candidate_id":body["proposal_id"],"run_id":null,"policy_sha256":authority.policy.as_ref().map(|a| &a.1),
         "policy_limits":{"enabled_classes":memory["tier0_op_classes"].as_array().cloned().unwrap_or_default(),"reflect_principals":memory["reflect_principals"].as_array().cloned().unwrap_or_default(),"minimum_evidence_ids":3,"minimum_source_groups":2,"max_changed_paths":1,"cooldown_seconds":86400},
-        "candidate_sha256":candidate,"source_sha256":sources,"evidence_sha256":{},"config_digests":{},
+        "candidate_sha256":candidate,"source_sha256":sources,"config_digests":{},
         "workspace_fingerprint":null,"evidence_log_sha256":"incomplete","delta_sha256":delta,"changed_path_count":changed.len(),
-        "proof_evidence_count":null,"proof_source_group_count":null,"evaluation_sha256":null,"checks":checks
+        "proof_evidence_count":if proof.complete{json!(proof.hashes.len())}else{Json::Null},"proof_source_group_count":if proof.complete{json!(proof.credentials.len())}else{Json::Null},"attesting_credentials":proof.credentials,"evidence_sha256":proof.hashes,"evaluation_sha256":null,"checks":checks
     });
     // Bind the diagnostic facts, not an unverified proof or promotion permit.
     bind_evaluation(&mut report);
     Ok(report)
+}
+fn retrieval_hold(authority: &Authority) -> Option<&'static str> {
+    #[cfg(test)]
+    if authority.retrieval_eval_bound {
+        return None;
+    }
+    let _ = authority;
+    Some("retrieval_eval_unbound")
+}
+/// The route cannot authorize using a partial report or a caller report.
+pub fn all_satisfied(report: &Json) -> bool {
+    const GATES: &[&str] = &[
+        "policy",
+        "auto_apply_enabled",
+        "kill_switch",
+        "proposer_credential",
+        "candidate",
+        "snapshot",
+        "delta",
+        "evidence_floor",
+        "source_group_floor",
+        "host",
+        "scan",
+        "card_trust",
+        "evidence_authority",
+        "owner_authority",
+        "retrieval_eval",
+        "cooldown_history",
+    ];
+    report["checks"].as_array().is_some_and(|checks| {
+        checks.len() == GATES.len()
+            && GATES.iter().all(|gate| {
+                checks.iter().any(|c| {
+                    c["gate"] == *gate
+                        && c["state"] == "satisfied"
+                        && c["code"] == format!("{gate}_satisfied")
+                })
+            })
+    })
 }
 fn bind_evaluation(report: &mut Json) {
     report["evaluation_sha256"] = Json::Null;
@@ -248,6 +336,8 @@ pub fn read<T: ReadTx + ?Sized>(
     let mut report = evaluate(tx, &body, authority, scanner, now)?;
     for card in proposals::cards(&body) {
         if !proposals::scoped_right(tx, who, string(card, "scope"), "review")? {
+            report["evidence_sha256"] = Json::Null;
+            report["attesting_credentials"] = Json::Null;
             report["candidate_sha256"] = Json::Null;
             report["delta_sha256"] = Json::Null;
             report["policy_limits"]["reflect_principals"] = Json::Null;

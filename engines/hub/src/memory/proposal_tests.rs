@@ -245,7 +245,7 @@ async fn schema_v3_upgrades_without_changing_epoch_or_cards() {
     let old_max: i64 = db
         .query_row("SELECT max(seq) FROM memory_events", [], |r| r.get(0))
         .unwrap();
-    db.execute_batch("DROP TABLE IF EXISTS memory_proposals; PRAGMA user_version=3;")
+    db.execute_batch("DROP TABLE IF EXISTS memory_proposals; DROP TABLE IF EXISTS memory_evidence; PRAGMA user_version=3;")
         .unwrap();
     drop(db);
     h.open(clean(), None);
@@ -256,7 +256,7 @@ async fn schema_v3_upgrades_without_changing_epoch_or_cards() {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        4
+        schema::USER_VERSION
     );
     let next = h
         .put(ADMIN_TOKEN, "fleet", "after-upgrade", None, "Next card.")

@@ -788,14 +788,27 @@ def parse_routing(raw: Any) -> dict[str, Any]:
 
 
 def parse_memory(raw: Any) -> dict[str, Any]:
-    """Hub memory policy. Auto-apply remains unavailable until attestation."""
+    """Digest-bound curation and evidence authority for hub memory."""
     body = _mapping(raw, "memory")
-    _reject_unknown(body, ("auto_apply", "tier0_op_classes", "reflect_principals"), "memory")
+    _reject_unknown(
+        body,
+        ("auto_apply", "tier0_op_classes", "reflect_principals", "curation_owner", "evidence_freshness_seconds"),
+        "memory",
+    )
     if "auto_apply" in body and type(body["auto_apply"]) is not bool:
         raise FleetPolicyError("fleet policy memory.auto_apply must be a boolean")
-    if body.get("auto_apply", False):
-        raise FleetPolicyError("fleet policy memory.auto_apply is unavailable until evidence attestation")
-    parsed: dict[str, Any] = {"auto_apply": False}
+    parsed: dict[str, Any] = {"auto_apply": body.get("auto_apply", False)}
+    # Do not add defaults to older documents, preserving their canonical digest.
+    if "curation_owner" in body:
+        owner = body["curation_owner"]
+        if owner not in ("hub", "external", "handoff-only"):
+            raise FleetPolicyError("fleet policy memory.curation_owner must be hub, external or handoff-only")
+        parsed["curation_owner"] = owner
+    if "evidence_freshness_seconds" in body:
+        window = body["evidence_freshness_seconds"]
+        if type(window) is not int or not 1 <= window <= 31536000:
+            raise FleetPolicyError("fleet policy memory.evidence_freshness_seconds must be 1 through 31536000")
+        parsed["evidence_freshness_seconds"] = window
     for field in ("tier0_op_classes", "reflect_principals"):
         values = body.get(field, [])
         if not isinstance(values, list) or len(values) > MAX_LIST_ITEMS:
@@ -806,6 +819,15 @@ def parse_memory(raw: Any) -> dict[str, Any]:
         ):
             raise FleetPolicyError("fleet policy memory.tier0_op_classes contains an unsupported op class")
         parsed[field] = sorted(set(items))
+    if parsed["auto_apply"] and (
+        parsed.get("curation_owner") != "hub"
+        or "evidence_freshness_seconds" not in parsed
+        or not parsed["tier0_op_classes"]
+        or not parsed["reflect_principals"]
+    ):
+        raise FleetPolicyError(
+            "fleet policy memory.auto_apply requires hub ownership, evidence freshness and both allowlists"
+        )
     return parsed
 
 
