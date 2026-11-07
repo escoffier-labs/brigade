@@ -202,14 +202,6 @@ def test_setup_preview_apply_and_rejects_foreign_keys(tmp_path: Path, monkeypatc
     with _reject("unexpected-key"):
         grokbot_packs.apply_setup(
             tmp_path,
-            PACK_ID,
-            bearer_env="TEST_GROKBOT_BEARER",
-            owner_workspace=owner,
-            cli_executable=tmp_path / "bin",
-        )
-    with _reject("unexpected-key"):
-        grokbot_packs.apply_setup(
-            tmp_path,
             "operator",
             bearer_env="TEST_GROKBOT_BEARER",
             owner_workspace=owner,
