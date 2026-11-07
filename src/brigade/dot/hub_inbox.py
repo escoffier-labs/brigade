@@ -117,7 +117,7 @@ class HubInbox(MessageOperations):
             finally:
                 self.require_authority(authority)
         except HubMessageError as error:
-            raise DotError(error.code) from None
+            raise DotError(error.code, error.hub_code) from None
         return value
 
     @property

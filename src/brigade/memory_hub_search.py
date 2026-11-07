@@ -65,6 +65,8 @@ def _replica_matches(
     replica = store.replica(target)
     if replica.watermark(hub) is None or not replica.meta.get("principal"):
         return [], False
+    if not hubc.replica_principal_allowed(replica.meta.get("principal")):
+        return [], False
     heads = list(replica.readable_heads(settings.read_scopes).values())
     fields = []
     for head in heads:

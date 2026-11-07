@@ -715,6 +715,25 @@ def test_duet_isolation_fails_when_sharing_dot_identity(duet_configured, dot_pri
     assert m._isolated_from_dot(target, runtime) is False
 
 
+@requires_local_state
+@pytest.mark.parametrize("pack_id", ["grokbot-memory", "grokbot-inbox"])
+def test_duet_isolation_names_a_neighbour_it_cannot_load(duet_configured, pack_id):
+    target, runtime, instance = duet_configured
+    assert m._isolated_from_dot(target, runtime) is True
+    payload = json.loads(instance.read_text())
+    payload.update(pack_id=pack_id, bind="127.0.0.1:8781", runtime_path=str(instance.parent / "missing-runtime.json"))
+    instance.with_name(f"{pack_id}.json").write_text(json.dumps(payload))
+    # Duet's own config is fine, so the refusal names the neighbour instead of surfacing its invalid_config.
+    with pytest.raises(DotError) as refused:
+        m._isolated_from_dot(target, runtime)
+    assert refused.value.code == "not_isolated_from_dot"
+    assert pack_id in str(refused.value) and refused.value.reason == f"cannot load the {pack_id} instance"
+    with pytest.raises(DotError) as start:
+        m.build_listener_from_target(target, pack_id="duet")
+    assert start.value.code == "not_isolated_from_dot" and pack_id in str(start.value)
+    assert m._load_config(target, profile=m.profile_for("duet"))[1] == runtime
+
+
 @pytest.fixture
 def duet_hub(duet_configured, monkeypatch):
     _, runtime, _ = duet_configured

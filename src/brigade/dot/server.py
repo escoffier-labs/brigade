@@ -111,6 +111,8 @@ def register_tools(server: Any, tools: DotTools, profile: ConnectorProfile = DOT
             return await asyncio.to_thread(tools.call, identity(IDENTITY.get()), name, arguments)
         except DotError as error:
             result = {"error": error.code}
+            if error.hub_code:
+                result["hub_code"] = error.hub_code
             if error.code in ERROR_MESSAGES:
                 result["message"] = ERROR_MESSAGES[error.code]
             return result

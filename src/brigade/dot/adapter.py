@@ -109,7 +109,7 @@ class DotTools:
             runtime_profile(profile, runtime.dispatch_enabled),
         )
         self.fleet, self.hub, self.memory, self.inbox = fleet, hub, memory, inbox
-        self.push = MemoryPush(runtime.paths.workspace, enabled=runtime.memory_push)
+        self.push = MemoryPush(runtime.paths.workspace, enabled=runtime.memory_push and self.profile.memory_push)
 
     def call(self, owner: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
@@ -119,6 +119,9 @@ class DotTools:
             identity(owner)
             values = validate_arguments(name, arguments, tools=self.profile.tools)
             if not self.profile.fleet_dispatch and name == "message_send":
+                if self.profile.strict_recipients and values["to"] not in self.runtime.hub.recipients:
+                    # Outside the allowlist, so refused like a hub send-grant denial and never forwarded.
+                    raise DotError("recipient_not_permitted", "message_recipient_not_permitted")
                 require(values["to"] in self.runtime.hub.recipients)
             if name in DISPATCH_GATED_TOOLS:
                 require(self.runtime.dispatch_enabled, "dispatch_disabled")
@@ -383,7 +386,8 @@ def build_tools(runtime: Runtime, profile: ConnectorProfile = DOT) -> tuple[DotT
         )
         inbox = InboxTools(runtime, state, hub_inbox)
         hub = HubTools(runtime, state, commands=commands, fleet=fleet, inbox=inbox)
-        memory = MemoryTools(runtime, commands=commands, profile=profile)
+        # A principal profile's memory calls use the credential the listener pinned at startup.
+        memory = MemoryTools(runtime, commands=commands, profile=profile, authority=hub_inbox.capture)
         tools = DotTools(runtime, state, fleet=fleet, hub=hub, memory=memory, inbox=inbox, profile=profile)
         return tools, state, hub_inbox
     except Exception:

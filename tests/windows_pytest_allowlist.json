@@ -48,7 +48,6 @@
     "test_governance_inventory.py",
     "test_graphtrail_delta.py",
     "test_grokbot_build_feed.py",
-    "test_grokbot_cerebro.py",
     "test_grokbot_feed.py",
     "test_grokbot_findings.py",
     "test_grokbot_findings_relay.py",

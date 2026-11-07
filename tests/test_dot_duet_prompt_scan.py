@@ -33,7 +33,9 @@ CARDS = {
     "injection-card": ("Release notes.\n\n" + INJECTION, "classic-injection", None),
 }
 REMOTE = (DOT, DUET)
-EVERY_PROFILE = (DOT, DUET, GROKBOT_MEMORY)
+# The Grok memory profile serves hub memory only, so its scan is tested on hub shaped answers in
+# test_grokbot_s26_profiles.py. These cases use local cards, which it never serves.
+EVERY_PROFILE = (DOT, DUET)
 SHA = "ab" * 32
 
 
@@ -573,7 +575,8 @@ class TestConnectorPaths(Scan):
 
     @requires_local_state
     def test_handoff_write_returns_an_inbox_relative_path(self):
-        for profile in EVERY_PROFILE:
+        # The Grok memory profile files its handoffs in hub memory_handoffs, so it has no inbox path to return.
+        for profile in REMOTE:
             for directory in reversed(profile.handoff_inbox.parents):
                 (self.workspace / directory).mkdir(exist_ok=True)
                 (self.workspace / directory).chmod(0o755)
