@@ -554,7 +554,6 @@ def _local_cards(target: Path) -> list[dict[str, Any]]:
                 "rel": fields["rel"],
                 "card_id": card_id,
                 "derived_id": derived,
-                "card_aliases": list(dict.fromkeys([identity.card_id, *identity.aliases])),
                 # Not publishable: `withheld` says why.
                 "private": reason is not None,
                 "withheld": reason,
@@ -795,7 +794,12 @@ class _Push:
             reason = exc.code or f"http-{exc.status}"
             # A new derived key must never replace a hub card that already
             # owns it. CAS is authoritative even without a readable replica.
-            if entry.get("derived_id") and entry.get("base_revision") is None and exc.code == "memory_base_mismatch":
+            if (
+                entry.get("derived_id")
+                and entry.get("base_revision") is None
+                and exc.code == "memory_base_mismatch"
+                and exc.body.get("current_hash") != hubc.content_hash(entry["text"])
+            ):
                 reason = "card-id-collision"
             if exc.code not in CONFLICT_CODES or reason == "card-id-collision":
                 self.report["refused"].append({"card_id": entry["card_id"], "status": exc.status, "code": reason})
@@ -890,7 +894,7 @@ def _push(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
     changes, skipped, adopted, resolved, local = _publishable(
         target, settings, hub, principal, preflight.epoch, confirm
     )
-    derived_ids = sum(card["derived_id"] and not card["private"] for card in local)
+    derived_ids = sum(card["derived_id"] for card in changes)
     first = scope not in store.published(target).get(hub, {})
     if first and not yes:
         return {
@@ -1013,6 +1017,11 @@ def drop_proposal(
         record = store.read_proposal(target, proposal_id)
         if record is None:
             return None
+        if keep == DROP_KEEP_LOCAL and record.get("reason") == "card-id-collision":
+            raise DropRefused(
+                "a card-id-collision cannot use --keep-local to replace an existing hub card. "
+                "Use --keep-hub or give the local card a distinct frontmatter id and push again"
+            )
         entry = record.get("entry") or {}
         scope, card_id = entry.get("scope"), entry.get("card_id")
         if entry.get("hub") != hub:
@@ -1047,6 +1056,7 @@ def drop_proposal(
         holder = _single_holder(target, card_id)
         extra: dict[str, Any] = {}
         local_card = "present"
+        local_path = holder["rel"] if holder is not None else None
         if keep == DROP_KEEP_HUB:
             if holder is not None and holder["private"]:
                 raise DropRefused(
@@ -1059,6 +1069,7 @@ def drop_proposal(
                     "so there is no hub text to keep"
                 )
             path, previous = _keep_hub_card(target, card_id, holder, entry.get("path"))
+            local_path = path.relative_to(target).as_posix()
             extra["card_text_replaced"] = previous
             closed = store.drop_proposal(target, proposal_id, outcome=DROP_KEEP_HUB, **extra)
             assert closed is not None
@@ -1082,12 +1093,18 @@ def drop_proposal(
                 "revision": head.get("revision"),
                 "content_hash": head.get("content_hash"),
                 "log_epoch": epoch,
+                "path": local_path,
             }
         elif retired is not None:
             # Another writer retired the card. The hub keeps the retired head
             # and wants its revision as the base, so the next push revives the
             # card with the local text. No content hash, so that push always sends.
-            cards[card_id] = {"revision": retired.get("revision"), "content_hash": None, "log_epoch": epoch}
+            cards[card_id] = {
+                "revision": retired.get("revision"),
+                "content_hash": None,
+                "log_epoch": epoch,
+                "path": local_path,
+            }
         else:
             # No hub head under this epoch: the next push sends no base.
             cards.pop(card_id, None)

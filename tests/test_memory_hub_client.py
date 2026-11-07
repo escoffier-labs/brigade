@@ -2430,3 +2430,101 @@ def test_push_derived_collision_cannot_reuse_an_old_published_base(hub, tmp_path
     assert report["refused"][0]["code"] == "card-id-collision"
     assert hub.cards[("repo:test/app", "old")]["text"] == "existing fixture\n"
     assert len(hub.puts()) == 1
+
+
+@pytest.mark.parametrize("keep", [sync.DROP_KEEP_LOCAL, sync.DROP_KEEP_HUB])
+def test_derived_conflict_drop_preserves_path_for_later_pushes(hub, tmp_path, capsys, keep):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"My Card": "initial fixture\n"})
+    card_id = importer.derive_card_id("memory/cards/My Card.md")
+    sync.push(target, client(hub), settings(target), yes=True)
+    client(hub).call(
+        "put",
+        scope="repo:test/app",
+        card_id=card_id,
+        base_revision=1,
+        base_epoch=hub.epoch,
+        text="remote fixture\n",
+        client_event_id=hubc.event_id(),
+    )
+    (target / "memory/cards/My Card.md").write_text("local fixture\n")
+    [proposal] = sync.push(target, client(hub), settings(target))["proposals"]
+    sync.pull(target, client(hub), settings(target))
+    code, _, err = run(
+        ["memory", "hub", "proposals", "drop", proposal["proposal_id"], "--" + keep, "--target", str(target)], capsys
+    )
+    assert code == 0, err
+    for _ in range(2):
+        code, out, err = run(["memory", "hub", "push", "--target", str(target), "--json"], capsys)
+        assert code == 0, err
+        assert json.loads(out)["ok"] is True
+    expected = "local fixture\n" if keep == sync.DROP_KEEP_LOCAL else "remote fixture\n"
+    assert hub.cards[("repo:test/app", card_id)]["text"] == expected
+
+
+def test_real_derived_collision_cannot_keep_local(hub, tmp_path):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"My Card": "local fixture\n"})
+    card_id = importer.derive_card_id("memory/cards/My Card.md")
+    client(hub).call(
+        "put",
+        scope="repo:test/app",
+        card_id=card_id,
+        base_revision=None,
+        text="existing fixture\n",
+        client_event_id=hubc.event_id(),
+    )
+    [proposal] = sync.push(target, client(hub), settings(target), yes=True)["proposals"]
+    sync.pull(target, client(hub), settings(target))
+    with pytest.raises(sync.DropRefused, match="--keep-hub.*frontmatter id"):
+        sync.drop_proposal(target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_LOCAL)
+    assert len(list(store.proposals(target, client(hub).identity))) == 1
+    assert hub.cards[("repo:test/app", card_id)]["text"] == "existing fixture\n"
+    sync.drop_proposal(target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_HUB)
+    for _ in range(2):
+        assert sync.push(target, client(hub), settings(target))["ok"] is True
+
+
+def test_derived_put_lost_published_record_is_not_a_collision(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="sync", **{"My Card": "fixture\n"})
+
+    def crash(*args):
+        raise RuntimeError("interrupted before recording publication")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sync, "_record_published", crash)
+        with pytest.raises(RuntimeError, match="interrupted"):
+            sync.push(target, client(hub), settings(target), yes=True)
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert report["refused"] == []
+    assert [p["reason"] for p in report["proposals"]] == ["memory_base_mismatch"]
+    assert len(hub.events) == 1
+    sync.pull(target, client(hub), settings(target))
+    assert sync.push(target, client(hub), settings(target))["ok"] is True
+    assert not list(store.proposals(target, client(hub).identity))
+    assert sync.push(target, client(hub), settings(target))["derived_ids"] == 0
+
+
+def test_derived_id_count_excludes_unchanged_and_colliding_cards(hub, tmp_path, capsys):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"My Card": "fixture\n"})
+    assert sync.push(target, client(hub), settings(target), yes=True)["derived_ids"] == 1
+    assert sync.push(target, client(hub), settings(target))["derived_ids"] == 0
+    (target / "memory/cards/My Card.md").write_text("edited fixture\n")
+    assert sync.push(target, client(hub), settings(target))["derived_ids"] == 1
+    derived = importer.derive_card_id("memory/cards/My Card.md")
+    (target / "memory/cards" / f"{derived}.md").write_text("other fixture\n")
+    assert sync.push(target, client(hub), settings(target))["derived_ids"] == 0
+
+
+def test_private_card_collision_with_public_card_fails_closed(hub, tmp_path):
+    target = workspace(
+        tmp_path, mode="sync", one="public fixture\n", other="---\nid: one\nvisibility: private\n---\nprivate fixture\n"
+    )
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert report["ok"] is False
+    assert [r["code"] for r in report["refused"]] == ["card-id-collision"]
+    assert not hub.puts()
