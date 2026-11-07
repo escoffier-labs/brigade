@@ -97,7 +97,7 @@ class HandoffChecks(Fixture):
         result = self.call("handoff_write", slug="bridge-probe", content=HANDOFF)
         name = self.expected_name("bridge-probe")
         self.assertTrue(result["ok"])
-        self.assertEqual(result["path"], str(self.inbox / name))
+        self.assertEqual(result["path"], f".codex/memory-handoffs/{name}")
         self.assertEqual(seen, [HANDOFF])
         argv = self.runner.argvs()[0]
         self.assertEqual(argv[:6], [BRIGADE, "handoff", "lint", "--json", "--target", str(self.workspace)])
@@ -157,7 +157,9 @@ class PolicyAndSkills(Fixture):
     def test_policy_is_workspace_scoped_hashed_and_compacted(self):
         paths = self.policy_files()
         result = self.call("fleet_policy")
-        self.assertEqual([source["path"] for source in result["sources"]], list(map(str, paths)))
+        self.assertEqual(
+            [source["path"] for source in result["sources"]], [".codex/AGENTS.md", "AGENTS.md", "ai-tools/AGENTS.md"]
+        )
         self.assertEqual(result["banned_phrases"], ["filler"])
         self.assertIn("Use plain words.", result["digest"]["writing_rules"])
         self.assertEqual(
@@ -241,7 +243,7 @@ class RequiredPolicySources(Fixture):
         for source, path, data in zip(result["sources"], paths, raw, strict=True):
             self.assertEqual(
                 (source["path"], source["sha256"], source["mtime"]),
-                (str(path), hashlib.sha256(data).hexdigest(), path.stat().st_mtime),
+                (str(path.relative_to(self.workspace)), hashlib.sha256(data).hexdigest(), path.stat().st_mtime),
             )
             self.assertIn('Banned phrases (compact): ["filler"]', source["content"])
         self.assertEqual(self.call("fleet_policy", since_hash=expected_hash), {"hash": expected_hash, "changed": False})

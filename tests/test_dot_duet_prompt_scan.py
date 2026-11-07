@@ -11,7 +11,7 @@ from unittest.mock import patch
 from brigade.dot.memory_tools import MemoryTools
 from brigade.dot.process import CommandResult
 from brigade.dot.profile import DOT, DUET, GROKBOT_MEMORY, PROFILES
-from tests.test_dot_adapter import Fixture
+from tests.test_dot_adapter import HANDOFF, NOW, Fixture, lint_report
 
 # Built at runtime so this file carries no literal private address, address book entry or injection phrase.
 PRIVATE_IP = ".".join(["10", "20", "30", "40"])
@@ -50,6 +50,11 @@ class Scan(Fixture):
         if retrieval is not None:
             reply["retrieval"] = retrieval
         self.runner.handler = lambda argv, stdin: CommandResult(0, json.dumps(reply).encode())
+
+    def assert_no_local_path(self, payload):
+        serialized = json.dumps(payload)
+        for local in (str(self.workspace), str(self.cards), str(self.root)):
+            assert local not in serialized
 
     @staticmethod
     def match(card_id, **fields):
@@ -263,11 +268,6 @@ class TestRemoteProfiles(Scan):
 
 class TestConnectorPayloads(Scan):
     """What reaches the connector carries no absolute path and no unchecked hub field (#2333)."""
-
-    def assert_no_local_path(self, payload):
-        serialized = json.dumps(payload)
-        for local in (str(self.workspace), str(self.cards), str(self.root)):
-            assert local not in serialized
 
     @requires_local_state
     def test_memory_search_names_the_workspace_directory_and_keeps_no_absolute_path(self):
@@ -553,3 +553,77 @@ class TestConnectorPayloads(Scan):
         with patch("brigade.memory_hub_client.hub_mode", return_value="on"):
             odd = self.memory(unscanned).memory_card("hub-odd", scope="anything")
         assert (odd["scope"], odd["revision"], odd["sha256"]) == ("anything", "2", "abc")
+
+
+class TestConnectorPaths(Scan):
+    """handoff_write and fleet_policy leave a path relative to the workspace, like the search and card tools."""
+
+    def writer(self, profile):
+        memory = self.memory(profile)
+        memory.clock = lambda: NOW
+        self.runner.handler = lambda argv, stdin: CommandResult(0, lint_report(True))
+        return memory
+
+    def policy_files(self):
+        for relative in (".codex/AGENTS.md", "AGENTS.md", "ai-tools/AGENTS.md"):
+            path = self.workspace / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.parent.chmod(0o755)
+            path.write_text("## Writing and formatting\nUse plain words.\n")
+
+    @requires_local_state
+    def test_handoff_write_returns_an_inbox_relative_path(self):
+        for profile in EVERY_PROFILE:
+            for directory in reversed(profile.handoff_inbox.parents):
+                (self.workspace / directory).mkdir(exist_ok=True)
+                (self.workspace / directory).chmod(0o755)
+            (self.workspace / profile.handoff_inbox).mkdir(exist_ok=True)
+            (self.workspace / profile.handoff_inbox).chmod(0o755)
+            payload = self.writer(profile).handoff_write("probe", HANDOFF)
+            assert payload["ok"] is True
+            assert payload["path"] == f"{profile.handoff_inbox.as_posix()}/{payload['filename']}"
+            assert not Path(payload["path"]).is_absolute()
+            self.assert_no_local_path(payload)
+
+    @requires_local_state
+    def test_handoff_write_with_a_path_that_will_not_scan_publishes_and_returns_null(self):
+        memory = self.writer(DOT)
+        with patch("brigade.dot.memory_tools._relative_path", return_value=PRIVATE_PATH):
+            payload = memory.handoff_write("held-back", HANDOFF)
+        assert payload["ok"] is True and payload["path"] is None
+        assert (self.inbox / payload["filename"]).read_text() == HANDOFF
+        self.assert_no_local_path(payload)
+
+    @requires_local_state
+    def test_fleet_policy_sources_are_workspace_relative(self):
+        self.policy_files()
+        for profile in EVERY_PROFILE:
+            payload = self.memory(profile).fleet_policy()
+            assert [source["path"] for source in payload["sources"]] == [
+                ".codex/AGENTS.md",
+                "AGENTS.md",
+                "ai-tools/AGENTS.md",
+            ]
+            self.assert_no_local_path(payload)
+
+    @requires_local_state
+    def test_fleet_policy_source_that_cannot_be_made_relative_is_null(self):
+        self.policy_files()
+        with patch("brigade.dot.memory_tools._relative_path", return_value=None):
+            payload = self.memory(DOT).fleet_policy()
+        assert [source["path"] for source in payload["sources"]] == [None, None, None]
+        self.assert_no_local_path(payload)
+        # An unchanged hash answers with no sources at all.
+        unchanged = self.memory(DOT).fleet_policy(since_hash=payload["hash"])
+        assert unchanged == {"hash": payload["hash"], "changed": False}
+
+    @requires_local_state
+    def test_a_profile_without_the_scan_keeps_the_absolute_paths(self):
+        unscanned = replace(DOT, prompt_load_scan=False)
+        payload = self.writer(unscanned).handoff_write("plain", HANDOFF)
+        assert payload["path"] == str(self.inbox / payload["filename"])
+        self.policy_files()
+        sources = self.memory(unscanned).fleet_policy()["sources"]
+        assert [source["path"] for source in sources] == [
+            str(self.workspace / relative) for relative in (".codex/AGENTS.md", "AGENTS.md", "ai-tools/AGENTS.md")
+        ]
