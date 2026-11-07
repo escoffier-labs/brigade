@@ -458,6 +458,21 @@ Each note gets one action: `import`, `unchanged`, `duplicate`, `changed`, `reviv
 - **Dry run.** `--dry-run` needs only a read grant on the scope. It asks the hub for its status and log, runs the local scanner and writes nothing, not even the replica. Before scanning it compares this client's scan ruleset (`<bundle version>:<sha256 of memory-rules.json>`) with `status.scan.ruleset_version` and refuses with exit 2 when they differ or the hub's scanner is unavailable, since the predictions would not match. A credential with no read grant on the scope cannot plan an import, dry or real. The real run uses the same planning function, so for the same arguments (the same paths, `--root`, `--exclude` and `--update`) it appends exactly the notes the dry run lists, and it refuses on the same ruleset mismatch. A dry run and a real run with different flags plan differently, so the first line of each prints the effective `--update` setting and the root. When the scope has no prior import and the plan appends something, the dry run also says the real run will need `--yes`.
 - **Real run.** It needs the import grant. A first import into a scope (the scope's log holds no `card.import` yet) prints the planned count and needs `--yes`. Each import carries a `client_event_id` derived from the scope, card id, content hash and base. The time half of the id is the start of the UTC day less the hub's five-minute future allowance, so a repeat of one request on the same day is replayed by the hub instead of appended, and a client clock up to ten minutes ahead of the hub's is still accepted just after midnight UTC. A repeat on another day plans from the hub's heads instead and finds the note `unchanged`. A 403 or 401 stops the whole run once (`memory_grant_missing`), as does a restored log. Other refusals, such as a `422` scan refusal, are reported on their note and the run continues. A refusal whose body says `retryable: true`, such as `503 memory_scan_unavailable` from a scanner that dropped out, counts like a hub-unavailable answer and does not reset the count. After three of those in a row the run stops and the rest are reported `not-sent`. Exit status is 1 when anything was refused, stopped or waiting on `--yes`.
 
+### Mirroring hub cards into a vault
+
+```bash
+brigade memory hub mirror --target . --out ~/Notes/Hub-Memory --exclude-scope collection:vault --dry-run --json
+brigade memory hub mirror --target . --out ~/Notes/Hub-Memory --exclude-scope collection:vault
+```
+
+`mirror` writes one Markdown note per eligible card from the workspace's read scopes, plus `Hub Memory Index.md`. The destination is disposable, one-way output. Local edits are replaced. Its `.brigade-memory-mirror.json` marker records owned files. A non-empty folder without that marker needs `--init`, which preserves foreign files.
+
+Repeat `--exclude-scope <scope>` to omit exact scope names, such as `collection:vault` and `principal:example`. It accepts the same scope names as the hub client, rejects invalid names with exit 2, and does not match prefixes or globs. Excluding a scope on a later run removes its previously owned notes and its index section. Foreign files and notes outside the destination stay untouched.
+
+Use this when importing a vault into a collection the workspace also reads: exclude that collection from the mirror to avoid duplicate notes in the vault. The importer already skips mirror folders. Exclusions apply only to mirror output and do not change read scopes or the replica. Supersession remains scoped, and retired cards stay omitted.
+
+`--dry-run` plans writes and deletions without changing the destination. Text and `--json` reports include `excluded_scopes` (the text label is `excluded scopes`) and the skipped card count under `excluded-scope`. Excluded cards are counted once under that reason, even if also retired or withheld.
+
 ## Evidence projection and identity audit
 
 ```bash

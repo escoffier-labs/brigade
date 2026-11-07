@@ -84,6 +84,13 @@ def register(memory_sub: argparse._SubParsersAction) -> None:
             command.add_argument("--out", type=Path, required=True, help="Destination folder for generated notes.")
             command.add_argument("--init", action="store_true", help="Initialize ownership in a non-empty folder.")
             command.add_argument("--dry-run", action="store_true", help="Report changes without writing the mirror.")
+            command.add_argument(
+                "--exclude-scope",
+                action="append",
+                default=[],
+                metavar="SCOPE",
+                help="Exclude an exact scope from the mirror (repeatable).",
+            )
         if name in ("push", "import"):
             command.add_argument(
                 "--yes",
@@ -451,6 +458,10 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
     target = args.target.expanduser().resolve()
     name = args.memory_hub_command
     try:
+        if name == "mirror":
+            for scope in args.exclude_scope:
+                if not hubc.valid_scope(scope):
+                    raise hubc.HubConfigError(f"invalid excluded scope: {scope!r}")
         if name == "proposals":
             return _proposals(args, target, transport)
         settings = hubc.load_settings(target)
@@ -513,9 +524,16 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
             from . import memory_hub_mirror
 
             report = memory_hub_mirror.mirror(
-                target, client, settings, args.out.expanduser(), init=args.init, dry_run=args.dry_run
+                target,
+                client,
+                settings,
+                args.out.expanduser(),
+                init=args.init,
+                dry_run=args.dry_run,
+                exclude_scopes=tuple(args.exclude_scope),
             )
             lines = [f"memory hub mirror: {len(report['written'])} write(s), {len(report['deleted'])} deletion(s)"]
+            lines.append("excluded scopes: " + (", ".join(report["excluded_scopes"]) or "none"))
             lines += [f"write: {name}" for name in report["written"]]
             lines += [f"delete: {name}" for name in report["deleted"]]
             lines += [f"skipped {reason}: {count}" for reason, count in report["skipped"].items()]

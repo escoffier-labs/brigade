@@ -52,7 +52,7 @@ def card(replica, card_id="alpha", **extra):
         "updated_at": "2026-11-05T00:00:00Z",
         **extra,
     }
-    replica.heads[store.Replica.key("fleet", card_id)] = head
+    replica.heads[store.Replica.key(head["scope"], card_id)] = head
     replica.save()
     return head
 
@@ -1278,3 +1278,154 @@ def test_refresh_that_would_pass_the_replica_cap_changes_nothing(setup):
     assert all("scan_state" not in head for head in after.heads.values())
     # Within the cap the same refresh still works.
     assert sync.refresh_scan_metadata(target, client, settings) >= 1
+
+
+def _collection_setup(setup):
+    target, settings, client, out, replica = setup
+    scopes = ("fleet", "collection:vault", "collection:vault-other")
+    settings = dataclasses.replace(settings, read_scopes=scopes)
+    replica.meta["read_scopes"] = list(scopes)
+    replica.save()
+    return target, settings, client, out, replica
+
+
+def test_exclude_scope_is_exact_and_repeatable(setup):
+    setup = _collection_setup(setup)
+    *_, out, replica = setup
+    card(replica, "keep")
+    card(replica, "vault", scope="collection:vault")
+    card(replica, "other", scope="collection:vault-other")
+    report = run(setup, exclude_scopes=("collection:vault", "fleet", "fleet"))
+    assert report["excluded_scopes"] == ["collection:vault", "fleet"]
+    assert report["skipped"] == {"excluded-scope": 2}
+    assert len(list(out.glob("other-*.md"))) == 1
+    assert not list(out.glob("vault-*.md"))
+    assert not list(out.glob("keep-*.md"))
+    assert "## collection:vault\n" not in (out / mirror.INDEX).read_text()
+
+
+def test_later_exclusion_cleans_owned_notes_and_dry_run_preserves_files(setup):
+    setup = _collection_setup(setup)
+    *_, out, replica = setup
+    card(replica, "keep")
+    card(replica, "vault", scope="collection:vault")
+    run(setup)
+    note = next(out.glob("vault-*.md"))
+    foreign = out / "foreign.md"
+    foreign.write_text("mine", encoding="utf-8")
+    outside = out.parent / note.name
+    outside.write_text("original vault note", encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in out.iterdir()}
+    report = run(setup, exclude_scopes=("collection:vault",), dry_run=True)
+    assert report["excluded_scopes"] == ["collection:vault"]
+    assert report["skipped"] == {"excluded-scope": 1}
+    assert report["deleted"] == [note.name]
+    assert before == {p.name: p.read_bytes() for p in out.iterdir()}
+    assert run(setup, exclude_scopes=("collection:vault",))["deleted"] == [note.name]
+    assert not note.exists()
+    assert "collection:vault" not in (out / mirror.INDEX).read_text()
+    assert foreign.read_text() == "mine"
+    assert outside.read_text() == "original vault note"
+    assert len(list(out.glob("keep-*.md"))) == 1
+
+
+@pytest.mark.parametrize("retired", [False, True])
+def test_exclusion_preserves_scoped_supersession_and_retirement(setup, retired):
+    setup = _collection_setup(setup)
+    *_, out, replica = setup
+    card(replica, "alpha")
+    card(replica, "beta", text="---\nsupersedes: alpha\n---\nbeta")
+    card(replica, "gone", state="retired")
+    card(replica, "beta", scope="collection:vault")
+    card(
+        replica,
+        "gamma",
+        scope="collection:vault",
+        state="retired" if retired else "live",
+        text="---\nsupersedes: beta\n---\ngamma",
+    )
+    report = run(setup, exclude_scopes=("collection:vault",))
+    assert report["skipped"] == {"excluded-scope": 2, "retired": 1, "superseded": 1}
+    assert len(list(out.glob("beta-*.md"))) == 1
+    assert not list(out.glob("alpha-*.md"))
+    assert not list(out.glob("gamma-*.md"))
+    assert not list(out.glob("gone-*.md"))
+
+
+@pytest.mark.parametrize(
+    "scope",
+    ["", "collection:", "collection:*", "collection:bad scope", 'collection:bad"name', "repo:", "fleet*", "unknown"],
+)
+def test_invalid_exclude_scope_is_refused_before_io(setup, monkeypatch, capsys, scope):
+    target, _, _, out, _ = setup
+    monkeypatch.setattr(hubc, "load_settings", lambda *_: pytest.fail("must validate before loading settings"))
+    assert (
+        cli.main(["memory", "hub", "mirror", "--target", str(target), "--out", str(out), "--exclude-scope", scope]) == 2
+    )
+    assert "invalid excluded scope" in capsys.readouterr().err
+    assert not out.exists()
+    with pytest.raises(hubc.HubConfigError, match="invalid excluded scope"):
+        run(setup, exclude_scopes=(scope,))
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_cli_exclusions_dry_run_report(setup, monkeypatch, capsys, json_output):
+    setup = _collection_setup(setup)
+    target, settings, client, out, replica = setup
+    card(replica)
+    card(replica, "vault", scope="collection:vault")
+    monkeypatch.setattr(hubc, "load_settings", lambda *_: settings)
+    monkeypatch.setattr(hubc, "client_for", lambda *a, **k: client)
+    args = [
+        "memory",
+        "hub",
+        "mirror",
+        "--target",
+        str(target),
+        "--out",
+        str(out),
+        "--dry-run",
+        "--exclude-scope",
+        "collection:vault",
+        "--exclude-scope",
+        "principal:unused",
+    ]
+    assert cli.main(args + (["--json"] if json_output else [])) == 0
+    output = capsys.readouterr().out
+    if json_output:
+        report = json.loads(output)
+        assert report["excluded_scopes"] == ["collection:vault", "principal:unused"]
+        assert report["skipped"] == {"excluded-scope": 1}
+        assert report["dry_run"] is True
+    else:
+        assert "excluded scopes: collection:vault, principal:unused" in output
+        assert "skipped excluded-scope: 1" in output
+    assert not out.exists()
+
+
+def test_excluded_successor_does_not_revive_explicitly_superseded_card(setup):
+    setup = _collection_setup(setup)
+    *_, out, replica = setup
+    card(replica, "alpha", text="---\nsuperseded_by: beta\n---\nalpha")
+    card(replica, "beta", scope="collection:vault")
+    report = run(setup, exclude_scopes=("collection:vault",))
+    assert report["skipped"] == {"excluded-scope": 1, "superseded": 1}
+    assert list(out.glob("*.md")) == [out / mirror.INDEX]
+
+
+def test_retired_successor_still_suppresses_predecessor_with_exclusions(setup):
+    setup = _collection_setup(setup)
+    *_, out, replica = setup
+    card(replica, "alpha")
+    card(replica, "beta", state="retired", text="---\nsupersedes: alpha\n---\nbeta")
+    report = run(setup, exclude_scopes=("collection:vault",))
+    assert report["skipped"] == {"retired": 1, "superseded": 1}
+    assert list(out.glob("*.md")) == [out / mirror.INDEX]
+
+
+@pytest.mark.parametrize("scope", ["fleet", "repo:example/project", "principal:example", "collection:notes"])
+def test_valid_excluded_scope_names(setup, scope):
+    assert hubc.valid_scope(scope)
+    report = run(setup, exclude_scopes=(scope,), dry_run=True)
+    assert report["excluded_scopes"] == [scope]
+    assert report["dry_run"] is True
