@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .care_launchers import runbook_argv
+from .care_launchers import entry_argv
 from .isolated_exec import trusted_cwd
 
 if TYPE_CHECKING:
@@ -21,9 +21,8 @@ SCHTASKS_EXE = r"C:\Windows\System32\schtasks.exe"
 
 
 def task_run(entry: CareEntry, *, workspace: Path) -> str:
-    if entry.kind == "runbook":
-        assert entry.runbook_rel is not None
-        return subprocess.list2cmdline(runbook_argv(entry.runbook_rel, workspace))
+    if entry.kind in ("runbook", "reflect"):
+        return subprocess.list2cmdline(entry_argv(entry, workspace))
     workspace_text = os.fspath(workspace).replace("/", "\\")
     cd_target = f'\\"{workspace_text}\\"' if " " in workspace_text or "\t" in workspace_text else workspace_text
     assert entry.shell is not None
@@ -31,7 +30,7 @@ def task_run(entry: CareEntry, *, workspace: Path) -> str:
 
 
 def create_command(entry: CareEntry, *, command: str, name: str, schedule: str, account: str) -> str:
-    if entry.kind != "runbook":
+    if entry.kind not in ("runbook", "reflect"):
         return f'schtasks /Create /TN "{name}" /TR "{command}" {schedule} {account} /F'
 
     # schtasks /TR is limited to 261 characters and passes through cmd quoting.
