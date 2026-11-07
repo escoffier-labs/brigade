@@ -70,7 +70,8 @@ class MemoryChecks(Fixture):
         good = self.call("memory_card", name="good-card")
         self.assertIn("/srv/repos/example", good["content"])
         self.assertIn(SHA, good["content"])
-        self.assertEqual(good["path"], str(self.cards / "good-card.md"))
+        # The connector sees the path under the workspace, not the local absolute one.
+        self.assertEqual(good["path"], "memory/cards/good-card.md")
         self.assertEqual(self.call("memory_card", name="linked")["error"], "card_unavailable")
         self.assertEqual(self.call("memory_card", name="missing")["error"], "card_not_found")
         os.chmod(self.cards, 0o777)
