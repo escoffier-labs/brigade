@@ -469,37 +469,55 @@ async fn proposal_events_do_not_disclose_collection_targets_or_card_bytes() {
 async fn writer_rechecks_target_grants_after_authorized_preparation() {
     for scope in ["repo:restricted", "collection:notes"] {
         for action in ["propose", "decide", "rollback"] {
-            let h = Hub::with(clean(), None);
-            let a = h.put(ADMIN_TOKEN, scope, "a", None, OLD).await;
-            let opened = submit(&h, ADMIN_TOKEN, vec![op(scope, "a", rev(&a))]).await;
-            if action == "rollback" {
-                decide(&h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
-            }
-            grant(&h, scope, &["read", "reflect", "review"]).await;
-            let raw = if action == "propose" {
-                json!({"action":action,"base_epoch":h.epoch().await,"ops":[op(scope,"a",rev(&a))],"client_event_id":h.id()})
+            let action_right = if action == "propose" {
+                "reflect"
             } else {
-                json!({"action":action,"proposal_id":opened.body["proposal_id"],"base_epoch":h.epoch().await,"client_event_id":h.id()})
+                "review"
             };
-            let mut raw = raw;
-            if action == "decide" {
-                raw["decision"] = json!("accept");
+            for revoked in ["read", action_right] {
+                let h = Hub::with(clean(), None);
+                let a = h.put(ADMIN_TOKEN, scope, "a", None, OLD).await;
+                let opened = submit(&h, ADMIN_TOKEN, vec![op(scope, "a", rev(&a))]).await;
+                if action == "rollback" {
+                    decide(&h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
+                }
+                // Keep the unscoped action gate satisfied after target revocation.
+                grant(&h, "repo:other", &["read", "reflect", "review"]).await;
+                grant(&h, scope, &["read", "reflect", "review"]).await;
+                let raw = if action == "propose" {
+                    json!({"action":action,"base_epoch":h.epoch().await,"ops":[op(scope,"a",rev(&a))],"client_event_id":h.id()})
+                } else {
+                    json!({"action":action,"proposal_id":opened.body["proposal_id"],"base_epoch":h.epoch().await,"client_event_id":h.id()})
+                };
+                let mut raw = raw;
+                if action == "decide" {
+                    raw["decision"] = json!("accept");
+                }
+                let store = h.store.as_ref().unwrap();
+                let who = store.authenticate(AGENT_TOKEN).await.unwrap();
+                let mut prepared = store
+                    .prepare(&who, action, raw.as_object().unwrap(), &raw)
+                    .unwrap();
+                let db = Connection::open(h.memory()).unwrap();
+                let command = proposals::prepare(&Conn(&db), &who, raw, clean().as_ref()).unwrap();
+                assert!(command.draft.is_ok());
+                prepared.action = Action::Proposal(command);
+                let retained: Vec<_> = ["read", "reflect", "review"]
+                    .into_iter()
+                    .filter(|right| *right != revoked)
+                    .collect();
+                grant(&h, scope, &retained).await;
+                let events = h.events();
+                let before = card(&h, scope, "a").await;
+                let refusal = store.write(prepared).await;
+                assert_eq!(
+                    (refusal.status, code(&refusal)),
+                    (403, "memory_grant_missing"),
+                    "{scope} {action} revoked {revoked}: {refusal:?}"
+                );
+                assert_eq!(h.events(), events);
+                assert_eq!(card(&h, scope, "a").await, before);
             }
-            let store = h.store.as_ref().unwrap();
-            let who = store.authenticate(AGENT_TOKEN).await.unwrap();
-            let mut prepared = store
-                .prepare(&who, action, raw.as_object().unwrap(), &raw)
-                .unwrap();
-            let db = Connection::open(h.memory()).unwrap();
-            let command = proposals::prepare(&Conn(&db), &who, raw, clean().as_ref()).unwrap();
-            assert!(command.draft.is_ok());
-            prepared.action = Action::Proposal(command);
-            grant(&h, scope, &["reflect", "review"]).await;
-            let events = h.events();
-            let before = card(&h, scope, "a").await;
-            assert_eq!(store.write(prepared).await.status, 403);
-            assert_eq!(h.events(), events);
-            assert_eq!(card(&h, scope, "a").await, before);
         }
     }
 }

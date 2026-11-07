@@ -456,7 +456,7 @@ fn stale_reason<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<Opt
     Ok(None)
 }
 fn metadata(body: &Json) -> Json {
-    json!({"proposal_id":body["proposal_id"],"rollback_of":body["rollback_of"],"tier":2,"state":body["state"],"decision":body["decision"],"reason":body["reason"],
+    json!({"proposal_id":body["proposal_id"],"rollback_of":body["rollback_of"],"tier":2,"state":body["state"],"decision":body["decision"],"reason":body["reason"],"rules":body["rules"],
         "cards":cards(body).iter().map(|c|json!({"scope":c["scope"],"card_id":c["card_id"],"base_revision":c["base_revision"],"before_hash":c["before_hash"],"after_hash":c["after_hash"],"before_state":c["before_state"],"after_state":c["after_state"],"pins":c["pins"].as_array().unwrap().iter().map(|p|json!({"block_id":p["block_id"],"hash":p["hash"]})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
 }
 fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::Result<()> {
@@ -486,7 +486,7 @@ fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::R
 fn reply(body: &Json, status: u16) -> Reply {
     Reply::new(
         status,
-        json!({"proposal_id":body["proposal_id"],"state":body["state"],"tier":2,"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"log_epoch":body["base_epoch"]}),
+        json!({"proposal_id":body["proposal_id"],"state":body["state"],"tier":2,"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"rules":body["rules"],"log_epoch":body["base_epoch"]}),
     )
 }
 fn update(tx: &dyn WriteTx, body: &Json, p: &Prepared) -> rusqlite::Result<()> {
@@ -510,6 +510,7 @@ fn open(
 ) -> rusqlite::Result<Reply> {
     body["proposal_id"] = json!(ids::mint(p.now_ms));
     body["proposer"] = json!(p.credential.principal());
+    body["rules"] = json!([]);
     if body["state"].is_null() {
         body["state"] = json!("pending");
     }
@@ -545,6 +546,7 @@ fn apply_cards(
     if let Some(r) = self_review(p, body) {
         return Ok(Some(r));
     }
+    body["rules"] = json!([]);
     if let Some(reason) = stale_reason(tx, body)? {
         body["state"] = json!("stale");
         body["reason"] = json!(reason);
@@ -555,6 +557,7 @@ fn apply_cards(
     for card in cards(body) {
         let scan = scanner.scan(string(card, "after_text"));
         if matches!(scan, Scan::Blocked { .. } | Scan::Failed) {
+            body["rules"] = json!(scan.rules());
             body["state"] = json!("held");
             body["reason"] = json!(if matches!(scan, Scan::Failed) {
                 "memory_scan_failed"
@@ -569,6 +572,7 @@ fn apply_cards(
         if !scan.permits_raise() {
             body["state"] = json!("held");
             body["reason"] = json!("memory_scan_flagged");
+            body["rules"] = json!(scan.rules());
             return Ok(None);
         }
         scans.push(scan);
@@ -635,6 +639,7 @@ fn rollback(body: &Json) -> Json {
     inverse["state"] = Json::Null;
     inverse["reason"] = Json::Null;
     inverse["decision"] = Json::Null;
+    inverse["rules"] = json!([]);
     inverse["cards"]
         .as_array_mut()
         .unwrap()

@@ -539,7 +539,9 @@ Tier 2 until S19b supplies classification.
 An accepted decision checks all revisions and exact pins before changing any
 head. A stale base or changed policy produces `state: stale`. A blocked,
 flagged or input-specific failed scan produces `state: held`, records its reason
-and changes no card. A later explicit decision can retry a held proposal. An unavailable scanner refuses the trust raise with
+and changes no card. A later explicit decision can retry a held proposal.
+Held proposals include the scan rule ids in `rules` in their body, reply and event metadata. A successful retry clears them.
+On `proposal.decide` events, `decision` is the requested decision. Use `state` for the outcome. An unavailable scanner refuses the trust raise with
 `503 memory_scan_unavailable`. A clean or private result can become `reviewed`
 only through this explicit decision. All card revisions, proposal state,
 events and idempotency commit together. A failure changes no card. Rejection

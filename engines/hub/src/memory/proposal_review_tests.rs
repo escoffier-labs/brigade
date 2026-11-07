@@ -159,15 +159,16 @@ async fn blocked_or_failed_decision_is_held_with_reason_and_no_card_changes() {
             (true, Some("test-v7".into()))
         }
     }
-    for (scan, reason) in [
+    for (scan, reason, rules) in [
         (
             Scan::Blocked {
                 ruleset: "test-v7".into(),
                 rules: vec!["blocking-rule".into()],
             },
             "memory_content_blocked",
+            json!(["blocking-rule"]),
         ),
-        (Scan::Failed, "memory_scan_failed"),
+        (Scan::Failed, "memory_scan_failed", json!([])),
     ] {
         let state = Arc::new(std::sync::Mutex::new(Scan::Clean {
             ruleset: "test-v7".into(),
@@ -188,9 +189,11 @@ async fn blocked_or_failed_decision_is_held_with_reason_and_no_card_changes() {
         assert_eq!(r.status, 200, "{r:?}");
         assert_eq!(r.body["state"], "held");
         assert_eq!(r.body["reason"], reason);
+        assert_eq!(r.body["rules"], rules);
         let saved = stored(&h, &opened.body["proposal_id"]);
         assert_eq!(saved["state"], "held");
         assert_eq!(saved["reason"], reason);
+        assert_eq!(saved["rules"], rules);
         assert_eq!(card(&h, "fleet", "a").await, before_a);
         assert_eq!(card(&h, "fleet", "b").await, before_b);
         let db = Connection::open(h.memory()).unwrap();
@@ -198,6 +201,17 @@ async fn blocked_or_failed_decision_is_held_with_reason_and_no_card_changes() {
         let payload: Json = serde_json::from_str(&payload).unwrap();
         assert_eq!(payload["state"], "held");
         assert_eq!(payload["reason"], reason);
+        assert_eq!(payload["rules"], rules);
+        *state.lock().unwrap() = Scan::Clean {
+            ruleset: "test-v7".into(),
+        };
+        let applied = decide(&h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
+        assert_eq!(applied.body["state"], "applied");
+        assert_eq!(applied.body["rules"], json!([]));
+        assert_eq!(stored(&h, &opened.body["proposal_id"])["rules"], json!([]));
+        let payload:String=db.query_row("SELECT payload FROM memory_events WHERE kind='proposal.decide' ORDER BY seq DESC LIMIT 1",[],|r|r.get(0)).unwrap();
+        let payload: Json = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["rules"], json!([]));
     }
 }
 #[tokio::test]
