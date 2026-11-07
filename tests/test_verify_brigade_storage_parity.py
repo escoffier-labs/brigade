@@ -520,7 +520,7 @@ def test_storage_parity_launch_rejects_foreign_hub_health(sp, tmp_path, monkeypa
     # Our process is still starting when the foreign health response arrives.
     # It reports its address-in-use failure after the next probe.
     process = SimpleNamespace(poll=lambda: 1 if len(probes) >= 2 else None)
-    hub = SimpleNamespace(url="http://127.0.0.1:12345", admin_token="example-admin", process=process)
+    hub = SimpleNamespace(url=f"http://{sp.hc.LOOPBACK}:12345", admin_token="example-admin", process=process)
     monkeypatch.setattr(sp.hc, "request", request)
     monkeypatch.setattr(sp.hc.time, "sleep", lambda _seconds: None)
     assert sp.hc._await_hub(hub, sp.hc.time.monotonic() + 10) == "exited"
