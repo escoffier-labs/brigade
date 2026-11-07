@@ -1,6 +1,6 @@
 //! Bounded metadata edits for proposal v2 ops. Complex YAML is refused.
 //! Evidence references remain unverified citations, never attested proof (S19e).
-use super::{ids, proposal_blocks};
+use super::{ids, proposal_blocks, text};
 use serde_json::{Value as Json, json};
 use std::collections::BTreeSet;
 
@@ -47,6 +47,37 @@ pub fn list(text: &str, key: &str) -> Result<BTreeSet<String>, &'static str> {
     }
     Ok(values.into_iter().collect())
 }
+/// Compact JSON with every reader boundary encoded as a Unicode escape.
+/// Work from valid serializer output, preserving escaped literal backslashes.
+fn front_json(value: &Json) -> String {
+    let encoded = value.to_string();
+    let mut chars = encoded.chars();
+    let mut out = String::with_capacity(encoded.len());
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            let escaped = chars.next().unwrap();
+            // These are JSON's short escapes for line boundaries. Other
+            // controls already use Unicode escapes or are not line breaks.
+            let boundary = match escaped {
+                'n' => Some('\n'),
+                'r' => Some('\r'),
+                'f' => Some('\u{c}'),
+                _ => None,
+            };
+            if let Some(c) = boundary {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            } else {
+                out.push('\\');
+                out.push(escaped);
+            }
+        } else if text::py_line_break(c) {
+            out.push_str(&format!("\\u{:04x}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
 pub fn set(text: &str, updates: &[(&str, Json)]) -> Result<String, &'static str> {
     let (meta, body) = front(text)?;
     for (key, _) in updates {
@@ -62,7 +93,7 @@ pub fn set(text: &str, updates: &[(&str, Json)]) -> Result<String, &'static str>
         }
     }
     for (key, value) in updates {
-        lines.push(format!("{key}: {value}"));
+        lines.push(format!("{key}: {}", front_json(value)));
     }
     Ok(ids::normalize(&format!(
         "---\n{}\n---\n{body}",
@@ -147,5 +178,54 @@ mod tests {
             claims("> Claim. ^c-abcdef\n\nClaim. ^c-abcdef\n").unwrap(),
             "> Claim. ^c-abcdef\n\nClaim.\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod serialization_tests {
+    use super::*;
+
+    #[test]
+    fn frontmatter_json_roundtrip_escapes_all_reader_boundaries() {
+        let values = json!([
+            "\n",
+            "\r",
+            "\u{b}",
+            "\u{c}",
+            "\u{1c}",
+            "\u{1d}",
+            "\u{1e}",
+            "\u{85}",
+            "\u{2028}",
+            "\u{2029}",
+            "literal\\u2028",
+            "café"
+        ]);
+        let encoded = set("Claim. ^c-abcdef\n", &[("evidence", values.clone())]).unwrap();
+        let value = get(&encoded, "evidence").unwrap().unwrap();
+        assert_eq!(
+            value,
+            r#"["\u000a","\u000d","\u000b","\u000c","\u001c","\u001d","\u001e","\u0085","\u2028","\u2029","literal\\u2028","café"]"#
+        );
+        assert_eq!(serde_json::from_str::<Json>(&value).unwrap(), values);
+        assert_eq!(front(&encoded).unwrap().1, "Claim. ^c-abcdef\n");
+    }
+
+    #[test]
+    fn frontmatter_json_values_cannot_create_reader_fields() {
+        let hidden = "\u{2028}expires: 2020-01-01\u{2029}";
+        for value in [json!(hidden), json!({(hidden): [hidden]})] {
+            let encoded = set("Claim. ^c-abcdef\n", &[("note", value.clone())]).unwrap();
+            let parsed = get(&encoded, "note").unwrap().unwrap();
+            assert_eq!(serde_json::from_str::<Json>(&parsed).unwrap(), value);
+            let fields = super::super::text::front_matter(&encoded);
+            assert_eq!(
+                fields
+                    .iter()
+                    .map(|(key, _)| key.as_str())
+                    .collect::<Vec<_>>(),
+                ["note"]
+            );
+        }
     }
 }

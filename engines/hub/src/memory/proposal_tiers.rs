@@ -43,7 +43,7 @@ fn cosmetic(op: &Json, card: &Json) -> bool {
 /// Compare every non-union metadata byte, including spacing and field order.
 /// Keep each line's newline so aliases/evidence position does not change the
 /// retained bytes. Only their validated, single-line fields may be excluded.
-fn merge_metadata(text: &str) -> Option<Vec<&str>> {
+fn merge_metadata<'a>(text: &'a str, excluded: &[&str]) -> Option<Vec<&'a str>> {
     let Some(rest) = text.strip_prefix("---\n") else {
         return Some(Vec::new());
     };
@@ -56,13 +56,23 @@ fn merge_metadata(text: &str) -> Option<Vec<&str>> {
     {
         return None;
     }
+    // A decoded boundary in a rewritten list stays review-only even when the
+    // serializer preserves its escapes. Do not infer safe meaning from it.
+    for key in excluded {
+        let values = super::proposal_metadata::list(text, key).ok()?;
+        if values
+            .iter()
+            .any(|v| v.chars().any(super::text::py_line_break))
+        {
+            return None;
+        }
+    }
     Some(
         meta.split_inclusive('\n')
             .filter(|line| {
-                !matches!(
-                    line.split_once(':').map(|(key, _)| key),
-                    Some("aliases" | "evidence")
-                )
+                !line
+                    .split_once(':')
+                    .is_some_and(|(key, _)| excluded.contains(&key))
             })
             .collect(),
     )
@@ -112,6 +122,30 @@ pub fn classify<T: ReadTx + ?Sized>(
         {
             return Ok(2);
         }
+        // The final snapshot includes every op on this card. Permit their
+        // union of typed fields, so cosmetic plus evidence edits remain valid.
+        let mut excluded = BTreeSet::new();
+        for op in operations
+            .iter()
+            .filter(|op| op["scope"] == card["scope"] && op["card_id"] == card["card_id"])
+        {
+            match string(op, "type") {
+                "append_evidence" => {
+                    excluded.insert("evidence");
+                }
+                "merge_exact_duplicates" => {
+                    excluded.extend(["aliases", "evidence"]);
+                }
+                _ => (),
+            }
+        }
+        let excluded: Vec<_> = excluded.into_iter().collect();
+        if !matches!(
+            (merge_metadata(string(card, "before_text"), &excluded), merge_metadata(string(card, "after_text"), &excluded)),
+            (Some(before), Some(after)) if before == after
+        ) {
+            return Ok(2);
+        }
     }
     if scopes.len() != 1 || trusts.len() != 1 {
         return Ok(2);
@@ -138,14 +172,10 @@ pub fn classify<T: ReadTx + ?Sized>(
                 }) else {
                     return Ok(2);
                 };
-                // JSON serialization can turn escaped separators into raw
-                // reader boundaries, so check the resulting metadata as well.
-                if merge_metadata(string(card, "after_text")).is_none()
-                    || !matches!(
-                        (merge_metadata(string(card, "before_text")), merge_metadata(string(other, "before_text"))),
-                        (Some(keeper), Some(source)) if keeper == source
-                    )
-                {
+                if !matches!(
+                    (merge_metadata(string(card, "before_text"), &["aliases", "evidence"]), merge_metadata(string(other, "before_text"), &["aliases", "evidence"])),
+                    (Some(keeper), Some(source)) if keeper == source
+                ) {
                     return Ok(2);
                 }
             }

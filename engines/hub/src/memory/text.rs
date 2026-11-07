@@ -90,25 +90,28 @@ pub fn single_line(s: &str) -> String {
         .collect();
     py_split(&printable).join(" ")
 }
+/// A boundary recognized by Python's `str.splitlines()`.
+pub fn py_line_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r'
+            | '\u{b}'
+            | '\u{c}'
+            | '\u{1c}'
+            | '\u{1d}'
+            | '\u{1e}'
+            | '\u{85}'
+            | '\u{2028}'
+            | '\u{2029}'
+    )
+}
 /// `str.splitlines()`.
 pub fn py_splitlines(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0;
     let mut iter = s.char_indices().peekable();
     while let Some((i, c)) = iter.next() {
-        let boundary = matches!(
-            c,
-            '\n' | '\r'
-                | '\u{b}'
-                | '\u{c}'
-                | '\u{1c}'
-                | '\u{1d}'
-                | '\u{1e}'
-                | '\u{85}'
-                | '\u{2028}'
-                | '\u{2029}'
-        );
-        if !boundary {
+        if !py_line_break(c) {
             continue;
         }
         out.push(&s[start..i]);

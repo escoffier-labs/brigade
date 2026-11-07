@@ -536,6 +536,15 @@ with `422 memory_proposal_invalid`, a top-level `reason` and indexed `ops`
 validation results. A malformed, empty or oversized ops packet has an empty
 `ops` result list. Nothing is stored. A valid submission returns `201` with `proposal_id`, `state: pending`,
 `diff`, `tier` and `log_epoch`. S19b computes the tier under the writer lock.
+Front matter JSON writes escape every shared reader line boundary as a
+Unicode escape. Lists round-trip without creating new metadata fields.
+For any Tier 0 or Tier 1 candidate, the classifier checks resulting front
+matter for reader boundary disagreements and requires unchanged bytes outside
+the fields its ops may change. Evidence append may change only `evidence`,
+duplicate merge may change `aliases` and `evidence`, and cosmetic replacement
+may change neither. Changed lists containing decoded line boundaries remain
+Tier 2 even when their serialized form stays escaped.
+
 A submitted `tier` on the request or any op is ignored. Op-level tier keys
 are stripped before the proposal body is stored. The same classifier
 runs again on every decision, using current heads and current scans.

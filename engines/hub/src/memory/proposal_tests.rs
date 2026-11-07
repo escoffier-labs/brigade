@@ -1057,7 +1057,9 @@ async fn s19b_security_normal_decide_checks_digest_when_supplied() {
 
 #[tokio::test]
 async fn s19b_security_merge_rejects_hidden_python_metadata_lines() {
-    for separator in ["\u{2028}", "\\u2028"] {
+    for separator in [
+        "\u{85}", "\\u0085", "\u{2028}", "\\u2028", "\u{2029}", "\\u2029",
+    ] {
         for hidden in ["expires: 2020-01-01", "status: superseded"] {
             for hidden_on_keeper in [true, false] {
                 let h = Hub::with(clean(), None);
@@ -1082,6 +1084,114 @@ async fn s19b_security_merge_rejects_hidden_python_metadata_lines() {
                 assert_eq!(r.body["tier"], 2);
                 assert_eq!(r.body["state"], "pending");
             }
+        }
+    }
+}
+
+#[tokio::test]
+async fn s19b_security_evidence_roundtrip_stays_escaped_and_review_only() {
+    for (escaped, separator) in [
+        ("\\u0085", '\u{85}'),
+        ("\\u2028", '\u{2028}'),
+        ("\\u2029", '\u{2029}'),
+    ] {
+        for hidden in ["expires: 2020-01-01", "status: superseded"] {
+            let h = Hub::with(clean(), None);
+            let original = format!(
+                "---\nevidence: [\"{escaped}{hidden}{escaped}\"]\nstatus: active\n---\n{OLD}\n"
+            );
+            let a = h.put(ADMIN_TOKEN, "fleet", "a", None, &original).await;
+            let opened = submit(&h, ADMIN_TOKEN, vec![evidence_op("fleet", "a", rev(&a))]).await;
+            assert_eq!(opened.status, 201);
+            assert_eq!(opened.body["tier"], 2);
+            let body: Json =
+                serde_json::from_str(&stored_proposal(&h, &opened.body["proposal_id"])).unwrap();
+            let after = body["cards"][0]["after_text"].as_str().unwrap();
+            assert!(!after.contains(separator));
+            assert!(after.contains(&format!("{escaped}{hidden}{escaped}")));
+            let fields = text::front_matter(after);
+            assert_eq!(
+                fields
+                    .iter()
+                    .map(|(key, _)| key.as_str())
+                    .collect::<Vec<_>>(),
+                ["status", "evidence"]
+            );
+            assert_eq!(fields[0].1, text::Value::Str("active".into()));
+            assert_eq!(
+                decide(&h, ADMIN_TOKEN, &opened.body["proposal_id"])
+                    .await
+                    .body["state"],
+                "applied"
+            );
+            assert!(
+                !card(&h, "fleet", "a").await["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(separator)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn s19b_security_all_lower_tiers_preserve_protected_metadata() {
+    for kind in ["append_evidence", "replace_block", "merge_exact_duplicates"] {
+        let h = Hub::with(clean(), None);
+        let original = format!("---\nstatus: active\naliases: []\nevidence: []\n---\n{OLD}\n");
+        let a = h.put(ADMIN_TOKEN, "fleet", "a", None, &original).await;
+        let mut operation = evidence_op("fleet", "a", rev(&a));
+        if kind == "replace_block" {
+            operation = op("fleet", "a", rev(&a));
+            operation["text"] = json!("Use  the focused gate.");
+        } else if kind == "merge_exact_duplicates" {
+            let b = h.put(ADMIN_TOKEN, "fleet", "b", None, &original).await;
+            operation["type"] = json!(kind);
+            operation.as_object_mut().unwrap().remove("evidence_ids");
+            operation["other_card"] =
+                json!({"scope":"fleet","card_id":"b","base_revision":rev(&b)});
+        }
+        let opened = submit(&h, ADMIN_TOKEN, vec![operation]).await;
+        assert_eq!(opened.status, 201);
+        assert_eq!(
+            opened.body["tier"],
+            if kind == "replace_block" { 1 } else { 0 }
+        );
+        let body: Json =
+            serde_json::from_str(&stored_proposal(&h, &opened.body["proposal_id"])).unwrap();
+        for (old, new) in [
+            ("status: active", "status: superseded"),
+            (
+                "status: active",
+                "status: active\u{2028}expires: 2020-01-01",
+            ),
+            (
+                if kind == "append_evidence" {
+                    "aliases: []"
+                } else {
+                    "status: active"
+                },
+                if kind == "append_evidence" {
+                    "aliases: [\"different\"]"
+                } else {
+                    "status: inactive"
+                },
+            ),
+        ] {
+            // Model a faulty metadata writer while keeping the actual pinned
+            // input and current head. The classifier must independently refuse it.
+            let mut altered = body.clone();
+            let after = altered["cards"][0]["after_text"]
+                .as_str()
+                .unwrap()
+                .replace(old, new);
+            altered["cards"][0]["after_hash"] = json!(ids::sha256_hex(after.as_bytes()));
+            altered["cards"][0]["after_text"] = json!(after);
+            let db = Connection::open(h.memory()).unwrap();
+            assert_eq!(
+                proposal_tiers::classify(&Conn(&db), &altered, clean().as_ref()).unwrap(),
+                2
+            );
         }
     }
 }
