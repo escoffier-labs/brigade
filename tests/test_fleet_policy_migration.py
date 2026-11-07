@@ -1075,7 +1075,7 @@ def test_preference_meta_follows_policy_revision_after_activation(conn):
     advanced = fleet_hub_policy.current_policy(conn)
     assert later["updated_at"] == advanced["created_at"]
     assert later["updated_by"] == "policy-editor"
-    assert later["updated_at"] != meta["updated_at"]
+    assert advanced["revision"] == current["revision"] + 1
 
 
 def _fake_activated_marker(conn: sqlite3.Connection) -> None:
