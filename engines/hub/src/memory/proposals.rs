@@ -32,11 +32,12 @@ impl Command {
         match self.request["action"].as_str() {
             Some("propose") => "propose",
             Some("decide") => "decide",
+            Some("auto_apply") => "auto_apply",
             _ => "rollback",
         }
     }
     pub fn right(&self) -> &'static str {
-        if self.name() == "propose" {
+        if matches!(self.name(), "propose" | "auto_apply") {
             "reflect"
         } else {
             "review"
@@ -120,6 +121,7 @@ pub fn authorize<T: ReadTx + ?Sized>(
     let right = match request["action"].as_str() {
         Some("propose") => "reflect",
         Some("preflight") => "read",
+        Some("auto_apply") => "reflect",
         _ => "review",
     };
     if request["action"] == "propose" {
@@ -419,7 +421,7 @@ fn submit<T: ReadTx + ?Sized>(
         })
         .collect();
     Ok(Ok(
-        json!({"base_epoch":epoch,"cards":by_card.into_values().collect::<Vec<_>>(),"ops":ops,"diff":diff,"tier":2,"rollback_of":null}),
+        json!({"base_epoch":epoch,"workspace_id":request["workspace_id"],"cards":by_card.into_values().collect::<Vec<_>>(),"ops":ops,"diff":diff,"tier":2,"rollback_of":null}),
     ))
 }
 /// Prepare CPU work and diffs on a query-only reader. A refusal is carried to
@@ -470,7 +472,7 @@ pub(super) fn stale_reason<T: ReadTx + ?Sized>(
     Ok(None)
 }
 fn metadata(body: &Json) -> Json {
-    json!({"proposal_id":body["proposal_id"],"rollback_of":body["rollback_of"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"state":body["state"],"decision":body["decision"],"reason":body["reason"],"rules":body["rules"],
+    json!({"proposal_id":body["proposal_id"],"decision_mode":body["decision_mode"],"auto_apply_gates":body["auto_apply_gates"],"rollback_of":body["rollback_of"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"state":body["state"],"decision":body["decision"],"reason":body["reason"],"rules":body["rules"],
         "cards":cards(body).iter().map(|c|json!({"scope":c["scope"],"card_id":c["card_id"],"base_revision":c["base_revision"],"before_hash":c["before_hash"],"after_hash":c["after_hash"],"before_state":c["before_state"],"after_state":c["after_state"],"pins":c["pins"].as_array().unwrap().iter().map(|p|json!({"block_id":p["block_id"],"hash":p["hash"]})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
 }
 fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::Result<()> {
@@ -507,6 +509,23 @@ fn reply(body: &Json, status: u16) -> Reply {
         json!({"proposal_id":body["proposal_id"],"state":body["state"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"rules":body["rules"],"preflight":body["preflight"],"log_epoch":body["base_epoch"]}),
     )
 }
+/// Automatic calls may be made by reflect-only callers, including replays.
+pub(super) fn redact_auto_reply<T: ReadTx + ?Sized>(
+    tx: &T,
+    who: &auth::Credential,
+    proposal: &Json,
+    response: &mut Json,
+) -> rusqlite::Result<()> {
+    if super::preflight::redact(tx, who, proposal, &mut response["preflight"])? {
+        response["diff"] = Json::Null;
+        if let Some(targets) = response["targets"].as_array_mut() {
+            for target in targets {
+                target["after_hash"] = Json::Null;
+            }
+        }
+    }
+    Ok(())
+}
 fn update(tx: &dyn WriteTx, body: &Json, p: &Prepared) -> rusqlite::Result<()> {
     tx.execute(
         "UPDATE memory_proposals SET state=?2,body=?3,decided_by=?4 WHERE proposal_id=?1",
@@ -514,7 +533,11 @@ fn update(tx: &dyn WriteTx, body: &Json, p: &Prepared) -> rusqlite::Result<()> {
             t(string(body, "proposal_id")),
             t(string(body, "state")),
             t(&body.to_string()),
-            t(p.credential.principal()),
+            if body["state"] == "pending" {
+                Value::Null
+            } else {
+                t(p.credential.principal())
+            },
         ],
     )?;
     Ok(())
@@ -529,6 +552,7 @@ fn open(
 ) -> rusqlite::Result<Reply> {
     body["proposal_id"] = json!(ids::mint(p.now_ms));
     body["proposer"] = json!(p.credential.principal());
+    body["proposer_credential"] = json!(super::attestation::identity(&p.credential, authority));
     body["rules"] = json!([]);
     body["decision_policy_revision"] = Json::Null;
     body["decision_policy_digest"] = Json::Null;
@@ -568,29 +592,46 @@ fn apply_cards(
     authority: &Authority,
     scanner: &dyn Scanner,
 ) -> rusqlite::Result<Option<Reply>> {
+    let automatic = matches!(&p.action,ops::Action::Proposal(c) if c.name()=="auto_apply");
     for card in cards(body) {
-        if !scoped_right(tx, &p.credential, string(card, "scope"), "review")? {
+        if !scoped_right(
+            tx,
+            &p.credential,
+            string(card, "scope"),
+            if automatic { "reflect" } else { "review" },
+        )? {
             return Ok(Some(denied("review")));
         }
     }
-    if let Some(r) = self_review(p, body) {
-        return Ok(Some(r));
-    }
-    // S19e must replace this guard deliberately. A low tier, policy document,
-    // or a preflight result is never an instruction to apply.
-    if !matches!(&p.action, ops::Action::Proposal(cmd) if cmd.name() == "decide" && cmd.request["decision"] == "accept")
-    {
-        return Ok(Some(error(
-            403,
-            "memory_review_required",
-            "an explicit reviewer decision is required",
-        )));
+    if !automatic {
+        if let Some(r) = self_review(p, body) {
+            return Ok(Some(r));
+        }
+        // Reviewed calls still require explicit acceptance. Only the automatic
+        // action can enter the separate all-gates boundary below.
+        if !matches!(&p.action, ops::Action::Proposal(cmd) if cmd.name() == "decide" && cmd.request["decision"] == "accept")
+        {
+            return Ok(Some(error(
+                403,
+                "memory_review_required",
+                "an explicit reviewer decision is required",
+            )));
+        }
     }
     body["tier"] = json!(super::proposal_tiers::classify(tx, body, scanner)?);
     // Keep diagnostics before blocker returns. Reusing the later apply-loop
     // scans would move scan work before those checks or need a second report path.
     body["preflight"] = super::preflight::evaluate(tx, body, authority, scanner, p.now_ms)?;
     body["rules"] = json!([]);
+    if automatic {
+        body["auto_apply_gates"] = body["preflight"]["checks"].clone();
+    }
+    if automatic && !super::preflight::all_satisfied(&body["preflight"]) {
+        // A failed automatic attempt leaves human review available.
+        body["state"] = json!("pending");
+        body["reason"] = json!("auto_apply_held");
+        return Ok(None);
+    }
     if body["policy_revision"] != json!(authority.policy.as_ref().map(|a| a.0))
         || body["policy_digest"] != json!(authority.policy.as_ref().map(|a| &a.1))
     {
@@ -612,6 +653,11 @@ fn apply_cards(
     let mut scans = Vec::new();
     for card in cards(body) {
         let scan = scanner.scan(string(card, "after_text"));
+        if automatic && !matches!(&scan,Scan::Clean{ruleset} if !ruleset.is_empty()) {
+            body["state"] = json!("pending");
+            body["reason"] = json!("scan_not_clean");
+            return Ok(None);
+        }
         if matches!(scan, Scan::Blocked { .. } | Scan::Failed) {
             body["rules"] = json!(scan.rules());
             body["state"] = json!("held");
@@ -636,12 +682,15 @@ fn apply_cards(
     let id = string(body, "proposal_id").to_string();
     let rollback = !body["rollback_of"].is_null();
     let digest = body["policy_digest"].as_str().map(String::from);
+    let body_audit = json!({"checks":body["preflight"]["checks"],"policy_digest":body["policy_digest"],"attesting_credentials":body["preflight"]["attesting_credentials"]});
     for (card, scan) in body["cards"].as_array_mut().unwrap().iter_mut().zip(scans) {
         let scope = string(card, "scope");
         let card_id = string(card, "card_id");
         let hash = string(card, "after_hash");
         let trust = if rollback {
             string(card, "restore_trust")
+        } else if automatic {
+            string(card, "before_trust")
         } else {
             "reviewed"
         };
@@ -666,7 +715,11 @@ fn apply_cards(
                 content_hash: Some(hash),
                 trust: Some(trust),
                 origin: None,
-                payload: json!({"proposal_id":id}),
+                payload: if automatic {
+                    json!({"proposal_id":id,"decision_mode":"automatic","gates":body_audit.clone()})
+                } else {
+                    json!({"proposal_id":id})
+                },
                 policy_digest: digest.as_deref(),
             },
         )?;
@@ -683,7 +736,9 @@ fn apply_cards(
             Some(string(card, "after_text")),
         )?;
         tx.execute("UPDATE memory_card_revisions SET proposal_id=?1 WHERE scope=?2 AND card_id=?3 AND revision=?4",&[t(&id),t(scope),t(card_id),Value::Integer(seq)])?;
+        let applied_trust = trust.to_string();
         card["applied_revision"] = json!(seq);
+        card["applied_trust"] = json!(applied_trust);
     }
     body["state"] = json!("applied");
     body["reason"] = Json::Null;
@@ -695,6 +750,9 @@ fn rollback(body: &Json) -> Json {
     inverse["state"] = Json::Null;
     inverse["reason"] = Json::Null;
     inverse["decision"] = Json::Null;
+    inverse["decision_mode"] = Json::Null;
+    inverse["auto_apply_gates"] = Json::Null;
+    inverse["preflight"] = Json::Null;
     inverse["rules"] = json!([]);
     inverse["cards"]
         .as_array_mut()
@@ -707,7 +765,9 @@ fn rollback(body: &Json) -> Json {
         card["before_hash"] = old["after_hash"].clone();
         card["before_text"] = old["after_text"].clone();
         card["before_state"] = old["after_state"].clone();
-        card["before_trust"] = json!(if body["rollback_of"].is_null() {
+        card["before_trust"] = json!(if let Some(trust) = old["applied_trust"].as_str() {
+            trust
+        } else if body["rollback_of"].is_null() {
             "reviewed"
         } else {
             string(&old, "restore_trust")
@@ -795,6 +855,36 @@ pub fn run(
             }
         }
         return open(tx, p, inverse, authority, "proposal.rollback", scanner);
+    }
+    if cmd.name() == "auto_apply" {
+        if !body["rollback_of"].is_null() {
+            return Ok(error(
+                409,
+                "memory_rollback_review_required",
+                "compensating proposals require a reviewed decision",
+            ));
+        }
+        if body["state"] != "pending" {
+            return Ok(error(
+                409,
+                "memory_proposal_state",
+                "automatic apply requires a pending proposal",
+            ));
+        }
+        if let Some(r) = apply_cards(tx, p, &mut body, authority, scanner)? {
+            return Ok(r);
+        }
+        if body["state"] == "applied" {
+            body["decision"] = json!("auto_apply");
+            body["decision_mode"] = json!("automatic");
+            body["decision_policy_revision"] = json!(authority.policy.as_ref().map(|a| a.0));
+            body["decision_policy_digest"] = json!(authority.policy.as_ref().map(|a| &a.1));
+            update(tx, &body, p)?;
+            event(tx, p, "proposal.decide", &body)?;
+        }
+        let mut response = reply(&body, 200);
+        redact_auto_reply(tx, &p.credential, &body, &mut response.body)?;
+        return Ok(response);
     }
     let redecide = body["state"] == "stale" && body["reason"] == "policy_changed";
     if !matches!(string(&body, "state"), "pending" | "held") && !redecide {

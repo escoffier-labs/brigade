@@ -583,3 +583,46 @@ def test_memory_policy_is_digest_bound_and_preserves_legacy_digests():
 def test_memory_policy_rejects_unsafe_or_unknown_settings(memory):
     with pytest.raises(fleet_policy.FleetPolicyError):
         fleet_policy.parse_document({**_document(), "memory": memory})
+
+
+def test_attested_memory_policy_requires_explicit_promotion_contract():
+    memory = {
+        "auto_apply": True,
+        "curation_owner": "hub",
+        "evidence_freshness_seconds": 86400,
+        "tier0_op_classes": ["append_evidence"],
+        "reflect_principals": ["agent:example"],
+    }
+    parsed = fleet_policy.parse_memory(memory)
+    assert parsed == memory
+    assert fleet_policy.parse_memory(parsed) == parsed
+    for key in ("curation_owner", "evidence_freshness_seconds", "tier0_op_classes", "reflect_principals"):
+        incomplete = {k: v for k, v in memory.items() if k != key}
+        with pytest.raises(fleet_policy.FleetPolicyError):
+            fleet_policy.parse_memory(incomplete)
+    baseline = {**memory, "auto_apply": False}
+    digest = fleet_policy.document_digest({**_document(), "memory": baseline})
+    for key, value in (("curation_owner", "external"), ("evidence_freshness_seconds", 3600)):
+        changed = {**baseline, key: value}
+        assert fleet_policy.document_digest({**_document(), "memory": changed}) != digest
+
+
+@pytest.mark.parametrize("owner", ["external", "handoff-only"])
+def test_external_memory_owners_cannot_enable_auto_apply(owner):
+    memory = {
+        "auto_apply": True,
+        "curation_owner": owner,
+        "evidence_freshness_seconds": 86400,
+        "tier0_op_classes": ["append_evidence"],
+        "reflect_principals": ["agent:example"],
+    }
+    with pytest.raises(fleet_policy.FleetPolicyError):
+        fleet_policy.parse_memory(memory)
+    memory["auto_apply"] = False
+    assert fleet_policy.parse_memory(memory)["curation_owner"] == owner
+
+
+@pytest.mark.parametrize("window", [0, -1, True, "86400", None, 31536001])
+def test_memory_evidence_freshness_is_bounded(window):
+    with pytest.raises(fleet_policy.FleetPolicyError):
+        fleet_policy.parse_memory({"evidence_freshness_seconds": window})

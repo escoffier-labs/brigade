@@ -43,6 +43,7 @@ pub struct Config {
     pub admin_digest: String,
     pub capacity: usize,
     pub scanner: Arc<dyn super::scan::Scanner>,
+    pub clock: super::ids::Clock,
     /// Wait for the memory lock: only a truncating checkpoint can hold it.
     pub memory_wait: Duration,
     /// Wait for the hub lock once the turn is granted (the Python upstream).
@@ -65,6 +66,7 @@ impl Config {
             admin_digest,
             capacity: 1024,
             scanner: Arc::new(super::scan::Unavailable),
+            clock: super::ids::Clock::default(),
             memory_wait: Duration::from_millis(250),
             hub_wait: Duration::from_secs(2),
             turn_wait: Duration::from_secs(5),
@@ -141,7 +143,7 @@ impl HubLock {
         // A policy that cannot be read under the lock refuses the command. No
         // policy row at all means no policy is configured.
         if policy {
-            Authority::read(&tx).map_err(|_| Err(storage("policy-reread")))
+            Authority::with_credentials(&tx, admin).map_err(|_| Err(storage("policy-reread")))
         } else {
             Ok(Authority::default())
         }
@@ -499,7 +501,7 @@ pub(crate) fn run(
         let mut results: Vec<(Pending, Answer)> = Vec::new();
         let mut broken = false;
         let mut rest = batch.into_iter();
-        for p in rest.by_ref() {
+        for mut p in rest.by_ref() {
             if Instant::now() >= p.deadline {
                 results.push((p, Err(storage("writer-timeout"))));
             } else {
@@ -509,6 +511,14 @@ pub(crate) fn run(
                     p.command.action.needs_policy(),
                 ) {
                     Ok(authority) => {
+                        // Proof freshness and cooldown use transaction time,
+                        // including requests that waited after preparation.
+                        if matches!(
+                            &p.command.action,
+                            ops::Action::Proposal(_) | ops::Action::Evidence(_)
+                        ) {
+                            p.command.now_ms = config.clock.now_ms();
+                        }
                         let embedder = config
                             .dense
                             .as_ref()
