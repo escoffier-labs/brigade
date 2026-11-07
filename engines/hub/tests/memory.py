@@ -1,6 +1,7 @@
 """Memory route availability (D21), persistence through the managed front,
 and lexical parity with the local BM25 scorer (S13b, gate R0)."""
 
+import hashlib
 import http.client
 import importlib.util
 import json
@@ -363,6 +364,44 @@ class Memory(unittest.TestCase):
         self.assertEqual(
             json.loads(payload), {"error": "incomplete request body", "code": "memory_request_invalid"}
         )
+
+    def test_s19b_memory_policy_digest_binds_native_decisions(self):
+        hub = self.run_hub("memory-policy", "--route-mode memory=native")
+
+        def call(path, body):
+            return hc.request(hub.url, "POST", path, token=hub.admin_token, body=body)
+
+        original = "Keep the focused gate. ^c-abcdef"
+        created = call("/memory", {"action": "put", "scope": "fleet", "card_id": "policy-card",
+            "text": original, "client_event_id": hm.event_id()})
+        self.assertEqual(created.status, 201)
+        epoch = created.json["log_epoch"]
+        opened = call("/memory", {"action": "propose", "tier": 0, "base_epoch": epoch,
+            "client_event_id": hm.event_id(), "ops": [{"type": "append_evidence", "scope": "fleet",
+                "card_id": "policy-card", "base_revision": created.json["event"]["revision"],
+                "block_id": "c-abcdef", "expected_block_hash": hashlib.sha256(original.encode()).hexdigest(),
+                "evidence_ids": ["node/workspace/receipt"]}]})
+        self.assertEqual(opened.status, 201, opened.json)
+        self.assertEqual((opened.json["tier"], opened.json["state"]), (0, "pending"))
+        policy = hc.request(hub.url, "GET", "/policy", token=hub.admin_token).json
+        document = policy["document"]
+        document["memory"] = {"auto_apply": True}
+        refused = call("/policy", {"action": "save", "document": document,
+            "expected_version": policy["version"], "reason": "memory policy"})
+        self.assertEqual(refused.status, 422, refused.json)
+        document["memory"] = {"auto_apply": False}
+        saved = call("/policy", {"action": "save", "document": document,
+            "expected_version": policy["version"], "reason": "memory policy"})
+        self.assertEqual(saved.status, 200, saved.json)
+        decision = {"action": "decide", "decision": "accept", "proposal_id": opened.json["proposal_id"],
+            "base_epoch": epoch, "client_event_id": hm.event_id()}
+        stale = call("/memory", decision)
+        self.assertEqual((stale.json["state"], stale.json["reason"]), ("stale", "policy_changed"))
+        self.assertEqual(stale.json["decision_policy_digest"], saved.json["digest"])
+        decision["client_event_id"] = hm.event_id()
+        applied = call("/memory", decision)
+        self.assertEqual(applied.json["state"], "applied", applied.json)
+        self.assertEqual(applied.json["decision_policy_digest"], saved.json["digest"])
 
     def test_drive_profile_passes_twice_against_one_hub(self):
         # --hub-url runs reuse a hub: the second run must not meet the first run's cards.

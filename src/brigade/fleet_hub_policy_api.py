@@ -679,6 +679,12 @@ def handle_policy(
             )
             status_payload: tuple[int, dict[str, Any]] = (200, result)
         elif action == "save":
+            document = body.get("document")
+            if isinstance(document, Mapping) and "memory" in document:
+                try:
+                    fleet_policy.parse_memory(document["memory"])
+                except fleet_policy.FleetPolicyError as exc:
+                    raise _error("invalid-memory-policy", str(exc), status=422) from exc
             expected_version = _int(body.get("expected_version"), "expected_version")
             reason = _text(body.get("reason"), "reason")
             assert expected_version is not None and reason is not None

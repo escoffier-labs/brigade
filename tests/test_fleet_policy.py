@@ -542,3 +542,44 @@ def test_inventory_collector_bindings_omit_ambiguous_providers():
     bindings = fleet_policy.inventory_collector_bindings(document)
     assert "google" not in bindings
     assert bindings["xai"] == {"harness": "grok", "account_id": "acct-x"}
+
+
+def test_memory_policy_is_digest_bound_and_preserves_legacy_digests():
+    import hashlib
+
+    from brigade.fleet_model_roster import canonical_json
+
+    legacy = fleet_policy.parse_document(_document())
+    assert "memory" not in legacy
+    assert (
+        fleet_policy.document_digest(legacy)
+        == "sha256:" + hashlib.sha256(canonical_json(legacy).encode("ascii")).hexdigest()
+    )
+    document = {**legacy, "memory": {"auto_apply": False}}
+    parsed = fleet_policy.parse_document(document)
+    assert parsed["memory"]["auto_apply"] is False
+    assert fleet_policy.parse_document(parsed) == parsed
+    assert fleet_policy.document_digest(parsed) != fleet_policy.document_digest(legacy)
+    changed = copy.deepcopy(parsed)
+    changed["memory"]["reflect_principals"] = ["agent:example"]
+    assert fleet_policy.document_digest(changed) != fleet_policy.document_digest(parsed)
+
+
+@pytest.mark.parametrize(
+    "memory",
+    [
+        True,
+        [],
+        {"auto_apply": True},
+        {"auto_apply": 1},
+        {"auto_apply": "false"},
+        {"auto_apply": None},
+        {"unknown": False},
+        {"reflect_principals": "agent:example"},
+        {"reflect_principals": [""]},
+        {"tier0_op_classes": ["replace_block"]},
+    ],
+)
+def test_memory_policy_rejects_unsafe_or_unknown_settings(memory):
+    with pytest.raises(fleet_policy.FleetPolicyError):
+        fleet_policy.parse_document({**_document(), "memory": memory})

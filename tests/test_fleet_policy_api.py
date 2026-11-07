@@ -1223,3 +1223,20 @@ def test_reservation_accept_client_uses_node_authenticated_transport(tmp_path, m
         assert accepted["reservation_id"] == ids["reservation_id"]
         assert fleet_client_policy.accept_reservation(**ids) == accepted
         assert calls == [False, False]
+
+
+def test_memory_auto_apply_is_refused_without_a_policy_revision(tmp_path):
+    with _hub(tmp_path) as hub:
+        document = _document()
+        document["memory"] = {"auto_apply": True}
+        status, payload = _request(
+            hub,
+            "POST",
+            "/policy",
+            token=ADMIN_TOKEN,
+            body={"action": "save", "document": document, "expected_version": 1, "reason": "memory policy"},
+        )
+        assert status == 422, payload
+        status, current = _request(hub, "GET", "/policy", token=ADMIN_TOKEN)
+        assert status == 200
+        assert current["version"] == 1

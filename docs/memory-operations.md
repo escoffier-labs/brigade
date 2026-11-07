@@ -535,8 +535,54 @@ with the same current rules as `put`. Any invalid op refuses the whole request
 with `422 memory_proposal_invalid`, a top-level `reason` and indexed `ops`
 validation results. A malformed, empty or oversized ops packet has an empty
 `ops` result list. Nothing is stored. A valid submission returns `201` with `proposal_id`, `state: pending`,
-`diff`, `tier` and `log_epoch`. S19a conservatively holds every proposal at
-Tier 2 until S19b supplies classification.
+`diff`, `tier` and `log_epoch`. S19b computes the tier under the writer lock.
+A submitted `tier` on the request or any op is ignored. The same classifier
+runs again on every decision, using current heads and current scans.
+
+Scan-clean evidence appends and exact duplicate merges can be Tier 0 when
+all target cards share one scope and one known trust class. Evidence strings
+remain unverified and do not count as proof. A replacement that only changes
+ASCII spaces in plain prose can be Tier 1. Other claim changes, including
+opposite polarity, removals, supersession and `previously` additions, stay
+Tier 2 because the classifier cannot prove their meaning safe. Compensation
+proposals are Tier 2. A proposal takes the highest tier of its ops.
+
+Flagged versions or op text, cross-scope targets, mixed trust, unknown trust,
+private or unavailable scans and any edit newer than the base revision force
+Tier 2. This includes newer human edits. A changed head still fails the
+compare-and-set and never applies. Tier 0 describes an edit only. Every tier
+waits for an explicit reviewer decision and there is no Tier 0 apply path.
+
+Fleet policy accepts an optional top-level `memory` object:
+
+```json
+{
+  "memory": {
+    "auto_apply": false,
+    "tier0_op_classes": ["append_evidence", "merge_exact_duplicates"],
+    "reflect_principals": ["agent:example"]
+  }
+}
+```
+
+Both lists default to empty. Unknown fields, invalid list entries and
+non-boolean `auto_apply` values are refused. Saving `auto_apply: true` returns
+422 and stores no revision. The lists reserve policy inputs for the later
+gate and attestation slices and grant no apply authority in S19b. Omitting
+`memory` preserves older policy digests. When present, the normalized section
+is included in the whole fleet policy digest, so any memory policy edit
+changes that digest.
+
+Proposal bodies and replies carry `policy_revision` and `policy_digest`.
+Each decision also records `decision_policy_revision` and
+`decision_policy_digest` in its body, reply and event metadata. The event's
+`policy_digest` column binds the policy read under the authority lock, even
+for rejection or a stale or held decision. With no configured policy, both
+bindings are null. A changed policy stops acceptance with `state: stale` and
+`reason: policy_changed`, without changing cards. A fresh explicit `decide`
+can rebind that policy-stale proposal to the current policy and recheck all
+bases, pins, scans and grants. Replaying the first decision returns its
+original stale result. Other stale proposals still require a new proposal.
 
 An accepted decision checks all revisions and exact pins before changing any
 head. A stale base or changed policy produces `state: stale`. A blocked,

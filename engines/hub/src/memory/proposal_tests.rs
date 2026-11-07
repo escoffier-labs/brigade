@@ -564,3 +564,235 @@ async fn duplicate_merge_can_retire_a_source_when_keeper_metadata_already_matche
     assert_eq!(card(&h, "fleet", "b").await["state"], "retired");
     assert_eq!(card(&h, "fleet", "a").await["revision"], rev(&a));
 }
+
+// S19b: classification must depend on hub facts rather than submitted tiers.
+fn evidence_op(scope: &str, card_id: &str, revision: i64) -> Json {
+    let mut value = op(scope, card_id, revision);
+    value["type"] = json!("append_evidence");
+    value.as_object_mut().unwrap().remove("text");
+    value["evidence_ids"] = json!(["node/workspace/receipt"]);
+    value
+}
+#[tokio::test]
+async fn computed_tiers_ignore_claims_and_never_apply_without_review() {
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    for (mut operation, want) in [
+        (evidence_op("fleet", "a", rev(&a)), 0),
+        (
+            {
+                let mut o = op("fleet", "a", rev(&a));
+                o["text"] = json!("Use  the focused gate.");
+                o
+            },
+            1,
+        ),
+        (op("fleet", "a", rev(&a)), 2),
+        (
+            {
+                let mut o = op("fleet", "a", rev(&a));
+                o["text"] = json!("Do not use the focused gate.");
+                o
+            },
+            2,
+        ),
+    ] {
+        operation["tier"] = json!(0);
+        let before = card(&h, "fleet", "a").await;
+        let r = h.call(ADMIN_TOKEN, json!({"action":"propose","tier":0,"ops":[operation],"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
+        assert_eq!(r.status, 201, "{r:?}");
+        assert_eq!(r.body["tier"], want);
+        assert_eq!(r.body["state"], "pending");
+        assert_eq!(card(&h, "fleet", "a").await, before);
+        let db = Connection::open(h.memory()).unwrap();
+        let payload: String = db.query_row("SELECT payload FROM memory_events WHERE kind='proposal.open' ORDER BY seq DESC LIMIT 1", [], |r|r.get(0)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Json>(&payload).unwrap()["tier"],
+            want
+        );
+        let refused = h.call(ADMIN_TOKEN, json!({"action":"decide","decision":"auto","proposal_id":r.body["proposal_id"],"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
+        assert_eq!(code(&refused), "memory_auto_apply_disabled");
+    }
+}
+#[tokio::test]
+async fn cross_scope_and_mixed_trust_inputs_force_tier_two() {
+    for mixed_trust in [false, true] {
+        let h = Hub::with(clean(), None);
+        let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+        let scope = if mixed_trust { "fleet" } else { "repo:example" };
+        let b = h.put(ADMIN_TOKEN, scope, "b", None, OLD).await;
+        if mixed_trust {
+            Connection::open(h.memory())
+                .unwrap()
+                .execute(
+                    "UPDATE memory_cards SET trust='imported' WHERE card_id='b'",
+                    [],
+                )
+                .unwrap();
+        }
+        let r = submit(
+            &h,
+            ADMIN_TOKEN,
+            vec![
+                evidence_op("fleet", "a", rev(&a)),
+                evidence_op(scope, "b", rev(&b)),
+            ],
+        )
+        .await;
+        assert_eq!(r.status, 201, "{r:?}");
+        assert_eq!(r.body["tier"], 2);
+    }
+}
+#[tokio::test]
+async fn unknown_scan_or_trust_and_flagged_inputs_force_tier_two() {
+    for scan in [
+        Scan::Unavailable,
+        Scan::Private {
+            ruleset: "test-v7".into(),
+            rules: vec!["private".into()],
+        },
+        Scan::Flagged {
+            ruleset: "test-v7".into(),
+            rules: vec!["role-override".into()],
+        },
+    ] {
+        let h = Hub::with(Arc::new(Fixed(scan)), None);
+        let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+        let r = submit(&h, ADMIN_TOKEN, vec![evidence_op("fleet", "a", rev(&a))]).await;
+        assert_eq!(r.status, 201, "{r:?}");
+        assert_eq!(r.body["tier"], 2);
+    }
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    Connection::open(h.memory())
+        .unwrap()
+        .execute_batch(
+            "PRAGMA ignore_check_constraints=ON; UPDATE memory_cards SET trust='unknown' WHERE card_id='a';",
+        )
+        .unwrap();
+    assert_eq!(
+        submit(&h, ADMIN_TOKEN, vec![evidence_op("fleet", "a", rev(&a))])
+            .await
+            .body["tier"],
+        2
+    );
+}
+#[tokio::test]
+async fn newer_admin_edit_reclassifies_lower_tier_proposal_and_keeps_head() {
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![evidence_op("fleet", "a", rev(&a))]).await;
+    assert_eq!(opened.body["tier"], 0);
+    h.put(
+        ADMIN_TOKEN,
+        "fleet",
+        "a",
+        Some(rev(&a)),
+        "Human correction. ^c-abcdef",
+    )
+    .await;
+    let before = card(&h, "fleet", "a").await;
+    let r = decide(&h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
+    assert_eq!(r.body["tier"], 2);
+    assert_eq!(r.body["state"], "stale");
+    assert_eq!(card(&h, "fleet", "a").await, before);
+}
+#[tokio::test]
+async fn changed_policy_requires_fresh_decision_bound_to_current_digest() {
+    for decision in ["accept", "reject"] {
+        let h = Hub::with(clean(), None);
+        let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+        let opened = submit(&h, ADMIN_TOKEN, vec![evidence_op("fleet", "a", rev(&a))]).await;
+        let request = json!({"action":"decide","proposal_id":opened.body["proposal_id"],"decision":decision,"base_epoch":h.epoch().await,"client_event_id":h.id()});
+        Connection::open(&h.hub).unwrap().execute_batch("INSERT INTO fleet_policy_revisions VALUES(2,'policy-digest-2'); UPDATE fleet_policy_meta SET current_revision=2;").unwrap();
+        let before = card(&h, "fleet", "a").await;
+        let first = h.call(ADMIN_TOKEN, request.clone()).await;
+        assert_eq!(first.body["decision_policy_digest"], "policy-digest-2");
+        if decision == "accept" {
+            assert_eq!(first.body["state"], "stale");
+            assert_eq!(card(&h, "fleet", "a").await, before);
+            assert_eq!(h.call(ADMIN_TOKEN, request).await, first);
+            let next = decide(&h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
+            assert_eq!(next.body["state"], "applied", "{next:?}");
+            assert_eq!(next.body["decision_policy_digest"], "policy-digest-2");
+        } else {
+            assert_eq!(first.body["state"], "rejected");
+        }
+        let db = Connection::open(h.memory()).unwrap();
+        let (digest, payload): (String, String) = db.query_row("SELECT policy_digest,payload FROM memory_events WHERE kind='proposal.decide' ORDER BY seq DESC LIMIT 1", [], |r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(digest, "policy-digest-2");
+        assert_eq!(
+            serde_json::from_str::<Json>(&payload).unwrap()["decision_policy_digest"],
+            "policy-digest-2"
+        );
+    }
+}
+
+#[tokio::test]
+async fn exact_merges_include_other_card_scope_and_trust_in_classification() {
+    for (scope, imported, want) in [
+        ("fleet", false, 0),
+        ("repo:other", false, 2),
+        ("fleet", true, 2),
+    ] {
+        let h = Hub::with(clean(), None);
+        let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+        let b = h.put(ADMIN_TOKEN, scope, "b", None, OLD).await;
+        if imported {
+            Connection::open(h.memory())
+                .unwrap()
+                .execute(
+                    "UPDATE memory_cards SET trust='imported' WHERE card_id='b'",
+                    [],
+                )
+                .unwrap();
+        }
+        let mut merge = op("fleet", "a", rev(&a));
+        merge["type"] = json!("merge_exact_duplicates");
+        merge.as_object_mut().unwrap().remove("text");
+        merge["other_card"] = json!({"scope":scope,"card_id":"b","base_revision":rev(&b)});
+        let opened = submit(&h, ADMIN_TOKEN, vec![merge]).await;
+        assert_eq!(opened.status, 201, "{opened:?}");
+        assert_eq!(opened.body["tier"], want);
+        assert_eq!(opened.body["state"], "pending");
+    }
+}
+#[tokio::test]
+async fn policy_removal_binds_decision_to_absence_instead_of_old_digest() {
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    Connection::open(&h.hub)
+        .unwrap()
+        .execute("DELETE FROM fleet_policy_meta", [])
+        .unwrap();
+    let r = decide(&h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
+    assert_eq!(r.body["state"], "stale");
+    assert!(r.body["decision_policy_digest"].is_null());
+    let digest: Option<String> = Connection::open(h.memory()).unwrap().query_row("SELECT policy_digest FROM memory_events WHERE kind='proposal.decide' ORDER BY seq DESC LIMIT 1", [], |r|r.get(0)).unwrap();
+    assert!(digest.is_none());
+}
+
+#[tokio::test]
+async fn claimed_higher_tiers_are_ignored_and_mixed_ops_take_highest_tier() {
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    for claimed in [json!(2), json!("unknown"), json!({"tier":0})] {
+        let mut evidence = evidence_op("fleet", "a", rev(&a));
+        evidence["tier"] = claimed.clone();
+        let r = h.call(ADMIN_TOKEN, json!({"action":"propose","tier":claimed,"ops":[evidence],"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
+        assert_eq!(r.status, 201, "{r:?}");
+        assert_eq!(r.body["tier"], 0);
+    }
+    for reverse in [false, true] {
+        let mut cosmetic = op("fleet", "a", rev(&a));
+        cosmetic["text"] = json!("Use  the focused gate.");
+        let mut ops = vec![cosmetic, evidence_op("fleet", "a", rev(&a))];
+        if reverse {
+            ops.reverse();
+        }
+        let r = submit(&h, ADMIN_TOKEN, ops).await;
+        assert_eq!(r.status, 201, "{r:?}");
+        assert_eq!(r.body["tier"], 1);
+    }
+}
