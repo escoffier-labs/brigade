@@ -65,7 +65,7 @@ fn invalid(reason: &str) -> Reply {
 fn missing() -> Reply {
     error(404, "memory_proposal_not_found", "proposal not found")
 }
-fn load<T: ReadTx + ?Sized>(tx: &T, id: &str) -> rusqlite::Result<Option<Json>> {
+pub(super) fn load<T: ReadTx + ?Sized>(tx: &T, id: &str) -> rusqlite::Result<Option<Json>> {
     let rows = tx.query(
         "SELECT state,body,principal FROM memory_proposals WHERE proposal_id=?1",
         &[t(id)],
@@ -77,7 +77,7 @@ fn load<T: ReadTx + ?Sized>(tx: &T, id: &str) -> rusqlite::Result<Option<Json>> 
         body
     }))
 }
-fn cards(body: &Json) -> &[Json] {
+pub(super) fn cards(body: &Json) -> &[Json] {
     body["cards"].as_array().map(Vec::as_slice).unwrap_or(&[])
 }
 pub(super) fn string<'a>(v: &'a Json, key: &str) -> &'a str {
@@ -90,7 +90,7 @@ fn denied(right: &str) -> Reply {
         &format!("this credential needs read and {right} grants on every target scope"),
     )
 }
-fn scoped_right<T: ReadTx + ?Sized>(
+pub(super) fn scoped_right<T: ReadTx + ?Sized>(
     tx: &T,
     who: &auth::Credential,
     scope: &str,
@@ -117,10 +117,10 @@ pub fn authorize<T: ReadTx + ?Sized>(
     who: &auth::Credential,
     request: &Json,
 ) -> rusqlite::Result<Option<Reply>> {
-    let right = if request["action"] == "propose" {
-        "reflect"
-    } else {
-        "review"
+    let right = match request["action"].as_str() {
+        Some("propose") => "reflect",
+        Some("preflight") => "read",
+        _ => "review",
     };
     if request["action"] == "propose" {
         if let Some(ops) = request["ops"].as_array() {
@@ -146,7 +146,7 @@ pub fn authorize<T: ReadTx + ?Sized>(
     }
     Ok(None)
 }
-fn op_schema(op: &Json) -> Result<(), &'static str> {
+pub(super) fn op_schema(op: &Json) -> Result<(), &'static str> {
     let map = op.as_object().ok_or("op must be an object")?;
     let extras: &[&str] = match string(op, "type") {
         "replace_block" | "add_previously" => &["text"],
@@ -234,8 +234,10 @@ fn snapshot<T: ReadTx + ?Sized>(tx: &T, op: &Json) -> rusqlite::Result<Result<Js
         return Ok(Err("card base revision is not the live head".into()));
     }
     let text = bytes(tx, &h.hash)?;
+    let rows = tx.query("SELECT scan_state FROM memory_card_revisions WHERE scope=?1 AND card_id=?2 AND revision=?3", &[t(scope),t(id),Value::Integer(h.revision)])?;
+    let scan = rows.first().map(|r| s(&r[0]));
     Ok(Ok(
-        json!({"scope":scope,"card_id":id,"base_revision":h.revision,"before_hash":h.hash,"before_text":text,"before_trust":h.trust,"before_state":h.state,"after_text":text,"after_state":"live","pins":[]}),
+        json!({"scope":scope,"card_id":id,"base_revision":h.revision,"before_hash":h.hash,"before_text":text,"before_trust":h.trust,"before_state":h.state,"before_scan":scan,"after_text":text,"after_state":"live","pins":[]}),
     ))
 }
 fn card_diff(card: &Json) -> String {
@@ -440,7 +442,10 @@ pub fn prepare<T: ReadTx + ?Sized>(
     };
     Ok(Command { request, draft })
 }
-fn stale_reason<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<Option<&'static str>> {
+pub(super) fn stale_reason<T: ReadTx + ?Sized>(
+    tx: &T,
+    body: &Json,
+) -> rusqlite::Result<Option<&'static str>> {
     if string(body, "base_epoch") != ops::epoch(tx)? {
         return Ok(Some("memory_epoch_changed"));
     }
@@ -499,7 +504,7 @@ fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::R
 fn reply(body: &Json, status: u16) -> Reply {
     Reply::new(
         status,
-        json!({"proposal_id":body["proposal_id"],"state":body["state"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"rules":body["rules"],"log_epoch":body["base_epoch"]}),
+        json!({"proposal_id":body["proposal_id"],"state":body["state"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"rules":body["rules"],"preflight":body["preflight"],"log_epoch":body["base_epoch"]}),
     )
 }
 fn update(tx: &dyn WriteTx, body: &Json, p: &Prepared) -> rusqlite::Result<()> {
@@ -528,11 +533,18 @@ fn open(
     body["decision_policy_revision"] = Json::Null;
     body["decision_policy_digest"] = Json::Null;
     body["tier"] = json!(super::proposal_tiers::classify(tx, &body, scanner)?);
+    body["opened_tier"] = body["tier"].clone();
     if body["state"].is_null() {
         body["state"] = json!("pending");
     }
     body["policy_revision"] = json!(authority.policy.as_ref().map(|a| a.0));
     body["policy_digest"] = json!(authority.policy.as_ref().map(|a| &a.1));
+    if !body["rollback_of"].is_null() {
+        for card in body["cards"].as_array_mut().unwrap() {
+            let rows = tx.query("SELECT scan_state FROM memory_card_revisions WHERE scope=?1 AND card_id=?2 AND revision=?3", &[t(string(card,"scope")),t(string(card,"card_id")),Value::Integer(card["base_revision"].as_i64().unwrap_or(0))])?;
+            card["before_scan"] = json!(rows.first().map(|r| s(&r[0])));
+        }
+    }
     // The blob table owns card bytes. Proposal rows retain pins and diff but
     // never publish either through the event stream.
     for card in cards(&body) {
@@ -553,6 +565,7 @@ fn apply_cards(
     tx: &dyn WriteTx,
     p: &Prepared,
     body: &mut Json,
+    authority: &Authority,
     scanner: &dyn Scanner,
 ) -> rusqlite::Result<Option<Reply>> {
     for card in cards(body) {
@@ -563,9 +576,35 @@ fn apply_cards(
     if let Some(r) = self_review(p, body) {
         return Ok(Some(r));
     }
+    // S19e must replace this guard deliberately. A low tier, policy document,
+    // or a preflight result is never an instruction to apply.
+    if !matches!(&p.action, ops::Action::Proposal(cmd) if cmd.name() == "decide" && cmd.request["decision"] == "accept")
+    {
+        return Ok(Some(error(
+            403,
+            "memory_review_required",
+            "an explicit reviewer decision is required",
+        )));
+    }
+    body["tier"] = json!(super::proposal_tiers::classify(tx, body, scanner)?);
+    // Keep diagnostics before blocker returns. Reusing the later apply-loop
+    // scans would move scan work before those checks or need a second report path.
+    body["preflight"] = super::preflight::evaluate(tx, body, authority, scanner, p.now_ms)?;
     body["rules"] = json!([]);
+    if body["policy_revision"] != json!(authority.policy.as_ref().map(|a| a.0))
+        || body["policy_digest"] != json!(authority.policy.as_ref().map(|a| &a.1))
+    {
+        body["state"] = json!("stale");
+        body["reason"] = json!("policy_changed");
+        return Ok(None);
+    }
     if let Some(reason) = stale_reason(tx, body)? {
         body["state"] = json!("stale");
+        body["reason"] = json!(reason);
+        return Ok(None);
+    }
+    if let Some(reason) = super::preflight::input_blocker(tx, body)? {
+        body["state"] = json!("held");
         body["reason"] = json!(reason);
         return Ok(None);
     }
@@ -801,7 +840,7 @@ pub fn run(
     {
         body["state"] = json!("stale");
         body["reason"] = json!("policy_changed");
-    } else if let Some(r) = apply_cards(tx, p, &mut body, scanner)? {
+    } else if let Some(r) = apply_cards(tx, p, &mut body, authority, scanner)? {
         return Ok(r);
     }
     body["decision"] = cmd.request["decision"].clone();
@@ -814,6 +853,57 @@ pub fn run(
 mod tests {
     use super::super::{ops::Action, tests::*};
     use super::*;
+    #[tokio::test]
+    async fn tier1_mutation_guard_requires_explicit_decide_at_apply_boundary() {
+        let h = Hub::with(super::super::proposal_tests::clean(), None);
+        let a = h
+            .put(
+                ADMIN_TOKEN,
+                "fleet",
+                "a",
+                None,
+                super::super::proposal_tests::OLD,
+            )
+            .await;
+        let mut operation = super::super::proposal_tests::op("fleet", "a", rev(&a));
+        operation["text"] = json!("Use  the focused gate.");
+        let opened = super::super::proposal_tests::submit(&h, ADMIN_TOKEN, vec![operation]).await;
+        assert_eq!(opened.body["tier"], 1);
+        let db = rusqlite::Connection::open(h.memory()).unwrap();
+        let tx = crate::writer::worker::Tx(&db);
+        let mut body = load(&tx, opened.body["proposal_id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        // A mutant that omits the explicit-decision guard would apply this
+        // cosmetic Tier 1 edit with no calibration and no reviewed decision.
+        let p = Prepared {
+            credential: auth::Credential::Admin,
+            action: Action::Proposal(Command {
+                request: json!({"action":"propose"}),
+                draft: Ok(body.clone()),
+            }),
+            client_event_id: h.id(),
+            request_digest: String::new(),
+            now_ms: h.now(),
+        };
+        let r = apply_cards(
+            &tx,
+            &p,
+            &mut body,
+            &Authority::read(&crate::writer::worker::Tx(
+                &rusqlite::Connection::open(&h.hub).unwrap(),
+            ))
+            .unwrap(),
+            super::super::proposal_tests::clean().as_ref(),
+        )
+        .unwrap();
+        assert_eq!(r.as_ref().map(|r| r.status), Some(403));
+        assert_eq!(body["state"], "pending");
+        assert_eq!(
+            ops::head(&tx, "fleet", "a").unwrap().unwrap().revision,
+            rev(&a)
+        );
+    }
     #[tokio::test]
     async fn apply_boundary_requires_read_and_review_on_each_target_scope() {
         for scope in ["repo:restricted", "collection:notes"] {
@@ -865,6 +955,7 @@ mod tests {
                     &tx,
                     &p,
                     &mut body,
+                    &Authority::default(),
                     &Fixed(Scan::Clean {
                         ruleset: "test-v7".into(),
                     }),

@@ -136,6 +136,30 @@ pub struct Prepared {
 #[derive(Clone, Debug, Default)]
 pub struct Authority {
     pub policy: Option<(i64, String)>,
+    pub policy_document: serde_json::Value,
+}
+
+impl Authority {
+    /// Called under the hub authority lock by the writer. Diagnostics use the
+    /// same read, without acquiring a write lock or trusting caller policy.
+    pub fn read<T: ReadTx + ?Sized>(tx: &T) -> rusqlite::Result<Self> {
+        let rows = tx.query(
+            "SELECT m.current_revision,r.digest,r.document FROM fleet_policy_meta m JOIN fleet_policy_revisions r ON r.revision=m.current_revision WHERE m.singleton=1",
+            &[],
+        )?;
+        match rows.first().map(|r| (&r[0], &r[1], &r[2])) {
+            None => Ok(Self::default()),
+            Some((Value::Integer(rev), Value::Text(digest), Value::Text(document))) => {
+                let document =
+                    serde_json::from_str(document).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                Ok(Self {
+                    policy: Some((*rev, digest.clone())),
+                    policy_document: document,
+                })
+            }
+            _ => Err(rusqlite::Error::InvalidQuery),
+        }
+    }
 }
 
 pub fn error(status: u16, code: &str, message: &str) -> Reply {

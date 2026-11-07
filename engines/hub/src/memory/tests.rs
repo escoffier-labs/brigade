@@ -38,10 +38,10 @@ pub(super) fn hub_fixture(dir: &Path) -> PathBuf {
         "PRAGMA journal_mode=WAL;
          CREATE TABLE nodes(node_id TEXT PRIMARY KEY, token_sha256 TEXT NOT NULL UNIQUE, label TEXT, created_at TEXT NOT NULL, revoked_at TEXT);
          CREATE TABLE fleet_message_principals(principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT);
-         CREATE TABLE fleet_policy_revisions(revision INTEGER PRIMARY KEY, digest TEXT NOT NULL);
+         CREATE TABLE fleet_policy_revisions(revision INTEGER PRIMARY KEY, digest TEXT NOT NULL, document TEXT NOT NULL DEFAULT '{}');
          CREATE TABLE fleet_policy_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1), current_revision INTEGER NOT NULL);
          CREATE TABLE claims_probe(id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT);
-         INSERT INTO fleet_policy_revisions VALUES(1,'policy-digest-1');
+         INSERT INTO fleet_policy_revisions(revision,digest) VALUES(1,'policy-digest-1');
          INSERT INTO fleet_policy_meta VALUES(1,1);",
     )
     .unwrap();
@@ -814,10 +814,11 @@ async fn authentication_and_unknown_actions() {
         revoked.body,
         json!({"error":"unauthorized: node token revoked"})
     );
-    for action in LATER {
-        let r = h.call(ADMIN_TOKEN, json!({"action": action})).await;
-        assert_eq!(r.status, 501, "{action}");
-    }
+    let preflight = h.call(ADMIN_TOKEN, json!({"action":"preflight"})).await;
+    assert_eq!(
+        (preflight.status, code(&preflight)),
+        (400, "memory_request_invalid")
+    );
     let unknown = h.call(ADMIN_TOKEN, json!({"action":"drop_tables"})).await;
     assert_eq!(
         (unknown.status, code(&unknown)),
@@ -904,7 +905,7 @@ async fn revocation_at_every_step_boundary() {
 
 #[tokio::test]
 async fn policy_edit_at_every_step_boundary() {
-    const EDIT: &str = "BEGIN IMMEDIATE; INSERT INTO fleet_policy_revisions VALUES(2,'policy-digest-2'); UPDATE fleet_policy_meta SET current_revision=2; COMMIT";
+    const EDIT: &str = "BEGIN IMMEDIATE; INSERT INTO fleet_policy_revisions(revision,digest) VALUES(2,'policy-digest-2'); UPDATE fleet_policy_meta SET current_revision=2; COMMIT";
     for step in STEPS {
         let state: Injected = Arc::default();
         let mut h = Hub::new();

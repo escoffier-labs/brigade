@@ -14,8 +14,8 @@ use super::{
     index,
     ops::{self, Authority, Prepared},
 };
-use crate::writer::{Arbiter, Lane, ReadTx, WriteTx, worker};
-use rusqlite::{Connection, ErrorCode, types::Value};
+use crate::writer::{Arbiter, Lane, WriteTx, worker};
+use rusqlite::{Connection, ErrorCode};
 use std::{
     collections::VecDeque,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -140,22 +140,11 @@ impl HubLock {
         }
         // A policy that cannot be read under the lock refuses the command. No
         // policy row at all means no policy is configured.
-        let policy = if policy {
-            let rows = tx
-                .query(
-                    "SELECT m.current_revision,r.digest FROM fleet_policy_meta m JOIN fleet_policy_revisions r ON r.revision=m.current_revision WHERE m.singleton=1",
-                    &[],
-                )
-                .map_err(|_| Err(storage("policy-reread")))?;
-            match rows.first().map(|r| (&r[0], &r[1])) {
-                None => None,
-                Some((Value::Integer(rev), Value::Text(digest))) => Some((*rev, digest.clone())),
-                Some(_) => return Err(Err(storage("policy-reread"))),
-            }
+        if policy {
+            Authority::read(&tx).map_err(|_| Err(storage("policy-reread")))
         } else {
-            None
-        };
-        Ok(Authority { policy })
+            Ok(Authority::default())
+        }
     }
     /// Ends the read-only hub transaction. Nothing was written to roll back.
     fn release(&self) {
