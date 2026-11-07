@@ -322,7 +322,7 @@ async fn each_auto_apply_gate_independently_holds_without_card_or_vector_changes
         ("tier2", "tier_requires_review"),
         ("blast", "blast_cap_exceeded"),
     ] {
-        let (h, id) = ready().await;
+        let (h, mut id) = ready().await;
         let db = Connection::open(h.memory()).unwrap();
         match mutation {
             "policy_off" => change_policy(&h, "auto_apply", json!(false)),
@@ -407,16 +407,24 @@ async fn each_auto_apply_gate_independently_holds_without_card_or_vector_changes
                 )
                 .unwrap();
             }
-            "tier1" => mutate_body(&h, &id, |b| {
-                b["ops"][0]["type"] = json!("replace_block");
-                b["ops"][0].as_object_mut().unwrap().remove("evidence_ids");
-                b["ops"][0]["text"] = json!("Use  the scoped gate.");
-            }),
-            "tier2" => mutate_body(&h, &id, |b| {
-                b["ops"][0]["type"] = json!("replace_block");
-                b["ops"][0].as_object_mut().unwrap().remove("evidence_ids");
-                b["ops"][0]["text"] = json!("Change the claim.");
-            }),
+            "tier1" | "tier2" => {
+                let head = card(&h, "fleet", "a").await;
+                let mut edit = op("fleet", "a", head["revision"].as_i64().unwrap());
+                edit["expected_block_hash"] = proposal_blocks::pins(head["text"].as_str().unwrap())
+                    .into_iter()
+                    .find(|pin| pin["block_id"] == "c-abcdef")
+                    .unwrap()["hash"]
+                    .clone();
+                edit["text"] = json!(if mutation == "tier1" {
+                    "Use  the scoped gate."
+                } else {
+                    "Change the claim."
+                });
+                let opened=h.call(ADMIN_TOKEN,json!({"action":"propose","workspace_id":"workspace-a","base_epoch":h.epoch().await,"ops":[edit],"client_event_id":h.id()})).await;
+                assert_eq!(opened.status, 201);
+                assert_eq!(opened.body["tier"], if mutation == "tier1" { 1 } else { 2 });
+                id = opened.body["proposal_id"].clone();
+            }
             "blast" => {
                 db.execute_batch("INSERT INTO memory_cards SELECT scope,'b',revision,content_hash,state,trust,writer,writer_class,title,summary,tags,created_at,updated_at FROM memory_cards WHERE card_id='a'; INSERT INTO memory_card_revisions SELECT scope,'b',revision,content_hash,trust,state,writer,seq,proposal_id,scan_state,created_at FROM memory_card_revisions WHERE card_id='a';").unwrap();
                 mutate_body(&h, &id, |b| {
@@ -433,6 +441,9 @@ async fn each_auto_apply_gate_independently_holds_without_card_or_vector_changes
         let before = bytes_snapshot(&h);
         let r = apply_with_eval(&h, auto_request(&h, &id).await, true).await;
         assert_eq!(r.body["state"], "pending", "{mutation}");
+        if mutation == "tier1" {
+            assert_eq!(r.body["tier"], 1);
+        }
         let codes: Vec<_> = r.body["preflight"]["checks"]
             .as_array()
             .unwrap()
