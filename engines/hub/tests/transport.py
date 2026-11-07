@@ -262,6 +262,25 @@ class Transport(unittest.TestCase):
                     self.assertLess(max(sizes), 4 * 1024 * 1024, sizes)
                 self.assertEqual(request(port, "/ready")[0], 200)
 
+    def test_relative_interpreter_path_and_bare_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            interpreter = root / ".venv/bin/python"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_text(
+                '#!/bin/sh\n'
+                f'test "$BRIGADE_HUB_PYTHON" -ef {shlex.quote(str(interpreter))} || exit 78\n'
+                f'exec {shlex.quote(REAL_PYTHON)} "$@"\n'
+            )
+            interpreter.chmod(0o755)
+            for upstream in (None, 1):
+                with self.subTest(upstream=upstream):
+                    with front(upstream, work_dir=directory,
+                               env_overrides={"BRIGADE_HUB_PYTHON": "./.venv/bin/python"}) as (_, port):
+                        self.assertEqual(request(port, "/health")[0], 200)
+            with front(env_overrides={"BRIGADE_HUB_PYTHON": "python3"}) as (_, port):
+                self.assertEqual(request(port, "/health")[0], 200)
+
     def test_relative_environment_deck_config_and_cli_precedence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

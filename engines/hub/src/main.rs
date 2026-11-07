@@ -1731,6 +1731,22 @@ fn main() {
         {
             *value = startup_path(value, cwd.as_deref())?;
         }
+        if let Ok(value) = std::env::var("BRIGADE_HUB_PYTHON") {
+            // Bare names retain PATH lookup. Executable paths, including a
+            // literal tilde directory, keep their original cwd semantics.
+            if value.contains(std::path::MAIN_SEPARATOR) {
+                let interpreter = std::path::Path::new(&value);
+                let path = if interpreter.is_absolute() {
+                    interpreter.to_path_buf()
+                } else {
+                    cwd.as_ref()
+                        .ok_or("working directory is unavailable for a relative interpreter path")?
+                        .join(interpreter)
+                };
+                // SAFETY: main has not created the runtime or any threads.
+                unsafe { std::env::set_var("BRIGADE_HUB_PYTHON", path) };
+            }
+        }
         for name in [
             "BRIGADE_FLEET_DECK_CONFIG",
             "BRIGADE_FLEET_FINDINGS_KEY_FILE",

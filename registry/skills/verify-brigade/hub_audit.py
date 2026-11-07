@@ -1,6 +1,6 @@
 """Run the in-repo Python hub with a write audit on every SQLite connection.
 
-`python hub_audit.py [-m brigade] fleet serve ...` starts the Python hub the
+`python -I hub_audit.py [-m brigade] fleet serve ...` starts the Python hub the
 way `hub_clock.py` does, and adds what the S29 read-only audit needs:
 
 - Every `sqlite3.connect` gets an authorizer before its first statement. The
@@ -301,7 +301,7 @@ def main(argv: list[str]) -> int:
     spec = os.environ.get("HUB_AUDIT_MUTATE", "")
     if spec:
         mutate(spec, _db_path(argv), recorder)
-    recorder.emit("ready", argv=argv[:2])
+    recorder.emit("ready", argv=argv[:2], isolated=sys.flags.isolated)
     from brigade.cli import process_main
 
     sys.argv = ["brigade", *argv]
