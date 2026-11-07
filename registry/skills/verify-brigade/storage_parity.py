@@ -287,7 +287,7 @@ def launch(
         startup_timeout=startup_timeout,
         exited=lambda code, tail: ParityError(f"the {engine.name} hub exited with {code}: {tail}"),
         timed_out=lambda tail: ParityError(
-            f"the {engine.name} hub did not answer /health within {startup_timeout:g}s: {tail}"
+            f"the {engine.name} hub did not become ready within {startup_timeout:g}s: {tail}"
         ),
     )
 
@@ -543,6 +543,7 @@ def operator_reply(s: Seq, step: str, message_id: int, body: str, client_id: str
 def phase_one(s: Seq) -> None:
     """Registration, heartbeat, claims with fencing, old mail, a question, and paging snapshots."""
     x, admin = s.ctx, s.ctx.admin
+    body: dict[str, Any]
     for node, label in ((NODE_A, "parity node a"), (NODE_B, None), (NODE_C, None)):
         body = {"action": "add", "node_id": node, **({"label": label} if label else {})}
         added = s.call(f"nodes add {node}", "POST", "/nodes", status=200, body=body, token=admin)
