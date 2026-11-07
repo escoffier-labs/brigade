@@ -507,7 +507,7 @@ Authorization is checked again before a stored diff is returned.
 | Action | Request fields in addition to `action` and `client_event_id` | Target-scope grant |
 |---|---|---|
 | `propose` | `base_epoch`, `ops` | `read` and `reflect` on every addressed card, including `other_card` |
-| `decide` | `proposal_id`, `base_epoch`, `decision` (`accept` or `reject`) | `read` and `review` on every addressed card |
+| `decide` | `proposal_id`, `base_epoch`, `decision` (`accept` or `reject`), `expected_policy_digest` (required when re-deciding after a policy change) | `read` and `review` on every addressed card |
 | `rollback` | `proposal_id` of an applied proposal, `base_epoch` | `read` and `review` on every addressed card |
 
 The admin token holds these grants. A right on another scope does not open a
@@ -551,8 +551,80 @@ with the same current rules as `put`. Any invalid op refuses the whole request
 with `422 memory_proposal_invalid`, a top-level `reason` and indexed `ops`
 validation results. A malformed, empty or oversized ops packet has an empty
 `ops` result list. Nothing is stored. A valid submission returns `201` with `proposal_id`, `state: pending`,
-`diff`, `tier` and `log_epoch`. S19a conservatively holds every proposal at
-Tier 2 until S19b supplies classification.
+`diff`, `tier` and `log_epoch`. S19b computes the tier under the writer lock.
+Front matter JSON writes escape every shared reader line boundary as a
+Unicode escape. Lists round-trip without creating new metadata fields.
+For any Tier 0 or Tier 1 candidate, the classifier checks resulting front
+matter for reader boundary disagreements and requires unchanged bytes outside
+the fields its ops may change. Evidence append may change only `evidence`,
+duplicate merge may change `aliases` and `evidence`, and cosmetic replacement
+may change neither. Changed lists containing decoded line boundaries remain
+Tier 2 even when their serialized form stays escaped.
+
+A submitted `tier` on the request or any op is ignored. Op-level tier keys
+are stripped before the proposal body is stored. The same classifier
+runs again on every decision, using current heads and current scans.
+
+Scan-clean evidence appends and exact duplicate merges can be Tier 0 when
+all target cards share one scope and one known trust class. A duplicate merge
+also requires byte-identical front matter after excluding the `aliases` and
+`evidence` fields. A differing `status`, `expires`, `visibility` or any other
+field makes it Tier 2. Evidence strings remain unverified and do not count as proof. A replacement that only changes
+ASCII spaces in plain prose can be Tier 1. Other claim changes, including
+opposite polarity, removals, supersession and `previously` additions, stay
+Tier 2 because the classifier cannot prove their meaning safe. Compensation
+proposals are Tier 2. A proposal takes the highest tier of its ops.
+
+Flagged versions or op text, cross-scope targets, mixed trust, unknown trust,
+private or unavailable scans and any edit newer than the base revision force
+Tier 2. This includes newer human edits. A changed head still fails the
+compare-and-set and never applies. Tier 0 describes an edit only. Every tier
+waits for an explicit reviewer decision and there is no Tier 0 apply path.
+
+Fleet policy accepts an optional top-level `memory` object:
+
+```json
+{
+  "memory": {
+    "auto_apply": false,
+    "tier0_op_classes": ["append_evidence", "merge_exact_duplicates"],
+    "reflect_principals": ["agent:example"]
+  }
+}
+```
+
+Both lists default to empty. Unknown fields, invalid list entries and
+non-boolean `auto_apply` values are refused. Saving `auto_apply: true` returns
+422 and stores no revision. `tier0_op_classes` and `reflect_principals` are
+stored and digest-bound but are not enforced until S19c. Setting either list
+does not narrow Tier 0 classification today, even when the list is empty.
+Neither list grants apply authority in S19b. Omitting `memory` preserves
+older policy digests. When present, the normalized section
+is included in the whole fleet policy digest, so any memory policy edit
+changes that digest.
+
+Proposal bodies and replies carry `policy_revision` and `policy_digest`.
+Each decision also records `decision_policy_revision` and
+`decision_policy_digest` in its body, reply and event metadata. The event's
+`policy_digest` column binds the policy read under the authority lock, even
+for rejection or a stale or held decision. With no configured policy, both
+bindings are null. A changed policy stops acceptance with `state: stale` and
+`reason: policy_changed`, without changing cards. A fresh explicit `decide`
+can rebind that policy-stale proposal only when its `expected_policy_digest`
+field equals the current authority policy digest. This is required for both
+accept and reject on the policy-stale path. Missing or mismatched expectations
+return `409 memory_policy_digest_mismatch` and change nothing. The refusal
+includes the current `policy_revision` and `policy_digest`. With no configured
+policy, an explicit JSON null acknowledges its absence. A normal decision can
+omit the field. When supplied, it must match on that path too.
+Clients must set `expected_policy_digest` only from a policy digest they
+actually showed the reviewer. Never fill it by copying `policy_digest` from
+a 409 refusal.
+
+After this digest check, acceptance still rechecks all bases, pins, scans and
+grants, and forbids self-review. A moved head leaves the proposal stale with
+`memory_base_mismatch`. Replaying the first decision returns its original
+stale result. Other stale proposals still require a new proposal.
 
 An accepted decision checks all revisions and exact pins before changing any
 head. A stale base or changed policy produces `state: stale`. A blocked,

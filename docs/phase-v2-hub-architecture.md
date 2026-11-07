@@ -256,7 +256,7 @@ maintainer can decide.
 | D12 | Memory is pushed to agents. Hub-built packets and the tool responses agents already call (`fleet_digest`, `inbox_list`) carry the top memory hits. Session-start and stop hooks inject and capture. Cloud connectors need no new tools. | Connector test: a hosted assistant used Brigade memory on 4 of 10 prompts and gave a card-backed answer on 3 of 10. Two other connectors used it on 0 of 2 each. | Decided |
 | D13 | Grok Bot gets a read-mostly memory profile (`memory_search`, `memory_card`, `handoff_write`) and a separate inbox profile with sender allowlists. Grok Bot does X work only. | Small quota, and a cloud agent should not hold write or dispatch authority it does not need. The connectivity PR in flight ships the read-only part first. | Decided |
 | D14 | One owner per duty: the hub's owners charters (`brigade.fleet_owners.v1`) plus a findings ledger keyed by fingerprints (email Message-ID, canonical job URL) with one reservation per finding at a time. | Duplicate reports from several agents watching the same inboxes and feeds. The roadmap forbids a second task database. | Decided. Reservations proposed here |
-| D15 | The #1856 tier rules become tested invariants on hub memory: Tier 0 may auto-promote under policy, Tier 1 is review-only until a calibration record exists, Tier 2 is always review. A failed refresh never replaces a healthy card. | #1856 acceptance criteria. On main the tiers are not implemented yet: reflect candidates carry Tier 0 or Tier 2 only, with no Tier 1, calibration record, policy `memory` section or invariant tests. #2187 adds a diagnostic preflight. | Decided as direction. Built in S19a to S19e |
+| D15 | The #1856 tier rules become tested invariants on hub memory: Tier 0 may auto-promote under policy, Tier 1 is review-only until a calibration record exists, Tier 2 is always review. A failed refresh never replaces a healthy card. | #1856 acceptance criteria. Local reflect candidates carry Tier 0 or Tier 2 only. S19b adds hub classification and a digest-bound policy `memory` section. Calibration and automatic apply remain later slices. #2187 adds a diagnostic preflight. | Decided as direction. Built in S19a to S19e |
 | D16 | Guard scanning moves to a native PCRE2 engine with JIT, built in parallel. The hub links the same engine to scan memory writes, with a Unicode mode the hub needs (S18a). | About 24 MB/s against 4.3 MB/s for Python `re` on the same 20 default rules, with identical match counts. #2212 scans ASCII input and hands the rest to Python `re`, and the hub has no Python fallback. | Decided (engine), Proposed (hub use) |
 | D17 | Native engines are renamed `brigade-code-graph` and `brigade-evidence`, with the old names kept as shims for at most two releases. The hub binary is `brigade-hub` and has no legacy alias. The `brigade` command and Python package keep their names. | Naming convention set by the engine rename plan (#2213). | Decided |
 | D18 | No runtime dependency is added to the Python core. The Rust hub ships through the native-engine release path (#2148). | Zero-dependency core. | Decided |
@@ -2301,12 +2301,13 @@ vault refused 33% with the same mix, plus U+034F and U+200C from pasted text.
 
 ### Reflect, proposals and promotion on hub memory
 
-State on main: #1856 is open. Reflect candidates and proposal v2 ops exist
+Local state: #1856 is open. Reflect candidates and proposal v2 ops exist
 (`memory_reflect.py`, `memory_reflect_candidates.py`,
-`memory_proposal_v2_ops.py`). The only tier logic marks a candidate Tier 2
-when it is review-only and Tier 0 otherwise. There is no Tier 1, calibration
-record, policy `memory` section, blast cap, cooldown, `care install` entry or
-invariant test. #2187 adds `brigade memory reflect preflight`, a diagnostic
+`memory_proposal_v2_ops.py`). Local candidate logic marks Tier 2 when it is
+review-only and Tier 0 otherwise. S19a added reviewed Rust hub proposals.
+S19b adds the hub classifier, Tier 1, and the policy `memory` section with
+digest binding. Calibration records, blast caps, cooldowns and the
+`care install` entry remain later work. #2187 adds `brigade memory reflect preflight`, a diagnostic
 Tier 0 report (`brigade.memory-tier0-preflight.v1`) that always says
 `eligible=false`. S19a to S19e build the tier rules on hub memory in five PRs,
 and the local implementation of #1856 can reuse their tests.
@@ -2377,6 +2378,48 @@ deciding principal. The hub exposes no separate or automatic apply route.
 The Python client additions for submitting and deciding hub proposals remain a
 later slice. Its existing `memory hub proposals` commands manage local conflict
 proposals only.
+
+S19b classifies under the memory writer lock on open and again on decide.
+Submitted `tier` fields at the request and op levels are ignored. Op-level
+keys are stripped before storage. Scan-clean
+`append_evidence` and `merge_exact_duplicates` ops can be Tier 0 when all
+inputs have one scope and one known trust class. A duplicate merge also
+requires byte-identical front matter after excluding `aliases` and `evidence`.
+Any other differing metadata, including `status`, `expires` or `visibility`,
+forces Tier 2. Replacements that only change ASCII spaces in plain prose are Tier 1. Other claim changes stay
+Tier 2 because their meaning is not proven safe. Cross-scope or mixed-trust
+inputs, flagged content or op text, unknown trust, non-clean scans and any
+newer edit, including human edits, force Tier 2. Rollback compensations also
+stay Tier 2. The proposal takes the highest op tier. These tiers confer no
+apply authority, and every proposal still requires explicit review.
+
+The fleet policy's optional `memory` object accepts `auto_apply` (false only),
+`tier0_op_classes` (a bounded list of `append_evidence` or
+`merge_exact_duplicates`) and `reflect_principals` (a bounded list of
+principal ids). Both lists are stored and digest-bound but are not enforced
+until S19c. Setting them does not narrow Tier 0 classification today, even
+when a list is empty. The lists default to empty. Unknown fields and invalid
+values are refused. Saving auto-apply as true returns 422 without storing a policy revision. Omitting the section
+preserves older digests. A present section enters the canonical fleet policy
+digest, so edits invalidate pending acceptances.
+
+Each proposal binds `policy_revision` and `policy_digest`. Each explicit
+decision records `decision_policy_revision` and `decision_policy_digest` in
+its body, reply and event metadata, with the same digest in the event's
+`policy_digest` column. This uses the current policy under the authority lock
+for accept, reject, held and stale outcomes. No configured policy is a null
+binding. A policy change returns `stale` with `policy_changed` and changes no
+card. Re-deciding a policy-stale proposal requires `expected_policy_digest`
+equal to the current authority policy digest before rebinding, for both
+accept and reject. A missing or mismatched expectation returns
+`409 memory_policy_digest_mismatch` and changes nothing. The refusal includes
+the current `policy_revision` and `policy_digest`. With no configured policy,
+explicit JSON null acknowledges absence. Normal decisions may omit the field,
+but a supplied expectation must match there too. Acceptance then retries all
+checks, including self-review, target grants and moved heads. A moved head
+leaves the proposal stale with `memory_base_mismatch`. Idempotent replay
+retains the first stale response. Other stale reasons still require a new
+proposal. S19c owns preflight and the remaining gates, S19d owns scheduling, and S19e owns attestation and auto-apply.
 
 | Tier 0 gate | Source of truth on the hub |
 |---|---|
@@ -3424,10 +3467,10 @@ next number.
 | S18a | Guard engine UTF mode for hub use | #2212 | Parity with Python `re` on the guard's Unicode fixture, with the divergent rules listed. ASCII behavior unchanged | everything |
 | S18 | Content scanning on memory writes and the prompt-load scan | S13a, S18a | A blocking rule refuses with rule ids only. A warning stores `flagged`. Bidi and invisible characters block, and zero-width joiners flag. Role-override text flags and forces Tier 2. With the engine missing, writes store scan state `pending` and every trust raise and push is refused. The prompt-load scan replaces a hit with a placeholder. Amended 2026-11-05: private findings store `private`, load into local prompts, and are refused on every connector path with `memory_content_private`. U+034F moved from block to private and U+200C from flag to private. Both are stripped from rendered prompt recall, and stored bytes keep them | S13b, S14 |
 | S19a | Proposals on hub memory: `propose` with dry-run validation, `decide`, `rollback`, pinned block checks, all-card atomic apply | S13a, S18 | Invalid proposals are refused at submit with a reason per op. A block changed after `propose` fails closed. A multi-card proposal with one stale base changes no card. A rollback after an intervening edit ends `stale` | S14, S17 |
-| S19b | Tier classifier and the policy `memory` section with digest binding | S19a | Claimed tiers are ignored. Flagged, cross-scope, mixed-trust and newer-human-edit cases are Tier 2. A policy edit invalidates pending decisions | S16b, S20 |
+| S19b | Tier classifier and the policy `memory` section with digest binding | S19a | Implemented: claimed tiers are ignored. Flagged, cross-scope, mixed-trust, newer-human-edit and unproven cases are Tier 2. Each decision binds the current policy digest. A policy edit requires a fresh decision. Auto-apply stays disabled | S16b, S20 |
 | S19c | Tier 0 gate engine: the hub `preflight` action, blockers re-verified inside the apply transaction, the invariant tests, and auto-apply refused until S19e | S19b, #2187 | Every invariant in [Reflect](#reflect-proposals-and-promotion-on-hub-memory) that does not need attestation passes, including the Tier 1 mutation test and the test that auto-apply cannot be enabled. No op can target anything but a card block | S20, S26 |
 | S19d | Scheduled reflect on hub memory: the `memory-reflect` entry in `care install`, pause after repeated failures, `memory reflect rollback` against the hub | S19c, S14 | `memory reflect run --dry-run` writes nothing to the hub. Three failures in a row pause the timer until a success | S19e, S27 |
-| S19e | Evidence attestation and hub Tier 0 auto-apply under policy | S19c | Fabricated, unresolved and cross-workspace aliased evidence never counts. A revoked credential's attestations stop counting. Auto-apply runs only when every gate holds | S19d, S27 |
+| S19e | Evidence attestation and hub Tier 0 auto-apply under policy | S19c | Fabricated, unresolved and cross-workspace aliased evidence never counts. A revoked credential's attestations stop counting. Auto-apply runs only when every gate holds and must not raise trust on `agent-unreviewed` heads without a trust gate | S19d, S27 |
 | S20 | Card import: dry run, idempotent, keeps card ids, deduplicates by content hash, skips `visibility: private` | S14, S18 | A second import appends nothing. The dry run lists exactly what the real run appends. Imported versions need a clean scan and the `import` grant | S16b, S17, S19b |
 | S21 | `memory answer`: client-side rerank through a read-only seat | S17 | R2 report. Off by default unless R2 passes | after 0.31.0 |
 

@@ -61,7 +61,7 @@ OPENCODE_MUSE_SPARK_1_3_IDS = frozenset(
 )
 
 TOP_LEVEL_FIELDS = frozenset(
-    {"schema", "defaults", "machines", "seats", "consumers", "repositories", "routing", "owners", "pr_rules"}
+    {"schema", "defaults", "machines", "seats", "consumers", "repositories", "routing", "owners", "pr_rules", "memory"}
 )
 DEFAULT_TELEMETRY_TTL_SECONDS = 300
 DEFAULT_RESERVATION_TTL_SECONDS = 300
@@ -787,6 +787,28 @@ def parse_routing(raw: Any) -> dict[str, Any]:
     }
 
 
+def parse_memory(raw: Any) -> dict[str, Any]:
+    """Hub memory policy. Auto-apply remains unavailable until attestation."""
+    body = _mapping(raw, "memory")
+    _reject_unknown(body, ("auto_apply", "tier0_op_classes", "reflect_principals"), "memory")
+    if "auto_apply" in body and type(body["auto_apply"]) is not bool:
+        raise FleetPolicyError("fleet policy memory.auto_apply must be a boolean")
+    if body.get("auto_apply", False):
+        raise FleetPolicyError("fleet policy memory.auto_apply is unavailable until evidence attestation")
+    parsed: dict[str, Any] = {"auto_apply": False}
+    for field in ("tier0_op_classes", "reflect_principals"):
+        values = body.get(field, [])
+        if not isinstance(values, list) or len(values) > MAX_LIST_ITEMS:
+            raise FleetPolicyError(f"fleet policy memory.{field} must be a bounded list")
+        items = [_identity(value, f"memory.{field}") for value in values]
+        if field == "tier0_op_classes" and any(
+            item not in ("append_evidence", "merge_exact_duplicates") for item in items
+        ):
+            raise FleetPolicyError("fleet policy memory.tier0_op_classes contains an unsupported op class")
+        parsed[field] = sorted(set(items))
+    return parsed
+
+
 def parse_document(raw: Any) -> dict[str, Any]:
     """Validate and normalize a policy document. Idempotent on its own output."""
     body = _mapping(raw, "document")
@@ -834,6 +856,9 @@ def parse_document(raw: Any) -> dict[str, Any]:
     pr_rules = fleet_policy_pr_rules.parse_pr_rules(body.get("pr_rules"))
     if pr_rules:
         document["pr_rules"] = pr_rules
+    # Preserve immutable digests for revisions that predate the memory section.
+    if "memory" in body:
+        document["memory"] = parse_memory(body["memory"])
     rendered = canonical_json(document)
     if len(rendered.encode("ascii")) > MAX_DOCUMENT_BYTES:
         raise FleetPolicyError(f"fleet policy document must be at most {MAX_DOCUMENT_BYTES} bytes")

@@ -19,6 +19,7 @@ pub mod index;
 pub mod ops;
 mod proposal_blocks;
 mod proposal_metadata;
+mod proposal_tiers;
 pub mod proposals;
 mod pytables;
 pub mod scan;
@@ -843,13 +844,14 @@ impl Store {
         raw: &Json,
     ) -> Result<Prepared, Reply> {
         let allowed: &[&str] = match action {
-            "propose" => &["action", "base_epoch", "ops", "client_event_id"],
+            "propose" => &["action", "base_epoch", "ops", "client_event_id", "tier"],
             "decide" => &[
                 "action",
                 "proposal_id",
                 "base_epoch",
                 "decision",
                 "client_event_id",
+                "expected_policy_digest",
             ],
             "rollback" => &["action", "proposal_id", "base_epoch", "client_event_id"],
             "put" | "import" => &[

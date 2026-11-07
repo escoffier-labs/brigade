@@ -80,7 +80,7 @@ fn load<T: ReadTx + ?Sized>(tx: &T, id: &str) -> rusqlite::Result<Option<Json>> 
 fn cards(body: &Json) -> &[Json] {
     body["cards"].as_array().map(Vec::as_slice).unwrap_or(&[])
 }
-fn string<'a>(v: &'a Json, key: &str) -> &'a str {
+pub(super) fn string<'a>(v: &'a Json, key: &str) -> &'a str {
     v[key].as_str().unwrap_or("")
 }
 fn denied(right: &str) -> Reply {
@@ -165,7 +165,7 @@ fn op_schema(op: &Json) -> Result<(), &'static str> {
     ];
     if map
         .keys()
-        .any(|k| !common.contains(&k.as_str()) && !extras.contains(&k.as_str()))
+        .any(|k| k != "tier" && !common.contains(&k.as_str()) && !extras.contains(&k.as_str()))
         || common.iter().chain(extras).any(|k| !map.contains_key(*k))
     {
         return Err("invalid typed op fields");
@@ -407,6 +407,15 @@ fn submit<T: ReadTx + ?Sized>(
         card["after_hash"] = json!(ids::sha256_hex(string(card, "after_text").as_bytes()));
         diff += &card_diff(card);
     }
+    // Tier claims are accepted as input but never retained for later readers.
+    let ops: Vec<Json> = ops
+        .iter()
+        .cloned()
+        .map(|mut op| {
+            op.as_object_mut().unwrap().remove("tier");
+            op
+        })
+        .collect();
     Ok(Ok(
         json!({"base_epoch":epoch,"cards":by_card.into_values().collect::<Vec<_>>(),"ops":ops,"diff":diff,"tier":2,"rollback_of":null}),
     ))
@@ -456,7 +465,7 @@ fn stale_reason<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<Opt
     Ok(None)
 }
 fn metadata(body: &Json) -> Json {
-    json!({"proposal_id":body["proposal_id"],"rollback_of":body["rollback_of"],"tier":2,"state":body["state"],"decision":body["decision"],"reason":body["reason"],"rules":body["rules"],
+    json!({"proposal_id":body["proposal_id"],"rollback_of":body["rollback_of"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"state":body["state"],"decision":body["decision"],"reason":body["reason"],"rules":body["rules"],
         "cards":cards(body).iter().map(|c|json!({"scope":c["scope"],"card_id":c["card_id"],"base_revision":c["base_revision"],"before_hash":c["before_hash"],"after_hash":c["after_hash"],"before_state":c["before_state"],"after_state":c["after_state"],"pins":c["pins"].as_array().unwrap().iter().map(|p|json!({"block_id":p["block_id"],"hash":p["hash"]})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
 }
 fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::Result<()> {
@@ -476,7 +485,11 @@ fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::R
                 trust: None,
                 origin: None,
                 payload: metadata(&visible),
-                policy_digest: body["policy_digest"].as_str(),
+                policy_digest: if kind == "proposal.decide" {
+                    body["decision_policy_digest"].as_str()
+                } else {
+                    body["policy_digest"].as_str()
+                },
             },
         )?;
     }
@@ -486,7 +499,7 @@ fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::R
 fn reply(body: &Json, status: u16) -> Reply {
     Reply::new(
         status,
-        json!({"proposal_id":body["proposal_id"],"state":body["state"],"tier":2,"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"rules":body["rules"],"log_epoch":body["base_epoch"]}),
+        json!({"proposal_id":body["proposal_id"],"state":body["state"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"rules":body["rules"],"log_epoch":body["base_epoch"]}),
     )
 }
 fn update(tx: &dyn WriteTx, body: &Json, p: &Prepared) -> rusqlite::Result<()> {
@@ -507,10 +520,14 @@ fn open(
     mut body: Json,
     authority: &Authority,
     kind: &str,
+    scanner: &dyn Scanner,
 ) -> rusqlite::Result<Reply> {
     body["proposal_id"] = json!(ids::mint(p.now_ms));
     body["proposer"] = json!(p.credential.principal());
     body["rules"] = json!([]);
+    body["decision_policy_revision"] = Json::Null;
+    body["decision_policy_digest"] = Json::Null;
+    body["tier"] = json!(super::proposal_tiers::classify(tx, &body, scanner)?);
     if body["state"].is_null() {
         body["state"] = json!("pending");
     }
@@ -705,7 +722,7 @@ pub fn run(
                 return Ok(r);
             }
         }
-        return open(tx, p, body, authority, "proposal.open");
+        return open(tx, p, body, authority, "proposal.open", scanner);
     }
     body = match load(tx, string(&cmd.request, "proposal_id"))? {
         Some(b) => b,
@@ -738,30 +755,54 @@ pub fn run(
                 return Ok(r);
             }
         }
-        return open(tx, p, inverse, authority, "proposal.rollback");
+        return open(tx, p, inverse, authority, "proposal.rollback", scanner);
     }
-    if !matches!(string(&body, "state"), "pending" | "held") {
+    let redecide = body["state"] == "stale" && body["reason"] == "policy_changed";
+    if !matches!(string(&body, "state"), "pending" | "held") && !redecide {
         return Ok(error(
             409,
             "memory_proposal_state",
             "proposal already decided",
         ));
     }
-    if cmd.request["decision"] == "reject" {
-        body["state"] = json!("rejected");
-    } else {
+    if cmd.request["decision"] == "accept" {
         if let Some(r) = self_review(p, &body) {
             return Ok(r);
         }
-        let policy = authority.policy.as_ref();
-        if body["policy_revision"] != json!(policy.map(|a| a.0))
-            || body["policy_digest"] != json!(policy.map(|a| &a.1))
-        {
-            body["state"] = json!("stale");
-            body["reason"] = json!("policy_changed");
-        } else if let Some(r) = apply_cards(tx, p, &mut body, scanner)? {
-            return Ok(r);
-        }
+    }
+    let policy = authority.policy.as_ref();
+    let current_digest = json!(policy.map(|a| &a.1));
+    let expected = cmd.request.get("expected_policy_digest");
+    if (redecide && expected.is_none()) || expected.is_some_and(|v| *v != current_digest) {
+        let mut r = error(
+            409,
+            "memory_policy_digest_mismatch",
+            "expected_policy_digest must match the current policy and is required for a policy-stale decision",
+        );
+        r.body["policy_digest"] = current_digest;
+        r.body["policy_revision"] = json!(policy.map(|a| a.0));
+        return Ok(r);
+    }
+    body["tier"] = json!(super::proposal_tiers::classify(tx, &body, scanner)?);
+    body["decision_policy_revision"] = json!(policy.map(|a| a.0));
+    body["decision_policy_digest"] = json!(policy.map(|a| &a.1));
+    if redecide {
+        // A fresh explicit request must acknowledge the current policy digest.
+        // Idempotent replay has already returned before reaching this code.
+        body["policy_revision"] = body["decision_policy_revision"].clone();
+        body["policy_digest"] = body["decision_policy_digest"].clone();
+    }
+    if cmd.request["decision"] == "reject" {
+        body["state"] = json!("rejected");
+        body["reason"] = Json::Null;
+        body["rules"] = json!([]);
+    } else if body["policy_revision"] != json!(policy.map(|a| a.0))
+        || body["policy_digest"] != json!(policy.map(|a| &a.1))
+    {
+        body["state"] = json!("stale");
+        body["reason"] = json!("policy_changed");
+    } else if let Some(r) = apply_cards(tx, p, &mut body, scanner)? {
+        return Ok(r);
     }
     body["decision"] = cmd.request["decision"].clone();
     update(tx, &body, p)?;
