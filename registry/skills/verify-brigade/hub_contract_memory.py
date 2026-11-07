@@ -1,4 +1,4 @@
-"""`hub-contract --profile memory`: additive v1 drive cases for `POST /memory` (S13a, S13b).
+"""`hub-contract --profile memory`: additive v1 drive cases for `POST /memory` (S13a, S13b, S19a).
 
 Memory routes are new under contract v1 (D21), so every 4xx carries
 `{error, code}`. A hub without memory answers `404 {"error": "not found"}`,
@@ -8,6 +8,7 @@ hub-agnostic: no `brigade.*` imports.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 import time
@@ -302,19 +303,27 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         status=201 if scan_available else 503,
         shape=event("imported") if scan_available else {**err("memory_scan_unavailable"), "retryable": hc.Eq(True)},
     )
-    # The explicit JIT stack permits this nested path to reach its warning.
+    # The explicit JIT stack permits this nested path to reach its rule. A
+    # Windows home path is private since bundle v6: stored, and importable.
     if scan_available:
+        nested = "C:" + chr(92) + "Users" + chr(92) + "a/" * 1000 + "!"
         mem(
-            "memory-nested-path-flagged",
+            "memory-nested-path-private",
             {
                 **imported,
                 "action": "put",
                 "card_id": card("scan-failed"),
-                "text": "C:" + chr(92) + "Users" + chr(92) + "a/" * 1000 + "!",
+                "text": nested,
                 "client_event_id": event_id(),
             },
             status=201,
-            shape=event("flagged"),
+            shape=event("agent-unreviewed"),
+        )
+        mem(
+            "memory-import-private",
+            {**imported, "card_id": card("scan-private"), "text": nested, "client_event_id": event_id()},
+            status=201,
+            shape=event("imported"),
         )
         for index, text in enumerate(
             [
@@ -485,8 +494,9 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         shape={"recorded": hc.Eq(True)},
     )
     _search_cases(d, mem, put, card, suffix, node_token=node_token, agent_token=agent_token, repo_one=repo_one)
+    _proposal_cases(mem, put, card("proposal"), epoch, scan_available)
     # Bounds and actions later slices build.
-    mem("memory-action-later", {"action": "propose"}, status=501, shape=err("memory_action_unavailable"))
+    mem("memory-action-later", {"action": "preflight"}, status=501, shape=err("memory_action_unavailable"))
     mem("memory-action-unknown", {"action": "nope"}, status=400, shape=err("memory_request_invalid"))
     put(
         "memory-card-too-large",
@@ -514,6 +524,106 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         shape={"error": hc.Eq("unauthorized: node token revoked")},
     )
     return _result(d)
+
+
+def _proposal_cases(mem: Any, put: Any, card_id: str, epoch: str, scan_available: bool) -> None:
+    """Exercise reviewed proposals and compensations through the public route."""
+    original = "Contract claim. ^c-abcdef"
+    created = put(
+        "memory-proposal-source", "fleet", card_id, None, original, status=201, shape=event("agent-unreviewed")
+    )
+    revision = _revision(created)
+    opened = mem(
+        "memory-propose",
+        {
+            "action": "propose",
+            "base_epoch": epoch,
+            "client_event_id": event_id(),
+            "ops": [
+                {
+                    "type": "replace_block",
+                    "scope": "fleet",
+                    "card_id": card_id,
+                    "base_revision": revision,
+                    "block_id": "c-abcdef",
+                    "expected_block_hash": hashlib.sha256(original.encode()).hexdigest(),
+                    "text": "Reviewed contract claim.",
+                }
+            ],
+        },
+        status=201,
+        shape={"proposal_id": hc.NonEmpty(), "state": hc.Eq("pending"), "diff": hc.NonEmpty()},
+    )
+    mem(
+        "memory-propose-keeps-head",
+        {"action": "card", "scope": "fleet", "card_id": card_id},
+        shape={"card": {"revision": hc.Eq(revision), "text": hc.Eq(original + "\n")}},
+    )
+    decision = {
+        "action": "decide",
+        "proposal_id": opened.get("proposal_id", ""),
+        "base_epoch": epoch,
+        "decision": "accept",
+        "client_event_id": event_id(),
+    }
+    if not scan_available:
+        mem("memory-decide-scan-unavailable", decision, status=503, shape=err("memory_scan_unavailable"))
+        mem(
+            "memory-rollback-unapplied",
+            {
+                "action": "rollback",
+                "proposal_id": opened.get("proposal_id", ""),
+                "base_epoch": epoch,
+                "client_event_id": event_id(),
+            },
+            status=409,
+            shape=err("memory_proposal_state"),
+        )
+        return
+    # The admin is an explicit self-review exemption in this protocol drive.
+    mem("memory-decide", decision, shape={"state": hc.Eq("applied")})
+    reviewed = mem(
+        "memory-decide-head",
+        {"action": "card", "scope": "fleet", "card_id": card_id},
+        shape={"card": {"trust": hc.Eq("reviewed"), "revision": int}},
+    )
+    inverse = mem(
+        "memory-rollback",
+        {
+            "action": "rollback",
+            "proposal_id": opened.get("proposal_id", ""),
+            "base_epoch": epoch,
+            "client_event_id": event_id(),
+        },
+        status=201,
+        shape={"proposal_id": hc.NonEmpty(), "state": hc.Eq("pending")},
+    )
+    mem(
+        "memory-rollback-keeps-head",
+        {"action": "card", "scope": "fleet", "card_id": card_id},
+        shape={
+            "card": {
+                "revision": hc.Eq(hc._obj(reviewed.get("card")).get("revision")),
+                "text": hc.Eq(hc._obj(reviewed.get("card")).get("text")),
+            }
+        },
+    )
+    mem(
+        "memory-rollback-decide",
+        {
+            "action": "decide",
+            "proposal_id": inverse.get("proposal_id", ""),
+            "base_epoch": epoch,
+            "decision": "accept",
+            "client_event_id": event_id(),
+        },
+        shape={"state": hc.Eq("applied")},
+    )
+    mem(
+        "memory-rollback-restored",
+        {"action": "card", "scope": "fleet", "card_id": card_id},
+        shape={"card": {"text": hc.Eq(original + "\n"), "trust": hc.Eq("agent-unreviewed")}},
+    )
 
 
 def _search_cases(

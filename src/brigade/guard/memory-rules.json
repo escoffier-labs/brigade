@@ -1,9 +1,13 @@
 {
-  "version": "brigade-memory-scan.v5",
+  "version": "brigade-memory-scan.v7",
+  "nfkc": {
+    "unicode": "14.0.0",
+    "unassigned": "378-379,380-383,38B-38B,38D-38D,3A2-3A2,530-530,557-558,58B-58C,590-590,5C8-5CF,5EB-5EE,5F5-5FF,70E-70E,74B-74C,7B2-7BF,7FB-7FC,82E-82F,83F-83F,85C-85D,85F-85F,86B-86F,88F-88F,892-897,984-984,98D-98E,991-992,9A9-9A9,9B1-9B1,9B3-9B5,9BA-9BB,9C5-9C6,9C9-9CA,9CF-9D6,9D8-9DB,9DE-9DE,9E4-9E5,9FF-A00,A04-A04,A0B-A0E,A11-A12,A29-A29,A31-A31,A34-A34,A37-A37,A3A-A3B,A3D-A3D,A43-A46,A49-A4A,A4E-A50,A52-A58,A5D-A5D,A5F-A65,A77-A80,A84-A84,A8E-A8E,A92-A92,AA9-AA9,AB1-AB1,AB4-AB4,ABA-ABB,AC6-AC6,ACA-ACA,ACE-ACF,AD1-ADF,AE4-AE5,AF2-AF8,B00-B00,B04-B04,B0D-B0E,B11-B12,B29-B29,B31-B31,B34-B34,B3A-B3B,B45-B46,B49-B4A,B4E-B54,B58-B5B,B5E-B5E,B64-B65,B78-B81,B84-B84,B8B-B8D,B91-B91,B96-B98,B9B-B9B,B9D-B9D,BA0-BA2,BA5-BA7,BAB-BAD,BBA-BBD,BC3-BC5,BC9-BC9,BCE-BCF,BD1-BD6,BD8-BE5,BFB-BFF,C0D-C0D,C11-C11,C29-C29,C3A-C3B,C45-C45,C49-C49,C4E-C54,C57-C57,C5B-C5C,C5E-C5F,C64-C65,C70-C76,C8D-C8D,C91-C91,CA9-CA9,CB4-CB4,CBA-CBB,CC5-CC5,CC9-CC9,CCE-CD4,CD7-CDC,CDF-CDF,CE4-CE5,CF0-CF0,CF3-CFF,D0D-D0D,D11-D11,D45-D45,D49-D49,D50-D53,D64-D65,D80-D80,D84-D84,D97-D99,DB2-DB2,DBC-DBC,DBE-DBF,DC7-DC9,DCB-DCE,DD5-DD5,DD7-DD7,DE0-DE5,DF0-DF1,DF5-E00,E3B-E3E,E5C-E80,E83-E83,E85-E85,E8B-E8B,EA4-EA4,EA6-EA6,EBE-EBF,EC5-EC5,EC7-EC7,ECE-ECF,EDA-EDB,EE0-EFF,F48-F48,F6D-F70,F98-F98,FBD-FBD,FCD-FCD,FDB-FFF,10C6-10C6,10C8-10CC,10CE-10CF,1249-1249,124E-124F,1257-1257,1259-1259,125E-125F,1289-1289,128E-128F,12B1-12B1,12B6-12B7,12BF-12BF,12C1-12C1,12C6-12C7,12D7-12D7,1311-1311,1316-1317,135B-135C,137D-137F,139A-139F,13F6-13F7,13FE-13FF,169D-169F,16F9-16FF,1716-171E,1737-173F,1754-175F,176D-176D,1771-1771,1774-177F,17DE-17DF,17EA-17EF,17FA-17FF,181A-181F,1879-187F,18AB-18AF,18F6-18FF,191F-191F,192C-192F,193C-193F,1941-1943,196E-196F,1975-197F,19AC-19AF,19CA-19CF,19DB-19DD,1A1C-1A1D,1A5F-1A5F,1A7D-1A7E,1A8A-1A8F,1A9A-1A9F,1AAE-1AAF,1ACF-1AFF,1B4D-1B4F,1B7F-1B7F,1BF4-1BFB,1C38-1C3A,1C4A-1C4C,1C89-1C8F,1CBB-1CBC,1CC8-1CCF,1CFB-1CFF,1F16-1F17,1F1E-1F1F,1F46-1F47,1F4E-1F4F,1F58-1F58,1F5A-1F5A,1F5C-1F5C,1F5E-1F5E,1F7E-1F7F,1FB5-1FB5,1FC5-1FC5,1FD4-1FD5,1FDC-1FDC,1FF0-1FF1,1FF5-1FF5,1FFF-1FFF,2065-2065,2072-2073,208F-208F,209D-209F,20C1-20CF,20F1-20FF,218C-218F,2427-243F,244B-245F,2B74-2B75,2B96-2B96,2CF4-2CF8,2D26-2D26,2D28-2D2C,2D2E-2D2F,2D68-2D6E,2D71-2D7E,2D97-2D9F,2DA7-2DA7,2DAF-2DAF,2DB7-2DB7,2DBF-2DBF,2DC7-2DC7,2DCF-2DCF,2DD7-2DD7,2DDF-2DDF,2E5E-2E7F,2E9A-2E9A,2EF4-2EFF,2FD6-2FEF,2FFC-2FFF,3040-3040,3097-3098,3100-3104,3130-3130,318F-318F,31E4-31EF,321F-321F,A48D-A48F,A4C7-A4CF,A62C-A63F,A6F8-A6FF,A7CB-A7CF,A7D2-A7D2,A7D4-A7D4,A7DA-A7F1,A82D-A82F,A83A-A83F,A878-A87F,A8C6-A8CD,A8DA-A8DF,A954-A95E,A97D-A97F,A9CE-A9CE,A9DA-A9DD,A9FF-A9FF,AA37-AA3F,AA4E-AA4F,AA5A-AA5B,AAC3-AADA,AAF7-AB00,AB07-AB08,AB0F-AB10,AB17-AB1F,AB27-AB27,AB2F-AB2F,AB6C-AB6F,ABEE-ABEF,ABFA-ABFF,D7A4-D7AF,D7C7-D7CA,D7FC-D7FF,FA6E-FA6F,FADA-FAFF,FB07-FB12,FB18-FB1C,FB37-FB37,FB3D-FB3D,FB3F-FB3F,FB42-FB42,FB45-FB45,FBC3-FBD2,FD90-FD91,FDC8-FDCE,FDD0-FDEF,FE1A-FE1F,FE53-FE53,FE67-FE67,FE6C-FE6F,FE75-FE75,FEFD-FEFE,FF00-FF00,FFBF-FFC1,FFC8-FFC9,FFD0-FFD1,FFD8-FFD9,FFDD-FFDF,FFE7-FFE7,FFEF-FFF8,FFFE-FFFF,1000C-1000C,10027-10027,1003B-1003B,1003E-1003E,1004E-1004F,1005E-1007F,100FB-100FF,10103-10106,10134-10136,1018F-1018F,1019D-1019F,101A1-101CF,101FE-1027F,1029D-1029F,102D1-102DF,102FC-102FF,10324-1032C,1034B-1034F,1037B-1037F,1039E-1039E,103C4-103C7,103D6-103FF,1049E-1049F,104AA-104AF,104D4-104D7,104FC-104FF,10528-1052F,10564-1056E,1057B-1057B,1058B-1058B,10593-10593,10596-10596,105A2-105A2,105B2-105B2,105BA-105BA,105BD-105FF,10737-1073F,10756-1075F,10768-1077F,10786-10786,107B1-107B1,107BB-107FF,10806-10807,10809-10809,10836-10836,10839-1083B,1083D-1083E,10856-10856,1089F-108A6,108B0-108DF,108F3-108F3,108F6-108FA,1091C-1091E,1093A-1093E,10940-1097F,109B8-109BB,109D0-109D1,10A04-10A04,10A07-10A0B,10A14-10A14,10A18-10A18,10A36-10A37,10A3B-10A3E,10A49-10A4F,10A59-10A5F,10AA0-10ABF,10AE7-10AEA,10AF7-10AFF,10B36-10B38,10B56-10B57,10B73-10B77,10B92-10B98,10B9D-10BA8,10BB0-10BFF,10C49-10C7F,10CB3-10CBF,10CF3-10CF9,10D28-10D2F,10D3A-10E5F,10E7F-10E7F,10EAA-10EAA,10EAE-10EAF,10EB2-10EFF,10F28-10F2F,10F5A-10F6F,10F8A-10FAF,10FCC-10FDF,10FF7-10FFF,1104E-11051,11076-1107E,110C3-110CC,110CE-110CF,110E9-110EF,110FA-110FF,11135-11135,11148-1114F,11177-1117F,111E0-111E0,111F5-111FF,11212-11212,1123F-1127F,11287-11287,11289-11289,1128E-1128E,1129E-1129E,112AA-112AF,112EB-112EF,112FA-112FF,11304-11304,1130D-1130E,11311-11312,11329-11329,11331-11331,11334-11334,1133A-1133A,11345-11346,11349-1134A,1134E-1134F,11351-11356,11358-1135C,11364-11365,1136D-1136F,11375-113FF,1145C-1145C,11462-1147F,114C8-114CF,114DA-1157F,115B6-115B7,115DE-115FF,11645-1164F,1165A-1165F,1166D-1167F,116BA-116BF,116CA-116FF,1171B-1171C,1172C-1172F,11747-117FF,1183C-1189F,118F3-118FE,11907-11908,1190A-1190B,11914-11914,11917-11917,11936-11936,11939-1193A,11947-1194F,1195A-1199F,119A8-119A9,119D8-119D9,119E5-119FF,11A48-11A4F,11AA3-11AAF,11AF9-11BFF,11C09-11C09,11C37-11C37,11C46-11C4F,11C6D-11C6F,11C90-11C91,11CA8-11CA8,11CB7-11CFF,11D07-11D07,11D0A-11D0A,11D37-11D39,11D3B-11D3B,11D3E-11D3E,11D48-11D4F,11D5A-11D5F,11D66-11D66,11D69-11D69,11D8F-11D8F,11D92-11D92,11D99-11D9F,11DAA-11EDF,11EF9-11FAF,11FB1-11FBF,11FF2-11FFE,1239A-123FF,1246F-1246F,12475-1247F,12544-12F8F,12FF3-12FFF,1342F-1342F,13439-143FF,14647-167FF,16A39-16A3F,16A5F-16A5F,16A6A-16A6D,16ABF-16ABF,16ACA-16ACF,16AEE-16AEF,16AF6-16AFF,16B46-16B4F,16B5A-16B5A,16B62-16B62,16B78-16B7C,16B90-16E3F,16E9B-16EFF,16F4B-16F4E,16F88-16F8E,16FA0-16FDF,16FE5-16FEF,16FF2-16FFF,187F8-187FF,18CD6-18CFF,18D09-1AFEF,1AFF4-1AFF4,1AFFC-1AFFC,1AFFF-1AFFF,1B123-1B14F,1B153-1B163,1B168-1B16F,1B2FC-1BBFF,1BC6B-1BC6F,1BC7D-1BC7F,1BC89-1BC8F,1BC9A-1BC9B,1BCA4-1CEFF,1CF2E-1CF2F,1CF47-1CF4F,1CFC4-1CFFF,1D0F6-1D0FF,1D127-1D128,1D1EB-1D1FF,1D246-1D2DF,1D2F4-1D2FF,1D357-1D35F,1D379-1D3FF,1D455-1D455,1D49D-1D49D,1D4A0-1D4A1,1D4A3-1D4A4,1D4A7-1D4A8,1D4AD-1D4AD,1D4BA-1D4BA,1D4BC-1D4BC,1D4C4-1D4C4,1D506-1D506,1D50B-1D50C,1D515-1D515,1D51D-1D51D,1D53A-1D53A,1D53F-1D53F,1D545-1D545,1D547-1D549,1D551-1D551,1D6A6-1D6A7,1D7CC-1D7CD,1DA8C-1DA9A,1DAA0-1DAA0,1DAB0-1DEFF,1DF1F-1DFFF,1E007-1E007,1E019-1E01A,1E022-1E022,1E025-1E025,1E02B-1E0FF,1E12D-1E12F,1E13E-1E13F,1E14A-1E14D,1E150-1E28F,1E2AF-1E2BF,1E2FA-1E2FE,1E300-1E7DF,1E7E7-1E7E7,1E7EC-1E7EC,1E7EF-1E7EF,1E7FF-1E7FF,1E8C5-1E8C6,1E8D7-1E8FF,1E94C-1E94F,1E95A-1E95D,1E960-1EC70,1ECB5-1ED00,1ED3E-1EDFF,1EE04-1EE04,1EE20-1EE20,1EE23-1EE23,1EE25-1EE26,1EE28-1EE28,1EE33-1EE33,1EE38-1EE38,1EE3A-1EE3A,1EE3C-1EE41,1EE43-1EE46,1EE48-1EE48,1EE4A-1EE4A,1EE4C-1EE4C,1EE50-1EE50,1EE53-1EE53,1EE55-1EE56,1EE58-1EE58,1EE5A-1EE5A,1EE5C-1EE5C,1EE5E-1EE5E,1EE60-1EE60,1EE63-1EE63,1EE65-1EE66,1EE6B-1EE6B,1EE73-1EE73,1EE78-1EE78,1EE7D-1EE7D,1EE7F-1EE7F,1EE8A-1EE8A,1EE9C-1EEA0,1EEA4-1EEA4,1EEAA-1EEAA,1EEBC-1EEEF,1EEF2-1EFFF,1F02C-1F02F,1F094-1F09F,1F0AF-1F0B0,1F0C0-1F0C0,1F0D0-1F0D0,1F0F6-1F0FF,1F1AE-1F1E5,1F203-1F20F,1F23C-1F23F,1F249-1F24F,1F252-1F25F,1F266-1F2FF,1F6D8-1F6DC,1F6ED-1F6EF,1F6FD-1F6FF,1F774-1F77F,1F7D9-1F7DF,1F7EC-1F7EF,1F7F1-1F7FF,1F80C-1F80F,1F848-1F84F,1F85A-1F85F,1F888-1F88F,1F8AE-1F8AF,1F8B2-1F8FF,1FA54-1FA5F,1FA6E-1FA6F,1FA75-1FA77,1FA7D-1FA7F,1FA87-1FA8F,1FAAD-1FAAF,1FABB-1FABF,1FAC6-1FACF,1FADA-1FADF,1FAE8-1FAEF,1FAF7-1FAFF,1FB93-1FB93,1FBCB-1FBEF,1FBFA-1FFFF,2A6E0-2A6FF,2B739-2B73F,2B81E-2B81F,2CEA2-2CEAF,2EBE1-2F7FF,2FA1E-2FFFF,3134B-E0000,E0002-E001F,E0080-E00FF,E01F0-EFFFF,FFFFE-FFFFF,10FFFE-10FFFF"
+  },
   "injections": [
     {
       "id": "classic-injection",
-      "pattern": "(?i)(ignore (all )?(previous|prior) instructions|do not (tell|reveal)|hidden instruction|send (all )?(secrets|tokens)|exfiltrat|disable safety|bypass safety)",
+      "pattern": "(?i)(ignore (all )?(previous|prior) instructions|do not (tell|reveal)|hidden instruction|send (all )?(secrets|tokens)|(?:^|[.!?;:]\\s{0,8}+)(?:(?:[-*#>\"(<!`_]|\\[[ xX]?\\]|[0-9]{1,3}[.)]|[^\\x00-\\x7f\\s])\\s{0,8}+){0,8}(?:(?:if|when|once|after|before|while|as soon as|for|in|at|on|during|from|with)\\b[^\\n,.;:!?]{0,80}+,\\s{0,8}+(?:(?:[-*#>\"(<!`_]|\\[[ xX]?\\]|[0-9]{1,3}[.)]|[^\\x00-\\x7f\\s])\\s{0,8}+){0,8}|[\\w'-]{1,32}(?:\\s{1,8}[\\w'-]{1,32}){0,2},\\s{0,8}+(?:(?:[-*#>\"(<!`_]|\\[[ xX]?\\]|[0-9]{1,3}[.)]|[^\\x00-\\x7f\\s])\\s{0,8}+){0,8})?(?:(?:please|now|then|first|next|also|just|immediately|quietly|silently|secretly|carefully|kindly|and),?\\s{1,8}+){0,2}+(?:(?:start|begin|keep|continue|resume)\\s{1,8}exfiltrating|exfiltrate)\\b|\\b(?:you\\s{1,8}(?:must|should|will|need\\s{1,8}to|have\\s{1,8}to|are\\s{1,8}to)|(?:your|the)\\s{1,8}(?:(?:now|next|first|real|only)\\s{1,8})?(?:task|job|goal|mission)\\s{1,8}is\\s{1,8}to|(?:want|need)\\s{1,8}you\\s{1,8}to|kindly|go\\s{1,8}ahead\\s{1,8}and|it.?s\\s{1,8}(?:now\\s{1,8})?time\\s{1,8}to|(?:make|be)\\s{1,8}sure\\s{1,8}to|remember\\s{1,8}to|(?:are|is)\\s{1,8}required\\s{1,8}to)(?:\\s{1,8}(?:please|now|then|first|next|also|just|immediately|quietly|silently|secretly|carefully|kindly),?){0,2}\\s{1,8}(?:(?:start|begin|keep|continue|resume)\\s{1,8}exfiltrating|exfiltrate)\\b|^(?:(?:[-*#>\"(<!`_]|\\[[ xX]?\\]|[0-9]{1,3}[.)]|[^\\x00-\\x7f\\s])\\s{0,8}+){0,8}(?:(?:please|now|then|first|next|also|just|immediately|quietly|silently|secretly|carefully|kindly),?\\s{1,8}+){0,2}+(?:read|cat|dump|copy|collect|grab|steal|take|gather|extract|fetch|open|archive|compress|zip|upload|find|get)[ \\t]{1,8}+(?:[^ \\t\\r\\n]{1,60}+(?<![.!?;:,])[ \\t]{1,8}+){1,6}and[ \\t]{1,8}+(?:then[ \\t]{1,8}+)?(?:(?:start|begin|keep|continue|resume)\\s{1,8}exfiltrating|exfiltrate)\\b|\\bexfiltrat(?:e|ing)\\b[^\\n]{0,128}?\\bto\\s{1,8}(?:https?://|[a-z0-9._-]{1,64}@|(?:[a-z0-9-]{1,63}\\.){1,8}[a-z]{2,24}\\b|(?:my|our|this|that|the attacker'?s?) (?:server|endpoint|webhook|url|bucket|inbox)\\b)|disable safety|bypass safety)",
       "flags": 42,
       "action": "warn"
     },
@@ -61,79 +65,79 @@
       "id": "example-phone-555",
       "pattern": "(?:(?<!\\w)\\+1[\\s.-]?\\(?555\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)\\(555\\)\\s{0,256}\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)555[\\s.-]\\d{3}[\\s.-]\\d{4}(?!\\w))",
       "flags": 2,
-      "action": "warn"
+      "action": "private"
     },
     {
       "id": "example-email-reserved",
       "pattern": "\\b[A-Z0-9._%+-]{1,256}@(?:(?:[A-Z0-9-]{1,63}\\.){0,127}example\\.(?:com|org|net)|(?:[A-Z0-9-]{1,63}\\.){0,127}(?:test|invalid|localhost|local))\\b",
       "flags": 2,
-      "action": "warn"
+      "action": "private"
     },
     {
       "id": "ssh-private-target",
       "pattern": "\\b[\\w.-]{1,256}@(?:10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|172\\.(?:1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}|192\\.168\\.\\d{1,3}\\.\\d{1,3}|127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})(?::\\S{1,4096})?",
       "flags": 0,
-      "action": "block"
+      "action": "private"
     },
     {
       "id": "private-ipv4",
       "pattern": "\\b(?:10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|172\\.(?:1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}|192\\.168\\.\\d{1,3}\\.\\d{1,3})\\b",
       "flags": 0,
-      "action": "block"
+      "action": "private"
     },
     {
       "id": "loopback-ipv4",
       "pattern": "\\b127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b",
       "flags": 0,
-      "action": "block"
+      "action": "private"
     },
     {
       "id": "localhost-port",
       "pattern": "\\blocalhost:\\d{1,256}\\b",
       "flags": 2,
-      "action": "block"
+      "action": "private"
     },
     {
       "id": "localhost-bare",
       "pattern": "(?<![\\w.-])localhost(?![\\w.-])",
       "flags": 2,
-      "action": "block"
+      "action": "private"
     },
     {
       "id": "port-reference",
       "pattern": "\\bport\\s{1,256}\\d{4,5}\\b",
       "flags": 2,
-      "action": "block"
+      "action": "private"
     },
     {
       "id": "windows-home-path",
       "pattern": "(?<![\\w.-])(?:(?<=(?P<windows_quote>[\\\"'`]))|(?<![\\\"'`]))[A-Z]:(?:\\\\{1,2}|/)Users(?:\\\\{1,2}|/)(?(windows_quote)[A-Za-z0-9._-](?:(?!(?P=windows_quote))[^\\r\\n<>:|?*])*?(?=(?P=windows_quote))|(?:[A-Za-z0-9._@+-]+(?: +[A-Za-z0-9._@+-]+)*(?:\\\\{1,2}|/))*(?:[A-Za-z0-9_@+-]+(?:[ .]+[A-Za-z0-9_@+-]+)*?\\.[A-Za-z0-9]+(?![\\w-]|\\.[\\w-])|[A-Za-z0-9._@+-]+))",
       "flags": 2,
-      "action": "warn"
+      "action": "private"
     },
     {
       "id": "home-path",
       "pattern": "(?<![\\w.-])/(?:home|Users)/(?!\\.(?:agents|cache|claude|codebuddy|codex|commandcode|config|copilot|cursor|factory|gemini|grok|kimi|local|localcode|pi|tabby)(?:/|$|[^A-Za-z0-9._-]))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._@+-]+)*",
       "flags": 0,
-      "action": "warn"
+      "action": "private"
     },
     {
       "id": "root-path",
       "pattern": "(?<![\\w.-])(?:(?<=(?P<root_quote>[\\\"'`]))/root(?:/[A-Za-z0-9._@+ -]+)+(?=(?P=root_quote))|/root(?:/[A-Za-z0-9._@+-]+)+)",
       "flags": 0,
-      "action": "block"
+      "action": "private"
     },
     {
       "id": "email",
       "pattern": "\\b[A-Z0-9._%+-]{1,256}@[A-Z0-9.-]{1,256}\\.[A-Z]{2,63}\\b(?!:\\S)",
       "flags": 2,
-      "action": "warn"
+      "action": "private"
     },
     {
       "id": "us-phone",
       "pattern": "(?:(?<!\\w)\\+1[\\s.-]?\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)\\(\\d{3}\\)\\s{0,256}\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)\\d{3}[\\s.-]\\d{3}[\\s.-]\\d{4}(?!\\w)|\\b(?:phone|tel|call)[\\s:]{1,256}\\+?1?[\\s.-]?\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}(?!\\w))",
       "flags": 2,
-      "action": "warn"
+      "action": "private"
     },
     {
       "id": "jwt-token",
@@ -169,7 +173,7 @@
       "id": "private-hostname",
       "pattern": "(?<![\\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+(?:local|internal|lan|corp|home|intranet|localdomain)(?![\\w-]|\\.[\\w-]|\\()",
       "flags": 2,
-      "action": "block"
+      "action": "private"
     }
   ]
 }

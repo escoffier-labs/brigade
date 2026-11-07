@@ -201,8 +201,9 @@ def load_config(target: Path) -> MemoryCareConfig | None:
     if tomllib is None:
         raise ValueError("memory-care config requires Python tomllib support")
     try:
-        data = tomllib.loads(path.read_text())
-    except tomllib.TOMLDecodeError as exc:  # type: ignore[union-attr]
+        # utf-8-sig: never the locale encoding, and a leading byte-order mark is dropped.
+        data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:  # type: ignore[union-attr]
         raise ValueError(f"invalid memory-care config: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError("memory-care config must be a TOML object")

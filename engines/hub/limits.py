@@ -3,10 +3,12 @@ import os
 import resource
 import sys
 
+cwd = sys.argv.pop(1)
 required = int(sys.argv[1])
 _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
 if hard != resource.RLIM_INFINITY and hard < required:
     sys.exit(f"RLIMIT_NOFILE hard limit {hard} below required {required}")
 resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
 os.environ["BRIGADE_HUB_LIMIT_PID"] = str(os.getpid())
+os.chdir(cwd)
 os.execv(sys.argv[2], sys.argv[2:])

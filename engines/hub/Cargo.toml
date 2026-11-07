@@ -8,13 +8,15 @@ publish = false
 
 [features]
 default = ["memory-scan"]
-memory-scan = ["dep:brigade-guard"]
+memory-scan = ["dep:brigade-guard", "dep:unicode-normalization"]
 
 [dependencies]
 brigade-guard = { path = "../brigade-guard", optional = true }
+base64 = "=0.22.1"
 axum = "0.8"
 clap = { version = "=4.5.60", features = ["derive"] }
 futures-util = "0.3"
+httpdate = "=1.0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-rustls = { version = "=0.27.7", default-features = false, features = ["http1", "ring", "webpki-roots", "tls12"] }
@@ -24,6 +26,10 @@ sha2 = "0.10"
 subtle = "2.6"
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
+# NFKC for the memory scan. Exact pin, as the guard pins pcre2: its Unicode data is
+# part of the scan verdict (Unicode 18.0.0 in 0.1.26, released 2026-10-16). The scan
+# uses it only on code points Unicode 14.0.0 assigns. See docs/memory-operations.md.
+unicode-normalization = { version = "=0.1.26", optional = true }
 url = "=2.4.1"
 
 [dev-dependencies]

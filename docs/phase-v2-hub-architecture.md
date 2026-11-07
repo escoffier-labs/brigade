@@ -256,7 +256,7 @@ maintainer can decide.
 | D12 | Memory is pushed to agents. Hub-built packets and the tool responses agents already call (`fleet_digest`, `inbox_list`) carry the top memory hits. Session-start and stop hooks inject and capture. Cloud connectors need no new tools. | Connector test: a hosted assistant used Brigade memory on 4 of 10 prompts and gave a card-backed answer on 3 of 10. Two other connectors used it on 0 of 2 each. | Decided |
 | D13 | Grok Bot gets a read-mostly memory profile (`memory_search`, `memory_card`, `handoff_write`) and a separate inbox profile with sender allowlists. Grok Bot does X work only. | Small quota, and a cloud agent should not hold write or dispatch authority it does not need. The connectivity PR in flight ships the read-only part first. | Decided |
 | D14 | One owner per duty: the hub's owners charters (`brigade.fleet_owners.v1`) plus a findings ledger keyed by fingerprints (email Message-ID, canonical job URL) with one reservation per finding at a time. | Duplicate reports from several agents watching the same inboxes and feeds. The roadmap forbids a second task database. | Decided. Reservations proposed here |
-| D15 | The #1856 tier rules become tested invariants on hub memory: Tier 0 may auto-promote under policy, Tier 1 is review-only until a calibration record exists, Tier 2 is always review. A failed refresh never replaces a healthy card. | #1856 acceptance criteria. On main the tiers are not implemented yet: reflect candidates carry Tier 0 or Tier 2 only, with no Tier 1, calibration record, policy `memory` section or invariant tests. #2187 adds a diagnostic preflight. | Decided as direction. Built in S19a to S19e |
+| D15 | The #1856 tier rules become tested invariants on hub memory: Tier 0 may auto-promote under policy, Tier 1 is review-only until a calibration record exists, Tier 2 is always review. A failed refresh never replaces a healthy card. | #1856 acceptance criteria. Local reflect candidates carry Tier 0 or Tier 2 only. S19b adds hub classification and a digest-bound policy `memory` section. Calibration and automatic apply remain later slices. #2187 adds a diagnostic preflight. | Decided as direction. Built in S19a to S19e |
 | D16 | Guard scanning moves to a native PCRE2 engine with JIT, built in parallel. The hub links the same engine to scan memory writes, with a Unicode mode the hub needs (S18a). | About 24 MB/s against 4.3 MB/s for Python `re` on the same 20 default rules, with identical match counts. #2212 scans ASCII input and hands the rest to Python `re`, and the hub has no Python fallback. | Decided (engine), Proposed (hub use) |
 | D17 | Native engines are renamed `brigade-code-graph` and `brigade-evidence`, with the old names kept as shims for at most two releases. The hub binary is `brigade-hub` and has no legacy alias. The `brigade` command and Python package keep their names. | Naming convention set by the engine rename plan (#2213). | Decided |
 | D18 | No runtime dependency is added to the Python core. The Rust hub ships through the native-engine release path (#2148). | Zero-dependency core. | Decided |
@@ -265,7 +265,7 @@ maintainer can decide.
 | D21 | New routes (`/memory`, `/findings`, `/metrics`, `/ready`) are additive under v1 and each lands with contract drive cases in the same PR. Until v2 adds `GET /version`, a client discovers memory support by probing. `404 {"error": "not found"}` means this hub has no memory. A hub with memory configured but unavailable answers `503` with `reason: "memory-unavailable"`. | The v1 contract defines added routes as non-breaking. The signed hub identity has a closed capability list that the Python hub validates, so it cannot advertise memory under v1. A 404 for an outage would make clients drop `sync` writes. | Proposed |
 | D22 | A memory card is identified by `(scope, card_id)`. Every change to a card's head (text, retirement, revival, trust) creates a new `revision`, and compare-and-set uses `base_revision`. The content hash is for deduplication only. | Hash-only compare-and-set cannot see a trust change on identical bytes, a retire and revive, or a return to earlier bytes, and a card id alone collides across repositories. | Proposed |
 | D23 | Each memory commit runs while the memory writer holds the hub database write lock, after re-reading the caller's credential and the policy revision under that lock. The memory writer takes the memory lock first and the hub lock second, holds the hub lock only for prepared work and one memory commit, and shares capped, alternating turns with the hub writer. The memory writer never writes to the hub file. | Credentials and policy live in `fleet-hub.db`. No SQLite transaction spans two files atomically, so without a lock a revocation could commit between the check and the memory commit. | Proposed |
-| D24 | Only `decide`, the hub's policy apply and `import` raise a card's trust, and each needs a clean scan of that content. A `put` from any caller, admin included, stores `agent-unreviewed` or `flagged`. If the scanner is unavailable, trust raises and pushes fail closed. | Every node token can write the `fleet` scope. Without this rule a scan-clean write from any node would be pushed to every agent. | Proposed |
+| D24 | Only `decide`, the hub's policy apply and `import` raise a card's trust, and each needs a clean scan of that content. A `put` from any caller, admin included, stores `agent-unreviewed` or `flagged`. If the scanner is unavailable, trust raises and pushes fail closed. Amended 2026-11-05 (S18 private class): a private scan also permits a trust raise, and a `put` with only private findings stores scan state `private` as `agent-unreviewed`. The boundary holds the operator's machines and the model providers behind the operator's own local harnesses (Claude Code, Codex and the like), so local prompt recall may carry private text. The private class guards connector audiences: Grok Bot channels, connector relays, public scopes, non-loopback embedders, cloud agents outside the operator's machines, and any other path to people or services other than the operator's harness providers. Private text is never pushed and every connector path refuses it. | Every node token can write the `fleet` scope. Without this rule a scan-clean write from any node would be pushed to every agent. The amendment follows a read-only sample of 1,891 private cards under bundle v5: 546 were refused (229 blocked, 317 flagged), none for a real secret or real injection text, and network rules caused 212 of the 229 blocks. | Proposed |
 | D25 | Hub Tier 0 auto-apply stays off until the hub verifies evidence itself (S19e). Until then every hub proposal waits for review. | Local evidence ids cannot be resolved on the hub, and three submitted strings are not proof. | Decided (2026-11-04, Q6) |
 | D26 | The Rust front answers upstream failures with 502 or 504, never 503. `/health` keeps its v1 liveness meaning. A new `GET /ready` reports readiness. Proxied requests that may write are never retried. | The v1 claim client treats a 503 as an answer and maps any other HTTP error to `hub-unavailable` (`fleet_client.py`, the `claim` path). A dead upstream must look like an unreachable hub to that client, so it retries instead of reporting a refusal. | Proposed |
 | D27 | Hub work dependency edges and the ready view (#2210) are built on the Rust hub after the Worklore family port. The memory log compaction invariants from #2210 are recorded now. | #2210 asks for one build, in the Rust hub, with a Python version only if the Rust schedule slips. | Proposed (Q7) |
@@ -1580,8 +1580,8 @@ D24 makes trust a rule of the hub, not something a writer can ask for:
   by S19e).
 - `imported` comes only from the `import` action, by the admin token or a
   principal with the `import` grant.
-- Every trust raise requires a clean scan of that content hash under the
-  current rule set. If the scanner is unavailable, the raise is refused with
+- Every trust raise requires a clean or private scan of that content hash
+  under the current rule set (private since the 2026-11-05 amendment). If the scanner is unavailable, the raise is refused with
   `503 {"error": "scan unavailable", "code": "memory_scan_unavailable"}`.
 - Only `reviewed`, `policy-promoted` and `imported` versions are pushed to
   principals other than the writer. That was Q4 in the first draft, and both
@@ -1593,6 +1593,9 @@ writes the `fleet` scope and the `repo:` scopes, because nodes are operator
 machines. A message principal (a cloud agent) has no memory grant until the
 admin adds one with the `grant` action, and the S23 and S26 runbooks add the
 grants Dot, Duet and Grok Bot need. The admin token holds every grant.
+A `collection:<name>` scope (#2329) holds an imported note collection, such
+as an Obsidian vault. It is no node's default, the `*` and `repo:*` grants
+never match it, and only a grant on the exact scope opens it.
 
 ### Event schema
 
@@ -1605,7 +1608,7 @@ grants Dot, Duet and Grok Bot need. The admin token holds every grant.
 | `client_event_id` | text | required on every write action. See [Idempotency](#idempotency) |
 | `kind` | enum | `card.put`, `card.retire`, `card.trust`, `card.import`, `evidence.attach`, `handoff.submit`, `proposal.open`, `proposal.decide`, `proposal.apply`, `proposal.rollback`, `grant.change`, `recall.capture` |
 | `principal` | text | taken from the credential, never from the body |
-| `scope` | text | `fleet`, `repo:<repo_identity>`, or `principal:<name>` (visible to that principal and the admin only). Part of card identity |
+| `scope` | text | `fleet`, `repo:<repo_identity>`, `collection:<name>` (visible only through a grant naming it), or `principal:<name>` (visible to that principal and the admin only). Part of card identity |
 | `card_id` | text | `[a-z0-9][a-z0-9._-]{0,127}`, from the card's front matter `id` or its file stem |
 | `revision` | integer or null | the card's new revision (equal to `seq`) for events that change a head |
 | `base_revision` | integer or null | compare-and-set precondition. Null creates a card. A revival names the retirement's revision |
@@ -1624,7 +1627,7 @@ bumps `normalizer_version`, which is part of every derived key.
 
 Every write action carries `client_event_id`: `put`, `retire`, `import`,
 `handoff`, `propose`, `decide`, `rollback`, `capture`, `embed_lease`,
-`embed_submit` and `grant`. It is a time-ordered id: 48 bits of Unix
+`embed_submit`, `embed_failed`, `reindex` and `grant`. It is a time-ordered id: 48 bits of Unix
 milliseconds, then 80 random bits, written as 26 characters of Crockford
 base32. A malformed id gets `400` with `code: "memory_client_event_invalid"`.
 
@@ -1652,8 +1655,8 @@ case, which only card writes have. Per action:
 |---|---|---|
 | `put`, `retire`, `import` | the stored response | refused by the window. Compare-and-set refuses it too if the first copy moved the card |
 | `decide` | the stored response | refused by the window. A decided proposal also refuses a second decision |
-| `propose`, `rollback`, `handoff`, `capture`, `grant`, `embed_lease` | the stored response | refused by the window, which is the only guard |
-| `embed_submit` | the stored response | refused by the window and by the expired lease |
+| `propose`, `rollback`, `handoff`, `capture`, `grant` | the stored response | refused by the window, which is the only guard |
+| `embed_lease`, `embed_submit`, `embed_failed`, `reindex` | run again: no record is kept, because a lease reply carries card text that must not outlive the card's retirement. A second lease checks grants, card state and scans again. A second submit or failure finds no leased job | refused by the window |
 
 This is finite deduplication for honest retries and replays. A principal that
 forges a fresh id is sending a new request it could send anyway, under the
@@ -1697,7 +1700,7 @@ One route, `POST /memory`, with an `action` field, the same style as
 | `propose`, `decide`, `rollback` | reflect, review | proposal v2 body and `client_event_id` | `201` or `200` with the proposal state and its dry-run diff |
 | `preflight` | read | `proposal_id` | `200` with the `brigade.memory-tier0-preflight.v1` report (S19c). Writes nothing |
 | `capture` | read | `session_ref` (a client-side HMAC), `pushed`, `opened`, optional `outcome`, `client_event_id` | `200 {recorded: true}` |
-| `embed_lease`, `embed_submit` | embed | `embedder_id` and `max`, or `lease_id` and base64 float32 little-endian `vectors`, plus `client_event_id` | `200` |
+| `embed_lease`, `embed_submit`, `embed_failed` | embed | `embedder_id` and `max`, or `lease_id` and base64 float32 little-endian `vectors`, or `lease_id` and up to four `failures` of `content_hash` and `reason`, plus `client_event_id` | `200` |
 | `grant` | admin token | `principal`, `scope`, `rights`, `client_event_id` | `200 {grant}` |
 | `status` | read | none | `200 {cards, revisions, seq, indexed_seq, log_epoch, hub_time, scan: {available, ruleset_version}, embedders: [{id, coverage}], default_mode}` |
 
@@ -2225,7 +2228,7 @@ Write time covers every `card.put`, `import`, `handoff.submit` and
   U+2064), U+FEFF other than a leading byte order mark, and tag characters
   (U+E0000 to U+E007F) block the write. Zero-width joiner and non-joiner
   (U+200C, U+200D) store the version as `flagged`, because some scripts and
-  emoji sequences need them.
+  emoji sequences need them. The amendment below makes U+200C private.
 - Role-override text: a rule family for phrases that try to replace an
   agent's instructions, for example "ignore previous instructions", "you are
   now" or "new system prompt". A hit stores the version as `flagged` and
@@ -2247,14 +2250,74 @@ and on the hub for hub cards. A hit replaces the item with
 `{card_id, blocked: "<rule id>"}`. This catches text written before a rule
 existed, and local cards edited on disk.
 
+Amendment (2026-11-05, bundle `brigade-memory-scan.v6`): the private class.
+A read-only sample of 1,891 cards under bundle v5 refused 546 of them, 229
+blocked and 317 flagged. Not one was a real secret or real injection text, and
+the secret rules never fired. The network rules caused 212 of the 229 blocks,
+`root-path` 10 and `invisible-character` 7, all seven for U+FE0F after an emoji
+the scanner did not recognize. Flagged-only cards were mostly home paths
+(247), email addresses (58), Windows home paths (15) and phone numbers (3).
+All 13 `classic-injection` hits were false positives, most for the verb
+"exfiltrate" in threat reports and policy text. A 300-note sample of a second
+vault refused 33% with the same mix, plus U+034F and U+200C from pasted text.
+
+- A new verdict sits between clean and flagged: `private`, stored as scan
+  state `private`. It covers the seven network rules (`loopback-ipv4`,
+  `private-ipv4`, `port-reference`, `localhost-bare`, `localhost-port`,
+  `private-hostname`, `ssh-private-target`), `root-path`, `home-path`,
+  `windows-home-path`, `email`, `us-phone`, the reserved example forms
+  `example-email-reserved` and `example-phone-555`, U+034F and U+200C.
+- The boundary holds the operator's machines and the model providers behind
+  the operator's own local harnesses (Claude Code, Codex and the like). A
+  local prompt already sends the workspace to that provider. The private class
+  guards connector audiences: Grok Bot channels, connector relays, public
+  scopes, non-loopback embedders, cloud agents outside the operator's
+  machines, and any other path that reaches people or services other than the
+  operator's harness providers.
+- Private text is accepted on `put`, `import` and `handoff`, stored,
+  searchable, replicated to the operator's nodes and loaded into local
+  prompts. The push boundary excludes it, connector prompt loads replace it
+  with a placeholder carrying `code: "memory_content_private"`, and an
+  embedder may send it only to an endpoint whose pinned address is loopback
+  (reason `content-private` otherwise, checked before any lookup or
+  connection). In pull mode the hub's query endpoint
+  does not decide: private cards are leased to workers only with
+  `[memory.embedder] pull_private = true`, which asserts that every worker with
+  the embed grant runs on the operator's machines. Any warning or blocking
+  finding beside a private one keeps the stricter verdict.
+- `brigade run` composes no recall into a seat prompt. A local or fleet-node
+  Claude seat may get hook recall from the operator's hub under the
+  operator's own account, which is inside the boundary. Cloud seats
+  (`codex-cloud`, `cursor-cloud`) get only the composed prompt. They are
+  connector audiences, so any later recall path to them refuses private text.
+- The publication guard does not change. The repository guard, the pre-push
+  scanner and evidence redaction read `guard/rules.py`, where these rules keep
+  their severity. Only the hub memory bundle classifies them as private.
+- U+FE0E or U+FE0F after an Extended_Pictographic base, and U+FE0F in a
+  keycap sequence, scan clean. U+FE00 to U+FE0D still block.
+- U+034F moves from block to private and U+200C from flag to private. The
+  stored bytes and content hash keep both. The scan copies drop them before
+  rule matching, and local prompt recall strips them from the fields it
+  renders, so a mix of the two cannot carry hidden bits into a prompt.
+- `classic-injection` matches "exfiltrate" only as an order: at the start of
+  a line or sentence (after up to four markdown or quote marks and two
+  urgency words), after a comma that follows a short address or an if/when
+  clause, addressed to the agent, or with a destination,
+  including a bare domain. The pattern is also `PROMPT_INJECTION_RE`, so
+  `scan_untrusted` and the handoff injection lint follow it.
+- Schema version 3 rebuilds `memory_card_revisions`, `memory_scans` and
+  `memory_handoffs` so their CHECK constraints admit `private`. Version 2 is
+  S15b's embedding tables.
+
 ### Reflect, proposals and promotion on hub memory
 
-State on main: #1856 is open. Reflect candidates and proposal v2 ops exist
+Local state: #1856 is open. Reflect candidates and proposal v2 ops exist
 (`memory_reflect.py`, `memory_reflect_candidates.py`,
-`memory_proposal_v2_ops.py`). The only tier logic marks a candidate Tier 2
-when it is review-only and Tier 0 otherwise. There is no Tier 1, calibration
-record, policy `memory` section, blast cap, cooldown, `care install` entry or
-invariant test. #2187 adds `brigade memory reflect preflight`, a diagnostic
+`memory_proposal_v2_ops.py`). Local candidate logic marks Tier 2 when it is
+review-only and Tier 0 otherwise. S19a added reviewed Rust hub proposals.
+S19b adds the hub classifier, Tier 1, and the policy `memory` section with
+digest binding. Calibration records, blast caps, cooldowns and the
+`care install` entry remain later work. #2187 adds `brigade memory reflect preflight`, a diagnostic
 Tier 0 report (`brigade.memory-tier0-preflight.v1`) that always says
 `eligible=false`. S19a to S19e build the tier rules on hub memory in five PRs,
 and the local implementation of #1856 can reuse their tests.
@@ -2268,9 +2331,12 @@ Reflect stays a batch job (#1856). On a hub-backed workspace:
 2. Dry run before staging: `propose` validates every op against the base
    revision's bytes and computes the unified diff before anything is stored.
    An invalid proposal is refused at once with `422 memory_proposal_invalid`
-   and a reason per op, instead of waiting in a reviewer's queue. Ops that
-   cannot be validated are dropped, never guessed. A proposal with every op
-   dropped is `failed`, and no card changes.
+   and an indexed validation result for every op, instead of waiting in a
+   reviewer's queue. If any op is invalid, the hub refuses the whole proposal
+   and stores nothing. It never retains a valid subset. The reflect batch job
+   on the client drops ops it cannot validate before calling `propose`, never
+   guesses, and records its own job as `failed` when no ops remain. This
+   client-side filtering does not authorize partial acceptance on the hub.
 3. Pinning: each op records the exact bytes and SHA-256 of the block it
    targets, plus the card's base revision. At apply time the hub requires
    those exact bytes at that block id. Any change fails the op closed. The hub
@@ -2295,10 +2361,75 @@ Reflect stays a batch job (#1856). On a hub-backed workspace:
    negative outcomes attached after the proposal opened, cooldown and blast
    cap from proposal history, and the scan state of every resulting version.
    Any blocker marks the proposal `stale` or `held` and changes nothing.
-8. `memory reflect rollback` appends a compensating proposal that restores the
-   previous revision's content and trust. It goes through the same
-   compare-and-set, so it ends `stale` if the card moved since, and the
-   reviewer sees why.
+8. `rollback` requires read and review grants on every target scope, or admin. It
+   appends a compensating proposal containing the previous revision's content
+   and trust, pinned to the applied revision as its base. It changes no card
+   immediately, even for a reviewer. The compensation waits for a separate
+   `decide`, like every proposal until S19e (D25, Q6), and goes through the same
+   compare-and-set and block-pin checks at apply. If a card moved after the
+   original apply or while the compensation waited for review, the compensation
+   ends `stale` and changes no card. The reviewer sees the reason.
+
+S19a authorizes each target with `has_right` under the authority lock:
+`read` plus `reflect` for `propose`, and `read` plus `review` for `decide`,
+its atomic apply, and `rollback`. Reflect and review do not imply read.
+Missing read access gets the same `403 memory_grant_missing` before card
+validation or a stored diff can expose existence, revisions or content. Every card referenced by a cross-card op is a target, including
+retained source cards. An unscoped right never substitutes for a target-scope
+right. Collections require an exact grant, since neither `*` nor `repo:*`
+matches a `collection:` scope. Replays repeat these authorization checks before
+returning a stored diff. A non-admin proposer cannot accept their own proposal
+(`403 memory_self_review`). This also applies to compensations, whose proposer
+is the rollback requester. The admin token is exempt. The compensation is
+constructed from the writer-loaded applied body and opens with a null decision.
+Blocked and input-specific failed scans at decide persist `held` with a reason
+and no card changes. The new `memory_proposals.decided_by` column records the
+deciding principal. The hub exposes no separate or automatic apply route.
+The Python client additions for submitting and deciding hub proposals remain a
+later slice. Its existing `memory hub proposals` commands manage local conflict
+proposals only.
+
+S19b classifies under the memory writer lock on open and again on decide.
+Submitted `tier` fields at the request and op levels are ignored. Op-level
+keys are stripped before storage. Scan-clean
+`append_evidence` and `merge_exact_duplicates` ops can be Tier 0 when all
+inputs have one scope and one known trust class. A duplicate merge also
+requires byte-identical front matter after excluding `aliases` and `evidence`.
+Any other differing metadata, including `status`, `expires` or `visibility`,
+forces Tier 2. Replacements that only change ASCII spaces in plain prose are Tier 1. Other claim changes stay
+Tier 2 because their meaning is not proven safe. Cross-scope or mixed-trust
+inputs, flagged content or op text, unknown trust, non-clean scans and any
+newer edit, including human edits, force Tier 2. Rollback compensations also
+stay Tier 2. The proposal takes the highest op tier. These tiers confer no
+apply authority, and every proposal still requires explicit review.
+
+The fleet policy's optional `memory` object accepts `auto_apply` (false only),
+`tier0_op_classes` (a bounded list of `append_evidence` or
+`merge_exact_duplicates`) and `reflect_principals` (a bounded list of
+principal ids). Both lists are stored and digest-bound but are not enforced
+until S19c. Setting them does not narrow Tier 0 classification today, even
+when a list is empty. The lists default to empty. Unknown fields and invalid
+values are refused. Saving auto-apply as true returns 422 without storing a policy revision. Omitting the section
+preserves older digests. A present section enters the canonical fleet policy
+digest, so edits invalidate pending acceptances.
+
+Each proposal binds `policy_revision` and `policy_digest`. Each explicit
+decision records `decision_policy_revision` and `decision_policy_digest` in
+its body, reply and event metadata, with the same digest in the event's
+`policy_digest` column. This uses the current policy under the authority lock
+for accept, reject, held and stale outcomes. No configured policy is a null
+binding. A policy change returns `stale` with `policy_changed` and changes no
+card. Re-deciding a policy-stale proposal requires `expected_policy_digest`
+equal to the current authority policy digest before rebinding, for both
+accept and reject. A missing or mismatched expectation returns
+`409 memory_policy_digest_mismatch` and changes nothing. The refusal includes
+the current `policy_revision` and `policy_digest`. With no configured policy,
+explicit JSON null acknowledges absence. Normal decisions may omit the field,
+but a supplied expectation must match there too. Acceptance then retries all
+checks, including self-review, target grants and moved heads. A moved head
+leaves the proposal stale with `memory_base_mismatch`. Idempotent replay
+retains the first stale response. Other stale reasons still require a new
+proposal. S19c owns preflight and the remaining gates, S19d owns scheduling, and S19e owns attestation and auto-apply.
 
 | Tier 0 gate | Source of truth on the hub |
 |---|---|
@@ -3344,12 +3475,12 @@ next number.
 | S16b | Embedder default decision | S16a, S17, S6a. Verify: S31 | The rule in [Embedder benchmark and default](#embedder-benchmark-and-default) applied to S16a's numbers, S17's R1 per model and an S6a run with embedding active. The `remote` branch is measured from a throwaway hub at the reference allotment on the LXC hub host, never the production container, calling the workstation endpoint over the tailnet with a model loaded beside the embedder by other GPU work, a cold load and an eviction injected, and every query answered within the budget. The `local` GPU branch is measured on the dogfood hub inside its hub slice with a synthetic fan-out active, a model loaded beside the embedder, and 20 memory writes per second, recording authority-lock wait and residence (p99 and maximum) and claim and revocation commit p99 against the targets in [Authority across the two files](#authority-across-the-two-files). Setup's model list holds only models that passed R1, and BM25 mode's numbers are reported beside hybrid's. The default mode is `hybrid` only for a model that passed R1 | S19b, S20 |
 | S17 | Hybrid retrieval, lineage collapse and source demotion, the `hub-lexical` and `hub-hybrid` eval adapters, RRF weight tuning, and R1 runs per candidate model | S15 | R1 report attached. Collapse and demotion do not lower hit@5 or MRR on the public fixture. A superseded chain shows once, and an unreviewed card from a scheduled writer sorts after interactive results | S19a, S20 |
 | S18a | Guard engine UTF mode for hub use | #2212 | Parity with Python `re` on the guard's Unicode fixture, with the divergent rules listed. ASCII behavior unchanged | everything |
-| S18 | Content scanning on memory writes and the prompt-load scan | S13a, S18a | A blocking rule refuses with rule ids only. A warning stores `flagged`. Bidi and invisible characters block, and zero-width joiners flag. Role-override text flags and forces Tier 2. With the engine missing, writes store scan state `pending` and every trust raise and push is refused. The prompt-load scan replaces a hit with a placeholder | S13b, S14 |
+| S18 | Content scanning on memory writes and the prompt-load scan | S13a, S18a | A blocking rule refuses with rule ids only. A warning stores `flagged`. Bidi and invisible characters block, and zero-width joiners flag. Role-override text flags and forces Tier 2. With the engine missing, writes store scan state `pending` and every trust raise and push is refused. The prompt-load scan replaces a hit with a placeholder. Amended 2026-11-05: private findings store `private`, load into local prompts, and are refused on every connector path with `memory_content_private`. U+034F moved from block to private and U+200C from flag to private. Both are stripped from rendered prompt recall, and stored bytes keep them | S13b, S14 |
 | S19a | Proposals on hub memory: `propose` with dry-run validation, `decide`, `rollback`, pinned block checks, all-card atomic apply | S13a, S18 | Invalid proposals are refused at submit with a reason per op. A block changed after `propose` fails closed. A multi-card proposal with one stale base changes no card. A rollback after an intervening edit ends `stale` | S14, S17 |
-| S19b | Tier classifier and the policy `memory` section with digest binding | S19a | Claimed tiers are ignored. Flagged, cross-scope, mixed-trust and newer-human-edit cases are Tier 2. A policy edit invalidates pending decisions | S16b, S20 |
+| S19b | Tier classifier and the policy `memory` section with digest binding | S19a | Implemented: claimed tiers are ignored. Flagged, cross-scope, mixed-trust, newer-human-edit and unproven cases are Tier 2. Each decision binds the current policy digest. A policy edit requires a fresh decision. Auto-apply stays disabled | S16b, S20 |
 | S19c | Tier 0 gate engine: the hub `preflight` action, blockers re-verified inside the apply transaction, the invariant tests, and auto-apply refused until S19e | S19b, #2187 | Every invariant in [Reflect](#reflect-proposals-and-promotion-on-hub-memory) that does not need attestation passes, including the Tier 1 mutation test and the test that auto-apply cannot be enabled. No op can target anything but a card block | S20, S26 |
 | S19d | Scheduled reflect on hub memory: the `memory-reflect` entry in `care install`, pause after repeated failures, `memory reflect rollback` against the hub | S19c, S14 | `memory reflect run --dry-run` writes nothing to the hub. Three failures in a row pause the timer until a success | S19e, S27 |
-| S19e | Evidence attestation and hub Tier 0 auto-apply under policy | S19c | Fabricated, unresolved and cross-workspace aliased evidence never counts. A revoked credential's attestations stop counting. Auto-apply runs only when every gate holds | S19d, S27 |
+| S19e | Evidence attestation and hub Tier 0 auto-apply under policy | S19c | Fabricated, unresolved and cross-workspace aliased evidence never counts. A revoked credential's attestations stop counting. Auto-apply runs only when every gate holds and must not raise trust on `agent-unreviewed` heads without a trust gate | S19d, S27 |
 | S20 | Card import: dry run, idempotent, keeps card ids, deduplicates by content hash, skips `visibility: private` | S14, S18 | A second import appends nothing. The dry run lists exactly what the real run appends. Imported versions need a clean scan and the `import` grant | S16b, S17, S19b |
 | S21 | `memory answer`: client-side rerank through a read-only seat | S17 | R2 report. Off by default unless R2 passes | after 0.31.0 |
 

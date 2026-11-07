@@ -11,12 +11,55 @@ from brigade.guard import Policy
 from brigade.untrusted import _LINE_RULES
 
 DEST = Path(__file__).resolve().parents[1] / "src/brigade/guard/memory-rules.json"
+VERSION = "brigade-memory-scan.v7"
+# NFKC runs only on code points Unicode 14.0.0 assigns, so Python 3.11 and later
+# and the Rust crate normalize the same text the same way.
+NFKC_UNICODE = "14.0.0"
+UNASSIGNED = Path(__file__).resolve().parent / "memory_scan_unicode14_unassigned.ranges"
+
+# Hub memory only (S18 amendment, D24). These guard rules describe the
+# operator's own infrastructure and identity. Memory stores such text and loads
+# it into the operator's local harness prompts, and refuses it on every path to
+# a connector audience (Grok Bot, relays, public scopes, remote embedders).
+# The publication guard keeps each rule's own severity in guard/rules.py.
+PRIVATE_RULES = frozenset(
+    {
+        "loopback-ipv4",
+        "private-ipv4",
+        "port-reference",
+        "localhost-bare",
+        "localhost-port",
+        "private-hostname",
+        "ssh-private-target",
+        "root-path",
+        "home-path",
+        "windows-home-path",
+        "email",
+        "example-email-reserved",
+        "us-phone",
+        "example-phone-555",
+    }
+)
+
+
+def unassigned_ranges() -> str:
+    """The source table as one `lo-hi,lo-hi` hex string, in order."""
+    lines = [line.strip() for line in UNASSIGNED.read_text(encoding="utf-8").splitlines()]
+    return ",".join(line for line in lines if line and not line.startswith("#"))
 
 
 def bundle() -> str:
     policy = Policy()
+    missing = PRIVATE_RULES - {rule.id for rule in policy.all_rules()}
+    if missing:
+        raise SystemExit(f"private memory rules missing from the guard: {sorted(missing)}")
     rules = [
-        {"id": rule.id, "pattern": rule.pattern, "flags": int(rule.flags), "action": policy.action_for(rule)}
+        {
+            "id": rule.id,
+            "pattern": rule.pattern,
+            "flags": int(rule.flags),
+            "action": "private" if rule.id in PRIVATE_RULES else policy.action_for(rule),
+        }
         for rule in policy.all_rules()
     ]
     injections = [
@@ -32,7 +75,8 @@ def bundle() -> str:
             "action": "warn",
         },
     ]
-    return json.dumps({"version": "brigade-memory-scan.v5", "injections": injections, "rules": rules}, indent=2) + "\n"
+    nfkc = {"unicode": NFKC_UNICODE, "unassigned": unassigned_ranges()}
+    return json.dumps({"version": VERSION, "nfkc": nfkc, "injections": injections, "rules": rules}, indent=2) + "\n"
 
 
 def main() -> int:

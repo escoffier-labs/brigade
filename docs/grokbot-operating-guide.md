@@ -44,10 +44,11 @@ uses `brigade.grokbot.connector-instance.v1` and lives at
 | `operator` | queue-role | `127.0.0.1:8766` | none | `grokbot_queue_cancel`, `grokbot_queue_expire`, `grokbot_queue_list`, `grokbot_queue_report`, `grokbot_queue_status` |
 | `repository-scout` | queue-role | `127.0.0.1:8767` | none | `grokbot_queue_ack_cancel`, `grokbot_queue_claim`, `grokbot_queue_complete`, `grokbot_queue_fail`, `grokbot_queue_list`, `grokbot_queue_renew`, `grokbot_queue_start`, `grokbot_queue_status` |
 | `implementation-worker` | queue-role | `127.0.0.1:8768` | none | same eight tools as `repository-scout` |
-| `cerebro-memory` | connector | `127.0.0.1:8770` | none | `cerebro_health`, `cerebro_proposal_status`, `cerebro_propose`, `cerebro_search`, `cerebro_show` |
 | `fleet-steward` | connector | `127.0.0.1:8771` | none | `execute_remediation`, `fleet_overview`, `host_status`, `incident_bundle`, `propose_remediation`, `service_health` |
 | `obsidian-operator` | connector | `127.0.0.1:8773` | `/mcp` | `obsidian_action_status`, `obsidian_capabilities`, `obsidian_execute_action`, `obsidian_propose_action`, `obsidian_read`, `obsidian_search` |
 | `operations-relay` | connector | `127.0.0.1:8777` | none | `automation_finding_status`, `submit_automation_finding` |
+| `grokbot-memory` | connector | `127.0.0.1:8781` | none | `handoff_write`, `memory_card`, `memory_search` |
+| `grokbot-inbox` | connector | `127.0.0.1:8782` | none | `inbox_ack`, `inbox_list`, `inbox_reply`, `message_send` |
 | `t3-dispatch` | connector | `127.0.0.1:8778` | none | `inbox_ack`, `inbox_list`, `inbox_reply`, `message_send`, `message_status`, `t3_answer`, `t3_approve`, `t3_capacity`, `t3_followup`, `t3_interrupt`, `t3_recent`, `t3_status`, `t3_submit`, `t3_wait` |
 
 `obsidian-operator` is the only pack with a public route. Port `8776` is
@@ -62,7 +63,7 @@ the bearer reference):
   action-state, and approval-directory references.
 - `obsidian-operator`: those, plus staging directory, Excalidraw helper
   executable, upstream URL, and upstream key reference.
-- `cerebro-memory`: CLI executable and workdir references.
+- `grokbot-memory` and `grokbot-inbox`: a runtime file reference only, and no bearer, because they verify Cloudflare Access tokens.
 - `operations-relay`: the owner workspace path only.
 
 ## Queue coordination

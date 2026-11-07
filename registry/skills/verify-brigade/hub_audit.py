@@ -1,6 +1,6 @@
 """Run the in-repo Python hub with a write audit on every SQLite connection.
 
-`python hub_audit.py [-m brigade] fleet serve ...` starts the Python hub the
+`python -I hub_audit.py [-m brigade] fleet serve ...` starts the Python hub the
 way `hub_clock.py` does, and adds what the S29 read-only audit needs:
 
 - Every `sqlite3.connect` gets an authorizer before its first statement. The
@@ -27,9 +27,11 @@ way `hub_clock.py` does, and adds what the S29 read-only audit needs:
   response.
 
 Configuration comes from the environment, so the Rust front's managed mode can
-start this launcher through `BRIGADE_HUB_PYTHON`, which passes `-m brigade`
-first: `HUB_AUDIT_FILE` (required, JSON lines), `HUB_AUDIT_CLOCK` (optional
-clock file, as in `hub_clock.py`), `HUB_AUDIT_DB` and `HUB_AUDIT_DB_ROUTE`
+start this launcher through `BRIGADE_HUB_PYTHON`. Its wrapper removes the
+leading `-I` before matching `-m brigade` and starts this launcher with `-I`.
+
+The launcher reads `HUB_AUDIT_FILE` (required, JSON lines), `HUB_AUDIT_CLOCK`
+(optional clock file, as in `hub_clock.py`), `HUB_AUDIT_DB` and `HUB_AUDIT_DB_ROUTE`
 (optional, together) and `HUB_AUDIT_MUTATE` (optional).
 
 This is the Python hub's test adapter, like `hub_clock.py`. The drive in
@@ -299,7 +301,7 @@ def main(argv: list[str]) -> int:
     spec = os.environ.get("HUB_AUDIT_MUTATE", "")
     if spec:
         mutate(spec, _db_path(argv), recorder)
-    recorder.emit("ready", argv=argv[:2])
+    recorder.emit("ready", argv=argv[:2], isolated=sys.flags.isolated)
     from brigade.cli import process_main
 
     sys.argv = ["brigade", *argv]

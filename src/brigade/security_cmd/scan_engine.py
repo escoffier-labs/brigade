@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 from .. import localio, work_cmd
 from ..selection import WRITER_INBOXES
-from ..untrusted import PROMPT_INJECTION_RE, scan_untrusted
+from ..untrusted import PROMPT_INJECTION_RE, fold_whitespace, scan_untrusted
 from ..localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
 
 from . import scan_detectors as _scan_detectors_mod
@@ -854,7 +854,7 @@ def _scan_line(
         "slash-command",
         "subagent",
         "tool-wrapper",
-    } and PROMPT_INJECTION_RE.search(line):
+    } and PROMPT_INJECTION_RE.search(fold_whitespace(line)):
         _finding(
             findings,
             target=target,

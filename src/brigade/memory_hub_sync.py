@@ -530,8 +530,15 @@ def withheld(text: str) -> str | None:
     return None
 
 
+def publication_card_id(text: str, rel: str, legacy_id: str) -> str:
+    """Share push's accepted legacy key or import fallback with hub search."""
+    from . import memory_hub_import
+
+    return legacy_id if hubc.valid_card_id(legacy_id) else memory_hub_import.note_card_id(text, rel)
+
+
 def _local_cards(target: Path) -> list[dict[str, Any]]:
-    from . import card_identity, memory_cmd
+    from . import card_identity, memory_cmd, memory_hub_import
 
     cards = []
     for fields in memory_cmd.search_card_fields(target):
@@ -542,11 +549,16 @@ def _local_cards(target: Path) -> list[dict[str, Any]]:
             continue
         meta, _ = memory_cmd._parse_frontmatter(text)
         identity = card_identity.card_identity(meta, fields["rel"])
+        # Keep accepted legacy keys, including those already published. Only
+        # invalid keys need S20's shared frontmatter/path derivation.
+        card_id = publication_card_id(text, fields["rel"], identity.card_id)
+        derived = card_id != identity.card_id and memory_hub_import.frontmatter_card_id(text) is None
         reason = withheld(text)
         cards.append(
             {
                 "rel": fields["rel"],
-                "card_id": identity.card_id,
+                "card_id": card_id,
+                "derived_id": derived,
                 # Not publishable: `withheld` says why.
                 "private": reason is not None,
                 "withheld": reason,
@@ -617,12 +629,18 @@ def _publishable(
     adopted: list[dict] = []
     resolved: list[str] = []
     local = _local_cards(target)
+    counts: dict[str, int] = {}
+    for card in local:
+        counts[card["card_id"]] = counts.get(card["card_id"], 0) + 1
     for card in local:
         if card["private"]:
             skipped.append({"path": card["rel"], "reason": card["withheld"]})
             continue
         if not hubc.valid_card_id(card["card_id"]):
             skipped.append({"path": card["rel"], "reason": "card-id-invalid"})
+            continue
+        if counts[card["card_id"]] > 1:
+            skipped.append({"path": card["rel"], "card_id": card["card_id"], "reason": "card-id-collision"})
             continue
         key = (scope, card["card_id"])
         head = heads.get(store.Replica.key(scope, card["card_id"])) or {}
@@ -640,6 +658,9 @@ def _publishable(
             skipped.append({"path": card["rel"], "reason": "pending"})
             continue
         last = state.get(card["card_id"])
+        if card["derived_id"] and isinstance(last, dict) and last.get("path") != card["rel"]:
+            skipped.append({"path": card["rel"], "card_id": card["card_id"], "reason": "card-id-collision"})
+            continue
         if isinstance(last, dict) and epoch and last.get("log_epoch") and last.get("log_epoch") != epoch:
             # Published under another log_epoch: the restored hub may not hold
             # this card, so the old base proves nothing. Adopt a current head
@@ -700,6 +721,9 @@ def _record_published(target: Path, hub: str, entry: dict[str, Any], event: dict
         "revision": event.get("revision"),
         "content_hash": event.get("content_hash") or hubc.content_hash(entry["text"]),
         "log_epoch": epoch,
+        "path": entry.get("path"),
+        # Adopted and rebased heads do not prove an acknowledged local write.
+        "written": True,
     }
     store.save_published(target, state)
 
@@ -716,6 +740,7 @@ def _entry(scope: str, card: dict[str, Any], hub: str) -> dict[str, Any]:
         "text": card["text"],
         "origin": "interactive",
         "path": card["rel"],
+        "derived_id": card.get("derived_id", False),
     }
     if base:
         entry["base_epoch"] = base.get("log_epoch")
@@ -774,7 +799,16 @@ class _Push:
                 self._spool(entry, spooled=spooled)
                 return
             reason = exc.code or f"http-{exc.status}"
-            if exc.code not in CONFLICT_CODES:
+            # A new derived key must never replace a hub card that already
+            # owns it. CAS is authoritative even without a readable replica.
+            if (
+                entry.get("derived_id")
+                and entry.get("base_revision") is None
+                and exc.code == "memory_base_mismatch"
+                and exc.body.get("current_hash") != hubc.content_hash(entry["text"])
+            ):
+                reason = "card-id-collision"
+            if exc.code not in CONFLICT_CODES or reason == "card-id-collision":
                 self.report["refused"].append({"card_id": entry["card_id"], "status": exc.status, "code": reason})
             self._propose(entry, reason, exc.body)
             return
@@ -867,6 +901,7 @@ def _push(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
     changes, skipped, adopted, resolved, local = _publishable(
         target, settings, hub, principal, preflight.epoch, confirm
     )
+    derived_ids = sum(card["derived_id"] for card in changes)
     first = scope not in store.published(target).get(hub, {})
     if first and not yes:
         return {
@@ -874,6 +909,7 @@ def _push(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
             "needs_confirmation": True,
             "scope": scope,
             "card_count": len(changes),
+            "derived_ids": derived_ids,
             "skipped": skipped,
         }
     state = store.published(target)
@@ -883,6 +919,7 @@ def _push(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
             "revision": item["revision"],
             "content_hash": item["card"]["content_hash"],
             "log_epoch": item["log_epoch"],
+            "path": item["card"]["rel"],
         }
     store.save_published(target, state)
     kept: dict[str, str] = {}
@@ -891,6 +928,11 @@ def _push(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
         if closed is not None:
             kept[proposal_id] = closed["dropped_to"]
     run = _Push(target, client, preflight.epoch, reachable=preflight.reachable)
+    run.report["refused"].extend(
+        {"card_id": item["card_id"], "path": item["path"], "code": item["reason"]}
+        for item in skipped
+        if item["reason"] == "card-id-collision"
+    )
     for entry in store.spool_entries(target, hub):
         refusal = _replay_refusal(target, entry, local, settings.scope)
         if refusal is not None:
@@ -930,7 +972,14 @@ def _push(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
             f"{len(kept)} proposal(s) resolved because the local card now holds the hub's text; "
             f"their own text is kept under {store.dropped_dir(target)}"
         )
-    return {"ok": True, "scope": scope, **run.report, "skipped": skipped, "warnings": warnings}
+    return {
+        "ok": not (run.report["refused"] or run.report["proposals"] or run.report.get("kept_local")),
+        "scope": scope,
+        **run.report,
+        "derived_ids": derived_ids,
+        "skipped": skipped,
+        "warnings": warnings,
+    }
 
 
 DROP_KEEP_LOCAL = "keep-local"
@@ -952,6 +1001,9 @@ def drop_proposal(
       head's revision becomes the base, so the next push revives the card
       with the local text. When the card is gone, private or already holds
       the hub head, the next push sends nothing, and `local_card` says why.
+      With no local holder, its published base is also dropped. A returning
+      card with changed text attempts a new conditional create, becoming a
+      proposal if the hub already holds that id.
     - `keep-hub`: the local card file is rewritten with the replica's hub head,
       which becomes the published base, so the next push sends nothing for it.
       It refuses a private local card, which the hub's public text would replace.
@@ -1007,8 +1059,31 @@ def drop_proposal(
         epoch = replica.meta.get("log_epoch")
         retired = _require_current_head(client, scope, card_id, head, epoch)
         holder = _single_holder(target, card_id)
+        if keep == DROP_KEEP_LOCAL and holder is not None:
+            published = store.published(target).get(hub, {}).get(scope, {}).get(card_id)
+            current = head if head is not None else retired
+            owns_revision = (
+                isinstance(published, dict)
+                and published.get("written") is True
+                and current is not None
+                and published.get("revision") == current.get("revision")
+                and published.get("log_epoch") == epoch
+                and published.get("path") == holder["rel"]
+            )
+            if current is not None and (
+                record.get("reason") == "card-id-collision" or (record.get("derived_create") and not owns_revision)
+            ):
+                if retired is not None:
+                    raise DropRefused(
+                        "the hub card is retired. Give the local card a distinct frontmatter id and push again"
+                    )
+                raise DropRefused(
+                    "this proposal cannot use --keep-local to replace an unowned hub revision. "
+                    "Use --keep-hub or give the local card a distinct frontmatter id and push again"
+                )
         extra: dict[str, Any] = {}
         local_card = "present"
+        local_path = holder["rel"] if holder is not None else None
         if keep == DROP_KEEP_HUB:
             if holder is not None and holder["private"]:
                 raise DropRefused(
@@ -1021,6 +1096,7 @@ def drop_proposal(
                     "so there is no hub text to keep"
                 )
             path, previous = _keep_hub_card(target, card_id, holder, entry.get("path"))
+            local_path = path.relative_to(target).as_posix()
             extra["card_text_replaced"] = previous
             closed = store.drop_proposal(target, proposal_id, outcome=DROP_KEEP_HUB, **extra)
             assert closed is not None
@@ -1039,17 +1115,28 @@ def drop_proposal(
         state = store.published(target)
         cards = state.setdefault(hub, {}).setdefault(scope, {})
         base = head if head is not None else retired
-        if head is not None:
+        if keep == DROP_KEEP_LOCAL and holder is None:
+            # The card was removed or re-identified. Closing its proposal
+            # grants no authority to overwrite the abandoned hub identity.
+            cards.pop(card_id, None)
+            base = None
+        elif head is not None:
             cards[card_id] = {
                 "revision": head.get("revision"),
                 "content_hash": head.get("content_hash"),
                 "log_epoch": epoch,
+                "path": local_path,
             }
         elif retired is not None:
             # Another writer retired the card. The hub keeps the retired head
             # and wants its revision as the base, so the next push revives the
             # card with the local text. No content hash, so that push always sends.
-            cards[card_id] = {"revision": retired.get("revision"), "content_hash": None, "log_epoch": epoch}
+            cards[card_id] = {
+                "revision": retired.get("revision"),
+                "content_hash": None,
+                "log_epoch": epoch,
+                "path": local_path,
+            }
         else:
             # No hub head under this epoch: the next push sends no base.
             cards.pop(card_id, None)
@@ -1138,69 +1225,6 @@ def _card_path(target: Path, rel: object) -> Path:
     if memory not in path.parents:
         raise DropRefused(f"the proposal's card path {rel} is outside {memory}")
     return target / rel
-
-
-# --- import --------------------------------------------------------------------------
-
-
-def import_cards(target: Path, client: hubc.MemoryHubClient, *, scope: str, paths: list[Path]) -> dict[str, Any]:
-    """One `import` call per card. Refusals carry the hub's code. Nothing is spooled.
-
-    The hub's `status` is read first so an admin credential is refused. A
-    credential with no read grant cannot read status; it still imports, and
-    the hub checks each card's import grant.
-    """
-    from . import card_identity, memory_cmd
-
-    hub_status: dict[str, Any] = {}
-    try:
-        hub_status = hubc.refuse_admin(client.call("status"))
-    except hubc.HubRefusal as exc:
-        if not (exc.status == 403 and exc.code == "memory_grant_missing"):
-            raise
-    live = store.replica(target)
-    # A replica head is a base only when the replica was pulled as the
-    # principal and under the log_epoch the hub reports now. Otherwise the
-    # import names no base and the hub answers whether one is needed.
-    current = live.belongs_to(client.identity, hub_status.get("principal")) and live.meta.get(
-        "log_epoch"
-    ) == hub_status.get("log_epoch")
-    heads = live.readable_heads([scope]) if current else {}
-    results: list[dict[str, Any]] = []
-    for path in paths:
-        rel = path.as_posix()
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            results.append({"path": rel, "status": "unreadable", "error": type(exc).__name__})
-            continue
-        reason = withheld(text)
-        if reason is not None:
-            results.append({"path": rel, "status": "skipped", "reason": reason})
-            continue
-        meta, _ = memory_cmd._parse_frontmatter(text)
-        card_id = card_identity.card_identity(meta, path.name).card_id
-        if not hubc.valid_card_id(card_id):
-            results.append({"path": rel, "status": "skipped", "reason": "card-id-invalid"})
-            continue
-        head = heads.get(store.Replica.key(scope, card_id))
-        body: dict[str, Any] = {
-            "scope": scope,
-            "card_id": card_id,
-            "base_revision": head.get("revision") if head else None,
-            "text": text,
-            "client_event_id": hubc.event_id(),
-        }
-        if head:
-            body["base_epoch"] = live.meta.get("log_epoch")
-        try:
-            reply = client.call("import", **body)
-        except hubc.HubRefusal as exc:
-            results.append({"path": rel, "card_id": card_id, "status": "refused", "code": exc.code, "http": exc.status})
-            continue
-        event = hubc.obj(reply.get("event"))
-        results.append({"path": rel, "card_id": card_id, "status": "imported", "revision": event.get("revision")})
-    return {"scope": scope, "results": results, "ok": all(r["status"] in {"imported", "skipped"} for r in results)}
 
 
 # --- status ----------------------------------------------------------------------------

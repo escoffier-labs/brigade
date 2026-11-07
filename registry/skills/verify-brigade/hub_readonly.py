@@ -56,7 +56,7 @@ import storage_parity as sp
 
 PROFILE = "prod-readonly"
 LAUNCHER = Path(__file__).resolve().parent / "hub_audit.py"
-DEFAULT_HUB_CMD = "{python} " + shlex.quote(str(LAUNCHER)) + " " + hc.DEFAULT_HUB_CMD.removeprefix("{brigade} ")
+DEFAULT_HUB_CMD = "{python} -I " + shlex.quote(str(LAUNCHER)) + " " + hc.DEFAULT_HUB_CMD.removeprefix("{brigade} ")
 
 # The exact list: operation -> the body keys it may carry (None for a bodyless GET).
 ALLOWED_OPERATIONS: dict[str, frozenset[str] | None] = {
@@ -628,7 +628,9 @@ def _wrapper(state_dir: Path, python: str) -> Path:
     wrapper = state_dir / "audited-python"
     py, launcher = shlex.quote(python), shlex.quote(str(LAUNCHER))
     wrapper.write_text(
-        f'#!/bin/sh\nif [ "$1" = "-m" ] && [ "$2" = "brigade" ]; then exec {py} {launcher} "$@"; fi\nexec {py} "$@"\n',
+        f'#!/bin/sh\nif [ "$1" = "-I" ]; then shift; fi\n'
+        f'if [ "$1" = "-m" ] && [ "$2" = "brigade" ]; then exec {py} -I {launcher} "$@"; fi\n'
+        f'exec {py} -I "$@"\n',
         encoding="utf-8",
     )
     wrapper.chmod(0o700)
@@ -711,7 +713,8 @@ def audit(
                 control_results.append(
                     {"operation": name, "status": resp.status, "writes": len(wrote), "ok": bool(wrote)}
                 )
-            instrumented = {int(record["pid"]) for record in log.since(0) if record.get("kind") == "ready"}
+            ready = [record for record in log.since(0) if record.get("kind") == "ready"]
+            instrumented = {int(record["pid"]) for record in ready}
             dbs = [db, *([route] if route else [])]
             holders = (
                 uninstrumented_holders(hub.process.pid, instrumented, *dbs)
@@ -730,11 +733,16 @@ def audit(
     if not lost and route and not route_intact(db, route, identity):
         lost = "the database file was replaced or linked elsewhere during the run"
     open_evidence = {"complete": lost is None, "reason": lost, "outside_opens": watch.events}
+    # Native SQLite connections also emit ready, but have no Python runtime.
+    # Exclude only that known native event so missing Python flags fail closed.
+    python_ready = [record for record in ready if record.get("action") != "native-sqlite"]
+    isolated = bool(python_ready) and all(record.get("isolated") == 1 for record in python_ready)
     hooks_live = bool(instrumented) and any(record.get("kind") == "write" for record in setup)
     sweepers_paused = any(record.get("kind") == "sweepers" for record in setup)
     report = {
         "instrumented_pids": sorted(instrumented),
         "hooks_live": hooks_live,
+        "isolated": isolated,
         "sweepers_paused": sweepers_paused,
         "uninstrumented_holders": holders,
         "open_evidence": open_evidence,
@@ -746,6 +754,8 @@ def audit(
         "mutation": mutation,
     }
     problems = []
+    if not isolated:
+        problems.append("the audited hub did not report isolated Python startup")
     if not hooks_live:
         problems.append("the audit hooks recorded nothing while the fixture was built: the hub is not instrumented")
     if not sweepers_paused:

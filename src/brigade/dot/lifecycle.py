@@ -24,7 +24,7 @@ from .access_auth import AccessVerifier, METADATA_PATH, bounded_headers, unique_
 from .adapter import DotTools, argument_problem, build_tools, validate_arguments
 from .events import EventService, EventsApp, IDENTITY
 from .hub_inbox import authenticated_authority
-from .profile import DOT, ConnectorProfile, profile_for
+from .profile import DOT, PROFILES, ConnectorProfile, profile_for
 from .runtime_config import Runtime, load_runtime
 from .safe_state import identity, require_local_platform
 from .server import register_tools
@@ -369,6 +369,9 @@ def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -
             tools.state.prune_call_log()
         except c.DotError:
             pass
+        if tools.profile.principal_memory:
+            # A crash can leave a pinned-token copy behind. No call is in flight yet, so every copy is stale.
+            tools.memory.sweep_token_copies(0)
         tools.state.hub_set("inbox_backend", "hub")
         fleet = tools.fleet
         service = EventService(
@@ -487,30 +490,53 @@ def doctor(target: Path, *, pack_id: str = c.PACK_ID) -> list[dict[str, str]]:
             checks.append({"check": "hub-identity", "status": "fail", "reason": error.code})
         else:
             checks.append({"check": "hub-identity", "status": "ok"})
-        record("isolation", lambda: _isolated_from_dot(target, runtime))
+        try:
+            isolated = _isolated_from_dot(target, runtime)
+        except c.DotError as error:
+            checks.append({"check": "isolation", "status": "fail", "reason": error.reason or error.code})
+        else:
+            checks.append({"check": "isolation", "status": "ok" if isolated else "fail"})
+        if profile.principal_memory:
+            from brigade.memory_hub_client import hub_mode
+
+            # The profile serves hub memory only: hub memory must be on, and a workspace holding local
+            # cards is a misconfiguration, because those cards would sit beside the principal's grants.
+            record("hub-memory", lambda: hub_mode(runtime.paths.workspace) != "off")
+            record("local-cards", lambda: not any((runtime.paths.workspace / "memory" / "cards").rglob("*.md")))
     record("endpoint", lambda: _probe(_base(config) + "/mcp", method="POST")[0] == 401)
     return checks
 
 
 def _isolated_from_dot(target: Path, runtime: Runtime) -> bool:
-    """A hosted profile never shares Dot's Hub identity, inbox, state or Access application."""
-    if not grokbot_packs.instance_config_path(target, DOT.pack_id).exists():
-        return True
-    _, dot_runtime = _load_config(target, profile=DOT)
-    return (
-        runtime.hub.principal != dot_runtime.hub.principal
-        and not _same_location(runtime.hub.message_token_file, dot_runtime.hub.message_token_file)
-        and not _same_token(runtime.hub.message_token_file, dot_runtime.hub.message_token_file)
-        and not _same_location(runtime.paths.state_dir, dot_runtime.paths.state_dir)
-        and runtime.auth.audience != dot_runtime.auth.audience
-        and runtime.auth.resource != dot_runtime.auth.resource
-        and (
-            not runtime.dispatch_enabled
-            or runtime.paths.fleet_config is None
-            or dot_runtime.paths.fleet_config is None
-            or not _same_location(runtime.paths.fleet_config, dot_runtime.paths.fleet_config)
-        )
-    )
+    """A hosted profile never shares Dot's, or another installed family member's, identity, inbox, state or Access app."""
+    for other in PROFILES.values():
+        if other.runtime_schema == runtime.schema:
+            continue
+        if not grokbot_packs.instance_config_path(target, other.pack_id).exists():
+            continue
+        try:
+            _, other_runtime = _load_config(target, profile=other)
+        except (c.DotError, grokbot_packs.PackError, OSError, ValueError):
+            # An unreadable neighbour cannot be shown to be isolated. Name it, so its fault is not read as this pack's.
+            raise c.DotError("not_isolated_from_dot", reason=f"cannot load the {other.pack_id} instance") from None
+        if (
+            runtime.hub.principal == other_runtime.hub.principal
+            or _same_location(runtime.hub.message_token_file, other_runtime.hub.message_token_file)
+            or _same_token(runtime.hub.message_token_file, other_runtime.hub.message_token_file)
+            or _same_location(runtime.paths.state_dir, other_runtime.paths.state_dir)
+            or runtime.auth.audience == other_runtime.auth.audience
+            or runtime.auth.resource == other_runtime.auth.resource
+        ):
+            return False
+        if (
+            other is DOT
+            and runtime.dispatch_enabled
+            and runtime.paths.fleet_config is not None
+            and other_runtime.paths.fleet_config is not None
+            and _same_location(runtime.paths.fleet_config, other_runtime.paths.fleet_config)
+        ):
+            return False
+    return True
 
 
 def _same_location(left: Path, right: Path) -> bool:

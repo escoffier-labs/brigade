@@ -8,6 +8,25 @@ mod messages_route;
 mod registration;
 mod response;
 
+/// All runtime Python children ignore ambient imports and start outside the workspace.
+fn python_command(python: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(python);
+    command.arg("-I").current_dir("/");
+    command
+}
+
+fn python_interpreter() -> String {
+    std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into())
+}
+
+fn startup_path(value: &str, cwd: Option<&std::path::Path>) -> Result<String, String> {
+    if value.starts_with('~') || std::path::Path::new(value).is_absolute() {
+        return Ok(value.to_owned());
+    }
+    let cwd = cwd.ok_or("working directory is unavailable for a relative startup path")?;
+    Ok(cwd.join(value).to_string_lossy().into_owned())
+}
+
 use axum::{
     Router,
     body::Body,
@@ -1195,15 +1214,14 @@ async fn upstream(
     slot: &mut Option<Child>,
 ) -> Result<String, String> {
     if let Some(url) = &config.upstream {
-        let status =
-            Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
-                .arg("-c")
-                .arg(include_str!("../validate.py"))
-                .args(config.python_args(0).into_iter().skip(2))
-                .kill_on_drop(true)
-                .status()
-                .await
-                .map_err(|e| e.to_string())?;
+        let status = Command::from(python_command(&python_interpreter()))
+            .arg("-c")
+            .arg(include_str!("../validate.py"))
+            .args(config.python_args(0).into_iter().skip(2))
+            .kill_on_drop(true)
+            .status()
+            .await
+            .map_err(|e| e.to_string())?;
         if !status.success() {
             return Err("Python upstream refused startup configuration".into());
         }
@@ -1222,8 +1240,7 @@ async fn upstream(
     } else {
         config.python_args(0)
     };
-    let mut command =
-        Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()));
+    let mut command = Command::from(python_command(&python_interpreter()));
     let parent = libc::pid_t::try_from(std::process::id()).map_err(|e| e.to_string())?;
     // SAFETY: the hook makes only async-signal-safe calls.
     unsafe { command.pre_exec(move || upstream_child(parent)) };
@@ -1289,7 +1306,7 @@ async fn run(mut config: Config) -> Result<(), String> {
     // Resolve defaults and user expansion through the matching Python runtime.
     let output = signals
         .before(async {
-            Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
+            Command::from(python_command(&python_interpreter()))
                 .args(["-c", include_str!("../resolve_db.py")])
                 .args(config.db.iter())
                 .kill_on_drop(true)
@@ -1315,14 +1332,12 @@ async fn run(mut config: Config) -> Result<(), String> {
     } else {
         let output = signals
             .before(async {
-                Command::new(
-                    std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()),
-                )
-                .args(["-c", "import secrets; print(secrets.token_hex(32))"])
-                .kill_on_drop(true)
-                .output()
-                .await
-                .map_err(|e| e.to_string())
+                Command::from(python_command(&python_interpreter()))
+                    .args(["-c", "import secrets; print(secrets.token_hex(32))"])
+                    .kill_on_drop(true)
+                    .output()
+                    .await
+                    .map_err(|e| e.to_string())
             })
             .await?;
         if !output.status.success() {
@@ -1464,7 +1479,13 @@ async fn start_and_serve(
                     readers.clone(),
                 ) {
                     Ok(mut store) => match store.configure_retrieval(&memory_config) {
-                        Ok(()) => memory_route::MemoryRoute::Store(Arc::new(store)),
+                        Ok(()) => {
+                            let store = Arc::new(store);
+                            // A failed first load degrades retrieval to lexical.
+                            // It never stops the hub.
+                            store.start_retrieval().await;
+                            memory_route::MemoryRoute::Store(store)
+                        }
                         // A file the operator named stops startup. The
                         // default file leaves memory unavailable and the
                         // rest of the hub serving, as an unreadable one does.
@@ -1738,7 +1759,62 @@ fn main() {
         eprintln!("error: blocking stop signals failed: {e}");
         std::process::exit(2);
     }
-    let config = Config::parse();
+    let mut config = Config::parse();
+    // Resolve before any runtime threads exist. Children use a safe cwd, while
+    // relative CLI and environment paths keep the caller's directory as base.
+    let cwd = std::env::current_dir().ok();
+    let paths = (|| -> Result<(), String> {
+        for value in [
+            &mut config.db,
+            &mut config.token_file,
+            &mut config.deck_config,
+            &mut config.memory_config,
+            &mut config.test_clock_file,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *value = startup_path(value, cwd.as_deref())?;
+        }
+        if let Ok(value) = std::env::var("BRIGADE_HUB_PYTHON") {
+            // Bare names retain PATH lookup. Executable paths, including a
+            // literal tilde directory, keep their original cwd semantics.
+            if value.contains(std::path::MAIN_SEPARATOR) {
+                let interpreter = std::path::Path::new(&value);
+                let path = if interpreter.is_absolute() {
+                    interpreter.to_path_buf()
+                } else {
+                    cwd.as_ref()
+                        .ok_or("working directory is unavailable for a relative interpreter path")?
+                        .join(interpreter)
+                };
+                // SAFETY: main has not created the runtime or any threads.
+                unsafe { std::env::set_var("BRIGADE_HUB_PYTHON", path) };
+            }
+        }
+        for name in [
+            "BRIGADE_FLEET_DECK_CONFIG",
+            "BRIGADE_FLEET_FINDINGS_KEY_FILE",
+        ] {
+            // An explicit CLI deck configuration wins even if the environment
+            // value is relative and the original cwd is no longer available.
+            if name == "BRIGADE_FLEET_DECK_CONFIG" && config.deck_config.is_some() {
+                continue;
+            }
+            if let Ok(value) = std::env::var(name) {
+                if !value.trim().is_empty() {
+                    let path = startup_path(&value, cwd.as_deref())?;
+                    // SAFETY: main has not created the runtime or any threads.
+                    unsafe { std::env::set_var(name, path) };
+                }
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = paths {
+        eprintln!("error: {e}");
+        std::process::exit(2);
+    }
     if let Err(e) = config.validate() {
         eprintln!("error: {e}");
         std::process::exit(2);
@@ -1747,9 +1823,7 @@ fn main() {
     // children so its safe resource API can raise our inherited descriptor limit.
     if std::env::var("BRIGADE_HUB_LIMIT_PID").ok() != Some(std::process::id().to_string()) {
         use std::os::unix::process::CommandExt;
-        let mut command = std::process::Command::new(
-            std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()),
-        );
+        let mut command = python_command(&python_interpreter());
         // The child inherits this thread's mask, so the stop signals stay
         // blocked through limits.py and its exec; the hook only makes that
         // explicit. SAFETY: pthread_sigmask is async-signal-safe.
@@ -1757,6 +1831,7 @@ fn main() {
         let error = command
             .arg("-c")
             .arg(include_str!("../limits.py"))
+            .arg(cwd.as_deref().unwrap_or_else(|| std::path::Path::new("/")))
             .arg((config.max_connections as u64 + 24 + 64).to_string())
             .arg(std::env::current_exe().expect("executable path"))
             .args(std::env::args_os().skip(1))

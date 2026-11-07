@@ -4,7 +4,7 @@ A workspace opts in through a `[hub]` table in `.brigade/memory-care.toml`:
 
     [hub]
     mode = "read"                       # off (default), read or sync
-    scope = "repo:me/app"               # where `sync` publishes; fleet, repo:<id> or principal:<id>
+    scope = "repo:me/app"               # where `sync` publishes; fleet, repo:<id>, collection:<name> or principal:<id>
     read_scopes = ["repo:me/app"]       # what search, card reads and the replica may use; default [scope]
     replica_max_mb = 50                 # cap on the replica's heads.json
 
@@ -75,6 +75,8 @@ CALL_TIMEOUT_SECONDS = 10.0
 DEFAULT_REPLICA_MAX_MB = 50
 ENV_HUB_URL = "BRIGADE_MEMORY_HUB_URL"
 ENV_HUB_TOKEN_FILE = "BRIGADE_MEMORY_HUB_TOKEN_FILE"
+# A connector that reads as its own principal sets this, so a replica pulled by any other credential never answers.
+ENV_REPLICA_PRINCIPAL = "BRIGADE_MEMORY_REPLICA_PRINCIPAL"
 SOURCE_ENV, SOURCE_TABLE, SOURCE_FLEET = "env", "[memory_hub]", "fleet"
 MEMORY_HUB_TABLE = "memory_hub"
 _OVERRIDE_KEYS = ("hub_url", "node_token_file")
@@ -145,11 +147,16 @@ def refuse_admin(status_body: dict[str, Any]) -> dict[str, Any]:
 
 
 def valid_scope(scope: object) -> bool:
+    """`fleet`, `repo:<identity>`, `collection:<name>` or `principal:<id>`, as the hub accepts them.
+
+    A collection name follows the repository identity rule. Node tokens get no
+    default access to a collection: only a grant naming it opens it.
+    """
     if not isinstance(scope, str):
         return False
     if scope == "fleet":
         return True
-    for prefix in ("repo:", "principal:"):
+    for prefix in ("repo:", "collection:", "principal:"):
         if scope.startswith(prefix):
             rest = scope[len(prefix) :]
             return 0 < len(rest) <= 200 and all(33 <= ord(c) <= 126 and c not in '*"\\' for c in rest)
@@ -160,10 +167,19 @@ def valid_card_id(card_id: object) -> bool:
     return isinstance(card_id, str) and _CARD_ID.fullmatch(card_id) is not None
 
 
+def replica_principal_allowed(recorded: object) -> bool:
+    """False when a pinned principal is set and the replica was pulled by a different one.
+
+    Unset means no pin, the behavior of every ordinary memory command.
+    """
+    expected = os.environ.get(ENV_REPLICA_PRINCIPAL, "").strip()
+    return not expected or recorded == expected
+
+
 def read_config_text(target: Path) -> str | None:
     """The memory-care config text; None when absent. Raises OSError or UnicodeDecodeError as is."""
     try:
-        return (target / CONFIG_REL).read_text(encoding="utf-8")
+        return (target / CONFIG_REL).read_text(encoding="utf-8-sig")
     except FileNotFoundError:
         return None
 
@@ -199,7 +215,8 @@ def _read_scopes(table: dict[str, Any], scope: str | None) -> tuple[str, ...]:
         return (scope,) if scope else ()
     if not isinstance(raw, list) or not 1 <= len(raw) <= READ_SCOPES_MAX or not all(valid_scope(item) for item in raw):
         raise HubConfigError(
-            f"[hub] read_scopes must be a list of 1 to {READ_SCOPES_MAX} scopes: fleet, repo:<identity> or principal:<id>"
+            f"[hub] read_scopes must be a list of 1 to {READ_SCOPES_MAX} scopes: "
+            "fleet, repo:<identity>, collection:<name> or principal:<id>"
         )
     return tuple(dict.fromkeys(raw))
 
@@ -370,7 +387,7 @@ def load_settings(target: Path, *, fleet: dict[str, str] | None = None) -> HubSe
     mode = hub_mode(target)
     scope = table.get("scope")
     if scope is not None and not valid_scope(scope):
-        raise HubConfigError("[hub] scope must be fleet, repo:<identity> or principal:<id>")
+        raise HubConfigError("[hub] scope must be fleet, repo:<identity>, collection:<name> or principal:<id>")
     if mode == "sync" and scope is None:
         raise HubConfigError('[hub] mode = "sync" needs a scope to publish into')
     read_scopes = _read_scopes(table, scope)
@@ -425,14 +442,22 @@ def event_id(ms: int | None = None) -> str:
     within one millisecond: the next one adds one to the previous random part.
     """
     if ms is not None:
-        value = (ms << 80) | secrets.randbits(80)
-    else:
-        with _LAST_EVENT_LOCK:
-            value = (int(time.time() * 1000) << 80) | secrets.randbits(80)
-            if value <= _LAST_EVENT[0]:
-                value = _LAST_EVENT[0] + 1
-            _LAST_EVENT[0] = value
+        return event_id_at(ms, secrets.randbits(80))
+    with _LAST_EVENT_LOCK:
+        value = (int(time.time() * 1000) << 80) | secrets.randbits(80)
+        if value <= _LAST_EVENT[0]:
+            value = _LAST_EVENT[0] + 1
+        _LAST_EVENT[0] = value
+    return _crockford(value)
+
+
+def _crockford(value: int) -> str:
     return "".join(CROCKFORD[(value >> (5 * i)) & 31] for i in reversed(range(26)))
+
+
+def event_id_at(ms: int, tail: int) -> str:
+    """The event id for Unix milliseconds `ms` and the 80-bit `tail`: the same pair always gives the same id."""
+    return _crockford((ms << 80) | (tail & ((1 << 80) - 1)))
 
 
 def event_id_ms(value: str) -> int | None:

@@ -53,6 +53,7 @@ class FakeHub:
         self.drop_reply_once = False
         # Credentials: token to principal, and what each principal may read.
         # None means a node's defaults: fleet, every repo: scope and its own principal: scope.
+        # As on the hub, neither the defaults nor a "*" grant open a collection: scope.
         self.principals = {NODE_CREDENTIAL: "node-1", OTHER_CREDENTIAL: "node-2", ADMIN_CREDENTIAL: "hub:admin"}
         self.grants: dict[str, set[str] | None] = {"node-1": None, "node-2": None, "hub:admin": {"*"}}
         self.who = ""
@@ -94,7 +95,8 @@ class FakeHub:
         grants = self.grants.get(self.who)
         if grants is None:
             return scope == "fleet" or scope.startswith("repo:") or scope == f"principal:{self.who}"
-        return "*" in grants or scope in grants
+        wildcard = "*" in grants and (self.who == "hub:admin" or not scope.startswith("collection:"))
+        return wildcard or scope in grants
 
     def reads_anything(self) -> bool:
         grants = self.grants.get(self.who)
@@ -356,6 +358,24 @@ def test_config_errors_are_specific(tmp_path):
         hubc.load_settings(target, fleet={})
 
 
+def test_collection_scopes_validate_like_repo_scopes(tmp_path):
+    collection = "collection:vault/cerebro"
+    assert hubc.valid_scope(collection) and hubc.valid_scope("collection:" + "n" * 200)
+    for bad in ("collection:", "collection:*", "collection:a b", 'collection:q"', "collection:b\\s", "collection"):
+        assert not hubc.valid_scope(bad), bad
+    assert not hubc.valid_scope("collection:" + "n" * 201)
+    target = workspace(tmp_path, mode="off", scope=collection, read_scopes=(collection, "fleet"))
+    loaded = hubc.load_settings(target, fleet={})
+    assert (loaded.scope, loaded.read_scopes) == (collection, (collection, "fleet"))
+    config = target / ".brigade" / "memory-care.toml"
+    config.write_text('[hub]\nmode = "read"\nscope = "collection:*"\n', encoding="utf-8")
+    with pytest.raises(hubc.HubConfigError, match="collection:<name>"):
+        hubc.load_settings(target, fleet={})
+    config.write_text('[hub]\nmode = "read"\nread_scopes = ["collection:"]\n', encoding="utf-8")
+    with pytest.raises(hubc.HubConfigError, match="read_scopes"):
+        hubc.load_settings(target, fleet={})
+
+
 def test_the_credential_never_appears_in_output(hub, tmp_path, capsys):
     target = workspace(tmp_path)
     code, out, err = run(["memory", "hub", "status", "--target", str(target), "--json"], capsys)
@@ -374,6 +394,7 @@ def test_status_reports_the_hubs_retrieval_details_in_text_and_json(hub, tmp_pat
         "reason": "embedder-unavailable",
         "endpoint_host": "embed.example.com",
         "breaker_open": True,
+        "coverage": {"cards": 7, "eligible": 7, "unembeddable": 3, "total": 10},
     }
     original = hub.do_status
 
@@ -387,6 +408,16 @@ def test_status_reports_the_hubs_retrieval_details_in_text_and_json(hub, tmp_pat
     code, out, _ = run(["memory", "hub", "status", "--target", str(target)], capsys)
     assert code == 0
     assert "retrieval: hybrid, effective lexical-fallback, state degraded (embedder-unavailable)" in out
+    # Cards over eligible cards, as readiness compares them, not over the corpus total.
+    assert "coverage 7/7 (3 unembeddable)" in out and "7/10" not in out
+    # Not a pull hub: no pull_private detail.
+    assert "pull_private" not in out
+    retrieval.update(pull=True, pull_private=False)
+    code, out, _ = run(["memory", "hub", "status", "--target", str(target)], capsys)
+    assert code == 0 and "pull_private off" in out
+    retrieval.update(pull_private=True)
+    code, out, _ = run(["memory", "hub", "status", "--target", str(target)], capsys)
+    assert code == 0 and "pull_private on" in out
 
 
 # --- push and pull -----------------------------------------------------------------
@@ -576,12 +607,6 @@ def test_a_404_with_a_replica_watermark_spools_instead_of_dropping(hub, tmp_path
 
 def test_refusals_surface_their_code(hub, tmp_path, capsys):
     target = workspace(tmp_path, mode="sync", one="# One\n")
-    code, out, _ = run(
-        ["memory", "hub", "import", "--target", str(target), "--json", str(target / "memory/cards/one.md")], capsys
-    )
-    assert code == 1
-    [result] = json.loads(out)["results"]
-    assert (result["status"], result["code"], result["http"]) == ("refused", "memory_grant_missing", 403)
     hub.put_reply = (403, {"error": "no write grant", "code": "memory_grant_missing"})
     report = sync.push(target, client(hub), settings(target), yes=True)
     assert report["refused"] == [{"card_id": "one", "status": 403, "code": "memory_grant_missing"}]
@@ -794,7 +819,8 @@ def test_dot_memory_search_keeps_hub_labels_only_when_hub_memory_answered(tmp_pa
     }
     got = _dot_memory(tmp_path, hub_reply).memory_search("a")
     assert got["matches"][0]["source"] == "replica" and got["retrieval"]["degraded"] is True
-    assert got["warning"].startswith("hub search unavailable")
+    # The CLI text embeds the hub reason, so only a code leaves.
+    assert got["warning"] == "hub_search_unavailable"
     plain = _dot_memory(tmp_path, {"match_count": 1, "matches": [match]}).memory_search("a")
     assert "source" not in plain["matches"][0] and "retrieval" not in plain
 
@@ -1199,11 +1225,9 @@ def test_an_unreadable_config_keeps_todays_error(hub, tmp_path, capsys):
     today = capsys.readouterr()
     code, out, err = run(["memory", "search", "--target", str(target), "words"], capsys)
     assert (code, out, err) == (expected, today.out, today.err)
-    if expected == 2:
-        # memory_cmd reads the config with the locale encoding, so where that
-        # decodes the byte (Windows cp1252) today's search succeeds, and the
-        # hub path must succeed with it.
-        assert err.startswith("error: invalid memory-care config:")
+    # Both readers decode as UTF-8 on every platform, so the byte is refused everywhere.
+    assert expected == 2
+    assert err.startswith("error: invalid memory-care config:")
     code, _, err = run(["memory", "hub", "status", "--target", str(target)], capsys)
     assert code == 2 and err.startswith("error: invalid memory-care config:")
     if os.name != "posix":
@@ -1935,7 +1959,7 @@ def test_a_spooled_write_never_replays_into_a_scope_the_config_left(hub, tmp_pat
     hub.mode = "up"
     code, out, err = run(["memory", "hub", "push", "--target", str(target), "--yes", "--json"], capsys)
     report = json.loads(out)
-    assert code == 0, err
+    assert code == 1, err
     assert [put["scope"] for put in hub.puts()] == ["repo:me/app"]
     assert ("fleet", "x") not in hub.cards
     assert [(p["card_id"], p["reason"]) for p in report["proposals"]] == [("x", "scope-changed")]
@@ -2097,16 +2121,6 @@ def test_a_spooled_write_is_withheld_once_its_visibility_is_not_plainly_public(h
     assert store.spool_count(target) == 0
 
 
-@pytest.mark.parametrize(("text", "reason"), WITHHELD, ids=WITHHELD_IDS)
-def test_import_withholds_a_card_whose_visibility_is_not_plainly_public(hub, tmp_path, text, reason):
-    target = workspace(tmp_path, mode="sync")
-    path = target / "memory" / "cards" / "p.md"
-    path.write_bytes(text.encode("utf-8"))
-    report = sync.import_cards(target, client(hub), scope="repo:test/app", paths=[path])
-    assert [(r["status"], r["reason"]) for r in report["results"]] == [("skipped", reason)]
-    assert [c for c in hub.calls if c["action"] == "import"] == []
-
-
 def _retire(hub: FakeHub, card_id: str, scope: str = "repo:test/app") -> None:
     """Another writer retires an existing card."""
     client(hub).call(
@@ -2259,22 +2273,6 @@ def test_push_adopts_a_replica_head_only_under_the_hubs_current_epoch(hub, tmp_p
     assert [p["card_id"] for p in report["published"]] == ["x"] and report["proposals"] == []
 
 
-def test_import_names_a_replica_base_only_under_the_hubs_current_epoch(hub, tmp_path):
-    target = workspace(tmp_path, mode="sync", x="# X\nimported\n")
-    revision = _put(hub, "repo:test/app", "x", "# X\nshared\n")["event"]["revision"]
-    sync.pull(target, client(hub), settings(target))
-    path = target / "memory" / "cards" / "x.md"
-
-    def last_import() -> dict:
-        return [c for c in hub.calls if c["action"] == "import"][-1]
-
-    sync.import_cards(target, client(hub), scope="repo:test/app", paths=[path])
-    assert (last_import()["base_revision"], last_import()["base_epoch"]) == (revision, hub.epoch)
-    hub.restore(hub.snapshot())
-    sync.import_cards(target, client(hub), scope="repo:test/app", paths=[path])
-    assert last_import()["base_revision"] is None and "base_epoch" not in last_import()
-
-
 @pytest.mark.parametrize("spooled", [False, True])
 def test_s18_round2_scan_failure_is_not_spooled_or_retried(hub, tmp_path, spooled):
     target = workspace(tmp_path, mode="sync", one="# One\n")
@@ -2320,3 +2318,413 @@ def test_s18_round3_handoff_call_refuses_scan_failure_once():
         c.call("handoff", kind="note", text="release notes", client_event_id=hubc.event_id())
     assert error.value.body == reply
     assert [body["action"] for body in calls] == ["handoff"]
+
+
+@pytest.mark.parametrize("metadata", ["", "---\nid: explicit-id\n---\n", "---\ncard_id: explicit-id\n---\n"])
+def test_push_derives_import_ids_and_keeps_old_name(hub, tmp_path, capsys, metadata):
+    from brigade import memory_hub_import as importer
+
+    text = metadata + "# My Card\nfixture\n"
+    target = workspace(tmp_path, mode="sync", **{"My Card": text})
+    expected = importer.note_card_id(text, "memory/cards/My Card.md")
+    code, out, _ = run(["memory", "hub", "push", "--target", str(target)], capsys)
+    assert code == 1 and "derived" in out
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert [item["card_id"] for item in report["published"]] == [expected]
+    assert report["derived_ids"] == (0 if metadata else 1)
+    assert (target / "memory/cards/My Card.md").read_text() == text
+    assert sync.push(target, client(hub), settings(target))["published"] == []
+    assert len(hub.puts()) == 1
+    for directory in (target, target / "memory", target / "memory/cards"):
+        directory.chmod(0o755)
+    if os.name == "posix":
+        assert _dot_memory(target, {}).memory_card("My Card")["content"] == text
+
+
+def test_push_refuses_local_derived_collision(hub, tmp_path, capsys):
+    from brigade import memory_hub_import as importer
+
+    derived = importer.derive_card_id("memory/cards/My Card.md")
+    target = workspace(tmp_path, mode="sync", **{"My Card": "fixture\n", derived: "other\n", "good": "ok\n"})
+    code, out, _ = run(["memory", "hub", "push", "--target", str(target), "--yes", "--json"], capsys)
+    report = json.loads(out)
+    assert code == 1 and report["ok"] is False
+    assert len(report["refused"]) == 2
+    assert {r["code"] for r in report["refused"]} == {"card-id-collision"}
+    assert [p["card_id"] for p in report["published"]] == ["good"]
+
+
+@pytest.mark.parametrize("reply", [(403, {"code": "memory_grant_missing"}), (409, {"code": "memory_base_mismatch"})])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_push_partial_failure_exits_one(hub, tmp_path, capsys, reply, json_output):
+    target = workspace(tmp_path, mode="sync", one="fixture\n")
+    hub.put_reply = reply
+    argv = ["memory", "hub", "push", "--target", str(target), "--yes"] + (["--json"] if json_output else [])
+    code, out, _ = run(argv, capsys)
+    assert code == 1
+    if json_output:
+        assert json.loads(out)["ok"] is False
+    else:
+        assert "1 proposal(s)" in out and "refused" in out.splitlines()[-1]
+
+
+def test_push_clean_and_policy_skip_exit_zero(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="sync", one="fixture\n", secret="---\nvisibility: private\n---\nfixture\n")
+    for _ in range(2):
+        code, _, _ = run(["memory", "hub", "push", "--target", str(target), "--yes"], capsys)
+        assert code == 0
+
+
+def test_push_valid_legacy_id_does_not_change(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", old="fixture\n")
+    sync.push(target, client(hub), settings(target), yes=True)
+    (target / "memory/cards/old.md").write_text("edited\n")
+    report = sync.push(target, client(hub), settings(target))
+    assert [p["card_id"] for p in report["published"]] == ["old"]
+    assert set(hub.cards) == {("repo:test/app", "old")}
+
+
+@pytest.mark.parametrize("pulled", [False, True])
+def test_push_derived_collision_with_existing_hub_card(hub, tmp_path, pulled):
+    from brigade import memory_hub_import as importer
+
+    derived = importer.derive_card_id("memory/cards/My Card.md")
+    target = workspace(tmp_path, mode="sync", **{"My Card": "local fixture\n", "good": "ok\n"})
+    client(hub).call(
+        "put",
+        scope="repo:test/app",
+        card_id=derived,
+        base_revision=None,
+        text="existing fixture\n",
+        client_event_id=hubc.event_id(),
+    )
+    if pulled:
+        sync.pull(target, client(hub), settings(target))
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert report["ok"] is False
+    assert report["refused"][0]["code"] == "card-id-collision"
+    assert hub.cards[("repo:test/app", derived)]["text"] == "existing fixture\n"
+    assert [p["card_id"] for p in report["published"]] == ["good"]
+
+
+def test_push_refuses_two_derived_ids_that_collide(hub, tmp_path, monkeypatch):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"First Card": "one\n", "Second Card": "two\n"})
+    monkeypatch.setattr(importer, "derive_card_id", lambda rel: "colliding-id")
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert report["ok"] is False and len(report["refused"]) == 2
+    assert not hub.puts()
+
+
+def test_push_derived_collision_cannot_reuse_an_old_published_base(hub, tmp_path, monkeypatch):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", old="existing fixture\n")
+    sync.push(target, client(hub), settings(target), yes=True)
+    (target / "memory/cards/old.md").unlink()
+    (target / "memory/cards/New Card.md").write_text("new fixture\n")
+    monkeypatch.setattr(importer, "derive_card_id", lambda rel: "old")
+    report = sync.push(target, client(hub), settings(target))
+    assert report["ok"] is False
+    assert report["refused"][0]["code"] == "card-id-collision"
+    assert hub.cards[("repo:test/app", "old")]["text"] == "existing fixture\n"
+    assert len(hub.puts()) == 1
+
+
+@pytest.mark.parametrize(
+    "keep,retired", [(sync.DROP_KEEP_LOCAL, False), (sync.DROP_KEEP_HUB, False), (sync.DROP_KEEP_LOCAL, True)]
+)
+def test_derived_conflict_drop_preserves_path_for_later_pushes(hub, tmp_path, capsys, keep, retired):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"My Card": "initial fixture\n"})
+    card_id = importer.derive_card_id("memory/cards/My Card.md")
+    sync.push(target, client(hub), settings(target), yes=True)
+    client(hub).call(
+        "put",
+        scope="repo:test/app",
+        card_id=card_id,
+        base_revision=1,
+        base_epoch=hub.epoch,
+        text="remote fixture\n",
+        client_event_id=hubc.event_id(),
+    )
+    (target / "memory/cards/My Card.md").write_text("local fixture\n")
+    [proposal] = sync.push(target, client(hub), settings(target))["proposals"]
+    if retired:
+        client(hub).call(
+            "retire",
+            scope="repo:test/app",
+            card_id=card_id,
+            base_revision=2,
+            base_epoch=hub.epoch,
+            client_event_id=hubc.event_id(),
+        )
+    sync.pull(target, client(hub), settings(target))
+    code, _, err = run(
+        ["memory", "hub", "proposals", "drop", proposal["proposal_id"], "--" + keep, "--target", str(target)], capsys
+    )
+    assert code == 0, err
+    for _ in range(2):
+        code, out, err = run(["memory", "hub", "push", "--target", str(target), "--json"], capsys)
+        assert code == 0, err
+        assert json.loads(out)["ok"] is True
+    expected = "local fixture\n" if keep == sync.DROP_KEEP_LOCAL else "remote fixture\n"
+    assert hub.cards[("repo:test/app", card_id)]["text"] == expected
+
+
+def test_real_derived_collision_cannot_keep_local(hub, tmp_path):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"My Card": "local fixture\n"})
+    card_id = importer.derive_card_id("memory/cards/My Card.md")
+    client(hub).call(
+        "put",
+        scope="repo:test/app",
+        card_id=card_id,
+        base_revision=None,
+        text="existing fixture\n",
+        client_event_id=hubc.event_id(),
+    )
+    [proposal] = sync.push(target, client(hub), settings(target), yes=True)["proposals"]
+    sync.pull(target, client(hub), settings(target))
+    with pytest.raises(sync.DropRefused, match="--keep-hub.*frontmatter id"):
+        sync.drop_proposal(target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_LOCAL)
+    assert len(list(store.proposals(target, client(hub).identity))) == 1
+    assert hub.cards[("repo:test/app", card_id)]["text"] == "existing fixture\n"
+    sync.drop_proposal(target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_HUB)
+    for _ in range(2):
+        assert sync.push(target, client(hub), settings(target))["ok"] is True
+
+
+def test_derived_put_lost_published_record_is_not_a_collision(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="sync", **{"My Card": "fixture\n"})
+
+    def crash(*args):
+        raise RuntimeError("interrupted before recording publication")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sync, "_record_published", crash)
+        with pytest.raises(RuntimeError, match="interrupted"):
+            sync.push(target, client(hub), settings(target), yes=True)
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert report["refused"] == []
+    assert [p["reason"] for p in report["proposals"]] == ["memory_base_mismatch"]
+    assert len(hub.events) == 1
+    sync.pull(target, client(hub), settings(target))
+    assert sync.push(target, client(hub), settings(target))["ok"] is True
+    assert not list(store.proposals(target, client(hub).identity))
+    assert sync.push(target, client(hub), settings(target))["derived_ids"] == 0
+
+
+def test_derived_id_count_excludes_unchanged_and_colliding_cards(hub, tmp_path, capsys):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"My Card": "fixture\n"})
+    assert sync.push(target, client(hub), settings(target), yes=True)["derived_ids"] == 1
+    assert sync.push(target, client(hub), settings(target))["derived_ids"] == 0
+    (target / "memory/cards/My Card.md").write_text("edited fixture\n")
+    assert sync.push(target, client(hub), settings(target))["derived_ids"] == 1
+    derived = importer.derive_card_id("memory/cards/My Card.md")
+    (target / "memory/cards" / f"{derived}.md").write_text("other fixture\n")
+    assert sync.push(target, client(hub), settings(target))["derived_ids"] == 0
+
+
+def test_private_card_collision_with_public_card_fails_closed(hub, tmp_path):
+    target = workspace(
+        tmp_path, mode="sync", one="public fixture\n", other="---\nid: one\nvisibility: private\n---\nprivate fixture\n"
+    )
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert report["ok"] is False
+    assert [r["code"] for r in report["refused"]] == ["card-id-collision"]
+    assert not hub.puts()
+
+
+def test_search_fuses_derived_publication_id_and_retains_old_name(hub, tmp_path):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"My Card": "# My Card\nkoala fixture\n"})
+    sync.push(target, client(hub), settings(target), yes=True)
+    payload = hub_search.search_payload(target, "koala", settings=settings(target))
+    assert payload["match_count"] == 1
+    [match] = payload["matches"]
+    assert match["card_id"] == importer.derive_card_id("memory/cards/My Card.md")
+    assert set(match["ranks"]) == {"hub", "local"}
+    assert "My Card" in match["card_aliases"]
+    for directory in (target, target / "memory", target / "memory/cards"):
+        directory.chmod(0o755)
+    if os.name == "posix":
+        assert _dot_memory(target, {}).memory_card("My Card")["content"] == "# My Card\nkoala fixture\n"
+        opened = _dot_cli(target).memory_card(match["card_id"])
+        assert opened["content"] == "# My Card\nkoala fixture\n"
+        assert opened["source"] == "hub"
+
+
+def test_collision_can_close_after_giving_local_card_a_frontmatter_id(hub, tmp_path):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"My Card": "local fixture\n"})
+    card_id = importer.derive_card_id("memory/cards/My Card.md")
+    _put(hub, "repo:test/app", card_id, "existing fixture\n")
+    [proposal] = sync.push(target, client(hub), settings(target), yes=True)["proposals"]
+    (target / "memory/cards/My Card.md").write_text("---\nid: distinct-card\n---\nlocal fixture\n")
+    assert sync.push(target, client(hub), settings(target))["ok"] is True
+    sync.pull(target, client(hub), settings(target))
+    closed = sync.drop_proposal(
+        target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_LOCAL
+    )
+    assert closed["rebased_on"] is None
+    assert not list(store.proposals(target, client(hub).identity))
+    assert card_id not in store.published(target)[client(hub).identity]["repo:test/app"]
+    assert hub.cards[("repo:test/app", card_id)]["text"] == "existing fixture\n"
+    assert ("repo:test/app", "distinct-card") in hub.cards
+
+
+@pytest.mark.parametrize("retired", [False, True])
+@pytest.mark.parametrize("ownership", ["none", "written", "adopted"])
+def test_identical_derived_create_needs_acknowledged_revision_to_keep_local(hub, tmp_path, retired, ownership):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"My Card": "identical fixture\n"})
+    card_id = importer.derive_card_id("memory/cards/My Card.md")
+    if ownership == "written":
+        sync.push(target, client(hub), settings(target), yes=True)
+    else:
+        _put(hub, "repo:test/app", card_id, "identical fixture\n")
+        if ownership == "adopted":
+            sync.pull(target, client(hub), settings(target))
+            sync.push(target, client(hub), settings(target), yes=True)
+    if retired:
+        client(hub).call(
+            "retire",
+            scope="repo:test/app",
+            card_id=card_id,
+            base_revision=1,
+            base_epoch=hub.epoch,
+            client_event_id=hubc.event_id(),
+        )
+    # A fresh create attempt reports the existing head, even with identical bytes.
+    card = sync._local_cards(target)[0]
+    attempt = sync._Push(target, client(hub), hub.epoch, reachable=True)
+    attempt.send(sync._entry("repo:test/app", card, client(hub).identity), spooled=False)
+    [proposal] = attempt.report["proposals"]
+    record = store.read_proposal(target, proposal["proposal_id"])
+    assert record["derived_create"] is True
+    (target / "memory/cards/My Card.md").write_text("edited fixture\n")
+    sync.pull(target, client(hub), settings(target))
+    if ownership == "written" and not retired:
+        sync.drop_proposal(target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_LOCAL)
+        assert sync.push(target, client(hub), settings(target))["ok"] is True
+        assert hub.cards[("repo:test/app", card_id)]["text"] == "edited fixture\n"
+    else:
+        remedy = "retired.*distinct frontmatter id" if retired else "--keep-hub.*frontmatter id"
+        with pytest.raises(sync.DropRefused, match=remedy) as refusal:
+            sync.drop_proposal(
+                target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_LOCAL
+            )
+        if retired:
+            assert "--keep-hub" not in str(refusal.value)
+            with pytest.raises(sync.DropRefused, match="no hub text to keep"):
+                sync.drop_proposal(
+                    target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_HUB
+                )
+        assert hub.cards[("repo:test/app", card_id)]["text"] == "identical fixture\n"
+        assert hub.cards[("repo:test/app", card_id)]["state"] == ("retired" if retired else "live")
+
+
+@pytest.mark.parametrize("raced_create", [False, True])
+def test_derived_create_can_retry_after_grant_restored_without_hub_head(hub, tmp_path, raced_create):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"My Card": "local fixture\n"})
+    card_id = importer.derive_card_id("memory/cards/My Card.md")
+    hub.put_reply = (403, {"code": "memory_grant_missing"})
+    [proposal] = sync.push(target, client(hub), settings(target), yes=True)["proposals"]
+    assert not hub.cards
+    hub.put_reply = None
+    sync.pull(target, client(hub), settings(target))
+    closed = sync.drop_proposal(
+        target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_LOCAL
+    )
+    assert closed["rebased_on"] is None
+    assert not list(store.proposals(target, client(hub).identity))
+    if raced_create:
+        _put(hub, "repo:test/app", card_id, "other writer fixture\n")
+    report = sync.push(target, client(hub), settings(target))
+    assert hub.puts()[-1]["base_revision"] is None
+    if raced_create:
+        assert report["ok"] is False
+        assert report["proposals"][0]["reason"] == "card-id-collision"
+        assert hub.cards[("repo:test/app", card_id)]["text"] == "other writer fixture\n"
+    else:
+        assert report["ok"] is True and len(report["published"]) == 1
+        assert sync.push(target, client(hub), settings(target))["published"] == []
+        assert hub.cards[("repo:test/app", card_id)]["text"] == "local fixture\n"
+    assert len(hub.events) == 1
+
+
+def test_gone_legacy_card_drops_base_and_restored_card_cannot_overwrite(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", one="initial fixture\n")
+    sync.push(target, client(hub), settings(target), yes=True)
+    client(hub).call(
+        "put",
+        scope="repo:test/app",
+        card_id="one",
+        base_revision=1,
+        base_epoch=hub.epoch,
+        text="remote fixture\n",
+        client_event_id=hubc.event_id(),
+    )
+    card = target / "memory/cards/one.md"
+    card.write_text("local fixture\n")
+    [proposal] = sync.push(target, client(hub), settings(target))["proposals"]
+    card.unlink()
+    sync.pull(target, client(hub), settings(target))
+    closed = sync.drop_proposal(
+        target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_LOCAL
+    )
+    assert closed["local_card"] == "gone" and closed["rebased_on"] is None
+    assert "one" not in store.published(target)[client(hub).identity]["repo:test/app"]
+    card.write_text("restored edited fixture\n")
+    report = sync.push(target, client(hub), settings(target))
+    assert report["ok"] is False
+    assert [p["reason"] for p in report["proposals"]] == ["memory_base_mismatch"]
+    assert hub.puts()[-1]["base_revision"] is None
+    assert hub.cards[("repo:test/app", "one")]["text"] == "remote fixture\n"
+    assert len(hub.events) == 2
+
+
+@pytest.mark.parametrize("mode", ["read", "sync"])
+def test_unpublished_derived_search_result_keeps_readable_local_id(hub, tmp_path, mode):
+    target = workspace(tmp_path, mode=mode, **{"My Card": "# My Card\nkoala fixture\n"})
+    payload = hub_search.search_payload(target, "koala", settings=settings(target))
+    [match] = payload["matches"]
+    assert match["source"] == "local"
+    assert match["card_id"] == "My Card"
+    if os.name == "posix":
+        assert _dot_cli(target).memory_card(match["card_id"])["content"] == "# My Card\nkoala fixture\n"
+
+
+def test_local_rank_winner_keeps_hub_id_after_publication_fusion():
+    hub_match = {
+        "card_id": "derived-id",
+        "scope": "fleet",
+        "content_hash": "fixture-hash",
+        "path": "cards/derived-id.md",
+    }
+    local_match = {
+        "card_id": "My Card",
+        "publication_id": "derived-id",
+        "content_hash": "fixture-hash",
+        "path": "memory/cards/My Card.md",
+        "card_aliases": ["My Card"],
+    }
+    unrelated = {"card_id": "other", "scope": "fleet", "content_hash": "other-hash", "path": "cards/other.md"}
+    matches = hub_search.fuse({"hub": [unrelated, hub_match], "local": [local_match]}, 20)
+    assert len(matches) == 2
+    fused = next(m for m in matches if "local" in m["ranks"])
+    assert fused["source"] == "local"
+    assert fused["card_id"] == "derived-id"
+    assert fused["card_aliases"] == ["My Card"]
+    assert fused["ranks"] == {"hub": 2, "local": 1}

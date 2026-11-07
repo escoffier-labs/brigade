@@ -55,6 +55,7 @@ Thumbs.db
 /memory/
 /scripts/*
 !/scripts/memory_scan_bundle.py
+!/scripts/memory_scan_unicode14_unassigned.ranges
 !/scripts/verify-engine-rename-installer
 !/scripts/windows-native-acceptance.ps1
 !/scripts/published-artifact-acceptance.py

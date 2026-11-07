@@ -101,7 +101,7 @@ def load_config(target: Path) -> VaultConfig | None:
     if tomllib is None:
         raise VaultConfigError("vault config requires Python tomllib support")
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeDecodeError) as exc:
         raise VaultConfigError(f"unreadable vault config: {exc}") from exc
     except tomllib.TOMLDecodeError as exc:

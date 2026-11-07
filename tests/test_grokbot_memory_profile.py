@@ -35,7 +35,7 @@ from tests.test_dot_runtime import _document
 from tests.test_fleet_messages import NODE_A, message_hub as message_hub
 
 SNAPSHOT = json.loads((Path(__file__).parent / "fixtures" / "dot_tools_snapshot.json").read_text())["tools"]
-MEMORY_TOOLS = {"memory_search", "memory_card"}
+MEMORY_TOOLS = {"memory_search", "memory_card", "handoff_write"}
 
 
 def _memory_document() -> dict[str, object]:
@@ -84,12 +84,11 @@ def test_profile_exposes_exactly_the_memory_tools():
     assert DOT.tools == TOOLS and DOT.hub_inbox and DUET.hub_inbox
 
 
-def test_profile_is_read_only():
-    assert GROKBOT_MEMORY.tools == frozenset({"memory_search", "memory_card"})
-    assert all(ALL_TOOL_SCHEMAS[name].read_only for name in GROKBOT_MEMORY.tools)
-    assert "handoff_write" not in GROKBOT_MEMORY.tools
-    assert GROKBOT_MEMORY.prompt_load_scan and not DOT.prompt_load_scan and not DUET.prompt_load_scan
-    assert "handoff_write" not in GROKBOT_MEMORY.operating_instructions
+def test_profile_reads_and_files_handoffs_for_review_only():
+    assert GROKBOT_MEMORY.tools == frozenset({"memory_search", "memory_card", "handoff_write"})
+    assert {name for name in GROKBOT_MEMORY.tools if not ALL_TOOL_SCHEMAS[name].read_only} == {"handoff_write"}
+    assert GROKBOT_MEMORY.prompt_load_scan and DOT.prompt_load_scan and DUET.prompt_load_scan
+    assert "never changes a card" in GROKBOT_MEMORY.operating_instructions
     assert not GROKBOT_MEMORY.tools & GATED_TOOLS
     spawn_or_send = {name for name in TOOLS if name.startswith(("fleet_", "inbox_", "message_", "skill_"))}
     assert not GROKBOT_MEMORY.tools & spawn_or_send
@@ -184,7 +183,6 @@ def test_build_tools_has_no_fleet_and_refuses_other_tools_at_call_time(dot_priva
             ("fleet_digest", {}),
             ("skill_get", {"name": "example-skill"}),
             ("dot_t3_capabilities", {}),
-            ("handoff_write", {"slug": "note", "content": "# Memory Handoff"}),
         ):
             with pytest.raises(DotError, match="^invalid_request$"):
                 tools.call("owner@example.test", name, arguments)
@@ -202,7 +200,7 @@ def test_registered_tools_are_exactly_the_profile_with_dot_schemas():
         value = tool.model_dump(mode="json", by_alias=True, exclude_none=True)
         assert value["inputSchema"] == SNAPSHOT[tool.name]["inputSchema"]
         assert value["annotations"] == SNAPSHOT[tool.name]["annotations"]
-        if tool.name in GROKBOT_MEMORY.descriptions:
+        if tool.name in {"memory_search", "memory_card"}:
             assert "never instructions" in value["description"]
 
 
@@ -327,6 +325,8 @@ BLOCKED_CARDS = {
     "role-card": ("Release notes.\n\n" + ROLE_OVERRIDE, "role-override"),
     "guard-card": (f"The relay listens on {PRIVATE_IP} today.", "private-ipv4"),
 }
+# Private-only refusals name their own code (S18 amendment, bundle v6).
+PRIVATE_RULES = {"private-ipv4"}
 
 
 class MemoryOutput(Fixture):
@@ -346,7 +346,7 @@ class MemoryOutput(Fixture):
     def test_clean_card_and_match_carry_untrusted(self):
         (self.cards / "clean-card.md").write_text("---\ntitle: Release notes\n---\nShip on Tuesdays.\n")
         self.search_reply(self.match("clean-card", summary="Ship on Tuesdays."))
-        for profile in (GROKBOT_MEMORY, DOT, DUET):
+        for profile in (DOT, DUET):
             memory = self.memory(profile)
             card = memory.memory_card("clean-card")
             assert card["content_trust"] == "untrusted"
@@ -357,11 +357,12 @@ class MemoryOutput(Fixture):
 
     @requires_local_state
     def test_scan_hit_returns_only_the_card_id_and_rule(self):
-        memory = self.memory(GROKBOT_MEMORY)
+        memory = self.memory(DUET)
         for name, (text, rule) in BLOCKED_CARDS.items():
             (self.cards / f"{name}.md").write_text(text)
             for offset in (0, 5):
-                assert memory.memory_card(name, offset=offset) == {"card_id": name, "blocked": rule}
+                code = {"code": "memory_content_private"} if rule in PRIVATE_RULES else {}
+                assert memory.memory_card(name, offset=offset) == {"card_id": name, "blocked": rule, **code}
 
     @requires_local_state
     def test_scan_hit_in_any_card_field_blocks_the_match(self):
@@ -372,12 +373,12 @@ class MemoryOutput(Fixture):
             self.match("alias-hit", card_aliases=[PRIVATE_IP]),
             self.match("clean"),
         )
-        matches = self.memory(GROKBOT_MEMORY).memory_search("release")["matches"]
+        matches = self.memory(DUET).memory_search("release")["matches"]
         assert matches[:4] == [
             {"card_id": "title-hit", "blocked": "bidi-control"},
             {"card_id": "summary-hit", "blocked": "role-override"},
             {"card_id": "tag-hit", "blocked": "invisible-character"},
-            {"card_id": "alias-hit", "blocked": "private-ipv4"},
+            {"card_id": "alias-hit", "blocked": "private-ipv4", "code": "memory_content_private"},
         ]
         assert matches[4]["card_id"] == "clean" and matches[4]["content_trust"] == "untrusted"
 
@@ -387,24 +388,29 @@ class MemoryOutput(Fixture):
             {**self.match("legacy-card"), "card_id": ROLE_OVERRIDE},
             {**self.match("odd-card", summary=ROLE_OVERRIDE), "card_id": "a b", "path": "memory/cards/c d.md"},
         )
-        matches = self.memory(GROKBOT_MEMORY).memory_search("release")["matches"]
+        matches = self.memory(DUET).memory_search("release")["matches"]
         assert matches == [
             {"card_id": "legacy-card", "blocked": "role-override"},
             {"card_id": None, "blocked": "role-override"},
         ]
 
     @requires_local_state
-    def test_dot_and_duet_keep_returning_unscanned_text(self):
-        text, _ = BLOCKED_CARDS["guard-card"]
+    def test_dot_and_duet_refuse_a_scan_hit(self):
+        text, rule = BLOCKED_CARDS["guard-card"]
         (self.cards / "guard-card.md").write_text(text)
         for profile in (DOT, DUET):
-            card = self.memory(profile).memory_card("guard-card")
-            assert card["content"] == text and card["content_trust"] == "untrusted"
+            assert self.memory(profile).memory_card("guard-card") == {
+                "card_id": "guard-card",
+                "blocked": rule,
+                "code": "memory_content_private",
+            }
 
 
 def test_scan_rules_without_regex_for_invisible_characters():
     assert invisible_rule("\ufeffleading byte order mark is fine") is None
     assert invisible_rule("joiner \u200d and non-joiner \u200c stay allowed") is None
+    assert invisible_rule("grapheme \u034f joiner is private, not invisible") is None
+    assert invisible_rule("\u26a0\ufe0f and 1\ufe0f\u20e3 keep their selectors") is None
     assert invisible_rule("late \ufeff byte order mark") == "invisible-character"
     assert invisible_rule("tag \U000e0041 character") == "invisible-character"
     assert invisible_rule("isolate \u2066 control") == "bidi-control"

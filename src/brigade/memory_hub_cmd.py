@@ -27,7 +27,10 @@ def register(memory_sub: argparse._SubParsersAction) -> None:
         "status": "Show the hub memory mode, the hub's memory status, the replica, the spool and open proposals.",
         "pull": "Follow the hub log into this host's replica; a changed log_epoch rebuilds it.",
         "push": 'Publish changed local cards to the configured scope (needs [hub] mode = "sync").',
-        "import": "Import cards into hub memory, one call per card (needs the import grant).",
+        "import": (
+            "Import Markdown notes (files or folders) into hub memory: --dry-run lists what it would append, "
+            "a second run appends nothing (the real run needs the import grant)."
+        ),
         "card": (
             "Read one hub card's text from the [hub] read scopes, in 30,000-character chunks; "
             "while the hub is unavailable, from this host's replica."
@@ -81,18 +84,58 @@ def register(memory_sub: argparse._SubParsersAction) -> None:
             command.add_argument("--out", type=Path, required=True, help="Destination folder for generated notes.")
             command.add_argument("--init", action="store_true", help="Initialize ownership in a non-empty folder.")
             command.add_argument("--dry-run", action="store_true", help="Report changes without writing the mirror.")
-        if name == "push":
             command.add_argument(
-                "--yes", action="store_true", help="Confirm the first publish into this scope after reading its count."
+                "--exclude-scope",
+                action="append",
+                default=[],
+                metavar="SCOPE",
+                help="Exclude an exact scope from the mirror (repeatable).",
+            )
+        if name in ("push", "import"):
+            command.add_argument(
+                "--yes",
+                action="store_true",
+                help=f"Confirm the first {'publish' if name == 'push' else 'import'} into this scope after reading its count.",
             )
         if name == "import":
-            command.add_argument("paths", nargs="+", type=Path, help="Card files to import.")
+            command.add_argument("paths", nargs="+", type=Path, help="Markdown files, or folders searched recursively.")
             command.add_argument("--scope", help="Scope to import into (default: [hub] scope).")
+            command.add_argument(
+                "--dry-run", action="store_true", help="List what would be appended and write nothing."
+            )
+            command.add_argument(
+                "--update",
+                action="store_true",
+                help="Overwrite a card whose id exists with other text, and bring back a retired one (default: report changed or revive and keep the hub's).",
+            )
+            command.add_argument(
+                "--exclude",
+                action="append",
+                default=[],
+                metavar="GLOB",
+                help="Skip notes matching GLOB against the root-relative path (repeatable; `*` crosses `/`).",
+            )
+            command.add_argument(
+                "--root",
+                type=Path,
+                help="Folder that derived card ids are relative to (default: the nearest ancestor holding .obsidian, else the common ancestor of the arguments).",
+            )
         if name == "card":
             command.add_argument("card_id", help="Card id, [a-z0-9][a-z0-9._-]{0,127}.")
             command.add_argument("--scope", help="Scope to read from; one of the [hub] read scopes.")
             command.add_argument("--offset", type=int, default=0, help="Character offset of the chunk.")
             command.add_argument("--all", action="store_true", help="Read every chunk and print the whole text.")
+
+
+def _coverage_text(coverage: Any) -> str:
+    """Cards with a vector over the cards that can have one. Readiness compares
+    these two, so a hub at `ok` with unembeddable cards still reads full."""
+    if not isinstance(coverage, dict):
+        return ""
+    eligible = coverage.get("eligible", coverage.get("total"))
+    text = f", coverage {coverage.get('cards')}/{eligible}"
+    unembeddable = coverage.get("unembeddable")
+    return text + (f" ({unembeddable} unembeddable)" if unembeddable else "")
 
 
 def _emit(payload: dict[str, Any], *, json_output: bool, lines: list[str], code: int = 0) -> int:
@@ -360,6 +403,8 @@ def _replica_card(
     replica = store.replica(target)
     if replica.watermark(client.identity) is None or not replica.meta.get("principal"):
         return None
+    if not hubc.replica_principal_allowed(replica.meta.get("principal")):
+        return None
     if unavailable.principal is not None and not replica.belongs_to(client.identity, unavailable.principal):
         return None
     if any(epoch != replica.meta.get("log_epoch") for epoch in unavailable.epochs):
@@ -415,6 +460,10 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
     target = args.target.expanduser().resolve()
     name = args.memory_hub_command
     try:
+        if name == "mirror":
+            for scope in args.exclude_scope:
+                if not hubc.valid_scope(scope):
+                    raise hubc.HubConfigError(f"invalid excluded scope: {scope!r}")
         if name == "proposals":
             return _proposals(args, target, transport)
         settings = hubc.load_settings(target)
@@ -451,6 +500,13 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
                         f"retrieval: {retrieval.get('mode')}, effective {retrieval.get('effective')}, "
                         f"state {retrieval.get('state')}"
                         + (f" ({retrieval['reason']})" if retrieval.get("reason") else "")
+                        + _coverage_text(retrieval.get("coverage"))
+                        + (f", endpoint {retrieval['endpoint_host']}" if retrieval.get("endpoint_host") else "")
+                        + (
+                            f", pull_private {'on' if retrieval.get('pull_private') else 'off'}"
+                            if retrieval.get("pull")
+                            else ""
+                        )
                     )
             else:
                 lines.append(f"hub: unavailable ({hub.get('reason')})")
@@ -470,9 +526,16 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
             from . import memory_hub_mirror
 
             report = memory_hub_mirror.mirror(
-                target, client, settings, args.out.expanduser(), init=args.init, dry_run=args.dry_run
+                target,
+                client,
+                settings,
+                args.out.expanduser(),
+                init=args.init,
+                dry_run=args.dry_run,
+                exclude_scopes=tuple(args.exclude_scope),
             )
             lines = [f"memory hub mirror: {len(report['written'])} write(s), {len(report['deleted'])} deletion(s)"]
+            lines.append("excluded scopes: " + (", ".join(report["excluded_scopes"]) or "none"))
             lines += [f"write: {name}" for name in report["written"]]
             lines += [f"delete: {name}" for name in report["deleted"]]
             lines += [f"skipped {reason}: {count}" for reason, count in report["skipped"].items()]
@@ -489,31 +552,54 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
             if report.get("needs_confirmation"):
                 lines = [
                     f"memory hub push: first publish to {report['scope']} would publish {report['card_count']} card(s).",
-                    "Run again with --yes to publish them.",
+                    f"{report['derived_ids']} derived id(s). Run again with --yes to publish them.",
                 ]
                 return _emit(report, json_output=args.json, lines=lines, code=1)
             if report.get("hub_memory") is False:
                 return _emit(report, json_output=args.json, lines=[f"error: {report['error']}"], code=1)
-            lines = [
-                f"memory hub push: {len(report['published'])} published, {len(report['spooled'])} spooled, "
-                f"{len(report['proposals'])} proposal(s), {len(report['skipped'])} skipped"
-            ]
-            lines += [f"- refused {item['card_id']}: {item['code']}" for item in report["refused"]]
+            lines = [f"- refused {item['card_id']}: {item['code']}" for item in report["refused"]]
             lines += [
                 f"- resolved {proposal_id}; its text is kept at {path}"
                 for proposal_id, path in (report.get("resolved_kept") or {}).items()
             ]
-            return _emit(report, json_output=args.json, lines=lines)
+            # Keep the count summary last so scheduled runs expose it in journals.
+            summary = (
+                f"memory hub push: {len(report['published'])} published, {len(report['spooled'])} spooled, "
+                f"{len(report['proposals'])} proposal(s), {len(report['refused'])} refused, "
+                f"{len(report.get('kept_local', []))} kept local, {len(report['skipped'])} skipped, "
+                f"{report['derived_ids']} derived id(s)"
+            )
+            # _emit prints warnings after lines. Fold them in before the final summary.
+            lines = lines + [f"warning: {warning}" for warning in report.get("warnings", [])] + [summary]
+            return _emit(
+                {**report, "warnings": []} if not args.json else report,
+                json_output=args.json,
+                lines=lines,
+                code=0 if report["ok"] else 1,
+            )
         if name == "import":
+            from . import memory_hub_import as importer
+
             scope = args.scope or settings.scope
             if not hubc.valid_scope(scope):
                 raise hubc.HubConfigError("import needs --scope or [hub] scope")
-            report = sync.import_cards(target, client, scope=str(scope), paths=list(args.paths))
-            lines = [f"memory hub import into {report['scope']}:"]
-            for item in report["results"]:
-                detail = item.get("code") or item.get("reason") or item.get("revision") or ""
-                lines.append(f"- {item['path']}  {item['status']}  {detail}".rstrip())
-            return _emit(report, json_output=args.json, lines=lines, code=0 if report["ok"] else 1)
+            report = importer.run(
+                client,
+                scope=str(scope),
+                paths=list(args.paths),
+                root=args.root,
+                excludes=list(args.exclude),
+                dry_run=args.dry_run,
+                update=args.update,
+                yes=args.yes,
+            )
+            if args.json:
+                for row in importer.json_lines(report):
+                    print(json.dumps(row, sort_keys=True, ensure_ascii=False))
+            else:
+                for line in importer.lines(report):
+                    print(line)
+            return 0 if report["ok"] else 1
         try:
             payload = _hub_card(client, settings, args)
         except hubc.HubUnavailable as exc:

@@ -153,17 +153,18 @@ def test_unpinned_script_tries_brigade_hook_then_cli():
     assert "set -eu\n" in text
     assert "--target" not in text
     entry_probe = text.index('cli="$(command -v brigade')
-    entry_exec = text.index(f'exec "${{cli%/*}}/brigade-hook" --event "$event" --package "{PACKAGE_REF}"')
-    cli_exec = text.index(f'exec {COMMAND_PREFIX} --event "$event" --package "{PACKAGE_REF}"')
+    entry_exec = text.index(f'"${{cli%/*}}/brigade-hook" --event "$event" --package "{PACKAGE_REF}"')
+    cli_exec = text.index(f'{COMMAND_PREFIX} --event "$event" --package "{PACKAGE_REF}"')
     assert entry_probe < entry_exec < cli_exec
+    assert "exec " not in text
 
 
 def test_pinned_script_forwards_target():
     text = hook_script_text(pin=Path("/work/my repo"))
     target = shlex.quote(str(Path("/work/my repo")))
 
-    assert f'exec "${{cli%/*}}/brigade-hook" --event "$event" --package "{PACKAGE_REF}" --target {target}' in text
-    assert f'exec {COMMAND_PREFIX} --event "$event" --package "{PACKAGE_REF}" --target {target}' in text
+    assert f'"${{cli%/*}}/brigade-hook" --event "$event" --package "{PACKAGE_REF}" --target {target} ||' in text
+    assert f'{COMMAND_PREFIX} --event "$event" --package "{PACKAGE_REF}" --target {target} ||' in text
 
 
 def test_script_is_valid_posix_sh(tmp_path: Path):
@@ -216,6 +217,102 @@ def test_script_ignores_brigade_hook_from_another_installation(tmp_path: Path):
     result = _run_script(script, env, "--event", "Stop")
 
     assert result.stdout.strip() == f"cli work hook-run --event Stop --package {PACKAGE_REF}"
+
+
+def _status_stub(path: Path, *, status: int, stdout: str = "") -> None:
+    path.write_text(f"#!/bin/sh\nprintf '%s' '{stdout}'\nexit {status}\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell wrapper")
+@pytest.mark.parametrize("crash_status", [1, 2, 126, 127, 139])
+def test_script_fails_open_when_the_hook_crashes(crash_status: int, tmp_path: Path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = tmp_path / "hook.sh"
+    script.write_text(hook_script_text(), encoding="utf-8")
+    _stub(bin_dir / "brigade", "cli")
+    _status_stub(bin_dir / "brigade-hook", status=crash_status)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+
+    result = _run_script(script, env, "--event", "UserPromptSubmit")
+
+    assert result.returncode == 1
+    assert "UserPromptSubmit handler exited with status" in result.stderr
+    assert f"status {crash_status}" in result.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell wrapper")
+def test_script_fails_open_when_the_cli_fallback_crashes(tmp_path: Path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = tmp_path / "hook.sh"
+    script.write_text(hook_script_text(), encoding="utf-8")
+    _status_stub(bin_dir / "brigade", status=2)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+
+    result = _run_script(script, env, "--event", "UserPromptSubmit")
+
+    assert result.returncode == 1
+    assert "failing open" in result.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell wrapper")
+def test_script_fails_open_when_the_hook_target_is_not_runnable(tmp_path: Path):
+    # The -x check passes, then the interpreter cannot open the script: the
+    # reinstall race from the field report. Python reports that as status 2.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = tmp_path / "hook.sh"
+    script.write_text(hook_script_text(), encoding="utf-8")
+    _stub(bin_dir / "brigade", "cli")
+    hook = bin_dir / "brigade-hook"
+    hook.write_text(
+        f"#!/bin/sh\n{shlex.quote(sys.executable)} {shlex.quote(str(bin_dir / 'gone.py'))}\n", encoding="utf-8"
+    )
+    hook.chmod(0o755)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+
+    result = _run_script(script, env, "--event", "UserPromptSubmit")
+
+    assert result.returncode == 1
+    assert "status 2" in result.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell wrapper")
+def test_script_passes_a_deliberate_block_decision_through(tmp_path: Path):
+    # Brigade blocks with a JSON decision on stdout and exit 0. The wrapper
+    # must forward both untouched and stay silent on stderr.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = tmp_path / "hook.sh"
+    script.write_text(hook_script_text(), encoding="utf-8")
+    _stub(bin_dir / "brigade", "cli")
+    decision = '{"decision":"block","reason":"verify first"}'
+    _status_stub(bin_dir / "brigade-hook", status=0, stdout=decision)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+
+    result = _run_script(script, env, "--event", "Stop")
+
+    assert result.returncode == 0
+    assert result.stdout == decision
+    assert result.stderr == ""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell wrapper")
+def test_script_exits_zero_on_success_without_warning(tmp_path: Path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = tmp_path / "hook.sh"
+    script.write_text(hook_script_text(), encoding="utf-8")
+    _stub(bin_dir / "brigade", "cli")
+    _stub(bin_dir / "brigade-hook", "entry")
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+
+    result = _run_script(script, env, "--event", "Stop")
+
+    assert result.returncode == 0
+    assert result.stderr == ""
 
 
 def test_script_text_does_not_depend_on_install_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

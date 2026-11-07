@@ -14,6 +14,11 @@ pub struct Base {
 }
 #[derive(Clone, Debug)]
 pub enum Action {
+    Proposal(super::proposals::Command),
+    Embedding {
+        command: super::embedding::Command,
+        config: Option<super::embedder::Config>,
+    },
     Put {
         scope: String,
         card_id: String,
@@ -52,6 +57,13 @@ pub enum Action {
 impl Action {
     pub fn name(&self) -> &'static str {
         match self {
+            Action::Proposal(c) => c.name(),
+            Action::Embedding { command, .. } => match command {
+                super::embedding::Command::Reindex { .. } => "reindex",
+                super::embedding::Command::Lease { .. } => "embed_lease",
+                super::embedding::Command::Failed { .. } => "embed_failed",
+                super::embedding::Command::Submit { .. } => "embed_submit",
+            },
             Action::Put { import: false, .. } => "put",
             Action::Put { import: true, .. } => "import",
             Action::Retire { .. } => "retire",
@@ -65,6 +77,12 @@ impl Action {
     /// The grant an action needs, and the scope it needs it on.
     fn requirement(&self) -> (Option<&str>, &'static str) {
         match self {
+            Action::Proposal(c) => (None, c.right()),
+            Action::Embedding {
+                command: super::embedding::Command::Reindex { .. },
+                ..
+            } => (None, "admin"),
+            Action::Embedding { .. } => (None, "embed"),
             Action::Put {
                 scope,
                 import: false,
@@ -89,11 +107,12 @@ impl Action {
         if matches!(self, Action::PolicyProbe) {
             return true;
         }
-        false
+        matches!(self, Action::Proposal(_))
     }
     /// New blob bytes this command may add, for the per-batch bound.
     pub fn new_bytes(&self) -> usize {
         match self {
+            Action::Proposal(c) => c.new_bytes(),
             Action::Put { text, .. } | Action::Handoff { text, .. } => text.len(),
             _ => 0,
         }
@@ -124,7 +143,7 @@ fn with(mut reply: Reply, extra: Json) -> Reply {
     }
     reply
 }
-fn t(s: &str) -> Value {
+pub(super) fn t(s: &str) -> Value {
     Value::Text(s.into())
 }
 fn opt(s: Option<&str>) -> Value {
@@ -133,7 +152,7 @@ fn opt(s: Option<&str>) -> Value {
 fn int(v: &Value) -> i64 {
     if let Value::Integer(i) = v { *i } else { 0 }
 }
-fn s(v: &Value) -> String {
+pub(super) fn s(v: &Value) -> String {
     if let Value::Text(s) = v {
         s.clone()
     } else {
@@ -148,13 +167,17 @@ pub fn epoch<T: ReadTx + ?Sized>(tx: &T) -> rusqlite::Result<String> {
         .map(|r| s(&r[0]))
         .unwrap_or_default())
 }
-struct Head {
-    revision: i64,
-    hash: String,
-    state: String,
-    trust: String,
+pub(super) struct Head {
+    pub(super) revision: i64,
+    pub(super) hash: String,
+    pub(super) state: String,
+    pub(super) trust: String,
 }
-fn head<T: ReadTx + ?Sized>(tx: &T, scope: &str, card_id: &str) -> rusqlite::Result<Option<Head>> {
+pub(super) fn head<T: ReadTx + ?Sized>(
+    tx: &T,
+    scope: &str,
+    card_id: &str,
+) -> rusqlite::Result<Option<Head>> {
     Ok(tx
         .query(
             "SELECT revision,content_hash,state,trust FROM memory_cards WHERE scope=?1 AND card_id=?2",
@@ -192,22 +215,22 @@ fn blocked(rules: &[String]) -> Reply {
     )
 }
 
-struct NewEvent<'a> {
-    kind: &'a str,
-    scope: Option<&'a str>,
-    card_id: Option<&'a str>,
-    changes_head: bool,
-    base_revision: Option<i64>,
-    content_hash: Option<&'a str>,
-    trust: Option<&'a str>,
-    origin: Option<&'a str>,
-    payload: Json,
-    policy_digest: Option<&'a str>,
+pub(super) struct NewEvent<'a> {
+    pub(super) kind: &'a str,
+    pub(super) scope: Option<&'a str>,
+    pub(super) card_id: Option<&'a str>,
+    pub(super) changes_head: bool,
+    pub(super) base_revision: Option<i64>,
+    pub(super) content_hash: Option<&'a str>,
+    pub(super) trust: Option<&'a str>,
+    pub(super) origin: Option<&'a str>,
+    pub(super) payload: Json,
+    pub(super) policy_digest: Option<&'a str>,
 }
 /// Appends one event and returns its `seq`. A head-changing event's revision
 /// equals its `seq`. `seq` is chosen inside the write transaction and never
 /// reused while the file is not restored, since events are never deleted.
-fn append(tx: &dyn WriteTx, p: &Prepared, e: NewEvent) -> rusqlite::Result<i64> {
+pub(super) fn append(tx: &dyn WriteTx, p: &Prepared, e: NewEvent) -> rusqlite::Result<i64> {
     let seq = int(&tx.query(
         "SELECT max(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='memory_events'),0),COALESCE((SELECT max(seq) FROM memory_events),0))+1",
         &[],
@@ -238,7 +261,12 @@ fn append(tx: &dyn WriteTx, p: &Prepared, e: NewEvent) -> rusqlite::Result<i64> 
     )?;
     Ok(seq)
 }
-fn store_blob(tx: &dyn WriteTx, hash: &str, text: &str, stamp: &str) -> rusqlite::Result<()> {
+pub(super) fn store_blob(
+    tx: &dyn WriteTx,
+    hash: &str,
+    text: &str,
+    stamp: &str,
+) -> rusqlite::Result<()> {
     tx.execute(
         "INSERT INTO memory_blobs(content_hash,bytes,size,created_at) VALUES(?1,?2,?3,?4) ON CONFLICT(content_hash) DO NOTHING",
         &[
@@ -250,7 +278,12 @@ fn store_blob(tx: &dyn WriteTx, hash: &str, text: &str, stamp: &str) -> rusqlite
     )?;
     Ok(())
 }
-fn store_scan(tx: &dyn WriteTx, hash: &str, scan: &Scan, stamp: &str) -> rusqlite::Result<()> {
+pub(super) fn store_scan(
+    tx: &dyn WriteTx,
+    hash: &str,
+    scan: &Scan,
+    stamp: &str,
+) -> rusqlite::Result<()> {
     tx.execute(
         "INSERT INTO memory_scans(content_hash,ruleset_version,state,rule_ids,scanned_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(content_hash,ruleset_version) DO UPDATE SET state=excluded.state,rule_ids=excluded.rule_ids,scanned_at=excluded.scanned_at",
         &[
@@ -265,7 +298,7 @@ fn store_scan(tx: &dyn WriteTx, hash: &str, scan: &Scan, stamp: &str) -> rusqlit
 }
 /// Moves a card's head and records the revision row in one step.
 #[allow(clippy::too_many_arguments)]
-fn set_head(
+pub(super) fn set_head(
     tx: &dyn WriteTx,
     p: &Prepared,
     scope: &str,
@@ -356,6 +389,7 @@ pub fn apply(
     p: &Prepared,
     authority: &Authority,
     scanner: &dyn super::scan::Scanner,
+    embedder: Option<(&str, bool)>,
 ) -> rusqlite::Result<Reply> {
     let (scope, right) = p.action.requirement();
     if !auth::has_right(tx, &p.credential, scope, right)? {
@@ -365,11 +399,25 @@ pub fn apply(
             &format!("this credential has no {right} grant for this memory action"),
         ));
     }
+    if let Action::Proposal(c) = &p.action {
+        if let Some(r) = super::proposals::authorize(tx, &p.credential, &c.request)? {
+            return Ok(r);
+        }
+    }
     let principal = p.credential.principal();
-    let stored = tx.query(
+    // Embedding commands keep no idempotency row. A lease reply carries card
+    // text, and a stored copy would outlive the card's retirement and answer
+    // a replay without the grant, state and scan checks. Each command is
+    // safe to repeat: a second submit or failure finds no leased job.
+    let replayable = !matches!(p.action, Action::Embedding { .. });
+    let stored = if replayable {
+        tx.query(
         "SELECT request_digest,status,response FROM memory_idempotency WHERE principal=?1 AND client_event_id=?2",
-        &[t(principal), t(&p.client_event_id)],
-    )?;
+            &[t(principal), t(&p.client_event_id)],
+        )?
+    } else {
+        Vec::new()
+    };
     if let Some(row) = stored.first() {
         // Checked before compare-and-set, so a retry of a committed write gets
         // its original answer even after the card moved.
@@ -392,8 +440,32 @@ pub fn apply(
         }
         _ => {}
     }
-    let reply = run(tx, &p, authority)?;
+    let reply = run(tx, &p, authority, scanner)?;
     if reply.status < 300 {
+        match &p.action {
+            Action::Put { scope, card_id, .. } | Action::Retire { scope, card_id, .. } => {
+                super::embedding::cleanup_card(tx, scope, card_id)?;
+                if let Some((id, private)) = embedder {
+                    super::embedding::queue_card(tx, scope, card_id, id, private)?;
+                }
+            }
+            Action::Proposal(c) if c.name() == "decide" && reply.body["state"] == "applied" => {
+                for row in tx.query(
+                    "SELECT scope,card_id FROM memory_card_revisions WHERE proposal_id=?1",
+                    &[t(reply.body["proposal_id"].as_str().unwrap())],
+                )? {
+                    let scope = s(&row[0]);
+                    let card_id = s(&row[1]);
+                    super::embedding::cleanup_card(tx, &scope, &card_id)?;
+                    if let Some((id, private)) = embedder {
+                        super::embedding::queue_card(tx, &scope, &card_id, id, private)?;
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+    if reply.status < 300 && replayable {
         tx.execute(
             "INSERT INTO memory_idempotency(principal,client_event_id,request_digest,status,response,created_ms) VALUES(?1,?2,?3,?4,?5,?6)",
             &[
@@ -409,7 +481,12 @@ pub fn apply(
     Ok(reply)
 }
 
-fn run(tx: &dyn WriteTx, p: &Prepared, _authority: &Authority) -> rusqlite::Result<Reply> {
+fn run(
+    tx: &dyn WriteTx,
+    p: &Prepared,
+    _authority: &Authority,
+    scanner: &dyn super::scan::Scanner,
+) -> rusqlite::Result<Reply> {
     let stamp = ids::isoformat(p.now_ms);
     let current_epoch = epoch(tx)?;
     let epoch_changed = || {
@@ -423,6 +500,16 @@ fn run(tx: &dyn WriteTx, p: &Prepared, _authority: &Authority) -> rusqlite::Resu
         )
     };
     match &p.action {
+        Action::Proposal(c) => {
+            let mut reply = super::proposals::run(tx, p, c, _authority, scanner)?;
+            if reply.body["log_epoch"].is_string() {
+                reply.body["log_epoch"] = json!(current_epoch);
+            }
+            Ok(reply)
+        }
+        Action::Embedding { command, config } => {
+            super::embedding::apply(tx, p, command, config.as_ref(), scanner)
+        }
         Action::Put {
             scope,
             card_id,

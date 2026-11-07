@@ -209,11 +209,12 @@ def _split(text: str) -> tuple[dict[str, Any], str]:
     return meta, body
 
 
-def _select(heads: list[dict]) -> tuple[list[tuple[dict, dict]], dict[str, int]]:
+def _select(heads: list[dict], exclude_scopes: tuple[str, ...] = ()) -> tuple[list[tuple[dict, dict]], dict[str, int]]:
     skipped: Counter[str] = Counter()
     rows = [(head, _split(str(head.get("text", "")))[0]) for head in heads]
     # Supersession is scoped. Chains name predecessors with supersedes, or a
     # successor with superseded_by. Never revive a predecessor if its head is withheld.
+    # Keep all rows here: exclusions must not change scoped supersession semantics.
     superseded: set[tuple[str, str]] = set()
     for head, meta in rows:
         previous = meta.get("supersedes", [])
@@ -224,7 +225,9 @@ def _select(heads: list[dict]) -> tuple[list[tuple[dict, dict]], dict[str, int]]
     selected = []
     for head, meta in rows:
         reason = None
-        if head.get("state") == "retired":
+        if head["scope"] in exclude_scopes:
+            reason = "excluded-scope"
+        elif head.get("state") == "retired":
             reason = "retired"
         elif head.get("trust") == "flagged" or head.get("scan_state") == "flagged":
             reason = "flagged"
@@ -234,7 +237,9 @@ def _select(heads: list[dict]) -> tuple[list[tuple[dict, dict]], dict[str, int]]
             reason = "visibility-private"
         elif withheld := sync.withheld(str(head.get("text", ""))):
             reason = withheld
-        elif head.get("scan_state") != "clean":
+        elif head.get("scan_state") not in ("clean", "private"):
+            # Private scans name the operator's own machines and contacts. The
+            # mirror writes to a local folder, so they are exported (S18).
             reason = "scan-unknown"
         elif (head["scope"], head["card_id"]) in superseded or meta.get("superseded_by"):
             reason = "superseded"
@@ -350,7 +355,12 @@ def mirror(
     *,
     init: bool = False,
     dry_run: bool = False,
+    exclude_scopes: tuple[str, ...] = (),
 ) -> dict[str, Any]:
+    for scope in exclude_scopes:
+        if not hubc.valid_scope(scope):
+            raise hubc.HubConfigError(f"invalid excluded scope: {scope!r}")
+    exclude_scopes = tuple(sorted(set(exclude_scopes)))
     out = out.absolute()
     _check_destination(out)
     if not init and not os.path.lexists(out / MARKER) and _foreign_entries(out):
@@ -362,8 +372,11 @@ def mirror(
     heads, principal, warnings = _heads(target, client, settings)
     identity = {"hub": client.identity, "principal": principal, "workspace": str(target.resolve())}
     if dry_run:
-        selected, skipped = _select(heads)
-        return _transact(out, identity, heads, selected, skipped, warnings, init=init, dry_run=True)
+        selected, skipped = _select(heads, exclude_scopes)
+        return {
+            **_transact(out, identity, heads, selected, skipped, warnings, init=init, dry_run=True),
+            "excluded_scopes": list(exclude_scopes),
+        }
     try:
         out.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -379,8 +392,11 @@ def mirror(
         heads, current = _readable_heads(target, client, settings)
         _require_principal(principal, current)
         _require_scan_state(heads)
-        selected, skipped = _select(heads)
-        return _transact(resolved, identity, heads, selected, skipped, warnings, init=init, dry_run=False)
+        selected, skipped = _select(heads, exclude_scopes)
+        return {
+            **_transact(resolved, identity, heads, selected, skipped, warnings, init=init, dry_run=False),
+            "excluded_scopes": list(exclude_scopes),
+        }
 
 
 def _transact(

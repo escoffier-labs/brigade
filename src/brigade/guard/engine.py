@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import bisect
 import re
+from collections.abc import Iterator
 from typing import NamedTuple
 
 from .detectors.opf import run_opf
@@ -51,8 +52,10 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
     allow_values = set(active_policy.allow_values)
 
     findings: list[Finding] = []
-    occupied: list[tuple[int, int, str]] = []
+    # One span set per rule that claimed text, so each stays sorted and bisectable.
+    occupied: list[_SpanSet] = []
     root_spans: list[tuple[int, int]] = []
+    root_index = _SpanSet()
     expanded_secret_spans: set[tuple[int, int]] = set()
     js_fields: set[int] | None = None
 
@@ -62,12 +65,13 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
     for rule, spans in zip(rules, rule_spans(text, rules), strict=True):
         is_root_path = rule.id == "root-path" and not any(rule is custom for custom in active_policy.custom_rules)
         expanded_end = 0
+        claimed = _SpanSet()
         # Built-in PEM spans are ordered and expanded_end makes them disjoint.
         # Only earlier rules can overlap them, even with many missing ENDs.
-        precedence_spans = (
-            occupied.copy()
+        precedence_sets = (
+            tuple(occupied)
             if rule.id == "private-key-block" and any(rule is default for default in DEFAULT_RULES)
-            else occupied
+            else (*occupied, claimed)
         )
         for start, end in spans:
             if start < expanded_end:
@@ -88,31 +92,10 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                     continue
             if _inside_ranges(start, end, skipped_ranges):
                 continue
-            # Earlier detectors can occupy part of an expanded root path.
-            # Retain its independent decision when it fully encloses them;
-            # ordinary and partial-overlap precedence stays unchanged.
-            if any(
-                start < prev_end
-                and end > prev_start
-                and not (is_root_path and start <= prev_start and prev_end <= end)
-                and not (
-                    rule.category in {"secret", "pii"}
-                    and rule.category != prev_category
-                    and any(
-                        root_start <= min(start, prev_start) and max(end, prev_end) <= root_end
-                        for root_start, root_end in root_spans
-                    )
-                )
-                for prev_start, prev_end, prev_category in precedence_spans
-            ):
+            if _precedence_blocks(start, end, rule.category, is_root_path, precedence_sets, root_index):
                 continue
             # Keep nested secret and PII decisions independent of root policy.
-            if any(
-                start < root_end
-                and end > root_start
-                and not (rule.category in {"secret", "pii"} and root_start <= start and end <= root_end)
-                for root_start, root_end in root_spans
-            ):
+            if _root_blocks(start, end, rule.category, root_index):
                 continue
 
             # Resolve detector precedence on raw spans. A secret tail must not
@@ -169,8 +152,11 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
             )
             if is_root_path:
                 root_spans.append((start, end))
+                root_index.add(start, end, rule.category)
             else:
-                occupied.append((start, raw_end, rule.category))
+                claimed.add(start, raw_end, rule.category)
+        if claimed:
+            occupied.append(claimed)
 
     for ignored in ignored_file_allows:
         findings.append(
@@ -338,7 +324,7 @@ def _pem_body_end(text: str, end: int) -> int:
             # Anchored matches advance monotonically through this physical line.
             offset = 0
             separator = re.compile(r"(?:[ \t]+|(?:\\r)?\\n)+")
-            metadata = re.compile(r"(?:Proc-Type:|DEK-Info:)[^\\\r\n]*(?:(?:\\r)?\\n|$)")
+            metadata = re.compile(r'(?:Proc-Type:|DEK-Info:)[^\\"\r\n]*(?:(?:\\r)?\\n|(?="\s*[,}\]])|$)')
             while True:
                 gap = separator.match(line, offset)
                 if gap is not None:
@@ -355,10 +341,12 @@ def _pem_body_end(text: str, end: int) -> int:
             if inline is not None:
                 body_end = cursor + offset + inline.end()
         else:
-            leading = re.match(r"[ \t]*(?:> )?", line)
+            leading = re.match(r"[ \t]*(?:> ?)?", line)
             assert leading is not None
             current_prefix = leading.group()
-            body = line[len(current_prefix) :]
+            body = line[len(current_prefix) :].rstrip(" \t")
+            if prefix is not None and current_prefix == prefix.rstrip() and not body.strip():
+                current_prefix = prefix
             if prefix is not None and prefix != current_prefix and line.strip():
                 break
             is_body = bool(re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", body))
@@ -1425,6 +1413,92 @@ def _inside_ranges(start: int, end: int, ranges: list[tuple[int, int]]) -> bool:
     return any(start < range_end and end > range_start for range_start, range_end in ranges)
 
 
+_NESTED_CATEGORIES = frozenset({"secret", "pii"})
+
+
+class _SpanSet:
+    """Half-open spans that answer overlap and enclosure queries.
+
+    One detector rule emits spans in ascending order and ``expanded_end`` keeps
+    them disjoint, so starts and ends both ascend and ``bisect`` finds the
+    overlapping run directly. A span that arrives out of order, overlapping or
+    inverted (``end < start``) clears ``ordered`` and queries scan every span,
+    as the pairwise check did.
+    """
+
+    __slots__ = ("starts", "ends", "tags", "ordered")
+
+    def __init__(self) -> None:
+        self.starts: list[int] = []
+        self.ends: list[int] = []
+        self.tags: list[str] = []
+        self.ordered = True
+
+    def __bool__(self) -> bool:
+        return bool(self.starts)
+
+    def add(self, start: int, end: int, tag: str) -> None:
+        if self.ordered and (end < start or (self.ends and start < self.ends[-1])):
+            self.ordered = False
+        self.starts.append(start)
+        self.ends.append(end)
+        self.tags.append(tag)
+
+    def overlapping(self, start: int, end: int) -> Iterator[tuple[int, int, str]]:
+        """Yield spans with ``span_start < end and span_end > start``."""
+        if self.ordered:
+            first = bisect.bisect_right(self.ends, start)
+            last = bisect.bisect_left(self.starts, end)
+            for index in range(first, last):
+                yield self.starts[index], self.ends[index], self.tags[index]
+            return
+        for span in zip(self.starts, self.ends, self.tags, strict=True):
+            if start < span[1] and end > span[0]:
+                yield span
+
+    def encloses(self, start: int, end: int) -> bool:
+        """Report whether one span has ``span_start <= start and end <= span_end``."""
+        if self.ordered:
+            index = bisect.bisect_right(self.starts, start) - 1
+            return index >= 0 and end <= self.ends[index]
+        return any(
+            span_start <= start and end <= span_end for span_start, span_end in zip(self.starts, self.ends, strict=True)
+        )
+
+
+def _precedence_blocks(
+    start: int, end: int, category: str, is_root_path: bool, claimed: tuple[_SpanSet, ...], roots: _SpanSet
+) -> bool:
+    """Report whether an earlier detector's span takes precedence over this one.
+
+    Earlier detectors can occupy part of an expanded root path. Retain its
+    independent decision when it fully encloses them. A secret or PII span also
+    coexists with another category inside one root span.
+    """
+    cross_category = category in _NESTED_CATEGORIES
+    for spans in claimed:
+        for prev_start, prev_end, prev_category in spans.overlapping(start, end):
+            if is_root_path and start <= prev_start and prev_end <= end:
+                continue
+            if (
+                cross_category
+                and category != prev_category
+                and roots.encloses(min(start, prev_start), max(end, prev_end))
+            ):
+                continue
+            return True
+    return False
+
+
+def _root_blocks(start: int, end: int, category: str, roots: _SpanSet) -> bool:
+    """Report whether a root span claims this one, except nested secret and PII."""
+    nests = category in _NESTED_CATEGORIES
+    for root_start, root_end, _ in roots.overlapping(start, end):
+        if not (nests and root_start <= start and end <= root_end):
+            return True
+    return False
+
+
 def _overlaps(start: int, end: int, occupied: list[tuple[int, int]]) -> bool:
     return any(start < prev_end and end > prev_start for prev_start, prev_end in occupied)
 
@@ -1485,6 +1559,20 @@ def _edits_for(
 
 
 def _apply_edits(text: str, edits: list[TextEdit]) -> str:
+    forward = sorted(edits, key=lambda item: item.start)
+    # Disjoint non-empty edits join in one pass. Rebuilding the string per edit
+    # is quadratic in text size. Anything else keeps the original application order.
+    if all(edit.start < edit.end for edit in forward) and all(
+        previous.end <= following.start for previous, following in zip(forward, forward[1:], strict=False)
+    ):
+        pieces: list[str] = []
+        cursor = 0
+        for edit in forward:
+            pieces.append(text[cursor : edit.start])
+            pieces.append(edit.replacement)
+            cursor = edit.end
+        pieces.append(text[cursor:])
+        return "".join(pieces)
     result = text
     for edit in sorted(edits, key=lambda item: item.start, reverse=True):
         result = result[: edit.start] + edit.replacement + result[edit.end :]

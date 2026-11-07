@@ -401,6 +401,7 @@ class Hub:
     log: Path | None = None
     process: subprocess.Popen | None = None
     log_handle: Any = None
+    readiness_detail: str = "no /health answer"
 
 
 def free_port() -> int:
@@ -474,15 +475,28 @@ def address_in_use(log_text: str) -> bool:
 
 
 def _await_hub(hub: Hub, deadline: float) -> str:
-    """Wait for `/health`: "healthy", "exited" (the process died first) or "timeout"."""
+    """Wait for `/health` and authenticated `/nodes` readiness.
+
+    Return "healthy", "exited" (the child died first), or "timeout".
+    Keep the last `/nodes` status in `hub.readiness_detail` so a timeout
+    distinguishes an unanswered health probe from a failed authenticated probe.
+    """
+    hub.readiness_detail = "no /health answer"
     process = hub.process
     assert process is not None
     while time.monotonic() < deadline:
         if process.poll() is not None:
             return "exited"
         if request(hub.url, "GET", "/health", timeout=1.0).status is not None:
-            # Another worker's hub can take the port and answer; ours must still be running.
-            return "healthy" if process.poll() is None else "exited"
+            # A competing hub can answer health before our child reports its
+            # bind failure. Prove this is our hub using the per-launch token.
+            authenticated = request(hub.url, "GET", "/nodes", token=hub.admin_token, timeout=1.0)
+            result = (
+                f"returned status {authenticated.status}" if authenticated.status is not None else "gave no response"
+            )
+            hub.readiness_detail = f"/health answered but authenticated /nodes {result}"
+            if authenticated.status == 200:
+                return "healthy" if process.poll() is None else "exited"
         time.sleep(0.1)
     return "timeout"
 
@@ -515,7 +529,7 @@ def launch_on_free_port(
         assert hub.log is not None
         tail = log_tail(hub.log)
         if state == "timeout":
-            raise timed_out(tail)
+            raise timed_out(f"{hub.readiness_detail}. Hub log: {tail}")
         if attempt < LAUNCH_ATTEMPTS and time.monotonic() < deadline and address_in_use(tail):
             continue
         raise exited(returncode, tail)
@@ -574,7 +588,7 @@ def launch_hub(template: str, *, brigade: list[str], state_dir: Path, startup_ti
         start,
         startup_timeout=startup_timeout,
         exited=lambda code, tail: ContractError(f"the hub exited with {code} before it was healthy: {tail}"),
-        timed_out=lambda tail: ContractError(f"the hub did not answer /health within {startup_timeout:g}s: {tail}"),
+        timed_out=lambda tail: ContractError(f"the hub did not become ready within {startup_timeout:g}s: {tail}"),
     )
 
 
@@ -1606,6 +1620,7 @@ def drive_keys_and_sealed(d: Drive, x: Ctx) -> None:
         token=x.b,
         shape={"key": {**KEY_ENTRY, "principal_id": Eq(x.node_a), "kid": Eq(x.kid_a)}},
     )
+    body: dict[str, Any]
     for case, body, token, status, shape in (
         (
             "messages keys_get an unknown key",

@@ -17,6 +17,7 @@ from .projection import kernel
 
 PROJECTOR = "obsidian-vault"
 PROJECTION_FOLDER = "Brigade Memory"
+PROJECTION_MARKER = ".brigade-memory-projection.json"
 DEFAULT_MAX_RELATED = 12
 MAX_RELATED = DEFAULT_MAX_RELATED
 CANVAS_COLUMNS = 24
@@ -79,6 +80,9 @@ def _project_payload(*, target: Path, vault: Path, max_related: int = DEFAULT_MA
     ledger = _read_ledger(ledger_path)
     prior_files = _ledger_files(ledger)
     desired = _render_projection(target, root=root, prior_files=prior_files, max_related=max_related)
+    desired[PROJECTION_MARKER] = (
+        json.dumps({"version": 1, "writer": PROJECTOR}, sort_keys=True, indent=2).encode() + b"\n"
+    )
     drift = _drift(root, prior_files)
     mutations: list[kernel.MutationSpec] = []
     actual_files: dict[str, str] = dict(prior_files)

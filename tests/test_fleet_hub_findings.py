@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from brigade import fleet_hub, fleet_hub_findings as f
+from tests._home import set_home
 
 
 def test_reservations_and_crash_recovery(tmp_path):
@@ -442,3 +443,24 @@ def test_secret_key_file_is_used_read_only_and_never_created(tmp_path, monkeypat
     with pytest.raises(f.FindingError, match="invalid"):
         f.handle(conn, body, caller="agent:one", owners={}, now=0)
     conn.close()
+
+
+def test_secret_key_file_expands_home(tmp_path, monkeypatch):
+    set_home(monkeypatch, tmp_path)
+    monkeypatch.setenv(f.KEY_FILE_ENV, "~/findings-key")
+    secret = tmp_path / "findings-key"
+    secret.write_bytes(bytes(range(32)))
+    secret.chmod(0o600)
+    with fleet_hub.init_db(tmp_path / "hub.db") as conn:
+        assert f._key(conn) == bytes(range(32))
+    assert not (tmp_path / "hub.db.findings-key").exists()
+
+
+@pytest.mark.parametrize("value", ["", " ", "\t\n"])
+def test_whitespace_secret_key_setting_uses_default(tmp_path, monkeypatch, value):
+    monkeypatch.setenv(f.KEY_FILE_ENV, value)
+    with fleet_hub.init_db(tmp_path / "hub.db") as conn:
+        key = f._key(conn)
+        assert len(key) == 32
+        assert f._key(conn) == key
+    assert (tmp_path / "hub.db.findings-key").exists()

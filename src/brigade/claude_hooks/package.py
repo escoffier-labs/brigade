@@ -60,7 +60,9 @@ def hook_script_text(*, pin: Path | None = None) -> str:
     """Return the user-scope hook script.
 
     It runs the lightweight ``brigade-hook`` entry point installed beside the
-    ``brigade`` on PATH and falls back to the full CLI otherwise.
+    ``brigade`` on PATH and falls back to the full CLI otherwise. A crashing
+    handler fails open: any non-zero inner status becomes exit 1 with a stderr
+    warning, so a crash can never reach Claude Code as exit 2 (its block signal).
     """
     pin_flag = f" --target {shlex.quote(str(pin))}" if pin is not None else ""
     args = f'--event "$event" --package "{PACKAGE_REF}"'
@@ -88,12 +90,26 @@ def hook_script_text(*, pin: Path | None = None) -> str:
     # Only the brigade-hook installed beside the brigade that runs the
     # fallback: one from another installation could carry a different
     # package version and no-op the event.
+    #
+    # The inner command is run, never exec'd. Claude Code treats exit 2 as a
+    # deliberate "block this prompt", and Python exits 2 when it cannot open
+    # its script (a pipx reinstall racing the -x check), so passing the inner
+    # status through turns an infrastructure crash into a silent block. Brigade
+    # decisions travel as JSON on stdout with exit 0, so every non-zero status
+    # here is a crash and is mapped to 1 (a non-blocking warning). Add a
+    # dedicated marker only if a hook path ever needs to exit 2 on purpose.
     lines += [
         'cli="$(command -v brigade 2>/dev/null || true)"',
+        "status=0",
         f'if [ -n "$cli" ] && [ -x "${{cli%/*}}/{DIRECT_ENTRY_COMMAND}" ]; then',
-        f'  exec "${{cli%/*}}/{DIRECT_ENTRY_COMMAND}" {args}{pin_flag}',
+        f'  "${{cli%/*}}/{DIRECT_ENTRY_COMMAND}" {args}{pin_flag} || status=$?',
+        "else",
+        f"  {COMMAND_PREFIX} {args}{pin_flag} || status=$?",
         "fi",
-        f"exec {COMMAND_PREFIX} {args}{pin_flag}",
+        'if [ "$status" -ne 0 ]; then',
+        '  echo "brigade hook: $event handler exited with status $status; failing open" >&2',
+        "  exit 1",
+        "fi",
     ]
     return "\n".join(lines) + "\n"
 
