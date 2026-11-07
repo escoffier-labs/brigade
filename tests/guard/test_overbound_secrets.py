@@ -136,6 +136,14 @@ def test_json_metadata_quote_boundary_preserves_following_value(pem_backend):
     assert "keep-this-json" in scan_text(text).redacted_text
 
 
+def test_stray_quote_in_raw_metadata_keeps_masking_key_material(pem_backend):
+    # Only a quote followed by JSON structure ends metadata early.
+    header = "-----BEGIN " + "RSA PRIVATE KEY-----"
+    body = "a" * 64
+    text = header + ' Proc-Type: 4,ENC"x ' + body + " " + body + "\n"
+    assert body not in scan_text(text).redacted_text
+
+
 @pytest.mark.parametrize(
     "text,reply",
     [
