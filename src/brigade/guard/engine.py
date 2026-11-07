@@ -324,7 +324,7 @@ def _pem_body_end(text: str, end: int) -> int:
             # Anchored matches advance monotonically through this physical line.
             offset = 0
             separator = re.compile(r"(?:[ \t]+|(?:\\r)?\\n)+")
-            metadata = re.compile(r'(?:Proc-Type:|DEK-Info:)[^\\"\r\n]*(?:(?:\\r)?\\n|$)')
+            metadata = re.compile(r'(?:Proc-Type:|DEK-Info:)[^\\"\r\n]*(?:(?:\\r)?\\n|(?=")|$)')
             while True:
                 gap = separator.match(line, offset)
                 if gap is not None:
