@@ -275,7 +275,6 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     serve_identity.add_argument(
         "--pack",
         choices=(
-            "cerebro-memory",
             "fleet-steward",
             "obsidian-operator",
             "operations-relay",
@@ -283,6 +282,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
             "dot",
             "duet",
             "grokbot-memory",
+            "grokbot-inbox",
         ),
     )
     p_grokbot_serve.add_argument(
@@ -382,18 +382,6 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     pack_secret = p_pack_setup.add_mutually_exclusive_group(required=False)
     pack_secret.add_argument("--bearer-file", type=Path, help="Path of a protected bearer file (reference only).")
     pack_secret.add_argument("--bearer-env", help="Name of the environment variable holding the bearer.")
-    p_pack_setup.add_argument(
-        "--cli-executable",
-        type=Path,
-        default=None,
-        help="Absolute Cerebro CLI executable. Required for cerebro-memory.",
-    )
-    p_pack_setup.add_argument(
-        "--workdir",
-        type=Path,
-        default=None,
-        help="Absolute Cerebro work directory. Required for cerebro-memory.",
-    )
     p_pack_setup.add_argument(
         "--runtime-path",
         type=Path,
@@ -1035,7 +1023,7 @@ def _grokbot_health_reason(reason: str) -> str:
 
 def _grokbot_bearer_valid(args, pack_id: str | None) -> bool:
     has_bearer = args.bearer_file is not None or args.bearer_env is not None
-    if pack_id in ("dot", "duet", "grokbot-memory"):
+    if pack_id in ("dot", "duet", "grokbot-memory", "grokbot-inbox"):
         if has_bearer:
             print(f"error: the {pack_id} pack takes no bearer; it verifies Cloudflare Access tokens", file=sys.stderr)
             return False
@@ -1079,8 +1067,6 @@ def _dispatch_grokbot(args, target: Path) -> int:
             if getattr(args, "pack", None):
                 if args.client_id is not None:
                     raise grokbot_mcp.ConfigurationError("invalid")
-                from .. import grokbot_cerebro
-
                 if args.pack != "obsidian-operator" and (
                     args.upstream_url or args.upstream_key_file or args.upstream_key_env
                 ):
@@ -1119,7 +1105,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                         target, **listener_kwargs
                     )
                     grokbot_operations_relay.run_listener(operations_config, operations_tools)
-                elif args.pack in ("dot", "duet", "grokbot-memory"):
+                elif args.pack in ("dot", "duet", "grokbot-memory", "grokbot-inbox"):
                     from .. import dot
 
                     dot_config, dot_tools, dot_runtime = dot.build_listener_from_target(
@@ -1132,16 +1118,11 @@ def _dispatch_grokbot(args, target: Path) -> int:
                         **({} if args.pack == "dot" else {"pack_id": args.pack}),
                     )
                     dot.run_listener(dot_config, dot_tools, dot_runtime)
-                elif args.pack == "t3-dispatch":
+                else:
                     from .. import grokbot_t3
 
                     t3_config, t3_tools = grokbot_t3.build_listener_from_target(target, **listener_kwargs)
                     grokbot_t3.run_listener(t3_config, t3_tools)
-                else:
-                    cerebro_config, cerebro_tools = grokbot_cerebro.build_listener_from_target(
-                        target, **listener_kwargs
-                    )
-                    grokbot_cerebro.run_listener(cerebro_config, cerebro_tools)
             else:
                 config = grokbot_mcp.build_listener_config(
                     target=target,
@@ -1162,7 +1143,6 @@ def _dispatch_grokbot(args, target: Path) -> int:
             return 2
         except Exception as exc:
             from .. import (
-                grokbot_cerebro,
                 grokbot_fleet,
                 grokbot_obsidian,
                 grokbot_operations_relay,
@@ -1177,7 +1157,6 @@ def _dispatch_grokbot(args, target: Path) -> int:
             if isinstance(
                 exc,
                 (
-                    grokbot_cerebro.CerebroError,
                     grokbot_fleet.FleetError,
                     grokbot_obsidian.ObsidianError,
                     grokbot_operations_relay.OperationsRelayError,
@@ -1543,8 +1522,6 @@ def _dispatch_grokbot_pack(args, target: Path) -> int:
                 "allowed_origins": args.allow_origin,
                 "bearer_env": args.bearer_env,
                 "bearer_file": args.bearer_file,
-                "cli_executable": getattr(args, "cli_executable", None),
-                "workdir": getattr(args, "workdir", None),
                 "runtime_path": getattr(args, "runtime_path", None),
                 "ledger_path": getattr(args, "ledger_path", None),
                 "action_state_path": getattr(args, "action_state_path", None),

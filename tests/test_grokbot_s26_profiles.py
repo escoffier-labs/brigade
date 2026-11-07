@@ -1,0 +1,487 @@
+"""S26: the Grok Bot memory and inbox profiles on hub memory, and the retired vault-backed tools."""
+
+from tests.dot_support import requires_local_state
+
+import asyncio
+from dataclasses import replace
+import importlib.util
+import json
+from pathlib import Path
+import re
+from types import SimpleNamespace
+
+import pytest
+
+from brigade import cli, grokbot_packs
+from brigade.dot import lifecycle as m
+from brigade.dot.adapter import DotTools, validate_arguments
+from brigade.dot.contracts import ALL_TOOL_SCHEMAS, DISPATCH_GATED_TOOLS, TOOLS, DotError
+from brigade.dot.hub_inbox import HubInbox
+from brigade.dot.hub_tools import HubTools
+from brigade.dot.inbox_tools import InboxTools
+from brigade.dot.memory_tools import MemoryTools
+from brigade.dot.process import CommandResult
+from brigade.dot.profile import DUET_DISPATCH_TOOLS, GROKBOT_INBOX, GROKBOT_MEMORY, PROFILES
+from brigade.dot.runtime_config import (
+    GROKBOT_INBOX_PRINCIPAL,
+    GROKBOT_INBOX_RUNTIME_SCHEMA,
+    GROKBOT_MEMORY_PRINCIPAL,
+    GROKBOT_MEMORY_RUNTIME_SCHEMA,
+    parse_runtime,
+)
+from brigade.memory_hub_client import CONFIG_REL, HubRefusal, HubUnavailable
+from tests.test_dot_adapter import EMAIL, HANDOFF, NOW, Fixture
+from tests.test_dot_lifecycle import config
+from tests.test_grokbot_memory_profile import _memory_document
+
+SNAPSHOT = json.loads((Path(__file__).parent / "fixtures" / "dot_tools_snapshot.json").read_text())["tools"]
+DOCS = Path(__file__).resolve().parents[1] / "docs"
+MEMORY_TOOLS = {"memory_search", "memory_card", "handoff_write"}
+INBOX_TOOLS = {"message_send", "inbox_list", "inbox_ack", "inbox_reply"}
+NOT_GROK_TOOLS = {
+    "fleet_submit",
+    "fleet_status",
+    "fleet_followup",
+    "fleet_answer",
+    "fleet_approve",
+    "fleet_interrupt",
+    "fleet_report_session",
+    "fleet_capacity",
+    "fleet_digest",
+    "fleet_overview",
+    "fleet_work_next",
+    "fleet_policy",
+    "skill_search",
+    "skill_get",
+    "dot_t3_capabilities",
+    "duet_capabilities",
+    "message_status",
+}
+
+
+def _inbox_document() -> dict[str, object]:
+    document = _memory_document()
+    document["schema"] = GROKBOT_INBOX_RUNTIME_SCHEMA
+    document["messaging_enabled"] = True
+    hub = dict(document["hub"])  # type: ignore[call-overload]
+    hub.update(principal=GROKBOT_INBOX_PRINCIPAL, recipients={"operator": "00000000-0000-4000-8000-000000000002"})
+    document["hub"] = hub
+    return document
+
+
+# Tool discovery lists only each profile's tools
+
+
+def test_each_profile_lists_exactly_its_tools():
+    assert GROKBOT_MEMORY.tools == MEMORY_TOOLS
+    assert GROKBOT_INBOX.tools == INBOX_TOOLS
+    assert PROFILES["grokbot-inbox"] is GROKBOT_INBOX
+    assert not GROKBOT_MEMORY.tools & GROKBOT_INBOX.tools
+    for profile in (GROKBOT_MEMORY, GROKBOT_INBOX):
+        assert profile.capabilities_tool is None
+        assert not profile.fleet_dispatch
+        assert profile.prompt_load_scan
+        assert not profile.memory_push
+    assert GROKBOT_INBOX.hub_inbox and not GROKBOT_MEMORY.hub_inbox
+    # Only the Grok profiles change behavior: the Dot and Duet profiles keep their own recipient, credential and
+    # handoff handling.
+    others = [profile for profile in PROFILES.values() if profile.pack_id not in {"grokbot-memory", "grokbot-inbox"}]
+    assert others and not any(p.strict_recipients or p.principal_memory for p in others)
+    assert all(p.memory_push for p in others)
+    assert GROKBOT_INBOX.strict_recipients and GROKBOT_MEMORY.principal_memory
+    assert GROKBOT_INBOX.send_limit_per_hour == 20 and GROKBOT_MEMORY.send_limit_per_hour is None
+
+
+@pytest.mark.parametrize("profile", [GROKBOT_MEMORY, GROKBOT_INBOX], ids=lambda profile: profile.pack_id)
+def test_registered_discovery_is_exactly_the_profile(profile):
+    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
+    listed = asyncio.run(m._server(config(), SimpleNamespace(), profile).list_tools())
+    assert {tool.name for tool in listed} == profile.tools
+    for tool in listed:
+        value = tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+        assert value["inputSchema"] == SNAPSHOT[tool.name]["inputSchema"]
+        assert value["annotations"] == SNAPSHOT[tool.name]["annotations"]
+    assert not {tool.name for tool in listed} & NOT_GROK_TOOLS
+
+
+# No dispatch tool is reachable
+
+
+@pytest.mark.parametrize("profile", [GROKBOT_MEMORY, GROKBOT_INBOX], ids=lambda profile: profile.pack_id)
+def test_no_dispatch_claim_or_fleet_tool_is_reachable(profile):
+    fleet_like = {name for name in TOOLS if name.startswith("fleet_")}
+    assert not profile.tools & (DISPATCH_GATED_TOOLS | DUET_DISPATCH_TOOLS | fleet_like | NOT_GROK_TOOLS)
+    for name in sorted(set(ALL_TOOL_SCHEMAS) - profile.tools):
+        with pytest.raises(DotError, match="^invalid_request$"):
+            validate_arguments(name, {}, tools=profile.tools)
+
+
+@requires_local_state
+@pytest.mark.parametrize("profile", [GROKBOT_MEMORY, GROKBOT_INBOX], ids=lambda profile: profile.pack_id)
+def test_call_by_name_outside_the_profile_is_refused(dot_private_dir, profile):
+    from brigade.dot.adapter import build_tools
+    from brigade.dot.fleet_tools import FleetTools
+    from unittest.mock import patch
+
+    document, schema = (
+        (_memory_document(), GROKBOT_MEMORY_RUNTIME_SCHEMA)
+        if profile is GROKBOT_MEMORY
+        else (_inbox_document(), GROKBOT_INBOX_RUNTIME_SCHEMA)
+    )
+    runtime = parse_runtime(document, schema=schema)
+    runtime = replace(runtime, paths=replace(runtime.paths, state_dir=dot_private_dir))
+    with patch.object(FleetTools, "__init__", side_effect=AssertionError("fleet client built")):
+        tools, state, _ = build_tools(runtime, profile)
+    try:
+        assert tools.fleet is None and tools.profile is profile
+        for name in sorted(NOT_GROK_TOOLS | (MEMORY_TOOLS | INBOX_TOOLS) - profile.tools):
+            with pytest.raises(DotError, match="^invalid_request$"):
+                tools.call("owner@example.test", name, {})
+    finally:
+        state.close()
+
+
+# Runtime documents
+
+
+def test_inbox_runtime_parses_with_dispatch_events_and_memory_off():
+    runtime = parse_runtime(_inbox_document(), schema=GROKBOT_INBOX_RUNTIME_SCHEMA)
+    assert runtime.schema == GROKBOT_INBOX_RUNTIME_SCHEMA
+    assert (runtime.dispatch_enabled, runtime.events_enabled, runtime.messaging_enabled) == (False, False, True)
+    assert runtime.memory_push is False
+    assert runtime.hub.principal == "agent:grokbot-inbox"
+    assert runtime.paths.fleet_config is None and runtime.paths.bin.t3_fleet is None
+    assert runtime.owner_authorization is None and runtime.callback_hosts == () and runtime.skills_deny == frozenset()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda data: data.update(dispatch_enabled=True),
+        lambda data: data.update(events_enabled=True),
+        lambda data: data.update(memory_push=True),
+        lambda data: data.update(digest_pr_repo="owner/repo"),
+        lambda data: data.update(skills_deny=["private-notes"]),
+        lambda data: data.update(callback_hosts=["example.test"]),
+        lambda data: data.update(owner_authorization={"version": "1", "text": "x"}),
+        lambda data: data["paths"].update(fleet_config="/srv/grokbot-inbox/config.toml"),
+        lambda data: data["paths"]["bin"].update(t3_fleet="/usr/bin/t3-fleet"),
+        lambda data: data["hub"].update(principal=GROKBOT_MEMORY_PRINCIPAL),
+        lambda data: data["hub"].update(principal="agent:dot"),
+        lambda data: data.pop("messaging_enabled"),
+        lambda data: data.update(messaging_enabled="yes"),
+        lambda data: data.update(schema=GROKBOT_MEMORY_RUNTIME_SCHEMA),
+    ],
+)
+def test_inbox_runtime_refuses_any_key_that_widens_the_profile(mutate):
+    document = _inbox_document()
+    mutate(document)
+    with pytest.raises(DotError, match="^invalid_config$"):
+        parse_runtime(document, schema=GROKBOT_INBOX_RUNTIME_SCHEMA)
+
+
+def test_the_two_grok_runtimes_never_cross_schemas_or_principals():
+    with pytest.raises(DotError, match="^invalid_config$"):
+        parse_runtime(_memory_document(), schema=GROKBOT_INBOX_RUNTIME_SCHEMA)
+    with pytest.raises(DotError, match="^invalid_config$"):
+        parse_runtime(_inbox_document(), schema=GROKBOT_MEMORY_RUNTIME_SCHEMA)
+    memory = _memory_document()
+    memory["hub"] = {**memory["hub"], "principal": GROKBOT_INBOX_PRINCIPAL}  # type: ignore[dict-item]
+    with pytest.raises(DotError, match="^invalid_config$"):
+        parse_runtime(memory, schema=GROKBOT_MEMORY_RUNTIME_SCHEMA)
+
+
+# The send allowlist
+
+
+class InboxProfile(Fixture):
+    dispatch = False
+
+    def make_adapter(self, enabled):
+        runtime = replace(
+            self.runtime,
+            schema=GROKBOT_INBOX_RUNTIME_SCHEMA,
+            dispatch_enabled=False,
+            events_enabled=False,
+            messaging_enabled=True,
+            memory_push=True,
+            hub=replace(
+                self.runtime.hub,
+                principal=GROKBOT_INBOX_PRINCIPAL,
+                recipients={"operator": "00000000-0000-4000-8000-000000000002"},
+            ),
+        )
+        self.inbox_runtime = runtime
+        hub_inbox = HubInbox(self.state, runtime.hub, profile=GROKBOT_INBOX, messaging_enabled=True)
+        inbox = InboxTools(runtime, self.state, hub_inbox)
+        hub = HubTools(runtime, self.state, commands=self.runner, fleet=None, inbox=inbox)
+        memory = MemoryTools(runtime, commands=self.runner, profile=GROKBOT_INBOX)
+        return DotTools(
+            runtime,
+            self.state,
+            fleet=None,
+            hub=hub,
+            memory=memory,
+            inbox=inbox,
+            clock=lambda: NOW,
+            profile=GROKBOT_INBOX,
+        )
+
+    @requires_local_state
+    def test_send_outside_the_hub_grants_gets_the_v1_code_and_sends_nothing(self):
+        self.messages.fail["send"] = dict(error="hub text", status=403, code="message_recipient_not_permitted")
+        with pytest.raises(DotError) as caught:
+            self.call("message_send", to="operator", subject="s", body="b")
+        assert caught.value.code == "recipient_not_permitted"
+        assert caught.value.hub_code == "message_recipient_not_permitted"
+        assert [call["action"] for call in self.messages.calls].count("send") == 1
+        assert self.messages.rows == []
+
+    @requires_local_state
+    def test_send_to_a_name_outside_the_allowlist_gets_the_same_code_without_a_hub_call(self):
+        for recipient in ("node-b", "agent:dot", "00000000-0000-4000-8000-000000000002", "review"):
+            with pytest.raises(DotError) as caught:
+                self.call("message_send", to=recipient, subject="s", body="b")
+            assert (caught.value.code, caught.value.hub_code) == (
+                "recipient_not_permitted",
+                "message_recipient_not_permitted",
+            )
+        assert self.messages.calls == []
+
+    @requires_local_state
+    def test_a_granted_alias_sends(self):
+        sent = self.call("message_send", to="operator", subject="s", body="b")
+        assert sent["id"] == 1
+        [call] = [c for c in self.messages.calls if c["action"] == "send"]
+        assert call["recipient"] == "00000000-0000-4000-8000-000000000002"
+
+    @requires_local_state
+    def test_reply_denial_keeps_the_hub_code_too(self):
+        self.messages.add(recipient=GROKBOT_INBOX_PRINCIPAL)
+        self.messages.fail["reply"] = dict(error="hub text", status=403, code="message_recipient_not_permitted")
+        with pytest.raises(DotError) as caught:
+            self.call("inbox_reply", msg_id=1, body="answer")
+        assert (caught.value.code, caught.value.hub_code) == (
+            "recipient_not_permitted",
+            "message_recipient_not_permitted",
+        )
+
+    @requires_local_state
+    def test_messaging_off_refuses_send_and_reply(self):
+        self.adapter.runtime = replace(self.adapter.runtime, messaging_enabled=False)
+        with pytest.raises(DotError, match="^messaging_disabled$"):
+            self.call("message_send", to="operator", subject="s", body="b")
+        assert self.messages.calls == []
+
+    @requires_local_state
+    def test_inbox_responses_carry_no_memory_hits(self):
+        self.messages.add(recipient=GROKBOT_INBOX_PRINCIPAL, subject="release notes", body="ship it")
+        # The runtime document asked for push (memory_push=True above), and the profile still refuses it.
+        assert self.adapter.push.enabled is False
+        result = self.call("inbox_list")
+        assert "memory_hits" not in result
+        assert result["content_trust"] == "untrusted"
+
+
+def test_server_result_carries_the_hub_code_beside_the_connector_name():
+    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
+    from brigade.dot.events import IDENTITY
+
+    class Denying:
+        def call(self, owner, name, arguments):
+            raise DotError("recipient_not_permitted", "message_recipient_not_permitted")
+
+    token = IDENTITY.set(EMAIL)
+    try:
+        server = m._server(config(), Denying(), GROKBOT_INBOX)
+        result = asyncio.run(server.call_tool("message_send", {"to": "operator", "subject": "s", "body": "b"}))
+    finally:
+        IDENTITY.reset(token)
+    structured = result[1] if isinstance(result, tuple) else result
+    text = json.dumps(structured, default=str)
+    assert "message_recipient_not_permitted" in text and "recipient_not_permitted" in text
+
+
+# handoff_write lands in hub memory_handoffs only
+
+
+class FakeHubClient:
+    calls: list[dict] = []
+    outcome: object = {"handoff_id": "h-0001", "log_epoch": 1}
+
+    def __init__(self, hub_url, token, *, transport=None):
+        # The real client refuses a missing URL or token the same way.
+        if not hub_url:
+            raise HubUnavailable("no-hub-configured")
+        if not token:
+            raise HubUnavailable("no-node-credential")
+        FakeHubClient.seen = (hub_url, token)
+
+    def call(self, action, *, timeout=None, **fields):
+        FakeHubClient.calls.append({"action": action, **fields})
+        if isinstance(FakeHubClient.outcome, Exception):
+            raise FakeHubClient.outcome
+        return FakeHubClient.outcome  # type: ignore[return-value]
+
+
+class HandoffToHub(Fixture):
+    dispatch = False
+
+    @pytest.fixture(autouse=True)
+    def hub_client(self, monkeypatch, isolated):
+        FakeHubClient.calls = []
+        FakeHubClient.outcome = {"handoff_id": "h-0001", "log_epoch": 1}
+        monkeypatch.setattr("brigade.memory_hub_client.MemoryHubClient", FakeHubClient)
+        self.memory = MemoryTools(self.runtime, commands=self.runner, profile=GROKBOT_MEMORY)
+        self.memory.clock = lambda: NOW
+        yield
+
+    def written(self):
+        return sorted(p.relative_to(self.workspace).as_posix() for p in self.workspace.rglob("*") if p.is_file())
+
+    @requires_local_state
+    def test_handoff_goes_to_the_hub_as_the_principal_and_writes_no_file(self):
+        before = self.written()
+        result = self.memory.handoff_write("bridge-probe", HANDOFF)
+        assert result == {
+            "ok": True,
+            "handoff_id": "h-0001",
+            "destination": "memory_handoffs",
+            "state": "pending_review",
+        }
+        [call] = FakeHubClient.calls
+        assert call["action"] == "handoff" and call["text"] == HANDOFF and call["kind"] == "bridge-probe"
+        assert re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{26}", call["client_event_id"])
+        # The credential sent is this principal's own message token file, never a card or inbox write.
+        assert FakeHubClient.seen[1] == self.runtime.hub.message_token_file.read_text().strip()
+        assert self.written() == before
+        assert not (self.workspace / ".grok").exists()
+        assert not any(self.inbox.iterdir())
+
+    @requires_local_state
+    def test_a_retry_in_the_same_window_reuses_the_idempotency_id(self):
+        self.memory.handoff_write("bridge-probe", HANDOFF)
+        self.memory.handoff_write("bridge-probe", HANDOFF)
+        self.memory.handoff_write("bridge-probe", HANDOFF + "\nmore\n")
+        first, second, third = (call["client_event_id"] for call in FakeHubClient.calls)
+        assert first == second != third
+
+    @requires_local_state
+    def test_credential_shaped_text_never_reaches_the_hub(self):
+        secret = "ghp_" + "a" * 36
+        result = self.memory.handoff_write("bridge-probe", HANDOFF + f"\ntoken {secret}\n")
+        assert result == {"error": "content_rejected", "reason": "credential-shaped text"}
+        assert FakeHubClient.calls == []
+
+    @requires_local_state
+    def test_hub_refusals_come_back_as_codes_and_nothing_is_written(self):
+        FakeHubClient.outcome = HubRefusal(403, {"error": "denied", "code": "memory_grant_missing"})
+        assert self.memory.handoff_write("bridge-probe", HANDOFF) == {
+            "error": "handoff_refused",
+            "code": "memory_grant_missing",
+        }
+        FakeHubClient.outcome = HubRefusal(422, {"error": "text that must not leak", "code": "memory_scan_flagged"})
+        assert self.memory.handoff_write("bridge-probe", HANDOFF) == {"error": "handoff_refused", "code": "refused"}
+        FakeHubClient.outcome = HubUnavailable("timeout")
+        assert self.memory.handoff_write("bridge-probe", HANDOFF) == {
+            "error": "handoff_unavailable",
+            "reason": "hub_unavailable",
+        }
+        assert not (self.workspace / ".grok").exists() and not any(self.inbox.iterdir())
+
+    @requires_local_state
+    def test_no_hub_or_no_token_fails_closed_without_a_local_fallback(self):
+        self.messages.settings["hub_url"] = ""
+        result = self.memory.handoff_write("bridge-probe", HANDOFF)
+        assert result == {"error": "handoff_unavailable", "reason": "hub_credential_unavailable"}
+        self.messages.settings["hub_url"] = "https://hub.invalid"
+        self.runtime.hub.message_token_file.unlink()
+        assert self.memory.handoff_write("bridge-probe", HANDOFF)["reason"] == "hub_credential_unavailable"
+        assert FakeHubClient.calls == [] and not (self.workspace / ".grok").exists() and not any(self.inbox.iterdir())
+
+
+# Reads use the principal's own credential
+
+
+class PrincipalReads(Fixture):
+    dispatch = False
+
+    def hub_on(self):
+        config_path = self.workspace / CONFIG_REL
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text('[hub]\nmode = "read"\nread_scopes = ["fleet"]\n')
+
+    def search(self, profile):
+        reply = {"match_count": 0, "matches": [], "retrieval": {"hub": "ok"}}
+        self.runner.handler = lambda argv, stdin: CommandResult(0, json.dumps(reply).encode())
+        return MemoryTools(self.runtime, commands=self.runner, profile=profile).memory_search("fleet")
+
+    @requires_local_state
+    def test_hub_reads_run_under_the_principal_token_file(self):
+        from brigade.memory_hub_client import ENV_HUB_TOKEN_FILE, ENV_HUB_URL
+
+        self.hub_on()
+        result = self.search(GROKBOT_MEMORY)
+        assert "error" not in result
+        [call] = self.runner.calls
+        assert call["env"][ENV_HUB_URL] == "https://hub.invalid"
+        assert call["env"][ENV_HUB_TOKEN_FILE] == str(self.runtime.hub.message_token_file)
+        # The host's node credential never rides along.
+        assert "BRIGADE_FLEET_NODE_TOKEN" not in call["env"]
+
+    @requires_local_state
+    def test_dot_and_duet_keep_the_node_credential_path(self):
+        from brigade.dot.profile import DOT, DUET
+        from brigade.memory_hub_client import ENV_HUB_TOKEN_FILE, ENV_HUB_URL
+
+        self.hub_on()
+        for profile in (DOT, DUET):
+            self.runner.calls.clear()
+            self.search(profile)
+            assert ENV_HUB_URL not in self.runner.calls[0]["env"]
+            assert ENV_HUB_TOKEN_FILE not in self.runner.calls[0]["env"]
+
+    @requires_local_state
+    def test_hub_memory_on_without_a_hub_url_fails_closed(self):
+        self.hub_on()
+        self.messages.settings["hub_url"] = ""
+        assert self.search(GROKBOT_MEMORY) == {"error": "hub_credential_unavailable"}
+        assert self.runner.calls == []
+
+    @requires_local_state
+    def test_hub_memory_off_leaves_the_environment_alone(self):
+        from brigade.memory_hub_client import ENV_HUB_TOKEN_FILE
+
+        self.search(GROKBOT_MEMORY)
+        assert ENV_HUB_TOKEN_FILE not in self.runner.calls[0]["env"]
+
+
+# The runbook step and the retirement
+
+
+def test_runbook_grants_the_memory_principal_read_on_fleet_and_handoff():
+    text = (DOCS / "grokbot-memory-connector.md").read_text(encoding="utf-8")
+    grants = [json.loads(block) for block in re.findall(r"```json\n(.*?)\n```", text, flags=re.S)]
+    [grant] = [block for block in grants if block.get("action") == "grant"]
+    assert grant["principal"] == GROKBOT_MEMORY_PRINCIPAL
+    assert grant["scope"] == "fleet"
+    assert grant["rights"] == ["read", "handoff"]
+    # The vault collection is a separate, explicit operator grant that nothing grants by default.
+    assert "collection:vault/cerebro" in text and "never granted by default or by a wildcard" in text
+
+
+def test_inbox_runbook_names_the_send_grant_step():
+    text = (DOCS / "grokbot-inbox-connector.md").read_text(encoding="utf-8")
+    assert "brigade fleet msg principals add agent:grokbot-inbox --may-send-to" in text
+    assert "message_recipient_not_permitted" in text
+
+
+def test_vault_backed_tools_are_retired():
+    assert importlib.util.find_spec("brigade.grokbot_cerebro") is None
+    assert "cerebro-memory" not in {pack["id"] for pack in grokbot_packs.list_packs()}
+    tools = {tool for pack in grokbot_packs.list_packs() for tool in pack["tools"]}
+    assert not {tool for tool in tools if tool.startswith("cerebro_")}
+    with pytest.raises(grokbot_packs.PackError, match="unknown-pack"):
+        grokbot_packs.show_pack("cerebro-memory")
+    with pytest.raises(SystemExit):
+        cli.main(["run", "cloud", "grokbot", "serve", "--pack", "cerebro-memory"])

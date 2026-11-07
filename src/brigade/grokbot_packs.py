@@ -21,7 +21,6 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from . import (
-    grokbot_cerebro,
     grokbot_fleet,
     grokbot_mcp,
     grokbot_obsidian,
@@ -67,11 +66,11 @@ DEFAULT_BINDS = {
     "repository-scout": "127.0.0.1:8767",
 }
 CONNECTOR_DEFAULT_BINDS = {
-    "cerebro-memory": "127.0.0.1:8770",
     "fleet-steward": "127.0.0.1:8771",
     "dot": "127.0.0.1:8779",
     "duet": "127.0.0.1:8780",
     "grokbot-memory": "127.0.0.1:8781",
+    "grokbot-inbox": "127.0.0.1:8782",
     "obsidian-operator": "127.0.0.1:8773",
     "operations-relay": "127.0.0.1:8777",
     "t3-dispatch": "127.0.0.1:8778",
@@ -83,8 +82,9 @@ T3_DISPATCH_PACK_ID = "t3-dispatch"
 DOT_PACK_ID = "dot"
 DUET_PACK_ID = "duet"
 GROKBOT_MEMORY_PACK_ID = "grokbot-memory"
+GROKBOT_INBOX_PACK_ID = "grokbot-inbox"
 # Packs that run the Dot connector code under their own profile and Cloudflare Access application.
-DOT_FAMILY_PACK_IDS = frozenset({DOT_PACK_ID, DUET_PACK_ID, GROKBOT_MEMORY_PACK_ID})
+DOT_FAMILY_PACK_IDS = frozenset({DOT_PACK_ID, DUET_PACK_ID, GROKBOT_MEMORY_PACK_ID, GROKBOT_INBOX_PACK_ID})
 FLEET_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
     {
         "runtime_path",
@@ -107,7 +107,6 @@ OBSIDIAN_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
 OPERATIONS_RELAY_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"owner_workspace"})
 T3_DISPATCH_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"runtime_path"})
 DOT_INSTANCE_KEYS = (INSTANCE_KEYS - {"bearer"}) | frozenset({"runtime_path"})
-CONNECTOR_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"cli_executable", "workdir"})
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 PACK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 PUBLIC_ROUTE_RE = re.compile(r"^$|^/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*$")
@@ -136,8 +135,6 @@ def _queue_pack(instance: str) -> dict[str, Any]:
 
 
 def _connector_tools(pack_id: str) -> frozenset[str]:
-    if pack_id == "cerebro-memory":
-        return grokbot_cerebro.TOOLS
     if pack_id == "fleet-steward":
         return grokbot_fleet.TOOLS
     if pack_id == OBSIDIAN_PACK_ID:
@@ -246,8 +243,6 @@ def preview_setup(
     bearer_env: str | None = None,
     bearer_file: Path | None = None,
     bearer: dict[str, Any] | None = None,
-    cli_executable: str | Path | None = None,
-    workdir: str | Path | None = None,
     runtime_path: str | Path | None = None,
     ledger_path: str | Path | None = None,
     action_state_path: str | Path | None = None,
@@ -270,8 +265,6 @@ def preview_setup(
         bearer_env=bearer_env,
         bearer_file=bearer_file,
         bearer=bearer,
-        cli_executable=cli_executable,
-        workdir=workdir,
         runtime_path=runtime_path,
         ledger_path=ledger_path,
         action_state_path=action_state_path,
@@ -296,8 +289,6 @@ def apply_setup(
     bearer_env: str | None = None,
     bearer_file: Path | None = None,
     bearer: dict[str, Any] | None = None,
-    cli_executable: str | Path | None = None,
-    workdir: str | Path | None = None,
     runtime_path: str | Path | None = None,
     ledger_path: str | Path | None = None,
     action_state_path: str | Path | None = None,
@@ -320,8 +311,6 @@ def apply_setup(
         bearer_env=bearer_env,
         bearer_file=bearer_file,
         bearer=bearer,
-        cli_executable=cli_executable,
-        workdir=workdir,
         runtime_path=runtime_path,
         ledger_path=ledger_path,
         action_state_path=action_state_path,
@@ -351,7 +340,7 @@ def doctor(target: Path, pack_id: str, *, service_result: bool = False) -> list[
     elif pack["id"] == T3_DISPATCH_PACK_ID:
         checks = grokbot_t3.doctor(target)
     else:
-        checks = grokbot_cerebro.doctor(target)
+        raise PackError("unknown-pack")
     checks.extend(_installed_bind_checks(target, pack))
     checks.extend(_no_public_route_checks(target, pack))
     if service_result:
@@ -373,7 +362,7 @@ def canary(target: Path, pack_id: str) -> dict[str, Any]:
         return dot.canary(target, **_profile_kwargs(pack["id"]))
     if pack["id"] == T3_DISPATCH_PACK_ID:
         return grokbot_t3.canary(target)
-    return grokbot_cerebro.canary(target)
+    raise PackError("unknown-pack")
 
 
 _PLATFORM_REFUSALS = frozenset({"unsupported-platform", "unsupported_on_windows"})
@@ -401,7 +390,7 @@ def render_install_service(target: Path, pack_id: str) -> str:
             return dot.render_unit(target, python=sys.executable, **_profile_kwargs(pack["id"]))
         if pack["id"] == T3_DISPATCH_PACK_ID:
             return grokbot_t3.render_unit(target, python=sys.executable)
-        return grokbot_cerebro.render_unit(target, python=sys.executable)
+        raise PackError("unknown-pack")
     except PackError:
         raise
     except (grokbot_mcp.ConfigurationError, grokbot_ops.ServiceRenderError, OSError) as exc:
@@ -411,7 +400,6 @@ def render_install_service(target: Path, pack_id: str) -> str:
         if isinstance(
             exc,
             (
-                grokbot_cerebro.CerebroError,
                 grokbot_fleet.FleetError,
                 grokbot_obsidian.ObsidianError,
                 grokbot_operations_relay.OperationsRelayError,
@@ -446,7 +434,7 @@ def apply_install_service(
         elif pack["id"] == T3_DISPATCH_PACK_ID:
             path = grokbot_t3.write_unit(target, out_dir, force=force)
         else:
-            path = grokbot_cerebro.write_unit(target, out_dir, force=force)
+            raise PackError("unknown-pack")
     except PackError:
         raise
     except (grokbot_mcp.ConfigurationError, grokbot_ops.ServiceRenderError, OSError) as exc:
@@ -456,7 +444,6 @@ def apply_install_service(
         if isinstance(
             exc,
             (
-                grokbot_cerebro.CerebroError,
                 grokbot_fleet.FleetError,
                 grokbot_obsidian.ObsidianError,
                 grokbot_operations_relay.OperationsRelayError,
@@ -496,8 +483,6 @@ def _setup(
     bearer_env: str | None,
     bearer_file: Path | None,
     bearer: dict[str, Any] | None,
-    cli_executable: str | Path | None,
-    workdir: str | Path | None,
     runtime_path: str | Path | None = None,
     ledger_path: str | Path | None = None,
     action_state_path: str | Path | None = None,
@@ -538,9 +523,7 @@ def _setup(
     upstream_fields = (upstream_url, upstream_key_env, upstream_key_file, upstream_key)
     if pack["kind"] == "queue-role":
         if (
-            cli_executable is not None
-            or workdir is not None
-            or owner_workspace is not None
+            owner_workspace is not None
             or any(path is not None for path in fleet_paths)
             or any(path is not None for path in obsidian_paths)
             or any(field is not None for field in upstream_fields)
@@ -548,16 +531,14 @@ def _setup(
             raise PackError("unexpected-key")
     elif pack["id"] in STEWARD_PACK_IDS:
         if (
-            cli_executable is not None
-            or workdir is not None
-            or owner_workspace is not None
+            owner_workspace is not None
             or any(path is not None for path in obsidian_paths)
             or any(field is not None for field in upstream_fields)
         ):
             raise PackError("unexpected-key")
         payload.update(_steward_path_references(pack["id"], runtime_path, ledger_path, action_state_path, approval_dir))
     elif pack["id"] == OBSIDIAN_PACK_ID:
-        if cli_executable is not None or workdir is not None or ledger_path is not None or owner_workspace is not None:
+        if ledger_path is not None or owner_workspace is not None:
             raise PackError("unexpected-key")
         payload.update(
             _obsidian_path_references(runtime_path, action_state_path, approval_dir, staging_dir, excalidraw_bin)
@@ -565,9 +546,7 @@ def _setup(
         payload.update(_obsidian_upstream_references(upstream_url, upstream_key_env, upstream_key_file, upstream_key))
     elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
         if (
-            cli_executable is not None
-            or workdir is not None
-            or any(path is not None for path in fleet_paths)
+            any(path is not None for path in fleet_paths)
             or any(path is not None for path in obsidian_paths)
             or any(field is not None for field in upstream_fields)
         ):
@@ -575,9 +554,7 @@ def _setup(
         payload["owner_workspace"] = _operations_relay_owner_reference(owner_workspace)
     elif pack["id"] in {T3_DISPATCH_PACK_ID} | DOT_FAMILY_PACK_IDS:
         if (
-            cli_executable is not None
-            or workdir is not None
-            or owner_workspace is not None
+            owner_workspace is not None
             or ledger_path is not None
             or action_state_path is not None
             or approval_dir is not None
@@ -591,17 +568,7 @@ def _setup(
             else _t3_runtime_reference(runtime_path)
         )
     else:
-        if (
-            owner_workspace is not None
-            or any(path is not None for path in fleet_paths)
-            or any(path is not None for path in obsidian_paths)
-            or any(field is not None for field in upstream_fields)
-        ):
-            raise PackError("unexpected-key")
-        payload["cli_executable"] = _connector_path_reference(cli_executable, kind="executable")
-        payload["workdir"] = _connector_path_reference(workdir, kind="directory")
-        if payload["cli_executable"] == payload["workdir"]:
-            raise PackError("unsafe-path")
+        raise PackError("unexpected-key")
     _validate_instance_config(payload, pack_id)
     _assert_setup_bind_available(target, pack_id, chosen_bind)
     writes = [str(instance_config_path(Path("."), pack_id))]
@@ -1011,11 +978,6 @@ def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[
         _dot_runtime_reference(payload.get("runtime_path"), pack["id"])
     elif pack["id"] == T3_DISPATCH_PACK_ID:
         _t3_runtime_reference(payload.get("runtime_path"))
-    elif pack["kind"] == "connector":
-        _connector_path_reference(payload.get("cli_executable"), kind="executable")
-        workdir = _connector_path_reference(payload.get("workdir"), kind="directory")
-        if payload.get("cli_executable") == workdir:
-            raise PackError("unsafe-path")
     return dict(payload)
 
 
@@ -1066,7 +1028,7 @@ def _instance_keys(pack: Mapping[str, Any]) -> frozenset[str]:
         return T3_DISPATCH_INSTANCE_KEYS
     if pack["id"] in STEWARD_PACK_IDS:
         return FLEET_INSTANCE_KEYS
-    return CONNECTOR_INSTANCE_KEYS
+    raise PackError("unknown-pack")
 
 
 def _operations_relay_owner_reference(owner_workspace: object) -> str:
@@ -1160,22 +1122,6 @@ def _steward_path_references(
             str(approval_dir),
         )
     except grokbot_fleet.FleetError as exc:
-        raise PackError("unsafe-path") from exc
-
-
-def _connector_path_reference(value: object, *, kind: str) -> str:
-    if value is None:
-        raise PackError("missing-path-reference")
-    if not isinstance(value, (str, Path)) or (isinstance(value, str) and not value):
-        raise PackError("unsafe-path")
-    from . import grokbot_cerebro
-
-    try:
-        text = str(value)
-        if kind == "executable":
-            return grokbot_cerebro.validate_cli_executable(text)
-        return grokbot_cerebro.validate_workdir(text)
-    except grokbot_cerebro.CerebroError as exc:
         raise PackError("unsafe-path") from exc
 
 

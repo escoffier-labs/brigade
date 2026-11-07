@@ -20,6 +20,18 @@ from .safe_state import private_directory, trusted_directory, redact_credentials
 from .state import utc_now
 
 CARD_CHUNK_CHARS = 30000
+HANDOFF_ID_WINDOW_MS = 600_000
+# The hub's handoff refusals worth showing the caller. Anything else comes back as plain `refused`.
+HANDOFF_REFUSAL_CODES = frozenset(
+    {
+        "memory_grant_missing",
+        "memory_request_invalid",
+        "memory_client_event_invalid",
+        "memory_client_event_expired",
+        "memory_client_event_conflict",
+        "memory_card_too_large",
+    }
+)
 POLICY_PATHS = (Path(".codex/AGENTS.md"), Path("AGENTS.md"), Path("ai-tools/AGENTS.md"))
 
 
@@ -30,13 +42,46 @@ class MemoryTools:
         self.cards = self.workspace / "memory" / "cards"
         self.handoff_inbox = self.workspace / profile.handoff_inbox
         self.clock = utc_now
-        self.environment = child_environment(child_path(runtime.paths.bin))
+        self._path = child_path(runtime.paths.bin)
+        self.environment = child_environment(self._path)
+
+    def _child_environment(self) -> dict[str, str] | None:
+        """The child's environment, or None when a principal profile has no credential to give it.
+
+        A principal profile (Grok Bot) reads hub memory as its own message principal, so the hub
+        override points at that principal's token file. Without it the child would fall back to the
+        host's node credential and its wider default scopes, so with hub memory on, a missing hub
+        URL fails closed. A workspace with hub memory off reads only its own local cards.
+        """
+        if not self.profile.principal_memory:
+            return self.environment
+        from .. import fleet_client
+        from ..memory_hub_client import ENV_HUB_TOKEN_FILE, ENV_HUB_URL, HubConfigError, hub_mode
+
+        try:
+            if hub_mode(self.workspace) == "off":
+                return self.environment
+        except (HubConfigError, ValueError, OSError):
+            return self.environment
+
+        try:
+            hub_url = fleet_client.load_fleet_settings()["hub_url"]
+        except (OSError, ValueError, fleet_client.FleetClientError):
+            return None
+        if not hub_url:
+            return None
+        return child_environment(
+            self._path, {ENV_HUB_URL: hub_url, ENV_HUB_TOKEN_FILE: str(self.runtime.hub.message_token_file)}
+        )
 
     def _brigade_json(
         self, tail: list[str], *, timeout: float = BRIGADE_TIMEOUT, max_output: int = MAX_SMALL_CAPTURE
     ) -> tuple[Any, str | None]:
+        environment = self._child_environment()
+        if environment is None:
+            return None, "hub_credential_unavailable"
         result = self.commands.run(
-            [self.runtime.paths.bin.brigade, *tail], timeout=timeout, max_output=max_output, env=self.environment
+            [self.runtime.paths.bin.brigade, *tail], timeout=timeout, max_output=max_output, env=environment
         )
         if result.timed_out:
             return None, "brigade_timeout"
@@ -235,9 +280,45 @@ class MemoryTools:
             content_trust="untrusted",
         )
 
+    def _hub_handoff(self, slug: str, content: str) -> dict[str, Any]:
+        """Submit one handoff to hub `memory_handoffs` as the connector principal. Nothing else is written."""
+        from ..memory_hub_client import (
+            HubConfigError,
+            HubRefusal,
+            HubUnavailable,
+            MemoryHubClient,
+            event_id_at,
+        )
+        from ..fleet_client import FleetClientError, load_fleet_settings
+        from ..fleet_client_message_credentials import FleetMessageHubError, read_message_token_file
+
+        try:
+            hub_url = load_fleet_settings()["hub_url"]
+            token = read_message_token_file(str(self.runtime.hub.message_token_file), label="handoff principal")
+            client = MemoryHubClient(hub_url, token)
+        except (HubUnavailable, HubConfigError, FleetClientError, FleetMessageHubError, OSError, ValueError):
+            return {"error": "handoff_unavailable", "reason": "hub_credential_unavailable"}
+        now_ms = int(self.clock().timestamp() * 1000)
+        digest = hashlib.sha256(f"{slug}\n{content}".encode()).digest()
+        # One content in one ten-minute window is one id, so a retry after a lost answer is not a second handoff.
+        event = event_id_at(now_ms - now_ms % HANDOFF_ID_WINDOW_MS, int.from_bytes(digest[:10], "big"))
+        try:
+            answer = client.call("handoff", text=content, kind=slug, client_event_id=event)
+        except HubUnavailable:
+            return {"error": "handoff_unavailable", "reason": "hub_unavailable"}
+        except HubRefusal as refusal:
+            code = refusal.body.get("code")
+            return {"error": "handoff_refused", "code": code if code in HANDOFF_REFUSAL_CODES else "refused"}
+        handoff_id = answer.get("handoff_id")
+        if type(handoff_id) is not int and not isinstance(handoff_id, str):
+            return {"error": "handoff_unavailable", "reason": "hub_unavailable"}
+        return dict(ok=True, handoff_id=handoff_id, destination="memory_handoffs", state="pending_review")
+
     def handoff_write(self, slug: str, content: str) -> dict[str, Any]:
         if redact_credentials(content) != content:
             return {"error": "content_rejected", "reason": "credential-shaped text"}
+        if self.profile.principal_memory:
+            return self._hub_handoff(slug, content)
         moment = self.clock()
         require(isinstance(moment, datetime) and moment.utcoffset() is not None, "clock_unavailable")
         prefix = self.profile.handoff_prefix

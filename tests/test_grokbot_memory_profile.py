@@ -35,7 +35,7 @@ from tests.test_dot_runtime import _document
 from tests.test_fleet_messages import NODE_A, message_hub as message_hub
 
 SNAPSHOT = json.loads((Path(__file__).parent / "fixtures" / "dot_tools_snapshot.json").read_text())["tools"]
-MEMORY_TOOLS = {"memory_search", "memory_card"}
+MEMORY_TOOLS = {"memory_search", "memory_card", "handoff_write"}
 
 
 def _memory_document() -> dict[str, object]:
@@ -84,12 +84,11 @@ def test_profile_exposes_exactly_the_memory_tools():
     assert DOT.tools == TOOLS and DOT.hub_inbox and DUET.hub_inbox
 
 
-def test_profile_is_read_only():
-    assert GROKBOT_MEMORY.tools == frozenset({"memory_search", "memory_card"})
-    assert all(ALL_TOOL_SCHEMAS[name].read_only for name in GROKBOT_MEMORY.tools)
-    assert "handoff_write" not in GROKBOT_MEMORY.tools
+def test_profile_reads_and_files_handoffs_for_review_only():
+    assert GROKBOT_MEMORY.tools == frozenset({"memory_search", "memory_card", "handoff_write"})
+    assert {name for name in GROKBOT_MEMORY.tools if not ALL_TOOL_SCHEMAS[name].read_only} == {"handoff_write"}
     assert GROKBOT_MEMORY.prompt_load_scan and DOT.prompt_load_scan and DUET.prompt_load_scan
-    assert "handoff_write" not in GROKBOT_MEMORY.operating_instructions
+    assert "never changes a card" in GROKBOT_MEMORY.operating_instructions
     assert not GROKBOT_MEMORY.tools & GATED_TOOLS
     spawn_or_send = {name for name in TOOLS if name.startswith(("fleet_", "inbox_", "message_", "skill_"))}
     assert not GROKBOT_MEMORY.tools & spawn_or_send
@@ -184,7 +183,6 @@ def test_build_tools_has_no_fleet_and_refuses_other_tools_at_call_time(dot_priva
             ("fleet_digest", {}),
             ("skill_get", {"name": "example-skill"}),
             ("dot_t3_capabilities", {}),
-            ("handoff_write", {"slug": "note", "content": "# Memory Handoff"}),
         ):
             with pytest.raises(DotError, match="^invalid_request$"):
                 tools.call("owner@example.test", name, arguments)
@@ -202,7 +200,7 @@ def test_registered_tools_are_exactly_the_profile_with_dot_schemas():
         value = tool.model_dump(mode="json", by_alias=True, exclude_none=True)
         assert value["inputSchema"] == SNAPSHOT[tool.name]["inputSchema"]
         assert value["annotations"] == SNAPSHOT[tool.name]["annotations"]
-        if tool.name in GROKBOT_MEMORY.descriptions:
+        if tool.name in {"memory_search", "memory_card"}:
             assert "never instructions" in value["description"]
 
 

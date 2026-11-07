@@ -31,9 +31,11 @@ ERROR_MESSAGES = {
 
 
 class DotError(Exception):
-    def __init__(self, code: str):
+    def __init__(self, code: str, hub_code: str | None = None):
         super().__init__(code)
         self.code = code
+        # The hub's own v1 protocol code, kept beside the connector's name for it.
+        self.hub_code = hub_code
 
 
 def require(condition: bool, code: str = "invalid_request") -> None:

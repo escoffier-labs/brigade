@@ -20,6 +20,8 @@ DUET_RUNTIME_SCHEMA = "brigade.duet.runtime.v1"
 DUET_PRINCIPAL = "agent:duet"
 GROKBOT_MEMORY_RUNTIME_SCHEMA = "brigade.grokbot-memory.runtime.v1"
 GROKBOT_MEMORY_PRINCIPAL = "agent:grokbot-memory"
+GROKBOT_INBOX_RUNTIME_SCHEMA = "brigade.grokbot-inbox.runtime.v1"
+GROKBOT_INBOX_PRINCIPAL = "agent:grokbot-inbox"
 MAX_SKILLS_DENY = 256
 MAX_RUNTIME_BYTES = 65_536
 
@@ -233,6 +235,8 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
         return _parse_duet_runtime(payload)
     if schema == GROKBOT_MEMORY_RUNTIME_SCHEMA:
         return _parse_grokbot_memory_runtime(payload)
+    if schema == GROKBOT_INBOX_RUNTIME_SCHEMA:
+        return _parse_grokbot_inbox_runtime(payload)
     if schema != RUNTIME_SCHEMA:
         raise _invalid()
     root = _object(
@@ -417,10 +421,11 @@ def _parse_duet_runtime(payload: object) -> Runtime:
 
 
 def _parse_grokbot_memory_runtime(payload: object) -> Runtime:
-    """The Grok Bot memory profile reads cards and writes handoffs. Nothing here enables more.
+    """The Grok Bot memory profile reads cards and submits handoffs for review. Nothing here enables more.
 
     There is no messaging, dispatch, digest, skill or event key. The hub section names a
-    dedicated principal so the listener proves its own identity and stays isolated from Dot.
+    dedicated principal, and that principal's own credential and memory grants are what the
+    profile reads and submits with, so the listener stays isolated from Dot.
     """
     root = _object(payload, {"schema", "auth", "paths", "hub"}, optional={"notify_command"})
     if root["schema"] != GROKBOT_MEMORY_RUNTIME_SCHEMA:
@@ -442,6 +447,37 @@ def _parse_grokbot_memory_runtime(payload: object) -> Runtime:
         owner_authorization=None,
         messaging_enabled=False,
         schema=GROKBOT_MEMORY_RUNTIME_SCHEMA,
+        memory_push=False,
+    )
+
+
+def _parse_grokbot_inbox_runtime(payload: object) -> Runtime:
+    """The Grok Bot inbox profile sends and reads hub messages under its own principal.
+
+    There is no dispatch, digest, skill, event or memory key. `hub.recipients` names the aliases the
+    tool accepts, and the hub's send grants (`may_send_to`) for the principal are the allowlist behind them.
+    """
+    root = _object(payload, {"schema", "auth", "paths", "hub", "messaging_enabled"}, optional={"notify_command"})
+    if root["schema"] != GROKBOT_INBOX_RUNTIME_SCHEMA:
+        raise _invalid()
+    auth = _parse_auth(root["auth"])
+    paths = _parse_hosted_paths(root["paths"])
+    hub = _parse_hub(root["hub"])
+    if hub.principal != GROKBOT_INBOX_PRINCIPAL:
+        raise _invalid()
+    return Runtime(
+        auth=auth,
+        paths=paths,
+        hub=hub,
+        dispatch_enabled=False,
+        events_enabled=False,
+        digest_pr_repo="",
+        callback_hosts=(),
+        notify_command=_parse_notify(root),
+        owner_authorization=None,
+        messaging_enabled=_boolean(root["messaging_enabled"]),
+        schema=GROKBOT_INBOX_RUNTIME_SCHEMA,
+        memory_push=False,
     )
 
 
