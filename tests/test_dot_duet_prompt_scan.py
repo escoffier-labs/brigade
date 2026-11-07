@@ -381,6 +381,22 @@ class TestConnectorPayloads(Scan):
             assert not any(text in serialized for text in (PRIVATE_EMAIL, PRIVATE_IP, INJECTION))
 
     @requires_local_state
+    def test_unhashable_retrieval_labels_are_dropped_not_raised(self):
+        # Hub JSON can put a list or object where a label belongs. The search still answers.
+        unhashable = {
+            "hub": ["ok"],
+            "effective": {"mode": "hybrid"},
+            "fallback": [["local"], {"source": "hub"}, "replica"],
+            "reason": ["timeout"],
+            "degraded": True,
+        }
+        self.search_reply(self.match("good"), retrieval=unhashable)
+        for profile in EVERY_PROFILE:
+            payload = self.memory(profile).memory_search("release")
+            assert payload["retrieval"] == {"degraded": True, "fallback": ["replica"]}
+            assert [match["card_id"] for match in payload["matches"]] == ["good"]
+
+    @requires_local_state
     def test_a_coded_refusal_reason_and_an_http_reason_are_kept(self):
         for reason in ("memory_grant_missing", "memory_query_invalid", "memory-reader-timeout", "http-502"):
             self.search_reply(self.match("good"), retrieval={"hub": "refused", "degraded": True, "reason": reason})

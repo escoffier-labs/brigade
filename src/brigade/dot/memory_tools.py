@@ -489,15 +489,20 @@ def _keep_known_hub_labels(item: dict[str, Any]) -> None:
         item["revision"] = None
 
 
+def _known_str(value: object, known: frozenset[str]) -> bool:
+    return isinstance(value, str) and value in known
+
+
 def _known_retrieval(retrieval: dict[str, Any]) -> dict[str, Any]:
     """The hub's retrieval report cut to the keys and values the CLI documents; the rest is dropped."""
     known: dict[str, Any] = {}
-    if retrieval.get("hub") in _RETRIEVAL_HUB:
+    # Hub JSON can hold any type, and a list or dict is unhashable, so each label is a str first.
+    if _known_str(retrieval.get("hub"), _RETRIEVAL_HUB):
         known["hub"] = retrieval["hub"]
     for key in ("degraded", "stale", "replica_incomplete"):
         if isinstance(retrieval.get(key), bool):
             known[key] = retrieval[key]
-    if retrieval.get("effective") in _RETRIEVAL_MODES:
+    if _known_str(retrieval.get("effective"), _RETRIEVAL_MODES):
         known["effective"] = retrieval["effective"]
     reason = retrieval.get("reason")
     if isinstance(reason, str) and (reason in _RETRIEVAL_REASONS or _HTTP_REASON.fullmatch(reason)):
@@ -508,7 +513,7 @@ def _known_retrieval(retrieval: dict[str, Any]) -> dict[str, Any]:
             known[key] = value
     fallback = retrieval.get("fallback")
     if isinstance(fallback, list):
-        known["fallback"] = [source for source in fallback if source in _SOURCES]
+        known["fallback"] = [source for source in fallback if _known_str(source, _SOURCES)]
     return known
 
 
