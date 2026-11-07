@@ -327,7 +327,7 @@ async fn private_joiners_are_stripped_from_rendered_prompt_hits() {
 /// the embedding tables and still refuses `private`.
 fn old_file(path: &std::path::Path, version: i64) -> Connection {
     let c = Connection::open(path).unwrap();
-    let mut v1 = schema::ddl();
+    let mut v1 = schema::ddl().replace(super::proposals::DDL, "");
     if version < 2 {
         v1 = v1.replace(super::embedding::DDL, "");
         assert!(!v1.contains("memory_vectors"));
@@ -373,11 +373,11 @@ fn a_step_another_process_applied_is_skipped() {
     // The SQL would fail if it ran, so success proves the step was skipped.
     schema::step(&late, "SELECT no_such_function()", 2).unwrap();
     schema::step(&late, "SELECT no_such_function()", 3).unwrap();
-    assert!(schema::step(&late, "SELECT no_such_function()", 4).is_err());
+    assert!(schema::step(&late, "SELECT no_such_function()", schema::USER_VERSION + 1).is_err());
     let version: i64 = late
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, schema::USER_VERSION);
     drop((late, first));
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -483,7 +483,7 @@ fn version_1_file_gains_embedding_tables_and_the_private_state() {
     assert!(c.prepare("SELECT 1 FROM memory_embed_jobs").is_err());
     let before = snapshot(&c);
     schema::migrate(&c, 0).unwrap();
-    assert_eq!(version_of(&c), 3);
+    assert_eq!(version_of(&c), schema::USER_VERSION);
     // Rows keep, and the S15b tables exist and are empty.
     for row in &before {
         assert!(snapshot(&c).contains(row), "lost {row}");
@@ -501,13 +501,13 @@ fn version_1_file_gains_embedding_tables_and_the_private_state() {
     .unwrap();
     // Opening again is a no-op.
     schema::migrate(&c, 0).unwrap();
-    assert_eq!(version_of(&c), 3);
+    assert_eq!(version_of(&c), schema::USER_VERSION);
     drop(c);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
-fn version_2_file_from_s15b_migrates_to_3_and_keeps_embedding_rows() {
+fn version_2_file_from_s15b_migrates_and_keeps_embedding_rows() {
     let dir = std::env::temp_dir().join(format!("s18-v2to3-{}", super::ids::mint(0)));
     std::fs::create_dir_all(&dir).unwrap();
     let c = old_file(&dir.join("memory.db"), 2);
@@ -528,7 +528,7 @@ fn version_2_file_from_s15b_migrates_to_3_and_keeps_embedding_rows() {
     );
     let before = snapshot(&c);
     schema::migrate(&c, 0).unwrap();
-    assert_eq!(version_of(&c), 3);
+    assert_eq!(version_of(&c), schema::USER_VERSION);
     let after = snapshot(&c);
     for row in &before {
         assert!(after.contains(row), "lost {row}");
@@ -554,6 +554,6 @@ fn a_fresh_file_starts_at_the_current_version() {
     let version: i64 = c
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, schema::USER_VERSION);
     c.execute_batch("INSERT INTO memory_blobs VALUES('h1',x'6869',2,'t'); INSERT INTO memory_handoffs VALUES('ho1','admin','note','h1','pending','private',1,'t');").unwrap();
 }

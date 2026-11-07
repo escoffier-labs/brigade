@@ -705,11 +705,11 @@ async fn replays_after_retention_are_refused_with_nothing_appended() {
         );
     }
     assert_eq!(h.events(), events);
-    // propose: S19a adds the action; the window check above is shared by every write.
+    // Proposal writes use the same mandatory id validation as every write.
     let propose = h.call(ADMIN_TOKEN, json!({"action":"propose"})).await;
     assert_eq!(
         (propose.status, code(&propose)),
-        (501, "memory_action_unavailable")
+        (400, "memory_client_event_invalid")
     );
 }
 

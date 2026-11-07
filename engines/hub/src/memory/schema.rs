@@ -2,7 +2,7 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 3;
+pub const USER_VERSION: i64 = 4;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
@@ -143,9 +143,10 @@ CREATE TABLE memory_idempotency(
   PRIMARY KEY(principal, client_event_id)
 ) WITHOUT ROWID;
 CREATE INDEX memory_idempotency_age ON memory_idempotency(created_ms);
-{}
+{}{}
 ",
-        super::embedding::DDL
+        super::embedding::DDL,
+        super::proposals::DDL
     )
 }
 
@@ -162,6 +163,7 @@ pub const TABLES: &[&str] = &[
     "memory_vectors",
     "memory_lineage",
     "memory_embed_jobs",
+    "memory_proposals",
 ];
 
 /// Create a fresh file's schema, or check an existing one. Never downgrades,
@@ -220,6 +222,9 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     }
     if version < 3 {
         step(c, &private_scan_state(), 3).map_err(err)?;
+    }
+    if version < 4 {
+        step(c, super::proposals::DDL, 4).map_err(err)?;
     }
     for table in TABLES {
         let present: Option<i64> = c

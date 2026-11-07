@@ -2320,9 +2320,12 @@ Reflect stays a batch job (#1856). On a hub-backed workspace:
 2. Dry run before staging: `propose` validates every op against the base
    revision's bytes and computes the unified diff before anything is stored.
    An invalid proposal is refused at once with `422 memory_proposal_invalid`
-   and a reason per op, instead of waiting in a reviewer's queue. Ops that
-   cannot be validated are dropped, never guessed. A proposal with every op
-   dropped is `failed`, and no card changes.
+   and an indexed validation result for every op, instead of waiting in a
+   reviewer's queue. If any op is invalid, the hub refuses the whole proposal
+   and stores nothing. It never retains a valid subset. The reflect batch job
+   on the client drops ops it cannot validate before calling `propose`, never
+   guesses, and records its own job as `failed` when no ops remain. This
+   client-side filtering does not authorize partial acceptance on the hub.
 3. Pinning: each op records the exact bytes and SHA-256 of the block it
    targets, plus the card's base revision. At apply time the hub requires
    those exact bytes at that block id. Any change fails the op closed. The hub
@@ -2347,10 +2350,25 @@ Reflect stays a batch job (#1856). On a hub-backed workspace:
    negative outcomes attached after the proposal opened, cooldown and blast
    cap from proposal history, and the scan state of every resulting version.
    Any blocker marks the proposal `stale` or `held` and changes nothing.
-8. `memory reflect rollback` appends a compensating proposal that restores the
-   previous revision's content and trust. It goes through the same
-   compare-and-set, so it ends `stale` if the card moved since, and the
-   reviewer sees why.
+8. `rollback` requires the review grant on every target scope, or admin. It
+   appends a compensating proposal containing the previous revision's content
+   and trust, pinned to the applied revision as its base. It changes no card
+   immediately, even for a reviewer. The compensation waits for a separate
+   `decide`, like every proposal until S19e (D25, Q6), and goes through the same
+   compare-and-set and block-pin checks at apply. If a card moved after the
+   original apply or while the compensation waited for review, the compensation
+   ends `stale` and changes no card. The reviewer sees the reason.
+
+S19a authorizes each target with `has_right` under the authority lock:
+`reflect` for `propose`, and `review` for `decide`, its atomic apply, and
+`rollback`. Every card referenced by a cross-card op is a target, including
+retained source cards. An unscoped right never substitutes for a target-scope
+right. Collections require an exact grant, since neither `*` nor `repo:*`
+matches a `collection:` scope. Replays repeat these authorization checks before
+returning a stored diff. The hub exposes no separate or automatic apply route.
+The Python client additions for submitting and deciding hub proposals remain a
+later slice. Its existing `memory hub proposals` commands manage local conflict
+proposals only.
 
 | Tier 0 gate | Source of truth on the hub |
 |---|---|
