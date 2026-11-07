@@ -76,9 +76,7 @@ async fn read(python: &str, path: &Path) -> Result<Value, String> {
     // PYTHON* variables, so a planted `json.py` or `tomllib.py` is never run.
     // `--required`: the file existed a moment ago, so one gone by the time
     // Python opens it is a read failure, not lexical mode.
-    let output = Command::new(python)
-        .arg("-I")
-        .current_dir("/")
+    let output = Command::from(crate::python_command(python))
         .arg("-c")
         .arg(include_str!("../resolve_memory.py"))
         .arg("--required")

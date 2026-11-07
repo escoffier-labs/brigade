@@ -7,6 +7,15 @@ do not supply imports. For source installs, use an editable install with
 `python3 -m pip install -e .` from the repository root. The managed upstream
 runs the installed `brigade` module with `-m`.
 
+Relative `BRIGADE_FLEET_DECK_CONFIG` and `BRIGADE_FLEET_FINDINGS_KEY_FILE`
+paths resolve against the original working directory before Python starts.
+`--deck-config` takes precedence over its environment setting. If that directory
+is gone, relative startup paths fail with an error. When every active startup
+path is absolute, the hub can fall back to `/`.
+
+The benchmark harness requires an editable install from this checkout and
+rejects interpreters that load another Brigade copy.
+
 ```sh
 brigade-hub --host localhost --token-file ./admin-token --db ./hub.db
 ```

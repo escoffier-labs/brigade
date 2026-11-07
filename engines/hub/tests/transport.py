@@ -1,5 +1,6 @@
 """Loopback transport regressions against the built front and managed upstream."""
 import contextlib
+import json
 import http.client
 import ipaddress
 import os
@@ -91,7 +92,7 @@ def alive(pid):
 
 
 @contextlib.contextmanager
-def front(upstream=None, extra=(), relative_db=False, env_overrides=None, default_db=False, planted=False):
+def front(upstream=None, extra=(), relative_db=False, env_overrides=None, default_db=False, planted=False, work_dir=None):
     with tempfile.TemporaryDirectory() as work:
         if planted:
             for module in ("json", "pathlib", "secrets", "resource", "tomllib"):
@@ -111,7 +112,7 @@ def front(upstream=None, extra=(), relative_db=False, env_overrides=None, defaul
             else:
                 env[name] = value
         with tempfile.TemporaryFile() as log:
-            child = subprocess.Popen(command, env=env, stdout=log, stderr=log, cwd=work if relative_db else None)
+            child = subprocess.Popen(command, env=env, stdout=log, stderr=log, cwd=work_dir or (work if relative_db or planted else None))
             try:
                 port = None
                 for _ in range(300):
@@ -202,10 +203,15 @@ class Transport(unittest.TestCase):
                 from types import SimpleNamespace
                 forbidden = Path({str(forbidden)!r})
                 def guard(event, args):
-                    if event in ("open", "sqlite3.connect") and isinstance(args[0], (str, bytes, os.PathLike)):
-                        path = Path(os.fsdecode(args[0])).absolute()
-                        if path == forbidden or forbidden in path.parents:
-                            raise RuntimeError("real home storage is forbidden")
+                    single = ("open", "sqlite3.connect", "os.mkdir", "os.makedirs")
+                    pairs = ("os.rename", "os.replace", "os.link", "shutil.copyfile", "shutil.copymode",
+                             "shutil.copystat", "shutil.copytree", "shutil.move")
+                    paths = args[:1] if event in single else args[:2] if event in pairs else ()
+                    for value in paths:
+                        if isinstance(value, (str, bytes, os.PathLike)):
+                            path = Path(os.fsdecode(value)).absolute()
+                            if path == forbidden or forbidden in path.parents:
+                                raise RuntimeError("real home storage is forbidden")
                 sys.addaudithook(guard)
                 pwd.getpwuid = lambda uid: SimpleNamespace(pw_dir={directory!r})
                 if os.environ.get("BRIGADE_HUB_CHECKPOINT_OWNER") == "rust":
@@ -228,13 +234,18 @@ class Transport(unittest.TestCase):
             )
             wrapper.chmod(0o755)
             # Exercise the audit event without asking SQLite to open a real path.
-            probe = subprocess.run(
-                [str(wrapper), "-I", "-c", f"import sys; sys.audit('sqlite3.connect', {str(forbidden / 'fleet-hub.db')!r})"],
-                cwd="/", capture_output=True, text=True,
-            )
-            self.assertNotEqual(probe.returncode, 0)
-            self.assertIn("real home storage is forbidden", probe.stderr)
-            with front(default_db=True, relative_db=True, planted=True,
+            for event in ("open", "sqlite3.connect", "os.mkdir", "os.makedirs", "os.rename", "os.replace", "os.link",
+                          "shutil.copyfile", "shutil.copymode", "shutil.copystat", "shutil.copytree", "shutil.move"):
+                for paths in ((str(forbidden / "fleet-hub.db"), "/tmp/fake"),
+                              ("/tmp/fake", str(forbidden / "fleet-hub.db"))) if event not in (
+                                  "open", "sqlite3.connect", "os.mkdir", "os.makedirs") else ((str(forbidden),),):
+                    probe = subprocess.run(
+                        [str(wrapper), "-I", "-c", f"import sys; sys.audit({event!r}, *{paths!r})"],
+                        cwd="/", capture_output=True, text=True,
+                    )
+                    self.assertNotEqual(probe.returncode, 0, event)
+                    self.assertIn("real home storage is forbidden", probe.stderr, event)
+            with front(default_db=True, planted=True,
                        env_overrides={"HOME": None, "BRIGADE_HUB_PYTHON": str(wrapper)}) as (_, port):
                 database = root / ".brigade/fleet-hub.db"
                 self.assertNotEqual(database, forbidden / "fleet-hub.db")
@@ -250,6 +261,69 @@ class Transport(unittest.TestCase):
                         sizes.append(Path(str(database) + "-wal").stat().st_size)
                     self.assertLess(max(sizes), 4 * 1024 * 1024, sizes)
                 self.assertEqual(request(port, "/ready")[0], 200)
+
+    def test_relative_environment_deck_config_and_cli_precedence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "deck.json"
+            config.write_text(json.dumps({"stations": [{"node_id": "fake-node", "name": "Fake", "capacity": 1}]}))
+            key = root / "key.bin"
+            key.write_bytes(b"x" * 32)
+            interpreter = root / "python"
+            interpreter.write_text(
+                '#!/bin/sh\n'
+                f'test "$BRIGADE_FLEET_FINDINGS_KEY_FILE" = {shlex.quote(str(key))} || exit 78\n'
+                f'exec {shlex.quote(REAL_PYTHON)} "$@"\n'
+            )
+            interpreter.chmod(0o755)
+            environment = {"BRIGADE_FLEET_FINDINGS_KEY_FILE": "key.bin", "BRIGADE_HUB_PYTHON": str(interpreter)}
+            for upstream in (None, 1):
+                with self.subTest(upstream=upstream):
+                    with front(upstream, work_dir=directory,
+                               env_overrides={**environment, "BRIGADE_FLEET_DECK_CONFIG": "deck.json"}) as (_, port):
+                        self.assertEqual(request(port, "/health")[0], 200)
+                    with front(upstream, work_dir=directory, extra=("--deck-config", str(config)),
+                               env_overrides={**environment, "BRIGADE_FLEET_DECK_CONFIG": "missing.json"}) as (_, port):
+                        self.assertEqual(request(port, "/health")[0], 200)
+
+    def test_deleted_cwd_is_cleanly_handled(self):
+        for relative in (False, True):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                gone = root / "gone"
+                gone.mkdir()
+                probe = (
+                    "import os,sys; os.chdir(sys.argv[1]); os.rmdir(sys.argv[1]); "
+                    "os.execv(sys.argv[2], sys.argv[2:])"
+                )
+                args = [str(BINARY), "--host", HOST, "--port", "0", "--db",
+                        "relative.db" if relative else str(root / "hub.db"),
+                        "--upstream", f"http://{HOST}:1"]
+                env = dict(os.environ, BRIGADE_FLEET_TOKEN="fake-admin-token")
+                env.pop("BRIGADE_FLEET_DECK_CONFIG", None)
+                env.pop("BRIGADE_FLEET_FINDINGS_KEY_FILE", None)
+                with tempfile.TemporaryFile() as log:
+                    child = subprocess.Popen([REAL_PYTHON, "-I", "-c", probe, str(gone), *args],
+                                             env=env, stdout=log, stderr=log)
+                    try:
+                        if relative:
+                            self.assertEqual(child.wait(10), 2)
+                        else:
+                            for _ in range(300):
+                                if bound_port(log) or child.poll() is not None:
+                                    break
+                                time.sleep(.02)
+                            self.assertIsNone(child.poll())
+                            self.assertIsNotNone(bound_port(log))
+                    finally:
+                        if child.poll() is None:
+                            child.terminate()
+                            child.wait(5)
+                    log.seek(0)
+                    output = log.read().decode()
+                    self.assertNotIn("panicked", output)
+                    if relative:
+                        self.assertIn("error: working directory is unavailable", output)
 
     def test_relative_database_admits_events_and_sessions(self):
         with socket.socket() as listener:

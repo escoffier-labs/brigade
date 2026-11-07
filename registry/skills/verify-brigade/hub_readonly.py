@@ -628,7 +628,9 @@ def _wrapper(state_dir: Path, python: str) -> Path:
     wrapper = state_dir / "audited-python"
     py, launcher = shlex.quote(python), shlex.quote(str(LAUNCHER))
     wrapper.write_text(
-        f'#!/bin/sh\nif [ "$1" = "-m" ] && [ "$2" = "brigade" ]; then exec {py} {launcher} "$@"; fi\nexec {py} "$@"\n',
+        f'#!/bin/sh\nif [ "$1" = "-I" ]; then shift; fi\n'
+        f'if [ "$1" = "-m" ] && [ "$2" = "brigade" ]; then exec {py} -I {launcher} "$@"; fi\n'
+        f'exec {py} -I "$@"\n',
         encoding="utf-8",
     )
     wrapper.chmod(0o700)

@@ -23,6 +23,20 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 
 
+def check_install(python=sys.executable):
+    """Compare only the matching editable install, ignoring ambient imports."""
+    try:
+        result = subprocess.run(
+            [python, "-I", "-c", "import brigade,json; print(json.dumps(brigade.__file__))"],
+            cwd="/", capture_output=True, text=True, check=True,
+        )
+        installed = Path(json.loads(result.stdout)).resolve()
+        if not installed.is_relative_to((ROOT / "src").resolve()):
+            raise ValueError("different Brigade installation")
+    except (OSError, ValueError, TypeError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("benchmark interpreter requires an editable Brigade install from ROOT/src") from exc
+
+
 def check_cgroup():
     try:
         relative = next(
@@ -72,12 +86,13 @@ def scoped(command, constrained):
 
 @contextlib.contextmanager
 def server(target, binary, constrained, directory):
+    check_install()
     with socket.socket() as sock:
         sock.bind((HOST, 0))
         port = sock.getsockname()[1]
     db = directory / "hub.db"
     command = (
-        [sys.executable, "-m", "brigade", "fleet", "serve"]
+        [sys.executable, "-I", "-m", "brigade", "fleet", "serve"]
         if target == "python"
         else [str(binary)]
     )
@@ -95,9 +110,9 @@ def server(target, binary, constrained, directory):
         BRIGADE_FLEET_TOKEN="bench-disposable-token",
         BRIGADE_BENCH_TOKEN="bench-disposable-token",
         BRIGADE_HUB_PYTHON=sys.executable,
-        PYTHONPATH=str(ROOT / "src"),
         BRIGADE_BENCH_LIMIT_REPORT=str(directory / "limits.json"),
     )
+    env.pop("PYTHONPATH", None)
     # Do not inherit live hub settings or upstream credentials.
     for key in list(env):
         if key.startswith("BRIGADE_HUB_") and key != "BRIGADE_HUB_PYTHON":
