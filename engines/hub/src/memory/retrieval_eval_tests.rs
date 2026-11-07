@@ -135,7 +135,7 @@ async fn retrieval_eval_bindings_fail_closed_and_are_rechecked_after_preparation
             json!(format!("sha256:{}", ids::sha256_hex(b"other"))),
             "retrieval_eval_policy_digest_mismatch",
         ),
-        ("indexed_seq", json!(0), "retrieval_eval_seq_stale"),
+        ("indexed_seq", json!(0), "retrieval_eval_target_drifted"),
         ("indexed_seq", json!(999999), "retrieval_eval_seq_future"),
         (
             "log_epoch",
@@ -143,19 +143,9 @@ async fn retrieval_eval_bindings_fail_closed_and_are_rechecked_after_preparation
             "retrieval_eval_epoch_mismatch",
         ),
         (
-            "scope",
-            json!("collection:other"),
-            "retrieval_eval_scope_mismatch",
-        ),
-        (
             "rrf_weights",
             json!({"lexical":2.0,"dense":1.0}),
             "retrieval_eval_weights_mismatch",
-        ),
-        (
-            "corpus_identity",
-            json!({"live_count":1,"digest":ids::sha256_hex(b"wrong")}),
-            "retrieval_eval_corpus_mismatch",
         ),
     ] {
         let (h, id) = ready().await;
@@ -281,7 +271,7 @@ async fn retrieval_eval_changed_corpus_and_active_hybrid_cannot_use_lexical_reco
             .as_array()
             .unwrap()
             .iter()
-            .any(|c| c["code"] == "retrieval_eval_seq_stale")
+            .any(|c| c["code"] == "retrieval_eval_drift_exceeded")
     );
     // Configure hybrid through the production runtime, with no endpoint access.
     h.store.as_mut().unwrap().configure_retrieval(&json!({"retrieval":"hybrid","embedder":{"backend":"remote","pull":true,"name":"fixture","shape":"api/embed","input_chars":1000,"query_prefix_version":1,"model_digest":ids::sha256_hex(b"model"),"dimensions":4}})).unwrap();
@@ -671,35 +661,27 @@ async fn retrieval_eval_review_fix_fixture_pin_matches_live_policy() {
 }
 
 #[tokio::test]
-async fn retrieval_eval_zero_head_tolerance_is_global_and_consumed_by_apply() {
+async fn retrieval_eval_cross_scope_and_unrelated_trust_changes_spend_no_budget() {
     let (h, id) = ready().await;
+    h.put(ADMIN_TOKEN, "fleet", "b", None, OLD).await;
     record_current(&h).await;
+    let before = gate_report(&h).await;
     h.put(ADMIN_TOKEN, "repo:other", "b", None, "other scope")
         .await;
-    let held = report(&h, &id).await;
-    assert!(
-        held.body["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|c| c["code"] == "retrieval_eval_seq_stale")
+    // Importing identical bytes changes only trust and revision.
+    let b = card(&h, "fleet", "b").await;
+    let imported = h.call(ADMIN_TOKEN, json!({"action":"import","scope":"fleet","card_id":"b","base_revision":b["revision"],"base_epoch":h.epoch().await,"text":b["text"],"client_event_id":h.id()})).await;
+    assert_eq!(imported.status, 201);
+    assert_ne!(imported.body["event"]["trust"], b["trust"]);
+    let after = gate_report(&h).await;
+    assert_eq!(
+        before["adapters"]["hub-lexical"]["binding"]["corpus_identity"],
+        after["adapters"]["hub-lexical"]["binding"]["corpus_identity"]
     );
-    let db = Connection::open(h.memory()).unwrap();
-    let body = proposals::load(&crate::writer::worker::Tx(&db), id.as_str().unwrap())
-        .unwrap()
-        .unwrap();
-    let another=h.call(ADMIN_TOKEN,json!({"action":"propose","workspace_id":"workspace-a","base_epoch":h.epoch().await,"ops":body["ops"],"client_event_id":h.id()})).await;
-    assert_eq!(another.status, 201);
-    record_current(&h).await;
-    let applied = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
-    assert_eq!(applied.body["state"], "applied");
-    let next = report(&h, &another.body["proposal_id"]).await;
-    assert!(
-        next.body["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|c| c["code"] == "retrieval_eval_seq_stale")
+    assert_check(&report(&h, &id).await, "retrieval_eval_satisfied");
+    assert_eq!(
+        h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await.body["state"],
+        "applied"
     );
 }
 
@@ -729,5 +711,385 @@ async fn retrieval_eval_newest_record_per_mode_binds_only_its_scope() {
             .unwrap()
             .iter()
             .any(|c| c["code"] == "retrieval_eval_scope_mismatch")
+    );
+}
+
+fn assert_check(reply: &Reply, expected: &str) {
+    assert!(
+        reply.body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == expected),
+        "missing {expected}"
+    );
+}
+async fn pad(h: &Hub, count: usize) {
+    for n in 0..count {
+        assert_eq!(
+            h.put(
+                ADMIN_TOKEN,
+                "fleet",
+                &format!("padding-{n:03}"),
+                None,
+                "Padding."
+            )
+            .await
+            .status,
+            201
+        );
+    }
+}
+async fn retire(h: &Hub, id: &str) {
+    let c = card(h, "fleet", id).await;
+    assert_eq!(h.call(ADMIN_TOKEN, json!({"action":"retire","scope":"fleet","card_id":id,"base_revision":c["revision"],"base_epoch":h.epoch().await,"reason":"obsolete","client_event_id":h.id()})).await.status, 200);
+}
+
+#[tokio::test]
+async fn retrieval_eval_snapshot_must_match_at_record_and_remains_immutable() {
+    for mutation in ["digest", "count", "scope", "late_write"] {
+        let (h, _) = ready().await;
+        let mut r = gate_report(&h).await;
+        let b = &mut r["adapters"]["hub-lexical"]["binding"];
+        match mutation {
+            "digest" => b["corpus_identity"]["digest"] = json!(ids::sha256_hex(b"wrong")),
+            "count" => b["corpus_identity"]["live_count"] = json!(2),
+            "scope" => b["scope"] = json!("repo:other"),
+            _ => {
+                h.put(ADMIN_TOKEN, "fleet", "late", None, "Late.").await;
+            }
+        }
+        let before = h.events();
+        let refused = record(&h, &r).await;
+        assert_eq!(refused.status, 409);
+        assert_eq!(code(&refused), "memory_retrieval_eval_corpus_mismatch");
+        assert_eq!(h.events(), before);
+        record_current(&h).await;
+        let db = Connection::open(h.memory()).unwrap();
+        assert!(
+            db.execute("UPDATE memory_retrieval_evals SET corpus_members='[]'", [])
+                .is_err()
+        );
+        assert!(
+            db.execute("UPDATE memory_retrieval_evals SET evaluated_ms=0", [])
+                .is_err()
+        );
+        let pairs: String = db
+            .query_row(
+                "SELECT corpus_members FROM memory_retrieval_evals",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let pairs: Vec<(String, String)> = serde_json::from_str(&pairs).unwrap();
+        assert_eq!(pairs.len(), if mutation == "late_write" { 2 } else { 1 });
+        let a = card(&h, "fleet", "a").await;
+        assert_eq!(
+            pairs[0],
+            ("a".into(), a["content_hash"].as_str().unwrap().into())
+        );
+    }
+}
+
+#[tokio::test]
+async fn retrieval_eval_budget_counts_added_removed_and_changed_once_with_live_floor_and_cap() {
+    // Each case reaches its inclusive limit, then exceeds it by one card.
+    for (initial, limit, kind) in [
+        (49, 1, "add"),
+        (51, 1, "remove"),
+        (50, 1, "content"),
+        (300, 5, "content"),
+    ] {
+        let (h, id) = ready().await;
+        pad(&h, initial - 1).await;
+        record_current(&h).await;
+        for n in 0..=limit {
+            let name = format!("padding-{n:03}");
+            match kind {
+                "add" => {
+                    h.put(ADMIN_TOKEN, "fleet", &format!("added-{n}"), None, "Added.")
+                        .await;
+                }
+                "remove" => retire(&h, &name).await,
+                _ => {
+                    let old = card(&h, "fleet", &name).await;
+                    assert_eq!(
+                        h.put(
+                            ADMIN_TOKEN,
+                            "fleet",
+                            &name,
+                            old["revision"].as_i64(),
+                            "Changed."
+                        )
+                        .await
+                        .status,
+                        201
+                    );
+                }
+            }
+            assert_check(
+                &report(&h, &id).await,
+                if n < limit {
+                    "retrieval_eval_satisfied"
+                } else {
+                    "retrieval_eval_drift_exceeded"
+                },
+            );
+        }
+        let before = bytes_snapshot(&h);
+        let held = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
+        assert_eq!(held.body["state"], "pending");
+        assert_eq!(bytes_snapshot(&h), before);
+    }
+    // Fewer than 50 live cards allow zero changed members.
+    let (h, id) = ready().await;
+    pad(&h, 47).await;
+    record_current(&h).await;
+    h.put(ADMIN_TOKEN, "fleet", "new", None, "New.").await;
+    assert_check(&report(&h, &id).await, "retrieval_eval_drift_exceeded");
+}
+
+#[tokio::test]
+async fn retrieval_eval_targets_hold_inside_budget_and_after_revert_or_trust_only_edit() {
+    for kind in ["content", "retire", "revert", "trust"] {
+        let (h, id) = ready().await;
+        pad(&h, 49).await;
+        record_current(&h).await;
+        let a = card(&h, "fleet", "a").await;
+        match kind {
+            "retire" => retire(&h, "a").await,
+            "trust" => {
+                let imported = h.call(ADMIN_TOKEN, json!({"action":"import","scope":"fleet","card_id":"a","base_revision":a["revision"],"base_epoch":h.epoch().await,"text":a["text"],"client_event_id":h.id()})).await;
+                assert_eq!(imported.status, 201);
+                assert_eq!(imported.body["event"]["content_hash"], a["content_hash"]);
+            }
+            _ => {
+                let edit = h
+                    .put(
+                        ADMIN_TOKEN,
+                        "fleet",
+                        "a",
+                        a["revision"].as_i64(),
+                        "Changed.",
+                    )
+                    .await;
+                assert_eq!(edit.status, 201);
+                if kind == "revert" {
+                    h.put(
+                        ADMIN_TOKEN,
+                        "fleet",
+                        "a",
+                        Some(rev(&edit)),
+                        a["text"].as_str().unwrap(),
+                    )
+                    .await;
+                }
+            }
+        }
+        assert_check(&report(&h, &id).await, "retrieval_eval_target_drifted");
+        let before = bytes_snapshot(&h);
+        let held = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
+        assert_eq!(held.body["state"], "pending");
+        assert_eq!(bytes_snapshot(&h), before);
+    }
+}
+
+#[tokio::test]
+async fn retrieval_eval_apply_rechecks_drift_after_preparation() {
+    let (h, id) = ready().await;
+    record_current(&h).await;
+    let store = h.store.as_ref().unwrap();
+    let who = store.authenticate(ADMIN_TOKEN).await.unwrap();
+    let request = auto_request(&h, &id).await;
+    let db = Connection::open(h.memory()).unwrap();
+    let mut p = store
+        .prepare(&who, "auto_apply", request.as_object().unwrap(), &request)
+        .unwrap();
+    p.action = ops::Action::Proposal(
+        proposals::prepare(
+            &crate::writer::worker::Tx(&db),
+            &who,
+            request,
+            clean().as_ref(),
+        )
+        .unwrap(),
+    );
+    assert_check(&report(&h, &id).await, "retrieval_eval_satisfied");
+    h.put(ADMIN_TOKEN, "fleet", "late", None, "Late.").await;
+    let r = store.write(p).await;
+    assert_eq!(r.body["state"], "pending");
+    assert!(
+        r.body["preflight"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "retrieval_eval_drift_exceeded")
+    );
+}
+
+#[tokio::test]
+async fn retrieval_eval_unreadable_latest_row_holds_but_newer_report_recovers_using_max_time() {
+    let (h, id) = ready().await;
+    record_current(&h).await;
+    let db = Connection::open(h.memory()).unwrap();
+    // Simulate bytes a later, stricter prepare cannot read. No trigger bypass.
+    db.execute("INSERT INTO memory_retrieval_evals(record_seq,mode,report_sha256,report_json,principal,credential_id,created_ms,evaluated_ms) VALUES(?1,'lexical',?2,'{}','admin','fixture',?3,?4)", rusqlite::params![h.events()+1, ids::sha256_hex(b"{}"), h.now(), h.now()-1]).unwrap();
+    assert_check(&report(&h, &id).await, "retrieval_eval_record_invalid");
+    // The maximum is the earlier row, not the latest appended one.
+    let equal = record(&h, &gate_report(&h).await).await;
+    assert_eq!(code(&equal), "memory_retrieval_eval_superseded");
+    // Reserve the synthetic record's sequence, otherwise the next audit event
+    // would reuse it. This fixture does not alter existing append-only rows.
+    db.execute(
+        "UPDATE sqlite_sequence SET seq=seq+1 WHERE name='memory_events'",
+        [],
+    )
+    .unwrap();
+    record_current(&h).await;
+    assert_check(&report(&h, &id).await, "retrieval_eval_satisfied");
+}
+
+#[tokio::test]
+async fn retrieval_eval_future_skew_sets_mode_ordering_floor() {
+    let (h, _) = ready().await;
+    let now = h.now();
+    let mut future = gate_report(&h).await;
+    future["evaluation_id"] = json!(ids::mint(now + retrieval_eval::MAX_FUTURE_MS));
+    assert_eq!(record(&h, &future).await.status, 201);
+    for offset in [1, retrieval_eval::MAX_FUTURE_MS] {
+        h.set_clock(now + offset);
+        assert_eq!(
+            code(&record(&h, &gate_report(&h).await).await),
+            "memory_retrieval_eval_superseded"
+        );
+    }
+    h.set_clock(now + retrieval_eval::MAX_FUTURE_MS + 1);
+    record_current(&h).await;
+}
+
+#[tokio::test]
+async fn retrieval_eval_schema_seven_upgrade_preserves_rows_epoch_sequence_and_ordering() {
+    let (mut h, id) = ready().await;
+    let r = gate_report(&h).await;
+    let first = record(&h, &r).await;
+    let epoch = h.epoch().await;
+    let high = h.events();
+    h.store.take();
+    let db = Connection::open(h.memory()).unwrap();
+    db.execute_batch("DROP TABLE memory_retrieval_evals")
+        .unwrap();
+    db.execute_batch(&retrieval_eval::legacy_ddl()).unwrap();
+    let raw = ids::canonical(&r);
+    db.execute(
+        "INSERT INTO memory_retrieval_evals VALUES(?1,'lexical',?2,?3,'admin','fixture',?4)",
+        rusqlite::params![
+            first.body["record_seq"].as_i64().unwrap(),
+            ids::sha256_hex(raw.as_bytes()),
+            raw,
+            h.now()
+        ],
+    )
+    .unwrap();
+    // An unreadable legacy row must not prevent the upgrade or future records.
+    db.execute(
+        "INSERT INTO memory_retrieval_evals VALUES(?1,'hybrid',?2,'broken','admin','fixture',?3)",
+        rusqlite::params![high + 1, ids::sha256_hex(b"broken"), h.now()],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE sqlite_sequence SET seq=500 WHERE name='memory_events'",
+        [],
+    )
+    .unwrap();
+    db.pragma_update(None, "user_version", 7).unwrap();
+    schema::migrate(&db, h.now()).unwrap();
+    assert_eq!(schema::log_epoch(&db).unwrap(), epoch);
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        8
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name='memory_events'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        500
+    );
+    let stored: (String, i64, Option<String>) = db.query_row("SELECT report_json,evaluated_ms,corpus_members FROM memory_retrieval_evals WHERE mode='lexical'", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(stored, (raw, h.now(), None));
+    assert_eq!(
+        db.query_row(
+            "SELECT evaluated_ms FROM memory_retrieval_evals WHERE mode='hybrid'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        h.now() + retrieval_eval::MAX_FUTURE_MS
+    );
+    assert!(
+        db.execute("UPDATE memory_retrieval_evals SET evaluated_ms=0", [])
+            .is_err()
+    );
+    assert!(
+        db.execute("DELETE FROM memory_retrieval_evals", [])
+            .is_err()
+    );
+    schema::migrate(&db, h.now()).unwrap();
+    drop(db);
+    h.open(clean(), None);
+    assert_check(&report(&h, &id).await, "retrieval_eval_snapshot_missing");
+    assert_eq!(
+        code(&record(&h, &r).await),
+        "memory_retrieval_eval_superseded"
+    );
+    record_current(&h).await;
+    assert!(
+        Connection::open(h.memory())
+            .unwrap()
+            .query_row("SELECT MAX(seq) FROM memory_events", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap()
+            > 500
+    );
+    assert_check(&report(&h, &id).await, "retrieval_eval_satisfied");
+}
+
+#[tokio::test]
+async fn retrieval_eval_one_record_allows_two_independent_applies_within_budget() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let (h, first) = ready().await;
+    let b = h.call(ADMIN_TOKEN, json!({"action":"import","scope":"fleet","card_id":"b","text":OLD,"client_event_id":h.id()})).await;
+    assert_eq!(b.status, 201);
+    let refs = [
+        "node-1/workspace-a/b-one",
+        "node-1/workspace-a/b-two",
+        "agent:dot/workspace-a/b-three",
+    ];
+    for (i, id) in refs.iter().enumerate() {
+        assert_eq!(h.call(if i == 2 { AGENT_TOKEN } else { NODE_TOKEN }, json!({"action":"evidence.attach","scope":"fleet","card_id":"b","workspace_id":"workspace-a","evidence_id":id,"artifact_kind":"verification","artifact_sha256":ids::sha256_hex(b"fixture evidence"),"observed_at":h.now(),"artifact_base64":STANDARD.encode(b"fixture evidence"),"client_event_id":h.id()})).await.status, 201);
+    }
+    let mut o = op("fleet", "b", rev(&b));
+    o["type"] = json!("append_evidence");
+    o.as_object_mut().unwrap().remove("text");
+    o["evidence_ids"] = json!(refs);
+    let second = h.call(ADMIN_TOKEN, json!({"action":"propose","workspace_id":"workspace-a","base_epoch":h.epoch().await,"ops":[o],"client_event_id":h.id()})).await;
+    assert_eq!(second.status, 201);
+    pad(&h, 98).await;
+    record_current(&h).await;
+    for id in [first, second.body["proposal_id"].clone()] {
+        assert_check(&report(&h, &id).await, "retrieval_eval_satisfied");
+        let r = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
+        assert_eq!(r.body["state"], "applied");
+    }
+    assert_eq!(
+        Connection::open(h.memory())
+            .unwrap()
+            .query_row("SELECT count(*) FROM memory_retrieval_evals", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
     );
 }

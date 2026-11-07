@@ -9,10 +9,9 @@ use super::{
 use crate::writer::{ReadTx, WriteTx};
 use rusqlite::types::Value;
 use serde_json::{Value as Json, json};
+use std::collections::{BTreeMap, BTreeSet};
 
-/// No head-changing writes may follow the evaluated sequence. Non-head audit
-/// events do not invalidate a run. The timestamp of the harness evaluation id
-/// expires it after 24 hours even when the corpus never changes.
+/// The harness evaluation id expires after 24 hours even with no corpus drift.
 pub const MAX_AGE_MS: i64 = 86_400_000;
 /// Match event-id admission: tolerate five minutes of client clock skew.
 /// A future run still cannot arm the gate until its evaluated time arrives.
@@ -21,12 +20,64 @@ pub const MAX_REPORT_BYTES: usize = 512 * 1024;
 pub const DDL: &str = "CREATE TABLE memory_retrieval_evals(
  record_seq INTEGER PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('lexical','hybrid')),
  report_sha256 TEXT NOT NULL, report_json TEXT NOT NULL, principal TEXT NOT NULL,
- credential_id TEXT NOT NULL, created_ms INTEGER NOT NULL);
+ credential_id TEXT NOT NULL, created_ms INTEGER NOT NULL,
+ evaluated_ms INTEGER NOT NULL, corpus_members TEXT);
 CREATE INDEX memory_retrieval_evals_latest ON memory_retrieval_evals(mode,record_seq DESC);
 CREATE TRIGGER memory_retrieval_evals_no_update BEFORE UPDATE ON memory_retrieval_evals
  BEGIN SELECT RAISE(ABORT,'memory_retrieval_evals is immutable'); END;
 CREATE TRIGGER memory_retrieval_evals_no_delete BEFORE DELETE ON memory_retrieval_evals
  BEGIN SELECT RAISE(ABORT,'memory_retrieval_evals is immutable'); END;";
+
+/// Version 7 did not retain the evaluated member set or evaluation timestamp.
+pub(super) fn legacy_ddl() -> String {
+    DDL.replace(",\n evaluated_ms INTEGER NOT NULL, corpus_members TEXT", "")
+}
+
+/// Called inside the schema migration transaction. Never reconstruct an old
+/// evaluated snapshot from today's heads. Legacy records hold until replaced.
+pub(super) fn migrate(c: &rusqlite::Connection) -> rusqlite::Result<()> {
+    c.execute_batch(
+        "ALTER TABLE memory_retrieval_evals RENAME TO memory_retrieval_evals_v7;
+        DROP INDEX memory_retrieval_evals_latest;
+        DROP TRIGGER memory_retrieval_evals_no_update;
+        DROP TRIGGER memory_retrieval_evals_no_delete;",
+    )?;
+    c.execute_batch(DDL)?;
+    let mut rows = c.prepare("SELECT record_seq,mode,report_sha256,report_json,principal,credential_id,created_ms FROM memory_retrieval_evals_v7")?;
+    let mut rows = rows.query([])?;
+    while let Some(row) = rows.next()? {
+        let raw: String = row.get(3)?;
+        let created_ms: i64 = row.get(6)?;
+        // Decode only the stable timestamp, independent of prepare's evolving
+        // report requirements. Corrupt legacy bytes get a conservative floor
+        // equal to the latest timestamp record admission could have allowed.
+        let evaluated_ms = serde_json::from_str::<Json>(&raw)
+            .ok()
+            .and_then(|body| ids::parse_event_id(string(&body, "evaluation_id")))
+            .map(|(_, ms)| ms)
+            .unwrap_or_else(|| created_ms.saturating_add(MAX_FUTURE_MS));
+        c.execute("INSERT INTO memory_retrieval_evals(record_seq,mode,report_sha256,report_json,principal,credential_id,created_ms,evaluated_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", rusqlite::params![row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, raw, row.get::<_, String>(4)?, row.get::<_, String>(5)?, created_ms, evaluated_ms])?;
+    }
+    c.execute_batch("DROP TABLE memory_retrieval_evals_v7")
+}
+
+fn members<T: ReadTx + ?Sized>(tx: &T, scope: &str) -> rusqlite::Result<BTreeMap<String, String>> {
+    Ok(tx.query("SELECT card_id,content_hash FROM memory_cards WHERE scope=?1 AND state='live' ORDER BY card_id", &[ops::t(scope)])?
+        .iter().map(|row| (ops::s(&row[0]).to_string(), ops::s(&row[1]).to_string())).collect())
+}
+fn member_pairs(members: &BTreeMap<String, String>) -> Vec<(&str, &str)> {
+    members
+        .iter()
+        .map(|(id, hash)| (id.as_str(), hash.as_str()))
+        .collect()
+}
+fn identity(members: &BTreeMap<String, String>) -> Json {
+    json!({"live_count":members.len(),"digest":ids::sha256_hex(ids::canonical(&json!(member_pairs(members))).as_bytes())})
+}
+fn drift_budget(live_count: usize) -> usize {
+    // Integer division floors 2%, including zero for fewer than 50 live cards.
+    (live_count / 50).min(5)
+}
 
 #[derive(Clone, Debug)]
 pub struct Live {
@@ -173,27 +224,16 @@ pub fn record(
         Err(r) => return Ok(r),
     };
     let r = &checked;
-    let latest=tx.query("SELECT report_json,report_sha256 FROM memory_retrieval_evals WHERE mode=?1 ORDER BY record_seq DESC LIMIT 1",&[ops::t(r.mode)])?;
-    if let Some(row) = latest.first() {
-        let previous = match prepare(
-            &json!({"report_json":ops::s(&row[0]),"report_sha256":ops::s(&row[1])}),
-        ) {
-            Ok(previous) => previous,
-            Err(_) => {
-                return Ok(ops::error(
-                    409,
-                    "memory_retrieval_eval_record_invalid",
-                    "the latest retrieval record is invalid, no record was appended",
-                ));
-            }
-        };
-        if r.evaluated_ms <= previous.evaluated_ms {
-            return Ok(ops::error(
-                409,
-                "memory_retrieval_eval_superseded",
-                "evaluation time must be strictly newer than the latest record for this mode",
-            ));
-        }
+    let latest = tx.query(
+        "SELECT MAX(evaluated_ms) FROM memory_retrieval_evals WHERE mode=?1",
+        &[ops::t(r.mode)],
+    )?;
+    if matches!(latest[0][0], Value::Integer(ms) if r.evaluated_ms <= ms) {
+        return Ok(ops::error(
+            409,
+            "memory_retrieval_eval_superseded",
+            "evaluation time must be strictly newer than every record for this mode",
+        ));
     }
     if r.evaluated_ms > p.now_ms.saturating_add(MAX_FUTURE_MS) {
         return Ok(ops::error(
@@ -207,6 +247,14 @@ pub fn record(
             422,
             "memory_retrieval_eval_expired",
             "evaluation time is more than 24 hours old",
+        ));
+    }
+    let snapshot = members(tx, string(binding(r), "scope"))?;
+    if binding(r)["corpus_identity"] != identity(&snapshot) {
+        return Ok(ops::error(
+            409,
+            "memory_retrieval_eval_corpus_mismatch",
+            "live scoped members do not match the evaluated corpus identity",
         ));
     }
     let payload = json!({"report_sha256":r.digest,"mode":r.mode,"gate":r.body["gate"]["name"],"passed":r.passed});
@@ -227,8 +275,8 @@ pub fn record(
         },
     )?;
     let credential = &a.admin_credential;
-    tx.execute("INSERT INTO memory_retrieval_evals(record_seq,mode,report_sha256,report_json,principal,credential_id,created_ms) VALUES(?1,?2,?3,?4,?5,?6,?7)", &[
-        Value::Integer(seq),ops::t(r.mode),ops::t(&r.digest),ops::t(&r.raw),ops::t(p.credential.principal()),ops::t(credential),Value::Integer(p.now_ms)])?;
+    tx.execute("INSERT INTO memory_retrieval_evals(record_seq,mode,report_sha256,report_json,principal,credential_id,created_ms,evaluated_ms,corpus_members) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", &[
+        Value::Integer(seq),ops::t(r.mode),ops::t(&r.digest),ops::t(&r.raw),ops::t(p.credential.principal()),ops::t(credential),Value::Integer(p.now_ms),Value::Integer(r.evaluated_ms),ops::t(&ids::canonical(&json!(member_pairs(&snapshot))))])?;
     Ok(Reply::new(
         201,
         json!({"record_seq":seq,"report_sha256":r.digest,"mode":r.mode,"passed":r.passed}),
@@ -250,7 +298,7 @@ pub fn hold<T: ReadTx + ?Sized>(
     } else {
         "lexical"
     };
-    let rows=tx.query("SELECT report_json,report_sha256 FROM memory_retrieval_evals WHERE mode=?1 ORDER BY record_seq DESC LIMIT 1",&[ops::t(mode)])?;
+    let rows=tx.query("SELECT report_json,report_sha256,corpus_members FROM memory_retrieval_evals WHERE mode=?1 ORDER BY record_seq DESC LIMIT 1",&[ops::t(mode)])?;
     let Some(row) = rows.first() else {
         return Ok(Some("retrieval_eval_unbound"));
     };
@@ -309,27 +357,46 @@ pub fn hold<T: ReadTx + ?Sized>(
         return Ok(reason);
     }
     let seq = b["indexed_seq"].as_i64().unwrap();
-    let last_head = tx.query(
-        "SELECT COALESCE(MAX(seq),0) FROM memory_events WHERE revision IS NOT NULL",
-        &[],
-    )?;
     let high = tx.query("SELECT COALESCE(MAX(seq),0) FROM memory_events", &[])?;
     let integer = |v: &Value| if let Value::Integer(n) = v { *n } else { 0 };
     if seq > integer(&high[0][0]) || seq > live.indexed_seq {
         return Ok(Some("retrieval_eval_seq_future"));
     }
-    if seq < integer(&last_head[0][0]) {
-        return Ok(Some("retrieval_eval_seq_stale"));
-    }
-    // Validate exact scoped corpus from raw content hashes. The timestamp and
-    // sequence checks alone cannot detect a report from another hub at seq N.
-    let members=tx.query("SELECT card_id,content_hash FROM memory_cards WHERE scope=?1 AND state='live' ORDER BY card_id",&[ops::t(string(b,"scope"))])?;
-    let members: Vec<_> = members
-        .iter()
-        .map(|r| json!([ops::s(&r[0]), ops::s(&r[1])]))
+    let Value::Text(raw_members) = &row[2] else {
+        return Ok(Some("retrieval_eval_snapshot_missing"));
+    };
+    let snapshot = match serde_json::from_str::<Vec<(String, String)>>(raw_members) {
+        Ok(pairs) => {
+            let len = pairs.len();
+            let snapshot: BTreeMap<_, _> = pairs.into_iter().collect();
+            if snapshot.len() != len || identity(&snapshot) != b["corpus_identity"] {
+                return Ok(Some("retrieval_eval_corpus_mismatch"));
+            }
+            snapshot
+        }
+        Err(_) => return Ok(Some("retrieval_eval_record_invalid")),
+    };
+    let live_members = members(tx, string(b, "scope"))?;
+    let changed: BTreeSet<_> = snapshot
+        .keys()
+        .chain(live_members.keys())
+        .map(String::as_str)
+        .filter(|id| snapshot.get(*id) != live_members.get(*id))
         .collect();
-    let identity = json!({"live_count":members.len(),"digest":ids::sha256_hex(ids::canonical(&json!(members)).as_bytes())});
-    Ok((b["corpus_identity"] != identity).then_some("retrieval_eval_corpus_mismatch"))
+    for card in super::proposals::cards(proposal) {
+        let id = string(card, "card_id");
+        // Any target head change since indexing holds, even a content revert or
+        // a trust-only edit. Unrelated trust-only edits spend no drift budget.
+        let revisions = tx.query("SELECT 1 FROM memory_events WHERE scope=?1 AND card_id=?2 AND revision IS NOT NULL AND seq>?3 LIMIT 1",
+            &[ops::t(string(card, "scope")), ops::t(id), Value::Integer(seq)])?;
+        if changed.contains(id) || !revisions.is_empty() {
+            return Ok(Some("retrieval_eval_target_drifted"));
+        }
+    }
+    // Snapshot::score filters IDF and length statistics to allowed scopes.
+    // The bound single-scope corpus is unaffected by writes outside it.
+    Ok((changed.len() > drift_budget(live_members.len()))
+        .then_some("retrieval_eval_drift_exceeded"))
 }
 
 /// Only review-capable diagnostics expose the selected trust-bearing record.

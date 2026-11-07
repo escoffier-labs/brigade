@@ -2,7 +2,7 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 7;
+pub const USER_VERSION: i64 = 8;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
@@ -239,6 +239,9 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     if version < 7 {
         step(c, &eval_schema(), 7).map_err(err)?;
     }
+    if version < 8 {
+        step_with(c, 8, super::retrieval_eval::migrate).map_err(err)?;
+    }
     for table in TABLES {
         let present: Option<i64> = c
             .query_row(
@@ -281,13 +284,20 @@ fn event_schema() -> String {
 }
 
 fn eval_schema() -> String {
-    format!("{} {}", super::retrieval_eval::DDL, event_schema())
+    format!("{} {}", super::retrieval_eval::legacy_ddl(), event_schema())
 }
 
 /// Apply one migration step unless another process already recorded it.
 /// The version is read again under the write lock: two hubs opening the same
 /// older file at once rebuild it once.
 pub(super) fn step(c: &Connection, sql: &str, version: i64) -> rusqlite::Result<()> {
+    step_with(c, version, |c| c.execute_batch(sql))
+}
+fn step_with(
+    c: &Connection,
+    version: i64,
+    apply: impl FnOnce(&Connection) -> rusqlite::Result<()>,
+) -> rusqlite::Result<()> {
     c.execute_batch("BEGIN IMMEDIATE")?;
     let applied = c
         .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
@@ -295,8 +305,7 @@ pub(super) fn step(c: &Connection, sql: &str, version: i64) -> rusqlite::Result<
             if current >= version {
                 return Ok(());
             }
-            c.execute_batch(sql)
-                .and_then(|()| c.pragma_update(None, "user_version", version))
+            apply(c).and_then(|()| c.pragma_update(None, "user_version", version))
         })
         .and_then(|()| c.execute_batch("COMMIT"));
     if applied.is_err() {
