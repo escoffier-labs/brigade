@@ -189,7 +189,8 @@ print(small, large, large / small, flush=True)
     assert large < 20, result.stdout
     # An 8x input step is about 8x when linear and about 64x when quadratic.
     # 24 sits near their geometric midpoint, so shared-runner noise (16.9 seen
-    # on CI) passes while the pre-memo engine (49x) still fails.
+    # on CI) passes while the pre-memo engine (49x) still fails. The sorted
+    # span sweep measures about 8x locally.
     assert ratio < 24, result.stdout
 
 
