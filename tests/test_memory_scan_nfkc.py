@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import runpy
 import sys
 import time
 import unicodedata
@@ -69,6 +70,16 @@ def circled(text: str) -> str:
 
 # Texts that must give the same verdict in Python and in the native hub.
 VERDICTS = {
+    "bidi": u("note{202E}"),
+    "joiner": u("note{200D}"),
+    "non-joiner": u("note{200C}"),
+    "grapheme-joiner": u("note{34F}"),
+    "variation-selector": u("note{FE00}"),
+    "emoji-selector": u("{2764}{FE0F}"),
+    "keycap-selector": u("1{FE0F}{20E3}"),
+    "ignorable": u("note{2060}"),
+    "bom-leading": u("{FEFF}note"),
+    "bom-internal": u("note{FEFF}"),
     "plain": PHRASE,
     "fullwidth": fullwidth(PHRASE),
     "math-bold": bold(PHRASE),
@@ -221,6 +232,7 @@ def computed() -> dict:
     sha, changed = code_point_digest()
     bundle = json.loads(files("brigade.guard").joinpath("memory-rules.json").read_text("utf-8"))
     return {
+        "ruleset_version": scan.ruleset_version(),
         "unicode": bundle["nfkc"]["unicode"],
         "changed_code_points": changed,
         "changed_sha256": sha,
@@ -236,6 +248,14 @@ def computed() -> dict:
             for state, rules in [scan_verdict([text])]
         ],
     }
+
+
+def test_scanner_sources_are_covered_by_the_bundle_digest():
+    generator = runpy.run_path(str(ROOT / "scripts/memory_scan_bundle.py"))
+    assert generator["bundle"]() == scan._BUNDLE_BYTES.decode("utf-8"), (
+        "scanner source or rules changed: run python scripts/memory_scan_bundle.py"
+    )
+    assert scan._BUNDLE["scanner_sources"] == generator["scanner_sources"]()
 
 
 def test_fixture_matches_what_python_computes():

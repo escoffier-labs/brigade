@@ -531,3 +531,178 @@ def test_worker_loop_keeps_running_after_a_malformed_reply(scripted_reply):
     # Two malformed replies back off 1 s then 2 s and the loop leases again.
     assert sleeps == [1.0, 2.0]
     assert [a for a, _ in client.calls].count("embed_failed") == 2
+
+
+@pytest.mark.parametrize("retry_failed", [False, True])
+def test_admin_rescan_cli_uses_explicit_token_and_one_bounded_batch(tmp_path, monkeypatch, capsys, retry_failed):
+    from brigade.cli import main
+
+    token = tmp_path / "admin-token"
+    token.write_text("fake-admin-token")
+    token.chmod(0o600)
+    settings = embed.hubc.HubSettings(mode="read", hub_url="https://example.com", token="fake-node-token")
+    monkeypatch.setattr(embed.hubc, "load_settings", lambda _: settings)
+    calls = []
+
+    class AdminClient:
+        def __init__(self, url, credential):
+            assert url == settings.hub_url
+            assert credential == "fake-admin-token"
+
+        def call(self, action, **fields):
+            calls.append((action, fields))
+            return {"scanned": 2, "complete": False}
+
+    monkeypatch.setattr(embed.hubc, "MemoryHubClient", AdminClient)
+    assert (
+        main(
+            [
+                "memory",
+                "rescan",
+                "--target",
+                str(tmp_path),
+                "--admin-token-file",
+                str(token),
+                "--limit",
+                "2",
+                *(["--retry-failed"] if retry_failed else []),
+            ]
+        )
+        == 0
+    )
+    assert len(calls) == 1 and calls[0][0] == "rescan"
+    assert calls[0][1]["limit"] == 2
+    assert calls[0][1].get("retry_failed", False) is retry_failed
+    assert embed.hubc.event_id_ms(calls[0][1]["client_event_id"]) is not None
+    assert json.loads(capsys.readouterr().out) == {"scanned": 2, "complete": False}
+
+
+@pytest.mark.parametrize("limit", ["0", "17", "-1"])
+def test_admin_rescan_cli_refuses_an_unbounded_batch(limit):
+    from brigade.cli import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["memory", "rescan", "--admin-token-file", "unused", "--limit", limit])
+    assert exc.value.code == 2
+
+
+def rescan_reply(scanned=1, complete=False, failed=0, corrupt=0):
+    return {
+        "scanned": scanned,
+        "complete": complete,
+        "counts": {
+            "clean": scanned - failed - corrupt,
+            "private": 0,
+            "flagged": 0,
+            "blocked": 0,
+            "failed": failed,
+            "corrupt": corrupt,
+        },
+    }
+
+
+class DrainClient:
+    def __init__(self, live, replies):
+        self.live, self.replies, self.calls = live, iter(replies), []
+
+    def call(self, action, **fields):
+        if action == "status":
+            return {"cards": self.live}
+        assert action == "rescan"
+        self.calls.append(fields)
+        return next(self.replies)
+
+
+def test_rescan_until_done_uses_fresh_ids_and_totals_including_failed(capsys):
+    client = DrainClient(3, [rescan_reply(2, failed=1), rescan_reply(1, complete=True)])
+    sleeps = []
+    assert embed.rescan_until_done(client, 2, sleep=sleeps.append) == 0
+    assert len({call["client_event_id"] for call in client.calls}) == 2
+    assert [call["limit"] for call in client.calls] == [2, 2]
+    assert sleeps == [0.05]
+    result = json.loads(capsys.readouterr().out)
+    assert result["complete"] is True and result["scanned"] == 3 and result["batches"] == 2
+    assert result["counts"] == {"clean": 2, "private": 0, "flagged": 0, "blocked": 0, "failed": 1, "corrupt": 0}
+
+
+def test_rescan_until_done_handles_short_byte_budget_batches(capsys):
+    client = DrainClient(32, [*[rescan_reply() for _ in range(31)], rescan_reply(complete=True)])
+    assert embed.rescan_until_done(client, 16, sleep=lambda _: None) == 0
+    assert len(client.calls) == 32
+    assert json.loads(capsys.readouterr().out)["scanned"] == 32
+
+
+def test_rescan_until_done_refuses_no_progress(capsys):
+    client = DrainClient(10, [rescan_reply(0)])
+    with pytest.raises(ValueError, match="no progress"):
+        embed.rescan_until_done(client, 4, sleep=lambda _: None)
+    assert len(client.calls) == 1
+    assert json.loads(capsys.readouterr().out)["complete"] is False
+
+
+def test_rescan_until_done_caps_a_server_that_never_completes(capsys):
+    import itertools
+
+    client = DrainClient(0, itertools.repeat(rescan_reply()))
+    with pytest.raises(ValueError, match="iteration limit"):
+        embed.rescan_until_done(client, 1, sleep=lambda _: None)
+    assert len(client.calls) == 16
+    assert json.loads(capsys.readouterr().out)["batches"] == 16
+
+
+@pytest.mark.parametrize("status", [200, 201, 204, 403, 409, 429, 503])
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_rescan_until_done_cli_stops_on_completion_or_first_non_200(status, tmp_path, monkeypatch, capsys, corrupt):
+    from brigade.cli import main
+
+    token = tmp_path / "admin-token"
+    token.write_text("fake-admin-token")
+    token.chmod(0o600)
+    settings = embed.hubc.HubSettings(mode="read", hub_url="https://example.com", token="fake-node-token")
+    monkeypatch.setattr(embed.hubc, "load_settings", lambda _: settings)
+    calls = []
+
+    def transport(url, credential, body, timeout):
+        calls.append(body)
+        if body["action"] == "status":
+            return 200, {"cards": 1}
+        return status, rescan_reply(complete=True, corrupt=int(corrupt))
+
+    client = embed.hubc.MemoryHubClient(settings.hub_url, "fake-admin-token", transport=transport)
+    monkeypatch.setattr(embed.hubc, "MemoryHubClient", lambda *_: client)
+    result = main(["memory", "rescan", "--until-done", "--target", str(tmp_path), "--admin-token-file", str(token)])
+    assert result == (0 if status == 200 and not corrupt else 1)
+    assert [call["action"] for call in calls] == ["status", "rescan"]
+    assert json.loads(capsys.readouterr().out)["complete"] is (status == 200)
+
+
+def test_rescan_until_done_finishes_before_reporting_corruption(capsys):
+    client = DrainClient(2, [rescan_reply(corrupt=1), rescan_reply(complete=True)])
+    assert embed.rescan_until_done(client, 1, sleep=lambda _: None) == 1
+    assert len(client.calls) == 2
+    output = capsys.readouterr()
+    summary = json.loads(output.out)
+    assert summary["complete"] is True and summary["scanned"] == 2
+    assert summary["counts"]["corrupt"] == 1 and summary["counts"]["failed"] == 0
+    assert "1 corrupt blob(s)" in output.err
+
+
+def test_rescan_retry_drain_uses_a_cursor_even_when_the_scanner_keeps_failing(capsys):
+    first = rescan_reply(failed=1)
+    first["next_after"] = "a" * 64
+    client = DrainClient(2, [first, rescan_reply(failed=1, complete=True)])
+    assert embed.rescan_until_done(client, 1, retry_failed=True, sleep=lambda _: None) == 0
+    assert client.calls[0]["retry_failed"] is True and "after" not in client.calls[0]
+    assert client.calls[1]["retry_failed"] is True and client.calls[1]["after"] == "a" * 64
+    assert json.loads(capsys.readouterr().out)["counts"]["failed"] == 2
+
+
+@pytest.mark.parametrize("cursor", [None, "bad", "A" * 64])
+def test_rescan_retry_drain_refuses_an_invalid_cursor(cursor, capsys):
+    reply = rescan_reply(failed=1)
+    reply["next_after"] = cursor
+    client = DrainClient(2, [reply])
+    with pytest.raises(ValueError, match="retry cursor"):
+        embed.rescan_until_done(client, 1, retry_failed=True, sleep=lambda _: None)
+    assert len(client.calls) == 1
+    assert json.loads(capsys.readouterr().out)["complete"] is False

@@ -15,6 +15,13 @@ fn fixture() -> serde_json::Value {
 #[test]
 fn nfkc_verdicts_match_python() {
     let scanner = scan::bundled();
+    assert_eq!(
+        scanner.describe(),
+        (
+            true,
+            Some(fixture()["ruleset_version"].as_str().unwrap().to_string())
+        )
+    );
     for case in fixture()["verdicts"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let result = scanner.scan(case["text"].as_str().unwrap());

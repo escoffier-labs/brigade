@@ -114,6 +114,17 @@ its default rules with the connector's injection rules. Repository policies,
 baselines and allow comments do not apply. `status.scan.ruleset_version` and
 `memory_meta.scan_ruleset_version` identify the bundle by version and digest.
 
+The bundle includes SHA-256 pins of the complete Python and Rust scanner
+implementation files, with LF line endings. Rust scanner tests live outside the
+pinned file. Edits to that test file do not change the ID. Regenerate the bundle with
+`python scripts/memory_scan_bundle.py` after an implementation edit, then refresh
+the shared fixture with `python tests/test_memory_scan_nfkc.py --write`.
+CI checks those source pins and shared verdicts. Runtime scanners hash only the
+shipped bundle, so a locally patched scanner still reports that bundle's ID.
+The pins do not cover library versions or behavior in PCRE2,
+`unicode-normalization`, Python `re`, or Python `unicodedata`. The separate
+Unicode version pin and normalization parity tests remain in place.
+
 | Input or operation | Result |
 |---|---|
 | Blocking guard rule, bidi control, invisible operator, embedded BOM or tag character | `422 memory_content_blocked` with rule ids only. No bytes are stored |
@@ -267,6 +278,78 @@ The `memory-scan` Cargo feature is enabled by default. A build with
 `--no-default-features` has no scanner and serves pending writes and explicit
 searches only. Restarting with the scanner does not promote or rescan old
 versions automatically. A later authorized write scans its exact bytes.
+
+After a ruleset ID change, update the client and hub together, then run the
+admin receipt refresh:
+
+```bash
+brigade memory rescan --target . --admin-token-file /path/to/admin-token --limit 4 --until-done
+```
+
+Without `--until-done`, the command sends one `POST /memory` request with action
+`rescan` using the explicit admin token file, as `memory reindex` does. Non-admin credentials receive `403`.
+The JSON response contains `ruleset_version`, `scanned`, counts by verdict,
+`complete`, `next_after`, `principal`, and `scanned_at`. Repeat until `complete` is true.
+`--until-done` does this with fresh client event IDs, a short pause between
+batches, and a final JSON summary of batch, hash and verdict totals. It exits
+non-zero on any non-200 reply, zero progress before completion, or the iteration
+cap. The cap starts at live heads divided by the count limit, rounded up, plus
+16. Short byte-budget batches can extend it, up to live heads plus 16.
+Each batch scans at most 16 distinct live content hashes, with a default of 4
+and a 512 KiB byte budget. A supported card can fill the byte budget on its own.
+The next request selects live heads still missing a current-ID receipt, so no
+cursor is needed for an ordinary drain, and identical blobs shared by several
+cards are scanned once.
+The scan uses the exact stored UTF-8 bytes without normalizing them again.
+
+The action writes only new `(content_hash, ruleset_version)` receipts and one
+`memory_meta` audit record keyed by `scan_rescan:<now_ms>:<client_event_id>` per nonempty
+batch. The record holds the ruleset ID, verdict counts, admin principal and
+time, without card text. These audit rows accumulate in `memory_meta`, about
+one per nonempty batch, with no automatic pruning.
+A scanner failure gets a current-ID `pending` receipt marked `scan-failed`
+and is counted under `counts.failed`. It remains excluded from push. After
+fixing a scanner runtime or library problem, an admin can retry these receipts
+under the same ruleset ID:
+
+```bash
+brigade memory rescan --target . --admin-token-file /path/to/admin-token --retry-failed --until-done
+```
+
+The API flag is `retry_failed: true`, default false. It selects current-ID
+receipts only when their state is `pending` and rule IDs are exactly
+`["scan-failed"]`, alongside hashes missing a receipt. A successful retry
+replaces the receipt through the normal scan upsert. Retry drains pass the
+`next_after` cursor back as `after`, so each hash is tried once per pass even
+when the scanner keeps failing. A completed pass may still report failed hashes.
+
+A missing blob gets `blob-missing`, and an invalid UTF-8 blob gets
+`blob-not-utf8`. Both stay `pending`, count under `counts.corrupt`, and produce
+a structured warning with the content hash and rule ID, without card text.
+Valid SQLite TEXT blobs are accepted as UTF-8 too. These corruption receipts
+are excluded from `--retry-failed` and stay closed to push. Inspect the hash in
+the hub warnings and repair the storage fault. `--until-done` finishes the
+remaining drain, prints a distinct corruption error line, and exits non-zero
+when its total corrupt count is positive. Reply and audit counters contain
+hash counts only. An engine availability or ruleset mismatch still refuses
+the request.
+Retries with the same client event ID replay the saved response. Once all live
+heads have receipts, a new request reports zero scans and writes nothing.
+
+Card bytes, trust, revisions, revision `scan_state`, and the event log stay
+unchanged. A changed verdict is recorded in the new receipt and its batch
+count. Connector push still requires both a clean revision scan state and a
+clean current-ID receipt, so rescan does not promote trust or make a previously
+private revision eligible by itself. Old receipts remain historical evidence.
+Explicit reads continue to work during rollout. Import refuses mixed client and
+hub IDs, while native `Store::push` excludes old receipts until this refresh.
+Unchanged cards cannot refresh receipts through ordinary CLI import or push.
+
+Rescan leaves existing vectors and embedding jobs unchanged. An embedded card
+that becomes flagged, blocked or private keeps its vector, so explicit non-push
+hybrid search can still rank it. Prompt-source search rescans each hit and
+withholds flagged or blocked content. Changing vector retention is a separate
+decision.
 
 Searches with `query_source: "prompt"` scan the returned fields and card bytes
 again. Any finding except a private one replaces the match with
@@ -463,7 +546,7 @@ brigade memory hub import --scope fleet --yes ~/Notes              # first impor
 brigade memory hub import --scope fleet ~/Notes                    # a second run appends nothing
 ```
 
-`import` takes Markdown files and folders. A folder is searched recursively for `.md` files. These are skipped and counted in the summary's `discovery` line: dot directories (`.obsidian`, `.git`, `.trash`), any folder holding the mirror marker `.brigade-memory-mirror.json` or projection marker `.brigade-memory-projection.json`, symlinks met while walking, and anything matching a repeatable `--exclude <glob>`. Each marker is checked in the argument's folder and every ancestor, and on the resolved real path, so subfolders, notes inside, and symlinked arguments into either owned folder are skipped. Mirror folders count under `mirror_dirs`; projections count under `projection_dirs`. Until existing vaults are projected again to write the marker, use `--exclude "Brigade Memory"`. Dot files such as `.draft.md` are imported, and only dot directories are skipped. A symlinked argument is followed, but a link met while walking is not.
+`import` takes Markdown files and folders. A folder is searched recursively for `.md` files. These are skipped and counted in the summary's `discovery` line: dot directories (`.obsidian`, `.git`, `.trash`), any folder holding the mirror marker `.brigade-memory-mirror.json` or projection marker `.brigade-memory-projection.json`, symlinks met while walking, and anything matching a repeatable `--exclude <glob>`. Each marker is checked in the argument's folder and every ancestor, and on the resolved real path, so subfolders, notes inside, and symlinked arguments into either owned folder are skipped. Mirror folders count under `mirror_dirs`. Projections count under `projection_dirs`. Until existing vaults are projected again to write the marker, use `--exclude "Brigade Memory"`. Dot files such as `.draft.md` are imported, and only dot directories are skipped. A symlinked argument is followed, but a link met while walking is not.
 
 A glob is matched against the path relative to the import root with case-sensitive `fnmatch`, so `Templates/` does not cover `templates/`. `*` crosses `/`. A glob without a `/` (a trailing one is dropped) also matches a file or folder name, which is how to match a folder at any depth: `Templates` or `Templates/` skips every folder with that name, and everything under it. A glob with a `/` is anchored at the root, so `Projects/Templates/` skips only that folder, and `*/Templates` matches a folder named `Templates` one or more levels down but not a top-level one.
 
