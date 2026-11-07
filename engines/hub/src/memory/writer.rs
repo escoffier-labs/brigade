@@ -57,6 +57,7 @@ pub struct Config {
     /// The lexical index this writer publishes after each committed batch.
     pub index: Option<Arc<index::Index>>,
     pub dense: Option<Arc<super::dense::Index>>,
+    pub eval_weights: Arc<std::sync::RwLock<serde_json::Value>>,
 }
 impl Config {
     pub fn new(memory: PathBuf, hub: PathBuf, admin_digest: String) -> Self {
@@ -76,6 +77,9 @@ impl Config {
             hook: None,
             index: None,
             dense: None,
+            eval_weights: Arc::new(std::sync::RwLock::new(
+                super::ranking::Weights::default().json(),
+            )),
         }
     }
 }
@@ -510,12 +514,23 @@ pub(crate) fn run(
                     &config.admin_digest,
                     p.command.action.needs_policy(),
                 ) {
-                    Ok(authority) => {
+                    Ok(mut authority) => {
+                        authority.retrieval =
+                            config
+                                .index
+                                .as_ref()
+                                .map(|index| super::retrieval_eval::Live {
+                                    indexed_seq: index.current().indexed_seq,
+                                    embedder_id: config.dense.as_ref().and_then(|d| d.active_id()),
+                                    weights: config.eval_weights.read().unwrap().clone(),
+                                });
                         // Proof freshness and cooldown use transaction time,
                         // including requests that waited after preparation.
                         if matches!(
                             &p.command.action,
-                            ops::Action::Proposal(_) | ops::Action::Evidence(_)
+                            ops::Action::Proposal(_)
+                                | ops::Action::Evidence(_)
+                                | ops::Action::RetrievalEval(_)
                         ) {
                             p.command.now_ms = config.clock.now_ms();
                         }

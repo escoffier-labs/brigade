@@ -232,7 +232,7 @@ pub fn evaluate<T: ReadTx + ?Sized>(
     check(
         &mut checks,
         "retrieval_eval",
-        retrieval_hold(authority),
+        super::retrieval_eval::hold(tx, body, authority, now)?,
         "unverifiable",
     );
     // Match #2187's diagnostic defaults. History is read in the same snapshot
@@ -274,17 +274,10 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         "workspace_fingerprint":null,"evidence_log_sha256":"incomplete","delta_sha256":delta,"changed_path_count":changed.len(),
         "proof_evidence_count":if proof.complete{json!(proof.hashes.len())}else{Json::Null},"proof_source_group_count":if proof.complete{json!(proof.principals.len())}else{Json::Null},"attesting_credentials":proof.credentials,"evidence_sha256":proof.hashes,"evaluation_sha256":null,"checks":checks
     });
+    report["retrieval_eval_record"] = super::retrieval_eval::summary(tx, authority)?;
     // Bind the diagnostic facts, not an unverified proof or promotion permit.
     bind_evaluation(&mut report);
     Ok(report)
-}
-fn retrieval_hold(authority: &Authority) -> Option<&'static str> {
-    #[cfg(test)]
-    if authority.retrieval_eval_bound {
-        return None;
-    }
-    let _ = authority;
-    Some("retrieval_eval_unbound")
 }
 /// The route cannot authorize using a partial report or a caller report.
 pub fn all_satisfied(report: &Json) -> bool {
@@ -347,6 +340,7 @@ pub(super) fn redact<T: ReadTx + ?Sized>(
 ) -> rusqlite::Result<bool> {
     for card in proposals::cards(body) {
         if !proposals::scoped_right(tx, who, string(card, "scope"), "review")? {
+            report["retrieval_eval_record"] = Json::Null;
             report["evidence_sha256"] = Json::Null;
             report["attesting_credentials"] = Json::Null;
             report["candidate_sha256"] = Json::Null;

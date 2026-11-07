@@ -1171,7 +1171,7 @@ async fn reindex_drains_multiple_pages_and_drop_preserves_other_embedder_rows() 
 fn schema_one_upgrades_and_finished_jobs_expire_in_bounded_sweep() {
     let db = rusqlite::Connection::open_in_memory().unwrap();
     schema::migrate(&db, 1_800_000_000_000).unwrap();
-    db.execute_batch("DROP TABLE memory_evidence; DROP TABLE memory_proposals; DROP TABLE memory_vectors; DROP TABLE memory_vector_log; DROP TABLE memory_lineage; DROP TABLE memory_embed_jobs; DROP INDEX memory_cards_hash; PRAGMA user_version=1").unwrap();
+    db.execute_batch("DROP TABLE memory_retrieval_evals; DROP TABLE memory_evidence; DROP TABLE memory_proposals; DROP TABLE memory_vectors; DROP TABLE memory_vector_log; DROP TABLE memory_lineage; DROP TABLE memory_embed_jobs; DROP INDEX memory_cards_hash; PRAGMA user_version=1").unwrap();
     schema::migrate(&db, 1_800_000_000_000).unwrap();
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))

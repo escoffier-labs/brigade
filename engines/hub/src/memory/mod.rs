@@ -34,6 +34,9 @@ mod ranking_tests;
 mod rescan;
 #[cfg(test)]
 mod rescan_tests;
+pub mod retrieval_eval;
+#[cfg(test)]
+mod retrieval_eval_tests;
 pub mod scan;
 pub mod schema;
 pub mod search;
@@ -136,6 +139,7 @@ pub struct Store {
     index: Arc<index::Index>,
     retrieval: Option<Arc<embedder::Runtime>>,
     rrf: ranking::Weights,
+    eval_weights: Arc<std::sync::RwLock<Json>>,
     dense: Arc<dense::Index>,
     coverage: std::sync::RwLock<embedding::Coverage>,
     /// Woken by a committed `put`, so an idle scheduler starts at once.
@@ -220,6 +224,7 @@ impl Store {
         config.clock = options.clock.clone();
         config.index = Some(index.clone());
         config.dense = Some(dense.clone());
+        let eval_weights = config.eval_weights.clone();
         let writer = writer::Writer::start(config, db, options.arbiter.clone())
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -234,6 +239,7 @@ impl Store {
             index,
             retrieval: None,
             rrf: ranking::Weights::default(),
+            eval_weights,
             dense,
             coverage: std::sync::RwLock::new(embedding::Coverage::default()),
             embed_wake: Arc::new(tokio::sync::Notify::new()),
@@ -281,6 +287,7 @@ impl Store {
             self.dense
                 .set_private_ok(embedding::private_ok(&runtime.config));
         }
+        *self.eval_weights.write().unwrap() = self.rrf.json();
         let live = self
             .index
             .current()
@@ -774,13 +781,20 @@ impl Store {
             "propose" | "decide" | "rollback" | "auto_apply" => {
                 self.proposal_request(credential, action, map, &raw).await
             }
-            "put" | "import" | "retire" | "handoff" | "capture" | "grant" | "rescan"
-            | "evidence.attach" | "evidence.purge" | "auto_apply_switch" => {
-                match self.prepare(credential, action, map, &raw) {
-                    Ok(prepared) => self.write(prepared).await,
-                    Err(reply) => reply,
-                }
-            }
+            "put"
+            | "import"
+            | "retire"
+            | "handoff"
+            | "capture"
+            | "grant"
+            | "rescan"
+            | "evidence.attach"
+            | "evidence.purge"
+            | "auto_apply_switch"
+            | "retrieval_eval.record" => match self.prepare(credential, action, map, &raw) {
+                Ok(prepared) => self.write(prepared).await,
+                Err(reply) => reply,
+            },
             _ => invalid("unknown memory action"),
         }
     }
@@ -796,7 +810,7 @@ impl Store {
             return invalid("preflight requires only a proposal_id");
         }
         let admin = self.admin.clone();
-        let authority = match self
+        let mut authority = match self
             .hub
             .submit(move |db| ops::Authority::with_credentials(&Conn(db), &admin))
             .await
@@ -804,6 +818,11 @@ impl Store {
             Ok(a) => a,
             Err(_) => return error(503, "memory_action_unavailable", "policy read unavailable"),
         };
+        authority.retrieval = Some(retrieval_eval::Live {
+            indexed_seq: self.index.current().indexed_seq,
+            embedder_id: self.dense.active_id(),
+            weights: self.rrf.json(),
+        });
         let who = credential.clone();
         let request = Json::Object(map.clone());
         let scanner = self.scanner.clone();
@@ -909,6 +928,9 @@ impl Store {
             "auto_apply" => &["action", "proposal_id", "base_epoch", "client_event_id"],
             "auto_apply_switch" => &["action", "enabled", "client_event_id"],
             "evidence.purge" => &["action", "evidence_id", "client_event_id"],
+            "retrieval_eval.record" => {
+                &["action", "report_json", "report_sha256", "client_event_id"]
+            }
             "evidence.attach" => &[
                 "action",
                 "scope",
@@ -973,7 +995,7 @@ impl Store {
         }
         if matches!(
             action,
-            "grant" | "rescan" | "auto_apply_switch" | "evidence.purge"
+            "grant" | "rescan" | "auto_apply_switch" | "evidence.purge" | "retrieval_eval.record"
         ) && *credential != Credential::Admin
         {
             return Err(error(
@@ -1058,6 +1080,7 @@ impl Store {
             }
         };
         let action = match action {
+            "retrieval_eval.record" => Action::RetrievalEval(retrieval_eval::prepare(raw)?),
             "evidence.purge" => Action::EvidencePurge(short("evidence_id", 1024, true)?.unwrap()),
             "auto_apply_switch" => Action::AutoApplySwitch(
                 map.get("enabled")

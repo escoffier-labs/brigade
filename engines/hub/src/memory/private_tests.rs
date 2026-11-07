@@ -329,7 +329,8 @@ fn old_file(path: &std::path::Path, version: i64) -> Connection {
     let c = Connection::open(path).unwrap();
     let mut v1 = schema::ddl()
         .replace(super::proposals::DDL, "")
-        .replace(super::attestation::DDL, "");
+        .replace(super::attestation::DDL, "")
+        .replace(super::retrieval_eval::DDL, "");
     if version < 2 {
         v1 = v1.replace(super::embedding::DDL, "");
         assert!(!v1.contains("memory_vectors"));

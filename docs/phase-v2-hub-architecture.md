@@ -1681,6 +1681,7 @@ One route, `POST /memory`, with an `action` field, the same style as
 | Action | Grant | Request | Success |
 |---|---|---|---|
 | `search` | read | `query` (at most 256 characters after normalization, and at most 4,096 UTF-8 bytes as sent, a separate guard on the work normalization does with its own `memory_query_invalid` message), `limit` (1 to 20, default 10), `mode` (`auto`, `lexical`, `hybrid`), `query_source` (`prompt`, `cwd`, `explicit`), optional `scopes`, `sources` and `min_seq` | `200 {matches, retrieval: {mode, degraded, stale}, indexed_seq}`. A query with no word characters is matched literally, in answer order, reading at most 1,000 cards or 4 MiB of card text, and also stopping at `limit` matches when more cards are visible than that budget. `match_count` is exact when every visible card fits the budget. `retrieval.truncated: true` marks a scan that stopped before the last visible card: its `matches` equal a full scan's first `limit`, and its `match_count` is a lower bound |
+| `retrieval_eval.record` | admin | `report_json` (exact S17 digest preimage, at most 512 KiB), `report_sha256`, `client_event_id` | `201 {record_seq, report_sha256, mode, passed}`. Append-only and audited. Failed reports are stored but hold automatic apply |
 | `card` | read | `card_id`, optional `scope`, `revision` and `offset` | `200 {card: {scope, card_id, revision, content_hash, text, next_offset, trust, seq}}`, text in 30,000-character chunks as Dot's `memory_card` returns it. Without `scope`, an id readable in two scopes answers `409 memory_card_ambiguous` with the scopes |
 | `put` | write on the scope | `scope`, `card_id`, `base_revision`, `base_epoch` (required when `base_revision` is set), `text`, `origin`, `client_event_id` | `201 {event: {seq, revision, content_hash, trust}, log_epoch}` |
 | `retire` | write on the scope | `scope`, `card_id`, `base_revision`, `base_epoch`, `reason`, `client_event_id` | `200 {event, log_epoch}` |
@@ -1725,6 +1726,7 @@ Tables in `fleet-hub-memory.db`:
 | `memory_embed_jobs` | `(content_hash, embedder_id)` | state, lease holder and expiry, attempts, last error code |
 | `memory_proposals` | `proposal_id` | state, tier, ops, pinned block hashes, evidence references, base revisions, policy digest, dry-run diff, decision |
 | `memory_evidence` | `(namespace, local_id)` | artifact digest, attesting credential, observation time, revocation state (S19e) |
+| `memory_retrieval_evals` | `record_seq` | append-only admin R0/R1-public report bytes, stable digest, configured mode, credential audit id and recording time (S19e-2) |
 | `memory_handoffs` | `handoff_id` | submitted handoffs waiting for review |
 | `memory_grants` | `(principal, scope)` | rights |
 | `memory_idempotency` | `(principal, client_event_id)` | request digest, response, time |
@@ -2458,7 +2460,7 @@ required before that route can apply in production.
 | Policy enables the op class | `memory` section of the current fleet policy revision. Its digest is bound into the proposal and re-read under the authority lock |
 | Proof: at least 3 distinct evidence ids from at least 2 sources, no contrary ids | attested evidence (S19e): distinct namespaced ids, with sources counted as distinct attesting principals other than the proposer, never as names written in the proposal |
 | Sources trusted and scan-clean | the attesting principals appear in the policy's reflect principals, and every touched version scans clean |
-| Retrieval eval gate passed | the latest R0 or R1 record for the active mode, bound to `indexed_seq`, index format, scorer version and policy revision |
+| Retrieval eval gate passed | the latest admin-recorded R0 or R1-public report for the configured mode, bound to `indexed_seq`, index format, scorer version, policy revision and digest, epoch, scope, corpus and weights, plus hybrid embedder identity. Zero head-write drift and a 24-hour run expiry apply |
 | Blast cap and per-card cooldown | `memory_events` history (`proposal.apply` and `proposal.rollback`), read inside the apply transaction |
 | Brigade is the configured memory owner | the policy's curation section names the hub. With an external owner or a handoff-only policy, reflect emits proposals and never applies |
 | Preflight agrees | the hub `preflight` action returns the #2187 report schema, filled from hub facts, read-only |
@@ -2471,7 +2473,7 @@ hashes as `source_sha256`. Local-only run and workspace fields are null or
 empty. `evaluation_sha256` binds the reported diagnostic facts. It grants no
 authority. The report remains `diagnostic_only=true`, `eligible=false` and
 `status=held`. The automatic route recomputes every gate inside its transaction.
-It cannot succeed while `retrieval_eval_unbound` remains, through S19e-1.
+It requires a current admin-recorded retrieval evaluation from S19e-2.
 
 The report checks the op and proposer allowlists, computed tier, exact pins,
 base revisions, policy binding, trust and scan state. Its diagnostic limits
@@ -2482,7 +2484,7 @@ fleet policy does not expose overrides for these limits. Unattested strings
 supply no proof count. S19e-1 resolves evidence from immutable, scoped records
 and checks `memory.curation_owner`. Missing legacy workspace or freshness
 bindings retain `evidence_authority_unbound`. Missing ownership retains
-`owner_authority_unbound`. Retrieval evaluation remains unbound until S19e-2.
+`owner_authority_unbound`. Missing retrieval records retain `retrieval_eval_unbound`.
 
 Reviewed apply recomputes the report under both writer locks before changing a
 card. A moved base or pin returns `stale`. Changed trust or an input scan state
@@ -2558,11 +2560,36 @@ id. This persistent memory flag takes effect on the next automatic transaction
 without editing policy. The switch emits `memory.auto_apply_switch`.
 Re-enabling it does not clear any other gate.
 
-S19e-2 adds the trusted R0/R1 retrieval-evaluation record bound to active mode,
-`indexed_seq`, index format, scorer version and policy revision. Until then,
-`retrieval_eval_unbound` is a hard production hold. The successful automatic
-path is exercised only through a field compiled into the unit-test crate.
-No configuration, environment setting or API field can enable that seam.
+S19e-2 is done. The admin-only `retrieval_eval.record` memory action accepts
+the exact S17 digest preimage in `report_json` and the harness digest in
+`report_sha256`. It verifies raw bytes and complete bindings, stores failed
+reports too, and appends an audit event without report text. Schema 7 adds an
+append-only record table. The unit-test retrieval seam is removed.
+
+The latest record for the configured mode must pass R0 or R1-public and match
+the log epoch, index format, scorer, policy revision and digest, scope, corpus
+identity and RRF weights. Hybrid requires the configured embedder identity,
+including when runtime search falls back to lexical. R1-public establishes no
+private model qualification. Inside the apply transaction the sequence must
+be no newer than the live index and at or after the last committed
+head-changing event. The fixed tolerance is zero head-changing writes.
+Non-head audit events may advance `indexed_seq`, so recording does not
+invalidate itself. A run expires after 24 hours from the timestamp in its
+harness `evaluation_id`. Re-recording old report bytes never refreshes it.
+Each mismatch returns a specific `retrieval_eval_*` hold code.
+
+Automatic apply stays off by default. Operators run the S17 harness against
+the target hub and matching scope fixture, record the report, then enable
+policy. The policy edit invalidates the initial record. Keep the persistent
+switch off while rerunning and recording against the final policy revision,
+then clear the switch. The full procedure and byte envelope are in
+[memory operations](memory-operations.md#bound-retrieval-evaluation-s19e-2).
+
+Contrary holds intentionally need fresh read and reflect grants without
+`reflect_principals` membership. Expired or revoked attestations no longer
+hold. An admin purge can clear an active hold. Held automatic replies report
+the persisted pending state. Replaying the same client event id returns the
+cached held answer. A new id is required to re-evaluate.
 
 Invariant tests, in S19a to S19e:
 
@@ -2570,7 +2597,7 @@ Invariant tests, in S19a to S19e:
   test removes the check and must fail.
 - Tier 2 always waits for review.
 - Auto-apply policy enablement requires the S19e-1 ownership and proof contract.
-  Production application remains held until S19e-2.
+  Automatic application also requires the bound S19e-2 evaluation.
 - A failed worker call, invalid ops, a failed eval gate or a failed write
   leaves every card revision and every vector byte-identical and records
   `failed`. Repeated failures pause the scheduled job until a success.
@@ -3595,8 +3622,8 @@ next number.
 | S19b | Tier classifier and the policy `memory` section with digest binding | S19a | Implemented: claimed tiers are ignored. Flagged, cross-scope, mixed-trust, newer-human-edit and unproven cases are Tier 2. Each decision binds the current policy digest. A policy edit requires a fresh decision. Auto-apply stays disabled | S16b, S20 |
 | S19c | Tier 0 gate engine: the hub `preflight` action, blockers re-verified inside the apply transaction, the invariant tests, and auto-apply refused until S19e | S19b, #2187 | Every invariant in [Reflect](#reflect-proposals-and-promotion-on-hub-memory) that does not need attestation passes, including the Tier 1 mutation test and the test that auto-apply cannot be enabled. No op can target anything but a card block | S20, S26 |
 | S19d | Scheduled reflect on hub memory: the `memory-reflect` entry in `care install`, pause after repeated failures, `memory reflect rollback` against the hub | S19c, S14 | `memory reflect run --dry-run` writes nothing to the hub. Three failures in a row pause the timer until a success | S19e, S27 |
-| S19e-1 | Evidence attestation, curation ownership and the gated hub Tier 0 auto-apply route | S19c | Fabricated, unresolved, cross-workspace aliased and revoked evidence never counts. All gates block automatic apply, including tier, allowlists, blast cap, cooldown, trust and scans. The admin kill switch persists. Audit and compensating rollback pass through a unit-test-only retrieval seam. Production retains `retrieval_eval_unbound` | S19e-2, S27 |
-| S19e-2 | Bound retrieval evaluation record (R0/R1 bound to `indexed_seq`, index format, scorer version and policy revision) | S19e-1, S17 | The final retrieval gate is satisfied only by a trusted record matching the active mode, index and policy. This is the last gate before automatic apply can succeed in production | S27 |
+| S19e-1 | Evidence attestation, curation ownership and the gated hub Tier 0 auto-apply route | S19c | Fabricated, unresolved, cross-workspace aliased and revoked evidence never counts. All gates block automatic apply, including tier, allowlists, blast cap, cooldown, trust and scans. The admin kill switch persists. Done. Audit and compensating rollback used a unit-test retrieval seam at delivery. Bound retrieval records replace it in the completed implementation | S19e-2, S27 |
+| S19e-2 | Bound retrieval evaluation record (R0/R1 bound to `indexed_seq`, index format, scorer version and policy revision) | S19e-1, S17 | The final retrieval gate is satisfied only by a trusted record matching the active mode, index and policy. Done. Admin-only append-only records, digest and live transaction bindings, zero head-write drift, 24-hour expiry and real automatic apply tests replace the final production hold | S27 |
 | S20 | Card import: dry run, idempotent, keeps card ids, deduplicates by content hash, skips `visibility: private` | S14, S18 | A second import appends nothing. The dry run lists exactly what the real run appends. Imported versions need a clean scan and the `import` grant | S16b, S17, S19b |
 | S21 | `memory answer`: client-side rerank through a read-only seat | S17 | R2 report. Off by default unless R2 passes | after 0.31.0 |
 

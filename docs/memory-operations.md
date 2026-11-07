@@ -664,7 +664,7 @@ private or unavailable scans and any edit newer than the base revision force
 Tier 2. This includes newer human edits. A changed head still fails the
 compare-and-set and never applies. Tier 0 describes an edit only. Every tier
 waits for an explicit reviewer decision or the fully gated Tier 0 route.
-Production automatic apply remains held by unbound retrieval evaluation.
+Automatic apply defaults off and requires a current bound retrieval evaluation.
 
 Fleet policy accepts an optional top-level `memory` object:
 
@@ -762,7 +762,8 @@ the visible report.
 | `card_trust` | `memory_trust_changed`, `memory_input_scan_unbound`, `memory_input_scan_held`, `card_trust_denied` |
 | `scan` | `scan_not_clean` |
 | `host` | `card_target_invalid` |
-| `evidence_authority`, `owner_authority`, `retrieval_eval` | The corresponding `*_unbound` reason |
+| `evidence_authority`, `owner_authority` | The corresponding `*_unbound` reason |
+| `retrieval_eval` | `retrieval_eval_unbound`, failed or expired report, or a specific live binding mismatch as described below |
 | `cooldown_history` | `cooldown_active` |
 
 A satisfied gate uses `<gate>_satisfied`. `host` reruns the typed op schema
@@ -773,7 +774,8 @@ at least three evidence ids from two sources, at most one changed card, and a
 current fleet policy has no limit overrides. S19e-1 resolves attested proof and
 curation ownership. Older proposals without workspace or freshness bindings
 retain null proof counts and an evidence-authority hold. Missing ownership
-retains its unbound hold. Retrieval evaluation remains unbound. Every report remains held,
+retains its unbound hold. A missing or mismatched retrieval record also holds
+automatic apply. Every diagnostic report remains
 `diagnostic_only=true` and `eligible=false`.
 
 At reviewed apply the hub reruns these checks inside the memory transaction
@@ -782,8 +784,8 @@ in the decision body and reply. A changed base or pin makes the proposal stale.
 Changed trust or an input scan state change holds it. Every output scans before
 any card changes. The policy allowlists and diagnostic promotion limits do not
 prevent an explicit reviewer from accepting an otherwise valid reviewed edit.
-The apply boundary requires `decide: accept` at every tier. Auto-apply remains
-unavailable in production while retrieval evaluation remains unbound.
+The reviewed apply boundary requires `decide: accept` at every tier.
+Automatic apply is held when any automatic gate fails.
 S19e-1 supplies attestation and the gated route described below.
 The stored `opened_tier` keeps the tier computed when the proposal opened,
 while `tier` records the latest decision-time classification.
@@ -968,10 +970,82 @@ apply. Successful automatic decisions record their mode, gates, policy digest
 and credential audit ids without card text. `rollback` opens the existing
 compensating proposal, which still needs a separate reviewed decision.
 
-Production automatic apply remains blocked by `retrieval_eval_unbound`.
-S19e-2 will supply the trusted retrieval evaluation bound to the active mode,
-index and policy. S19e-1 tests the successful path through a unit-test-only
-seam that is absent from production builds and has no API or config setting.
+### Bound retrieval evaluation (S19e-2)
+
+Automatic apply defaults off. An admin records an S17 R0 or R1-public report
+through `POST /memory`, action `retrieval_eval.record`, with `report_json`,
+`report_sha256` and a fresh `client_event_id`. `report_json` is the exact
+UTF-8 digest preimage: the harness report without its `digest` field, serialized
+with sorted keys, compact separators and ASCII escaping. `report_sha256` is
+the harness `digest`. The hub hashes these raw bytes without normalization.
+Use `record_report` below to preserve Python float and Unicode serialization.
+Reports are limited to 512 KiB. Use `--aggregate-only` for larger fixtures.
+
+The hub requires the run's `evaluation_id`, fixture digest, complete adapter
+binding and a well-formed gate result. It stores valid failed reports too.
+Records are append-only and emit `retrieval_eval.record` audit events without
+report text. The newest record for the configured mode wins. A failed newest
+record holds automatic apply even if an older record passed. R1-public is the
+public harness gate. Recording it does not establish private model qualification.
+
+The apply transaction rechecks the record under the hub authority lock. Its
+mode, log epoch, index format, scorer version, policy revision and digest,
+RRF weights, scope and exact corpus identity must match. Hybrid also requires
+the same configured embedder identity, even during lexical fallback. A lexical
+record never authorizes a configured hybrid hub.
+
+The fixed sequence tolerance is zero head-changing writes since `indexed_seq`.
+The evaluated sequence must be covered by the live index and cover every
+committed head change. Audit events, evidence attachments and proposal opens
+may advance the log without invalidating the record. This lets recording and
+policy-switch audit events complete without authorizing a changed corpus.
+The run expires 24 hours after the timestamp in its harness `evaluation_id`,
+even with no writes. Recording the same old bytes again cannot extend that
+window. Rerun after a card write, retrieval change, policy revision or expiry.
+Specific `retrieval_eval_*` reason codes identify failed, expired, future,
+stale sequence, epoch, format, scorer, policy, embedder, weights, scope or
+corpus mismatches. Missing records retain `retrieval_eval_unbound`.
+
+Operator procedure:
+
+1. Keep policy automatic apply off while running the initial gate. Use an
+   explicit read credential and a fixture snapshot matching the selected live
+   scope. Run R0 for lexical, or R1 for hybrid with `--candidate-embedder`.
+   A disposable fixture hub report cannot authorize another hub.
+
+   ```bash
+   python -m brigade.memory_retrieval_eval --gate R0 --hub-url "$HUB_URL" --hub-token-file "$READ_TOKEN_FILE" --hub-scope fleet --fixture-root "$FIXTURE_ROOT" --aggregate-only --json > retrieval-report.json
+   ```
+
+2. Record the report using an explicit admin client. The helper verifies the
+   existing digest before sending and never substitutes a new digest.
+
+   ```python
+   import json
+   from pathlib import Path
+   from brigade.memory_hub_client import MemoryHubClient
+   from brigade.memory_retrieval_eval.hub import record_report
+
+   client = MemoryHubClient(hub_url, Path(admin_token_file).read_text().strip())
+   record_report(client, json.loads(Path("retrieval-report.json").read_text()))
+   ```
+
+3. Hold the persistent admin switch off, then enable the policy with explicit
+   hub ownership, freshness and both allowlists. A policy edit invalidates the
+   earlier record by design. Rerun and record against the final enabled policy
+   revision while the switch remains off. Inspect proposal preflight, then
+   clear the switch when ready. Clearing it changes no policy revision.
+
+A failed automatic attempt returns the persisted pending proposal state and
+its attempt reason. It never claims an unpersisted terminal transition.
+Replaying a held `auto_apply` with the same `client_event_id` returns its cached
+held answer. Mint a new id to re-evaluate after recording or repairing a gate.
+
+Contrary holds intentionally require only a fresh valid credential with read
+and reflect on the scoped card. Membership in `reflect_principals` is not
+required. Any reflect grantee can hold a card in its scope through contrary
+evidence. An admin purge can clear an active contrary hold. Expired or revoked
+attestations no longer supply one.
 
 
 ### Scheduled hub reflection (S19d)
@@ -993,8 +1067,8 @@ scan state after the refresh stay skipped.
 
 This pass does not invent anchors or evidence. Local reflection still derives
 its existing evidence and review candidates when hub mode is off. S19e-1 adds
-attestation and the gated automatic route. Production automatic apply remains
-held for S19e-2. Scheduled reflection only proposes.
+attestation and the gated automatic route. Automatic apply requires a separate call with every gate satisfied.
+Scheduled reflection only proposes.
 
 `brigade memory reflect run --dry-run --target <workspace>` performs only hub
 reads. It can refresh the local replica, but sends no `propose`, `decide`,

@@ -14,6 +14,7 @@ pub struct Base {
 }
 #[derive(Clone, Debug)]
 pub enum Action {
+    RetrievalEval(super::retrieval_eval::Report),
     AutoApplySwitch(bool),
     EvidencePurge(String),
     Evidence(super::attestation::Attachment),
@@ -65,6 +66,7 @@ pub enum Action {
 impl Action {
     pub fn name(&self) -> &'static str {
         match self {
+            Action::RetrievalEval(_) => "retrieval_eval.record",
             Action::AutoApplySwitch(_) => "auto_apply_switch",
             Action::EvidencePurge(_) => "evidence.purge",
             Action::Evidence(_) => "evidence.attach",
@@ -89,6 +91,7 @@ impl Action {
     /// The grant an action needs, and the scope it needs it on.
     fn requirement(&self) -> (Option<&str>, &'static str) {
         match self {
+            Action::RetrievalEval(_) => (None, "admin"),
             Action::AutoApplySwitch(_) | Action::EvidencePurge(_) => (None, "admin"),
             Action::Evidence(a) => (
                 Some(super::proposals::string(&a.request, "scope")),
@@ -124,11 +127,15 @@ impl Action {
         if matches!(self, Action::PolicyProbe) {
             return true;
         }
-        matches!(self, Action::Proposal(_) | Action::Evidence(_))
+        matches!(
+            self,
+            Action::Proposal(_) | Action::Evidence(_) | Action::RetrievalEval(_)
+        )
     }
     /// New blob bytes this command may add, for the per-batch bound.
     pub fn new_bytes(&self) -> usize {
         match self {
+            Action::RetrievalEval(r) => r.raw.len(),
             Action::AutoApplySwitch(_) | Action::EvidencePurge(_) => 0,
             Action::Evidence(a) => a.bytes.len(),
             Action::Proposal(c) => c.new_bytes(),
@@ -152,8 +159,7 @@ pub struct Authority {
     pub policy_document: serde_json::Value,
     pub valid_credentials: std::collections::BTreeSet<String>,
     pub admin_credential: String,
-    #[cfg(test)]
-    pub retrieval_eval_bound: bool,
+    pub retrieval: Option<super::retrieval_eval::Live>,
 }
 
 impl Authority {
@@ -631,6 +637,7 @@ fn run(
         )
     };
     match &p.action {
+        Action::RetrievalEval(r) => super::retrieval_eval::record(tx, p, r, _authority),
         Action::AutoApplySwitch(enabled) => {
             tx.execute("INSERT INTO memory_meta(key,value) VALUES('auto_apply_enabled',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",&[t(if *enabled {"true"}else{"false"})])?;
             let payload = json!({"auto_apply_enabled":enabled});
