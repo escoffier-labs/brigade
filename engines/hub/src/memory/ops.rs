@@ -16,6 +16,8 @@ pub struct Base {
 pub enum Action {
     Rescan {
         limit: usize,
+        retry_failed: bool,
+        after: Option<String>,
     },
     Proposal(super::proposals::Command),
     Embedding {
@@ -507,7 +509,11 @@ fn run(
         )
     };
     match &p.action {
-        Action::Rescan { limit } => super::rescan::run(tx, p, scanner, *limit),
+        Action::Rescan {
+            limit,
+            retry_failed,
+            after,
+        } => super::rescan::run(tx, p, scanner, *limit, *retry_failed, after.as_deref()),
         Action::Proposal(c) => {
             let mut reply = super::proposals::run(tx, p, c, _authority, scanner)?;
             if reply.body["log_epoch"].is_string() {

@@ -164,7 +164,7 @@ async fn rescan_counts_changed_verdicts_deduplicates_blobs_and_skips_retired_hea
     assert_eq!(reply.body["complete"], true);
     assert_eq!(
         reply.body["counts"],
-        json!({"clean":1,"private":1,"flagged":1,"blocked":1,"failed":0})
+        json!({"clean":1,"private":1,"flagged":1,"blocked":1,"failed":0,"corrupt":0})
     );
     assert_eq!(contents(&db, "memory_card_revisions"), revisions);
     let store = h.store.as_ref().unwrap();
@@ -325,9 +325,28 @@ async fn rescan_bad_or_missing_blob_gets_a_pending_receipt_and_drain_continues()
             .await;
         assert_eq!(reply.status, 200);
         assert_eq!(reply.body["scanned"], 2);
-        assert_eq!(reply.body["counts"]["failed"], 1);
+        assert_eq!(reply.body["counts"]["failed"], 0);
         assert_eq!(reply.body["counts"]["clean"], 1);
+        assert_eq!(reply.body["counts"]["corrupt"], 1);
         assert_eq!(reply.body["complete"], true);
+        let rule: String = db.query_row("SELECT rule_ids FROM memory_scans WHERE content_hash=?1 AND ruleset_version='current'", [&failed], |r| r.get(0)).unwrap();
+        assert_eq!(
+            rule,
+            json!([if missing {
+                "blob-missing"
+            } else {
+                "blob-not-utf8"
+            }])
+            .to_string()
+        );
+        let retried = h
+            .call(
+                ADMIN_TOKEN,
+                json!({"action":"rescan", "retry_failed":true, "client_event_id":h.id()}),
+            )
+            .await;
+        assert_eq!(retried.status, 200);
+        assert_eq!(retried.body["scanned"], 0);
         assert_eq!(db.query_row("SELECT state FROM memory_scans WHERE content_hash=?1 AND ruleset_version='current'", [&failed], |r| r.get::<_, String>(0)).unwrap(), "pending");
     }
 }
@@ -454,4 +473,178 @@ async fn rescan_byte_budget_makes_progress_and_scans_exact_stored_blobs() {
     observed.sort();
     expected.sort();
     assert_eq!(observed, expected);
+}
+
+#[tokio::test]
+async fn rescan_accepts_text_storage_without_marking_corruption() {
+    let h = Hub::with(
+        Arc::new(Fixed(Scan::Clean {
+            ruleset: "current".into(),
+        })),
+        None,
+    );
+    assert_eq!(h.call(ADMIN_TOKEN, json!({"action":"import", "scope":"fleet", "card_id":"one", "text":"release checklist", "client_event_id":h.id()})).await.status, 201);
+    let db = Connection::open(h.memory()).unwrap();
+    db.execute("UPDATE memory_blobs SET bytes=CAST(bytes AS TEXT)", [])
+        .unwrap();
+    db.execute("DELETE FROM memory_scans", []).unwrap();
+    let reply = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"rescan", "client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.body["counts"]["clean"], 1);
+    assert_eq!(reply.body["counts"]["corrupt"], 0);
+    assert_eq!(
+        db.query_row("SELECT typeof(bytes) FROM memory_blobs", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "text"
+    );
+}
+
+struct ToggleFailure(std::sync::atomic::AtomicBool);
+impl Scanner for ToggleFailure {
+    fn describe(&self) -> (bool, Option<String>) {
+        (true, Some("new".into()))
+    }
+    fn scan(&self, _: &str) -> Scan {
+        if self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            Scan::Failed
+        } else {
+            Scan::Clean {
+                ruleset: "new".into(),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn rescan_retry_pass_advances_past_failures_and_can_recover_under_the_same_id() {
+    let mut h = Hub::with(
+        Arc::new(Fixed(Scan::Clean {
+            ruleset: "old".into(),
+        })),
+        None,
+    );
+    for id in ["one", "two"] {
+        assert_eq!(h.call(ADMIN_TOKEN, json!({"action":"import", "scope":"fleet", "card_id":id, "text":format!("release {id}"), "client_event_id":h.id()})).await.status, 201);
+    }
+    let scanner = Arc::new(ToggleFailure(std::sync::atomic::AtomicBool::new(true)));
+    h.store.take();
+    h.open(scanner.clone(), None);
+    let seed = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"rescan", "client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(seed.body["counts"]["failed"], 2);
+    let no_retry = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"rescan", "client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(no_retry.body["scanned"], 0);
+    let first = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"rescan", "retry_failed":true, "limit":1, "client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(first.status, 200);
+    assert_eq!(first.body["complete"], false);
+    assert_eq!(first.body["counts"]["failed"], 1);
+    let second = h.call(ADMIN_TOKEN, json!({"action":"rescan", "retry_failed":true, "after":first.body["next_after"], "limit":1, "client_event_id":h.id()})).await;
+    assert_eq!(second.status, 200);
+    assert_eq!(second.body["complete"], true);
+    assert_eq!(second.body["counts"]["failed"], 1);
+    scanner.0.store(false, std::sync::atomic::Ordering::Relaxed);
+    let retry = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"rescan", "retry_failed":true, "client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(retry.status, 200);
+    assert_eq!(retry.body["counts"]["clean"], 2);
+    assert_eq!(retry.body["complete"], true);
+    let db = Connection::open(h.memory()).unwrap();
+    assert_eq!(db.query_row("SELECT count(*) FROM memory_scans WHERE ruleset_version='new' AND state='clean' AND rule_ids='[]'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+}
+
+#[tokio::test]
+async fn rescan_retry_flag_is_admin_only_validated_and_part_of_replay_identity() {
+    let h = Hub::with(
+        Arc::new(Fixed(Scan::Clean {
+            ruleset: "current".into(),
+        })),
+        None,
+    );
+    for token in [NODE_TOKEN, AGENT_TOKEN] {
+        assert_eq!(
+            h.call(
+                token,
+                json!({"action":"rescan", "retry_failed":true, "client_event_id":h.id()})
+            )
+            .await
+            .status,
+            403
+        );
+    }
+    for value in [Json::Null, json!("true"), json!(1)] {
+        assert_eq!(
+            h.call(
+                ADMIN_TOKEN,
+                json!({"action":"rescan", "retry_failed":value, "client_event_id":h.id()})
+            )
+            .await
+            .status,
+            400
+        );
+    }
+    assert_eq!(
+        h.call(
+            ADMIN_TOKEN,
+            json!({"action":"rescan", "after":"bad", "client_event_id":h.id()})
+        )
+        .await
+        .status,
+        400
+    );
+    assert_eq!(h.call(ADMIN_TOKEN, json!({"action":"import", "scope":"fleet", "card_id":"one", "text":"release", "client_event_id":h.id()})).await.status, 201);
+    let db = Connection::open(h.memory()).unwrap();
+    db.execute("DELETE FROM memory_scans", []).unwrap();
+    let mut request = json!({"action":"rescan", "client_event_id":h.id()});
+    assert_eq!(h.call(ADMIN_TOKEN, request.clone()).await.status, 200);
+    request["retry_failed"] = json!(true);
+    assert_eq!(h.call(ADMIN_TOKEN, request).await.status, 409);
+}
+
+#[test]
+fn rescan_corruption_warnings_log_hash_and_rule_without_card_text() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "memory::rescan_tests::rescan_bad_or_missing_blob_gets_a_pending_receipt_and_drain_continues", "--nocapture"])
+        .output().unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let warnings: Vec<Json> = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Json>(line).ok())
+        .filter(|value| value["event"] == "memory_rescan_corrupt")
+        .collect();
+    assert_eq!(warnings.len(), 2);
+    for warning in &warnings {
+        assert_eq!(warning["level"], "warn");
+        assert_eq!(warning.as_object().unwrap().len(), 4);
+        let hash = warning["content_hash"].as_str().unwrap();
+        assert_eq!(hash.len(), 64);
+        assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+    assert!(warnings.iter().any(|v| v["rule_id"] == "blob-missing"));
+    assert!(warnings.iter().any(|v| v["rule_id"] == "blob-not-utf8"));
+    assert!(!stderr.contains("release"));
 }

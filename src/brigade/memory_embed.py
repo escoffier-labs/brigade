@@ -9,6 +9,7 @@ import http.client
 import ipaddress
 import json
 import math
+import re
 import struct
 import sys
 import time
@@ -35,6 +36,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     rescan.add_argument("--target", "-t", type=Path, default=Path("."))
     rescan.add_argument(
         "--until-done", action="store_true", help="Drain missing receipts in bounded batches and print totals."
+    )
+    rescan.add_argument(
+        "--retry-failed", action="store_true", help="Retry current scan-failed receipts, excluding corruption receipts."
     )
     rescan.add_argument("--limit", type=int, default=4, choices=range(1, 17), metavar="1..16")
     rescan.add_argument("--admin-token-file", type=Path, required=True)
@@ -337,13 +341,15 @@ def serve(
             sleep(1)
 
 
-def rescan_until_done(client: hubc.MemoryHubClient, limit: int, *, sleep: Any = time.sleep) -> int:
+def rescan_until_done(
+    client: hubc.MemoryHubClient, limit: int, *, retry_failed: bool = False, sleep: Any = time.sleep
+) -> int:
     """Drain finite live heads, allowing short byte-budget batches without spinning."""
     totals: dict[str, Any] = {
         "batches": 0,
         "scanned": 0,
         "complete": False,
-        "counts": dict.fromkeys(("clean", "private", "flagged", "blocked", "failed"), 0),
+        "counts": dict.fromkeys(("clean", "private", "flagged", "blocked", "failed", "corrupt"), 0),
     }
     try:
         live = client.call("status")["cards"]
@@ -351,8 +357,14 @@ def rescan_until_done(client: hubc.MemoryHubClient, limit: int, *, sleep: Any = 
             raise ValueError("invalid live card count")
         cap = (live + limit - 1) // limit + 16
         hard_cap = live + 16
+        after = None
         while totals["batches"] < cap:
-            reply = client.call("rescan", limit=limit, client_event_id=hubc.event_id())
+            fields: dict[str, Any] = {"limit": limit, "client_event_id": hubc.event_id()}
+            if retry_failed:
+                fields["retry_failed"] = True
+                if after is not None:
+                    fields["after"] = after
+            reply = client.call("rescan", **fields)
             scanned, complete, counts = reply["scanned"], reply["complete"], reply["counts"]
             if type(scanned) is not int or not 0 <= scanned <= limit or type(complete) is not bool:
                 raise ValueError("invalid rescan progress")
@@ -368,7 +380,16 @@ def rescan_until_done(client: hubc.MemoryHubClient, limit: int, *, sleep: Any = 
                 totals["counts"][verdict] += counts[verdict]
             totals["complete"] = complete
             if complete:
-                return 0
+                return int(totals["counts"]["corrupt"] > 0)
+            if retry_failed:
+                cursor = reply.get("next_after")
+                if (
+                    not isinstance(cursor, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", cursor) is None
+                    or (after is not None and cursor <= after)
+                ):
+                    raise ValueError("invalid rescan retry cursor")
+                after = cursor
             if scanned == 0:
                 raise ValueError("rescan made no progress")
             if scanned < limit:
@@ -377,6 +398,11 @@ def rescan_until_done(client: hubc.MemoryHubClient, limit: int, *, sleep: Any = 
         raise ValueError("rescan iteration limit reached")
     finally:
         print(json.dumps(totals))
+        if totals["counts"]["corrupt"]:
+            print(
+                f"error: rescan found {totals['counts']['corrupt']} corrupt blob(s), inspect hub warnings by content hash",
+                file=sys.stderr,
+            )
 
 
 def dispatch(args: argparse.Namespace) -> int:
@@ -387,10 +413,12 @@ def dispatch(args: argparse.Namespace) -> int:
         if args.memory_command in {"reindex", "rescan"}:
             client = hubc.MemoryHubClient(settings.hub_url, secret(args.admin_token_file.expanduser()))
             if args.memory_command == "rescan" and args.until_done:
-                return rescan_until_done(client, args.limit)
+                return rescan_until_done(client, args.limit, retry_failed=args.retry_failed)
             fields: dict[str, Any] = {"client_event_id": hubc.event_id()}
             if args.memory_command == "rescan":
                 fields["limit"] = args.limit
+                if args.retry_failed:
+                    fields["retry_failed"] = True
             elif args.drop:
                 fields["drop"] = args.drop
             print(json.dumps(client.call(args.memory_command, **fields)))

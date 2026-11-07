@@ -874,7 +874,13 @@ impl Store {
                 "reason",
                 "client_event_id",
             ],
-            "rescan" => &["action", "limit", "client_event_id"],
+            "rescan" => &[
+                "action",
+                "limit",
+                "retry_failed",
+                "after",
+                "client_event_id",
+            ],
             "handoff" => &["action", "text", "kind", "client_event_id"],
             "capture" => &[
                 "action",
@@ -980,8 +986,28 @@ impl Store {
                         .filter(|n| (1..=16).contains(n))
                         .ok_or_else(|| invalid("limit must be an integer from 1 to 16"))?,
                 };
+                let retry_failed = match map.get("retry_failed") {
+                    None => false,
+                    Some(value) => value
+                        .as_bool()
+                        .ok_or_else(|| invalid("retry_failed must be a boolean"))?,
+                };
+                let after = match map.get("after") {
+                    None => None,
+                    Some(Json::String(value))
+                        if value.len() == 64
+                            && value
+                                .bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+                    {
+                        Some(value.clone())
+                    }
+                    _ => return Err(invalid("after must be a lowercase SHA-256 hash")),
+                };
                 Action::Rescan {
                     limit: limit as usize,
+                    retry_failed,
+                    after,
                 }
             }
             "propose" | "decide" | "rollback" => {

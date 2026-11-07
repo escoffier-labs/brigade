@@ -289,7 +289,7 @@ brigade memory rescan --target . --admin-token-file /path/to/admin-token --limit
 Without `--until-done`, the command sends one `POST /memory` request with action
 `rescan` using the explicit admin token file, as `memory reindex` does. Non-admin credentials receive `403`.
 The JSON response contains `ruleset_version`, `scanned`, counts by verdict,
-`complete`, `principal`, and `scanned_at`. Repeat until `complete` is true.
+`complete`, `next_after`, `principal`, and `scanned_at`. Repeat until `complete` is true.
 `--until-done` does this with fresh client event IDs, a short pause between
 batches, and a final JSON summary of batch, hash and verdict totals. It exits
 non-zero on any non-200 reply, zero progress before completion, or the iteration
@@ -298,7 +298,8 @@ cap. The cap starts at live heads divided by the count limit, rounded up, plus
 Each batch scans at most 16 distinct live content hashes, with a default of 4
 and a 512 KiB byte budget. A supported card can fill the byte budget on its own.
 The next request selects live heads still missing a current-ID receipt, so no
-cursor is needed and identical blobs shared by several cards are scanned once.
+cursor is needed for an ordinary drain, and identical blobs shared by several
+cards are scanned once.
 The scan uses the exact stored UTF-8 bytes without normalizing them again.
 
 The action writes only new `(content_hash, ruleset_version)` receipts and one
@@ -306,12 +307,32 @@ The action writes only new `(content_hash, ruleset_version)` receipts and one
 batch. The record holds the ruleset ID, verdict counts, admin principal and
 time, without card text. These audit rows accumulate in `memory_meta`, about
 one per nonempty batch, with no automatic pruning.
-A failed scan, non-UTF-8 blob or missing blob gets a current-ID `pending`
-receipt marked `scan-failed` and is counted under `counts.failed`, so later
-hashes can still drain. The count is hashes, without text. These receipts stay
-ineligible for push and are not retried under the same ruleset ID. A complete
-drain can include failed hashes, which remain visible in the final counts. An engine
-availability or ruleset mismatch still refuses the request.
+A scanner failure gets a current-ID `pending` receipt marked `scan-failed`
+and is counted under `counts.failed`. It remains excluded from push. After
+fixing a scanner runtime or library problem, an admin can retry these receipts
+under the same ruleset ID:
+
+```bash
+brigade memory rescan --target . --admin-token-file /path/to/admin-token --retry-failed --until-done
+```
+
+The API flag is `retry_failed: true`, default false. It selects current-ID
+receipts only when their state is `pending` and rule IDs are exactly
+`["scan-failed"]`, alongside hashes missing a receipt. A successful retry
+replaces the receipt through the normal scan upsert. Retry drains pass the
+`next_after` cursor back as `after`, so each hash is tried once per pass even
+when the scanner keeps failing. A completed pass may still report failed hashes.
+
+A missing blob gets `blob-missing`, and an invalid UTF-8 blob gets
+`blob-not-utf8`. Both stay `pending`, count under `counts.corrupt`, and produce
+a structured warning with the content hash and rule ID, without card text.
+Valid SQLite TEXT blobs are accepted as UTF-8 too. These corruption receipts
+are excluded from `--retry-failed` and stay closed to push. Inspect the hash in
+the hub warnings and repair the storage fault. `--until-done` finishes the
+remaining drain, prints a distinct corruption error line, and exits non-zero
+when its total corrupt count is positive. Reply and audit counters contain
+hash counts only. An engine availability or ruleset mismatch still refuses
+the request.
 Retries with the same client event ID replay the saved response. Once all live
 heads have receipts, a new request reports zero scans and writes nothing.
 
