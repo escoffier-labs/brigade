@@ -304,10 +304,13 @@ class MemoryTools:
             except FileExistsError:
                 return {"error": "handoff_exists", "filename": filename}
             os.fsync(inbox)
+            absolute = str(Path(self.handoff_inbox) / filename)
+            # The file is already published, so a path that cannot be shown is null, not a failed write.
+            path = self._shown_path(absolute) if self.profile.prompt_load_scan else absolute
             return dict(
                 ok=True,
                 filename=filename,
-                path=str(Path(self.handoff_inbox) / filename),
+                path=path,
                 bytes=len(encoded),
                 action=entry.get("action"),
                 lint_warnings=entry.get("warnings"),
@@ -332,7 +335,16 @@ class MemoryTools:
             os.close(inbox)
 
     def fleet_policy(self, since_hash: str | None = None) -> dict[str, Any]:
-        return policy(self.workspace, since_hash)
+        payload = policy(self.workspace, since_hash)
+        if self.profile.prompt_load_scan:
+            for source in payload.get("sources", ()):
+                source["path"] = self._shown_path(source["path"])
+        return payload
+
+    def _shown_path(self, path: str) -> str | None:
+        """A returned path as a workspace-relative one that scans clean, else None (prompt-load scan profiles)."""
+        relative = _relative_path(path, self.workspace)
+        return None if relative is None or egress_refusal([relative]) else relative
 
     def skill_search(self, query: str, limit: int = 20) -> dict[str, Any]:
         value, error = self._brigade_json(["skills", "search", query, "--target", str(self.workspace), "--json"])

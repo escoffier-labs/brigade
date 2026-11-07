@@ -201,6 +201,8 @@ in a reduced form:
 | `memory_search` `workspace` | The workspace directory name only, never the absolute path. It comes back as `null` when the workspace is the user's home directory or the name itself scans as private |
 | `memory_search` match `path` | For a local match, relative to the workspace. An absolute path inside the workspace is made relative. Any other absolute path, a drive or backslash path, an empty path or one that climbs out with `..` refuses the match as `malformed-match`. For a hub or replica match the hub's own path is never passed on: it is rebuilt as `cards/<card_id>.md`, or `null` when the id is not a plain slug that scans clean |
 | `memory_card` `path` | Relative to the workspace, as in `memory/cards/<name>.md` |
+| `handoff_write` `path` | The inbox folder and file name relative to the workspace, as in `.codex/memory-handoffs/<file>.md`. It is `null` when the path cannot be made relative or does not scan clean. The handoff is already written by then, so the call still returns `ok` and `filename` |
+| `fleet_policy` source `path` | Relative to the workspace, as in `.codex/AGENTS.md`. It is `null` when the path cannot be made relative or does not scan clean. The `hash` is unchanged |
 | match `source`, `trust` | Only `local`, `hub` or `replica`, and only `reviewed`, `policy-promoted`, `imported`, `agent-unreviewed` or `flagged`. Any other value comes back as `null` |
 | match `revision`, hub card `revision` | A non-negative integer, else `null` |
 | match `score`, `match_count` | A number for `score` and a non-negative integer for `match_count`, else `null` |
