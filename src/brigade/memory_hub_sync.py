@@ -1001,6 +1001,9 @@ def drop_proposal(
       head's revision becomes the base, so the next push revives the card
       with the local text. When the card is gone, private or already holds
       the hub head, the next push sends nothing, and `local_card` says why.
+      With no local holder, its published base is also dropped. A returning
+      card with changed text attempts a new conditional create, becoming a
+      proposal if the hub already holds that id.
     - `keep-hub`: the local card file is rewritten with the replica's hub head,
       which becomes the published base, so the next push sends nothing for it.
       It refuses a private local card, which the hub's public text would replace.
@@ -1067,7 +1070,13 @@ def drop_proposal(
                 and published.get("log_epoch") == epoch
                 and published.get("path") == holder["rel"]
             )
-            if record.get("reason") == "card-id-collision" or (record.get("derived_create") and not owns_revision):
+            if current is not None and (
+                record.get("reason") == "card-id-collision" or (record.get("derived_create") and not owns_revision)
+            ):
+                if retired is not None:
+                    raise DropRefused(
+                        "the hub card is retired. Give the local card a distinct frontmatter id and push again"
+                    )
                 raise DropRefused(
                     "this proposal cannot use --keep-local to replace an unowned hub revision. "
                     "Use --keep-hub or give the local card a distinct frontmatter id and push again"

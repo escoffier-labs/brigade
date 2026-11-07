@@ -2615,9 +2615,78 @@ def test_identical_derived_create_needs_acknowledged_revision_to_keep_local(hub,
         assert sync.push(target, client(hub), settings(target))["ok"] is True
         assert hub.cards[("repo:test/app", card_id)]["text"] == "edited fixture\n"
     else:
-        with pytest.raises(sync.DropRefused, match="--keep-hub.*frontmatter id"):
+        remedy = "retired.*distinct frontmatter id" if retired else "--keep-hub.*frontmatter id"
+        with pytest.raises(sync.DropRefused, match=remedy) as refusal:
             sync.drop_proposal(
                 target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_LOCAL
             )
+        if retired:
+            assert "--keep-hub" not in str(refusal.value)
+            with pytest.raises(sync.DropRefused, match="no hub text to keep"):
+                sync.drop_proposal(
+                    target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_HUB
+                )
         assert hub.cards[("repo:test/app", card_id)]["text"] == "identical fixture\n"
         assert hub.cards[("repo:test/app", card_id)]["state"] == ("retired" if retired else "live")
+
+
+@pytest.mark.parametrize("raced_create", [False, True])
+def test_derived_create_can_retry_after_grant_restored_without_hub_head(hub, tmp_path, raced_create):
+    from brigade import memory_hub_import as importer
+
+    target = workspace(tmp_path, mode="sync", **{"My Card": "local fixture\n"})
+    card_id = importer.derive_card_id("memory/cards/My Card.md")
+    hub.put_reply = (403, {"code": "memory_grant_missing"})
+    [proposal] = sync.push(target, client(hub), settings(target), yes=True)["proposals"]
+    assert not hub.cards
+    hub.put_reply = None
+    sync.pull(target, client(hub), settings(target))
+    closed = sync.drop_proposal(
+        target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_LOCAL
+    )
+    assert closed["rebased_on"] is None
+    assert not list(store.proposals(target, client(hub).identity))
+    if raced_create:
+        _put(hub, "repo:test/app", card_id, "other writer fixture\n")
+    report = sync.push(target, client(hub), settings(target))
+    assert hub.puts()[-1]["base_revision"] is None
+    if raced_create:
+        assert report["ok"] is False
+        assert report["proposals"][0]["reason"] == "card-id-collision"
+        assert hub.cards[("repo:test/app", card_id)]["text"] == "other writer fixture\n"
+    else:
+        assert report["ok"] is True and len(report["published"]) == 1
+        assert sync.push(target, client(hub), settings(target))["published"] == []
+        assert hub.cards[("repo:test/app", card_id)]["text"] == "local fixture\n"
+    assert len(hub.events) == 1
+
+
+def test_gone_legacy_card_drops_base_and_restored_card_cannot_overwrite(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", one="initial fixture\n")
+    sync.push(target, client(hub), settings(target), yes=True)
+    client(hub).call(
+        "put",
+        scope="repo:test/app",
+        card_id="one",
+        base_revision=1,
+        base_epoch=hub.epoch,
+        text="remote fixture\n",
+        client_event_id=hubc.event_id(),
+    )
+    card = target / "memory/cards/one.md"
+    card.write_text("local fixture\n")
+    [proposal] = sync.push(target, client(hub), settings(target))["proposals"]
+    card.unlink()
+    sync.pull(target, client(hub), settings(target))
+    closed = sync.drop_proposal(
+        target, client(hub), settings(target), proposal["proposal_id"], keep=sync.DROP_KEEP_LOCAL
+    )
+    assert closed["local_card"] == "gone" and closed["rebased_on"] is None
+    assert "one" not in store.published(target)[client(hub).identity]["repo:test/app"]
+    card.write_text("restored edited fixture\n")
+    report = sync.push(target, client(hub), settings(target))
+    assert report["ok"] is False
+    assert [p["reason"] for p in report["proposals"]] == ["memory_base_mismatch"]
+    assert hub.puts()[-1]["base_revision"] is None
+    assert hub.cards[("repo:test/app", "one")]["text"] == "remote fixture\n"
+    assert len(hub.events) == 2
