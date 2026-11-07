@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from brigade import fleet_hub, fleet_hub_findings as f
+from tests._home import set_home
 
 
 def test_reservations_and_crash_recovery(tmp_path):
@@ -445,8 +446,7 @@ def test_secret_key_file_is_used_read_only_and_never_created(tmp_path, monkeypat
 
 
 def test_secret_key_file_expands_home(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    set_home(monkeypatch, tmp_path)
     monkeypatch.setenv(f.KEY_FILE_ENV, "~/findings-key")
     secret = tmp_path / "findings-key"
     secret.write_bytes(bytes(range(32)))
