@@ -552,21 +552,31 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
             if report.get("needs_confirmation"):
                 lines = [
                     f"memory hub push: first publish to {report['scope']} would publish {report['card_count']} card(s).",
-                    "Run again with --yes to publish them.",
+                    f"{report['derived_ids']} derived id(s). Run again with --yes to publish them.",
                 ]
                 return _emit(report, json_output=args.json, lines=lines, code=1)
             if report.get("hub_memory") is False:
                 return _emit(report, json_output=args.json, lines=[f"error: {report['error']}"], code=1)
-            lines = [
-                f"memory hub push: {len(report['published'])} published, {len(report['spooled'])} spooled, "
-                f"{len(report['proposals'])} proposal(s), {len(report['skipped'])} skipped"
-            ]
-            lines += [f"- refused {item['card_id']}: {item['code']}" for item in report["refused"]]
+            lines = [f"- refused {item['card_id']}: {item['code']}" for item in report["refused"]]
             lines += [
                 f"- resolved {proposal_id}; its text is kept at {path}"
                 for proposal_id, path in (report.get("resolved_kept") or {}).items()
             ]
-            return _emit(report, json_output=args.json, lines=lines)
+            # Keep the count summary last so scheduled runs expose it in journals.
+            summary = (
+                f"memory hub push: {len(report['published'])} published, {len(report['spooled'])} spooled, "
+                f"{len(report['proposals'])} proposal(s), {len(report['refused'])} refused, "
+                f"{len(report.get('kept_local', []))} kept local, {len(report['skipped'])} skipped, "
+                f"{report['derived_ids']} derived id(s)"
+            )
+            # _emit prints warnings after lines. Fold them in before the final summary.
+            lines = lines + [f"warning: {warning}" for warning in report.get("warnings", [])] + [summary]
+            return _emit(
+                {**report, "warnings": []} if not args.json else report,
+                json_output=args.json,
+                lines=lines,
+                code=0 if report["ok"] else 1,
+            )
         if name == "import":
             from . import memory_hub_import as importer
 
