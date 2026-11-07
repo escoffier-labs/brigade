@@ -110,7 +110,11 @@ def _run_eval(
             "overall": aggregate_scores(per_query),
             "by_category": by_category,
             "queries": per_query,
-            **({"binding": search.binding} if isinstance(search, HubAdapter) else {}),
+            **(
+                {"binding": search.binding, "diagnostics": dict(search.diagnostics)}
+                if isinstance(search, HubAdapter)
+                else {}
+            ),
         }
 
     return {

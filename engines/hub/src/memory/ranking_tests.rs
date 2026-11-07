@@ -165,14 +165,7 @@ fn rrf_defaults_and_invalid_weights() {
 async fn hybrid_weights_change_order_and_collapse_after_fusion_without_an_endpoint() {
     let h = Hub::with(proposal_tests::clean(), None);
     let old = h.call(ADMIN_TOKEN, json!({"action":"import","scope":"fleet","card_id":"a-old", "text":"---\nsuperseded_by: newest\n---\nneedle needle", "client_event_id":h.id()})).await;
-    h.put(
-        NODE_TOKEN,
-        "fleet",
-        "newest",
-        None,
-        "different current answer",
-    )
-    .await;
+    h.call(ADMIN_TOKEN,json!({"action":"import","scope":"fleet","card_id":"newest","text":"different current answer","client_event_id":h.id()})).await;
     let rival = h
         .put(NODE_TOKEN, "fleet", "rival", None, "needle extra words")
         .await;
@@ -272,9 +265,7 @@ async fn proposal_generated_scoped_links_collapse_after_decide_and_push_falls_ba
         let a = h
             .put(ADMIN_TOKEN, "fleet", "x", None, "needle claim. ^c-abcdef")
             .await;
-        let b = h
-            .put(ADMIN_TOKEN, "fleet", "y", None, "needle claim. ^c-abcdef")
-            .await;
+        let b = h.call(ADMIN_TOKEN,json!({"action":"import","scope":"fleet","card_id":"y","text":"needle claim. ^c-abcdef","client_event_id":h.id()})).await;
         apply_relation(&h, kind, "x", rev(&a), "y", rev(&b)).await;
         if kind == "merge_exact_duplicates" {
             // Merge retires Y. First verify the real post-decision search,
@@ -298,6 +289,9 @@ async fn proposal_generated_scoped_links_collapse_after_decide_and_push_falls_ba
                 )
                 .await;
             assert_eq!(revived.status, 201);
+            // A revived duplicate must regain trust before it can participate.
+            let restored=h.call(ADMIN_TOKEN,json!({"action":"import","scope":"fleet","card_id":"y","base_revision":rev(&revived),"base_epoch":h.epoch().await,"text":"needle claim. ^c-abcdef","client_event_id":h.id()})).await;
+            assert_eq!(restored.status, 201);
         }
         let q = json!({"action":"search","query":"needle","min_seq":h.events()});
         let r = h.call(ADMIN_TOKEN, q.clone()).await;
@@ -312,8 +306,23 @@ async fn proposal_generated_scoped_links_collapse_after_decide_and_push_falls_ba
             "{kind}: chain {:?}",
             r.body["matches"][0]["lineage"]
         );
-        // X was reviewed by decide, Y remains unreviewed. Neither its id nor
-        // its text may displace or appear in X's push result.
+        // Rewriting a trusted successor removes it from lineage in default
+        // search as well as push search.
+        let y = proposal_tests::card(&h, "fleet", "y").await;
+        let rewritten = h
+            .put(
+                ADMIN_TOKEN,
+                "fleet",
+                "y",
+                y["revision"].as_i64(),
+                "unreviewed successor edit",
+            )
+            .await;
+        assert_eq!(rewritten.status, 201);
+        let q = json!({"action":"search","query":"needle","min_seq":h.events()});
+        let normal = h.call(ADMIN_TOKEN, q.clone()).await;
+        assert_eq!(normal.body["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(normal.body["matches"][0]["card_id"], "x");
         let pushed = h
             .store
             .as_ref()
@@ -521,4 +530,187 @@ fn separate_terminal_heads_keep_their_own_matched_member_scores() {
     assert_eq!(r.chains[&2].len(), 2);
     let only_a = ranking::collapse(&snap, &[true], vec![(1, 2.0)]);
     assert_eq!(only_a.hits, [(1, 2.0)]);
+}
+
+fn graph_card(id: &str, seq: i64, body: &str) -> index::Card {
+    index::Card {
+        scope: "fleet".into(),
+        card_id: id.into(),
+        revision: seq,
+        text: body.into(),
+        trust: "reviewed".into(),
+        content_hash: format!("h-{id}-{seq}"),
+        automated: false,
+    }
+}
+
+#[tokio::test]
+async fn unreviewed_successor_rewrite_and_revival_cannot_replace_reviewed_predecessor() {
+    for revive in [false, true] {
+        let h = Hub::with(proposal_tests::clean(), None);
+        let r = h
+            .put(ADMIN_TOKEN, "fleet", "r", None, "needle claim. ^c-abcdef")
+            .await;
+        let s=h.call(ADMIN_TOKEN,json!({"action":"import","scope":"fleet","card_id":"s","text":"trusted successor","client_event_id":h.id()})).await;
+        apply_relation(&h, "supersede_card", "r", rev(&r), "s", rev(&s)).await;
+        assert_eq!(
+            proposal_tests::card(&h, "fleet", "r").await["trust"],
+            "reviewed"
+        );
+        let mut base = rev(&s);
+        if revive {
+            let retired=h.call(ADMIN_TOKEN,json!({"action":"retire","scope":"fleet","card_id":"s","base_revision":base,"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
+            assert_eq!(retired.status, 200);
+            base = rev(&retired);
+        }
+        let edit = h
+            .put(
+                ADMIN_TOKEN,
+                "fleet",
+                "s",
+                Some(base),
+                "unreviewed successor",
+            )
+            .await;
+        assert_eq!(edit.status, 201);
+        assert_eq!(edit.body["event"]["trust"], "agent-unreviewed");
+        let q = json!({"action":"search","query":"needle","min_seq":h.events()});
+        let normal = h.call(ADMIN_TOKEN, q.clone()).await;
+        let push = h
+            .store
+            .as_ref()
+            .unwrap()
+            .search_for(&Credential::Admin, q.as_object().unwrap(), true)
+            .await;
+        for result in [normal, push] {
+            assert_eq!(result.body["matches"].as_array().unwrap().len(), 1);
+            assert_eq!(result.body["matches"][0]["card_id"], "r");
+            assert_eq!(
+                result.body["matches"][0]["lineage"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn terminal_cycles_are_independent_of_other_terminal_heads() {
+    for (cards, query_hit, expected) in [
+        (
+            vec![
+                graph_card("root", 1, "root"),
+                graph_card("a", 2, "---\nsupersedes: root\nsuperseded_by: c\n---\na"),
+                graph_card("b", 3, "---\nsupersedes: root\n---\nb"),
+                graph_card("c", 4, "---\nsuperseded_by: a\n---\nc"),
+            ],
+            1,
+            "c",
+        ),
+        (
+            vec![
+                graph_card("x", 1, "---\nsuperseded_by: t\n---\nx"),
+                graph_card("t", 2, "t"),
+                graph_card("c1", 3, "---\naliases: [x]\nsuperseded_by: c2\n---\nc1"),
+                graph_card("c2", 4, "---\nsuperseded_by: c1\n---\nc2"),
+            ],
+            3,
+            "c2",
+        ),
+    ] {
+        let snap = index::Builder::from_cards(cards, 4).snapshot();
+        let one = ranking::collapse(&snap, &[true], vec![(query_hit, 1.0)]);
+        assert_eq!(one.hits.len(), 1);
+        assert_eq!(&*snap.doc(one.hits[0].0).card_id, expected);
+        assert_eq!(one.sources[&one.hits[0].0], query_hit);
+        assert!(
+            one.chains[&one.hits[0].0]
+                .iter()
+                .any(|m| m["card_id"].as_str() == Some(snap.doc(query_hit).card_id.as_ref()))
+        );
+        let all = ranking::collapse(&snap, &[true], vec![(0, 1.0), (query_hit, 0.9)]);
+        let ids: Vec<_> = all
+            .hits
+            .iter()
+            .map(|(n, _)| &*snap.doc(*n).card_id)
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&expected));
+    }
+}
+
+#[test]
+fn only_workspace_paths_strip_file_extensions() {
+    for (reference, expected) in [
+        ("answer.md", "answer.md"),
+        ("fleet/answer.md", "answer.md"),
+        ("cards/answer.md", "answer"),
+        ("memory/cards/answer.md", "answer"),
+        ("fleet/answer.txt", "answer.txt"),
+        ("memory/cards/answer.txt", "answer"),
+    ] {
+        let cards = vec![
+            graph_card(
+                "root",
+                1,
+                &format!("---\nsuperseded_by: {reference}\n---\nneedle"),
+            ),
+            graph_card("answer", 2, "base"),
+            graph_card("answer.md", 3, "md"),
+            graph_card("answer.txt", 4, "txt"),
+        ];
+        let snap = index::Builder::from_cards(cards, 4).snapshot();
+        let r = ranking::collapse(&snap, &[true], vec![(0, 1.0)]);
+        assert_eq!(r.hits.len(), 1);
+        assert_eq!(&*snap.doc(r.hits[0].0).card_id, expected, "{reference}");
+    }
+}
+
+#[tokio::test]
+async fn lineage_budget_preserves_all_hits_and_reports_overflow() {
+    let mut cards: Vec<_> = (0..600)
+        .map(|n| {
+            graph_card(
+                &format!("n{n:03}"),
+                n + 1,
+                &format!("---\nsuperseded_by: n{:03}\n---\nneedle", n + 1),
+            )
+        })
+        .collect();
+    cards.push(graph_card("other", 601, "needle"));
+    let snap = index::Builder::from_cards(cards, 601).snapshot();
+    let hits = vec![(0, 3.0), (599, 2.0), (600, 1.0)];
+    let mut probes = 0;
+    let r = ranking::collapse_eligible(&snap, &[true], hits.clone(), |_| {
+        probes += 1;
+        Ok(true)
+    })
+    .unwrap();
+    assert_eq!(r.hits, hits);
+    assert_eq!(r.visited, ranking::NODE_CAP);
+    assert_eq!(probes, ranking::NODE_CAP);
+    assert!(r.overflow);
+    assert_eq!(r.uncollapsed, 3);
+    assert!(r.chains.is_empty());
+    let h = Hub::new();
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let request =
+        search::parse(json!({"query":"needle","eval":true}).as_object().unwrap()).unwrap();
+    let reply = search::run(
+        &Conn(&db),
+        &Credential::Admin,
+        &request,
+        &snap,
+        &scan::Unavailable,
+    )
+    .unwrap();
+    assert_eq!(reply.body["lineage_visited"], ranking::NODE_CAP);
+    assert_eq!(reply.body["lineage_overflow"], true);
+    assert_eq!(reply.body["lineage_uncollapsed"], index::TOP);
+    assert_eq!(
+        reply.body["matches"].as_array().unwrap().len(),
+        request.limit
+    );
 }

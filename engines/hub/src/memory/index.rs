@@ -498,6 +498,7 @@ impl Builder {
     }
     /// Resolve trusted assertions once per publication. Ordinary cards require
     /// no graph work. Old snapshots retain their own immutable adjacency lists.
+    // Switch to incremental key patching if trusted-owner rebuilds dominate publication cost.
     fn resolve_lineage(&mut self) {
         let mut forward: HashMap<u32, Vec<super::ranking::Neighbour>> = HashMap::new();
         let mut reverse: HashMap<u32, Vec<super::ranking::Neighbour>> = HashMap::new();
@@ -505,8 +506,8 @@ impl Builder {
             let d = self.snap.doc(owner);
             let mut link = |from, to| {
                 if from != to
-                    && &*self.snap.doc(from).trust != "flagged"
-                    && &*self.snap.doc(to).trust != "flagged"
+                    && super::ranking::trusted(&self.snap.doc(from).trust)
+                    && super::ranking::trusted(&self.snap.doc(to).trust)
                 {
                     forward
                         .entry(from)

@@ -151,12 +151,19 @@ in lexical mode. An explicitly named invalid configuration stops hub startup. `l
 rank constant 60. A restart applies tuning. Lineage links use scoped
 `superseded_by`, `supersedes`, `merged_from` and merge `aliases` metadata.
 Links accept bare ids, workspace paths and `scope/card_id` references, with
-scope-qualified references restricted to the source card's own scope. Only
-`reviewed`, `policy-promoted` and `imported` cards may assert lineage.
+scope-qualified references restricted to the source card's own scope. Bare
+and scope-qualified ids keep their full suffix, so `fleet/answer.md` addresses
+card `answer.md`. Workspace paths such as `cards/answer.md` strip the file
+extension and address `answer`. Only
+`reviewed`, `policy-promoted` and `imported` cards may assert lineage. Both
+endpoints must retain one of those trust levels. An unreviewed rewrite or
+revival of a referenced successor cannot take over its reviewed predecessor.
 Unreviewed interactive cards, unreviewed automation and flagged cards cannot
 create links. Each collapsed hit includes chain members and revisions for
 `card` lookup. Distinct live terminal successors remain separate results.
-Cycles select the newest head event seq. Flagged cards never replace another
+Each terminal strongly connected component selects its newest non-flagged
+head event seq. A terminal cycle and a separate terminal head are resolved
+independently, so a hit inside the cycle remains represented. Flagged cards never replace another
 card as a lineage head. In push mode the head, members and relation owners
 must all pass the current push eligibility checks. If a successor is withheld,
 the eligible predecessor remains a result.
@@ -168,7 +175,15 @@ Lineage neighbours are resolved when the index publishes a snapshot. Queries
 walk only hit components, and an empty hit list does no lineage work. Ordinary
 searches skip the policy lookup and corpus digest. Eval adapters explicitly
 request `eval: true` to obtain both bindings. `lineage_visited` reports the
-number of documents visited by collapse.
+number of distinct lineage nodes probed, including initial candidates.
+
+A query probes at most 512 lineage nodes. This covers the 200 initial
+candidates and one full 256-item alias list, with room for short history.
+On overflow the query returns all eligible input hits uncollapsed in their
+original order, omits chains and sets `lineage_overflow: true` with the
+`lineage_uncollapsed` count. This also preserves any hits not yet walked.
+Hub eval reports aggregate these counters under `diagnostics`, including the
+closing index/configuration fence call.
 
 Principal credentials are treated as automated until principals have a
 registered writer class, regardless of an `interactive` hint. Node and admin writes use `scheduled` and `worker`

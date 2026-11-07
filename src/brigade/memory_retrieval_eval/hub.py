@@ -47,6 +47,7 @@ class HubAdapter:
         self.mode = mode
         self.options = options
         self.binding: dict[str, Any] | None = None
+        self.diagnostics = {"max_lineage_visited": 0, "lineage_overflows": 0, "uncollapsed_hits": 0}
 
     def __call__(self, query: str, limit: int) -> list[tuple[str, float]]:
         reply = self.client.call(
@@ -88,6 +89,11 @@ class HubAdapter:
         if self.binding is not None and binding != self.binding:
             raise ValueError("hub index or retrieval configuration changed during eval")
         self.binding = copy.deepcopy(binding)
+        self.diagnostics["max_lineage_visited"] = max(
+            self.diagnostics["max_lineage_visited"], int(reply.get("lineage_visited", 0))
+        )
+        self.diagnostics["lineage_overflows"] += int(bool(reply.get("lineage_overflow", False)))
+        self.diagnostics["uncollapsed_hits"] += int(reply.get("lineage_uncollapsed", 0))
         return [
             (self.ids.get(str(hit["card_id"]), str(hit["card_id"])), float(hit["score"])) for hit in reply["matches"]
         ]

@@ -338,6 +338,8 @@ pub fn run<T: ReadTx + ?Sized>(
             chains: std::collections::HashMap::new(),
             sources: std::collections::HashMap::new(),
             visited: 0,
+            overflow: false,
+            uncollapsed: 0,
         }
     } else {
         super::ranking::collapse_eligible(snap, &allowed, ordered, |n| {
@@ -411,6 +413,8 @@ pub fn run<T: ReadTx + ?Sized>(
             "matches": matches,
             "match_count": total,
             "lineage_visited": collapsed.visited,
+            "lineage_overflow": collapsed.overflow,
+            "lineage_uncollapsed": collapsed.uncollapsed,
             "retrieval": retrieval,
             "indexed_seq": snap.indexed_seq,
             "index_format": super::index::FORMAT_VERSION,

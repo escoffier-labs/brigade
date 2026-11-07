@@ -1879,13 +1879,20 @@ hub copies its semantics from `src/brigade/memory_bm25.py` and
 6. Collapse lineage: cards linked by `supersede_card` or
    `merge_exact_duplicates`, and handoff-derived items from one chain, appear
    once per live terminal head. Only reviewed, policy-promoted or imported
-   cards can assert links. References written as `scope/card_id` must name
+   cards can assert links, and both endpoints must retain one of those trust
+   levels. An unreviewed successor rewrite or revival cannot replace its
+   reviewed predecessor. References written as `scope/card_id` must name
    the source card's scope. Separate live successors are preserved. Cycles
-   use the newest head event seq, and flagged cards never replace another
+   resolve each terminal strongly connected component independently using its
+   newest non-flagged head event seq, and flagged cards never replace another
    head. Push collapse uses only eligible heads, members and assertion owners,
    preserving an eligible predecessor when its successor is withheld.
    Resolved forward and reverse neighbours live on immutable index snapshots.
-   A query walks only components reached from its top hits.
+   A query walks only components reached from its top hits, probing at most
+   512 nodes including its initial candidates. Overflow returns the eligible
+   input hits uncollapsed and reports the overflow and uncollapsed-hit count.
+   Bare and scoped ids retain filename-like suffixes. Only workspace file
+   paths strip the file extension.
 7. Demote repetitive automated sources: versions that are still
    `agent-unreviewed` and came from a `scheduled` or `worker` writer sort after
    every other match, unless the query sets `sources: ["automation"]`.

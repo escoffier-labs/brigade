@@ -197,3 +197,11 @@ def test_external_url_mode_refuses_extra_corpus_without_writing(tmp_path, monkey
         )
     assert actions.count("card") == len(cards)
     assert actions.count("search") == 1
+
+
+def test_eval_diagnostics_carry_lineage_budget_overflow():
+    reply = response()
+    reply.update(lineage_visited=512, lineage_overflow=True, lineage_uncollapsed=2)
+    search = adapter(reply)
+    search("words", 40)
+    assert search.diagnostics == {"max_lineage_visited": 512, "lineage_overflows": 1, "uncollapsed_hits": 2}

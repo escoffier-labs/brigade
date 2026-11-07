@@ -33,8 +33,12 @@ def measure(binary: Path, overlay: bool, padding: int = 0) -> dict:
             # Both binaries receive identical cards, text and source hints.
             for card in cards:
                 stem = Path(card.path).stem
-                if client.call("card", scope="fleet", card_id=stem)["card"]["trust"] == "flagged":
+                head = client.call("card", scope="fleet", card_id=stem)["card"]
+                if head["scan_state"] != "clean":
                     continue
+                # Both versions receive trusted endpoints for approved lineage.
+                trusted = client.call("import", scope="fleet", card_id=stem, base_revision=head["revision"], base_epoch=client.call("status")["log_epoch"], text=card.body, origin="interactive", client_event_id=event_id())
+                seq = trusted["event"]["seq"]
                 relation = f"superseded_by: {stem}\n"
                 body = "---\n" + relation + card.body[4:] if card.body.startswith("---\n") else "---\n" + relation + "---\n" + card.body
                 for prefix, text, origin in [("old-", body, "interactive"), ("timer-", card.body, "scheduled")]:
@@ -50,10 +54,12 @@ def measure(binary: Path, overlay: bool, padding: int = 0) -> dict:
         start = time.monotonic()
         rows = []
         visited = []
+        overflows = 0
         for query in queries:
             reply = client.call("search", query=query.query, mode="lexical", limit=20, scopes=["fleet"])
             assert reply["retrieval"]["mode"] == "lexical" and not reply["retrieval"]["stale"]
             ranked = [ids.get(hit["card_id"], hit["card_id"]) for hit in reply["matches"]]
+            overflows += int(bool(reply.get("lineage_overflow", False)))
             if "lineage_visited" in reply:
                 visited.append(reply["lineage_visited"])
             rows.append(score_query(ranked, query.gold, 5))
@@ -64,7 +70,7 @@ def measure(binary: Path, overlay: bool, padding: int = 0) -> dict:
             assert max(visited) <= 200
             assert empty["lineage_visited"] == 0
         return {"case": f"fixture-{padding}-padding" if padding else "lineage-sources" if overlay else "fixture", "load_average": load,
-                "live_count":live_count,"max_lineage_visited":max(visited) if visited else None,"empty_lineage_visited":empty.get("lineage_visited"),
+                "live_count":live_count,"max_lineage_visited":max(visited) if visited else None,"empty_lineage_visited":empty.get("lineage_visited"),"lineage_overflows":overflows,
                 "seconds": elapsed, **aggregate_scores(rows)}
 
 
