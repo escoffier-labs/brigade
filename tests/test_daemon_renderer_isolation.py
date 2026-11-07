@@ -24,7 +24,6 @@ RENDERERS = (
     "t3-intake",
     "ops",
     "pack-relay",
-    "cerebro",
     "operations-relay",
     "obsidian",
     "fleet",
@@ -70,7 +69,7 @@ def _render(name, target, python, monkeypatch):
         "brigade.dot.lifecycle"
         if base == "dot"
         else f"brigade.grokbot_{name.replace('-', '_') if name == 'operations-relay' else base}"
-        + ("" if base in {"cerebro", "operations"} else ".lifecycle")
+        + ("" if base in {"operations"} else ".lifecycle")
     )
     if base == "dot":
         monkeypatch.setattr(module, "require_local_platform", lambda: None)
