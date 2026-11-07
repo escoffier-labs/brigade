@@ -14,6 +14,9 @@ pub struct Base {
 }
 #[derive(Clone, Debug)]
 pub enum Action {
+    Rescan {
+        limit: usize,
+    },
     Proposal(super::proposals::Command),
     Embedding {
         command: super::embedding::Command,
@@ -57,6 +60,7 @@ pub enum Action {
 impl Action {
     pub fn name(&self) -> &'static str {
         match self {
+            Action::Rescan { .. } => "rescan",
             Action::Proposal(c) => c.name(),
             Action::Embedding { command, .. } => match command {
                 super::embedding::Command::Reindex { .. } => "reindex",
@@ -96,7 +100,7 @@ impl Action {
             } => (Some(scope), "import"),
             Action::Handoff { .. } => (None, "handoff"),
             Action::Capture { .. } => (None, "read"),
-            Action::Grant { .. } => (None, "admin"),
+            Action::Grant { .. } | Action::Rescan { .. } => (None, "admin"),
             #[cfg(test)]
             Action::PolicyProbe => (None, "read"),
         }
@@ -465,7 +469,10 @@ pub fn apply(
             _ => (),
         }
     }
-    if reply.status < 300 && replayable {
+    if reply.status < 300
+        && replayable
+        && !(matches!(p.action, Action::Rescan { .. }) && reply.body["scanned"] == 0)
+    {
         tx.execute(
             "INSERT INTO memory_idempotency(principal,client_event_id,request_digest,status,response,created_ms) VALUES(?1,?2,?3,?4,?5,?6)",
             &[
@@ -500,6 +507,7 @@ fn run(
         )
     };
     match &p.action {
+        Action::Rescan { limit } => super::rescan::run(tx, p, scanner, *limit),
         Action::Proposal(c) => {
             let mut reply = super::proposals::run(tx, p, c, _authority, scanner)?;
             if reply.body["log_epoch"].is_string() {

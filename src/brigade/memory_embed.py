@@ -31,6 +31,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     reindex.add_argument("--drop", metavar="EMBEDDER_ID")
     reindex.add_argument("--admin-token-file", type=Path, required=True)
 
+    rescan = sub.add_parser("rescan", help="Refresh one batch of live hub scan receipts without changing cards.")
+    rescan.add_argument("--target", "-t", type=Path, default=Path("."))
+    rescan.add_argument("--limit", type=int, default=4, choices=range(1, 17), metavar="1..16")
+    rescan.add_argument("--admin-token-file", type=Path, required=True)
+
 
 class EndpointError(ValueError):
     """The local endpoint failed. The hub releases the job without counting an attempt."""
@@ -334,12 +339,14 @@ def dispatch(args: argparse.Namespace) -> int:
         settings = hubc.load_settings(args.target.expanduser().resolve())
         if not settings.enabled:
             raise ValueError("hub memory is off")
-        if args.memory_command == "reindex":
+        if args.memory_command in {"reindex", "rescan"}:
             client = hubc.MemoryHubClient(settings.hub_url, secret(args.admin_token_file.expanduser()))
             fields: dict[str, Any] = {"client_event_id": hubc.event_id()}
-            if args.drop:
+            if args.memory_command == "rescan":
+                fields["limit"] = args.limit
+            elif args.drop:
                 fields["drop"] = args.drop
-            print(json.dumps(client.call("reindex", **fields)))
+            print(json.dumps(client.call(args.memory_command, **fields)))
             return 0
         path = args.config.expanduser().resolve()
         with path.open("rb") as stream:
@@ -360,5 +367,5 @@ def dispatch(args: argparse.Namespace) -> int:
         hubc.HubUnavailable,
         hubc.HubRefusal,
     ):
-        print("error: embedding operation refused or unavailable", file=sys.stderr)
+        print("error: memory maintenance or embedding operation refused or unavailable", file=sys.stderr)
         return 1

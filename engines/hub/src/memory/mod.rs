@@ -21,6 +21,9 @@ mod proposal_blocks;
 mod proposal_metadata;
 pub mod proposals;
 mod pytables;
+mod rescan;
+#[cfg(test)]
+mod rescan_tests;
 pub mod scan;
 pub mod schema;
 pub mod search;
@@ -756,7 +759,7 @@ impl Store {
             "propose" | "decide" | "rollback" => {
                 self.proposal_request(credential, action, map, &raw).await
             }
-            "put" | "import" | "retire" | "handoff" | "capture" | "grant" => {
+            "put" | "import" | "retire" | "handoff" | "capture" | "grant" | "rescan" => {
                 match self.prepare(credential, action, map, &raw) {
                     Ok(prepared) => self.write(prepared).await,
                     Err(reply) => reply,
@@ -871,6 +874,7 @@ impl Store {
                 "reason",
                 "client_event_id",
             ],
+            "rescan" => &["action", "limit", "client_event_id"],
             "handoff" => &["action", "text", "kind", "client_event_id"],
             "capture" => &[
                 "action",
@@ -885,11 +889,11 @@ impl Store {
         if let Some(k) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
             return Err(invalid(&format!("unknown field {k:?} for {action}")));
         }
-        if action == "grant" && *credential != Credential::Admin {
+        if matches!(action, "grant" | "rescan") && *credential != Credential::Admin {
             return Err(error(
                 403,
                 "memory_grant_missing",
-                "the admin token is required to change memory grants",
+                "the admin token is required for this memory action",
             ));
         }
         let now_ms = self.clock.now_ms();
@@ -968,6 +972,18 @@ impl Store {
             }
         };
         let action = match action {
+            "rescan" => {
+                let limit = match map.get("limit") {
+                    None => 4,
+                    Some(value) => value
+                        .as_u64()
+                        .filter(|n| (1..=16).contains(n))
+                        .ok_or_else(|| invalid("limit must be an integer from 1 to 16"))?,
+                };
+                Action::Rescan {
+                    limit: limit as usize,
+                }
+            }
             "propose" | "decide" | "rollback" => {
                 if action != "propose"
                     && str_field("proposal_id")

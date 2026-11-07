@@ -384,7 +384,7 @@ def register(sub: argparse._SubParsersAction) -> None:
 
 
 def dispatch(args) -> int:
-    if args.memory_command in {"embed-worker", "reindex"}:
+    if args.memory_command in {"embed-worker", "reindex", "rescan"}:
         from .. import memory_embed
 
         return memory_embed.dispatch(args)

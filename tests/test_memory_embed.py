@@ -531,3 +531,39 @@ def test_worker_loop_keeps_running_after_a_malformed_reply(scripted_reply):
     # Two malformed replies back off 1 s then 2 s and the loop leases again.
     assert sleeps == [1.0, 2.0]
     assert [a for a, _ in client.calls].count("embed_failed") == 2
+
+
+def test_admin_rescan_cli_uses_explicit_token_and_one_bounded_batch(tmp_path, monkeypatch, capsys):
+    from brigade.cli import main
+
+    token = tmp_path / "admin-token"
+    token.write_text("fake-admin-token")
+    token.chmod(0o600)
+    settings = embed.hubc.HubSettings(mode="read", hub_url="https://example.com", token="fake-node-token")
+    monkeypatch.setattr(embed.hubc, "load_settings", lambda _: settings)
+    calls = []
+
+    class AdminClient:
+        def __init__(self, url, credential):
+            assert url == settings.hub_url
+            assert credential == "fake-admin-token"
+
+        def call(self, action, **fields):
+            calls.append((action, fields))
+            return {"scanned": 2, "complete": False}
+
+    monkeypatch.setattr(embed.hubc, "MemoryHubClient", AdminClient)
+    assert main(["memory", "rescan", "--target", str(tmp_path), "--admin-token-file", str(token), "--limit", "2"]) == 0
+    assert len(calls) == 1 and calls[0][0] == "rescan"
+    assert calls[0][1]["limit"] == 2
+    assert embed.hubc.event_id_ms(calls[0][1]["client_event_id"]) is not None
+    assert json.loads(capsys.readouterr().out) == {"scanned": 2, "complete": False}
+
+
+@pytest.mark.parametrize("limit", ["0", "17", "-1"])
+def test_admin_rescan_cli_refuses_an_unbounded_batch(limit):
+    from brigade.cli import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["memory", "rescan", "--admin-token-file", "unused", "--limit", limit])
+    assert exc.value.code == 2
