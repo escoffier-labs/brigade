@@ -17,6 +17,7 @@ mod embedding_tests;
 pub mod ids;
 pub mod index;
 pub mod ops;
+mod preflight;
 mod proposal_blocks;
 mod proposal_metadata;
 mod proposal_tiers;
@@ -36,6 +37,8 @@ mod embedder_tests;
 mod lexical_tests;
 #[cfg(test)]
 mod powercut;
+#[cfg(test)]
+mod preflight_tests;
 #[cfg(test)]
 mod private_tests;
 #[cfg(test)]
@@ -83,8 +86,6 @@ const DENSE_LOAD_FAILED: &str = "dense-load-failed";
 const DENSE_NOT_LOADED: &str = "dense-not-loaded";
 const IDLE_MIN: Duration = Duration::from_secs(1);
 const IDLE_MAX: Duration = Duration::from_secs(30);
-/// Actions in the route table that later slices build.
-const LATER: &[&str] = &["preflight"];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reply {
@@ -751,6 +752,7 @@ impl Store {
         match action {
             "card" | "log" | "status" => self.read(credential, action, map).await,
             "search" => self.search(credential, map).await,
+            "preflight" => self.preflight(credential, map).await,
             "reindex" | "embed_lease" | "embed_submit" | "embed_failed" => {
                 self.embedding_request(credential, action, &raw).await
             }
@@ -763,12 +765,43 @@ impl Store {
                     Err(reply) => reply,
                 }
             }
-            a if LATER.contains(&a) => error(
-                501,
-                "memory_action_unavailable",
-                "this memory action is not available on this hub yet",
-            ),
             _ => invalid("unknown memory action"),
+        }
+    }
+    async fn preflight(&self, credential: &Credential, map: &Map<String, Json>) -> Reply {
+        if map
+            .keys()
+            .any(|k| !["action", "proposal_id"].contains(&k.as_str()))
+            || map
+                .get("proposal_id")
+                .and_then(Json::as_str)
+                .is_none_or(|id| ids::parse_event_id(id).is_none())
+        {
+            return invalid("preflight requires only a proposal_id");
+        }
+        let authority = match self.hub.submit(|db| ops::Authority::read(&Conn(db))).await {
+            Ok(a) => a,
+            Err(_) => return error(503, "memory_action_unavailable", "policy read unavailable"),
+        };
+        let who = credential.clone();
+        let request = Json::Object(map.clone());
+        let scanner = self.scanner.clone();
+        let now = self.clock.now_ms();
+        match self
+            .readers
+            .submit(move |db| {
+                // ReaderPool already pins one deferred, query-only snapshot.
+                // No writer, event, idempotency entry or index refresh is involved.
+                preflight::read(&Conn(db), &who, &request, &authority, scanner.as_ref(), now)
+            })
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => error(
+                503,
+                "memory_action_unavailable",
+                "preflight read unavailable",
+            ),
         }
     }
     async fn proposal_request(

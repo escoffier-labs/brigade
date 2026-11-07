@@ -2306,8 +2306,9 @@ Local state: #1856 is open. Reflect candidates and proposal v2 ops exist
 `memory_proposal_v2_ops.py`). Local candidate logic marks Tier 2 when it is
 review-only and Tier 0 otherwise. S19a added reviewed Rust hub proposals.
 S19b adds the hub classifier, Tier 1, and the policy `memory` section with
-digest binding. Calibration records, blast caps, cooldowns and the
-`care install` entry remain later work. #2187 adds `brigade memory reflect preflight`, a diagnostic
+digest binding. S19c adds diagnostic gates, including a one-card blast cap
+and a 24-hour per-card cooldown from hub proposal history. Calibration records
+and the `care install` entry remain later work. #2187 adds `brigade memory reflect preflight`, a diagnostic
 Tier 0 report (`brigade.memory-tier0-preflight.v1`) that always says
 `eligible=false`. S19a to S19e build the tier rules on hub memory in five PRs,
 and the local implementation of #1856 can reuse their tests.
@@ -2396,9 +2397,10 @@ apply authority, and every proposal still requires explicit review.
 The fleet policy's optional `memory` object accepts `auto_apply` (false only),
 `tier0_op_classes` (a bounded list of `append_evidence` or
 `merge_exact_duplicates`) and `reflect_principals` (a bounded list of
-principal ids). Both lists are stored and digest-bound but are not enforced
-until S19c. Setting them does not narrow Tier 0 classification today, even
-when a list is empty. The lists default to empty. Unknown fields and invalid
+principal ids). S19c enforces both lists in the Tier 0 gate. Every op class
+must be listed and the proposer must be a listed principal. Both lists default
+to empty and deny Tier 0 eligibility. They do not change the classifier's edit
+tier or restrict an explicit reviewed decision. Unknown fields and invalid
 values are refused. Saving auto-apply as true returns 422 without storing a policy revision. Omitting the section
 preserves older digests. A present section enters the canonical fleet policy
 digest, so edits invalidate pending acceptances.
@@ -2419,7 +2421,8 @@ but a supplied expectation must match there too. Acceptance then retries all
 checks, including self-review, target grants and moved heads. A moved head
 leaves the proposal stale with `memory_base_mismatch`. Idempotent replay
 retains the first stale response. Other stale reasons still require a new
-proposal. S19c owns preflight and the remaining gates, S19d owns scheduling, and S19e owns attestation and auto-apply.
+proposal. S19c adds read-only preflight and rechecks its hub facts inside the
+apply transaction. S19d owns scheduling and S19e owns attestation and auto-apply.
 
 | Tier 0 gate | Source of truth on the hub |
 |---|---|
@@ -2430,6 +2433,34 @@ proposal. S19c owns preflight and the remaining gates, S19d owns scheduling, and
 | Blast cap and per-card cooldown | `memory_proposals` history, read inside the apply transaction |
 | Brigade is the configured memory owner | the policy's curation section names the hub. With an external owner or a handoff-only policy, reflect emits proposals and never applies |
 | Preflight agrees | the hub `preflight` action returns the #2187 report schema, filled from hub facts, read-only |
+
+S19c `preflight` accepts only `action` and `proposal_id`. It requires `read`
+on every target scope, including retained source cards, and never uses the
+memory writer. It returns the #2187 report fields with the proposal id as
+`candidate_id`, the fleet policy digest as `policy_sha256`, and scoped card
+hashes as `source_sha256`. Local-only run and workspace fields are null or
+empty. `evaluation_sha256` binds the reported diagnostic facts. It grants no
+authority. The report remains `diagnostic_only=true`, `eligible=false` and
+`status=held` until the missing authority contracts exist.
+
+The report checks the op and proposer allowlists, computed tier, exact pins,
+base revisions, policy binding, trust and scan state. Its diagnostic limits
+match #2187: three evidence ids, two source groups, one changed card and a
+24-hour cooldown. The blast count includes actual content and state changes.
+Cooldown reads head-changing apply and rollback events from hub history. The
+fleet policy does not yet expose overrides for these limits. Unattested strings
+supply no proof count. Evidence, curation owner and bound retrieval evaluation
+remain explicit `*_unbound` holds. The current policy has no curation-owner
+contract and the hub has no bound retrieval-evaluation record yet.
+
+Reviewed apply recomputes the report under both writer locks before changing a
+card. A moved base or pin returns `stale`. Changed trust or an input scan state
+change returns `held`. Result scans still run before the first write.
+Policy allowlists, blast caps, cooldown and missing promotion authority hold
+Tier 0 eligibility while an explicit reviewer can accept a reviewed edit.
+The stored decision body retains this report. The apply boundary itself
+requires `decide: accept` for every tier. S19c adds no automatic apply route,
+calibration records, timer or evidence attachment API.
 
 Evidence attestation (S19e). An `evidence.attach` event carries a namespaced
 id, the artifact kind, the SHA-256 of the artifact bytes and its observation

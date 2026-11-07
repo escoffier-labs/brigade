@@ -463,7 +463,7 @@ brigade memory hub import --scope fleet --yes ~/Notes              # first impor
 brigade memory hub import --scope fleet ~/Notes                    # a second run appends nothing
 ```
 
-`import` takes Markdown files and folders. A folder is searched recursively for `.md` files. These are skipped and counted in the summary's `discovery` line: dot directories (`.obsidian`, `.git`, `.trash`), any folder holding the mirror marker `.brigade-memory-mirror.json` or projection marker `.brigade-memory-projection.json`, symlinks met while walking, and anything matching a repeatable `--exclude <glob>`. Each marker is checked in the argument's folder and every ancestor, and on the resolved real path, so subfolders, notes inside, and symlinked arguments into either owned folder are skipped. Mirror folders count under `mirror_dirs`; projections count under `projection_dirs`. Until existing vaults are projected again to write the marker, use `--exclude "Brigade Memory"`. Dot files such as `.draft.md` are imported, and only dot directories are skipped. A symlinked argument is followed, but a link met while walking is not.
+`import` takes Markdown files and folders. A folder is searched recursively for `.md` files. These are skipped and counted in the summary's `discovery` line: dot directories (`.obsidian`, `.git`, `.trash`), any folder holding the mirror marker `.brigade-memory-mirror.json` or projection marker `.brigade-memory-projection.json`, symlinks met while walking, and anything matching a repeatable `--exclude <glob>`. Each marker is checked in the argument's folder and every ancestor, and on the resolved real path, so subfolders, notes inside, and symlinked arguments into either owned folder are skipped. Mirror folders count under `mirror_dirs`. Projections count under `projection_dirs`. Until existing vaults are projected again to write the marker, use `--exclude "Brigade Memory"`. Dot files such as `.draft.md` are imported, and only dot directories are skipped. A symlinked argument is followed, but a link met while walking is not.
 
 A glob is matched against the path relative to the import root with case-sensitive `fnmatch`, so `Templates/` does not cover `templates/`. `*` crosses `/`. A glob without a `/` (a trailing one is dropped) also matches a file or folder name, which is how to match a folder at any depth: `Templates` or `Templates/` skips every folder with that name, and everything under it. A glob with a `/` is anchored at the root, so `Projects/Templates/` skips only that folder, and `*/Templates` matches a folder named `Templates` one or more levels down but not a top-level one.
 
@@ -596,9 +596,10 @@ Fleet policy accepts an optional top-level `memory` object:
 Both lists default to empty. Unknown fields, invalid list entries and
 non-boolean `auto_apply` values are refused. Saving `auto_apply: true` returns
 422 and stores no revision. `tier0_op_classes` and `reflect_principals` are
-stored and digest-bound but are not enforced until S19c. Setting either list
-does not narrow Tier 0 classification today, even when the list is empty.
-Neither list grants apply authority in S19b. Omitting `memory` preserves
+enforced by the Tier 0 gate. Every op class and the proposer must appear in
+their respective lists. Empty lists deny Tier 0 eligibility. The lists do not
+change an edit's computed tier or restrict an explicit reviewer decision.
+Neither list grants apply authority. Omitting `memory` preserves
 older policy digests. When present, the normalized section
 is included in the whole fleet policy digest, so any memory policy edit
 changes that digest.
@@ -646,6 +647,53 @@ changes no card. Compensation writes new revisions rather than rewinding the
 append-only log. Memory schema v4 adds `memory_proposals` and preserves v3
 cards, revisions, `log_epoch` and sequence continuity during migration.
 The new table's `decided_by` column records the deciding principal.
+
+### Hub Tier 0 preflight
+
+Send `{"action":"preflight","proposal_id":"<proposal id>"}` to the memory
+endpoint. The credential needs `read` on every target scope. It needs no
+`reflect` or `review` grant. The action returns the
+`brigade.memory-tier0-preflight.v1` report and writes no proposal, event,
+idempotency entry, card or vector.
+
+The report keeps #2187's fields. `candidate_id` names the hub proposal,
+`policy_sha256` is the current fleet policy digest, and `source_sha256` maps
+scoped card ids to their base content hashes. Local run and workspace fields
+are null or empty. `evaluation_sha256` hashes the diagnostic facts. It is
+never a promotion permit. The hub reports actual pins, revisions, trust,
+scan state and computed tier. Policy allowlists are checked against stored
+ops and the authenticated proposer recorded at submit.
+
+| Gate | Hold reasons on the hub |
+|---|---|
+| `policy` | `policy_missing`, `policy_invalid`, `class_disabled`, `reflect_principal_disabled` |
+| `candidate` | `tier_requires_review` |
+| `snapshot` | `policy_changed`, `memory_epoch_changed`, `card_missing`, `memory_base_mismatch`, `pinned_content_changed`, `pinned_block_changed` |
+| `delta` | `delta_requires_review`, `blast_cap_exceeded` |
+| `evidence_floor`, `source_group_floor` | `proof_binding_incomplete` |
+| `card_trust` | `memory_trust_changed`, `memory_input_scan_held`, `card_trust_denied` |
+| `scan` | `scan_not_clean` |
+| `evidence_authority`, `owner_authority`, `retrieval_eval` | The corresponding `*_unbound` reason |
+| `cooldown_history` | `cooldown_active` |
+
+A satisfied gate uses `<gate>_satisfied`. `host` checks the already validated
+card-block target boundary. Diagnostic limits match local preflight defaults:
+at least three evidence ids from two sources, at most one changed card, and a
+24-hour per-card cooldown from head-changing apply and rollback events. The
+current fleet policy has no limit overrides. S19e owns attested proof, so the
+proof counts stay null and the evidence authority stays unbound. The current
+policy has no curation-owner contract and the hub has no bound retrieval eval
+record. Those gates also stay unbound. Every report remains held,
+`diagnostic_only=true` and `eligible=false`.
+
+At reviewed apply the hub reruns these checks inside the memory transaction
+with the current policy document read under the hub lock. It saves the report
+in the decision body and reply. A changed base or pin makes the proposal stale.
+Changed trust or an input scan state change holds it. Every output scans before
+any card changes. The policy allowlists and diagnostic promotion limits do not
+prevent an explicit reviewer from accepting an otherwise valid reviewed edit.
+The apply boundary requires `decide: accept` at every tier. Auto-apply remains
+unavailable, even for Tier 0. Scheduling and attestation remain later slices.
 
 ## Evidence projection and identity audit
 

@@ -527,7 +527,7 @@ async fn policy_change_since_open_stales_the_decision() {
     let h = Hub::with(clean(), None);
     let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
     let opened = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
-    Connection::open(&h.hub).unwrap().execute_batch("INSERT INTO fleet_policy_revisions VALUES(2,'policy-digest-2'); UPDATE fleet_policy_meta SET current_revision=2;").unwrap();
+    Connection::open(&h.hub).unwrap().execute_batch("INSERT INTO fleet_policy_revisions(revision,digest) VALUES(2,'policy-digest-2'); UPDATE fleet_policy_meta SET current_revision=2;").unwrap();
     let before = card(&h, "fleet", "a").await;
     let r = decide(&h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
     assert_eq!(r.body["state"], "stale");
@@ -704,7 +704,7 @@ async fn changed_policy_requires_fresh_decision_bound_to_current_digest() {
         let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
         let opened = submit(&h, ADMIN_TOKEN, vec![evidence_op("fleet", "a", rev(&a))]).await;
         let request = json!({"action":"decide","proposal_id":opened.body["proposal_id"],"decision":decision,"base_epoch":h.epoch().await,"client_event_id":h.id()});
-        Connection::open(&h.hub).unwrap().execute_batch("INSERT INTO fleet_policy_revisions VALUES(2,'policy-digest-2'); UPDATE fleet_policy_meta SET current_revision=2;").unwrap();
+        Connection::open(&h.hub).unwrap().execute_batch("INSERT INTO fleet_policy_revisions(revision,digest) VALUES(2,'policy-digest-2'); UPDATE fleet_policy_meta SET current_revision=2;").unwrap();
         let before = card(&h, "fleet", "a").await;
         let first = h.call(ADMIN_TOKEN, request.clone()).await;
         assert_eq!(first.body["decision_policy_digest"], "policy-digest-2");
@@ -816,7 +816,7 @@ fn stored_proposal(h: &Hub, id: &Json) -> String {
 fn edit_policy(h: &Hub, revision: i64, digest: &str) {
     let db = Connection::open(&h.hub).unwrap();
     db.execute(
-        "INSERT INTO fleet_policy_revisions VALUES(?1,?2)",
+        "INSERT INTO fleet_policy_revisions(revision,digest) VALUES(?1,?2)",
         rusqlite::params![revision, digest],
     )
     .unwrap();
