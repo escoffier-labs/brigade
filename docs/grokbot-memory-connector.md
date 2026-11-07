@@ -33,8 +33,12 @@ and the source. The connector points those commands at a private copy of the
 token its listener pinned at startup (`hub.message_token_file`), not the host's
 node credential, so the principal's grants are the boundary. A token file or
 hub URL that changes after startup is refused with `hub_credential_changed`
-before any call leaves the host. Offline retrieval serves only a replica this
-principal pulled itself, never one another credential pulled.
+before any call leaves the host. Offline retrieval serves only a replica whose own
+recorded principal is this one, never one another credential pulled. That check
+trusts the principal recorded in the replica, the same trust boundary as `[hub]`
+and `read_scopes` in the workspace config. The profile therefore has no offline
+fallback until a `brigade memory hub pull` has been run in its workspace with its
+own credential.
 
 The profile never serves a local card in any mode. `memory_card` goes to the
 hub, and `memory_search` drops matches whose source is `local`. Set the

@@ -8,6 +8,7 @@ import os
 from pathlib import Path, PurePath
 import re
 import stat
+import time
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator
 from uuid import uuid4
@@ -24,6 +25,9 @@ from .state import utc_now
 
 CARD_CHUNK_CHARS = 30000
 HANDOFF_ID_WINDOW_MS = 600_000
+TOKEN_COPY_PREFIX = ".memory-token-"
+# Well over the 30 second child timeout, so a sweep during a call never removes a live copy.
+TOKEN_COPY_MAX_AGE_SECONDS = 300
 # The hub's handoff refusals worth showing the caller. Anything else comes back as plain `refused`.
 HANDOFF_REFUSAL_CODES = frozenset(
     {
@@ -74,11 +78,33 @@ class MemoryTools:
         except FleetClientError:
             raise DotError("hub_credential_invalid") from None
 
+    def sweep_token_copies(self, older_than: float) -> None:
+        """Unlink leftover pinned-token copies in the state directory that are at least `older_than` seconds old.
+
+        A copy outlives a crash that skipped its `finally`, and a rotated token would then sit in the
+        directory indefinitely. Startup passes 0, since nothing is in flight. A call passes a margin well
+        over the child timeout, so a copy another thread is using is never removed.
+        """
+        state_fd = private_directory(self.runtime.paths.state_dir, create=True)
+        try:
+            now = time.time()
+            for entry in os.scandir(state_fd):
+                if not entry.name.startswith(TOKEN_COPY_PREFIX):
+                    continue
+                try:
+                    if now - os.stat(entry.name, dir_fd=state_fd, follow_symlinks=False).st_mtime >= older_than:
+                        os.unlink(entry.name, dir_fd=state_fd)
+                except OSError:
+                    continue
+        finally:
+            os.close(state_fd)
+
     @contextmanager
     def _pinned_token_file(self, authority: MessageAuthority) -> Iterator[str]:
         """A private copy of the pinned token, so a child reads exactly the authority that was just checked."""
+        self.sweep_token_copies(TOKEN_COPY_MAX_AGE_SECONDS)
         state_fd = private_directory(self.runtime.paths.state_dir, create=True)
-        name = f".memory-token-{uuid4().hex}"
+        name = f"{TOKEN_COPY_PREFIX}{uuid4().hex}"
         try:
             descriptor = os.open(
                 name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=state_fd
@@ -114,17 +140,20 @@ class MemoryTools:
         if mode == "off":
             return None, "hub_memory_required"
         authority = self._principal_authority()
-        with self._pinned_token_file(authority) as token_file:
-            environment = child_environment(
-                self._path,
-                {
-                    ENV_HUB_URL: authority.hub,
-                    ENV_HUB_TOKEN_FILE: token_file,
-                    # Offline retrieval serves only a replica this principal pulled itself.
-                    ENV_REPLICA_PRINCIPAL: self.runtime.hub.principal,
-                },
-            )
-            return self._parsed(self.commands.run(argv, timeout=timeout, max_output=max_output, env=environment))
+        try:
+            with self._pinned_token_file(authority) as token_file:
+                environment = child_environment(
+                    self._path,
+                    {
+                        ENV_HUB_URL: authority.hub,
+                        ENV_HUB_TOKEN_FILE: token_file,
+                        # Offline retrieval serves only a replica this principal pulled itself.
+                        ENV_REPLICA_PRINCIPAL: self.runtime.hub.principal,
+                    },
+                )
+                return self._parsed(self.commands.run(argv, timeout=timeout, max_output=max_output, env=environment))
+        except OSError:
+            return None, "memory_unavailable"
 
     @staticmethod
     def _parsed(result: Any) -> tuple[Any, str | None]:
@@ -217,6 +246,9 @@ class MemoryTools:
             if self.profile.prompt_load_scan:
                 # Hub JSON passes through the search CLI, so only known keys and values leave.
                 retrieval = _known_retrieval(value["retrieval"])
+                if self.profile.principal_memory and "fallback" in retrieval:
+                    # Local cards are never served here, so an answer must not say they stood in.
+                    retrieval["fallback"] = [source for source in retrieval["fallback"] if source != "local"]
                 payload["retrieval"] = retrieval
                 code = _warning_code(value.get("warning"), retrieval)
                 if code:
@@ -386,9 +418,10 @@ class MemoryTools:
     def _lint_handoff(self, encoded: bytes) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """`brigade handoff lint` over a private copy: `(entry, None)` when valid, else `(None, refusal)`."""
         lint_name = f"handoff-lint-{uuid4().hex}.md"
-        state_fd = private_directory(self.runtime.paths.state_dir, create=True)
+        state_fd = None
         lint_written = False
         try:
+            state_fd = private_directory(self.runtime.paths.state_dir, create=True)
             descriptor = os.open(
                 lint_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=state_fd
             )
@@ -412,12 +445,13 @@ class MemoryTools:
         except OSError:
             return None, {"error": "handoff_unavailable"}
         finally:
-            if lint_written:
-                try:
-                    os.unlink(lint_name, dir_fd=state_fd)
-                except OSError:
-                    pass
-            os.close(state_fd)
+            if state_fd is not None:
+                if lint_written:
+                    try:
+                        os.unlink(lint_name, dir_fd=state_fd)
+                    except OSError:
+                        pass
+                os.close(state_fd)
         report = parse_json_bytes(result.stdout) if not (result.timed_out or result.overflow) else None
         entries = report.get("results") if isinstance(report, dict) else None
         if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):

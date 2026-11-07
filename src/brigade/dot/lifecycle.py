@@ -369,6 +369,9 @@ def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -
             tools.state.prune_call_log()
         except c.DotError:
             pass
+        if tools.profile.principal_memory:
+            # A crash can leave a pinned-token copy behind. No call is in flight yet, so every copy is stale.
+            tools.memory.sweep_token_copies(0)
         tools.state.hub_set("inbox_backend", "hub")
         fleet = tools.fleet
         service = EventService(
@@ -487,14 +490,19 @@ def doctor(target: Path, *, pack_id: str = c.PACK_ID) -> list[dict[str, str]]:
             checks.append({"check": "hub-identity", "status": "fail", "reason": error.code})
         else:
             checks.append({"check": "hub-identity", "status": "ok"})
-        record("isolation", lambda: _isolated_from_dot(target, runtime))
+        try:
+            isolated = _isolated_from_dot(target, runtime)
+        except c.DotError as error:
+            checks.append({"check": "isolation", "status": "fail", "reason": error.reason or error.code})
+        else:
+            checks.append({"check": "isolation", "status": "ok" if isolated else "fail"})
         if profile.principal_memory:
             from brigade.memory_hub_client import hub_mode
 
             # The profile serves hub memory only: hub memory must be on, and a workspace holding local
             # cards is a misconfiguration, because those cards would sit beside the principal's grants.
             record("hub-memory", lambda: hub_mode(runtime.paths.workspace) != "off")
-            record("local-cards", lambda: not any((runtime.paths.workspace / "memory" / "cards").glob("*.md")))
+            record("local-cards", lambda: not any((runtime.paths.workspace / "memory" / "cards").rglob("*.md")))
     record("endpoint", lambda: _probe(_base(config) + "/mcp", method="POST")[0] == 401)
     return checks
 
@@ -506,7 +514,11 @@ def _isolated_from_dot(target: Path, runtime: Runtime) -> bool:
             continue
         if not grokbot_packs.instance_config_path(target, other.pack_id).exists():
             continue
-        _, other_runtime = _load_config(target, profile=other)
+        try:
+            _, other_runtime = _load_config(target, profile=other)
+        except (c.DotError, grokbot_packs.PackError, OSError, ValueError):
+            # An unreadable neighbour cannot be shown to be isolated. Name it, so its fault is not read as this pack's.
+            raise c.DotError("not_isolated_from_dot", reason=f"cannot load the {other.pack_id} instance") from None
         if (
             runtime.hub.principal == other_runtime.hub.principal
             or _same_location(runtime.hub.message_token_file, other_runtime.hub.message_token_file)

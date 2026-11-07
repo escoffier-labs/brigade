@@ -464,7 +464,7 @@ def _hub_card_reply(card_id="fleet-card", text="Ship on Tuesdays.", source="hub"
     return json.dumps({"ok": True, "source": source, "card": card}).encode()
 
 
-class PrincipalReads(PinnedAuthority):
+class ReadHelpers(PinnedAuthority):
     def hub_on(self, mode="read"):
         config_path = self.workspace / CONFIG_REL
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -479,6 +479,8 @@ class PrincipalReads(PinnedAuthority):
         base = dict(card_id=card_id, title="Release notes", path=f"cards/{card_id}.md", score=1, source=source)
         return {**base, "summary": "", "tags": ["release"], "card_aliases": [], "scope": "fleet", **fields}
 
+
+class PrincipalReads(ReadHelpers):
     @requires_local_state
     def test_hub_reads_run_under_the_pinned_principal_token_and_replica_pin(self):
         from brigade.memory_hub_client import ENV_HUB_TOKEN_FILE, ENV_HUB_URL, ENV_REPLICA_PRINCIPAL
@@ -602,6 +604,87 @@ class PrincipalReads(PinnedAuthority):
             assert "local text" in card["content"]
 
 
+class TokenCopies(ReadHelpers):
+    def copies(self):
+        return sorted(p.name for p in self.private.glob(".memory-token-*"))
+
+    @requires_local_state
+    def test_a_call_removes_its_copy_and_a_crash_leftover_is_swept_on_start(self):
+        import os
+        import time
+
+        self.hub_on()
+        self.reply()
+        memory = self.pinned()
+        stale = self.private / ".memory-token-crashed"
+        stale.write_text("an old token")
+        stale.chmod(0o600)
+        os.utime(stale, (time.time() - 3600, time.time() - 3600))
+        young = self.private / ".memory-token-inflight"
+        young.write_text("another call's token")
+        young.chmod(0o600)
+        memory.memory_search("fleet")
+        # The call's own copy is gone, the old leftover was swept, and a fresh file another call may use stays.
+        assert self.copies() == [".memory-token-inflight"]
+        # Startup sweeps everything: no call is in flight yet.
+        memory.sweep_token_copies(0)
+        assert self.copies() == []
+        (self.private / "unrelated.txt").write_text("keep")
+        memory.sweep_token_copies(0)
+        assert (self.private / "unrelated.txt").exists()
+
+
+class StateDirFailures(ReadHelpers):
+    @pytest.fixture(autouse=True)
+    def failing_state_dir(self, monkeypatch, isolated):
+        self.runner.handler = lambda argv, stdin: CommandResult(0, LINT_OK)
+
+        def broken(*args, **kwargs):
+            raise OSError("state directory unavailable")
+
+        monkeypatch.setattr("brigade.dot.memory_tools.private_directory", broken)
+
+    @requires_local_state
+    def test_the_hub_handoff_path_maps_a_state_dir_oserror_like_the_file_path(self):
+        assert self.pinned().handoff_write("bridge-probe", HANDOFF) == {"error": "handoff_unavailable"}
+
+    @requires_local_state
+    def test_the_read_path_maps_a_state_dir_oserror_to_memory_unavailable(self):
+        self.hub_on()
+        memory = self.pinned()
+        assert memory.memory_search("fleet") == {"error": "memory_unavailable"}
+        assert memory.memory_card("fleet-card") == {"error": "card_not_found", "name": "fleet-card"}
+        assert self.runner.calls == []
+
+
+class OfflineAnswers(ReadHelpers):
+    @requires_local_state
+    def test_the_fallback_never_lists_local_and_the_warning_names_the_hub(self):
+        self.hub_on()
+        retrieval = {"hub": "refused", "degraded": True, "reason": "memory_grant_missing", "fallback": ["local"]}
+        body = {"match_count": 0, "matches": [], "retrieval": retrieval, "warning": "answered from local cards only"}
+        self.runner.handler = lambda argv, stdin: CommandResult(0, json.dumps(body).encode())
+        found = self.pinned().memory_search("fleet")
+        assert found["matches"] == [] and found["warning"] == "hub_search_refused"
+        assert found["retrieval"]["fallback"] == []
+        body["retrieval"] = {**retrieval, "hub": "unavailable", "fallback": ["local", "replica"]}
+        found = self.pinned().memory_search("fleet")
+        assert found["retrieval"]["fallback"] == ["replica"] and found["warning"] == "hub_search_unavailable"
+        assert "local" not in json.dumps(found["retrieval"])
+
+    @requires_local_state
+    def test_dot_and_duet_keep_reporting_a_local_fallback(self):
+        from brigade.dot.profile import DOT, DUET
+
+        self.hub_on()
+        retrieval = {"hub": "unavailable", "degraded": True, "fallback": ["local"]}
+        body = {"match_count": 0, "matches": [], "retrieval": retrieval, "warning": "x"}
+        self.runner.handler = lambda argv, stdin: CommandResult(0, json.dumps(body).encode())
+        for profile in (DOT, DUET):
+            found = MemoryTools(self.runtime, commands=self.runner, profile=profile).memory_search("fleet")
+            assert found["retrieval"]["fallback"] == ["local"]
+
+
 # Listener isolation across the Dot family
 
 
@@ -695,8 +778,27 @@ def test_doctor_fails_a_memory_workspace_with_local_cards_or_hub_off(authenticat
     (workspace / "memory" / "cards" / "leak.md").write_text("a local card\n")
     assert checks()["local-cards"] == "fail"
     (workspace / "memory" / "cards" / "leak.md").unlink()
+    (workspace / "memory" / "cards" / "nested").mkdir()
+    (workspace / "memory" / "cards" / "nested" / "deep.md").write_text("a nested local card\n")
+    assert checks()["local-cards"] == "fail"
+    (workspace / "memory" / "cards" / "nested" / "deep.md").unlink()
     config_path.write_text('[hub]\nmode = "off"\n')
     assert checks()["hub-memory"] == "fail"
+
+
+@requires_local_state
+def test_listener_start_sweeps_leftover_token_copies(authenticated_memory, monkeypatch):  # noqa: F811
+    monkeypatch.setitem(__import__("sys").modules, "uvicorn", SimpleNamespace(run=lambda *a, **kw: None))
+    monkeypatch.setattr(m.access_auth, "_jwt", lambda: None)
+    target, runtime = authenticated_memory
+    cfg, tools, runtime = m.build_listener_from_target(target, pack_id="grokbot-memory")
+    leftovers = [runtime.paths.state_dir / f".memory-token-{name}" for name in ("one", "two")]
+    for leftover in leftovers:
+        leftover.write_text("a token copy a crash left behind")
+        leftover.chmod(0o600)
+    with patch.object(m, "build_app", return_value="app"):
+        m.run_listener(cfg, tools, runtime)
+    assert not any(leftover.exists() for leftover in leftovers)
 
 
 def test_serve_never_falls_through_to_another_pack(monkeypatch, tmp_path):

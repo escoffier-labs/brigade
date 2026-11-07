@@ -31,9 +31,11 @@ ERROR_MESSAGES = {
 
 
 class DotError(Exception):
-    def __init__(self, code: str, hub_code: str | None = None):
-        super().__init__(code)
+    def __init__(self, code: str, hub_code: str | None = None, *, reason: str | None = None):
+        super().__init__(code if reason is None else f"{code}: {reason}")
         self.code = code
+        # Why, for an operator reading doctor output or a log. It never reaches a tool result.
+        self.reason = reason
         # The hub's own v1 protocol code, kept beside the connector's name for it.
         self.hub_code = hub_code
 
