@@ -475,6 +475,90 @@ Use this when importing a vault into a collection the workspace also reads: excl
 
 `--dry-run` plans writes and deletions without changing the destination. Text and `--json` reports include `excluded_scopes` (the text label is `excluded scopes`) and the skipped card count under `excluded-scope`. Excluded cards are counted once under that reason, even if also retired or withheld.
 
+
+## Reviewed proposals on hub memory
+
+The Rust hub accepts `propose`, `decide` and `rollback` on `POST /memory`.
+These actions are separate from the Python client's existing
+`memory hub proposals list` and `drop`, which manage local conflict proposals.
+S19a adds no Python submission or decision subcommands.
+
+Every request carries a fresh time-ordered `client_event_id`. Repeating the
+same request under the same principal returns its committed response. Reusing
+an id for different bytes is refused. Expired ids are refused before replay.
+Authorization is checked again before a stored diff is returned.
+
+| Action | Request fields in addition to `action` and `client_event_id` | Target-scope grant |
+|---|---|---|
+| `propose` | `base_epoch`, `ops` | `read` and `reflect` on every addressed card, including `other_card` |
+| `decide` | `proposal_id`, `base_epoch`, `decision` (`accept` or `reject`) | `read` and `review` on every addressed card |
+| `rollback` | `proposal_id` of an applied proposal, `base_epoch` | `read` and `review` on every addressed card |
+
+The admin token holds these grants. A right on another scope does not open a
+proposal's targets. Collections need grants naming the exact `collection:`
+scope. Neither `*` nor `repo:*` matches collections. There is no standalone
+apply action and no automatic decision or apply path. Reflect and review
+rights do not imply read access. Missing read access returns the same
+`403 memory_grant_missing` before validation or a stored diff can expose card
+existence, revisions or content.
+
+A principal cannot accept its own proposal: `decide accept` returns
+`403 memory_self_review`. The admin token is exempt. A compensation belongs
+to its rollback requester, so that principal also needs another reviewer to
+accept it. Rejecting one's own proposal is permitted.
+
+An op names `type`, `scope`, `card_id`, `base_revision`, `block_id` and
+`expected_block_hash`. The block id uses the existing `c-abcdef` claim-anchor
+form. Its hash is the SHA-256 of the exact block bytes, including the anchor
+suffix and excluding the final newline. The proposal pins both bytes and
+hash. A missing, duplicate, opaque or changed anchor is refused. Unsupported
+Markdown stays opaque, including code, tables and quoted blocks. Cards
+containing HTML stay opaque as a whole.
+Only card identities are accepted, never file paths, skills or policy targets.
+
+Supported typed ops are `replace_block` and `add_previously` with `text`,
+`remove_block`, `append_evidence` with `evidence_ids`, and `supersede_card` or
+`merge_exact_duplicates` with `other_card`. The latter is an object naming
+`scope`, `card_id` and `base_revision`. Metadata edits require simple scalar
+fields or JSON string lists and refuse ambiguous or multiline fields,
+including YAML block scalars even when a blank line precedes their continuation. Evidence
+ids must be namespaced. They remain unverified citations and never increment
+proof counts or authorize auto-apply. Attestation arrives in S19e. Duplicate
+merges compare the body bytes exactly after stripping addressable anchors,
+retire the other card and retain its content in revision history. Whitespace in
+opaque blocks, including Python code indentation, is preserved in comparison.
+
+A submission contains 1 to 64 ops over at most eight cards. The hub computes a
+unified diff against the base bytes, with `/@state` hunks for retirement or
+revival, and scans op text and resulting card text
+with the same current rules as `put`. Any invalid op refuses the whole request
+with `422 memory_proposal_invalid`, a top-level `reason` and indexed `ops`
+validation results. A malformed, empty or oversized ops packet has an empty
+`ops` result list. Nothing is stored. A valid submission returns `201` with `proposal_id`, `state: pending`,
+`diff`, `tier` and `log_epoch`. S19a conservatively holds every proposal at
+Tier 2 until S19b supplies classification.
+
+An accepted decision checks all revisions and exact pins before changing any
+head. A stale base or changed policy produces `state: stale`. A blocked,
+flagged or input-specific failed scan produces `state: held`, records its reason
+and changes no card. A later explicit decision can retry a held proposal.
+Held proposals include the scan rule ids in `rules` in their body, reply and event metadata. A successful retry clears them.
+On `proposal.decide` events, `decision` is the requested decision. Use `state` for the outcome. An unavailable scanner refuses the trust raise with
+`503 memory_scan_unavailable`. A clean or private result can become `reviewed`
+only through this explicit decision. All card revisions, proposal state,
+events and idempotency commit together. A failure changes no card. Rejection
+changes only proposal state. Private versions retain the existing connector
+egress restrictions.
+
+Rollback creates a new compensating proposal and changes no card immediately.
+It restores the previous content, state and trust only after its own accepted
+`decide`. Its bases are the original apply's revisions. An intervening edit
+before rollback or before its decision leaves the compensation `stale` and
+changes no card. Compensation writes new revisions rather than rewinding the
+append-only log. Memory schema v4 adds `memory_proposals` and preserves v3
+cards, revisions, `log_epoch` and sequence continuity during migration.
+The new table's `decided_by` column records the deciding principal.
+
 ## Evidence projection and identity audit
 
 ```bash

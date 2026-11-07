@@ -7,7 +7,7 @@
 //!
 //! Writes and prompt loads use the versioned guard scanner (S18).
 //! Embedding and dense retrieval use the S18 scan gate (S15).
-//! Proposals and decisions follow in S19a.
+//! Reviewed proposals, atomic decisions and rollback use [`proposals`] (S19a).
 pub mod auth;
 pub mod dense;
 pub mod embedder;
@@ -17,6 +17,9 @@ mod embedding_tests;
 pub mod ids;
 pub mod index;
 pub mod ops;
+mod proposal_blocks;
+mod proposal_metadata;
+pub mod proposals;
 mod pytables;
 pub mod scan;
 pub mod schema;
@@ -34,6 +37,10 @@ mod lexical_tests;
 mod powercut;
 #[cfg(test)]
 mod private_tests;
+#[cfg(test)]
+mod proposal_review_tests;
+#[cfg(test)]
+mod proposal_tests;
 #[cfg(test)]
 mod tests;
 
@@ -76,7 +83,7 @@ const DENSE_NOT_LOADED: &str = "dense-not-loaded";
 const IDLE_MIN: Duration = Duration::from_secs(1);
 const IDLE_MAX: Duration = Duration::from_secs(30);
 /// Actions in the route table that later slices build.
-const LATER: &[&str] = &["propose", "decide", "rollback", "preflight"];
+const LATER: &[&str] = &["preflight"];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reply {
@@ -746,6 +753,9 @@ impl Store {
             "reindex" | "embed_lease" | "embed_submit" | "embed_failed" => {
                 self.embedding_request(credential, action, &raw).await
             }
+            "propose" | "decide" | "rollback" => {
+                self.proposal_request(credential, action, map, &raw).await
+            }
             "put" | "import" | "retire" | "handoff" | "capture" | "grant" => {
                 match self.prepare(credential, action, map, &raw) {
                     Ok(prepared) => self.write(prepared).await,
@@ -760,6 +770,36 @@ impl Store {
             _ => invalid("unknown memory action"),
         }
     }
+    async fn proposal_request(
+        &self,
+        credential: &Credential,
+        action: &str,
+        map: &Map<String, Json>,
+        raw: &Json,
+    ) -> Reply {
+        let mut prepared = match self.prepare(credential, action, map, raw) {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
+        let scanner = self.scanner.clone();
+        let who = credential.clone();
+        let request = raw.clone();
+        let command = self
+            .readers
+            .submit(move |db| proposals::prepare(&Conn(db), &who, request, scanner.as_ref()))
+            .await;
+        match command {
+            Ok(command) => prepared.action = Action::Proposal(command),
+            Err(_) => {
+                return error(
+                    503,
+                    "memory_action_unavailable",
+                    "proposal preparation unavailable",
+                );
+            }
+        }
+        self.write(prepared).await
+    }
     async fn write(&self, prepared: Prepared) -> Reply {
         // A lease changes no coverage unless it parks text (the reply says so),
         // and the scheduler sends one per tick.
@@ -770,7 +810,7 @@ impl Store {
                 ..
             }
         );
-        let queued = matches!(prepared.action, Action::Put { .. });
+        let queued = matches!(prepared.action, Action::Put { .. } | Action::Proposal(_));
         match self
             .writer
             .submit(prepared, Instant::now() + COMMAND_DEADLINE)
@@ -803,6 +843,15 @@ impl Store {
         raw: &Json,
     ) -> Result<Prepared, Reply> {
         let allowed: &[&str] = match action {
+            "propose" => &["action", "base_epoch", "ops", "client_event_id"],
+            "decide" => &[
+                "action",
+                "proposal_id",
+                "base_epoch",
+                "decision",
+                "client_event_id",
+            ],
+            "rollback" => &["action", "proposal_id", "base_epoch", "client_event_id"],
             "put" | "import" => &[
                 "action",
                 "scope",
@@ -919,6 +968,27 @@ impl Store {
             }
         };
         let action = match action {
+            "propose" | "decide" | "rollback" => {
+                if action != "propose"
+                    && str_field("proposal_id")
+                        .and_then(ids::parse_event_id)
+                        .is_none()
+                {
+                    return Err(invalid("proposal_id must be a time-ordered id"));
+                }
+                if action == "decide" && !matches!(str_field("decision"), Some("accept" | "reject"))
+                {
+                    return Err(error(
+                        422,
+                        "memory_auto_apply_disabled",
+                        "a reviewer must explicitly accept or reject the proposal",
+                    ));
+                }
+                Action::Proposal(proposals::Command {
+                    request: raw.clone(),
+                    draft: Err(invalid("proposal not prepared")),
+                })
+            }
             "put" | "import" => {
                 let (scope, card_id) = card()?;
                 let base = base()?;

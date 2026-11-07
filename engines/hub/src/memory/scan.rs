@@ -3,7 +3,8 @@
 pub enum Scan {
     /// No engine or rule set. Never treated as clean.
     Unavailable,
-    /// Input-specific engine failure. Refuse writes, never store pending.
+    /// Input-specific engine failure. Refuse content writes, never store pending.
+    /// A proposal decision records `held` and leaves every card unchanged.
     Failed,
     Clean {
         ruleset: String,
