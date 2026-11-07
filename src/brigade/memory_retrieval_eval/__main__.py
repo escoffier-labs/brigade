@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from .harness import DEFAULT_FIXTURE_ROOT, run_eval
-from brigade.memory_hub_client import HubRefusal, HubUnavailable
+from brigade.memory_hub_client import HubRefusal, HubUnavailable, event_id
 
 from .hub import HubOptions, stable_digest
 from .gates import evaluate_gate
@@ -67,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.gate:
             report["gate"] = evaluate_gate(report, args.gate)
+            report["evaluation_id"] = event_id()
         if args.aggregate_only:
             for block in report["adapters"].values():
                 block.pop("queries", None)

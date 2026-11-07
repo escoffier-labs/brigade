@@ -107,7 +107,7 @@ async fn contrary_and_negative_records_in_other_workspaces_hold_the_card() {
             201
         );
         let before = bytes_snapshot(&h);
-        let r = apply_with_eval(&h, auto_request(&h, &id).await, true).await;
+        let r = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
         assert_eq!(r.body["state"], "pending");
         assert!(
             r.body["preflight"]["checks"]
@@ -117,11 +117,10 @@ async fn contrary_and_negative_records_in_other_workspaces_hold_the_card() {
                 .any(|c| c["code"] == "contrary_evidence")
         );
         assert_eq!(bytes_snapshot(&h), before);
+        super::retrieval_eval_tests::record_current(&h).await;
         assert_eq!(h.call(ADMIN_TOKEN,json!({"action":"evidence.purge","evidence_id":"agent:dot/workspace-b/late","client_event_id":h.id()})).await.status,200);
         assert_eq!(
-            apply_with_eval(&h, auto_request(&h, &id).await, true)
-                .await
-                .body["state"],
+            h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await.body["state"],
             "applied"
         );
     }
@@ -199,6 +198,36 @@ async fn principal_cap_spans_workspaces_and_admin_purge_frees_capacity() {
     let (tombstone,bytes):(i64,Vec<u8>)=db.query_row("SELECT tombstoned,artifact_bytes FROM memory_evidence WHERE evidence_id='hub:admin/workspace-a/r0'",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
     assert_eq!(tombstone, 1);
     assert!(bytes.is_empty());
+    let columns: Vec<(String, String)> = db
+        .prepare("PRAGMA table_info(memory_evidence)")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    for (column, kind) in columns {
+        let sql = match column.as_str() {
+            "tombstoned" => "UPDATE memory_evidence SET tombstoned=0 WHERE tombstoned=1".into(),
+            "artifact_bytes" => {
+                "UPDATE memory_evidence SET artifact_bytes=x'61' WHERE tombstoned=1".into()
+            }
+            _ => {
+                let value = if kind == "INTEGER" {
+                    format!("COALESCE({column},0)+1")
+                } else {
+                    format!("COALESCE({column},'')||'_changed'")
+                };
+                format!(
+                    "UPDATE memory_evidence SET tombstoned=1,artifact_bytes=x'',{column}={value} WHERE tombstoned=0"
+                )
+            }
+        };
+        let error = db.execute(&sql, []).unwrap_err().to_string();
+        assert!(
+            error.contains("memory_evidence is immutable"),
+            "{column}: {error}"
+        );
+    }
     assert!(db.execute("DELETE FROM memory_evidence", []).is_err());
     let n: i64 = db
         .query_row(
@@ -404,6 +433,8 @@ fn version_five_upgrade_preserves_rows_epoch_sequence_and_immutability() {
     db.execute_batch("INSERT INTO memory_meta VALUES('log_epoch','legacy-epoch'); INSERT INTO memory_events(event_id,client_event_id,kind,principal,payload,created_at) VALUES('legacy-event','legacy-client','recall.capture','legacy','{}','created'); UPDATE sqlite_sequence SET seq=500 WHERE name='memory_events';").unwrap();
     db.execute("INSERT INTO memory_evidence VALUES('legacy/workspace-a/one','fleet','a','workspace-a','legacy','credential','node','verification',?1,?2,0,'support','clean',0)",rusqlite::params![ids::sha256_hex(b"legacy"),b"legacy".as_slice()]).unwrap();
     db.pragma_update(None, "application_id", schema::APPLICATION_ID)
+        .unwrap();
+    db.execute_batch("DROP TABLE memory_retrieval_evals")
         .unwrap();
     db.pragma_update(None, "user_version", 5).unwrap();
     schema::migrate(&db, 0).unwrap();

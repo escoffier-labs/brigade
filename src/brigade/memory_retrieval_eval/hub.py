@@ -68,6 +68,10 @@ class HubAdapter:
         binding = {key: reply[key] for key in fields}
         if "policy_revision" not in reply or "policy_digest" not in reply:
             raise ValueError("hub eval response lacks policy binding")
+        if not reply.get("log_epoch"):
+            raise ValueError("hub eval response lacks log epoch binding")
+        binding["log_epoch"] = reply["log_epoch"]
+        binding["scope"] = self.options.scope
         binding["policy_revision"] = reply["policy_revision"]
         binding["policy_digest"] = reply["policy_digest"]
         identity = reply.get("corpus_identity", {}).get(self.options.scope)
@@ -191,3 +195,14 @@ def hub_client(options: HubOptions, cards: Sequence[CardDoc]) -> Iterator[Memory
             yield client
         finally:
             hc.stop_hub(hub)
+
+
+def record_report(client: MemoryHubClient, report: dict[str, Any]) -> dict[str, Any]:
+    """Submit the S17 digest preimage as exact bytes, using an explicit admin client."""
+    payload = {key: value for key, value in report.items() if key != "digest"}
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    if hashlib.sha256(raw.encode()).hexdigest() != report.get("digest"):
+        raise ValueError("retrieval report stable digest mismatch")
+    return client.call(
+        "retrieval_eval.record", report_json=raw, report_sha256=report["digest"], client_event_id=event_id()
+    )

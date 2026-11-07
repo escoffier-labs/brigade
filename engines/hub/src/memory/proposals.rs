@@ -682,7 +682,7 @@ fn apply_cards(
     let id = string(body, "proposal_id").to_string();
     let rollback = !body["rollback_of"].is_null();
     let digest = body["policy_digest"].as_str().map(String::from);
-    let body_audit = json!({"checks":body["preflight"]["checks"],"policy_digest":body["policy_digest"],"attesting_credentials":body["preflight"]["attesting_credentials"]});
+    let body_audit = json!({"checks":body["preflight"]["checks"],"retrieval_eval_record":body["preflight"]["retrieval_eval_record"],"policy_digest":body["policy_digest"],"attesting_credentials":body["preflight"]["attesting_credentials"]});
     for (card, scan) in body["cards"].as_array_mut().unwrap().iter_mut().zip(scans) {
         let scope = string(card, "scope");
         let card_id = string(card, "card_id");
@@ -881,6 +881,11 @@ pub fn run(
             body["decision_policy_digest"] = json!(authority.policy.as_ref().map(|a| &a.1));
             update(tx, &body, p)?;
             event(tx, p, "proposal.decide", &body)?;
+        }
+        // An unsuccessful attempt never writes a proposal transition. Report
+        // the persisted pending state even if a late check changed the local body.
+        if body["state"] != "applied" {
+            body["state"] = json!("pending");
         }
         let mut response = reply(&body, 200);
         redact_auto_reply(tx, &p.credential, &body, &mut response.body)?;

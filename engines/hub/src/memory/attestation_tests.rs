@@ -9,8 +9,11 @@ pub(super) fn policy(h: &Hub) {
     Connection::open(&h.hub)
         .unwrap()
         .execute(
-            "UPDATE fleet_policy_revisions SET document=?1",
-            [json!({"memory":memory}).to_string()],
+            "UPDATE fleet_policy_revisions SET document=?1,digest=?2",
+            [
+                json!({"memory":memory}).to_string(),
+                format!("sha256:{}", ids::sha256_hex(b"test policy")),
+            ],
         )
         .unwrap();
 }
@@ -130,46 +133,8 @@ pub(super) async fn ready() -> (Hub, Json) {
 pub(super) async fn auto_request(h: &Hub, id: &Json) -> Json {
     json!({"action":"auto_apply","proposal_id":id,"base_epoch":h.epoch().await,"client_event_id":h.id()})
 }
-// This seam is compiled only in the unit-test crate. Production always returns
-// retrieval_eval_unbound. There is no config, environment or wire bypass.
-pub(super) async fn apply_with_eval(h: &Hub, request: Json, bound: bool) -> Reply {
-    let store = h.store.as_ref().unwrap();
-    let who = store.authenticate(ADMIN_TOKEN).await.unwrap();
-    let mut p = store
-        .prepare(&who, "auto_apply", request.as_object().unwrap(), &request)
-        .unwrap();
-    let db = Connection::open(h.memory()).unwrap();
-    db.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let hub = Connection::open(&h.hub).unwrap();
-    hub.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let mut authority =
-        ops::Authority::with_credentials(&crate::writer::worker::Tx(&hub), &digest(ADMIN_TOKEN))
-            .unwrap();
-    authority.retrieval_eval_bound = bound;
-    p.action = ops::Action::Proposal(
-        proposals::prepare(
-            &crate::writer::worker::Tx(&db),
-            &who,
-            request,
-            clean().as_ref(),
-        )
-        .unwrap(),
-    );
-    let r = ops::apply(
-        &crate::writer::worker::Tx(&db),
-        &p,
-        &authority,
-        clean().as_ref(),
-        None,
-    )
-    .unwrap();
-    db.execute_batch(if r.status < 400 { "COMMIT" } else { "ROLLBACK" })
-        .unwrap();
-    hub.execute_batch("ROLLBACK").unwrap();
-    r
-}
 #[tokio::test]
-async fn retrieval_is_last_hold_and_bound_test_path_is_exactly_once_audited_and_reversible() {
+async fn retrieval_is_last_hold_and_recorded_path_is_exactly_once_audited_and_reversible() {
     let (h, id) = ready().await;
     let before = card(&h, "fleet", "a").await;
     let r = report(&h, &id).await;
@@ -185,13 +150,14 @@ async fn retrieval_is_last_hold_and_bound_test_path_is_exactly_once_audited_and_
     assert_eq!(r.body["state"], "pending");
     assert_eq!(before, card(&h, "fleet", "a").await);
     let request = auto_request(&h, &id).await;
-    let applied = apply_with_eval(&h, request.clone(), true).await;
+    super::retrieval_eval_tests::record_current(&h).await;
+    let applied = h.call(ADMIN_TOKEN, request.clone()).await;
     assert_eq!(applied.body["state"], "applied");
     let after = card(&h, "fleet", "a").await;
     assert_eq!(after["trust"], before["trust"]);
-    assert_eq!(apply_with_eval(&h, request, true).await, applied);
+    assert_eq!(h.call(ADMIN_TOKEN, request).await, applied);
     assert_eq!(
-        apply_with_eval(&h, auto_request(&h, &id).await, true)
+        h.call(ADMIN_TOKEN, auto_request(&h, &id).await)
             .await
             .status,
         409
@@ -206,7 +172,10 @@ async fn retrieval_is_last_hold_and_bound_test_path_is_exactly_once_audited_and_
             .len(),
         2
     );
-    assert_eq!(audit["gates"]["policy_digest"], "policy-digest-1");
+    assert_eq!(
+        audit["gates"]["policy_digest"],
+        format!("sha256:{}", ids::sha256_hex(b"test policy"))
+    );
     assert_eq!(audit["gates"]["checks"].as_array().unwrap().len(), 16);
     assert!(!payload.contains(OLD));
     let inverse=h.call(ADMIN_TOKEN,json!({"action":"rollback","proposal_id":id,"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
@@ -226,7 +195,7 @@ async fn kill_switch_is_admin_only_and_blocks_the_next_apply() {
     assert_eq!(h.call(AGENT_TOKEN, switch.clone()).await.status, 403);
     assert_eq!(h.call(ADMIN_TOKEN, switch).await.status, 200);
     let before = card(&h, "fleet", "a").await;
-    let r = apply_with_eval(&h, auto_request(&h, &id).await, true).await;
+    let r = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
     assert_eq!(r.body["state"], "pending");
     assert_eq!(before, card(&h, "fleet", "a").await);
     assert!(
@@ -255,7 +224,7 @@ pub(super) fn mutate_body(h: &Hub, id: &Json, change: impl FnOnce(&mut Json)) {
     )
     .unwrap();
 }
-fn change_policy(h: &Hub, key: &str, value: Json) {
+pub(super) fn change_policy(h: &Hub, key: &str, value: Json) {
     let db = Connection::open(&h.hub).unwrap();
     let text: String = db
         .query_row("SELECT document FROM fleet_policy_revisions", [], |r| {
@@ -325,6 +294,7 @@ async fn each_auto_apply_gate_independently_holds_without_card_or_vector_changes
         ("blast", "blast_cap_exceeded"),
     ] {
         let (h, mut id) = ready().await;
+        super::retrieval_eval_tests::record_current(&h).await;
         let db = Connection::open(h.memory()).unwrap();
         match mutation {
             "policy_off" => change_policy(&h, "auto_apply", json!(false)),
@@ -441,7 +411,7 @@ async fn each_auto_apply_gate_independently_holds_without_card_or_vector_changes
             _ => unreachable!(),
         }
         let before = bytes_snapshot(&h);
-        let r = apply_with_eval(&h, auto_request(&h, &id).await, true).await;
+        let r = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
         assert_eq!(r.body["state"], "pending", "{mutation}");
         if mutation == "tier1" {
             assert_eq!(r.body["tier"], 1);
@@ -467,7 +437,8 @@ async fn imported_trust_is_preserved_and_rollback_pins_the_actual_applied_trust(
     mutate_body(&h, &id, |b| {
         b["cards"][0]["before_trust"] = json!("imported")
     });
-    let r = apply_with_eval(&h, auto_request(&h, &id).await, true).await;
+    super::retrieval_eval_tests::record_current(&h).await;
+    let r = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
     assert_eq!(r.body["state"], "applied");
     assert_eq!(card(&h, "fleet", "a").await["trust"], "imported");
     let inverse=h.call(ADMIN_TOKEN,json!({"action":"rollback","proposal_id":id,"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
@@ -488,7 +459,7 @@ async fn late_contrary_evidence_is_rechecked_inside_apply_and_decide_recounts_re
         "observed_at":h.now(),"artifact_base64":STANDARD.encode(b"negative result"),"stance":"negative","client_event_id":h.id()});
     assert_eq!(h.call(AGENT_TOKEN, request).await.status, 201);
     let before = bytes_snapshot(&h);
-    let r = apply_with_eval(&h, auto_request(&h, &id).await, true).await;
+    let r = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
     assert!(
         r.body["preflight"]["checks"]
             .as_array()

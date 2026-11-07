@@ -18,6 +18,7 @@ def response(mode="lexical"):
     return {
         "matches": [{"card_id": "one", "score": 1}],
         "indexed_seq": 3,
+        "log_epoch": "fixture-epoch",
         "corpus_identity": {"fleet": {"live_count": 1, "digest": "fixture-corpus"}},
         "policy_revision": 1,
         "policy_digest": "fixture-policy",
@@ -45,6 +46,7 @@ def adapter(reply, mode="lexical", cards=(), **options):
 def test_binding_stable_and_rejects_index_or_config_change():
     for key, value in [
         ("indexed_seq", 4),
+        ("log_epoch", "other-epoch"),
         ("scorer_version", "new"),
         ("index_format", "2"),
         ("ranking", "raw"),
@@ -205,3 +207,102 @@ def test_eval_diagnostics_carry_lineage_budget_overflow():
     search = adapter(reply)
     search("words", 40)
     assert search.diagnostics == {"max_lineage_visited": 512, "lineage_overflows": 1, "uncollapsed_hits": 2}
+
+
+def test_record_report_preserves_s17_digest_bytes_and_refuses_tampering():
+    import hashlib
+    import json
+
+    from brigade.memory_retrieval_eval.hub import record_report
+
+    payload = {"gate": {"name": "R0", "passed": False}, "example": "\N{SNOWMAN}", "metric": 1e-7}
+    report = {**payload, "digest": stable_digest(payload)}
+    calls = []
+
+    def transport(url, token, body, timeout):
+        calls.append(body)
+        assert body["action"] == "retrieval_eval.record"
+        assert hashlib.sha256(body["report_json"].encode()).hexdigest() == report["digest"]
+        assert json.loads(body["report_json"]) == payload
+        assert "digest" not in json.loads(body["report_json"])
+        return 201, {"record_seq": 1}
+
+    client = MemoryHubClient("https://hub.example.test", "fake-token", transport=transport)
+    assert record_report(client, report) == {"record_seq": 1}
+    report["metric"] = 1
+    with pytest.raises(ValueError, match="digest mismatch"):
+        record_report(client, report)
+    assert len(calls) == 1
+
+
+def test_native_s17_report_records_without_reserializing_digest(tmp_path, monkeypatch):
+    import json
+    import os
+    import urllib.request
+    from contextlib import nullcontext
+
+    from brigade import fleet_policy
+    from brigade.memory_hub_client import event_id
+    from brigade.memory_retrieval_eval import DEFAULT_FIXTURE_ROOT, harness
+    from brigade.memory_retrieval_eval.corpus import load_cards
+    from brigade.memory_retrieval_eval.gates import evaluate_gate
+    from brigade.memory_retrieval_eval.hub import hub_client, record_report
+    from tests._home import set_home
+
+    binary = os.environ.get("BRIGADE_HUB_BINARY")
+    if not binary:
+        pytest.skip("native hub binary not selected")
+    set_home(monkeypatch, tmp_path / "home")
+    options = HubOptions(binary=Path(binary), raw=True)
+    with hub_client(options, load_cards(DEFAULT_FIXTURE_ROOT)) as client:
+        assert client is not None
+        request = urllib.request.Request(
+            client.hub_url + "/policy",
+            data=json.dumps(
+                {
+                    "action": "save",
+                    "document": {"schema": fleet_policy.POLICY_SCHEMA},
+                    "expected_version": 1,
+                    "reason": "retrieval eval fixture",
+                }
+            ).encode(),
+            headers={"Authorization": "Bearer " + client._token, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            assert response.status == 200
+        monkeypatch.setattr(harness, "hub_client", lambda *args: nullcontext(client))
+        report = run_eval(adapters=["bm25", "hub-lexical"], hub_options=options, aggregate_only=True)
+        report.pop("digest")
+        report["gate"] = evaluate_gate(report, "R0")
+        report["evaluation_id"] = event_id()
+        report["digest"] = stable_digest(report)
+        assert report["gate"]["passed"]
+        reply = record_report(client, report)
+        assert reply["passed"] is True
+        assert reply["report_sha256"] == report["digest"]
+
+
+def test_ranking_hash_survives_aggregate_only_reports():
+    full = run_eval(adapters=["bm25"])
+    compact = run_eval(adapters=["bm25"], aggregate_only=True)
+    expected = stable_digest([row["ranked_candidates"] for row in full["adapters"]["bm25"]["queries"]])
+    assert full["adapters"]["bm25"]["ranking_sha256"] == expected
+    assert compact["adapters"]["bm25"]["ranking_sha256"] == expected
+    assert "queries" not in compact["adapters"]["bm25"]
+
+
+def test_r0_compact_gate_requires_matching_ranking_hashes():
+    from brigade.memory_retrieval_eval.gates import evaluate_gate
+
+    report = {
+        "adapters": {
+            "bm25": {"available": True, "ranking_sha256": "a" * 64},
+            "hub-lexical": {"available": True, "ranking_sha256": "a" * 64, "binding": {"ranking": "raw"}},
+        }
+    }
+    assert evaluate_gate(report, "R0")["passed"]
+    report["adapters"]["hub-lexical"]["ranking_sha256"] = "b" * 64
+    assert not evaluate_gate(report, "R0")["passed"]
+    for block in report["adapters"].values():
+        block.pop("ranking_sha256")
+    assert not evaluate_gate(report, "R0")["passed"]

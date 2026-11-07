@@ -2,7 +2,7 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 6;
+pub const USER_VERSION: i64 = 7;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
@@ -84,7 +84,7 @@ CREATE TABLE memory_events(
   client_event_id TEXT NOT NULL,
   kind TEXT NOT NULL CHECK(kind IN ('card.put','card.retire','card.trust','card.import',
     'evidence.attach','handoff.submit','proposal.open','proposal.decide','proposal.apply',
-    'proposal.rollback','grant.change','recall.capture','memory.auto_apply_switch','evidence.purge')),
+    'proposal.rollback','grant.change','recall.capture','memory.auto_apply_switch','evidence.purge','retrieval_eval.record')),
   principal TEXT NOT NULL,
   scope TEXT,
   card_id TEXT,
@@ -143,11 +143,12 @@ CREATE TABLE memory_idempotency(
   PRIMARY KEY(principal, client_event_id)
 ) WITHOUT ROWID;
 CREATE INDEX memory_idempotency_age ON memory_idempotency(created_ms);
-{}{}{}
+{}{}{}{}
 ",
         super::embedding::DDL,
         super::proposals::DDL,
-        super::attestation::DDL
+        super::attestation::DDL,
+        super::retrieval_eval::DDL
     )
 }
 
@@ -166,6 +167,7 @@ pub const TABLES: &[&str] = &[
     "memory_embed_jobs",
     "memory_proposals",
     "memory_evidence",
+    "memory_retrieval_evals",
 ];
 
 /// Create a fresh file's schema, or check an existing one. Never downgrades,
@@ -234,6 +236,9 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     if version < 6 {
         step(c, &review_schema(), 6).map_err(err)?;
     }
+    if version < 7 {
+        step(c, &eval_schema(), 7).map_err(err)?;
+    }
     for table in TABLES {
         let present: Option<i64> = c
             .query_row(
@@ -253,19 +258,30 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
 
 /// Extend the event CHECK without losing sequence high watermarks or triggers.
 fn review_schema() -> String {
+    format!(
+        "{} {}",
+        super::attestation::tombstone_migration(),
+        event_schema()
+    )
+}
+
+fn event_schema() -> String {
     let ddl = ddl();
     let block = &ddl[ddl.find("CREATE TABLE memory_events(").unwrap()
         ..ddl.find("CREATE TABLE memory_blobs(").unwrap()];
     let (table, rest) = block.split_once("CREATE INDEX memory_events_card").unwrap();
     format!(
-        "{} CREATE TEMP TABLE memory_events_high_water AS SELECT seq FROM sqlite_sequence WHERE name='memory_events'; {} INSERT INTO memory_events_v6 SELECT * FROM memory_events; DROP TABLE memory_events; ALTER TABLE memory_events_v6 RENAME TO memory_events; CREATE INDEX memory_events_card{} UPDATE sqlite_sequence SET seq=MAX(seq,COALESCE((SELECT seq FROM memory_events_high_water),0)) WHERE name='memory_events'; DROP TABLE memory_events_high_water;",
-        super::attestation::tombstone_migration(),
+        "CREATE TEMP TABLE memory_events_high_water AS SELECT seq FROM sqlite_sequence WHERE name='memory_events'; {} INSERT INTO memory_events_v6 SELECT * FROM memory_events; DROP TABLE memory_events; ALTER TABLE memory_events_v6 RENAME TO memory_events; CREATE INDEX memory_events_card{} UPDATE sqlite_sequence SET seq=MAX(seq,COALESCE((SELECT seq FROM memory_events_high_water),0)) WHERE name='memory_events'; DROP TABLE memory_events_high_water;",
         table.replace(
             "CREATE TABLE memory_events(",
             "CREATE TABLE memory_events_v6("
         ),
         rest
     )
+}
+
+fn eval_schema() -> String {
+    format!("{} {}", super::retrieval_eval::DDL, event_schema())
 }
 
 /// Apply one migration step unless another process already recorded it.

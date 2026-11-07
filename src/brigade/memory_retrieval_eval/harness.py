@@ -110,6 +110,7 @@ def _run_eval(
             "overall": aggregate_scores(per_query),
             "by_category": by_category,
             "queries": per_query,
+            "ranking_sha256": stable_digest([row["ranked_candidates"] for row in per_query]),
             **(
                 {"binding": search.binding, "diagnostics": dict(search.diagnostics)}
                 if isinstance(search, HubAdapter)

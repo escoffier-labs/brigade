@@ -424,6 +424,7 @@ pub fn run<T: ReadTx + ?Sized>(
         }),
     );
     if request.eval {
+        reply.body["log_epoch"] = json!(super::ops::epoch(tx)?);
         let mut corpus: std::collections::BTreeMap<String, Vec<(String, String)>> =
             std::collections::BTreeMap::new();
         for (scope, ok) in scopes.iter().zip(&allowed) {

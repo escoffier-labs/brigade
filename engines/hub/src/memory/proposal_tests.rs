@@ -245,7 +245,7 @@ async fn schema_v3_upgrades_without_changing_epoch_or_cards() {
     let old_max: i64 = db
         .query_row("SELECT max(seq) FROM memory_events", [], |r| r.get(0))
         .unwrap();
-    db.execute_batch("DROP TABLE IF EXISTS memory_proposals; DROP TABLE IF EXISTS memory_evidence; PRAGMA user_version=3;")
+    db.execute_batch("DROP TABLE IF EXISTS memory_retrieval_evals; DROP TABLE IF EXISTS memory_proposals; DROP TABLE IF EXISTS memory_evidence; PRAGMA user_version=3;")
         .unwrap();
     drop(db);
     h.open(clean(), None);

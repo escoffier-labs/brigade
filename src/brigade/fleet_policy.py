@@ -792,7 +792,14 @@ def parse_memory(raw: Any) -> dict[str, Any]:
     body = _mapping(raw, "memory")
     _reject_unknown(
         body,
-        ("auto_apply", "tier0_op_classes", "reflect_principals", "curation_owner", "evidence_freshness_seconds"),
+        (
+            "auto_apply",
+            "tier0_op_classes",
+            "reflect_principals",
+            "curation_owner",
+            "evidence_freshness_seconds",
+            "retrieval_eval",
+        ),
         "memory",
     )
     if "auto_apply" in body and type(body["auto_apply"]) is not bool:
@@ -809,6 +816,15 @@ def parse_memory(raw: Any) -> dict[str, Any]:
         if type(window) is not int or not 1 <= window <= 31536000:
             raise FleetPolicyError("fleet policy memory.evidence_freshness_seconds must be 1 through 31536000")
         parsed["evidence_freshness_seconds"] = window
+    if "retrieval_eval" in body:
+        evaluation = _mapping(body["retrieval_eval"], "memory.retrieval_eval")
+        _reject_unknown(evaluation, ("fixture_digest",), "memory.retrieval_eval")
+        if "fixture_digest" in evaluation and (
+            not isinstance(evaluation["fixture_digest"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", evaluation["fixture_digest"]) is None
+        ):
+            raise FleetPolicyError("fleet policy memory.retrieval_eval.fixture_digest must be lowercase SHA-256 hex")
+        parsed["retrieval_eval"] = dict(evaluation)
     for field in ("tier0_op_classes", "reflect_principals"):
         values = body.get(field, [])
         if not isinstance(values, list) or len(values) > MAX_LIST_ITEMS:
