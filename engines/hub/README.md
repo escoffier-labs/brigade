@@ -1,8 +1,11 @@
 # brigade-hub (S3c)
 
-A Rust HTTP front for the Python Fleet Hub. Run where `python3 -m brigade`
-resolves this matching Python package, or set `BRIGADE_HUB_PYTHON` to its
-interpreter.
+A Rust HTTP front for the Python Fleet Hub. Install the matching Python package
+in the selected interpreter, or set `BRIGADE_HUB_PYTHON` to its interpreter.
+Python children run with `-I` from `/`, so `PYTHONPATH` and the working directory
+do not supply imports. For source installs, use an editable install with
+`python3 -m pip install -e .` from the repository root. The managed upstream
+runs the installed `brigade` module with `-m`.
 
 ```sh
 brigade-hub --host localhost --token-file ./admin-token --db ./hub.db

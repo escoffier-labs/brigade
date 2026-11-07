@@ -78,10 +78,11 @@ async fn read(python: &str, path: &Path) -> Result<Value, String> {
     // Python opens it is a read failure, not lexical mode.
     let output = Command::new(python)
         .arg("-I")
+        .current_dir("/")
         .arg("-c")
         .arg(include_str!("../resolve_memory.py"))
         .arg("--required")
-        .arg(path)
+        .arg(std::path::absolute(path).map_err(|e| e.to_string())?)
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output()

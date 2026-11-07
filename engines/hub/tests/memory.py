@@ -275,7 +275,7 @@ class Memory(unittest.TestCase):
         self.assertEqual(response.status, 200, response)
         self.assertEqual(response.json["retrieval"]["mode"], "lexical")
         readers = [m.read_text() for m in (self.work / "planted").glob("planted-*")]
-        self.assertFalse([r for r in readers if "hub.toml" in r], readers)
+        self.assertFalse(readers, readers)
 
     def test_native_memory_survives_restart_and_reports_metrics(self):
         state_name = "native"

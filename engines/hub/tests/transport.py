@@ -6,12 +6,14 @@ import os
 from pathlib import Path
 import re
 import resource
+import shlex
 import sqlite3
 import signal
 import socket
 import subprocess
 import tempfile
 import threading
+import textwrap
 import time
 import unittest
 
@@ -89,8 +91,11 @@ def alive(pid):
 
 
 @contextlib.contextmanager
-def front(upstream=None, extra=(), relative_db=False, env_overrides=None, default_db=False):
+def front(upstream=None, extra=(), relative_db=False, env_overrides=None, default_db=False, planted=False):
     with tempfile.TemporaryDirectory() as work:
+        if planted:
+            for module in ("json", "pathlib", "secrets", "resource", "tomllib"):
+                (Path(work) / f"{module}.py").write_text("raise RuntimeError('planted module imported')\n")
         command = [str(BINARY), "--host", HOST, "--port", "0", "--db", "hub.db" if relative_db else f"{work}/hub.db"]
         if default_db:
             command = command[:-2]
@@ -98,6 +103,8 @@ def front(upstream=None, extra=(), relative_db=False, env_overrides=None, defaul
         if upstream:
             command += ["--upstream", f"http://{HOST}:{upstream}"]
         env = dict(os.environ, BRIGADE_FLEET_TOKEN="fake-admin-token")
+        if planted:
+            env["PYTHONPATH"] = work
         for name, value in (env_overrides or {}).items():
             if value is None:
                 env.pop(name, None)
@@ -180,22 +187,57 @@ def raw(port, data):
 
 class Transport(unittest.TestCase):
     def test_python_default_without_home_and_single_checkpoint_owner(self):
-        # Give Python's Unix password-database fallback a disposable home. Never
-        # open the operator database while testing HOME-unset startup.
+        # The test-only interpreter redirects the passwd fallback before the
+        # resolver imports Path. Isolated startup never loads sitecustomize.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "sitecustomize.py").write_text(
-                "import os, pwd\n"
-                "from types import SimpleNamespace\n"
-                f"pwd.getpwuid = lambda uid: SimpleNamespace(pw_dir={directory!r})\n"
-                "if os.environ.get('BRIGADE_HUB_CHECKPOINT_OWNER') == 'rust':\n"
-                " import brigade.fleet_hub_upstream as u\n"
-                " def forbidden(*args, **kwargs): raise RuntimeError('duplicate Python checkpointer')\n"
-                " u.CheckpointMaintenance = forbidden\n"
+            forbidden = Path.home() / ".brigade"
+            wrapper = root / "python"
+            bootstrap = textwrap.dedent(f"""\
+                import os, sys
+                assert sys.flags.isolated == 1, "missing isolated mode"
+                assert os.getcwd() == "/", "unsafe interpreter cwd"
+                import pwd, runpy
+                from pathlib import Path
+                from types import SimpleNamespace
+                forbidden = Path({str(forbidden)!r})
+                def guard(event, args):
+                    if event in ("open", "sqlite3.connect") and isinstance(args[0], (str, bytes, os.PathLike)):
+                        path = Path(os.fsdecode(args[0])).absolute()
+                        if path == forbidden or forbidden in path.parents:
+                            raise RuntimeError("real home storage is forbidden")
+                sys.addaudithook(guard)
+                pwd.getpwuid = lambda uid: SimpleNamespace(pw_dir={directory!r})
+                if os.environ.get("BRIGADE_HUB_CHECKPOINT_OWNER") == "rust":
+                    import brigade.fleet_hub_upstream as u
+                    def forbidden_checkpoint(*args, **kwargs):
+                        raise RuntimeError("duplicate Python checkpointer")
+                    u.CheckpointMaintenance = forbidden_checkpoint
+                mode, payload, *tail = sys.argv[1:]
+                sys.argv = [payload if mode == "-m" else "-c", *tail]
+                if mode == "-m":
+                    runpy.run_module(payload, run_name="__main__", alter_sys=True)
+                else:
+                    assert mode == "-c", mode
+                    exec(compile(payload, "<test interpreter>", "exec"), {{"__name__": "__main__"}})
+                """)
+            wrapper.write_text(
+                "#!/bin/bash\n"
+                'test "$1" = "-I" || exit 78\n'
+                f'exec {shlex.quote(REAL_PYTHON)} "$1" -c {shlex.quote(bootstrap)} "${{@:2}}"\n'
             )
-            pythonpath = os.pathsep.join([directory, str(Path(__file__).resolve().parents[3] / "src"), os.environ.get("PYTHONPATH", "")])
-            with front(default_db=True, env_overrides={"HOME": None, "PYTHONPATH": pythonpath}) as (_, port):
+            wrapper.chmod(0o755)
+            # Exercise the audit event without asking SQLite to open a real path.
+            probe = subprocess.run(
+                [str(wrapper), "-I", "-c", f"import sys; sys.audit('sqlite3.connect', {str(forbidden / 'fleet-hub.db')!r})"],
+                cwd="/", capture_output=True, text=True,
+            )
+            self.assertNotEqual(probe.returncode, 0)
+            self.assertIn("real home storage is forbidden", probe.stderr)
+            with front(default_db=True, relative_db=True, planted=True,
+                       env_overrides={"HOME": None, "BRIGADE_HUB_PYTHON": str(wrapper)}) as (_, port):
                 database = root / ".brigade/fleet-hub.db"
+                self.assertNotEqual(database, forbidden / "fleet-hub.db")
                 self.assertTrue(database.exists())
                 with sqlite3.connect(database) as writer:
                     writer.execute("PRAGMA wal_autocheckpoint=0")
@@ -435,6 +477,20 @@ class Transport(unittest.TestCase):
                 stop.set()
                 worker.join(3)
 
+    def test_python_children_ignore_working_directory(self):
+        # Covers limits re-exec, database lookup, key generation and upstream.
+        with front(relative_db=True, planted=True) as (_, port):
+            self.assertEqual(request(port, "/health")[0], 200)
+        with tempfile.NamedTemporaryFile(mode="w") as clock:
+            clock.write(str(time.time()))
+            clock.flush()
+            with front(relative_db=True, planted=True, extra=("--test-clock-file", clock.name)) as (_, port):
+                self.assertEqual(request(port, "/health")[0], 200)
+        # External validation has a separate launch path.
+        with refused_port() as port:
+            with front(port, relative_db=True, planted=True) as (_, front_port):
+                self.assertEqual(request(front_port, "/health")[0], 200)
+
     @unittest.skipUnless(Path("/proc").exists(), "child discovery requires procfs")
     def test_managed_child_death(self):
         with front() as (child, _):
@@ -491,7 +547,7 @@ class Transport(unittest.TestCase):
             fake = state / "python"
             fake.write_text(
                 "#!/bin/sh\n"
-                'if [ "$1" = "-m" ] && [ "$2" = "brigade" ]; then\n'
+                'if [ "$1" = "-I" ] && [ "$2" = "-m" ] && [ "$3" = "brigade" ]; then\n'
                 f'  exec "{REAL_PYTHON}" -c \'{STALLED_UPSTREAM}\' "{state}" {mode}\n'
                 "fi\n"
                 f'exec "{REAL_PYTHON}" "$@"\n',
