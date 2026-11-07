@@ -504,5 +504,6 @@ mod native {
         }
     }
     #[cfg(test)]
-    include!("scan_tests.rs");
+    #[path = "scan_tests.rs"]
+    mod tests;
 }

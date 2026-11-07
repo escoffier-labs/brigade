@@ -31,8 +31,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     reindex.add_argument("--drop", metavar="EMBEDDER_ID")
     reindex.add_argument("--admin-token-file", type=Path, required=True)
 
-    rescan = sub.add_parser("rescan", help="Refresh one batch of live hub scan receipts without changing cards.")
+    rescan = sub.add_parser("rescan", help="Refresh live hub scan receipts in one batch or drain until done.")
     rescan.add_argument("--target", "-t", type=Path, default=Path("."))
+    rescan.add_argument(
+        "--until-done", action="store_true", help="Drain missing receipts in bounded batches and print totals."
+    )
     rescan.add_argument("--limit", type=int, default=4, choices=range(1, 17), metavar="1..16")
     rescan.add_argument("--admin-token-file", type=Path, required=True)
 
@@ -334,6 +337,48 @@ def serve(
             sleep(1)
 
 
+def rescan_until_done(client: hubc.MemoryHubClient, limit: int, *, sleep: Any = time.sleep) -> int:
+    """Drain finite live heads, allowing short byte-budget batches without spinning."""
+    totals: dict[str, Any] = {
+        "batches": 0,
+        "scanned": 0,
+        "complete": False,
+        "counts": dict.fromkeys(("clean", "private", "flagged", "blocked", "failed"), 0),
+    }
+    try:
+        live = client.call("status")["cards"]
+        if type(live) is not int or live < 0:
+            raise ValueError("invalid live card count")
+        cap = (live + limit - 1) // limit + 16
+        hard_cap = live + 16
+        while totals["batches"] < cap:
+            reply = client.call("rescan", limit=limit, client_event_id=hubc.event_id())
+            scanned, complete, counts = reply["scanned"], reply["complete"], reply["counts"]
+            if type(scanned) is not int or not 0 <= scanned <= limit or type(complete) is not bool:
+                raise ValueError("invalid rescan progress")
+            if (
+                not isinstance(counts, dict)
+                or any(type(counts.get(k)) is not int or counts[k] < 0 for k in totals["counts"])
+                or sum(counts[k] for k in totals["counts"]) != scanned
+            ):
+                raise ValueError("invalid rescan counts")
+            totals["batches"] += 1
+            totals["scanned"] += scanned
+            for verdict in totals["counts"]:
+                totals["counts"][verdict] += counts[verdict]
+            totals["complete"] = complete
+            if complete:
+                return 0
+            if scanned == 0:
+                raise ValueError("rescan made no progress")
+            if scanned < limit:
+                cap = min(hard_cap, cap + 1)
+            sleep(0.05)
+        raise ValueError("rescan iteration limit reached")
+    finally:
+        print(json.dumps(totals))
+
+
 def dispatch(args: argparse.Namespace) -> int:
     try:
         settings = hubc.load_settings(args.target.expanduser().resolve())
@@ -341,6 +386,8 @@ def dispatch(args: argparse.Namespace) -> int:
             raise ValueError("hub memory is off")
         if args.memory_command in {"reindex", "rescan"}:
             client = hubc.MemoryHubClient(settings.hub_url, secret(args.admin_token_file.expanduser()))
+            if args.memory_command == "rescan" and args.until_done:
+                return rescan_until_done(client, args.limit)
             fields: dict[str, Any] = {"client_event_id": hubc.event_id()}
             if args.memory_command == "rescan":
                 fields["limit"] = args.limit

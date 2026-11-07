@@ -53,6 +53,8 @@ async fn rescan_restores_push_without_changing_cards_and_rerun_writes_nothing() 
     let revisions = contents(&db, "memory_card_revisions");
     let blobs = contents(&db, "memory_blobs");
     let events = contents(&db, "memory_events");
+    let vectors = contents(&db, "memory_vectors");
+    let jobs = contents(&db, "memory_embed_jobs");
     h.store.take();
     h.open(current(), None);
     let store = h.store.as_ref().unwrap();
@@ -88,6 +90,8 @@ async fn rescan_restores_push_without_changing_cards_and_rerun_writes_nothing() 
     assert_eq!(contents(&db, "memory_card_revisions"), revisions);
     assert_eq!(contents(&db, "memory_blobs"), blobs);
     assert_eq!(contents(&db, "memory_events"), events);
+    assert_eq!(contents(&db, "memory_vectors"), vectors);
+    assert_eq!(contents(&db, "memory_embed_jobs"), jobs);
     let meta = contents(&db, "memory_meta");
     let receipts = contents(&db, "memory_scans");
     let idempotency = contents(&db, "memory_idempotency");
@@ -160,9 +164,16 @@ async fn rescan_counts_changed_verdicts_deduplicates_blobs_and_skips_retired_hea
     assert_eq!(reply.body["complete"], true);
     assert_eq!(
         reply.body["counts"],
-        json!({"clean":1,"private":1,"flagged":1,"blocked":1})
+        json!({"clean":1,"private":1,"flagged":1,"blocked":1,"failed":0})
     );
     assert_eq!(contents(&db, "memory_card_revisions"), revisions);
+    let store = h.store.as_ref().unwrap();
+    let admin = store.authenticate(ADMIN_TOKEN).await.unwrap();
+    let query = json!({"query":"instructions"});
+    assert_eq!(
+        store.push(&admin, query.as_object().unwrap()).await.body["matches"],
+        json!([])
+    );
     let version = h.store.as_ref().unwrap().scanner.describe().1.unwrap();
     let states: Vec<String> = db
         .prepare("SELECT state FROM memory_scans WHERE ruleset_version=?1 ORDER BY state")
@@ -215,24 +226,24 @@ async fn rescan_is_admin_only_validates_limit_and_refuses_a_missing_scanner() {
     assert!(contents(&db, "memory_scans").is_empty());
 }
 
-struct FailAfterOne(std::sync::atomic::AtomicUsize);
-impl Scanner for FailAfterOne {
+struct FailHash(String);
+impl Scanner for FailHash {
     fn describe(&self) -> (bool, Option<String>) {
         (true, Some("new".into()))
     }
-    fn scan(&self, _: &str) -> Scan {
-        if self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+    fn scan(&self, text: &str) -> Scan {
+        if ids::sha256_hex(text.as_bytes()) == self.0 {
+            Scan::Failed
+        } else {
             Scan::Clean {
                 ruleset: "new".into(),
             }
-        } else {
-            Scan::Failed
         }
     }
 }
 
 #[tokio::test]
-async fn rescan_failure_rolls_back_receipts_and_audit_for_the_entire_batch() {
+async fn rescan_failed_hash_does_not_block_the_next_call() {
     let mut h = Hub::with(
         Arc::new(Fixed(Scan::Clean {
             ruleset: "old".into(),
@@ -243,13 +254,136 @@ async fn rescan_failure_rolls_back_receipts_and_audit_for_the_entire_batch() {
         assert_eq!(h.call(ADMIN_TOKEN, json!({"action":"import", "scope":"fleet", "card_id":id, "text":format!("release {id}"), "client_event_id":h.id()})).await.status, 201);
     }
     let db = Connection::open(h.memory()).unwrap();
-    let receipts = contents(&db, "memory_scans");
+    let failed: String = db
+        .query_row("SELECT min(content_hash) FROM memory_cards", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
     h.store.take();
-    h.open(
-        Arc::new(FailAfterOne(std::sync::atomic::AtomicUsize::new(0))),
+    h.open(Arc::new(FailHash(failed.clone())), None);
+    for (complete, failed_count) in [(false, 1), (true, 0)] {
+        let reply = h
+            .call(
+                ADMIN_TOKEN,
+                json!({"action":"rescan", "limit":1, "client_event_id":h.id()}),
+            )
+            .await;
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.body["scanned"], 1);
+        assert_eq!(reply.body["counts"]["failed"], failed_count);
+        assert_eq!(reply.body["complete"], complete);
+    }
+    let row: (String, String) = db.query_row("SELECT state,rule_ids FROM memory_scans WHERE content_hash=?1 AND ruleset_version='new'", [&failed], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(row, ("pending".into(), "[\"scan-failed\"]".into()));
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM memory_scans WHERE ruleset_version='new'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn rescan_bad_or_missing_blob_gets_a_pending_receipt_and_drain_continues() {
+    for missing in [false, true] {
+        let h = Hub::with(
+            Arc::new(Fixed(Scan::Clean {
+                ruleset: "current".into(),
+            })),
+            None,
+        );
+        for id in ["one", "two"] {
+            assert_eq!(h.call(ADMIN_TOKEN, json!({"action":"import", "scope":"fleet", "card_id":id, "text":format!("release {id}"), "client_event_id":h.id()})).await.status, 201);
+        }
+        let db = Connection::open(h.memory()).unwrap();
+        db.execute("DELETE FROM memory_scans", []).unwrap();
+        let failed: String = db
+            .query_row("SELECT min(content_hash) FROM memory_cards", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        if missing {
+            // Deliberately corrupt this fixture to exercise the missing-blob path.
+            db.pragma_update(None, "foreign_keys", false).unwrap();
+            db.execute("DELETE FROM memory_blobs WHERE content_hash=?1", [&failed])
+                .unwrap();
+        } else {
+            db.execute(
+                "UPDATE memory_blobs SET bytes=x'FF' WHERE content_hash=?1",
+                [&failed],
+            )
+            .unwrap();
+        }
+        let reply = h
+            .call(
+                ADMIN_TOKEN,
+                json!({"action":"rescan", "client_event_id":h.id()}),
+            )
+            .await;
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.body["scanned"], 2);
+        assert_eq!(reply.body["counts"]["failed"], 1);
+        assert_eq!(reply.body["counts"]["clean"], 1);
+        assert_eq!(reply.body["complete"], true);
+        assert_eq!(db.query_row("SELECT state FROM memory_scans WHERE content_hash=?1 AND ruleset_version='current'", [&failed], |r| r.get::<_, String>(0)).unwrap(), "pending");
+    }
+}
+
+#[tokio::test]
+async fn rescan_audit_key_survives_idempotency_record_removal() {
+    let h = Hub::with(
+        Arc::new(Fixed(Scan::Clean {
+            ruleset: "current".into(),
+        })),
         None,
     );
-    let meta = contents(&db, "memory_meta");
+    for id in ["one", "two"] {
+        assert_eq!(h.call(ADMIN_TOKEN, json!({"action":"import", "scope":"fleet", "card_id":id, "text":format!("release {id}"), "client_event_id":h.id()})).await.status, 201);
+    }
+    let db = Connection::open(h.memory()).unwrap();
+    db.execute("DELETE FROM memory_scans", []).unwrap();
+    let request = json!({"action":"rescan", "limit":1, "client_event_id":h.id()});
+    assert_eq!(h.call(ADMIN_TOKEN, request.clone()).await.status, 200);
+    db.execute("DELETE FROM memory_idempotency", []).unwrap();
+    h.set_clock(h.now() + 1);
+    assert_eq!(h.call(ADMIN_TOKEN, request).await.status, 200);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM memory_meta WHERE key LIKE 'scan_rescan:%'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
+}
+
+struct WrongVersion;
+impl Scanner for WrongVersion {
+    fn describe(&self) -> (bool, Option<String>) {
+        (true, Some("expected".into()))
+    }
+    fn scan(&self, _: &str) -> Scan {
+        Scan::Clean {
+            ruleset: "wrong".into(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn rescan_engine_mismatch_still_fails_closed_with_write_path_wording() {
+    let mut h = Hub::with(
+        Arc::new(Fixed(Scan::Clean {
+            ruleset: "old".into(),
+        })),
+        None,
+    );
+    assert_eq!(h.call(ADMIN_TOKEN, json!({"action":"import", "scope":"fleet", "card_id":"one", "text":"release", "client_event_id":h.id()})).await.status, 201);
+    h.store.take();
+    h.open(Arc::new(WrongVersion), None);
     let reply = h
         .call(
             ADMIN_TOKEN,
@@ -257,9 +391,13 @@ async fn rescan_failure_rolls_back_receipts_and_audit_for_the_entire_batch() {
         )
         .await;
     assert_eq!(reply.status, 503);
-    assert_eq!(reply.body["code"], "memory_scan_failed");
-    assert_eq!(contents(&db, "memory_scans"), receipts);
-    assert_eq!(contents(&db, "memory_meta"), meta);
+    assert_eq!(reply.body["retryable"], false);
+    assert!(
+        reply.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("retrying will not help")
+    );
 }
 
 struct Witness(std::sync::Mutex<Vec<String>>);

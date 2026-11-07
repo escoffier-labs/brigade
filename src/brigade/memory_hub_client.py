@@ -549,6 +549,8 @@ class MemoryHubClient:
             raise HubUnavailable("unreachable") from exc
         payload = payload if isinstance(payload, dict) else {}
         if 200 <= status < 300:
+            if action == "rescan" and status != 200:
+                raise HubRefusal(status, {"code": "memory_rescan_status", "error": "rescan requires HTTP 200"})
             return payload
         if 300 <= status < 400 or status in _UNAVAILABLE_STATUSES:
             # A redirect is never followed with the credential, and 408 or 429

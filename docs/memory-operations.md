@@ -283,13 +283,18 @@ After a ruleset ID change, update the client and hub together, then run the
 admin receipt refresh:
 
 ```bash
-brigade memory rescan --target . --admin-token-file /path/to/admin-token --limit 4
+brigade memory rescan --target . --admin-token-file /path/to/admin-token --limit 4 --until-done
 ```
 
-This sends one `POST /memory` request with action `rescan` using the explicit
-admin token file, as `memory reindex` does. Non-admin credentials receive `403`.
+Without `--until-done`, the command sends one `POST /memory` request with action
+`rescan` using the explicit admin token file, as `memory reindex` does. Non-admin credentials receive `403`.
 The JSON response contains `ruleset_version`, `scanned`, counts by verdict,
 `complete`, `principal`, and `scanned_at`. Repeat until `complete` is true.
+`--until-done` does this with fresh client event IDs, a short pause between
+batches, and a final JSON summary of batch, hash and verdict totals. It exits
+non-zero on any non-200 reply, zero progress before completion, or the iteration
+cap. The cap starts at live heads divided by the count limit, rounded up, plus
+16. Short byte-budget batches can extend it, up to live heads plus 16.
 Each batch scans at most 16 distinct live content hashes, with a default of 4
 and a 512 KiB byte budget. A supported card can fill the byte budget on its own.
 The next request selects live heads still missing a current-ID receipt, so no
@@ -297,9 +302,16 @@ cursor is needed and identical blobs shared by several cards are scanned once.
 The scan uses the exact stored UTF-8 bytes without normalizing them again.
 
 The action writes only new `(content_hash, ruleset_version)` receipts and one
-`memory_meta` audit record keyed by `scan_rescan:<client_event_id>` per nonempty
+`memory_meta` audit record keyed by `scan_rescan:<now_ms>:<client_event_id>` per nonempty
 batch. The record holds the ruleset ID, verdict counts, admin principal and
-time, without card text. A scanner failure rolls back the whole batch.
+time, without card text. These audit rows accumulate in `memory_meta`, about
+one per nonempty batch, with no automatic pruning.
+A failed scan, non-UTF-8 blob or missing blob gets a current-ID `pending`
+receipt marked `scan-failed` and is counted under `counts.failed`, so later
+hashes can still drain. The count is hashes, without text. These receipts stay
+ineligible for push and are not retried under the same ruleset ID. A complete
+drain can include failed hashes, which remain visible in the final counts. An engine
+availability or ruleset mismatch still refuses the request.
 Retries with the same client event ID replay the saved response. Once all live
 heads have receipts, a new request reports zero scans and writes nothing.
 
@@ -311,6 +323,12 @@ private revision eligible by itself. Old receipts remain historical evidence.
 Explicit reads continue to work during rollout. Import refuses mixed client and
 hub IDs, while native `Store::push` excludes old receipts until this refresh.
 Unchanged cards cannot refresh receipts through ordinary CLI import or push.
+
+Rescan leaves existing vectors and embedding jobs unchanged. An embedded card
+that becomes flagged, blocked or private keeps its vector, so explicit non-push
+hybrid search can still rank it. Prompt-source search rescans each hit and
+withholds flagged or blocked content. Changing vector retention is a separate
+decision.
 
 Searches with `query_source: "prompt"` scan the returned fields and card bytes
 again. Any finding except a private one replaces the match with

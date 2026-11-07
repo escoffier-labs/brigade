@@ -2,7 +2,7 @@
   "version": "brigade-memory-scan.v7",
   "scanner_sources": {
     "python": "5cde76ed5efcb4d4ce43000edfeb511b659a4fbf77247e8d18f1f7b96f66936a",
-    "rust": "befc68934c5cddf41f214817fdb82db5702d843a44bc95d700b8c07df7416e9e"
+    "rust": "157b063ab533746ab83c29791d24143dffca02befb5489d2d74602a176cae0fa"
   },
   "nfkc": {
     "unicode": "14.0.0",
