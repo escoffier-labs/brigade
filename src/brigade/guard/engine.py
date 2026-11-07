@@ -324,7 +324,7 @@ def _pem_body_end(text: str, end: int) -> int:
             # Anchored matches advance monotonically through this physical line.
             offset = 0
             separator = re.compile(r"(?:[ \t]+|(?:\\r)?\\n)+")
-            metadata = re.compile(r"(?:Proc-Type:|DEK-Info:)[^\\\r\n]*(?:(?:\\r)?\\n|$)")
+            metadata = re.compile(r'(?:Proc-Type:|DEK-Info:)[^\\"\r\n]*(?:(?:\\r)?\\n|(?="\s*[,}\]])|$)')
             while True:
                 gap = separator.match(line, offset)
                 if gap is not None:
@@ -341,10 +341,12 @@ def _pem_body_end(text: str, end: int) -> int:
             if inline is not None:
                 body_end = cursor + offset + inline.end()
         else:
-            leading = re.match(r"[ \t]*(?:> )?", line)
+            leading = re.match(r"[ \t]*(?:> ?)?", line)
             assert leading is not None
             current_prefix = leading.group()
-            body = line[len(current_prefix) :]
+            body = line[len(current_prefix) :].rstrip(" \t")
+            if prefix is not None and current_prefix == prefix.rstrip() and not body.strip():
+                current_prefix = prefix
             if prefix is not None and prefix != current_prefix and line.strip():
                 break
             is_body = bool(re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", body))

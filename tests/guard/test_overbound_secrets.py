@@ -54,14 +54,17 @@ def pem_backend(request, monkeypatch):
 
 @pytest.mark.parametrize("ending", ["closed", "unterminated"])
 @pytest.mark.parametrize("repeat", [2, 140])
-@pytest.mark.parametrize("layout", ["plain", "indent", "quote", "escaped", "escaped-json", "spaces"])
+@pytest.mark.parametrize(
+    "layout", ["plain", "indent", "quote", "escaped", "escaped-json", "spaces", "body-trailing-spaces"]
+)
 def test_pem_trailing_findings_keep_secret_and_unrelated_text(pem_backend, ending, repeat, layout):
     header = "-----BEGIN " + "PRIVATE KEY-----\n"
     body = ("a" * 64 + "\n") * repeat
-    if layout in {"indent", "quote"}:
+    if layout in {"indent", "quote", "body-trailing-spaces"}:
         prefix = "    " if layout == "indent" else "> "
         header = prefix + header
-        body = (prefix + "a" * 64 + "\n") * repeat
+        suffix = " " if layout == "body-trailing-spaces" else ""
+        body = (prefix + "a" * 64 + suffix + "\n") * repeat
     elif layout in {"escaped", "escaped-json", "spaces"}:
         separator = r"\n" if layout.startswith("escaped") else " "
         header = header.rstrip("\n") + separator
@@ -91,14 +94,19 @@ def test_pem_trailing_findings_keep_secret_and_unrelated_text(pem_backend, endin
     assert expected_guard in process.stdout
 
 
-@pytest.mark.parametrize("layout", ["indent", "quote", "quote-blank", "escaped-json", "escaped-crlf-json"])
+@pytest.mark.parametrize(
+    "layout", ["indent", "quote", "quote-blank", "quote-bare-blank", "escaped-json", "escaped-crlf-json"]
+)
 @pytest.mark.parametrize("consumer", ["guard", "agent-session", "workspace", "external-web"])
 def test_unterminated_encrypted_pem_metadata(pem_backend, layout, consumer):
     header = "-----BEGIN " + "RSA PRIVATE KEY-----"
     lines = [header, "Proc-Type: 4,ENCRYPTED", "DEK-Info: AES-256-CBC,0123456789ABCDEF", "", "a" * 64, "b" * 64]
-    if layout in {"indent", "quote", "quote-blank"}:
+    if layout in {"indent", "quote", "quote-blank", "quote-bare-blank"}:
         prefix = "    " if layout == "indent" else "> "
-        pem = "\n".join(prefix + line if line or layout == "quote-blank" else "" for line in lines) + "\n"
+        pem_lines = [prefix + line if line or layout == "quote-blank" else "" for line in lines]
+        if layout == "quote-bare-blank":
+            pem_lines[3] = ">"
+        pem = "\n".join(pem_lines) + "\n"
     else:
         separator = r"\n" if layout == "escaped-json" else r"\r\n"
         pem = '"' + separator.join(lines) + '"\n'
@@ -120,6 +128,46 @@ def test_unterminated_encrypted_pem_metadata(pem_backend, layout, consumer):
     assert "b" * 60 not in redacted
     assert redacted.endswith(expected)
     assert "Contact " in expected and " done." in expected
+
+
+def test_json_metadata_quote_boundary_preserves_following_value(pem_backend):
+    header = "-----BEGIN " + "RSA PRIVATE KEY-----"
+    text = '{"k": "' + header + r'\nProc-Type: 4,ENCRYPTED", "note": "keep-this-json"}' + "\n"
+    assert "keep-this-json" in scan_text(text).redacted_text
+
+
+def test_stray_quote_in_raw_metadata_keeps_masking_key_material(pem_backend):
+    # Only a quote followed by JSON structure ends metadata early.
+    header = "-----BEGIN " + "RSA PRIVATE KEY-----"
+    body = "a" * 64
+    text = header + ' Proc-Type: 4,ENC"x ' + body + " " + body + "\n"
+    assert body not in scan_text(text).redacted_text
+
+
+@pytest.mark.parametrize(
+    "text,reply",
+    [
+        (
+            "> -----BEGIN RSA PRIVATE KEY-----\n> "  # content-guard: allow private-key-block
+            + "a" * 64
+            + "\n>\n> ordinary reply\n",
+            "ordinary reply",
+        ),
+        (
+            "-----BEGIN RSA PRIVATE KEY-----\n"  # content-guard: allow private-key-block
+            + "a" * 64
+            + "\n> quoted reply\n",
+            "quoted reply",
+        ),
+    ],
+)
+def test_truncated_pem_stops_before_ordinary_reply(pem_backend, text, reply):
+    assert reply in scan_text(text).redacted_text
+
+
+def test_header_followed_by_bare_quote_word_is_masked(pem_backend):
+    text = "-----BEGIN RSA PRIVATE KEY-----\n>word\n"  # content-guard: allow private-key-block
+    assert ">word" not in scan_text(text).redacted_text
 
 
 @pytest.mark.parametrize("separator", ["\n", "\n\n", "\r\n\r\n"])
