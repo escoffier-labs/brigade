@@ -2556,6 +2556,9 @@ def test_search_fuses_derived_publication_id_and_retains_old_name(hub, tmp_path)
         directory.chmod(0o755)
     if os.name == "posix":
         assert _dot_memory(target, {}).memory_card("My Card")["content"] == "# My Card\nkoala fixture\n"
+        opened = _dot_cli(target).memory_card(match["card_id"])
+        assert opened["content"] == "# My Card\nkoala fixture\n"
+        assert opened["source"] == "hub"
 
 
 def test_collision_can_close_after_giving_local_card_a_frontmatter_id(hub, tmp_path):
@@ -2690,3 +2693,38 @@ def test_gone_legacy_card_drops_base_and_restored_card_cannot_overwrite(hub, tmp
     assert hub.puts()[-1]["base_revision"] is None
     assert hub.cards[("repo:test/app", "one")]["text"] == "remote fixture\n"
     assert len(hub.events) == 2
+
+
+@pytest.mark.parametrize("mode", ["read", "sync"])
+def test_unpublished_derived_search_result_keeps_readable_local_id(hub, tmp_path, mode):
+    target = workspace(tmp_path, mode=mode, **{"My Card": "# My Card\nkoala fixture\n"})
+    payload = hub_search.search_payload(target, "koala", settings=settings(target))
+    [match] = payload["matches"]
+    assert match["source"] == "local"
+    assert match["card_id"] == "My Card"
+    if os.name == "posix":
+        assert _dot_cli(target).memory_card(match["card_id"])["content"] == "# My Card\nkoala fixture\n"
+
+
+def test_local_rank_winner_keeps_hub_id_after_publication_fusion():
+    hub_match = {
+        "card_id": "derived-id",
+        "scope": "fleet",
+        "content_hash": "fixture-hash",
+        "path": "cards/derived-id.md",
+    }
+    local_match = {
+        "card_id": "My Card",
+        "publication_id": "derived-id",
+        "content_hash": "fixture-hash",
+        "path": "memory/cards/My Card.md",
+        "card_aliases": ["My Card"],
+    }
+    unrelated = {"card_id": "other", "scope": "fleet", "content_hash": "other-hash", "path": "cards/other.md"}
+    matches = hub_search.fuse({"hub": [unrelated, hub_match], "local": [local_match]}, 20)
+    assert len(matches) == 2
+    fused = next(m for m in matches if "local" in m["ranks"])
+    assert fused["source"] == "local"
+    assert fused["card_id"] == "derived-id"
+    assert fused["card_aliases"] == ["My Card"]
+    assert fused["ranks"] == {"hub": 2, "local": 1}

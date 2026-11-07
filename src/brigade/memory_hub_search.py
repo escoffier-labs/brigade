@@ -110,8 +110,8 @@ def _local_matches(target: Path, query: str) -> tuple[list[dict[str, Any]], int]
             text = (target / match["path"]).read_text(encoding="utf-8")
             match["content_hash"] = hubc.content_hash(text)
             legacy_id = match["card_id"]
-            match["card_id"] = memory_hub_sync.publication_card_id(text, match["path"], legacy_id)
-            if match["card_id"] != legacy_id:
+            match["publication_id"] = memory_hub_sync.publication_card_id(text, match["path"], legacy_id)
+            if match["publication_id"] != legacy_id:
                 match["card_aliases"] = list(dict.fromkeys([legacy_id, *match.get("card_aliases", [])]))
         except (OSError, UnicodeDecodeError):
             match["content_hash"] = None
@@ -124,6 +124,8 @@ def fuse(lists: dict[str, list[dict[str, Any]]], limit: int, *, home_scope: str 
     Hub and replica matches carry a scope; the same bytes in two scopes stay
     two entries. A local match has none and joins an entry with its card id
     and bytes, preferring `home_scope` (where this workspace publishes).
+    A local publication_id is a fusion key. Its readable card_id stays local
+    unless it joins a scoped result, whose hub card_id opens that version.
     """
     entries: list[dict[str, Any]] = []
     by_content: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -140,7 +142,11 @@ def fuse(lists: dict[str, list[dict[str, Any]]], limit: int, *, home_scope: str 
 
     for source in sorted(lists, key=_SOURCE_ORDER.__getitem__):
         for rank, match in enumerate(lists[source], start=1):
-            content = (str(match.get("card_id")), str(match.get("content_hash") or f"{source}:{match.get('path')}"))
+            fusion_id = match.get("publication_id") if source == "local" else None
+            content = (
+                str(fusion_id or match.get("card_id")),
+                str(match.get("content_hash") or f"{source}:{match.get('path')}"),
+            )
             entry = find(match, content)
             if entry is None:
                 entry = {**match, "source": source, "ranks": {}, "rrf": 0.0, "best": (rank, source)}
@@ -158,12 +164,14 @@ def fuse(lists: dict[str, list[dict[str, Any]]], limit: int, *, home_scope: str 
             entry["ranks"][source] = rank
             entry["rrf"] += 1.0 / (RRF_K + rank)
             scope = entry.get("scope") or match.get("scope")
+            scoped_id = match.get("card_id") if match.get("scope") else entry.get("card_id")
             if (rank, _SOURCE_ORDER[source]) < (entry["best"][0], _SOURCE_ORDER[entry["best"][1]]):
                 entry["best"] = (rank, source)
                 entry.update({k: v for k, v in match.items() if k != "ranks"}, source=source)
             entry["card_aliases"] = aliases
             if scope:
                 entry["scope"] = scope
+                entry["card_id"] = scoped_id
     ordered = sorted(entries, key=lambda m: (-m["rrf"], _SOURCE_ORDER[m["source"]], str(m.get("path"))))
     out = []
     for entry in ordered[:limit]:
