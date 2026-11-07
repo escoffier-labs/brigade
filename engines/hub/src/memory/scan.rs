@@ -507,6 +507,29 @@ mod native {
     mod tests {
         use super::*;
 
+        /// Source pins cover every class and fold, and also catch edits to
+        /// this scanner when only the Rust CI jobs run.
+        #[test]
+        fn scanner_sources_match_the_bundle() {
+            let bundle: Value = serde_json::from_str(include_str!(
+                "../../../../src/brigade/guard/memory-rules.json"
+            ))
+            .unwrap();
+            for (name, source) in [
+                (
+                    "python",
+                    include_str!("../../../../src/brigade/memory_content_scan.py"),
+                ),
+                ("rust", include_str!("scan.rs")),
+            ] {
+                assert_eq!(
+                    super::super::super::ids::sha256_hex(source.replace("\r\n", "\n").as_bytes()),
+                    bundle["scanner_sources"][name].as_str().unwrap(),
+                    "{name} scanner changed: run python scripts/memory_scan_bundle.py"
+                );
+            }
+        }
+
         fn nfkc_fixture() -> Value {
             serde_json::from_str(include_str!(
                 "../../../../tests/fixtures/memory-scan-nfkc.json"

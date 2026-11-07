@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -48,6 +49,23 @@ def unassigned_ranges() -> str:
     return ",".join(line for line in lines if line and not line.startswith("#"))
 
 
+def scanner_sources() -> dict[str, str]:
+    """Pin both implementations, including classes and fold logic, in the ID.
+
+    Hash UTF-8 source with LF line endings so Windows checkouts agree. Whole
+    files deliberately include more than classes: any scanner edit must refresh
+    the bundle with this script and pass the shared verdict fixtures.
+    """
+    root = DEST.parents[3]
+    return {
+        name: hashlib.sha256((root / path).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+        for name, path in (
+            ("python", "src/brigade/memory_content_scan.py"),
+            ("rust", "engines/hub/src/memory/scan.rs"),
+        )
+    }
+
+
 def bundle() -> str:
     policy = Policy()
     missing = PRIVATE_RULES - {rule.id for rule in policy.all_rules()}
@@ -76,7 +94,19 @@ def bundle() -> str:
         },
     ]
     nfkc = {"unicode": NFKC_UNICODE, "unassigned": unassigned_ranges()}
-    return json.dumps({"version": VERSION, "nfkc": nfkc, "injections": injections, "rules": rules}, indent=2) + "\n"
+    return (
+        json.dumps(
+            {
+                "version": VERSION,
+                "scanner_sources": scanner_sources(),
+                "nfkc": nfkc,
+                "injections": injections,
+                "rules": rules,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
 
 
 def main() -> int:
