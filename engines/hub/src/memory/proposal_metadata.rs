@@ -69,16 +69,7 @@ pub fn set(text: &str, updates: &[(&str, Json)]) -> Result<String, &'static str>
 fn claims(text: &str) -> Result<String, &'static str> {
     let (_, body) = front(text)?;
     // Remove only supported anchor suffixes, retaining opaque syntax as bytes.
-    let mut result = body.to_string();
-    for pin in proposal_blocks::pins(body) {
-        let id = pin["block_id"].as_str().unwrap();
-        let anchored = pin["bytes"].as_str().unwrap();
-        result = result.replacen(
-            anchored,
-            anchored.strip_suffix(&format!(" ^{id}")).unwrap(),
-            1,
-        );
-    }
+    let result = proposal_blocks::strip_anchors(body);
     Ok(result.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 pub fn apply(text: &str, op: &Json, other: Option<(&str, &str)>) -> Result<String, &'static str> {
@@ -139,5 +130,17 @@ pub fn apply(text: &str, op: &Json, other: Option<(&str, &str)>) -> Result<Strin
             )
         }
         _ => Err("unsupported metadata op"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn duplicate_comparison_strips_only_the_addressable_anchor() {
+        assert_eq!(
+            claims("> Claim. ^c-abcdef\n\nClaim. ^c-abcdef\n").unwrap(),
+            "> Claim. ^c-abcdef Claim."
+        );
     }
 }

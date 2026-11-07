@@ -112,6 +112,19 @@ pub fn pin(text: &str, id: &str, hash: &str) -> Result<Json, &'static str> {
     Ok(json!({"block_id":id,"hash":hash,"bytes":bytes}))
 }
 
+/// Strip suffixes by exact structural ranges, preserving opaque block bytes.
+pub fn strip_anchors(text: &str) -> String {
+    let mut result = text.to_string();
+    for (start, end) in spans(text).into_iter().rev() {
+        if let Some((_, id)) = text[start..end].rsplit_once(" ^") {
+            if anchor(id) {
+                result.replace_range(end - id.len() - 2..end, "");
+            }
+        }
+    }
+    result
+}
+
 /// Pins for every addressable anchor in the current version, for compensation.
 pub fn pins(text: &str) -> Vec<Json> {
     spans(text)
