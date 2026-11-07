@@ -178,6 +178,28 @@ def test_a_symlink_into_a_mirror_subfolder_is_caught_by_its_real_path(tmp_path):
         assert found.sources == [] and found.stats["mirror_dirs"] == 1
 
 
+def test_projection_folder_is_skipped_and_counted(tmp_path):
+    from brigade.obsidian_vault import PROJECTION_MARKER
+
+    vault = make_vault(
+        tmp_path / "vault", {"Brigade Memory/Cards/card.md": "# card\n", "Brigade Memory/" + PROJECTION_MARKER: "{}"}
+    )
+    found = importer.discover([vault], root=None, excludes=[])
+    assert found.sources == []
+    assert found.stats["projection_dirs"] == 1
+
+
+def test_projection_ancestor_and_symlink_arguments_are_skipped(tmp_path):
+    from brigade.obsidian_vault import PROJECTION_MARKER
+
+    projection = make_vault(tmp_path / "data" / "projection", {"deep/card.md": "# card\n", PROJECTION_MARKER: "{}"})
+    vault = make_vault(tmp_path / "vault", {".obsidian/app.json": "{}"})
+    (vault / "linked").symlink_to(projection / "deep", target_is_directory=True)
+    for argument in (projection / "deep", vault / "linked"):
+        found = importer.discover([argument], root=vault, excludes=[])
+        assert found.sources == [] and found.stats["projection_dirs"] == 1
+
+
 def test_without_a_vault_marker_or_root_the_run_warns_that_ids_depend_on_the_arguments(hub, tmp_path, capsys):
     plain = make_vault(tmp_path / "plain", {"x.md": "# X\n"})
     vault = make_vault(tmp_path / "vault", {".obsidian/app.json": "{}", "x.md": "# X\n"})
