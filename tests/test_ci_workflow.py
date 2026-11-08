@@ -1415,8 +1415,11 @@ def test_windows_native_acceptance_source_mode_skips_only_bundled_unpublished_co
     unpublished = [component_id for component_id, record in manifest["components"].items() if not record.get("assets")]
     published = [component_id for component_id, record in manifest["components"].items() if record.get("assets")]
     assert "agent-notify" in unpublished
-    # brigade-hub is optional and Linux-only; the bundled manifest carries it unpublished.
-    assert set(unpublished) == {"agent-notify", "brigade-hub"}
+    # The bundled manifest never lists optional brigade-hub. A second empty-asset
+    # id would reach Get-UnpublishedComponentIds, whose @(...) and [string[]]
+    # cast join two ids into one string, so the skip set must stay one id.
+    assert set(unpublished) == {"agent-notify"}
+    assert "brigade-hub" not in manifest["components"]
     assert published, "at least one published component must remain strictly required"
 
     unpublished_fn = _extract_powershell_function(script, "Get-UnpublishedComponentIds")
@@ -1481,7 +1484,7 @@ def test_windows_native_acceptance_source_setup_command_contract_omits_empty_ass
     manifest = json.loads((ROOT / "src/brigade/templates/components/manifest-v1.json").read_text())
     unpublished = [component_id for component_id, record in manifest["components"].items() if not record.get("assets")]
     published = [component_id for component_id, record in manifest["components"].items() if record.get("assets")]
-    assert unpublished == ["agent-notify", "brigade-hub"]
+    assert unpublished == ["agent-notify"]
     assert "graphtrail" in published
 
     main = script[script.index("$acceptRoot = $null") :]

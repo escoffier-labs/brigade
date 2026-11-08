@@ -50,24 +50,16 @@ services:
     network_mode: "service:netns"
     depends_on:
       - netns
-    # `fleet serve --engine rust` (S10) checks brigade-hub against the
-    # checksum the image recorded, then runs it. brigade-hub takes the port in
-    # managed mode and starts the Python hub as its child on an ephemeral
-    # loopback port, keyed by a value generated at each start, and restarts
-    # that child with backoff while a native family serves. fleet serve
-    # forwards stop signals, writes the listening and clean-exit lines the S31
-    # checks read, and exits non-zero when /health fails or the namespace is
-    # left with loopback only, so the restart policy starts the hub again.
-    entrypoint:
-      - brigade
-      - fleet
-      - serve
-      - --engine
-      - rust
-      - --hub-binary
-      - /usr/local/bin/brigade-hub
-      - --hub-sha256-file
-      - /usr/local/share/brigade/brigade-hub.sha256
+    # brigade-hub (the Rust hub) takes the port in managed mode and starts the
+    # Python hub as its child on an ephemeral loopback port, keyed by a value
+    # generated at each start. hub/entry.py execs `brigade fleet serve
+    # --engine rust` (S10) when the pinned Brigade has it: that checks
+    # brigade-hub against the checksum the image recorded, forwards stop
+    # signals, writes the listening and clean-exit lines the S31 checks read,
+    # and exits non-zero when /health fails or the namespace keeps only
+    # loopback. The default BRIGADE_REF predates S10, so entry.py runs its
+    # S31 wrapper for it instead.
+    entrypoint: ["python", "/brigade/entry.py"]
     command:
       - --host
       - 127.0.0.1
@@ -84,8 +76,8 @@ services:
       - memory=native
     environment:
       BRIGADE_FLEET_FINDINGS_KEY_FILE: /run/secrets/findings_key
-      # The in-container watchdog also exits when the holder restarted and
-      # this namespace kept only loopback.
+      # With the Rust engine, its watchdog also exits when the holder
+      # restarted and this namespace kept only loopback.
       BRIGADE_HUB_WATCHDOG_NETNS: "1"
     secrets:
       - admin_token
@@ -94,6 +86,7 @@ services:
       - brigade-state:/var/lib/brigade
       # For the planned `--config` (S15). Neither hub reads it yet.
       - ./config/hub.toml:/etc/brigade/hub.toml:ro
+      - ./hub:/brigade:ro
     cap_drop: [ALL]
     # Covers brigade-hub's drain of at most 25 s and then up to 10 s for the
     # Python upstream's own shutdown after its SIGTERM.

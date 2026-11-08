@@ -5,7 +5,7 @@ hub, `brigade-hub`, and back (S10 in
 [the v2 hub design](../phase-v2-hub-architecture.md#cutover)). It is written
 for the production hub on the LXC hub host
 ([Fleet hub on a Proxmox LXC](fleet-hub-proxmox.md)). The dogfood Compose
-recipe already runs the Rust engine
+recipe runs the Rust engine once its pinned Brigade has it
 ([Dogfood hub from the Compose recipe](fleet-hub-dogfood.md)).
 
 Both engines serve the same `fleet-hub.db`. The Python hub stays the schema
@@ -50,12 +50,17 @@ service manager restarts both.
 | `--engine rust` | `ExecStart` | Run `brigade-hub` in front. Without it, the Python hub serves alone. |
 | `--route-mode FAMILY=MODE` | `ExecStart`, repeatable | `brigade-hub` route modes. Families `registration`, `claims`, `messages` and `memory` accept `native` or `proxy`. `heartbeat`, `cold` and `browser` accept `proxy` only until their slices land. Every family defaults to `proxy`. |
 | `--hub-binary PATH` with `--hub-sha256 HEX` or `--hub-sha256-file PATH` | `ExecStart` | Run this binary instead of the one `brigade setup --component brigade-hub` installed. The checksum file may be `sha256sum` output. |
+| `--port 0` | `ExecStart` | Any free port. The watchdog and the listening line use the address `brigade-hub` reports binding. |
 | `XDG_DATA_HOME` | unit `Environment=` and the setup command | Where `brigade setup` records the installed binary. Use the same value for both. |
 | `BRIGADE_HUB_PYTHON` | unit `Environment=` | The managed Python hub's interpreter. Defaults to the interpreter running `fleet serve`, so both engines come from one install. |
 | `BRIGADE_HUB_WATCHDOG_INTERVAL`, `BRIGADE_HUB_WATCHDOG_FAILURES`, `BRIGADE_HUB_WATCHDOG_STARTUP` | unit `Environment=` | Seconds between `/health` checks (10), failures before a restart (3), and seconds allowed for the first answer (120). |
 | `BRIGADE_HUB_WATCHDOG_NETNS=1` | container only | Also exit after 3 checks that find only loopback in the network namespace. |
 
-`brigade-hub` ships for `linux-amd64` and `linux-arm64` only.
+`brigade-hub` ships for `linux-amd64` and `linux-arm64` only. The binary
+must be a regular file, not a symlink, owned by root or the service user,
+and writable by its owner alone. `fleet serve` opens it once, checks that
+descriptor's SHA-256, and runs the same descriptor, so replacing the file
+after the check has no effect on what runs.
 
 ## Install the binary
 

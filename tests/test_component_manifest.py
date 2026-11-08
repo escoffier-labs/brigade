@@ -331,8 +331,9 @@ def test_bundled_manifest_pins_miseledger_and_graphtrail_assets():
     assert manifest.brigade_version == __version__
     assert manifest.manifest_revision == "2026-07-19"
     assert manifest.supported_platforms == component_manifest.SUPPORTED_PLATFORMS
+    # The optional brigade-hub ships only in release manifests, never in the bundled one.
     assert set(manifest.components) == {
-        component_manifest.wire_id(manifest.components, cid) for cid in component_manifest.KNOWN_COMPONENT_IDS
+        component_manifest.wire_id(manifest.components, cid) for cid in component_manifest.DEFAULT_COMPONENT_IDS
     }
     assert manifest.components["miseledger"].component_revision == "v0.6.0"
     assert manifest.components["miseledger"].source.release_tag == "v0.6.0"
@@ -415,7 +416,9 @@ def test_schema_contract_requires_exact_platform_order_and_known_components():
     assert supported["const"] == list(component_manifest.SUPPORTED_PLATFORMS)
 
     components = schema["properties"]["components"]
-    assert components["required"] == list(component_manifest.KNOWN_COMPONENT_IDS)
+    # brigade-hub is optional: described, never required.
+    assert components["required"] == list(component_manifest.DEFAULT_COMPONENT_IDS)
+    assert "brigade-hub" in components["properties"]
     for component_id in ("brigade-evidence", "sessionfind"):
         component_schema = components["properties"][component_id]
         assert component_schema["allOf"][0]["$ref"] == "#/$defs/known_component"

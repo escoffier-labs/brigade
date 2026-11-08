@@ -9,5 +9,9 @@
   doubling to 30 s, while native routes keep serving. Proxied routes answer `502 upstream-down` and
   `/ready` answers 503 until it is back. Native long polls answer at once when the hub starts its 25 s
   shutdown drain.
-- The dogfood Compose recipe runs `fleet serve --engine rust`, with the watchdog also exiting when the
-  hub's network namespace is left with only loopback.
+- The dogfood Compose recipe runs `fleet serve --engine rust` when its pinned Brigade has the engine,
+  with the watchdog also exiting when the hub's network namespace is left with only loopback, and
+  keeps its S31 wrapper for an older pin.
+- `fleet serve --engine rust` runs the exact file it checked: it opens the binary once, refuses a symlink,
+  a file owned by another user or one its group or others can write, and executes that descriptor.
+  `--port 0` works, since the watchdog uses the address `brigade-hub` reports binding.

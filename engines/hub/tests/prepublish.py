@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "registry/skills/verify-brigade"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hub_contract as hc  # noqa: E402 - repository-local drive helper
-from engine_rollback import lost_rows, rows  # noqa: E402 - shared row comparison
+from engine_rollback import installed_binary, lost_rows, rows  # noqa: E402 - shared helpers
 
 from brigade import fleet_hub  # noqa: E402
 
@@ -47,8 +47,9 @@ RESTORE_ADVANCES = {"claims", "claim_fences", "fleet_policy_meta", "model_roster
 
 
 def engine_args() -> list[str]:
-    digest = hashlib.sha256(BINARY.read_bytes()).hexdigest()
-    return ["fleet", "serve", "--engine", "rust", "--hub-binary", str(BINARY), "--hub-sha256", digest]
+    binary = installed_binary()
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    return ["fleet", "serve", "--engine", "rust", "--hub-binary", str(binary), "--hub-sha256", digest]
 
 
 def template() -> str:
@@ -95,11 +96,56 @@ class Prepublish(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(result.stdout.startswith("brigade-hub "), result.stdout)
 
+    @staticmethod
+    def parent_of(entry: Path) -> int | None:
+        try:
+            return int((entry / "stat").read_text().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def environ(entry: Path) -> bytes:
+        try:
+            return (entry / "environ").read_bytes()
+        except OSError:
+            return b""
+
+    def hub_process(self, parent: int) -> int:
+        """The brigade-hub child of `fleet serve` (pid `parent`)."""
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                ppid = int((entry / "stat").read_text().rsplit(")", 1)[1].split()[1])
+                argv = (entry / "cmdline").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            if ppid == parent and os.path.basename(argv[0]) == b"brigade-hub":
+                return int(entry.name)
+        self.fail("no brigade-hub process under fleet serve")
+
     def test_startup_drive_and_clean_stop(self):
         with tempfile.TemporaryDirectory() as directory:
             hub = launch(Path(directory))
             try:
                 self.ready(hub)
+                # It ran from the checked descriptor and re-executed through
+                # its own image, keeping its name for process listings.
+                pid = self.hub_process(hub.process.pid)
+                image = installed_binary()
+                self.assertTrue(os.path.samefile(f"/proc/{pid}/exe", image))
+                # The descriptor the re-exec ran through is closed, and the
+                # Python upstream never inherits its variable. Never print an
+                # environment: it can hold credentials.
+                held = [fd for fd in Path(f"/proc/{pid}/fd").iterdir() if fd.resolve() == image.resolve()]
+                self.assertEqual(held, [], "brigade-hub still holds a descriptor of its own image")
+                upstream = [
+                    child
+                    for child in Path("/proc").iterdir()
+                    if child.name.isdigit() and self.parent_of(child) == pid
+                ]
+                leaked = any(b"BRIGADE_HUB_EXE_FD=" in self.environ(child) for child in upstream)
+                self.assertFalse(leaked, "a child of brigade-hub inherited BRIGADE_HUB_EXE_FD")
                 result = hc.run_contract(hub)
                 self.assertFalse(result["mismatches"], result["mismatches"])
             finally:

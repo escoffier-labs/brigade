@@ -100,7 +100,7 @@ def setup(acceptance):
     )
     data_root = component_paths.data_root(env=env)
     installed = component_state.load_installed_state(Path(component_paths.installed_state_path(data_root)))
-    assert set(installed.components) == set(component_manifest.KNOWN_COMPONENT_IDS)
+    assert set(installed.components) == set(component_manifest.DEFAULT_COMPONENT_IDS)
     return {key: Path(record.executable) for key, record in installed.components.items()}
 
 

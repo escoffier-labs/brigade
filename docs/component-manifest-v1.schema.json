@@ -26,14 +26,7 @@
     },
     "components": {
       "type": "object",
-      "required": [
-        "agent-notify",
-        "brigade-code-graph",
-        "brigade-code-graph-mcp",
-        "brigade-evidence",
-        "sessionfind",
-        "brigade-hub"
-      ],
+      "required": ["agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind"],
       "properties": {
         "agent-notify": {
           "allOf": [

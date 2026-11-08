@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import signal
 import sqlite3
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -16,7 +18,10 @@ import brigade
 from brigade import component_install, component_paths, component_state, fleet_hub, fleet_hub_engine
 from brigade.cli import fleet as fleet_cli
 
-linux_only = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="--engine rust runs on Linux only")
+linux_only = pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="brigade-hub ships for Linux only; these run or check the binary (O_NOFOLLOW, owner and mode bits, /proc)",
+)
 
 
 # A stand-in brigade-hub. Like the real one it unblocks the stop signals it
@@ -25,6 +30,8 @@ _PRELUDE = (
     "import os, signal, sys, time\n"
     "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
     "signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM, signal.SIGINT})\n"
+    # brigade-hub reports its bound address on stderr; the watchdog waits for it.
+    "sys.stderr.write('listening on 127.0.0.1:3774\\n'); sys.stderr.flush()\n"
 )
 SERVE = "while True:\n    time.sleep(0.05)\n"
 
@@ -74,7 +81,7 @@ def test_hub_argv_keeps_every_serve_flag_and_route_modes(tmp_path):
         route_modes=("claims=native", "memory=native"),
     )
     assert argv == [
-        "/opt/brigade-hub",
+        str(Path("/opt/brigade-hub")),
         "--host",
         "127.0.0.1",
         "--port",
@@ -122,8 +129,13 @@ def test_resolve_binary_requires_binary_and_checksum_together(tmp_path):
 
 
 def _install_state(tmp_path: Path, *, version: str, components: dict[str, Path]) -> dict[str, str]:
-    env = {"HOME": str(tmp_path / "home"), "XDG_DATA_HOME": str(tmp_path / "data")}
-    roots = component_install.resolve_roots(env=env, system="linux")
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "LOCALAPPDATA": str(tmp_path / "localappdata"),
+    }
+    # This host's roots, as `brigade setup` and resolve_binary use them.
+    roots = component_install.resolve_roots(env=env)
     records = {
         cid: component_state.InstalledComponentRecord(
             component_revision="a" * 40,
@@ -182,16 +194,110 @@ def test_resolve_binary_refuses_a_hub_from_another_release(tmp_path):
         fleet_hub_engine.resolve_binary(None, None, env=env)
 
 
-def test_verify_binary_refuses_missing_unexecutable_and_altered_files(tmp_path):
+def _refused(binary: fleet_hub_engine.Binary, match: str) -> None:
+    with pytest.raises(fleet_hub_engine.EngineError, match=match):
+        os.close(fleet_hub_engine.open_binary(binary))
+
+
+@linux_only
+def test_open_binary_checks_the_descriptor_it_returns(tmp_path):
     hub, digest = _fake_hub(tmp_path, "sys.exit(0)\n")
-    fleet_hub_engine.verify_binary(fleet_hub_engine.Binary(hub, digest, "test"))
-    with pytest.raises(fleet_hub_engine.EngineError, match="does not match the checksum"):
-        fleet_hub_engine.verify_binary(fleet_hub_engine.Binary(hub, "0" * 64, "test"))
+    fd = fleet_hub_engine.open_binary(fleet_hub_engine.Binary(hub, digest, "test"))
+    try:
+        assert os.path.samestat(os.fstat(fd), os.stat(hub))
+    finally:
+        os.close(fd)
+    _refused(fleet_hub_engine.Binary(hub, "0" * 64, "test"), "does not match the checksum")
+    _refused(fleet_hub_engine.Binary(tmp_path / "absent", digest, "test"), "missing")
     hub.chmod(0o644)
-    with pytest.raises(fleet_hub_engine.EngineError, match="not executable"):
-        fleet_hub_engine.verify_binary(fleet_hub_engine.Binary(hub, digest, "test"))
-    with pytest.raises(fleet_hub_engine.EngineError, match="missing"):
-        fleet_hub_engine.verify_binary(fleet_hub_engine.Binary(tmp_path / "absent", digest, "test"))
+    _refused(fleet_hub_engine.Binary(hub, digest, "test"), "not executable")
+
+
+@linux_only
+@pytest.mark.parametrize("mode", [0o775, 0o757], ids=["group-writable", "world-writable"])
+def test_open_binary_refuses_a_binary_others_can_write(tmp_path, mode):
+    hub, digest = _fake_hub(tmp_path, "sys.exit(0)\n")
+    hub.chmod(mode)
+    _refused(fleet_hub_engine.Binary(hub, digest, "test"), "writable by its group or others")
+
+
+@linux_only
+def test_open_binary_refuses_a_symlink_and_a_directory(tmp_path):
+    hub, digest = _fake_hub(tmp_path, "sys.exit(0)\n")
+    link = tmp_path / "link"
+    link.symlink_to(hub)
+    _refused(fleet_hub_engine.Binary(link, digest, "test"), "cannot open brigade-hub binary")
+    _refused(fleet_hub_engine.Binary(tmp_path, digest, "test"), "not a regular file")
+
+
+@linux_only
+def test_open_binary_refuses_a_binary_owned_by_another_user(tmp_path, monkeypatch):
+    hub, digest = _fake_hub(tmp_path, "sys.exit(0)\n")
+    monkeypatch.setattr(fleet_hub_engine.os, "geteuid", lambda: os.stat(hub).st_uid + 1)
+    if os.stat(hub).st_uid == 0:
+        pytest.skip("root owns the fixture, which is always allowed")
+    _refused(fleet_hub_engine.Binary(hub, digest, "test"), "not root or this user")
+
+
+@linux_only
+def test_a_binary_swapped_after_the_check_never_runs(tmp_path, monkeypatch):
+    ran = tmp_path / "ran"
+    original, digest = _fake_hub(tmp_path, f"open({str(ran)!r}, 'w').write('original')\n")
+    impostor = tmp_path / "impostor"
+    impostor.write_text(f"#!{sys.executable}\nopen({str(ran)!r}, 'w').write('impostor')\n")
+    impostor.chmod(0o755)
+    real_init = fleet_hub.init_db
+
+    def init_then_swap(path, *args, **kwargs):
+        # Between the digest check and the exec, replace the directory entry.
+        conn = real_init(path, *args, **kwargs)
+        os.replace(impostor, original)
+        return conn
+
+    monkeypatch.setattr(fleet_hub, "init_db", init_then_swap)
+    _run(tmp_path, original, digest)
+    assert ran.read_text() == "original"
+
+
+@linux_only
+def test_port_zero_never_probes_port_zero(tmp_path, capsys):
+    script = tmp_path / "brigade-hub"
+    script.write_text(
+        f"#!{sys.executable}\nimport sys, time\n"
+        "sys.stderr.write('starting\\nlistening on [::1]:43123\\n'); sys.stderr.flush()\ntime.sleep(1)\n"
+    )
+    script.chmod(0o755)
+    digest = hashlib.sha256(script.read_bytes()).hexdigest()
+    probed: list[str] = []
+    code = fleet_hub_engine.run(
+        host="::1",
+        port=0,
+        db_path=tmp_path / "hub.db",
+        token_file=None,
+        allow_admin_writes=False,
+        require_sealed=False,
+        deck_config_path=None,
+        trust_tailscale_identity=False,
+        trust_forwarded_proto=False,
+        hub_binary=script,
+        hub_sha256=digest,
+        env=_watchdog_env(),
+        healthy=lambda url: probed.append(url) or True,
+        only_loopback=lambda: False,
+    )
+    assert code == 0
+    assert probed and set(probed) == {"http://[::1]:43123/health"}
+    captured = capsys.readouterr()
+    assert "listening on [::1]:43123 (" in captured.out
+    # brigade-hub's own stderr still reaches ours.
+    assert "starting" in captured.err
+
+
+def test_bound_address_reads_brigade_hub_listening_lines():
+    assert fleet_hub_engine.bound_address(b"listening on 127.0.0.1:3774\n") == ("127.0.0.1", 3774)
+    assert fleet_hub_engine.bound_address(b"listening on [::1]:40000\n") == ("::1", 40000)
+    assert fleet_hub_engine.bound_address(b"listening on nowhere\n") is None
+    assert fleet_hub_engine.bound_address(b"error: listening on 1.2.3.4:5\n") is None
 
 
 @linux_only
@@ -393,3 +499,91 @@ def test_default_engine_is_python(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_hub, "run", lambda **kwargs: seen.update(kwargs) or 0)
     assert fleet_cli._dispatch_serve(_serve_args(tmp_path), environ={}) == 0
     assert seen["host"] == "127.0.0.1"
+
+
+def _supervise(argv):
+    return fleet_hub_engine._supervise(
+        argv,
+        detail="test",
+        interval=1.0,
+        failures=3,
+        startup=30.0,
+        watch_namespace=False,
+        healthy=lambda _url: False,
+        only_loopback=lambda: False,
+    )
+
+
+@linux_only
+def test_a_stop_that_lands_while_the_hub_is_spawning_is_forwarded(monkeypatch, capsys):
+    sent = []
+
+    class Child:
+        stderr = None
+
+        def __init__(self, argv, **_kwargs):
+            # The stop lands mid-spawn: the handler runs before `child` is bound.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        def send_signal(self, signum):
+            sent.append(signum)
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
+    monkeypatch.setattr(fleet_hub_engine.subprocess, "Popen", Child)
+    try:
+        code = _supervise(["brigade-hub"])
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    assert sent == [signal.SIGTERM]
+    assert code == 0
+    assert capsys.readouterr().out.strip() == fleet_hub_engine.STOPPED
+
+
+MASK_HUB = """
+import signal, sys, time
+from pathlib import Path
+with open("/proc/self/status", encoding="utf-8") as status:
+    blocked = next(line.split()[1] for line in status if line.startswith("SigBlk:"))
+Path(sys.argv[-1]).write_text(blocked, encoding="utf-8")
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+# As brigade-hub does once its handlers exist: a held stop arrives now.
+signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM, signal.SIGINT})
+time.sleep(20)
+sys.exit(4)
+"""
+
+
+@linux_only
+def test_the_hub_starts_with_stop_signals_blocked_so_a_pending_stop_waits(tmp_path, monkeypatch, capsys):
+    fake = tmp_path / "brigade-hub"
+    fake.write_text(f"#!{sys.executable}\n{MASK_HUB}", encoding="utf-8")
+    fake.chmod(0o755)
+    real = subprocess.Popen
+
+    def popen(argv, **kwargs):
+        # The stop lands during the spawn; it is held, then forwarded.
+        os.kill(os.getpid(), signal.SIGTERM)
+        return real(argv, **kwargs)
+
+    previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    monkeypatch.setattr(fleet_hub_engine.subprocess, "Popen", popen)
+    try:
+        code = _supervise([str(fake), str(tmp_path / "mask")])
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    blocked = int((tmp_path / "mask").read_text(encoding="utf-8"), 16)
+    assert blocked & (1 << (signal.SIGTERM - 1)) and blocked & (1 << (signal.SIGINT - 1))
+    # The forwarded stop reached the hub's handler, not its default action.
+    assert code == 0
+    assert capsys.readouterr().out.strip() == fleet_hub_engine.STOPPED
+    # This process's own mask is back as it was.
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == mask

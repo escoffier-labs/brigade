@@ -729,7 +729,8 @@ def test_release_manifest_still_rejects_missing_agent_notify_without_beta_handof
 
     # Strict validation (no compatibility handoff) rejects the missing
     # agent-notify entry, preserving the stable/release invariant.
-    with pytest.raises(ValueError, match="missing required components: agent-notify, brigade-hub"):
+    # brigade-hub is optional, so only agent-notify is reported missing.
+    with pytest.raises(ValueError, match="missing required components: agent-notify$"):
         update_cmd.validate_release_manifest_bytes(release)
 
     # The narrowly named compatibility mode is the only path that accepts it,

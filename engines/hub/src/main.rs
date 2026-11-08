@@ -1828,6 +1828,38 @@ async fn serve(
     conn.as_mut().graceful_shutdown();
     let _ = conn.await;
 }
+/// Close the descriptor of this binary's image named by `BRIGADE_HUB_EXE_FD`,
+/// so no child inherits it. `fleet serve --engine rust` passes the descriptor
+/// it checked and executed, and the descriptor-limit re-exec passes its own.
+/// Only a descriptor of this same image (same device and inode as
+/// `/proc/self/exe`) is closed. Runs first in `main`, before any thread.
+fn close_image_descriptor() {
+    let Some(fd) = std::env::var("BRIGADE_HUB_EXE_FD")
+        .ok()
+        .and_then(|fd| fd.parse::<libc::c_int>().ok())
+    else {
+        return;
+    };
+    // SAFETY: main has not created the runtime or any threads.
+    unsafe { std::env::remove_var("BRIGADE_HUB_EXE_FD") };
+    if fd < 3 {
+        return;
+    }
+    // SAFETY: both stat buffers are zeroed locals, the path is a static
+    // NUL-terminated string, and only a descriptor proven to be this image
+    // is closed.
+    unsafe {
+        let mut held: libc::stat = std::mem::zeroed();
+        let mut image: libc::stat = std::mem::zeroed();
+        if libc::fstat(fd, &mut held) == 0
+            && libc::stat(c"/proc/self/exe".as_ptr(), &mut image) == 0
+            && (held.st_dev, held.st_ino) == (image.st_dev, image.st_ino)
+        {
+            libc::close(fd);
+        }
+    }
+}
+
 fn main() {
     // Before the runtime's threads exist, so none of them takes a stop signal
     // with the default action. `Stop::install` unblocks them in `run`.
@@ -1835,6 +1867,7 @@ fn main() {
         eprintln!("error: blocking stop signals failed: {e}");
         std::process::exit(2);
     }
+    close_image_descriptor();
     let mut config = Config::parse();
     // Resolve before any runtime threads exist. Children use a safe cwd, while
     // relative CLI and environment paths keep the caller's directory as base.
@@ -1904,12 +1937,31 @@ fn main() {
         // blocked through limits.py and its exec; the hook only makes that
         // explicit. SAFETY: pthread_sigmask is async-signal-safe.
         unsafe { command.pre_exec(|| stop_signals(libc::SIG_BLOCK)) };
+        // Run the image this process already runs, through an inherited
+        // descriptor instead of its path, so a file swapped in at that path
+        // after `fleet serve` checked its digest never runs. argv[0] stays as
+        // given. Without /proc, fall back to the path.
+        // SAFETY: open of a static NUL-terminated path, no other effects.
+        let image = unsafe { libc::open(c"/proc/self/exe".as_ptr(), libc::O_RDONLY) };
+        let exe: std::ffi::OsString = if image >= 0 {
+            command.env("BRIGADE_HUB_EXE_FD", image.to_string());
+            format!("/proc/self/fd/{image}").into()
+        } else {
+            std::env::current_exe()
+                .expect("executable path")
+                .into_os_string()
+        };
         let error = command
             .arg("-c")
             .arg(include_str!("../limits.py"))
             .arg(cwd.as_deref().unwrap_or_else(|| std::path::Path::new("/")))
             .arg((config.max_connections as u64 + 24 + 64).to_string())
-            .arg(std::env::current_exe().expect("executable path"))
+            .arg(exe)
+            .arg(
+                std::env::args_os()
+                    .next()
+                    .unwrap_or_else(|| "brigade-hub".into()),
+            )
             .args(std::env::args_os().skip(1))
             .exec();
         eprintln!("error: descriptor limit setup failed: {error}");

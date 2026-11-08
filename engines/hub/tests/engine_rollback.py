@@ -16,8 +16,10 @@ mode (`-I`) imports this checkout's `brigade`, since brigade-hub starts its
 upstream that way.
 """
 
+import atexit
 import hashlib
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -35,10 +37,30 @@ NATIVE = "--route-mode registration=native --route-mode claims=native --route-mo
 BRIGADE = [sys.executable, "-m", "brigade"]
 
 
+_INSTALLED: list[Path] = []
+
+
+def installed_binary() -> Path:
+    """A private 0755 copy of BINARY, as an install leaves it.
+
+    `fleet serve --engine rust` refuses a binary its group or others can
+    write, which a build under umask 002 is.
+    """
+    if not _INSTALLED:
+        directory = Path(tempfile.mkdtemp(prefix="brigade-hub-installed-"))
+        atexit.register(shutil.rmtree, directory, ignore_errors=True)
+        copy = directory / "brigade-hub"
+        shutil.copyfile(BINARY, copy)
+        copy.chmod(0o755)
+        _INSTALLED.append(copy)
+    return _INSTALLED[0]
+
+
 def rust_template() -> str:
-    digest = hashlib.sha256(BINARY.read_bytes()).hexdigest()
+    binary = installed_binary()
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     return (
-        f"{{brigade}} fleet serve --engine rust --hub-binary {BINARY} --hub-sha256 {digest} "
+        f"{{brigade}} fleet serve --engine rust --hub-binary {binary} --hub-sha256 {digest} "
         f"--host {{host}} --port {{port}} --db {{db}} --token-file {{token_file}} {NATIVE}"
     )
 

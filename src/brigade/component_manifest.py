@@ -212,7 +212,9 @@ def _load_raw(
             name, value, allow_standalone_legacy_revisions=allow_standalone_legacy_revisions
         )
 
-    missing = [component_id for component_id in KNOWN_COMPONENT_IDS if wire_id(components, component_id) is None]
+    # Optional components are never required: a manifest without brigade-hub
+    # still serves a default setup, and only `--component` asks for it.
+    missing = [component_id for component_id in DEFAULT_COMPONENT_IDS if wire_id(components, component_id) is None]
     if missing:
         # The beta handoff downloads the last stable release manifest, which
         # predates any component id added to KNOWN_COMPONENT_IDS on main but

@@ -26,8 +26,10 @@ import hashlib
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
@@ -107,18 +109,40 @@ def resolve_binary(
     return Binary(Path(record.executable), record.sha256, f"installed state {state_path}")
 
 
-def verify_binary(binary: Binary) -> None:
-    """Refuse a missing, non-executable or altered binary."""
-    if not binary.path.is_file():
-        raise EngineError(f"brigade-hub binary missing: {binary.path}")
-    if not os.access(binary.path, os.X_OK):
-        raise EngineError(f"brigade-hub binary is not executable: {binary.path}")
-    digest = hashlib.sha256()
-    with binary.path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
+def open_binary(binary: Binary) -> int:
+    """Open the binary once, check it, and return the descriptor to execute.
+
+    The checks and the digest read the descriptor, never the path again, and
+    the caller executes that same descriptor, so a file or directory entry
+    swapped in after the check never runs. The file must be a regular file,
+    not a symlink, owned by root or this user, executable, and writable by
+    its owner alone.
+    """
+    try:
+        fd = os.open(binary.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise EngineError(f"brigade-hub binary missing: {binary.path}") from None
+    except OSError as exc:
+        raise EngineError(f"cannot open brigade-hub binary {binary.path}: {exc.strerror}") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise EngineError(f"brigade-hub binary is not a regular file: {binary.path}")
+        if info.st_uid not in (0, os.geteuid()):
+            raise EngineError(f"brigade-hub binary {binary.path} is owned by uid {info.st_uid}, not root or this user")
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise EngineError(f"brigade-hub binary {binary.path} is writable by its group or others")
+        if not info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+            raise EngineError(f"brigade-hub binary is not executable: {binary.path}")
+        digest = hashlib.sha256()
+        for block in iter(lambda: os.read(fd, 1024 * 1024), b""):
             digest.update(block)
-    if digest.hexdigest() != binary.sha256:
-        raise EngineError(f"brigade-hub binary {binary.path} does not match the checksum from {binary.source}")
+        if digest.hexdigest() != binary.sha256:
+            raise EngineError(f"brigade-hub binary {binary.path} does not match the checksum from {binary.source}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def hub_argv(
@@ -157,6 +181,20 @@ def health_url(host: str, port: int) -> str:
     """Where the watchdog checks `/health`: the bound address, or loopback for a wildcard bind."""
     probe = {"0.0.0.0": "127.0.0.1", "::": "::1", "": "127.0.0.1"}.get(host, host)
     return f"http://{'[' + probe + ']' if ':' in probe else probe}:{port}/health"
+
+
+_LISTENING = re.compile(rb"^listening on (\S+?)\r?\n?$")
+
+
+def bound_address(line: bytes) -> tuple[str, int] | None:
+    """The host and port from brigade-hub's `listening on <address>` line."""
+    match = _LISTENING.match(line)
+    if match is None:
+        return None
+    host, _, port = match.group(1).decode("ascii", "replace").rpartition(":")
+    if not port.isdigit() or not host:
+        return None
+    return host.strip("[]"), int(port)
 
 
 def healthy(url: str) -> bool:
@@ -222,63 +260,72 @@ def run(
         startup = _env_number(environ, "BRIGADE_HUB_WATCHDOG_STARTUP", STARTUP_SECONDS)
         watch_namespace = environ.get("BRIGADE_HUB_WATCHDOG_NETNS", "") == "1"
         binary = resolve_binary(hub_binary, hub_sha256, hub_sha256_file=hub_sha256_file, env=environ)
-        verify_binary(binary)
-        db_path = Path(db_path).expanduser()
-        from . import fleet_hub
-
-        # The Python hub owns the schema (D6). Migrate, or refuse a newer
-        # file, before brigade-hub or its upstream opens it.
-        conn = fleet_hub.init_db(db_path)
-        try:
-            # init_db sets WAL only when it migrates, and `fleet restore`
-            # publishes its file in rollback-journal mode. brigade-hub's
-            # readers take no busy wait, so in that mode every Python write
-            # during startup refuses them. WAL persists in the file.
-            journal = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
-        finally:
-            conn.close()
-        if str(journal).lower() != "wal":
-            raise EngineError(f"fleet hub database {db_path} could not switch to WAL (journal mode {journal})")
+        image = open_binary(binary)
     except EngineError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    except Exception as exc:  # noqa: BLE001 - init_db raises sqlite3, OS and hub errors alike
-        print(f"error: fleet hub database: {exc}", file=sys.stderr)
-        return 2
-    argv = hub_argv(
-        binary.path,
-        host=host,
-        port=port,
-        db_path=db_path,
-        token_file=token_file,
-        allow_admin_writes=allow_admin_writes,
-        require_sealed=require_sealed,
-        deck_config_path=deck_config_path,
-        trust_tailscale_identity=trust_tailscale_identity,
-        trust_forwarded_proto=trust_forwarded_proto,
-        route_modes=route_modes,
-    )
-    return _supervise(
-        argv,
-        url=health_url(host, port),
-        banner=(
-            f"{STARTED} {host}:{port} (brigade-hub front, managed Python upstream; db {db_path}; "
-            f"route modes {', '.join(route_modes) or 'defaults'})"
-        ),
-        interval=interval,
-        failures=failures,
-        startup=startup,
-        watch_namespace=watch_namespace,
-        healthy=healthy,
-        only_loopback=only_loopback,
-    )
+    db_path = Path(db_path).expanduser()
+    try:
+        try:
+            from . import fleet_hub
+
+            # The Python hub owns the schema (D6). Migrate, or refuse a newer
+            # file, before brigade-hub or its upstream opens it.
+            conn = fleet_hub.init_db(db_path)
+            try:
+                # init_db sets WAL only when it migrates, and `fleet restore`
+                # publishes its file in rollback-journal mode. brigade-hub's
+                # readers take no busy wait, so in that mode every Python write
+                # during startup refuses them. WAL persists in the file.
+                journal = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            finally:
+                conn.close()
+            if str(journal).lower() != "wal":
+                raise EngineError(f"fleet hub database {db_path} could not switch to WAL (journal mode {journal})")
+        except EngineError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - init_db raises sqlite3, OS and hub errors alike
+            print(f"error: fleet hub database: {exc}", file=sys.stderr)
+            return 2
+        argv = hub_argv(
+            binary.path,
+            host=host,
+            port=port,
+            db_path=db_path,
+            token_file=token_file,
+            allow_admin_writes=allow_admin_writes,
+            require_sealed=require_sealed,
+            deck_config_path=deck_config_path,
+            trust_tailscale_identity=trust_tailscale_identity,
+            trust_forwarded_proto=trust_forwarded_proto,
+            route_modes=route_modes,
+        )
+        return _supervise(
+            argv,
+            image=image,
+            detail=(
+                f"brigade-hub front, managed Python upstream; db {db_path}; "
+                f"route modes {', '.join(route_modes) or 'defaults'}"
+            ),
+            interval=interval,
+            failures=failures,
+            startup=startup,
+            watch_namespace=watch_namespace,
+            healthy=healthy,
+            only_loopback=only_loopback,
+        )
+
+    finally:
+        # brigade-hub has its own copy of the descriptor once it is running.
+        os.close(image)
 
 
 def _supervise(
     argv: list[str],
     *,
-    url: str,
-    banner: str,
+    image: int | None = None,
+    detail: str,
     interval: float,
     failures: int,
     startup: float,
@@ -293,6 +340,11 @@ def _supervise(
     # one Brigade install unless the operator names another.
     child_env = dict(os.environ)
     child_env.setdefault("BRIGADE_HUB_PYTHON", sys.executable)
+    child_env.pop("BRIGADE_HUB_EXE_FD", None)
+    if image is not None:
+        # brigade-hub closes this descriptor of its own image at start, so
+        # neither it nor its Python upstream keeps it.
+        child_env["BRIGADE_HUB_EXE_FD"] = str(image)
 
     def send(signum: int) -> None:
         if child is None:
@@ -319,15 +371,27 @@ def _supervise(
         # right after the spawn never meets its pre-main default action.
         mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
         try:
-            child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, env=child_env)
+            # The checked descriptor is what runs (`image`), and argv[0] keeps
+            # the binary's name for process listings and the S31 checks.
+            child = subprocess.Popen(
+                argv,
+                executable=None if image is None else f"/proc/self/fd/{image}",
+                pass_fds=() if image is None else (image,),
+                stdin=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=child_env,
+            )
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         if pending is not None:
             send(pending)
+        bound: list[tuple[str, int]] = []
+        relay = threading.Thread(target=_relay_stderr, args=(child, bound), daemon=True)
+        relay.start()
         reason = _watch(
             child,
-            url=url,
-            banner=banner,
+            bound=bound,
+            detail=detail,
             interval=interval,
             failures=failures,
             startup=startup,
@@ -346,6 +410,7 @@ def _supervise(
                 child.wait()
             return 1
         returncode = child.wait()
+        relay.join(timeout=2)
     finally:
         for sig, handler in previous_handlers.items():
             signal.signal(sig, handler)
@@ -356,11 +421,35 @@ def _supervise(
     return exit_code(returncode)
 
 
+def _relay_stderr(child: subprocess.Popen[bytes], bound: list[tuple[str, int]]) -> None:
+    """Copy brigade-hub's stderr through, and record the address it reports binding.
+
+    With `--port 0` only brigade-hub knows its port, so the watchdog and the
+    listening line wait for this.
+    """
+    stream = child.stderr
+    if stream is None:
+        return
+    out = getattr(sys.stderr, "buffer", None)
+    for line in iter(stream.readline, b""):
+        if not bound and (address := bound_address(line)) is not None:
+            bound.append(address)
+        try:
+            if out is not None:
+                out.write(line)
+            else:
+                sys.stderr.write(line.decode("utf-8", "replace"))
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            pass
+    stream.close()
+
+
 def _watch(
     child: subprocess.Popen[bytes],
     *,
-    url: str,
-    banner: str,
+    bound: list[tuple[str, int]],
+    detail: str,
     interval: float,
     failures: int,
     startup: float,
@@ -378,10 +467,16 @@ def _watch(
         if stopping():
             return None
         now = time.monotonic()
-        if now >= next_check:
-            if healthy(url):
+        if now >= next_check and not bound:
+            # Not bound yet: nothing to probe.
+            if now - started > startup:
+                return f"/health did not answer within {startup:g} s of startup"
+            next_check = now + POLL_SECONDS
+        elif now >= next_check:
+            host, port = bound[0]
+            if healthy(health_url(host, port)):
                 if not served:
-                    print(banner, flush=True)
+                    print(f"{STARTED} {'[' + host + ']' if ':' in host else host}:{port} ({detail})", flush=True)
                     served = True
                 sick = 0
             elif served:
