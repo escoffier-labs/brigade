@@ -134,14 +134,18 @@ def pulling(target: Path, *, deadline_seconds: float | None = None) -> Iterator[
 
 
 def write_private(path: Path, data: str) -> None:
-    """Write `data` as UTF-8 to a 0600 file through a temporary name and an atomic replace."""
+    """Write `data` as UTF-8 to a 0600 file through a temporary name and an atomic replace.
+
+    Newlines are written untranslated, so the file holds exactly `data`'s bytes on
+    every platform and a digest of the serialized text matches the file.
+    """
     private_dir(path.parent)
     if path.is_symlink():
         raise StoreError(f"{path} is a symlink")
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC, 0o600)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())

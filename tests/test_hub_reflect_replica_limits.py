@@ -98,3 +98,26 @@ def test_saved_count_and_digest_are_verified_before_decoding(tmp_path, monkeypat
         with pytest.raises(OSError):
             store.Replica(root)
     assert decoded == []
+
+
+def test_saved_digest_matches_the_file_under_windows_newline_translation(tmp_path, monkeypatch):
+    from brigade import memory_hub_replica_limits as limits
+
+    real_fdopen = store.os.fdopen
+
+    def windows_fdopen(fd, mode="r", *args, **kwargs):
+        # Text mode on Windows writes CRLF unless the caller asks for no translation.
+        if "b" not in mode:
+            kwargs.setdefault("newline", "\r\n")
+        return real_fdopen(fd, mode, *args, **kwargs)
+
+    monkeypatch.setattr(store.os, "fdopen", windows_fdopen)
+    root = tmp_path / "replica"
+    replica = store.Replica(root)
+    replica.heads = {f"fleet\ncard-{i}": {"scope": "fleet", "text": "x"} for i in range(2)}
+    replica.save()
+    raw = (root / "heads.json").read_bytes()
+    assert b"\r\n" not in raw
+    assert store.read_json(root / "meta.json")["heads_sha256"] == hashlib.sha256(raw).hexdigest()
+    with limits.bounded(max_cards=10, max_bytes=1024 * 1024):
+        assert store.Replica(root).heads == replica.heads
