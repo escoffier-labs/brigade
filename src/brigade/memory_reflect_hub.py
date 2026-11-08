@@ -16,6 +16,7 @@ from . import memory_hub_sync as sync
 from . import memory_proposal_io as io
 from . import memory_proposal_v2_ops as delta
 from . import memory_reflect_candidates as derive
+from . import memory_reflect_near as near
 from .inbox_lock import held_file_lock
 
 STATE = ".brigade/memory/reflect/schedule.json"
@@ -26,6 +27,10 @@ MAX_SCOPE_BYTES = 64 * 1024 * 1024
 MAX_REPLICA_BYTES = 64 * 1024 * 1024
 REPLICA_FILE_SLACK = 1024 * 1024
 
+
+# Hub quota refusals end proposing for this run without counting as a failure.
+QUOTA_REFUSALS = hubc.QUOTA_REFUSALS
+DUPLICATE_PENDING = "memory_proposal_duplicate_pending"
 
 STATE_ERROR = "invalid reflect schedule state. Inspect and remove .brigade/memory/reflect/schedule.json to recover"
 
@@ -252,6 +257,10 @@ def _reflect(
         raise ReflectError("hub_reflect_limit_invalid", "--limit must be from 1 to 100")
     if scope is not None and scope not in settings.read_scopes:
         raise ReflectError("hub_reflect_scope_invalid", "--scope must be a configured hub read scope")
+    try:
+        near_limit = near.threshold(target)
+    except near.ThresholdError as exc:
+        raise ReflectConfigError(str(exc)) from None
     with store.locked(target):
         _check_replica_files(target, scope=scope, dry_run=dry_run)
     configured_scopes = settings.read_scopes
@@ -310,36 +319,45 @@ def _reflect(
         sync.refresh_scan_metadata(target, client, settings)
         heads = read_heads()
         check_bounds()
-    ops = []
+    # Each submission is one propose request. Exact merges stay one op each.
+    submissions: list[list[dict[str, Any]]] = []
     skipped: dict[str, int] = {}
+    budget = near.Budget()
     for name in settings.read_scopes:
-        scope_ops, scope_skips = _ops([head for head in heads if head["scope"] == name])
-        ops.extend(scope_ops)
-        for reason, count in scope_skips.items():
+        scoped = [head for head in heads if head["scope"] == name]
+        scope_ops, scope_skips = _ops(scoped)
+        submissions.extend([op] for op in scope_ops)
+        # The near pass runs after the exact pass and leaves exact groups to it.
+        near_ops, near_skips = near.ops(scoped, limit=near_limit, budget=budget)
+        submissions.extend(near_ops)
+        for reason, count in (*scope_skips.items(), *near_skips.items()):
             skipped[reason] = skipped.get(reason, 0) + count
     binding = io.sha256(
         io.json_bytes([client.identity, report["principal"], report["log_epoch"], list(configured_scopes)])
     )
     previous = dict(state.get("submissions", {})) if state.get("binding") == binding else {}
     remaining = []
-    for op in ops:
-        digest = io.sha256(io.json_bytes(op))
+    for ops in submissions:
+        # A single op keeps its historical digest, so remembered submissions survive upgrades.
+        digest = io.sha256(io.json_bytes(ops[0] if len(ops) == 1 else ops))
         remembered = previous.get(digest, {})
         if remembered.get("proposal_id"):
             skipped["already_proposed"] = skipped.get("already_proposed", 0) + 1
         elif remembered.get("refused"):
             skipped["refused"] = skipped.get("refused", 0) + 1
         else:
-            remaining.append((digest, op))
+            remaining.append((digest, ops))
     selected = remaining[:limit]
     proposals = []
     refused = []
     error = None
     failed_ops = 0
+    attempted = len(selected)
     if not dry_run:
         # Preserve unprocessed submissions under this binding across scope and limit changes.
         state.update(binding=binding, submissions=previous)
-        for digest, op in selected:
+        for position, (digest, ops) in enumerate(selected):
+            stop = False
             for attempt in range(2):
                 pending = dict(previous.get(digest) or {"client_event_id": hubc.event_id()})
                 previous[digest] = pending
@@ -347,10 +365,24 @@ def _reflect(
                 _save(target, state)
                 try:
                     opened = client.call(
-                        "propose", base_epoch=report["log_epoch"], client_event_id=pending["client_event_id"], ops=[op]
+                        "propose", base_epoch=report["log_epoch"], client_event_id=pending["client_event_id"], ops=ops
                     )
                 except hubc.HubRefusal as exc:
                     code = exc.code if _code(exc.code) else "hub_refused"
+                    if exc.status == 429 and code in QUOTA_REFUSALS:
+                        # A full quota is back pressure, not a failure: stop and leave the rest for later runs.
+                        skipped["proposal_quota"] = skipped.get("proposal_quota", 0) + len(selected) - position
+                        attempted, stop = position, True
+                        break
+                    if exc.status == 409 and code == DUPLICATE_PENDING:
+                        existing = exc.body.get("proposal_id")
+                        if _event_id(existing):
+                            pending["proposal_id"] = existing
+                        else:
+                            pending["refused"] = code
+                        _save(target, state)
+                        skipped["duplicate_pending"] = skipped.get("duplicate_pending", 0) + 1
+                        break
                     refused.append({"op_digest": digest, "code": code})
                     if exc.denies_access:
                         error = code
@@ -378,10 +410,10 @@ def _reflect(
                 _save(target, state)
                 proposals.append({"proposal_id": pending["proposal_id"]})
                 break
-            if error is not None:
+            if error is not None or stop:
                 break
-        # Only final refusals of ops attempted this run count, never cached skips or recovered ids.
-        if selected and failed_ops == len(selected) and error is None:
+        # Only final refusals of ops attempted this run count, never cached skips, recovered ids or quota stops.
+        if attempted and failed_ops == attempted and error is None:
             error = "all_ops_refused"
     payload = {
         "status": "failed" if error else "completed",
@@ -390,10 +422,11 @@ def _reflect(
         "candidate_count": len(selected),
         "skipped_ops": sum(skipped.values()),
         "skipped_reasons": skipped,
-        "ops": [op for _, op in selected],
+        "ops": [op for _, ops in selected for op in ops],
         "proposals": proposals,
         "refused_ops": refused,
         "seq": report["seq"],
+        "near_duplicate": {"threshold": near_limit, **budget.stats},
     }
     if error:
         payload["error"] = error

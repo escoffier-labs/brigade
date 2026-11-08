@@ -1207,7 +1207,7 @@ attestations no longer supply one.
 
 For a workspace with `[hub] mode = "read"` or `"sync"`, `brigade memory reflect
 run --target <workspace>` pulls the hub log from the replica's sequence
-watermark and opens reviewed proposals. The current deterministic hub pass
+watermark and opens reviewed proposals. The first deterministic hub pass
 finds exact duplicate claim bodies within each configured read scope. It keeps
 opaque bytes such as code indentation, requires an existing claim anchor on
 the keeper, and pins both card revisions and the keeper's block hash. It drops
@@ -1224,6 +1224,69 @@ This pass does not invent anchors or evidence. Local reflection still derives
 its existing evidence and review candidates when hub mode is off. S19e-1 adds
 attestation and the gated automatic route. Automatic apply requires a separate call with every gate satisfied.
 Scheduled reflection only proposes.
+
+#### Near-duplicate pass
+
+After the exact pass, each configured read scope runs a deterministic
+near-duplicate pass over the same bounded heads. It reads nothing beyond the
+50,000-card and 64 MiB scope bounds described below. Each claim body is
+compared with its addressable anchors stripped, folded to lower case and split
+into words. Similarity is the Jaccard index of the two bodies' word 5-gram
+shingles. A body shorter than five words is one shingle. Cards that form an
+exact duplicate group are left to the exact pass. Cards whose front matter
+already says `status: superseded` or names `superseded_by` are left out.
+
+The threshold defaults to 0.9. Set it from 0.5 to 1.0 in
+`.brigade/memory-care.toml`:
+
+```toml
+[reflect]
+near_duplicate_threshold = 0.9
+```
+
+A value outside that range, or a value that is not a number, fails the run
+with `hub_reflect_config` before any hub call.
+
+Candidate pairs come from an inverted index over a prefix of each card's
+shingles in a fixed hash order. Two cards at or above the threshold always
+share a prefix shingle, so the prefix filter alone loses no pair. A shingle
+indexed by more than 64 cards is template text and is skipped. This keeps pair
+generation close to linear in the number of cards. The report counts these
+shingles as `near_duplicate.common_shingles`. A run verifies at most 200,000
+distinct candidate pairs across all scopes. Reaching that budget stops the
+pass for the current scope and counts `near_pair_limit`.
+
+Clusters are stars around a keeper. Cards with at least one near-duplicate are
+taken in keeper order: the most recently revised card first, then the lowest
+card id on a tie. A card's hub revision is its hub log sequence, so the highest
+revision is the latest write. Each keeper claims its direct near-duplicates
+that no earlier keeper took. Every member is therefore at or above the
+threshold against its own keeper, never only through a chain of other cards.
+
+Each member gets a `supersede_card` op. The op names the member as its card
+and the keeper as `other_card`. It pins the member's base revision and the
+hash of the member's first anchored block. `other_card` pins the keeper's base
+revision, and the hub pins every anchored block of the keeper. Accepting the
+op sets the member's `status` to `superseded` and `superseded_by` to the
+keeper. Nothing is retired or deleted. A cluster is split into submissions of
+at most seven ops, so each submission stays within the hub limits of 64 ops
+over eight cards.
+
+Eligibility follows the exact pass. A cluster with any non-clean scan state
+counts `near_non_clean`. Mixed trust counts `near_mixed_trust`. A shared trust
+class outside the known set counts `near_unknown_trust`. A keeper without an
+anchored block counts `near_missing_pin` for every member. A member without an
+anchored block counts `near_missing_pin` for its own op. A member whose
+`status` or `superseded_by` field is ambiguous or multiline counts
+`near_invalid_metadata`. Counts are per skipped op and never include card
+text.
+
+The hub classifies `supersede_card` as Tier 2, so these proposals are never
+Tier 0 eligible and never take the automatic apply route. Each one waits for
+an explicit reviewer decision. `--dry-run` lists the supersede ops it would
+open beside the exact ops, with the skip counts and the `near_duplicate`
+counters `threshold`, `candidate_pairs`, `pair_checks`, `clusters` and
+`common_shingles`.
 
 Hub reflection selects scopes before deriving or bounding candidates. Each scope
 allows at most 50,000 live cards and 64 MiB of UTF-8 card text, replacing the
@@ -1300,7 +1363,10 @@ reads. It can refresh the local replica, but sends no `propose`, `decide`,
 and leaves the failure counter and pause unchanged.
 A real run saves each proposal request id before submission, retries a lost
 response with that id, and remembers acknowledged proposals to avoid opening
-them again while their base revisions stay the same. Remembered submissions
+them again while their base revisions stay the same. An exact merge is one op
+per submission and keeps its op digest. A near-duplicate submission is
+remembered by the digest of its op list, and `--limit` counts submissions.
+Remembered submissions
 survive runs with a narrower scope or smaller limit under the same hub,
 principal, log epoch and configured read scopes. Ops with a recorded proposal
 id or a stored non-retryable refusal are skipped before applying the limit,
@@ -1319,6 +1385,15 @@ skipped on later runs. Exceptions are 408, 429, expired or conflicting ids,
 and replies marked `retryable: true`. All 5xx replies and unavailable responses
 remain retryable. A stored refusal contains only the event id and refusal code,
 with no hub text.
+
+A `429` with `memory_proposal_principal_quota` or `memory_proposal_scope_quota`
+means a pending proposal quota is full. The run stops proposing, counts every
+unsent submission under `skipped_reasons.proposal_quota` and completes. A full
+quota never counts toward the pause, and later runs resume once reviewers
+decide pending proposals. A `409 memory_proposal_duplicate_pending` reply
+records the existing proposal id it names for that submission and counts
+`duplicate_pending`. It is not a refusal, and later runs skip the submission as
+already proposed.
 
 Other ops continue unless the error is an authorization refusal or the hub is
 unavailable. A run fails for transport, configuration or authorization errors,
