@@ -1,6 +1,11 @@
-# brigade-hub (S3c)
+# brigade-hub
 
-A Rust HTTP front for the Python Fleet Hub. Install the matching Python package
+A Rust HTTP front for the Python Fleet Hub. Operators run it through
+`brigade fleet serve --engine rust` (S10), which migrates the database, checks
+the binary against its recorded checksum and supervises it. Install it with
+`brigade setup --component brigade-hub` (Linux only). Cutover and rollback:
+[docs/runbooks/fleet-hub-rust-engine.md](../../docs/runbooks/fleet-hub-rust-engine.md).
+`brigade-hub --version` prints the version and starts nothing. Install the matching Python package
 in the selected interpreter, or set `BRIGADE_HUB_PYTHON` to its interpreter.
 Python children run with `-I` from `/`, so `PYTHONPATH` and the working directory
 do not supply imports. For source installs, use an editable install with
@@ -44,16 +49,23 @@ and the TCP peer address. Every Python request address consumer uses that
 validated address, including browser trust checks and request logging.
 Persisted per-request address auditing is deferred to a later schema slice.
 
-Live deployment remains outside this slice. S3c owns upstream mode and client
-address forwarding. S10 owns packaging and deployment recipes.
-
-The front exits nonzero if its managed child dies. `/health` retains the v1
+With every family proxied, the front exits nonzero if its managed child dies,
+and a service manager restarts the pair. Once a family other than `health`
+and `metrics` is native, the front restarts a dead child instead, after 1
+second and then doubling to 30 seconds, back to 1 second after a run of 60
+seconds, with a fresh ephemeral port and the same per-start key. Native routes
+keep serving meanwhile. Proxied routes answer 502 `upstream-down`, `/ready`
+answers 503, and webhook delivery, which runs in the Python child, pauses.
+`/metrics` reports `brigade_hub_upstream_up`,
+`brigade_hub_webhook_delivery_paused` and
+`brigade_hub_upstream_restarts_total`. `/health` retains the v1
 liveness bytes and server header. `GET /ready` reads a background health probe that runs every
 second on its own connection with a one-second deadline and returns only `{"ready":true}` or `{"ready":false}`,
-with status 200 or 503. A service manager must restart the pair after failure.
-Shutdown stops accepting, closes idle keep-alive connections, lets in-flight
-requests finish for at most 25 seconds, then stops the child. A container stop
-grace period must exceed 25 seconds.
+with status 200 or 503.
+Shutdown stops accepting, closes idle keep-alive connections, answers every
+native long poll with its current page, lets in-flight requests finish for at
+most 25 seconds, then stops the child, which gets 10 seconds for its own
+shutdown. A container stop grace period must exceed 35 seconds.
 
 `--upstream http://<numeric-loopback>:<port>` uses an existing Python hub.
 Its operator must configure matching token, database, deck, sealing and trust
@@ -111,8 +123,10 @@ are removed. Identity and scheme headers are stripped unless explicitly trusted
 on browser routes. Incoming internal client-address headers are always dropped.
 Request and response bytes pass unchanged, without JSON re-encoding.
 
-Deferred: S4 storage, S8 native waiters, S9 metrics and route modes, and S10
-packaging and deployment recipes.
+Releases publish `brigade-hub-linux-amd64` and `brigade-hub-linux-arm64`
+after `tests/prepublish.py` passes on each target. The binary supervises its
+Python child with Linux process controls (`PR_SET_PDEATHSIG`), so macOS and
+Windows builds wait on a port of that supervision.
 
 Verification: execute `engines/hub/verify` through `brigade work verify run`.
 The frozen contract drive launches the managed front with:

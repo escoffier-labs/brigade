@@ -1415,7 +1415,11 @@ def test_windows_native_acceptance_source_mode_skips_only_bundled_unpublished_co
     unpublished = [component_id for component_id, record in manifest["components"].items() if not record.get("assets")]
     published = [component_id for component_id, record in manifest["components"].items() if record.get("assets")]
     assert "agent-notify" in unpublished
+    # The bundled manifest never lists optional brigade-hub. A second empty-asset
+    # id would reach Get-UnpublishedComponentIds, whose @(...) and [string[]]
+    # cast join two ids into one string, so the skip set must stay one id.
     assert set(unpublished) == {"agent-notify"}
+    assert "brigade-hub" not in manifest["components"]
     assert published, "at least one published component must remain strictly required"
 
     unpublished_fn = _extract_powershell_function(script, "Get-UnpublishedComponentIds")
@@ -2154,7 +2158,8 @@ def test_ci_runs_the_rust_hub_suite_through_the_gate_via_the_reusable_workflow()
     assert "  workflow_call:\n" in header
     assert "push:" not in header
     assert "pull_request:" not in header
-    assert re.findall(r"^  ([a-z0-9-]+):$", reusable.split("jobs:\n", 1)[1], re.MULTILINE) == ["hub"]
+    # `hub` runs the suite; `hub-arm64` builds the release's second Linux target.
+    assert re.findall(r"^  ([a-z0-9-]+):$", reusable.split("jobs:\n", 1)[1], re.MULTILINE) == ["hub", "hub-arm64"]
     assert "toolchain: [stable, '1.85.0']" in reusable
 
 
@@ -2530,9 +2535,9 @@ def test_windows_release_asset_validation_runtime(tmp_path, case, engine):
         assert result.returncode != 0, "malformed release was accepted"
 
         expected = {
-            "partial": "exactly 25 or 40 native assets",
+            "partial": "exactly the manifest's native assets",
             "corrupt": "release asset digest mismatch",
-            "extra": "exactly 25 or 40 native assets",
+            "extra": "exactly the manifest's native assets",
             "duplicate": "duplicate manifest key",
         }
         assert expected[case] in result.stdout + result.stderr

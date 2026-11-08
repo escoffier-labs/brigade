@@ -377,7 +377,9 @@ impl Messages {
             mark = next;
             match result {
                 Err(refusal) => return Some(reply(refusal)),
-                Ok((rows, page)) if rows || tokio::time::Instant::now() >= deadline => {
+                Ok((rows, page))
+                    if rows || tokio::time::Instant::now() >= deadline || self.wake.closing() =>
+                {
                     return Some(reply(page));
                 }
                 Ok(_) => {}

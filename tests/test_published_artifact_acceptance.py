@@ -1110,7 +1110,7 @@ def test_smoke_import_and_search_rejects_an_empty_new_only_export(acceptance_mod
         )
 
 
-def _release_fixture(*, additive=True):
+def _release_fixture(*, additive=True, hub=False):
     base = "https://github.com/escoffier-labs/brigade/releases/download/v1.2.3/"
     legacy = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
     aliases = ("graphtrail", "graphtrail-mcp", "miseledger")
@@ -1133,6 +1133,22 @@ def _release_fixture(*, additive=True):
                 "source": {"repository": "escoffier-labs/brigade", "release_tag": "v1.2.3"},
                 "assets": assets,
             }
+    if hub:
+        # brigade-hub: optional, published for Linux only.
+        assets = {}
+        for platform in ("linux-amd64", "linux-arm64"):
+            name = f"brigade-hub-{platform}"
+            bodies[name] = name.encode()
+            assets[platform] = {
+                "asset_name": name,
+                "sha256": hashlib.sha256(bodies[name]).hexdigest(),
+                "byte_size": len(bodies[name]),
+                "download_url": base + name,
+            }
+        components["brigade-hub"] = {
+            "source": {"repository": "escoffier-labs/brigade", "release_tag": "v1.2.3"},
+            "assets": assets,
+        }
     bodies["component-manifest-v1.json"] = json.dumps({"components": components}).encode()
     checksums = {name: hashlib.sha256(body).hexdigest() for name, body in bodies.items()}
     return base, bodies, checksums
@@ -1165,6 +1181,34 @@ def test_additive_release_hashes_all_forty_binaries_without_changing_legacy_retu
     }
     for name, body in bodies.items():
         assert (tmp_path / "release-assets" / name).read_bytes() == body
+
+
+def test_release_with_brigade_hub_hashes_its_linux_assets_and_keeps_the_default_set(acceptance_module, tmp_path):
+    _, bodies, checksums = _release_fixture(hub=True)
+    result = _verify_fixture(acceptance_module, tmp_path, bodies, checksums)
+    # 40 full-matrix binaries, 2 brigade-hub binaries, the manifest and checksums.txt.
+    assert len(list((tmp_path / "release-assets").iterdir())) == 44
+    assert (tmp_path / "release-assets" / "brigade-hub-linux-arm64").read_bytes() == b"brigade-hub-linux-arm64"
+    # Setup installs brigade-hub only on request, so the default smoke set is unchanged.
+    assert "brigade-hub" not in result["native_paths"]
+
+
+@pytest.mark.parametrize("platform", ["darwin-arm64", "windows-amd64"])
+def test_release_rejects_brigade_hub_outside_linux(acceptance_module, tmp_path, platform):
+    base, bodies, checksums = _release_fixture(hub=True)
+    manifest = json.loads(bodies["component-manifest-v1.json"])
+    name = f"brigade-hub-{platform}" + (".exe" if platform.startswith("windows") else "")
+    bodies[name] = name.encode()
+    manifest["components"]["brigade-hub"]["assets"][platform] = {
+        "asset_name": name,
+        "sha256": hashlib.sha256(bodies[name]).hexdigest(),
+        "byte_size": len(bodies[name]),
+        "download_url": base + name,
+    }
+    bodies["component-manifest-v1.json"] = json.dumps(manifest).encode()
+    checksums = {key: hashlib.sha256(body).hexdigest() for key, body in bodies.items()}
+    with pytest.raises(acceptance_module.AcceptanceError, match="'brigade-hub' does not publish the full platform"):
+        _verify_fixture(acceptance_module, tmp_path, bodies, checksums)
 
 
 @pytest.mark.parametrize("count", [1, 5, 14])

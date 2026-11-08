@@ -18,8 +18,20 @@ BASE = f"https://github.com/{REPOSITORY}/releases/download/{TAG}/"
 API = f"https://api.github.com/repos/{REPOSITORY}/releases/tags/{TAG}"
 REF_API = f"https://api.github.com/repos/{REPOSITORY}/git/ref/tags/{TAG}"
 TAG_API = f"https://api.github.com/repos/{REPOSITORY}/git/tags/"
-COMPONENTS = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
+COMPONENTS = (
+    "agent-notify",
+    "brigade-code-graph",
+    "brigade-code-graph-mcp",
+    "brigade-evidence",
+    "brigade-hub",
+    "sessionfind",
+)
 PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
+
+
+def _platforms(component: str) -> tuple[str, ...]:
+    # brigade-hub ships for Linux only.
+    return ("linux-amd64", "linux-arm64") if component == "brigade-hub" else PLATFORMS
 
 
 def _module():
@@ -41,7 +53,7 @@ def _manifest() -> dict:
     components = {}
     for component in COMPONENTS:
         assets = {}
-        for platform in PLATFORMS:
+        for platform in _platforms(component):
             name = _asset_name(component, platform)
             body = name.encode()
             assets[platform] = {
@@ -337,8 +349,9 @@ def test_verifier_accepts_additive_release_with_distinct_alias_digests(tmp_path)
     release, checksums, body = _additive_release()
     path = tmp_path / "manifest.json"
     path.write_text(body)
-    assert len(release["assets"]) == 42
-    assert len(checksums.splitlines()) == 41
+    # 40 full-matrix assets, brigade-hub's 2 Linux assets, the manifest and checksums.txt.
+    assert len(release["assets"]) == 44
+    assert len(checksums.splitlines()) == 43
     assert _module().verify_manifest(path, fetch=_fetcher(release, checksums, body)) == []
 
 

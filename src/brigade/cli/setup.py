@@ -7,6 +7,8 @@ from pathlib import Path
 
 
 def register(sub: argparse._SubParsersAction) -> None:
+    from ..component_manifest import OPT_IN_COMPONENT_IDS
+
     p_setup = sub.add_parser("setup", help="Install pinned native Brigade components.")
     p_setup.add_argument("--dry-run", action="store_true", help="Report planned actions without writing.")
     p_setup.add_argument("--offline", action="store_true", help="Use verified cache only; fail if missing.")
@@ -22,6 +24,13 @@ def register(sub: argparse._SubParsersAction) -> None:
         choices=("auto", "standalone"),
         default="auto",
         help="Select exact release metadata, or the one-release standalone compatibility manifest.",
+    )
+    p_setup.add_argument(
+        "--component",
+        action="append",
+        default=[],
+        choices=sorted(OPT_IN_COMPONENT_IDS),
+        help="Also install this optional component (repeatable). Hub hosts use brigade-hub.",
     )
     p_setup.set_defaults(func=dispatch)
 
@@ -42,4 +51,6 @@ def dispatch(args) -> int:
         kwargs["allow_compatible_stable_manifest"] = args.allow_compatible_stable_manifest
     if args.manifest_source != "auto":
         kwargs["manifest_source"] = args.manifest_source
+    if args.component:
+        kwargs["components"] = tuple(args.component)
     return setup_native_components(**kwargs)

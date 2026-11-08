@@ -310,6 +310,12 @@ def _write_manifest(tmp_path: Path, **overrides) -> Path:
                 executable="sessionfind",
                 assets=_full_miseledger_assets("sessionfind"),
             ),
+            "brigade-hub": _minimal_known_component(
+                repository="escoffier-labs/brigade",
+                release_tag=None,
+                executable="brigade-hub",
+                assets={},
+            ),
         },
     }
     payload.update(overrides)
@@ -325,8 +331,9 @@ def test_bundled_manifest_pins_miseledger_and_graphtrail_assets():
     assert manifest.brigade_version == __version__
     assert manifest.manifest_revision == "2026-07-19"
     assert manifest.supported_platforms == component_manifest.SUPPORTED_PLATFORMS
+    # The optional brigade-hub ships only in release manifests, never in the bundled one.
     assert set(manifest.components) == {
-        component_manifest.wire_id(manifest.components, cid) for cid in component_manifest.KNOWN_COMPONENT_IDS
+        component_manifest.wire_id(manifest.components, cid) for cid in component_manifest.DEFAULT_COMPONENT_IDS
     }
     assert manifest.components["miseledger"].component_revision == "v0.6.0"
     assert manifest.components["miseledger"].source.release_tag == "v0.6.0"
@@ -409,7 +416,9 @@ def test_schema_contract_requires_exact_platform_order_and_known_components():
     assert supported["const"] == list(component_manifest.SUPPORTED_PLATFORMS)
 
     components = schema["properties"]["components"]
-    assert components["required"] == list(component_manifest.KNOWN_COMPONENT_IDS)
+    # brigade-hub is optional: described, never required.
+    assert components["required"] == list(component_manifest.DEFAULT_COMPONENT_IDS)
+    assert "brigade-hub" in components["properties"]
     for component_id in ("brigade-evidence", "sessionfind"):
         component_schema = components["properties"][component_id]
         assert component_schema["allOf"][0]["$ref"] == "#/$defs/known_component"
@@ -603,7 +612,7 @@ def test_manifest_ignores_unknown_components_with_deterministic_diagnostic(tmp_p
     assert "future-tool" not in manifest.components
     assert manifest.unknown_component_diagnostics == (
         "component manifest lists unknown component 'future-tool'; known components: "
-        "agent-notify, brigade-code-graph, brigade-code-graph-mcp, brigade-evidence, sessionfind",
+        "agent-notify, brigade-code-graph, brigade-code-graph-mcp, brigade-evidence, sessionfind, brigade-hub",
     )
 
 
@@ -619,7 +628,7 @@ def test_manifest_ignores_unknown_components_regardless_of_value_shape(tmp_path,
     assert "future-tool" not in manifest.components
     assert manifest.unknown_component_diagnostics == (
         "component manifest lists unknown component 'future-tool'; known components: "
-        "agent-notify, brigade-code-graph, brigade-code-graph-mcp, brigade-evidence, sessionfind",
+        "agent-notify, brigade-code-graph, brigade-code-graph-mcp, brigade-evidence, sessionfind, brigade-hub",
     )
 
 
@@ -733,7 +742,7 @@ def test_manifest_rejects_empty_sessionfind_assets(tmp_path):
 
 
 def test_manifest_rejects_graphtrail_revision_that_is_not_git_sha(tmp_path, monkeypatch):
-    monkeypatch.setattr(component_manifest, "UNPUBLISHED_COMPONENT_IDS", frozenset({"graphtrail"}))
+    monkeypatch.setattr(component_manifest, "UNPUBLISHED_COMPONENT_IDS", frozenset({"graphtrail", "brigade-hub"}))
     base = json.loads(_write_manifest(tmp_path).read_text())
     base["components"]["graphtrail"]["assets"] = {}
     del base["components"]["graphtrail"]["source"]["release_tag"]
@@ -769,7 +778,7 @@ def test_manifest_rejects_published_component_without_release_tag(tmp_path):
 
 
 def test_manifest_rejects_unpublished_component_with_release_tag(tmp_path, monkeypatch):
-    monkeypatch.setattr(component_manifest, "UNPUBLISHED_COMPONENT_IDS", frozenset({"graphtrail"}))
+    monkeypatch.setattr(component_manifest, "UNPUBLISHED_COMPONENT_IDS", frozenset({"graphtrail", "brigade-hub"}))
     base = json.loads(_write_manifest(tmp_path).read_text())
     base["components"]["graphtrail"]["source"]["release_tag"] = "v0.1.0"
     base["components"]["graphtrail"]["assets"] = {}
@@ -854,12 +863,66 @@ def test_platform_key_hard_failure_lists_supported_keys():
         component_manifest.platform_key(system="Plan9", machine="mips")
 
 
-def test_unpublished_component_ids_pinned_to_agent_notify_only():
+def test_unpublished_component_ids_pinned_to_agent_notify_and_brigade_hub():
     # The compatibility handoff may tolerate only the component ids declared
-    # currently unpublished. At this commit that set is exactly agent-notify;
-    # pin the exact set so a future addition forces an explicit decision here.
-    assert component_manifest.UNPUBLISHED_COMPONENT_IDS == frozenset({"agent-notify"})
-    assert "agent-notify" in component_manifest.KNOWN_COMPONENT_IDS
+    # currently unpublished. At this commit that set is agent-notify and
+    # brigade-hub, which the last stable release predates; pin the exact set
+    # so a future addition forces an explicit decision here.
+    assert component_manifest.UNPUBLISHED_COMPONENT_IDS == frozenset({"agent-notify", "brigade-hub"})
+    assert {"agent-notify", "brigade-hub"} <= set(component_manifest.KNOWN_COMPONENT_IDS)
+
+
+def _hub_assets(platforms) -> dict:
+    assets = {}
+    for platform in platforms:
+        name = f"brigade-hub-{platform}" + (".exe" if platform == "windows-amd64" else "")
+        assets[platform] = {
+            "asset_name": name,
+            "byte_size": 1,
+            "sha256": "b" * 64,
+            "download_url": f"https://github.com/escoffier-labs/brigade/releases/download/v0.31.0/{name}",
+        }
+    return assets
+
+
+def _hub_record(platforms) -> dict:
+    return _minimal_known_component(
+        repository="escoffier-labs/brigade",
+        release_tag="v0.31.0",
+        executable="brigade-hub",
+        assets=_hub_assets(platforms),
+    )
+
+
+def test_brigade_hub_publishes_linux_only_and_is_opt_in(tmp_path):
+    path = _write_manifest(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["components"]["brigade-hub"] = _hub_record(("linux-amd64", "linux-arm64"))
+    path.write_text(json.dumps(payload))
+    manifest = component_manifest.load(path)
+    assert set(manifest.components["brigade-hub"].assets) == {"linux-amd64", "linux-arm64"}
+    assert component_manifest.component_platforms("brigade-hub") == ("linux-amd64", "linux-arm64")
+    assert "brigade-hub" in component_manifest.published_component_ids(manifest)
+    assert "brigade-hub" not in component_manifest.DEFAULT_COMPONENT_IDS
+    assert component_manifest.resolve_asset(manifest, "brigade-hub", "linux-arm64").asset_name == (
+        "brigade-hub-linux-arm64"
+    )
+    with pytest.raises(ValueError, match="unsupported-component-platform"):
+        component_manifest.resolve_asset(manifest, "brigade-hub", "darwin-arm64")
+
+
+@pytest.mark.parametrize(
+    "platforms",
+    [("linux-amd64",), component_manifest.SUPPORTED_PLATFORMS],
+    ids=["partial-linux", "full-matrix"],
+)
+def test_brigade_hub_rejects_any_other_platform_set(tmp_path, platforms):
+    path = _write_manifest(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["components"]["brigade-hub"] = _hub_record(platforms)
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="'brigade-hub' must publish the full supported platform matrix or no assets"):
+        component_manifest.load(path)
 
 
 def _pre_agent_notify_manifest(tmp_path: Path) -> Path:
@@ -934,7 +997,7 @@ def test_compatible_stable_manifest_rejects_unknown_extras(tmp_path):
     with pytest.raises(
         ValueError,
         match="component manifest lists unknown component 'future-tool'; known components: "
-        "agent-notify, brigade-code-graph, brigade-code-graph-mcp, brigade-evidence, sessionfind",
+        "agent-notify, brigade-code-graph, brigade-code-graph-mcp, brigade-evidence, sessionfind, brigade-hub",
     ):
         component_manifest.load(path, allow_compatible_stable_manifest=True)
 

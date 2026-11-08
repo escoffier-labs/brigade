@@ -61,6 +61,39 @@
             }
           ]
         },
+        "brigade-hub": {
+          "allOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["component_revision", "source", "executable", "assets"],
+              "properties": {
+                "component_revision": {"$ref": "#/$defs/brigade-code-graph_component_revision"},
+                "executable": {"const": "brigade-hub"},
+                "source": {},
+                "assets": {}
+              }
+            },
+            {
+              "oneOf": [
+                {
+                  "properties": {
+                    "source": {"$ref": "#/$defs/unpublished_source"},
+                    "assets": {"$ref": "#/$defs/empty_assets"}
+                  },
+                  "required": ["source", "assets"]
+                },
+                {
+                  "properties": {
+                    "source": {"$ref": "#/$defs/published_source"},
+                    "assets": {"$ref": "#/$defs/linux_assets"}
+                  },
+                  "required": ["source", "assets"]
+                }
+              ]
+            }
+          ]
+        },
         "brigade-code-graph": {
           "allOf": [
             {
@@ -206,6 +239,15 @@
       "type": "object",
       "additionalProperties": false,
       "maxProperties": 0
+    },
+    "linux_assets": {
+      "type": "object",
+      "required": ["linux-amd64", "linux-arm64"],
+      "properties": {
+        "linux-amd64": {"$ref": "#/$defs/unix_asset"},
+        "linux-arm64": {"$ref": "#/$defs/unix_asset"}
+      },
+      "additionalProperties": false
     },
     "published_assets": {
       "type": "object",

@@ -52,8 +52,13 @@ services:
       - netns
     # brigade-hub (the Rust hub) takes the port in managed mode and starts the
     # Python hub as its child on an ephemeral loopback port, keyed by a value
-    # generated at each start. hub/entry.py forwards stop signals and writes
-    # the listening and clean-exit lines the S31 checks read.
+    # generated at each start. hub/entry.py execs `brigade fleet serve
+    # --engine rust` (S10) when the pinned Brigade has it: that checks
+    # brigade-hub against the checksum the image recorded, forwards stop
+    # signals, writes the listening and clean-exit lines the S31 checks read,
+    # and exits non-zero when /health fails or the namespace keeps only
+    # loopback. The default BRIGADE_REF predates S10, so entry.py runs its
+    # S31 wrapper for it instead.
     entrypoint: ["python", "/brigade/entry.py"]
     command:
       - --host
@@ -71,12 +76,15 @@ services:
       - memory=native
     environment:
       BRIGADE_FLEET_FINDINGS_KEY_FILE: /run/secrets/findings_key
+      # With the Rust engine, its watchdog also exits when the holder
+      # restarted and this namespace kept only loopback.
+      BRIGADE_HUB_WATCHDOG_NETNS: "1"
     secrets:
       - admin_token
       - findings_key
     volumes:
       - brigade-state:/var/lib/brigade
-      # For the planned `--config` (S10, S15). Neither hub reads it yet.
+      # For the planned `--config` (S15). Neither hub reads it yet.
       - ./config/hub.toml:/etc/brigade/hub.toml:ro
       - ./hub:/brigade:ro
     cap_drop: [ALL]

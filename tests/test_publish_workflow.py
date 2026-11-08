@@ -213,22 +213,52 @@ def test_publish_workflow_builds_five_agent_notify_binaries_with_release_metadat
     assert "if-no-files-found: error" in section
 
 
-def test_publish_workflow_assemble_release_counts_40_native_assets_and_42_release_files():
+def _job(text: str, name: str) -> str:
+    start = text.index(f"  {name}:\n")
+    rest = text[start + len(name) + 4 :]
+    following = re.search(r"^  [a-z0-9-]+:\n", rest, re.MULTILINE)
+    return text[start : start + len(name) + 4 + (following.start() if following else len(rest))]
+
+
+def _staged_native_files(text: str) -> int:
+    """Native files the build jobs upload: each job's platforms times the files it stages per platform."""
+    staged = {
+        # Unix staging lines; the Windows lines stage the same files.
+        "build-rust-native": lambda job: len(re.findall(r'^\s+cp target/release/\S+ "\$GITHUB_WORKSPACE', job, re.M)),
+        "build-hub-native": lambda job: len(re.findall(r'^\s+cp engines/hub/target/release/brigade-hub "', job, re.M)),
+        "build-go-native": lambda job: job.count("go build -trimpath -o"),
+        "build-agent-notify-native": lambda job: job.count("go build -trimpath -ldflags"),
+    }
+    total = 0
+    for name, per_platform in staged.items():
+        job = _job(text, name)
+        total += len(re.findall(r"^\s+- platform: ", job, re.M)) * per_platform(job)
+    return total
+
+
+def test_publish_workflow_assemble_release_counts_42_native_assets_and_44_release_files():
     text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
     assemble = text[text.index("  assemble-release:") : text.index("  create-release:")]
 
-    assert 'test "$(find downloaded -type f | wc -l)" -eq 40' in assemble
-    assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 42' in assemble
+    # 20 code-graph, 15 Go, 5 agent-notify and 2 Linux-only brigade-hub binaries.
+    assert _staged_native_files(text) == 42
+    assert 'test "$(find downloaded -type f | wc -l)" -eq 42' in assemble
+    # Plus component-manifest-v1.json and checksums.txt.
+    assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 44' in assemble
     assert "pattern: agent-notify-*" in assemble
-    # assemble-release waits on the agent-notify native job.
+    # brigade-hub uploads as rust-hub-<platform>, which the rust-* download takes.
+    assert "pattern: rust-*" in assemble
+    # assemble-release waits on the agent-notify and brigade-hub native jobs.
     needs_line = next(line for line in assemble.splitlines() if line.strip().startswith("needs:"))
     assert "build-agent-notify-native" in needs_line
+    assert "build-hub-native" in needs_line
 
 
-def test_publish_release_gate_requires_42_release_assets():
+def test_publish_release_gate_requires_44_release_assets():
     text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
     gate = text[text.index("  release-asset-gate:") : text.index("  build-and-publish:")]
-    assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 42' in gate
+    assert _staged_native_files(text) + 2 == 44
+    assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 44' in gate
 
 
 def _load_workflow_yaml(path: Path):

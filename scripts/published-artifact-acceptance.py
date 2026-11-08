@@ -23,6 +23,11 @@ from urllib.parse import urlparse
 
 COMPONENT_IDS = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
 LEGACY_IDS = ("graphtrail", "graphtrail-mcp", "miseledger")
+# Optional components: in the release manifest, but `brigade setup` installs
+# them only on request, so the default install and its report never list them.
+OPTIONAL_IDS = ("brigade-hub",)
+# Components published for fewer platforms than SUPPORTED_PLATFORMS.
+COMPONENT_PLATFORMS = {"brigade-hub": ("linux-amd64", "linux-arm64")}
 CANONICAL_IDS = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 REPOSITORY = "escoffier-labs/brigade"
@@ -232,12 +237,14 @@ def verify_release_assets(
     if not isinstance(manifest, dict) or not isinstance(manifest.get("components"), dict):
         raise AcceptanceError("release component manifest has no components object")
     components = manifest["components"]
-    if set(components) != set(COMPONENT_IDS):
-        raise AcceptanceError("release component manifest must contain exactly five components")
+    released = tuple(component for component in (*COMPONENT_IDS, *OPTIONAL_IDS) if component in components)
+    if set(components) != set(released) or not set(COMPONENT_IDS) <= set(released):
+        raise AcceptanceError("release component manifest must contain the five default components and no unknown one")
 
     expected: dict[str, tuple[str, str]] = {}
     native_paths: dict[str, dict[str, Path]] = {component: {} for component in COMPONENT_IDS}
-    for component in COMPONENT_IDS:
+    for component in released:
+        platforms = COMPONENT_PLATFORMS.get(component, SUPPORTED_PLATFORMS)
         record = components.get(component)
         if not isinstance(record, dict):
             raise AcceptanceError(f"release component manifest entry {component!r} is invalid")
@@ -245,9 +252,9 @@ def verify_release_assets(
         if not isinstance(source, dict) or source.get("repository") != REPOSITORY or source.get("release_tag") != tag:
             raise AcceptanceError(f"release component {component!r} does not point to {REPOSITORY}@{tag}")
         component_assets = record.get("assets")
-        if not isinstance(component_assets, dict) or set(component_assets) != set(SUPPORTED_PLATFORMS):
+        if not isinstance(component_assets, dict) or set(component_assets) != set(platforms):
             raise AcceptanceError(f"release component {component!r} does not publish the full platform matrix")
-        for platform in SUPPORTED_PLATFORMS:
+        for platform in platforms:
             asset = component_assets[platform]
             if not isinstance(asset, dict):
                 raise AcceptanceError(f"release component {component!r} asset {platform!r} is invalid")
@@ -281,7 +288,9 @@ def verify_release_assets(
         for name in canonical_assets:
             expected[name] = (checksums[name], _release_url(version, name))
     elif set(checksums) != expected_checksum_names:
-        raise AcceptanceError("checksums.txt must cover exactly 25 or 40 native assets and component-manifest-v1.json")
+        raise AcceptanceError(
+            "checksums.txt must cover exactly the manifest's native assets and component-manifest-v1.json"
+        )
     if checksums.get("component-manifest-v1.json") != _sha256_bytes(manifest_bytes):
         raise AcceptanceError("release manifest digest does not match checksums.txt")
     (release_dir / "component-manifest-v1.json").write_bytes(manifest_bytes)
@@ -301,8 +310,8 @@ def verify_release_assets(
             if name in canonical_assets
             else next(
                 (component, platform)
-                for component in COMPONENT_IDS
-                for platform in SUPPORTED_PLATFORMS
+                for component in released
+                for platform in COMPONENT_PLATFORMS.get(component, SUPPORTED_PLATFORMS)
                 if name == f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
             )
         )
@@ -814,7 +823,9 @@ def smoke_verified_canonical_release(
     checksums = _parse_checksums((release_dir / "checksums.txt").read_text(encoding="utf-8"))
     if len(checksums) == 26:
         return
-    if len(checksums) != 41:
+    # 40 native assets and the manifest, plus brigade-hub's two Linux assets
+    # from the release that first ships it.
+    if len(checksums) not in (41, 43):
         raise AcceptanceError("invalid cached release inventory")
     platform = host_platform_key()
     paths = {name: (release_dir / f"{name}-{platform}").resolve() for name in CANONICAL_IDS}

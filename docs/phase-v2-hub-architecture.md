@@ -1283,7 +1283,12 @@ then profile default.
   adds the component manifest entry, updates the manifest validators' complete
   set, and extends `setup` install acceptance. Pull requests that touch
   `engines/hub/` build all five targets. Both the minimum Rust version and
-  current stable must build.
+  current stable must build. As built, S10 ships `linux-amd64` and
+  `linux-arm64` only: the supervisor arms `PR_SET_PDEATHSIG` on its Python
+  child and uses Unix signal masks, so the manifest gives `brigade-hub` a
+  Linux-only platform set and opt-in install, and pull requests build both
+  Linux targets. macOS and Windows builds wait on a port of that
+  supervision. Every hub host named in [Hosting](#hosting) runs Linux.
 - Before a release tag, a pre-publication job installs each target's artifact
   and runs startup, the contract drive, an upgrade from an older schema
   fixture, an interrupted migration, backup and restore through the online

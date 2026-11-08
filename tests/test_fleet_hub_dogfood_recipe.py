@@ -322,6 +322,7 @@ def test_compose_config_holder_layout_no_ports_and_gpu_only_in_the_profile(proje
     # Compose renders the Rust front as written: the dogfood target, the wrapper and memory native.
     assert hub["build"]["target"] == "dogfood"
     assert hub["entrypoint"] == ["python", "/brigade/entry.py"]
+    assert hub["environment"]["BRIGADE_HUB_WATCHDOG_NETNS"] == "1"
     assert hub["command"][hub["command"].index("--route-mode") + 1] == "memory=native"
     assert full["services"]["backup"]["entrypoint"] == ["python", "/brigade/backup.py"]
     assert "--db" not in full["services"]["backup"]["command"]
@@ -806,10 +807,22 @@ def test_containerfile_builds_brigade_hub_in_a_pinned_rust_stage_and_copies_only
     build = _stage_body(text, "hub-build")
     assert "COPY --from=source /src /src" in build
     assert "cargo build --locked --release --bin brigade-hub" in build
+    assert "sha256sum target/release/brigade-hub > target/release/brigade-hub.sha256" in build
     dogfood = _stage_body(text, "dogfood")
     assert images["dogfood"] == "python-hub"
     copies = [line for line in dogfood.splitlines() if line.startswith("COPY ")]
-    assert copies == ["COPY --from=hub-build /src/engines/hub/target/release/brigade-hub /usr/local/bin/brigade-hub"]
+    # The binary and the checksum `fleet serve --engine rust` checks it against.
+    assert copies == [
+        "COPY --from=hub-build /src/engines/hub/target/release/brigade-hub /usr/local/bin/brigade-hub",
+        "COPY --from=hub-build /src/engines/hub/target/release/brigade-hub.sha256"
+        " /usr/local/share/brigade/brigade-hub.sha256",
+    ]
+    assert (entry.ENGINE_BINARY, entry.ENGINE_SUM) == (
+        "/usr/local/bin/brigade-hub",
+        "/usr/local/share/brigade/brigade-hub.sha256",
+    )
+    # The dogfood stage keeps the Python image's entrypoint; compose runs hub/entry.py.
+    assert "ENTRYPOINT" not in dogfood
     assert "ENV BRIGADE_HUB_PYTHON=/usr/local/bin/python3" in dogfood
     # The default target is the Python-only image. A builder that skips
     # unused stages builds it without compiling Rust; the legacy builder does not.
@@ -1218,3 +1231,81 @@ def test_entry_reads_the_hub_flags_and_maps_signal_deaths():
     assert entry.route_modes(argv) == ["memory=native", "claims=proxy"]
     assert entry.exit_code(-9) == 137 and entry.exit_code(2) == 2
     assert (entry.STARTED, entry.STOPPED) == (checks.HUB_STARTED, checks.HUB_STOPPED)
+
+
+# ------------------------------------------- Rust engine guard (S10)
+
+
+def _default_ref(name):
+    """The default BRIGADE_REF that compose and the Containerfile each pin."""
+    compose = (RECIPE / "compose.yaml").read_text(encoding="utf-8")
+    containerfile = (RECIPE / "Containerfile").read_text(encoding="utf-8")
+    return {
+        "compose": compose.split("BRIGADE_REF: ${BRIGADE_REF:-", 1)[1].split("}", 1)[0],
+        "containerfile": containerfile.split("ARG BRIGADE_REF=", 1)[1].split("\n", 1)[0],
+    }[name]
+
+
+def test_default_build_args_pin_one_ref_and_compose_leaves_the_engine_choice_to_entry():
+    # compose.yaml and the Containerfile build the same default Brigade.
+    assert _default_ref("compose") == _default_ref("containerfile")
+    # That default pin predates `fleet serve --engine` (S10), so a default build
+    # must not pass it: hub/entry.py picks the engine only when the image has it.
+    compose = (RECIPE / "compose.yaml").read_text(encoding="utf-8")
+    hub = compose.split("\n  hub:\n", 1)[1].split("\n  front:\n", 1)[0]
+    assert '    entrypoint: ["python", "/brigade/entry.py"]\n' in hub
+    settings = [line for line in hub.splitlines() if not line.strip().startswith("#")]
+    assert not any("--engine" in line for line in settings)
+
+
+def test_entry_falls_back_to_the_wrapper_for_a_brigade_without_the_engine(tmp_path, monkeypatch):
+    checksum = tmp_path / "brigade-hub.sha256"
+    checksum.write_text("a" * 64 + "  brigade-hub\n", encoding="utf-8")
+    monkeypatch.setattr(entry, "ENGINE_SUM", str(checksum))
+    # The default pin's Brigade has no brigade.fleet_hub_engine.
+    monkeypatch.setattr(entry.importlib.util, "find_spec", lambda _name: None)
+    assert entry.engine_command(["--host", "127.0.0.1"]) is None
+
+
+def test_entry_falls_back_without_a_recorded_checksum(tmp_path, monkeypatch):
+    monkeypatch.setattr(entry, "ENGINE_SUM", str(tmp_path / "absent.sha256"))
+    assert entry.engine_command(["--host", "127.0.0.1"]) is None
+
+
+def test_entry_execs_fleet_serve_with_the_rust_engine_when_the_image_has_it(tmp_path, monkeypatch):
+    checksum = tmp_path / "brigade-hub.sha256"
+    checksum.write_text("a" * 64 + "  brigade-hub\n", encoding="utf-8")
+    monkeypatch.setattr(entry, "ENGINE_SUM", str(checksum))
+    monkeypatch.setattr(entry.importlib.util, "find_spec", lambda name: object() if name.endswith("engine") else None)
+    execs = []
+
+    class Execd(Exception):
+        pass
+
+    def execv(path, argv):
+        execs.append((path, argv))
+        raise Execd
+
+    monkeypatch.setattr(entry.os, "execv", execv)
+    argv = ["--host", "127.0.0.1", "--port", "3774", "--route-mode", "memory=native"]
+    with pytest.raises(Execd):
+        entry.main(argv)
+    assert execs == [
+        (
+            sys.executable,
+            [
+                sys.executable,
+                "-m",
+                "brigade",
+                "fleet",
+                "serve",
+                "--engine",
+                "rust",
+                "--hub-binary",
+                "/usr/local/bin/brigade-hub",
+                "--hub-sha256-file",
+                str(checksum),
+                *argv,
+            ],
+        )
+    ]

@@ -63,6 +63,18 @@ jobs:
         run: python tests/messages_native.py
       - name: Native heartbeat wire and storage parity
         run: python tests/heartbeat_native.py
+      - name: Native writes continue while the managed upstream crashes (S10)
+        env:
+          BRIGADE_HUB_BINARY: ${{ github.workspace }}/engines/hub/target/release/brigade-hub
+        run: python tests/upstream_restart.py -v
+      - name: Rollback from the Rust engine to the Python engine (S10)
+        env:
+          BRIGADE_HUB_BINARY: ${{ github.workspace }}/engines/hub/target/release/brigade-hub
+        run: python tests/engine_rollback.py -v
+      - name: Pre-publication acceptance through fleet serve --engine rust (S10)
+        env:
+          BRIGADE_HUB_BINARY: ${{ github.workspace }}/engines/hub/target/release/brigade-hub
+        run: python tests/prepublish.py -v
       - name: Frozen wire contract through managed front
         working-directory: .
         run: >-
@@ -89,3 +101,30 @@ jobs:
         run: >-
           python registry/skills/verify-brigade/control-brigade.py hub-contract --profile memory --memory-absent
           --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native'
+
+  hub-arm64:
+    # The release ships brigade-hub for linux-amd64 (the job above) and
+    # linux-arm64. Build the second target on its own runner and run the
+    # pre-publication acceptance there, as the release job does.
+    name: hub (linux-arm64)
+    runs-on: ubuntu-24.04-arm
+    defaults:
+      run:
+        working-directory: engines/hub
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e ../..
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: engines/hub
+      - run: cargo build --locked --release --bin brigade-hub
+      - name: Pre-publication acceptance through fleet serve --engine rust
+        env:
+          BRIGADE_HUB_BINARY: ${{ github.workspace }}/engines/hub/target/release/brigade-hub
+        run: python tests/prepublish.py -v

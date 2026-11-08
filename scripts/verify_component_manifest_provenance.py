@@ -19,9 +19,18 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = ROOT / "src/brigade/templates/components/manifest-v1.json"
 REPOSITORY = "escoffier-labs/brigade"
-COMPONENT_IDS = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
+COMPONENT_IDS = (
+    "agent-notify",
+    "brigade-code-graph",
+    "brigade-code-graph-mcp",
+    "brigade-evidence",
+    "brigade-hub",
+    "sessionfind",
+)
 LEGACY_ALIASES = ("graphtrail", "graphtrail-mcp", "miseledger")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
+# brigade-hub ships for Linux only (component_manifest.COMPONENT_PLATFORMS).
+COMPONENT_PLATFORMS = {"brigade-hub": ("linux-amd64", "linux-arm64")}
 USER_AGENT = "brigade-component-manifest-provenance/1.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -158,10 +167,11 @@ def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> l
         elif tag != release_tag:
             errors.append(f"component {component!r} source.release_tag {release_tag!r} does not match {tag!r}")
         assets = value.get("assets")
-        if not isinstance(assets, dict) or set(assets) != set(SUPPORTED_PLATFORMS):
+        platforms = COMPONENT_PLATFORMS.get(component, SUPPORTED_PLATFORMS)
+        if not isinstance(assets, dict) or set(assets) != set(platforms):
             errors.append(f"component {component!r} must publish the full platform matrix")
             continue
-        for platform in SUPPORTED_PLATFORMS:
+        for platform in platforms:
             asset = assets.get(platform)
             if not isinstance(asset, dict):
                 errors.append(f"component {component!r} platform {platform!r} asset must be an object")

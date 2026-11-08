@@ -14,7 +14,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,7 @@ from brigade import component_manifest, component_paths, component_shims, compon
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK = 1024 * 1024
 _EXECUTABLE_MODE = 0o755
-_SMOKE_COMPONENT_IDS = component_manifest.KNOWN_COMPONENT_IDS
+_SMOKE_COMPONENT_IDS = component_manifest.DEFAULT_COMPONENT_IDS
 _SMOKE_TIMEOUT_SECONDS = 30.0
 _DOWNLOAD_TIMEOUT_SECONDS = 30.0
 _WINDOWS_HTTPS_PRIME_TIMEOUT_SECONDS = 30.0
@@ -232,10 +232,28 @@ def build_setup_plan(
     *,
     platform: str,
     roots: SetupRoots,
+    opt_in: Collection[str] = (),
 ) -> list[SetupPlanAction]:
-    """Build a deterministic dry-run/install plan for every published component."""
+    """Build a deterministic dry-run/install plan for every published component.
+
+    Opt-in components (:data:`component_manifest.OPT_IN_COMPONENT_IDS`) join
+    the plan only when named in ``opt_in``, and each one named must be
+    published for ``platform``.
+    """
+    published = component_manifest.published_component_ids(manifest)
+    for component_id in sorted(opt_in):
+        if component_id not in component_manifest.OPT_IN_COMPONENT_IDS:
+            optional = ", ".join(sorted(component_manifest.OPT_IN_COMPONENT_IDS))
+            raise ValueError(f"unknown optional component {component_id!r}; optional components: {optional}")
+        if component_id not in published:
+            raise ValueError(
+                f"component {component_id!r} is not published in manifest {manifest.manifest_revision}; "
+                "install a Brigade release that ships it"
+            )
     plan: list[SetupPlanAction] = []
-    for component_id in component_manifest.published_component_ids(manifest):
+    for component_id in published:
+        if component_id in component_manifest.OPT_IN_COMPONENT_IDS and component_id not in opt_in:
+            continue
         asset = component_manifest.resolve_asset(manifest, component_id, platform)
         component = manifest.components[component_id]
         cache_path = component_paths.cached_asset_path(
@@ -291,15 +309,24 @@ def _print_setup_dry_run(
         print(f"  - {entry.action}")
 
 
+def _setup_opt_in(requested: Collection[str], state: component_state.InstalledState | None) -> frozenset[str]:
+    """Requested optional components plus those an earlier setup installed, so
+    a plain `brigade setup` or update never drops a hub host's brigade-hub."""
+    kept = {cid for cid in (state.components if state else ()) if cid in component_manifest.OPT_IN_COMPONENT_IDS}
+    return frozenset(requested) | frozenset(kept)
+
+
 def _setup_dry_run(
     manifest: component_manifest.ComponentManifest,
     *,
     env: Mapping[str, str] | None,
+    components: Collection[str] = (),
 ) -> int:
     try:
         roots = resolve_roots(env=env)
         platform = component_manifest.platform_key()
-        plan = build_setup_plan(manifest, platform=platform, roots=roots)
+        state = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
+        plan = build_setup_plan(manifest, platform=platform, roots=roots, opt_in=_setup_opt_in(components, state))
     except ValueError as exc:
         print(f"component setup: {exc}", file=sys.stderr)
         return 1
@@ -770,10 +797,30 @@ def _smoke_agent_notify(
         raise ComponentInstallError(f"agent-notify smoke failed: {path} JSON missing version field")
 
 
+def _smoke_brigade_hub(
+    path: Path,
+    run: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    # `--version` returns before the hub reads any flag, opens a database or
+    # starts Python, so the smoke never serves.
+    argv = [str(path), "--version"]
+    try:
+        completed = _invoke_smoke_runner(run, argv)
+    except subprocess.TimeoutExpired as exc:
+        raise ComponentInstallError(f"brigade-hub smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s") from exc
+    except OSError as exc:
+        raise ComponentInstallError(f"brigade-hub smoke failed to run {path}: {exc}") from exc
+    if completed.returncode != 0:
+        raise ComponentInstallError(f"brigade-hub smoke failed: {path} --version exited {completed.returncode}")
+    if not (completed.stdout or "").startswith("brigade-hub "):
+        raise ComponentInstallError(f"brigade-hub smoke failed: {path} --version did not name brigade-hub")
+
+
 _SMOKE_DISPATCH: dict[
     str, Callable[[Path, Callable[..., subprocess.CompletedProcess[str]]], SmokeObservation | None]
 ] = {
     "agent-notify": _smoke_agent_notify,
+    "brigade-hub": _smoke_brigade_hub,
     "graphtrail": _smoke_code_graph,
     "graphtrail-mcp": _smoke_code_graph_mcp,
     "miseledger": _smoke_miseledger,
@@ -1154,11 +1201,18 @@ def setup_native_components(
     manifest_path: Path | None = None,
     manifest_source: str = "auto",
     allow_compatible_stable_manifest: str | None = None,
+    components: Collection[str] = (),
 ) -> int:
-    """Install pinned native components; return process exit code."""
+    """Install pinned native components; return process exit code.
+
+    ``components`` names optional components to install as well, such as
+    ``brigade-hub`` on a hub host.
+    """
     try:
         if dry_run and rollback:
             raise ComponentInstallError("--dry-run and --rollback cannot be used together")
+        if rollback and components:
+            raise ComponentInstallError("--component and --rollback cannot be used together")
         if allow_compatible_stable_manifest is not None and manifest_path is None:
             raise ComponentInstallError("--allow-compatible-stable-manifest requires --manifest")
         if rollback:
@@ -1190,17 +1244,19 @@ def setup_native_components(
                 f"running Brigade {brigade.__version__!r}"
             )
         if dry_run:
-            return _setup_dry_run(manifest, env=env)
+            return _setup_dry_run(manifest, env=env, components=components)
 
         roots = resolve_roots(env=env)
         platform = component_manifest.platform_key()
-        plan = build_setup_plan(manifest, platform=platform, roots=roots)
-        assets = [entry for entry in plan if entry.action == "verify-cache"]
         current_state_path = Path(component_paths.installed_state_path(roots.data_root))
         previous_state_path = Path(component_paths.installed_previous_state_path(roots.data_root))
         current_state = component_state.load_installed_state(current_state_path)
         if current_state_path.exists() and current_state is None:
             raise ComponentInstallError(f"invalid installed state: {current_state_path}")
+        plan = build_setup_plan(
+            manifest, platform=platform, roots=roots, opt_in=_setup_opt_in(components, current_state)
+        )
+        assets = [entry for entry in plan if entry.action == "verify-cache"]
 
         for entry in assets:
             asset = component_manifest.resolve_asset(manifest, entry.component_id, platform)

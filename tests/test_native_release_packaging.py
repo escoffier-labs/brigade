@@ -28,12 +28,16 @@ BINARIES = (
 )
 
 
+# brigade-hub ships for Linux only.
+HUB_PLATFORMS = ("linux-amd64", "linux-arm64")
+
+
 def native_names():
     return {
         f"{binary}-{platform}" + (".exe" if platform == "windows-amd64" else "")
         for binary in BINARIES
         for platform in PLATFORMS
-    }
+    } | {f"brigade-hub-{platform}" for platform in HUB_PLATFORMS}
 
 
 def workflow():
@@ -73,6 +77,25 @@ def test_native_builds_compile_and_stage_distinct_targets_for_every_platform():
         )
 
 
+def test_hub_builds_linux_targets_and_runs_prepublication_acceptance_before_staging():
+    hub = _workflow_job_section(workflow(), "build-hub-native")
+    assert set(re.findall(r"platform: ([\w-]+)", hub)) == set(HUB_PLATFORMS)
+    assert "runner: ubuntu-24.04-arm" in hub
+    build = re.findall(r"run: (cargo build [^\n]+)", hub)
+    assert len(build) == 1
+    args = shlex.split(build[0])
+    assert "--release" in args and "--locked" in args
+    assert args[args.index("--bin") + 1] == "brigade-hub"
+    acceptance = hub.index("run: python engines/hub/tests/prepublish.py")
+    assert (
+        hub.index("cargo build") < acceptance < hub.index('cp engines/hub/target/release/brigade-hub "release-assets/')
+    )
+    assert 'release-assets/brigade-hub-${{ matrix.platform }}"' in hub
+    assert "name: rust-hub-${{ matrix.platform }}" in hub
+    assemble = _workflow_job_section(workflow(), "assemble-release")
+    assert "build-hub-native" in assemble.split("\n", 2)[1]
+
+
 @pytest.mark.parametrize("inventory", ["complete", "legacy", "missing", "duplicate"])
 def test_assembly_rejects_incomplete_or_duplicate_native_downloads(tmp_path, inventory):
     names = sorted(native_names())
@@ -88,7 +111,7 @@ def test_assembly_rejects_incomplete_or_duplicate_native_downloads(tmp_path, inv
         path = tmp_path / "downloaded" / "other" / names.pop()
         path.parent.mkdir()
         path.write_bytes(b"duplicate")
-        # Keep count at 40, so only the duplicate-basename guard can reject it.
+        # Keep count at 42, so only the duplicate-basename guard can reject it.
         (tmp_path / "downloaded" / "native" / names.pop()).unlink()
     step = _workflow_step_section(workflow(), "assemble-release", "Generate and validate complete release inventory")
     script = textwrap.dedent(step.split("        run: |\n", 1)[1]).split("python scripts/", 1)[0]
@@ -103,10 +126,10 @@ def test_attestation_covers_every_native_asset_and_primary_manifest():
     subjects = assemble.split("          subject-path: |\n", 1)[1].split("      - uses:", 1)[0]
     paths = [line.strip() for line in subjects.splitlines() if line.strip()]
     expected = native_names() | {"component-manifest-v1.json"}
-    assert len(paths) == 41
+    assert len(paths) == 43
     assert set(paths) == {f"release-assets/{name}" for name in expected}
     for job in ("assemble-release", "release-asset-gate"):
-        assert re.search(r"find release-assets[^\n]+-eq 42", _workflow_job_section(workflow(), job))
+        assert re.search(r"find release-assets[^\n]+-eq 44", _workflow_job_section(workflow(), job))
 
 
 @pytest.mark.parametrize(
@@ -184,5 +207,5 @@ def test_release_gate_binds_every_attestation_to_source_commit_and_ref(tmp_path)
     result = subprocess.run(_workflow_bash_command(script, "-e"), cwd=tmp_path, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in log.read_text().splitlines()]
-    assert len(calls) == 41
+    assert len(calls) == 43
     assert {Path(args[2]).name for args in calls} == subjects

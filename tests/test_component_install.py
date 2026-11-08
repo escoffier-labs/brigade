@@ -51,8 +51,8 @@ from tests.component_install_helpers import (
 )
 from tests.support import PRIVATE_DIRECTORY_MODE, assert_private_mode
 
-_SMOKE_COMPONENTS = component_manifest.KNOWN_COMPONENT_IDS
-_FOUR_ENGINE_IDS = tuple(cid for cid in component_manifest.KNOWN_COMPONENT_IDS if cid != "agent-notify")
+_SMOKE_COMPONENTS = component_manifest.DEFAULT_COMPONENT_IDS
+_FOUR_ENGINE_IDS = tuple(cid for cid in component_manifest.DEFAULT_COMPONENT_IDS if cid != "agent-notify")
 
 
 @pytest.fixture(autouse=True)
@@ -219,7 +219,7 @@ def _managed_paths(env: dict[str, str]) -> dict[str, Path]:
     roots = resolve_roots(env=env, system="linux")
     return {
         component_id: Path(component_paths.managed_executable_path(roots.data_root, component_id))
-        for component_id in component_manifest.KNOWN_COMPONENT_IDS
+        for component_id in component_manifest.DEFAULT_COMPONENT_IDS
     }
 
 
@@ -253,7 +253,7 @@ def _rollback_state(
     component_ids: tuple[str, ...] | None = None,
 ) -> component_state.InstalledState:
     roots = resolve_roots(env=env, system="linux")
-    selected = component_ids if component_ids is not None else component_manifest.KNOWN_COMPONENT_IDS
+    selected = component_ids if component_ids is not None else component_manifest.DEFAULT_COMPONENT_IDS
     components: dict[str, component_state.InstalledComponentRecord] = {}
     for component_id in selected:
         payload = _rollback_payload(component_id, version=version)
@@ -621,7 +621,7 @@ def test_repeat_setup_repairs_cleared_execute_bits_without_network(tmp_path, mon
     assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
     paths = _managed_paths(env)
     mtimes_before = {component_id: path.stat().st_mtime_ns for component_id, path in paths.items()}
-    repair_target = component_manifest.KNOWN_COMPONENT_IDS[0]
+    repair_target = component_manifest.DEFAULT_COMPONENT_IDS[0]
     paths[repair_target].chmod(0o644)
 
     assert setup_native_components(env=env, opener=FakeOpener({})) == 0
@@ -647,7 +647,7 @@ def test_build_setup_plan_lists_all_five_components(tmp_path):
     manifest = write_test_manifest(manifest_path, brigade_version=brigade.__version__)
     roots = resolve_roots(env=linux_env(tmp_path), system="linux")
     plan = build_setup_plan(manifest, platform="linux-amd64", roots=roots)
-    assert {action.component_id for action in plan} == set(component_manifest.KNOWN_COMPONENT_IDS)
+    assert {action.component_id for action in plan} == set(component_manifest.DEFAULT_COMPONENT_IDS)
 
 
 def test_build_setup_plan_emits_deterministic_actions(tmp_path):
@@ -656,9 +656,9 @@ def test_build_setup_plan_emits_deterministic_actions(tmp_path):
     roots = resolve_roots(env=linux_env(tmp_path), system="linux")
     plan = build_setup_plan(manifest, platform="linux-amd64", roots=roots)
     per_component = ("verify-cache", "download", "materialize", "smoke")
-    assert [action.action for action in plan] == list(per_component) * len(component_manifest.KNOWN_COMPONENT_IDS)
+    assert [action.action for action in plan] == list(per_component) * len(component_manifest.DEFAULT_COMPONENT_IDS)
     expected_ids: list[str] = []
-    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+    for component_id in component_manifest.DEFAULT_COMPONENT_IDS:
         expected_ids.extend([component_id] * len(per_component))
     assert [action.component_id for action in plan] == expected_ids
 
@@ -669,7 +669,7 @@ def test_build_setup_plan_uses_exact_cache_and_managed_paths(tmp_path):
     roots = resolve_roots(env=linux_env(tmp_path), system="linux")
     platform = "linux-amd64"
     plan = build_setup_plan(manifest, platform=platform, roots=roots)
-    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+    for component_id in component_manifest.DEFAULT_COMPONENT_IDS:
         asset = manifest.components[component_id].assets[platform]
         cache_path = component_paths.cached_asset_path(roots.cache_root, asset.sha256, asset.asset_name)
         managed_path = component_paths.managed_executable_path(roots.data_root, component_id)
@@ -710,7 +710,7 @@ def test_setup_dry_run_prints_required_metadata(tmp_path, monkeypatch, capsys):
     assert brigade.__version__ in out
     assert "fixture" in out
     assert "linux-amd64" in out
-    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+    for component_id in component_manifest.DEFAULT_COMPONENT_IDS:
         assert component_id in out
     assert "verify-cache" in out
     assert "materialize" in out
@@ -1360,7 +1360,7 @@ def test_setup_online_reuses_persisted_beta_stable_manifest_when_cli_advances(tm
     assert (state.component_tag, state.component_manifest_sha256) == ("v0.25.0", digest)
     installed = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
     assert installed is not None
-    assert set(installed.components) == set(component_manifest.KNOWN_COMPONENT_IDS)
+    assert set(installed.components) == set(component_manifest.DEFAULT_COMPONENT_IDS)
 
 
 def test_setup_offline_reuses_persisted_beta_stable_manifest_when_cli_advances(tmp_path, monkeypatch):
@@ -1387,7 +1387,7 @@ def test_setup_offline_reuses_persisted_beta_stable_manifest_when_cli_advances(t
     assert (state.component_tag, state.component_manifest_sha256) == ("v0.25.0", digest)
     installed = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
     assert installed is not None
-    assert set(installed.components) == set(component_manifest.KNOWN_COMPONENT_IDS)
+    assert set(installed.components) == set(component_manifest.DEFAULT_COMPONENT_IDS)
 
 
 def test_setup_offline_reuses_persisted_beta_pre_agent_notify_stable_manifest(tmp_path, monkeypatch):
@@ -1595,7 +1595,7 @@ def test_setup_rollback_verifies_all_prior_caches_before_mutating_managed_files(
     state_before = (current_path.read_bytes(), previous_path.read_bytes())
     paths = _managed_paths(env)
     managed_before = {component_id: path.read_bytes() for component_id, path in paths.items()}
-    last_component = component_manifest.KNOWN_COMPONENT_IDS[-1]
+    last_component = component_manifest.DEFAULT_COMPONENT_IDS[-1]
     record = previous.components[last_component]
     roots = resolve_roots(env=env, system="linux")
     Path(component_paths.cached_asset_path(roots.cache_root, record.sha256, record.asset_name)).unlink()
@@ -1618,7 +1618,7 @@ def test_setup_rollback_bad_prior_cache_preserves_binaries_and_state(tmp_path, f
     state_before = (current_path.read_bytes(), previous_path.read_bytes())
     paths = _managed_paths(env)
     managed_before = {component_id: path.read_bytes() for component_id, path in paths.items()}
-    component_id = component_manifest.KNOWN_COMPONENT_IDS[0]
+    component_id = component_manifest.DEFAULT_COMPONENT_IDS[0]
     record = previous.components[component_id]
     roots = resolve_roots(env=env, system="linux")
     cache_path = Path(component_paths.cached_asset_path(roots.cache_root, record.sha256, record.asset_name))
@@ -1685,7 +1685,7 @@ def test_setup_rollback_four_to_five_upgrade_restores_prior_and_removes_managed_
     previous, current = _seed_rollback_pair(
         env,
         previous_ids=_FOUR_ENGINE_IDS,
-        current_ids=component_manifest.KNOWN_COMPONENT_IDS,
+        current_ids=component_manifest.DEFAULT_COMPONENT_IDS,
     )
     current_path, previous_path = _rollback_state_paths(env)
     roots = resolve_roots(env=env, system="linux")
@@ -1712,7 +1712,7 @@ def test_setup_rollback_four_to_five_never_removes_external_path_agent_notify(tm
     previous, current = _seed_rollback_pair(
         env,
         previous_ids=_FOUR_ENGINE_IDS,
-        current_ids=component_manifest.KNOWN_COMPONENT_IDS,
+        current_ids=component_manifest.DEFAULT_COMPONENT_IDS,
     )
     roots = resolve_roots(env=env, system="linux")
     managed_notify = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
@@ -1754,7 +1754,7 @@ def test_setup_rollback_four_to_five_never_removes_env_override_agent_notify(tmp
     _seed_rollback_pair(
         env,
         previous_ids=_FOUR_ENGINE_IDS,
-        current_ids=component_manifest.KNOWN_COMPONENT_IDS,
+        current_ids=component_manifest.DEFAULT_COMPONENT_IDS,
     )
     roots = resolve_roots(env=env, system="linux")
     managed_notify = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
@@ -1774,7 +1774,7 @@ def test_setup_rollback_four_to_five_leaves_foreign_managed_path_untouched(tmp_p
     previous, current = _seed_rollback_pair(
         env,
         previous_ids=_FOUR_ENGINE_IDS,
-        current_ids=component_manifest.KNOWN_COMPONENT_IDS,
+        current_ids=component_manifest.DEFAULT_COMPONENT_IDS,
     )
     roots = resolve_roots(env=env, system="linux")
     managed_notify = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
@@ -1793,7 +1793,7 @@ def test_setup_rollback_four_to_five_smoke_failure_restores_added_managed_binary
     _seed_rollback_pair(
         env,
         previous_ids=_FOUR_ENGINE_IDS,
-        current_ids=component_manifest.KNOWN_COMPONENT_IDS,
+        current_ids=component_manifest.DEFAULT_COMPONENT_IDS,
     )
     current_path, previous_path = _rollback_state_paths(env)
     state_before = (current_path.read_bytes(), previous_path.read_bytes())
@@ -1937,8 +1937,8 @@ def test_setup_install_writes_all_five_managed_files_and_state_after_smoke(tmp_p
     state_path = Path(component_paths.installed_state_path(roots.data_root))
     state = component_state.load_installed_state(state_path)
     assert state is not None
-    assert set(state.components) == set(component_manifest.KNOWN_COMPONENT_IDS)
-    assert len(opener.calls) == len(component_manifest.KNOWN_COMPONENT_IDS)
+    assert set(state.components) == set(component_manifest.DEFAULT_COMPONENT_IDS)
+    assert len(opener.calls) == len(component_manifest.DEFAULT_COMPONENT_IDS)
     for component_id, managed_path in _managed_paths(env).items():
         payload, byte_size, sha256 = fixture_payload(component_id)
         assert managed_path.read_bytes() == payload
@@ -1948,14 +1948,14 @@ def test_setup_install_writes_all_five_managed_files_and_state_after_smoke(tmp_p
 
 
 def _write_unpublished_notify_manifest(path: Path, *, brigade_version: str) -> component_manifest.ComponentManifest:
-    """Manifest with the 4 native engines published and agent-notify unpublished."""
+    """Manifest with the 4 native engines published and agent-notify and brigade-hub unpublished."""
     components: dict[str, object] = {}
     for component_id in component_manifest.KNOWN_COMPONENT_IDS:
-        if component_id == "agent-notify":
+        if component_id in ("agent-notify", "brigade-hub"):
             components[component_id] = {
                 "component_revision": fixture_component_revision(component_id),
                 "source": {"repository": FIXTURE_REPOSITORY},
-                "executable": "agent-notify",
+                "executable": component_id,
                 "assets": {},
             }
             continue
@@ -2039,7 +2039,7 @@ def _write_pre_agent_notify_manifest(path: Path, *, brigade_version: str) -> Non
     the most recent stable release published before agent-notify was added.
     """
     components: dict[str, object] = {}
-    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+    for component_id in component_manifest.DEFAULT_COMPONENT_IDS:
         if component_id == "agent-notify":
             continue
         assets: dict[str, object] = {}
@@ -2169,7 +2169,7 @@ def test_setup_fetches_every_asset_before_managed_bin_mutation(tmp_path, monkeyp
     original_materialize = component_install.materialize_executable
 
     def assert_all_downloaded(*, cache_path, managed_path):
-        assert len(opener.calls) == len(component_manifest.KNOWN_COMPONENT_IDS)
+        assert len(opener.calls) == len(component_manifest.DEFAULT_COMPONENT_IDS)
         original_materialize(cache_path=cache_path, managed_path=managed_path)
 
     monkeypatch.setattr(component_install, "materialize_executable", assert_all_downloaded)
@@ -2182,7 +2182,7 @@ def test_setup_last_download_failure_preserves_managed_bin(tmp_path, monkeypatch
     paths = _managed_paths(env)
     prior = _write_prior_managed(paths)
     payloads = all_fixture_payloads()
-    payloads.pop(next(reversed(payloads)))
+    payloads.pop(manifest_asset_fixture(component_manifest.DEFAULT_COMPONENT_IDS[-1]).download_url)
 
     assert setup_native_components(env=env, opener=FakeOpener(payloads)) == 1
 
@@ -2606,8 +2606,15 @@ def test_family_upgrade_and_offline_rollback_preserve_actual_identities(tmp_path
                 downloads[old_url] = downloads[asset["download_url"]]
         new_payload["components"][new] = record
     roots = resolve_roots(env=env)
+
+    def installed_ids(payload):
+        # A plain setup skips optional components such as brigade-hub.
+        return {component_manifest.family_id(cid) for cid in payload["components"]} - set(
+            component_manifest.OPT_IN_COMPONENT_IDS
+        )
+
     fixture_paths = {
-        Path(component_paths.managed_executable_path(roots.data_root, cid)) for cid in new_payload["components"]
+        Path(component_paths.managed_executable_path(roots.data_root, cid)) for cid in installed_ids(new_payload)
     }
     smoke_calls: list[list[str]] = []
 
@@ -2626,19 +2633,17 @@ def test_family_upgrade_and_offline_rollback_preserve_actual_identities(tmp_path
         manifest_path.write_text(json.dumps(payload))
         assert setup_native_components(env=env, opener=FakeOpener(downloads), runner=fixture_runner) == 0
     state_path = Path(component_paths.installed_state_path(roots.data_root))
-    assert set(component_state.load_installed_state(state_path).components) == {
-        component_manifest.family_id(cid) for cid in second["components"]
-    }
+    assert set(component_state.load_installed_state(state_path).components) == installed_ids(second)
     assert (
         setup_native_components(env=env, rollback=True, offline=True, opener=FakeOpener({}), runner=fixture_runner) == 0
     )
     restored = component_state.load_installed_state(state_path)
-    assert set(restored.components) == {component_manifest.family_id(cid) for cid in first["components"]}
+    assert set(restored.components) == installed_ids(first)
     suffix = ".exe" if os.name == "nt" else ""
     for cid, record in restored.components.items():
         assert Path(record.executable).name == f"{cid}{suffix}"
         assert Path(record.executable).read_bytes() == downloads[record.download_url]
-    assert len(smoke_calls) == 3 * len(first["components"])
+    assert len(smoke_calls) == 3 * len(installed_ids(first))
     assert {Path(argv[0]) for argv in smoke_calls} == fixture_paths
     for old, canonical in aliases.items():
         shim = Path(component_paths.managed_executable_path(roots.data_root, old))

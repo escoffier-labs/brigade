@@ -158,6 +158,32 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--trust-forwarded-proto", action="store_true", help="Trust HTTPS scheme from an overwriting loopback proxy."
     )
     p_serve.add_argument("--require-sealed", action="store_true", help="Refuse plaintext message sends.")
+    p_serve.add_argument(
+        "--engine",
+        choices=("python", "rust"),
+        default="python",
+        help=(
+            "Hub engine. `rust` runs the installed brigade-hub in front of this Python hub, on the same "
+            "database (Linux; `brigade setup --component brigade-hub`). Default python."
+        ),
+    )
+    p_serve.add_argument(
+        "--route-mode",
+        action="append",
+        default=[],
+        metavar="FAMILY=MODE",
+        help="With --engine rust: a brigade-hub route mode such as claims=native (repeatable).",
+    )
+    p_serve.add_argument(
+        "--hub-binary", type=Path, default=None, help="With --engine rust: run this brigade-hub instead."
+    )
+    p_serve.add_argument("--hub-sha256", default=None, help="With --hub-binary: the SHA-256 that binary must match.")
+    p_serve.add_argument(
+        "--hub-sha256-file",
+        type=Path,
+        default=None,
+        help="With --hub-binary: a file holding that SHA-256, such as the one a container image records.",
+    )
     p_serve.set_defaults(func=_dispatch_serve)
 
     p_nodes = fleet_sub.add_parser(
@@ -564,6 +590,41 @@ def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | No
     from .. import fleet_command_deck, fleet_hub
 
     db_path = args.db if args.db is not None else (Path.home() / DEFAULT_DB_REL_PATH)
+    engine = getattr(args, "engine", "python")
+    rust_only = [
+        flag
+        for flag, value in (
+            ("--route-mode", getattr(args, "route_mode", None)),
+            ("--hub-binary", getattr(args, "hub_binary", None)),
+            ("--hub-sha256", getattr(args, "hub_sha256", None)),
+            ("--hub-sha256-file", getattr(args, "hub_sha256_file", None)),
+        )
+        if value
+    ]
+    if engine == "rust":
+        from .. import fleet_hub_engine
+
+        return fleet_hub_engine.run(
+            host=args.host,
+            port=args.port,
+            db_path=db_path,
+            token_file=args.token_file,
+            allow_admin_writes=bool(args.allow_admin_writes),
+            require_sealed=bool(getattr(args, "require_sealed", False)),
+            deck_config_path=fleet_command_deck.resolve_config_path(
+                args.deck_config, os.environ if environ is None else environ
+            ),
+            trust_tailscale_identity=bool(args.trust_tailscale_identity),
+            trust_forwarded_proto=bool(getattr(args, "trust_forwarded_proto", False)),
+            route_modes=tuple(args.route_mode),
+            hub_binary=args.hub_binary,
+            hub_sha256=args.hub_sha256,
+            hub_sha256_file=getattr(args, "hub_sha256_file", None),
+            env=environ,
+        )
+    if rust_only:
+        print(f"error: {', '.join(rust_only)} requires --engine rust", file=sys.stderr)
+        return 2
     return fleet_hub.run(
         host=args.host,
         port=args.port,

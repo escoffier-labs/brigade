@@ -154,7 +154,7 @@ def inspect_components(
         )
 
     inspections: list[ComponentInspection] = []
-    for component_id in component_manifest.manifest_component_ids(manifest):
+    for component_id in _reported_ids(component_manifest.manifest_component_ids(manifest), installed_state):
         inspections.append(
             _inspect_component(
                 component_id,
@@ -187,6 +187,12 @@ def inspect_components(
     )
 
 
+def _reported_ids(ids: tuple[str, ...], installed_state: component_state.InstalledState | None) -> tuple[str, ...]:
+    """Every listed component, except an optional one this host never installed."""
+    installed = installed_state.components if installed_state else {}
+    return tuple(cid for cid in ids if cid not in component_manifest.OPT_IN_COMPONENT_IDS or cid in installed)
+
+
 def _environment_blocked_report(
     *,
     manifest_source: Path,
@@ -201,7 +207,10 @@ def _environment_blocked_report(
     """Return a read-only unsupported report when roots or manifest cannot be resolved."""
     report_state_path = state_path or Path(component_paths.installed_state_path(_UNAVAILABLE_DATA_ROOT))
     data_root = roots.data_root if roots is not None else _UNAVAILABLE_DATA_ROOT
-    ids = component_manifest.manifest_component_ids(manifest) if manifest else component_manifest.KNOWN_COMPONENT_IDS
+    ids = _reported_ids(
+        component_manifest.manifest_component_ids(manifest) if manifest else component_manifest.KNOWN_COMPONENT_IDS,
+        installed_state,
+    )
     inspections: list[ComponentInspection] = []
     for component_id in ids:
         installed_key = (
@@ -264,6 +273,9 @@ def _installed_state_matches_manifest(
         installed_key = component_manifest.wire_id(installed_state.components, component_id)
         installed = installed_state.components.get(installed_key) if installed_key is not None else None
         if installed is None:
+            if component_id in component_manifest.OPT_IN_COMPONENT_IDS:
+                # An optional component this host never installed.
+                continue
             return False
         component = manifest.components[component_id]
         try:

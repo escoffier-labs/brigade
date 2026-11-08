@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Entrypoint for the dogfood hub container: `brigade-hub` in front of the Python hub.
 
+When the image's Brigade has the Rust engine (S10) and the image recorded the
+binary's checksum, this execs `brigade fleet serve --engine rust`, which checks
+the binary, supervises it and runs the watchdog. The recipe's default
+BRIGADE_REF predates that engine, so otherwise it falls back to the S31
+wrapper below. Bump the pin past S10 at the next release and the fallback
+goes unused.
+
 `brigade-hub` runs in managed mode. It starts `python3 -m brigade fleet serve`
 as its child on an ephemeral loopback port, gives it a per-start key, and
 exits non-zero if that child dies. This wrapper is the interim stand-in for the
@@ -23,6 +30,7 @@ a crash. Stdlib only.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import signal
 import subprocess
@@ -30,6 +38,9 @@ import sys
 import urllib.request
 
 HUB = os.environ.get("BRIGADE_HUB_BIN", "brigade-hub")
+# Where the dogfood stage installs brigade-hub and the checksum it recorded.
+ENGINE_BINARY = "/usr/local/bin/brigade-hub"
+ENGINE_SUM = "/usr/local/share/brigade/brigade-hub.sha256"
 STARTED = "brigade fleet hub listening on"
 STOPPED = "brigade fleet hub stopped cleanly"
 POLL_SECONDS = 0.25
@@ -65,7 +76,36 @@ def exit_code(returncode: int) -> int:
     return 128 - returncode if returncode < 0 else returncode
 
 
+def engine_command(argv: list[str]) -> list[str] | None:
+    """`fleet serve --engine rust` with these flags, when this image supports it."""
+    if not os.path.isfile(ENGINE_SUM):
+        return None
+    try:
+        if importlib.util.find_spec("brigade.fleet_hub_engine") is None:
+            return None
+    except ModuleNotFoundError:
+        return None
+    return [
+        sys.executable,
+        "-m",
+        "brigade",
+        "fleet",
+        "serve",
+        "--engine",
+        "rust",
+        "--hub-binary",
+        ENGINE_BINARY,
+        "--hub-sha256-file",
+        ENGINE_SUM,
+        *argv,
+    ]
+
+
 def main(argv: list[str]) -> int:
+    command = engine_command(argv)
+    if command is not None:
+        # Same PID, so the init process's signals reach fleet serve directly.
+        os.execv(command[0], command)
     host = option(argv, "--host", "127.0.0.1")
     port = option(argv, "--port", "3774")
     db = option(argv, "--db", "~/.brigade/fleet-hub.db")
