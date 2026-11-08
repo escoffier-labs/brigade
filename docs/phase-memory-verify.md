@@ -652,6 +652,13 @@ Otherwise the whole proposal is refused with
 therefore cannot bind a manifest for card A to a proposal that changes card B,
 to a card in another scope, or to a revision the manifest did not check.
 
+Slice 4 keeps this state in a `memory_evidence_bindings` side table (memory
+schema 12), so `memory_evidence` stays immutable, and a trigger lets a row
+move forward only. A proposal that goes stale because the policy changed can
+still be decided again, so its records stay `pending_review` until that
+decision or until compaction makes them inert. A record older than 24 hours
+cannot bind even before the sweep reaches it.
+
 ### Hash read for reviewers
 
 `attestation::resolve` returns hashes only for supporting records from

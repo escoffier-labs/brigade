@@ -549,6 +549,7 @@ fn update(
             Value::Integer(p.now_ms),
         ],
     )?;
+    super::manifest_binding::settle(tx, body, p.now_ms)?;
     Ok(None)
 }
 fn open(
@@ -878,7 +879,18 @@ pub fn run(
                 return Ok(r);
             }
         }
-        return open(tx, p, body, authority, "proposal.open", scanner);
+        // D5: a cited verifier manifest binds or the proposal is refused whole.
+        let bound =
+            match super::manifest_binding::check(tx, &body, p.credential.principal(), p.now_ms)? {
+                Ok(ids) => ids,
+                Err(r) => return Ok(r),
+            };
+        let opened = open(tx, p, body, authority, "proposal.open", scanner)?;
+        if opened.status == 201 {
+            let id = string(&opened.body, "proposal_id");
+            super::manifest_binding::bind(tx, &bound, id, p.now_ms)?;
+        }
+        return Ok(opened);
     }
     body = match load(tx, string(&cmd.request, "proposal_id"))? {
         Some(b) => b,

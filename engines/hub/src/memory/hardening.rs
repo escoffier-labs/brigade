@@ -239,6 +239,7 @@ pub fn compact(db: &Connection, now: i64, limits: &Limits, max: usize) -> rusqli
         let audit = json!({"proposal_id":row.get::<_,String>(0)?,"compacted":true,"proposer":row.get::<_,String>(2)?,"created_at":row.get::<_,String>(3)?,"decided_by":row.get::<_,Option<String>>(4)?,"proposal_digest":row.get::<_,Option<String>>(5)?,"terminal_ms":row.get::<_,i64>(6)?,"state":row.get::<_,String>(7)?,"body_digest":ids::sha256_hex(raw.as_bytes()),"decision":body["decision"],"decision_mode":body["decision_mode"],"base_epoch":body["base_epoch"],"policy_digest":body["policy_digest"],"decision_policy_digest":body["decision_policy_digest"],"cards":proposals::cards(&body).iter().map(|c|json!({"scope":c["scope"],"card_id":c["card_id"],"base_revision":c["base_revision"],"before_hash":c["before_hash"],"after_hash":c["after_hash"]})).collect::<Vec<_>>()});
         let raw = audit.to_string();
         db.execute("UPDATE memory_proposals SET body=?2,retained_bytes=?3,compacted=1 WHERE proposal_id=?1",rusqlite::params![row.get::<_,String>(0)?,raw,raw.len() as i64])?;
+        super::manifest_binding::compacted(db, &row.get::<_, String>(0)?, now)?;
         // Older hubs published proposed blobs before acceptance. Reclaim only
         // bytes with no durable card or handoff reference. Pending bodies own
         // their own text and will republish their blob if subsequently applied.

@@ -2,7 +2,7 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 11;
+pub const USER_VERSION: i64 = 12;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
@@ -143,14 +143,15 @@ CREATE TABLE memory_idempotency(
   PRIMARY KEY(principal, client_event_id)
 ) WITHOUT ROWID;
 CREATE INDEX memory_idempotency_age ON memory_idempotency(created_ms);
-{}{}{}{}{}{}
+{}{}{}{}{}{}{}
 ",
         super::embedding::DDL,
         super::proposals::DDL,
         super::attestation::DDL,
         super::retrieval_eval::DDL,
         super::read_counts::DDL,
-        super::verifier::DDL
+        super::verifier::DDL,
+        super::manifest_binding::DDL
     )
 }
 
@@ -174,6 +175,7 @@ pub const TABLES: &[&str] = &[
     "memory_read_totals",
     "memory_verifiers",
     "memory_verifier_credentials",
+    "memory_evidence_bindings",
 ];
 
 /// Create a fresh file's schema, or check an existing one. Never downgrades,
@@ -263,6 +265,12 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     // unflagged: a missing row is an unflagged one.
     if version < 11 {
         step(c, super::verifier::DDL, 11).map_err(err)?;
+    }
+    // Version 12: proposal-bound state for verifier attestations (D5 of
+    // phase-memory-verify). Existing records get no row and keep their
+    // current behavior.
+    if version < 12 {
+        step(c, super::manifest_binding::DDL, 12).map_err(err)?;
     }
     for table in TABLES {
         let present: Option<i64> = c

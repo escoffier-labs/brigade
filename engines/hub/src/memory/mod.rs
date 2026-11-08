@@ -22,6 +22,7 @@ mod embedding_tests;
 mod hardening;
 pub mod ids;
 pub mod index;
+mod manifest_binding;
 pub mod ops;
 mod preflight;
 mod proposal_blocks;
@@ -64,6 +65,8 @@ mod embedder_tests;
 mod hardening_tests;
 #[cfg(test)]
 mod lexical_tests;
+#[cfg(test)]
+mod manifest_binding_tests;
 #[cfg(test)]
 mod powercut;
 #[cfg(test)]
@@ -1940,7 +1943,7 @@ fn reads<T: ReadTx + ?Sized>(
                     "credential": credential.class(),
                     "verifier": verifier::flagged(tx, credential.principal())?,
                     "verifier_generation": {"memory": verifier::db_generation(tx)?},
-                    "capabilities": [verifier::CAPABILITY],
+                    "capabilities": [verifier::CAPABILITY, manifest_binding::CAPABILITY],
                 }),
             );
             if let Some(names) = readable_scopes {
