@@ -23,6 +23,7 @@ removing `--engine rust`: both engines serve the same database file.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import ipaddress
 import os
 import re
@@ -33,10 +34,10 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import brigade
 
@@ -243,11 +244,22 @@ def bound_address(line: bytes) -> tuple[str, int] | None:
 
 
 def healthy(url: str) -> bool:
-    try:
-        with urllib.request.urlopen(url, timeout=2) as response:
-            return response.status == 200
-    except OSError:
+    """One direct `GET /health` to the approved address in `url`.
+
+    A plain connection, never urllib: no proxy from the environment and no
+    redirect followed, so only that address answers and only 200 counts.
+    """
+    parts = urlsplit(url)
+    if parts.hostname is None or parts.port is None:
         return False
+    connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=2)
+    try:
+        connection.request("GET", parts.path or "/health")
+        return connection.getresponse().status == 200
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
 
 
 def only_loopback(net: Path = Path("/sys/class/net")) -> bool:

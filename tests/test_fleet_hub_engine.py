@@ -404,6 +404,67 @@ def test_a_hostname_child_reporting_another_address_is_refused(tmp_path, monkeyp
     assert "reported a non-loopback address '203.0.113.8'" in capsys.readouterr().err
 
 
+class _Stub:
+    """A stub hub on loopback answering `/health` with one fixed status."""
+
+    def __init__(self, status: int):
+        import http.server
+        import threading
+
+        seen = self.paths = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(self.path)
+                self.send_response(status)
+                if status == 302:
+                    self.send_header("Location", "http://192.0.2.1:9/health")
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/health"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.mark.parametrize("variable", ["HTTP_PROXY", "http_proxy", "ALL_PROXY"])
+def test_the_probe_ignores_proxy_settings(monkeypatch, variable):
+    # 192.0.2.1 (RFC 5737) never answers, so a probe sent through it would fail.
+    monkeypatch.setenv(variable, "http://192.0.2.1:9")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    stub = _Stub(200)
+    try:
+        assert fleet_hub_engine.healthy(stub.url) is True
+        assert stub.paths == ["/health"]
+    finally:
+        stub.close()
+
+
+def test_a_redirect_is_unhealthy_and_never_followed():
+    stub = _Stub(302)
+    try:
+        assert fleet_hub_engine.healthy(stub.url) is False
+        # One request, to the stub only: the Location was not followed.
+        assert stub.paths == ["/health"]
+    finally:
+        stub.close()
+
+
+def test_the_probe_reports_an_unreachable_or_malformed_target_as_unhealthy():
+    stub = _Stub(200)
+    port = stub.server.server_address[1]
+    stub.close()
+    assert fleet_hub_engine.healthy(f"http://127.0.0.1:{port}/health") is False
+    assert fleet_hub_engine.healthy("not a url") is False
+
+
 def test_bound_address_reads_brigade_hub_listening_lines():
     assert fleet_hub_engine.bound_address(b"listening on 127.0.0.1:3774\n") == ("127.0.0.1", 3774)
     assert fleet_hub_engine.bound_address(b"listening on [::1]:40000\n") == ("::1", 40000)
