@@ -63,6 +63,8 @@ pub enum Action {
     Verifier {
         principal: String,
         verifier: bool,
+        /// Announced in the hub file before the command reaches the writer.
+        generation: i64,
     },
     /// Native registration binds a credential's flag copy before issuing it.
     VerifierBind {
@@ -977,7 +979,8 @@ fn run(
         Action::Verifier {
             principal,
             verifier,
-        } => super::verifier::set(tx, p, _authority, principal, *verifier),
+            generation,
+        } => super::verifier::set(tx, p, _authority, principal, *verifier, *generation),
         Action::VerifierBind {
             principal,
             class,

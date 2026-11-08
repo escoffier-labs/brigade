@@ -10,6 +10,14 @@ principal listed until the clear commits. The writer republishes the
 committed set after the commit and at every start. The file can therefore
 over-report flagged principals but never under-report them.
 
+The list is bound to the flag state by a generation. Before a flag change
+reaches the memory writer, the Rust hub writer durably records the change's
+generation in ``hub_meta`` under ``memory_verifier_generation``, and every list
+the memory writer publishes carries the generation it reflects. A list whose
+generation is below the hub's is one a crash or a failed startup republish left
+behind, and it refuses any policy that lists a reflect principal, whatever
+principals it names.
+
 Every policy revision is written inside ``BEGIN IMMEDIATE`` on the hub
 database, and this module reads the file inside that transaction. A flag change
 that committed first is therefore visible here, and a policy revision that
@@ -34,6 +42,8 @@ MEMORY_FILE = "fleet-hub-memory.db"
 SCHEMA = "brigade.memory-verifiers.v1"
 LISTED = "memory_policy_verifier_listed"
 UNREADABLE = "memory_policy_verifier_list_unreadable"
+STALE = "memory_policy_verifier_list_stale"
+HUB_GENERATION_KEY = "memory_verifier_generation"
 MAX_BYTES = 1024 * 1024
 
 
@@ -53,8 +63,20 @@ def sidecar_path(conn: sqlite3.Connection) -> Path | None:
     return None
 
 
+def hub_generation(conn: sqlite3.Connection) -> int:
+    """The latest verifier generation the hub announced, 0 when none was."""
+    try:
+        row = conn.execute("SELECT value FROM hub_meta WHERE key = ?", (HUB_GENERATION_KEY,)).fetchone()
+    except sqlite3.OperationalError:
+        return 0
+    try:
+        return int(row[0]) if row is not None else 0
+    except (TypeError, ValueError) as exc:
+        raise VerifierListed(f"{STALE}: the hub's verifier generation is not a number", code=STALE) from exc
+
+
 def flagged(conn: sqlite3.Connection) -> frozenset[str]:
-    """Principal ids the memory hub last published as verifiers."""
+    """Principal ids the memory hub last published as verifiers, at a current generation."""
     path = sidecar_path(conn)
     if path is None:
         return frozenset()
@@ -82,8 +104,18 @@ def flagged(conn: sqlite3.Connection) -> frozenset[str]:
         verifiers = document.get("verifiers")
         if not isinstance(verifiers, list) or not all(isinstance(item, str) for item in verifiers):
             raise ValueError("verifiers")
+        generation = document.get("generation")
+        if type(generation) is not int or generation < 0:
+            raise ValueError("generation")
     except ValueError as exc:
         raise VerifierListed(f"{UNREADABLE}: the memory verifier list is malformed", code=UNREADABLE) from exc
+    expected = hub_generation(conn)
+    if generation < expected:
+        raise VerifierListed(
+            f"{STALE}: the memory verifier list is at generation {generation} but the hub announced {expected}. "
+            "Restart hub memory so it republishes the list",
+            code=STALE,
+        )
     return frozenset(verifiers)
 
 

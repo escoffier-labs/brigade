@@ -154,6 +154,10 @@ pub struct Store {
     /// Where `read_stats` audit rows go. Without one `read_stats` is
     /// refused, never served unaudited.
     audit: std::sync::OnceLock<Arc<dyn read_stats::AuditLog>>,
+    /// Announces each verifier flag change's generation in the hub file.
+    generation: std::sync::OnceLock<Arc<dyn verifier::GenerationLog>>,
+    /// One verifier flag change at a time, from announcement to commit.
+    verifier_turn: tokio::sync::Mutex<()>,
     clock: ids::Clock,
     scanner: Arc<dyn Scanner>,
     last_sweep: std::sync::atomic::AtomicI64,
@@ -265,6 +269,8 @@ impl Store {
             read_stats_cursors,
             read_stats_gate: read_stats::Gate::default(),
             audit: std::sync::OnceLock::new(),
+            generation: std::sync::OnceLock::new(),
+            verifier_turn: tokio::sync::Mutex::new(()),
             clock: options.clock,
             scanner: options.scanner,
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
@@ -760,6 +766,52 @@ impl Store {
     pub fn attach_audit(&self, log: Arc<dyn read_stats::AuditLog>) {
         let _ = self.audit.set(log);
     }
+    pub fn attach_generation(&self, log: Arc<dyn verifier::GenerationLog>) {
+        let _ = self.generation.set(log);
+    }
+    /// D4: announce the next generation in the hub file, durably, before the
+    /// flag change reaches the memory writer. The list the change publishes
+    /// carries that generation, so a list a crash left behind is visibly older
+    /// than the hub's and the policy writer refuses it.
+    async fn verifier_change(&self, mut prepared: Prepared) -> Reply {
+        let unavailable = |reason: &str| {
+            error(
+                503,
+                "memory_verifier_generation_unavailable",
+                &format!(
+                    "the verifier generation could not be announced ({reason}), so the flag was not changed"
+                ),
+            )
+        };
+        let Some(log) = self.generation.get() else {
+            return unavailable("no hub writer");
+        };
+        let _turn = self.verifier_turn.lock().await;
+        let announced = match self
+            .hub
+            .submit(|db| verifier::hub_generation(&Conn(db)))
+            .await
+        {
+            Ok(g) => g,
+            _ => return unavailable("hub read"),
+        };
+        let committed = match self
+            .readers
+            .submit(|db| verifier::db_generation(&Conn(db)))
+            .await
+        {
+            Ok(g) => g,
+            _ => return unavailable("memory read"),
+        };
+        let next = announced.max(committed) + 1;
+        if !log.record(next).await {
+            return unavailable("hub write");
+        }
+        if let Action::Verifier { generation, .. } = &mut prepared.action {
+            *generation = next;
+        }
+        self.write(prepared).await
+    }
     /// The lexical index, for `/metrics` and `status`.
     pub fn index(&self) -> &Arc<index::Index> {
         &self.index
@@ -891,13 +943,16 @@ impl Store {
             | "handoff"
             | "capture"
             | "grant"
-            | "verifier"
             | "rescan"
             | "evidence.attach"
             | "evidence.purge"
             | "auto_apply_switch"
             | "retrieval_eval.record" => match self.prepare(credential, action, map, &raw) {
                 Ok(prepared) => self.write(prepared).await,
+                Err(reply) => reply,
+            },
+            "verifier" => match self.prepare(credential, action, map, &raw) {
+                Ok(prepared) => self.verifier_change(prepared).await,
                 Err(reply) => reply,
             },
             _ => invalid("unknown memory action"),
@@ -1202,6 +1257,7 @@ impl Store {
                     .get("verifier")
                     .and_then(Json::as_bool)
                     .ok_or_else(|| invalid("verifier must be a boolean"))?,
+                generation: 0,
             },
             "auto_apply_switch" => Action::AutoApplySwitch(
                 map.get("enabled")

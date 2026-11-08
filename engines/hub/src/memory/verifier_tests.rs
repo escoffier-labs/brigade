@@ -275,13 +275,15 @@ async fn flag_changes_publish_the_verifier_list_for_the_policy_writer() {
     // Startup publishes the current, empty list.
     assert_eq!(
         read(),
-        json!({"schema":"brigade.memory-verifiers.v1","verifiers":[]})
+        json!({"schema":"brigade.memory-verifiers.v1","generation":0,"verifiers":[]})
     );
     assert_eq!(flag(&h, "agent:dot", true).await.status, 200);
     assert_eq!(flag(&h, "node-1", true).await.status, 200);
     assert_eq!(read()["verifiers"], json!(["agent:dot", "node-1"]));
+    assert_eq!((read()["generation"].clone(), announced(&h)), (json!(2), 2));
     assert_eq!(flag(&h, "agent:dot", false).await.status, 200);
     assert_eq!(read()["verifiers"], json!(["node-1"]));
+    assert_eq!((read()["generation"].clone(), announced(&h)), (json!(3), 3));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -688,11 +690,96 @@ async fn a_list_that_over_reports_after_a_lost_commit_is_repaired_on_restart() {
     // commit, but the memory file never recorded the change.
     Connection::open(h.memory())
         .unwrap()
-        .execute_batch("DELETE FROM memory_verifiers; DELETE FROM memory_verifier_credentials;")
+        .execute_batch(
+            "DELETE FROM memory_verifiers; DELETE FROM memory_verifier_credentials;
+             DELETE FROM memory_meta WHERE key='verifier_generation';",
+        )
         .unwrap();
     let sidecar = verifier::sidecar(&h.memory());
     let read = || -> Json { serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap() };
     assert_eq!(read()["verifiers"], json!(["agent:dot"]));
     h.open(clean(), None);
+    // The committed set, at the generation the lost change announced.
     assert_eq!(read()["verifiers"], json!([]));
+    assert_eq!(read()["generation"], json!(1));
+}
+
+fn announced(h: &Hub) -> i64 {
+    Connection::open(&h.hub)
+        .unwrap()
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM hub_meta WHERE key='memory_verifier_generation'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+}
+fn listed_generation(h: &Hub) -> Json {
+    let body = std::fs::read(verifier::sidecar(&h.memory())).unwrap();
+    serde_json::from_slice::<Json>(&body).unwrap()["generation"].clone()
+}
+
+#[tokio::test]
+async fn a_valid_list_left_at_an_older_generation_is_republished_on_restart() {
+    let mut h = Hub::with(clean(), None);
+    assert_eq!(flag(&h, "agent:dot", true).await.status, 200);
+    assert_eq!((listed_generation(&h), announced(&h)), (json!(1), 1));
+    h.store.take();
+    // The rename of the change's list was lost: the old list is still valid.
+    verifier::publish(&h.memory(), 0, &[]).unwrap();
+    assert_eq!(listed_generation(&h), json!(0));
+    h.open(clean(), None);
+    let list: Json =
+        serde_json::from_slice(&std::fs::read(verifier::sidecar(&h.memory())).unwrap()).unwrap();
+    assert_eq!(list["generation"], json!(1));
+    assert_eq!(list["verifiers"], json!(["agent:dot"]));
+}
+
+#[tokio::test]
+async fn a_refused_flag_change_republishes_at_its_announced_generation() {
+    let h = Hub::with(clean(), None);
+    policy(
+        &h,
+        json!({"tier0_op_classes":["append_evidence"],"reflect_principals":["agent:dot"]}),
+    );
+    let r = flag(&h, "agent:dot", true).await;
+    assert_eq!(code(&r), "memory_policy_verifier_listed");
+    // The announcement stands, so the list must reach it or hold policy writes.
+    assert_eq!((listed_generation(&h), announced(&h)), (json!(1), 1));
+    assert_eq!(principal_flag(&h, "agent:dot"), None);
+}
+
+#[tokio::test]
+async fn a_failed_startup_republish_refuses_to_start_memory() {
+    let mut h = Hub::with(clean(), None);
+    assert_eq!(flag(&h, "agent:dot", true).await.status, 200);
+    h.store.take();
+    verifier::publish(&h.memory(), 0, &[]).unwrap();
+    // Block the temporary file the republish writes first.
+    let sidecar = verifier::sidecar(&h.memory());
+    let temp = sidecar.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::create_dir(&temp).unwrap();
+    std::fs::write(temp.join("blocker"), b"x").unwrap();
+    let readers = Arc::new(ReaderPool::open_unchecked(&h.hub, 1, 64, READ_LIMIT).unwrap());
+    let opened = Store::open(
+        Options {
+            memory: h.memory(),
+            hub: h.hub.clone(),
+            admin_digest: digest(ADMIN_TOKEN),
+            clock: ids::Clock {
+                file: Some(h.clock.clone()),
+            },
+            scanner: clean(),
+            arbiter: h.arbiter.clone(),
+            hook: None,
+        },
+        readers,
+    );
+    assert!(opened.is_err());
+    // The stale list stays below the hub's generation, so the policy writer
+    // refuses listings until a start republishes it.
+    assert_eq!((listed_generation(&h), announced(&h)), (json!(0), 1));
+    std::fs::remove_dir_all(&temp).unwrap();
+    h.open(clean(), None);
+    assert_eq!(listed_generation(&h), json!(1));
 }

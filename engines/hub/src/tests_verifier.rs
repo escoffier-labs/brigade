@@ -58,6 +58,9 @@ fn fixture() -> Fixture {
     let writer =
         brigade_hub::writer::Writer::start(brigade_hub::writer::Config::new(hub.clone()), arbiter)
             .unwrap();
+    store.attach_generation(Arc::new(
+        brigade_hub::memory_verifier_generation::HubGeneration::new(writer.clone()),
+    ));
     let registration = registration::Registration {
         readers,
         writer,
@@ -260,4 +263,64 @@ async fn message_principal_readds_are_flagged_and_unflagged_principals_get_no_fl
         )
         .await;
     assert_eq!(status, 404, "{missing}");
+}
+
+/// Runs the Python policy writer's verifier check against `hub` and returns
+/// the refusal code, or "accepted".
+fn policy_check(hub: &Path, reflect: &str) -> String {
+    let python = std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into());
+    let script = "import sqlite3, sys\nfrom brigade import fleet_hub_verifiers as v\nconn = sqlite3.connect(sys.argv[1])\ntry:\n    v.refuse_listed(conn, {'memory': {'reflect_principals': [sys.argv[2]]}})\n    print('accepted')\nexcept v.VerifierListed as exc:\n    print(exc.code)\n";
+    let out = std::process::Command::new(python)
+        .args(["-c", script])
+        .arg(hub)
+        .arg(reflect)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[tokio::test]
+async fn a_failed_startup_republish_blocks_policy_writes() {
+    let f = fixture();
+    f.admin(json!({"action":"verifier","principal":"agent:held","verifier":true}))
+        .await;
+    assert_eq!(
+        policy_check(&f.hub, "agent:held"),
+        "memory_policy_verifier_listed"
+    );
+    assert_eq!(policy_check(&f.hub, "agent:other"), "accepted");
+    let memory = f.dir.join("fleet-hub-memory.db");
+    // A crash lost the change's list: the old, valid list is back on disk.
+    brigade_hub::memory::verifier::publish(&memory, 0, &[]).unwrap();
+    // The next start cannot republish it.
+    let sidecar = brigade_hub::memory::verifier::sidecar(&memory);
+    let temp = sidecar.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::create_dir(&temp).unwrap();
+    std::fs::write(temp.join("blocker"), b"x").unwrap();
+    let readers = Arc::new(brigade_hub::read::ReaderPool::open(&f.hub, 1, 64).unwrap());
+    let restarted = Store::open(
+        Options {
+            memory: memory.clone(),
+            hub: f.hub.clone(),
+            admin_digest: registration::digest(ADMIN),
+            clock: ids::Clock::default(),
+            scanner: Arc::new(scan::Unavailable),
+            arbiter: Arc::new(brigade_hub::writer::Arbiter::default()),
+            hook: None,
+        },
+        readers,
+    );
+    assert!(restarted.is_err());
+    // Every policy that lists a reflect principal is held, flagged or not.
+    for reflect in ["agent:held", "agent:other"] {
+        assert_eq!(
+            policy_check(&f.hub, reflect),
+            "memory_policy_verifier_list_stale"
+        );
+    }
 }

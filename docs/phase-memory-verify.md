@@ -563,7 +563,10 @@ Python, so the memory writer publishes the flagged principal ids to
 `fleet-hub-memory-verifiers.json` inside the flag change's transaction, before
 it commits, and refuses the change if that write fails. The policy writer
 checks that file inside its own hub write transaction and refuses a listing
-when hub memory exists but the file is missing or unreadable. The
+when hub memory exists but the file is missing or unreadable. The file carries
+a generation that the hub writer records in `hub_meta` before each flag change
+runs, so a list a crash left behind is refused as stale, and memory does not
+start until it can republish the list. The
 operator details are in [memory-operations.md](memory-operations.md).
 
 ### Prompt injection

@@ -15,11 +15,19 @@
 //! did not bind one is refused for a verifier principal until an admin sets
 //! the flag again, which binds every live credential.
 //!
-//! Python never opens the memory file (D7), so after a committed flag change
-//! the writer publishes the flagged principal ids to a sidecar file while it
-//! still holds the hub lock. The Python policy writer reads that file inside
-//! its own hub write transaction and refuses a `reflect_principals` entry
-//! that names one of them.
+//! Python never opens the memory file (D7), so the writer publishes the
+//! flagged principal ids to a sidecar file while it holds the hub lock. The
+//! Python policy writer reads that file inside its own hub write transaction
+//! and refuses a `reflect_principals` entry that names one of them.
+//!
+//! The list is bound to the flag state by a generation. Before a flag change
+//! reaches the memory writer, the hub writer durably records the next
+//! generation in `hub_meta` (`memory_verifier_generation`), a table Python
+//! already reads. The change stores it in `memory_meta`, and every published
+//! list carries the generation it reflects. Python refuses a list whose
+//! generation is below the hub's, so a list that a crash left behind, or that
+//! a failed startup republish could not replace, holds policy writes instead
+//! of passing as current.
 use super::{
     Reply,
     attestation::credential_id,
@@ -52,6 +60,54 @@ pub const CAPABILITY: &str = "verifier_floor";
 /// Beside the memory file. Holds only principal ids, never a credential.
 pub const SIDECAR: &str = "fleet-hub-memory-verifiers.json";
 pub const SIDECAR_SCHEMA: &str = "brigade.memory-verifiers.v1";
+/// The `hub_meta` key holding the latest generation a flag change announced.
+pub const HUB_GENERATION_KEY: &str = "memory_verifier_generation";
+const DB_GENERATION_KEY: &str = "verifier_generation";
+
+/// Records a flag change's generation in the hub file before the change runs.
+/// Resolves true only once the value is durably committed.
+pub trait GenerationLog: Send + Sync {
+    fn record(
+        &self,
+        generation: i64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>;
+}
+
+fn number<T: ReadTx + ?Sized>(tx: &T, sql: &str, key: &str) -> rusqlite::Result<i64> {
+    Ok(tx
+        .query(sql, &[t(key)])?
+        .first()
+        .and_then(|r| s(&r[0]).parse().ok())
+        .unwrap_or(0))
+}
+
+/// The latest generation the hub file announced. A hub file without
+/// `hub_meta` (test fixtures) has announced none.
+pub fn hub_generation<T: ReadTx + ?Sized>(hub: &T) -> rusqlite::Result<i64> {
+    if hub
+        .query(
+            "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='hub_meta'",
+            &[],
+        )?
+        .is_empty()
+    {
+        return Ok(0);
+    }
+    number(
+        hub,
+        "SELECT value FROM hub_meta WHERE key=?1",
+        HUB_GENERATION_KEY,
+    )
+}
+
+/// The generation of the last flag change the memory file committed.
+pub fn db_generation<T: ReadTx + ?Sized>(tx: &T) -> rusqlite::Result<i64> {
+    number(
+        tx,
+        "SELECT value FROM memory_meta WHERE key=?1",
+        DB_GENERATION_KEY,
+    )
+}
 
 fn one<T: ReadTx + ?Sized>(tx: &T, sql: &str, key: &str) -> rusqlite::Result<bool> {
     Ok(tx
@@ -115,6 +171,7 @@ pub fn set(
     authority: &Authority,
     principal: &str,
     verifier: bool,
+    generation: i64,
 ) -> rusqlite::Result<Reply> {
     if verifier && listed(&authority.policy_document, principal) {
         return Ok(error(
@@ -124,6 +181,10 @@ pub fn set(
         ));
     }
     let stamp = ids::isoformat(p.now_ms);
+    tx.execute(
+        "INSERT INTO memory_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        &[t(DB_GENERATION_KEY), t(&generation.to_string())],
+    )?;
     let flag = Value::Integer(i64::from(verifier));
     tx.execute(
         "INSERT INTO memory_verifiers(principal,verifier,updated_at,updated_by) VALUES(?1,?2,?3,?4) ON CONFLICT(principal) DO UPDATE SET verifier=excluded.verifier,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
@@ -224,16 +285,17 @@ pub fn sidecar(memory: &Path) -> PathBuf {
     memory.with_file_name(SIDECAR)
 }
 
-/// Replace the sidecar with `principals`. A temporary file is renamed over
-/// the old one, so a reader sees the old list or the new one. The writer
-/// calls this after a committed flag change, before it releases the hub lock,
-/// and once at startup. A stale file after a crash is replaced at the next
-/// start.
-pub fn publish(memory: &Path, principals: &[String]) -> std::io::Result<()> {
+/// Replace the sidecar with `principals` at `generation`. The temporary file
+/// is synced, renamed over the old one and the directory is synced, so a
+/// reader sees the old list or the new one, and a list a flag change
+/// published before its commit survives a power cut. The writer calls this
+/// inside a flag change before it commits, after the batch, and at startup.
+pub fn publish(memory: &Path, generation: i64, principals: &[String]) -> std::io::Result<()> {
     use std::io::Write;
     let path = sidecar(memory);
     let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    let body = json!({"schema": SIDECAR_SCHEMA, "verifiers": principals}).to_string();
+    let body = json!({"schema": SIDECAR_SCHEMA, "generation": generation, "verifiers": principals})
+        .to_string();
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -241,12 +303,19 @@ pub fn publish(memory: &Path, principals: &[String]) -> std::io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let written = options
-        .open(&temp)
-        .and_then(|mut f| f.write_all(body.as_bytes()));
+    let written = options.open(&temp).and_then(|mut f| {
+        f.write_all(body.as_bytes())?;
+        f.sync_all()
+    });
     if let Err(e) = written.and_then(|()| std::fs::rename(&temp, &path)) {
         let _ = std::fs::remove_file(&temp);
         return Err(e);
+    }
+    // The rename itself is durable only once the directory is synced. Windows
+    // cannot open a directory this way, and NTFS journals the rename.
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
     }
     Ok(())
 }

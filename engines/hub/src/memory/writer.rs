@@ -190,28 +190,35 @@ impl HubLock {
 }
 
 /// Publish the flagged principal ids `db` sees, plus `retained`, beside the
-/// memory file.
+/// memory file, labeled with the newest of `db`'s generation and `announced`.
 fn publish_set(
     db: &Connection,
     memory: &std::path::Path,
     retained: &std::collections::BTreeSet<String>,
+    announced: i64,
 ) -> Result<(), String> {
-    let mut list = super::verifier::principals(&worker::Tx(db)).map_err(|e| e.to_string())?;
+    let tx = worker::Tx(db);
+    let mut list = super::verifier::principals(&tx).map_err(|e| e.to_string())?;
+    let generation = super::verifier::db_generation(&tx)
+        .map_err(|e| e.to_string())?
+        .max(announced);
     list.extend(retained.iter().cloned());
     list.sort();
     list.dedup();
-    super::verifier::publish(memory, &list).map_err(|e| e.to_string())
+    super::verifier::publish(memory, generation, &list).map_err(|e| e.to_string())
 }
 
-/// Publish the committed set at startup and after a committed flag change.
-/// The list published before that commit already covers every principal the
-/// file holds flagged, so a failure here leaves a list that over-reports, which
-/// the policy writer treats as refusals. It is logged and repaired by the next
-/// flag change or start.
-fn publish_verifiers(db: &Connection, memory: &std::path::Path) {
-    if let Err(e) = publish_set(db, memory, &Default::default()) {
-        eprintln!("WARN memory verifier list not published: {e}");
-    }
+/// Publish the committed set at the hub's current generation, read through
+/// `hub`. Startup and every batch that held a flag change call this. A flag
+/// change that never committed announced a generation its list can now carry,
+/// because the committed set is what is true.
+fn publish_verifiers(
+    db: &Connection,
+    hub: &Connection,
+    memory: &std::path::Path,
+) -> Result<(), String> {
+    let announced = super::verifier::hub_generation(&worker::Tx(hub)).map_err(|e| e.to_string())?;
+    publish_set(db, memory, &Default::default(), announced)
 }
 
 /// A flag change publishes inside its own savepoint, before the batch commits.
@@ -227,6 +234,7 @@ fn publish_pending(
     let ops::Action::Verifier {
         principal,
         verifier,
+        ..
     } = action
     else {
         return Ok(());
@@ -234,7 +242,8 @@ fn publish_pending(
     if !verifier {
         retained.insert(principal.clone());
     }
-    publish_set(db, memory, retained).map_err(|e| {
+    // The change stored its announced generation in this transaction.
+    publish_set(db, memory, retained, 0).map_err(|e| {
         eprintln!("WARN memory verifier list not published, flag change refused: {e}");
         ops::error(
             503,
@@ -277,9 +286,13 @@ impl Writer {
         arbiter: Arc<Arbiter>,
     ) -> rusqlite::Result<Self> {
         let hub = HubLock::open(&config.hub)?;
-        // Replace a sidecar a crash may have left stale (phase-memory-verify
-        // D4), before the store accepts its first request.
-        publish_verifiers(&memory, &config.memory);
+        // Replace a list a crash may have left stale (phase-memory-verify D4)
+        // before the store accepts its first request. If that fails, memory
+        // does not start: the stale list's generation holds policy writes.
+        publish_verifiers(&memory, &hub.db, &config.memory).map_err(|e| {
+            eprintln!("memory verifier list not published at startup: {e}");
+            rusqlite::Error::ToSqlConversionFailure(e.into())
+        })?;
         let (sender, receiver) = mpsc::channel(config.capacity);
         if let Some(index) = &config.index {
             index.attach(sender.downgrade());
@@ -876,15 +889,19 @@ pub(crate) fn run(
         if committed {
             hook(&config, Step::Committed);
         }
-        // A committed verifier flag change reaches the Python policy writer
-        // before any hub write can follow it: the hub lock is still held.
+        // Any flag change in the batch, applied, refused or replayed, already
+        // announced a generation. Republish the committed set at that
+        // generation while the hub lock still holds back every hub write. A
+        // failure leaves a list whose generation holds policy writes until the
+        // next flag change or start replaces it.
         if committed
-            && results.iter().any(|(p, r)| {
-                matches!(p.command.action, ops::Action::Verifier { .. })
-                    && matches!(r, Ok(reply) if reply.status < 300)
-            })
+            && results
+                .iter()
+                .any(|(p, _)| matches!(p.command.action, ops::Action::Verifier { .. }))
         {
-            publish_verifiers(&db, &config.memory);
+            if let Err(e) = publish_verifiers(&db, &hub.db, &config.memory) {
+                eprintln!("WARN memory verifier list not republished: {e}");
+            }
         }
         // Step 5: end the hub transaction and return the turn at once, even
         // when the memory commit failed.

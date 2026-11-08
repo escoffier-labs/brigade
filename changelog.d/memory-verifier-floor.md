@@ -8,6 +8,8 @@
   Preflight reports a `verifier_floor` hold and `auto_apply` refuses the proposal. A fleet
   policy that lists a verifier in `memory.reflect_principals` is refused with
   `memory_policy_verifier_listed`, and so is flagging a listed principal. A flag change that
-  cannot publish the verifier list for the policy writer is rolled back and refused. Memory `status`
+  cannot publish the verifier list for the policy writer is rolled back and refused. The list
+  is written durably and carries a generation the hub records before each flag change, so a
+  policy write refuses a stale list, and hub memory does not start until it can republish it. Memory `status`
   reports the caller's `verifier` and `reflect_principal` booleans and a `verifier_floor`
   capability.

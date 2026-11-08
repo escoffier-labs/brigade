@@ -2018,3 +2018,17 @@ lock. With no memory file beside the hub database, no principal is flagged.
 Once the memory file exists, a missing, unreadable or malformed list refuses
 any policy that lists a reflect principal, with
 `memory_policy_verifier_list_unreadable`.
+
+The list is bound to the flag state by a generation. Before a flag change
+reaches the memory writer, the hub writer durably records the next generation
+in `hub_meta` under `memory_verifier_generation`. The change stores it in the
+memory file, and every list carries the generation it reflects. The list is
+written to a synced temporary file, renamed, and the directory is synced
+before the change commits. If the generation cannot be recorded, the change is
+refused with `503 memory_verifier_generation_unavailable`. A policy write that
+finds the list below the hub's generation, because a crash lost the list or a
+start could not replace it, refuses any policy that lists a reflect principal,
+with `memory_policy_verifier_list_stale`. Hub memory does not start when its
+startup republish fails, so the stale list keeps holding those policy writes
+until a start succeeds. A list at a higher generation than `hub_meta`, after
+the hub file is restored from an older copy, is accepted.
