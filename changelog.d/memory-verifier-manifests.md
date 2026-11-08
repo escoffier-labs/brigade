@@ -14,3 +14,5 @@
 - `proposal_show` returns a `verifier_manifests` list of bound manifest hashes to callers with
   `review` on every target and every bound record's scope, and omits the key for everyone
   else. Memory `status` advertises a `verifier_manifests` capability.
+- `proposal_show` no longer panics on a compacted proposal. Compaction drops a proposal's pins,
+  and the reply now lists them as empty instead of failing the read.
