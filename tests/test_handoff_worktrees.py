@@ -399,6 +399,89 @@ def test_subdirectory_root_maps_into_linked_checkouts(tmp_path: Path):
     assert handoff_worktrees.main_checkout_for(linked / "project", repo=main) != main.resolve()
 
 
+@needs_symlinks
+def test_symlinked_prefix_component_in_main_checkout_is_refused(tmp_path: Path):
+    main = tmp_path / "main"
+    (main / "a" / "b").mkdir(parents=True)
+    (main / "a" / "b" / "README.md").write_text("b\n")
+    _git(main, "init", "-q")
+    _git(main, "add", "a/b/README.md")
+    _git(main, "commit", "-q", "-m", "init")
+    linked = tmp_path / "linked"
+    _git(main, "worktree", "add", "-q", "--detach", str(linked))
+    outside = tmp_path / "outside"
+    (main / "a").rename(outside)  # outside/b is a real directory
+    (main / "a").symlink_to(outside, target_is_directory=True)
+    session = linked / "a" / "b"
+    pending = _handoff(session / ".claude" / "memory-handoffs", "2026-11-08-0900-pending.md", "pending")
+
+    assert handoff_worktrees.main_checkout_for(session, repo=main) is None
+    hint = handoff_worktrees.stop_hint(session)
+    assert "could not be verified" in hint and str(outside) not in hint
+    assert handoff_worktrees.handoff_inbox(session) == session / ".claude" / "memory-handoffs"
+
+    runguard.remove_worktree(main, session, force=True)
+
+    assert pending.is_file()
+    assert not (outside / "b" / ".claude").exists()
+
+
+# Codex 4507748094: rescue covers project-subdirectory inboxes.
+
+
+def _repo_with_project(tmp_path: Path) -> tuple[Path, Path]:
+    main = tmp_path / "main"
+    (main / "project").mkdir(parents=True)
+    (main / "project" / "README.md").write_text("project\n")
+    _git(main, "init", "-q")
+    _git(main, "add", "project/README.md")
+    _git(main, "commit", "-q", "-m", "init")
+    linked = tmp_path / "linked"
+    _git(main, "worktree", "add", "-q", "--detach", str(linked))
+    return main, linked
+
+
+def test_project_subdirectory_handoff_is_rescued_to_matching_main_directory(tmp_path: Path):
+    main, linked = _repo_with_project(tmp_path)
+    pending = _handoff(linked / "project" / ".claude" / "memory-handoffs", "pending.md", "project handoff")
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert not linked.exists()
+    delivered = main / "project" / ".claude" / "memory-handoffs" / "pending.md"
+    assert delivered.read_text() == _HANDOFF.format(summary="project handoff")
+    assert not (main / ".claude" / "memory-handoffs" / "pending.md").exists()
+    assert not pending.exists()
+
+
+def test_inbox_scan_over_budget_keeps_worktree(tmp_path: Path, monkeypatch, capsys):
+    main, linked = _repo_with_project(tmp_path)
+    pending = _handoff(linked / "project" / ".claude" / "memory-handoffs", "pending.md", "project handoff")
+    monkeypatch.setattr(handoff_worktrees, "MAX_SCAN_DIRS", 1)
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert linked.exists()
+    assert pending.is_file()
+    assert "inbox-scan-failed" in capsys.readouterr().err
+
+
+@needs_symlinks
+def test_project_handoff_with_unwalkable_destination_keeps_worktree(tmp_path: Path, capsys):
+    main, linked = _repo_with_project(tmp_path)
+    pending = _handoff(linked / "project" / ".claude" / "memory-handoffs", "pending.md", "project handoff")
+    outside = tmp_path / "outside"
+    (main / "project").rename(outside)
+    (main / "project").symlink_to(outside, target_is_directory=True)
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert linked.exists()
+    assert pending.is_file()
+    assert not (outside / ".claude").exists()
+    assert "destination-unavailable" in capsys.readouterr().err
+
+
 # Daybreak 1: linked inboxes must stay inside the configured repository.
 
 
