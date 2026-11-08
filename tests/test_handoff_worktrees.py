@@ -30,6 +30,17 @@ needs_posix_perms = pytest.mark.skipif(
 needs_symlinks = pytest.mark.skipif(os.name == "nt", reason="creates POSIX symlinks")
 
 
+@pytest.fixture(autouse=True)
+def _no_quiescence_wait(monkeypatch):
+    """Fresh test files count as quiet unless a test sets the window."""
+    monkeypatch.setattr(handoff_worktrees, "QUIESCENCE_SECONDS", 0.0, raising=False)
+
+
+def _age(path: Path, seconds: float = 60.0) -> None:
+    past = path.stat().st_mtime - seconds
+    os.utime(path, (past, past))
+
+
 def _git(cwd: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
@@ -571,6 +582,154 @@ def test_rename_noreplace_never_replaces(tmp_path: Path):
         os.close(fd)
     assert (tmp_path / "b.md").read_text() == "b"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["b.md", "d.md"] if os.uname().sysname == "Linux" else True
+
+
+def test_recent_source_is_not_claimed_and_worktree_kept(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    source = _handoff(inbox, "2026-11-08-0900-fresh.md", "still being written")
+    monkeypatch.setattr(handoff_worktrees, "QUIESCENCE_SECONDS", 5.0)
+
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert [(r.state, r.reason) for r in results] == [("failed", "source-too-recent")]
+    assert linked.exists()
+    assert source.read_text() == _HANDOFF.format(summary="still being written")
+    assert _claims(inbox) == []
+    assert not (main / ".claude" / "memory-handoffs" / source.name).exists()
+
+
+def test_source_modified_after_claim_is_rechecked_and_restored(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    source = _handoff(inbox, "2026-11-08-0900-old.md", "old")
+    _age(source)
+    monkeypatch.setattr(handoff_worktrees, "QUIESCENCE_SECONDS", 5.0)
+    real = handoff_worktrees._rename_noreplace
+
+    def rename(parent, src, dst):
+        real(parent, src, dst)
+        if dst.startswith(".brigade-claim-"):
+            os.utime(inbox / dst)  # a writer touches the claimed inode
+
+    monkeypatch.setattr(handoff_worktrees, "_rename_noreplace", rename)
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    assert [(r.state, r.reason) for r in results] == [("failed", "source-too-recent")]
+    assert source.is_file()
+    assert _claims(inbox) == []
+
+
+def test_late_write_through_pre_claim_fd_is_republished(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    source = _handoff(inbox, "2026-11-08-0900-slow.md", "first part")
+    writer = os.open(source, os.O_WRONLY | os.O_APPEND)
+    real_unlink = handoff_worktrees.dirfd.unlink_child
+
+    def unlink_child(parent, name, **kwargs):
+        if name.startswith(".brigade-claim-"):
+            os.write(writer, b"late tail\n")
+        return real_unlink(parent, name, **kwargs)
+
+    monkeypatch.setattr(handoff_worktrees.dirfd, "unlink_child", unlink_child)
+    try:
+        results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+    finally:
+        os.close(writer)
+
+    assert [(r.state, r.reason) for r in results] == [("failed", "late-write-republished")]
+    dest = main / ".claude" / "memory-handoffs"
+    late = list(dest.glob("2026-11-08-0900-slow-late-*.md"))
+    assert len(late) == 1
+    assert late[0].read_text().endswith("late tail\n")
+    assert (dest / source.name).read_text() == _HANDOFF.format(summary="first part")
+
+
+def test_late_write_keeps_worktree(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    source = _handoff(inbox, "2026-11-08-0900-slow.md", "first part")
+    writer = os.open(source, os.O_WRONLY | os.O_APPEND)
+    real_unlink = handoff_worktrees.dirfd.unlink_child
+
+    def unlink_child(parent, name, **kwargs):
+        if name.startswith(".brigade-claim-"):
+            os.write(writer, b"late tail\n")
+        return real_unlink(parent, name, **kwargs)
+
+    monkeypatch.setattr(handoff_worktrees.dirfd, "unlink_child", unlink_child)
+    try:
+        runguard.remove_worktree(main, linked, force=True)
+    finally:
+        os.close(writer)
+
+    assert linked.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX link fallback")
+def test_link_fallback_never_overwrites_a_racing_file(tmp_path: Path, monkeypatch):
+    (tmp_path / "a.md").write_text("claimed")
+    monkeypatch.setattr(handoff_worktrees, "_renameat2_noreplace", lambda *args: False)
+    real_link, real_rename = os.link, os.rename
+
+    def plant(destination, dir_fd):
+        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, dir_fd=dir_fd)
+        os.write(fd, b"racer")
+        os.close(fd)
+
+    def link(src, dst, *args, **kwargs):
+        plant(dst, kwargs["dst_dir_fd"])
+        return real_link(src, dst, *args, **kwargs)
+
+    def rename(src, dst, *args, **kwargs):
+        plant(dst, kwargs["dst_dir_fd"])
+        return real_rename(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(handoff_worktrees.os, "link", link)
+    monkeypatch.setattr(handoff_worktrees.os, "rename", rename)
+    # Keep dirfd's capability probe true with the wrappers installed.
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {link, rename})
+    fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(FileExistsError):
+            handoff_worktrees._rename_noreplace(fd, "a.md", "b.md")
+    finally:
+        os.close(fd)
+    assert (tmp_path / "b.md").read_text() == "racer"
+    assert (tmp_path / "a.md").read_text() == "claimed"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX link fallback")
+def test_link_fallback_moves_the_source(tmp_path: Path, monkeypatch):
+    (tmp_path / "a.md").write_text("claimed")
+    monkeypatch.setattr(handoff_worktrees, "_renameat2_noreplace", lambda *args: False)
+    fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        handoff_worktrees._rename_noreplace(fd, "a.md", "b.md")
+    finally:
+        os.close(fd)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["b.md"]
+
+
+def test_tracked_destination_copy_is_not_a_duplicate(tmp_path: Path, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    dest = main / ".claude" / "memory-handoffs"
+    committed = _handoff(dest, "committed.md", "same bytes")
+    _git(main, "add", "-f", "--", str(committed.relative_to(main)))
+    _git(main, "commit", "-q", "-m", "track")
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "pending.md", "same bytes")
+
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    assert [r.state for r in results] == ["delivered"]
+    assert not pending.exists()
+    assert (dest / "pending.md").is_file()
+    assert ingest_mod.run(main) == 0
+    drafts = list((main / "memory" / "handoff-inbox").glob("*pending*.md"))
+    assert len(drafts) == 1
+    assert committed.is_file()
 
 
 def test_preplanted_temp_name_is_never_deleted(tmp_path: Path, monkeypatch):

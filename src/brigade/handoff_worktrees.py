@@ -10,6 +10,15 @@ Every path git reports is checked against the configured repository's own
 common git dir, and every inbox component is opened through held, no-follow
 directory descriptors, so neither repo metadata nor a planted link can steer
 discovery or rescue outside that repository.
+
+Rescue claims a quiet source (unmodified for QUIESCENCE_SECONDS) with an
+atomic no-replace rename, copies it, and keeps the claimed file open across
+its unlink so a late write through an older descriptor is still seen and
+republished. Residual risk: a writer that stalls longer than the quiescence
+window mid-write and then writes to the already-unlinked inode after the
+post-unlink check loses those bytes. Closing that needs an atomic
+publication contract for handoff writers (write a private temp, fsync,
+publish with a no-replace rename), tracked in escoffier-labs/brigade#2397.
 """
 
 from __future__ import annotations
@@ -22,6 +31,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -59,6 +69,9 @@ _TEMP_SUFFIX = ".tmp"
 _CLAIM_PREFIX = ".brigade-claim-"
 _CLAIM_SUFFIX = ".md.claimed"
 _RENAME_NOREPLACE = 1
+# A handoff modified more recently than this is still being written. It is
+# left in place and its worktree is kept.
+QUIESCENCE_SECONDS = 5.0
 
 
 def _git_env() -> dict[str, str]:
@@ -347,27 +360,33 @@ def _write_flags() -> int:
     )
 
 
+def _read_fd(fd: int) -> bytes:
+    """Read a held regular file from offset 0, bounded."""
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("not a regular file")
+    if info.st_size > MAX_HANDOFF_BYTES:
+        raise OSError("handoff exceeds size limit")
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    remaining = MAX_HANDOFF_BYTES + 1
+    while remaining > 0:
+        chunk = os.read(fd, min(remaining, 65536))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    data = b"".join(chunks)
+    if len(data) > MAX_HANDOFF_BYTES:
+        raise OSError("handoff exceeds size limit")
+    return data
+
+
 def _read_child(parent: int, name: str) -> tuple[bytes, os.stat_result]:
     """Read a regular file through a no-follow handle; return bytes and fstat."""
     fd = dirfd.open_child_file(parent, name, _read_flags())
     try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise OSError("not a regular file")
-        if info.st_size > MAX_HANDOFF_BYTES:
-            raise OSError("handoff exceeds size limit")
-        chunks: list[bytes] = []
-        remaining = MAX_HANDOFF_BYTES + 1
-        while remaining > 0:
-            chunk = os.read(fd, min(remaining, 65536))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        data = b"".join(chunks)
-        if len(data) > MAX_HANDOFF_BYTES:
-            raise OSError("handoff exceeds size limit")
-        return data, info
+        return _read_fd(fd), os.fstat(fd)
     finally:
         os.close(fd)
 
@@ -380,22 +399,35 @@ def _child_exists(parent: int, name: str) -> bool:
     return True
 
 
-def _digest_index(parent: int) -> set[str]:
-    """sha256 of the `*.md` files directly under a held directory (bounded)."""
+def _digest_index(parent: int, skip: tuple[set[str], set[tuple[int, int]]] | None = None) -> set[str]:
+    """sha256 of the `*.md` files directly under a held directory (bounded).
+
+    `skip` holds names and identities to leave out of the index.
+    """
+    skip_names = {n.casefold() for n in skip[0]} if skip else set()
+    skip_ids = skip[1] if skip else set()
     known: set[str] = set()
     for name in dirfd.child_names(parent, MAX_INBOX_ENTRIES):
-        if not name.endswith(".md") or name.startswith("."):
+        if not name.endswith(".md") or name.startswith(".") or name.casefold() in skip_names:
             continue
         try:
-            data, _ = _read_child(parent, name)
+            data, info = _read_child(parent, name)
         except OSError:
+            continue
+        if (info.st_dev, info.st_ino) in skip_ids:
             continue
         known.add(digest(data))
     return known
 
 
-def _known_digests(dest_fd: int) -> set[str]:
-    known = _digest_index(dest_fd)
+def _known_digests(dest_fd: int, inbox: Path) -> set[str]:
+    """Content ingest will see or has already archived at the destination.
+
+    A git-tracked file in the inbox is never ingested, so its bytes do not
+    count as delivered. If tracking is unknown, only `processed/` counts.
+    """
+    tracked = _tracked(inbox)
+    known = _digest_index(dest_fd, tracked) if tracked is not None else set()
     try:
         processed = dirfd.open_child_directory(dest_fd, "processed", writable=False)
     except FileNotFoundError:
@@ -435,7 +467,7 @@ class _Dest:
             fd = _walk(self.root_fd, parts, create=True)
             assert fd is not None
             try:
-                known = _known_digests(fd)
+                known = _known_digests(fd, self.root.resolve(strict=True).joinpath(*parts))
             except BaseException:
                 os.close(fd)
                 raise
@@ -471,15 +503,21 @@ def _rename_noreplace(parent: int, source: str, destination: str) -> None:
     """Atomically rename one child of a held directory without replacing.
 
     Linux uses renameat2(RENAME_NOREPLACE) and Windows a no-replace handle
-    rename. Elsewhere `destination` is a fresh random name, so a checked
-    plain rename moves exactly the object at `source` without clobbering.
+    rename. Other POSIX systems link the source to `destination`, which fails
+    if anything exists there, then unlink the source name only while it is
+    still the linked object, so a file a writer put back is left pending.
     """
     if os.name == "posix":
         if _renameat2_noreplace(parent, source, destination):
             return
-        if _child_exists(parent, destination):
-            raise FileExistsError(errno.EEXIST, "destination exists", destination)
-        os.rename(source, destination, src_dir_fd=parent, dst_dir_fd=parent)
+        os.link(source, destination, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+        linked = dirfd.stat_child(parent, destination)
+        try:
+            current = dirfd.stat_child(parent, source)
+        except FileNotFoundError:
+            return
+        if (current.st_dev, current.st_ino) == (linked.st_dev, linked.st_ino):
+            os.unlink(source, dir_fd=parent)
         return
     dirfd.replace_children(parent, source, destination, replace=False)
 
@@ -506,6 +544,50 @@ def _is_candidate(name: str) -> bool:
     return name.endswith(".md") and not name.startswith(".") and name != "TEMPLATE.md"
 
 
+def _quiet(info: os.stat_result) -> bool:
+    return time.time() - info.st_mtime >= QUIESCENCE_SECONDS
+
+
+def _publish_bytes(dest_fd: int, raw: bytes, names: tuple[str, ...]) -> str:
+    """Publish `raw` under the first free name, never replacing anything.
+
+    The bytes go to a temp name the ingesters ignore, are fsynced and read
+    back, then linked or renamed into place without replacement.
+    """
+    sha = digest(raw)
+    temp = f"{_TEMP_PREFIX}{uuid.uuid4().hex}{_TEMP_SUFFIX}"
+    out = dirfd.open_child_file(dest_fd, temp, _write_flags(), 0o644)
+    created = True
+    try:
+        try:
+            view = memoryview(raw)
+            while view:
+                view = view[os.write(out, view) :]
+            os.fsync(out)
+        finally:
+            os.close(out)
+        copied, _ = _read_child(dest_fd, temp)
+        if digest(copied) != sha:
+            raise OSError("copy verification failed")
+        for final in dict.fromkeys(names):
+            if _child_exists(dest_fd, final):
+                continue
+            try:
+                dirfd.replace_children(dest_fd, temp, final, replace=False)
+            except FileExistsError:
+                continue
+            created = False
+            dirfd.fsync_directory(dest_fd)
+            return final
+        raise FileExistsError(errno.EEXIST, "no free destination name", names[0])
+    finally:
+        if created:
+            try:
+                dirfd.unlink_child(dest_fd, temp)
+            except OSError:
+                pass
+
+
 def _rescue_one(
     src_fd: int,
     name: str,
@@ -526,6 +608,9 @@ def _rescue_one(
         return Rescue(source, "failed", reason="not-regular-file")
     if (before.st_dev, before.st_ino) in tracked_ids:
         return None
+    if not _quiet(before):
+        return Rescue(source, "failed", reason="source-too-recent")
+    stem = name[: -len(".md")]
     # Claim the source atomically. From here on only the claimed object is
     # read, compared and removed, whatever happens at the original path.
     claim = f"{_CLAIM_PREFIX}{uuid.uuid4().hex}{_CLAIM_SUFFIX}"
@@ -534,67 +619,53 @@ def _rescue_one(
     except OSError:
         return Rescue(source, "failed", reason="claim-failed")
     claimed = True
-    dest_fd: int | None = None
-    temp: str | None = None
-    temp_created = False
+    held: int | None = None
     try:
-        held = dirfd.stat_child(src_fd, claim)
-        if not stat.S_ISREG(held.st_mode) or (held.st_dev, held.st_ino) in tracked_ids:
+        held = dirfd.open_child_file(src_fd, claim, _read_flags())
+        opened = os.fstat(held)
+        named = dirfd.stat_child(src_fd, claim)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+            or (opened.st_dev, opened.st_ino) in tracked_ids
+        ):
             return Rescue(source, "failed", reason="source-changed")
-        raw, opened = _read_child(src_fd, claim)
-        if (opened.st_dev, opened.st_ino) != (held.st_dev, held.st_ino):
-            return Rescue(source, "failed", reason="source-changed")
+        if not _quiet(opened):
+            return Rescue(source, "failed", reason="source-too-recent")
+        raw = _read_fd(held)
         sha = digest(raw)
         dest_fd, known = dest.inbox(parts)
         published: str | None = None
         if sha in known:
             state = "duplicate"
         else:
-            temp = f"{_TEMP_PREFIX}{uuid.uuid4().hex}{_TEMP_SUFFIX}"
-            out = dirfd.open_child_file(dest_fd, temp, _write_flags(), 0o644)
-            temp_created = True
-            try:
-                view = memoryview(raw)
-                while view:
-                    view = view[os.write(out, view) :]
-                os.fsync(out)
-            finally:
-                os.close(out)
-            copied, _ = _read_child(dest_fd, temp)
-            if digest(copied) != sha:
-                return Rescue(source, "failed", reason="copy-verification-failed")
-            stem = name[: -len(".md")]
-            for final in dict.fromkeys((name, f"{stem}-{sha[:12]}.md")):
-                if _child_exists(dest_fd, final):
-                    continue
-                try:
-                    dirfd.replace_children(dest_fd, temp, final, replace=False)
-                except FileExistsError:
-                    continue
-                published, temp_created = final, False
-                break
-            if published is None:
-                return Rescue(source, "failed", reason="destination-collision")
-            dirfd.fsync_directory(dest_fd)
+            published = _publish_bytes(dest_fd, raw, (name, f"{stem}-{sha[:12]}.md"))
             known.add(sha)
             state = "delivered"
         # The claimed bytes must still be the bytes that were delivered.
-        current, _ = _read_child(src_fd, claim)
-        if digest(current) != sha:
+        if digest(_read_fd(held)) != sha:
             return Rescue(source, "failed", reason="source-changed")
+        delivered = os.fstat(held)
         dirfd.unlink_child(src_fd, claim)
         claimed = False
         dirfd.fsync_directory(src_fd)
+        # A writer holding a descriptor from before the claim can still write
+        # to the unlinked inode. Read it once more through the held handle.
+        after = os.fstat(held)
+        late = _read_fd(held)
+        if (after.st_size, after.st_mtime_ns) != (delivered.st_size, delivered.st_mtime_ns) or digest(late) != sha:
+            late_name = _publish_bytes(
+                dest_fd, late, (f"{stem}-late-{digest(late)[:12]}.md", f"{stem}-late-{uuid.uuid4().hex[:8]}.md")
+            )
+            late_path = str(dest.root.joinpath(*parts, late_name)) if dest.root else None
+            return Rescue(source, "failed", dest=late_path, reason="late-write-republished")
         dest_path = str(dest.root.joinpath(*parts, published)) if dest.root and published else None
         return Rescue(source, state, dest=dest_path)
     except OSError:
         return Rescue(source, "failed", reason="rescue-io-error")
     finally:
-        if temp_created and temp is not None and dest_fd is not None:
-            try:
-                dirfd.unlink_child(dest_fd, temp)
-            except OSError:
-                pass
+        if held is not None:
+            os.close(held)
         if claimed and not _restore_claim(src_fd, claim, name):
             print(
                 f"brigade: claimed handoff left as {safe_text(claim)} in {safe_text(label)}",
