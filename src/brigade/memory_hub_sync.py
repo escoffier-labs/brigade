@@ -340,12 +340,18 @@ def _follow(
 
     `save` writes the replica under the state lock; it runs every
     SAVE_EVERY_PAGES pages so an interrupted rebuild resumes.
+
+    Under reflect's replica bounds the log is replayed as metadata first, so
+    a card put and later retired never counts or costs a body fetch. The
+    live-card bound is checked once the replay reaches the log head, before
+    any body is read, and the watermark moves only after the bodies land.
     """
     watermark = int(replica.meta.get("seq") or 0)
     new_scopes = readable - set(replica.meta.get("read_scopes") or [])
     after = 0 if new_scopes else watermark
     used = replica.bytes()
     pages = 0
+    deferred = _Deferred(replica) if store.limits.active() else None
     while True:
         page = client.call("log", after_seq=after, limit=LOG_PAGE)
         if str(page.get("log_epoch") or "") != epoch:
@@ -367,6 +373,9 @@ def _follow(
             if event["scope"] not in readable:
                 continue  # refused earlier in this page
             report["applied"] += 1
+            if deferred is not None:
+                deferred.add(key, event)
+                continue
             used = _apply(
                 client,
                 replica,
@@ -383,12 +392,71 @@ def _follow(
         if not isinstance(next_seq, int) or next_seq <= after:
             break
         after = next_seq
-        replica.meta["seq"] = max(after, watermark)
         pages += 1
+        if deferred is not None:
+            continue  # no watermark or save until the deferred bodies are applied
+        replica.meta["seq"] = max(after, watermark)
         if pages % SAVE_EVERY_PAGES == 0:
             # Bounded progress for a long rebuild; the full write happens once at the end.
             save()
+    if deferred is not None:
+        store.limits.check_count(deferred.live)
+        for key, event in deferred.ordered():
+            if event["scope"] not in readable:
+                continue  # refused earlier in this drain
+            used = _apply(
+                client,
+                replica,
+                settings,
+                key,
+                event,
+                epoch=epoch,
+                used=used,
+                readable=readable,
+                report=report,
+                save=save,
+            )
+        if pages:
+            replica.meta["seq"] = max(after, watermark)
     _refill(client, replica, settings, epoch=epoch, used=used, readable=readable, report=report, save=save)
+
+
+class _Deferred:
+    """The last log event per key, as metadata only, and how many cards it leaves live.
+
+    The replica's heads stay untouched until `ordered` is applied, so a
+    failed replay leaves the replica and its watermark as they were.
+    """
+
+    def __init__(self, replica: store.Replica) -> None:
+        self.replica = replica
+        self.events: dict[str, dict[str, Any]] = {}
+        self.live = len(replica.heads)
+        self.used = 0
+
+    def _delta(self, key: str, event: dict[str, Any]) -> int:
+        return (event["kind"] != "card.retire") - (key in self.replica.heads)
+
+    @staticmethod
+    def _cost(key: str) -> int:
+        return len(key.encode("utf-8")) + store.limits.REPLAY_ENTRY_OVERHEAD
+
+    def add(self, key: str, event: dict[str, Any]) -> None:
+        previous = self.events.pop(key, None)
+        if previous is not None:
+            self.live -= self._delta(key, previous)
+            self.used -= self._cost(key)
+        compact = {name: event[name] for name in ("kind", "scope", "card_id", "revision")}
+        if compact["kind"] == "card.retire" and key not in self.replica.heads and key not in self.replica.missing:
+            return  # put and retired within this replay: nothing to fetch or drop
+        self.events[key] = compact
+        self.live += self._delta(key, compact)
+        self.used += self._cost(key)
+        store.limits.check_replay(self.used)
+
+    def ordered(self) -> list[tuple[str, dict[str, Any]]]:
+        """Retirements first, so their heads free count and bytes before any body is fetched."""
+        return sorted(self.events.items(), key=lambda item: item[1]["kind"] != "card.retire")
 
 
 def _apply(

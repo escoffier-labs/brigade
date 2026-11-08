@@ -1239,8 +1239,12 @@ Before loading an existing replica or an interrupted rebuild, reflection
 checks the on-disk `heads.json` size. A file above the 64 MiB ceiling plus
 1 MiB of serialization slack is refused with `hub_reflect_replica_limit`
 before JSON parsing. Reflect also limits the whole selected replica to 50,000
-cards, including unscoped runs. Sync checks the count before fetching a new
-head, and saves check it before serialization. Each save records a card count
+live cards, including unscoped runs. Sync replays the log as metadata first,
+so a card put and later retired never counts toward the bound or costs a body
+fetch. Once the replay reaches the log head, sync checks the live count before
+fetching any body, and saves check it again before serialization. The deferred
+log metadata has its own byte budget, and exceeding it fails with
+`hub_reflect_replica_limit`. The watermark advances only after the bodies land. Each save records a card count
 and snapshot digest. Reads validate the stored count against a streaming count
 and digest before decoding the full heads dictionary, including legacy
 snapshots without count metadata. A false low count cannot bypass the bound.

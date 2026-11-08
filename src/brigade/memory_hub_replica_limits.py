@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Iterator
 
 MAX_META_BYTES = 8 * 1024 * 1024
+# Nominal memory per deferred log entry beside its key: the compact event and dict slot.
+REPLAY_ENTRY_OVERHEAD = 512
 _LIMITS: ContextVar[tuple[int, int] | None] = ContextVar("hub_replica_limits", default=None)
 
 
@@ -36,6 +38,13 @@ def check_count(count: int) -> None:
     limits = _LIMITS.get()
     if limits is not None and count > limits[0]:
         raise ReplicaLimitError("cards")
+
+
+def check_replay(used: int) -> None:
+    """Refuse a log replay whose deferred metadata outgrows the per-replica byte bound."""
+    limits = _LIMITS.get()
+    if limits is not None and used > limits[1]:
+        raise ReplicaLimitError("replay")
 
 
 def active() -> bool:

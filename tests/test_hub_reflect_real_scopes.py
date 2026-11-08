@@ -42,6 +42,44 @@ def test_scope_bound_fails_closed_with_code_and_reason(setup, capsys, monkeypatc
     assert writes(hub) == []
 
 
+def test_historical_peak_above_bound_rebuilds_from_live_cards(setup, capsys, monkeypatch):
+    from brigade import memory_hub_sync as sync
+
+    target, hub, _ = setup
+    monkeypatch.setattr(reflect, "MAX_SCOPE_CARDS", 2)
+    monkeypatch.setattr(sync, "LOG_PAGE", 1)
+    hub._commit("card.put", "fleet", "c", "Unique c", "live", hubc.event_id())
+    hub._commit("card.retire", "fleet", "a", hub.cards[("fleet", "a")]["text"], "retired", hubc.event_id())
+    code, report = run(target, capsys, "run")
+    assert code == 0 and "error" not in report
+    fetched = {call["card_id"] for call in hub.calls if call["action"] == "card"}
+    assert fetched == {"b", "c"}
+
+
+def test_live_cards_above_bound_refuse_before_any_body_fetch(setup, capsys, monkeypatch):
+    from brigade import memory_hub_sync as sync
+
+    target, hub, _ = setup
+    monkeypatch.setattr(reflect, "MAX_SCOPE_CARDS", 2)
+    monkeypatch.setattr(sync, "LOG_PAGE", 1)
+    hub._commit("card.put", "fleet", "c", "Unique c", "live", hubc.event_id())
+    code, report = run(target, capsys, "run")
+    assert code == 1 and report["error"] == "hub_reflect_scope_limit"
+    assert [call for call in hub.calls if call["action"] == "card"] == []
+    assert writes(hub) == []
+
+
+def test_replay_metadata_bound_fails_closed(setup, capsys, monkeypatch):
+    from brigade import memory_hub_store as store
+
+    target, hub, _ = setup
+    monkeypatch.setattr(store.limits, "REPLAY_ENTRY_OVERHEAD", reflect.MAX_REPLICA_BYTES + reflect.REPLICA_FILE_SLACK)
+    code, report = run(target, capsys, "run")
+    assert code == 1 and report["error"] == "hub_reflect_replica_limit"
+    assert [call for call in hub.calls if call["action"] == "card"] == []
+    assert writes(hub) == []
+
+
 def test_reflect_care_scope_is_pinned_in_service(setup, capsys):
     target, _, home = setup
     assert (
