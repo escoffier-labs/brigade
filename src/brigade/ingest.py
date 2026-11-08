@@ -19,7 +19,6 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
-from . import budgets
 from .card_fingerprint import (
     CardMatch,
     ensure_card_id_frontmatter,
@@ -30,22 +29,22 @@ from .card_fingerprint import (
     reinforce_existing_card,
 )
 from .handoff_content import normalize_suggested_card_content
+from .handoff_ingest_rules import (
+    EXPECTED_SHA_SECTION,
+    SHA256_RE,
+    bootstrap_budget_problem,
+    safe_card_name,
+    read_card_bytes,
+    safe_document_target,
+    sha_matches,
+)
 from .selection import WRITER_INBOXES
 from .untrusted import scan_untrusted
 
 SECTION_RE = re.compile(r"^##\s+(?P<name>.+?)\s*$", re.MULTILINE)
-SAFE_CARD_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.md$")
-SAFE_RULE_PATH_RE = re.compile(r"^rules/[A-Za-z0-9._-]+\.md$")
 _IDENTITY_MIGRATION_FIELDS = frozenset(
     {"aliases", "merged_from", "supersedes", "memory_proposal", "memory_proposal_sources"}
 )
-SAFE_SPECIAL_TARGETS = {
-    "TOOLS.md",
-    "USER.md",
-    ".learnings/LEARNINGS.md",
-    ".learnings/ERRORS.md",
-    ".learnings/FEATURE_REQUESTS.md",
-}
 
 # Recognized handoff sections. Any section name outside this set is a signal
 # that the parser split content at an internal `##` heading; route to inbox.
@@ -57,6 +56,7 @@ KNOWN_SECTIONS = {
     "evidence",
     "recommended memory action",
     "target card",
+    EXPECTED_SHA_SECTION.lower(),
     "suggested card content",
     "target document",
     "suggested document content",
@@ -344,7 +344,7 @@ def decide(
         card = sections.get("target card", "").strip()
         content = sections.get("suggested card content", "")
         content, fence_error = normalize_suggested_card_content(content)
-        if not SAFE_CARD_NAME_RE.match(card):
+        if not safe_card_name(card):
             return Outcome("inboxed", reason=f"target card name unsafe: {card!r}")
         if fence_error:
             return Outcome("inboxed", reason=fence_error)
@@ -373,6 +373,15 @@ def decide(
                     "inboxed",
                     reason=f"governed card identity migration requires review: {', '.join(governed)}",
                 )
+        # A stale base must not silently replace a card that changed after the
+        # writer read it. The section is optional here, `handoff lint` requires it.
+        expected = sections.get(EXPECTED_SHA_SECTION.lower(), "").strip().lower()
+        if action == "update-card" and expected:
+            current = read_card_bytes(target, card)
+            if not SHA256_RE.fullmatch(expected):
+                return Outcome("inboxed", reason=f"{EXPECTED_SHA_SECTION} is not 64 hex characters")
+            if current is not None and not sha_matches(current, expected):
+                return Outcome("inboxed", reason=f"update-card {EXPECTED_SHA_SECTION} does not match current {card}")
         sig = scan_untrusted(content)
         if sig.flagged:
             return Outcome(
@@ -392,7 +401,7 @@ def decide(
         content = sections.get("suggested document content", "")
         if not document:
             return Outcome("inboxed", reason="no-card handoff missing target document")
-        if not (document in SAFE_SPECIAL_TARGETS or SAFE_RULE_PATH_RE.match(document)):
+        if not safe_document_target(document):
             return Outcome("inboxed", reason=f"target document not in safe list: {document!r}")
         if not content.strip():
             return Outcome("inboxed", reason="empty document content")
@@ -415,16 +424,9 @@ def decide(
         # Bootstrap files load into the session prefix every turn and silently
         # truncate past ~12k chars. Refuse an append that would push the file
         # over its budget; route to the inbox so a human trims or re-homes it.
-        addition = "\n\n" + content.strip() + "\n"
-        would_exceed, budget = budgets.route_would_exceed_budget(dest, addition)
-        if would_exceed:
-            return Outcome(
-                "inboxed",
-                reason=(
-                    f"bootstrap budget guard: appending to {document} would exceed "
-                    f"its {budget}B budget; trim the file or promote to a memory card"
-                ),
-            )
+        budget_problem = bootstrap_budget_problem(document, content, target)
+        if budget_problem:
+            return Outcome("inboxed", reason=budget_problem)
         sig = scan_untrusted(content)
         if sig.flagged:
             return Outcome(

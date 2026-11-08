@@ -1,5 +1,7 @@
 # Memory Handoff
 
+<!-- Prefer `brigade handoff draft`: it fills the expected SHA and refuses what the ingester would reject. -->
+
 ## Type
 
 setup | workflow | bugfix | decision | security | preference | research | project-context
@@ -36,6 +38,10 @@ Card actions must omit document sections entirely. `no-card` actions must omit c
 ## Target card
 
 card-name-if-known.md
+
+## Expected card SHA256
+
+<!-- update-card only: SHA-256 of the current card file. Delete this section for create-card. -->
 
 ## Suggested card content
 

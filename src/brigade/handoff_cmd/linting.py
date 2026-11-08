@@ -102,6 +102,7 @@ def lint(
     guard_policy: str = "personal",
     json_output: bool = False,
     strict: bool = False,
+    workspace: Path | None = None,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -109,7 +110,7 @@ def lint(
         return 2
     from ..untrusted import scan_handoff_injection_heuristics, scan_untrusted
 
-    results = lint_targets(target, paths=paths)
+    results = lint_targets(target, paths=paths, workspace=workspace.expanduser().resolve() if workspace else None)
     guard_results: list[dict[str, Any]] = []
     if content_guard:
         for result in results:
@@ -271,7 +272,10 @@ def _guard_handoff_path(path: Path, *, target: Path, policy: str) -> dict[str, A
 
 
 def lint_targets(
-    target: Path, paths: list[Path] | None = None, sources: Path | None = None
+    target: Path,
+    paths: list[Path] | None = None,
+    sources: Path | None = None,
+    workspace: Path | None = None,
 ) -> tuple[HandoffLintResult, ...]:
     target = target.expanduser().resolve()
     candidates = (
@@ -279,10 +283,10 @@ def lint_targets(
         if paths
         else _issue_ops_mod._pending_handoff_paths(target, sources=sources)
     )
-    return tuple(lint_file(path) for path in candidates)
+    return tuple(lint_file(path, workspace=workspace or target) for path in candidates)
 
 
-def lint_file(path: Path) -> HandoffLintResult:
+def lint_file(path: Path, *, workspace: Path | None = None) -> HandoffLintResult:
     path = path.expanduser().resolve()
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -294,11 +298,16 @@ def lint_file(path: Path) -> HandoffLintResult:
             errors=(f"cannot read handoff file: {exc}",),
             warnings=(),
         )
-    return lint_text(text, path=path)
+    return lint_text(text, path=path, workspace=workspace)
 
 
-def lint_text(text: str, *, path: Path | None = None) -> HandoffLintResult:
-    """Lint an in-memory handoff without reopening an untrusted filesystem path."""
+def lint_text(text: str, *, path: Path | None = None, workspace: Path | None = None) -> HandoffLintResult:
+    """Lint an in-memory handoff without reopening an untrusted filesystem path.
+
+    `workspace` is the memory workspace whose cards and bootstrap documents the
+    ingester will read. With it, lint also runs the ingester's state checks (the
+    expected SHA matches the live card, no create-card collision, bootstrap budget).
+    """
     source_path = Path("<memory-handoff>") if path is None else path
     errors: list[str] = []
     warnings: list[str] = []
@@ -345,9 +354,12 @@ def lint_text(text: str, *, path: Path | None = None) -> HandoffLintResult:
             errors.append("Recommended memory action must be one of: " + ", ".join(HANDOFF_ACTIONS))
 
     if action in CARD_ACTIONS:
-        _issue_ops_mod._lint_card_action(sections, errors, warnings)
+        _issue_ops_mod._lint_card_action(sections, errors, warnings, action=action, workspace=workspace)
     elif action == NO_CARD_ACTION:
-        _issue_ops_mod._lint_no_card_action(sections, errors)
+        # A memory proposal notification is advisory: ingest inboxes it before any routing,
+        # so its target document is never written and needs no allow-list check.
+        notification = any(name.casefold() == "memory proposal notification" for name in raw_sections)
+        _issue_ops_mod._lint_no_card_action(sections, errors, workspace=workspace, ingest_routes=not notification)
 
     readability = scan_standalone_readability(text)
     warnings.extend(_readability_warning(finding) for finding in readability)
