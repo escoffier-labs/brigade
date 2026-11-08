@@ -1287,7 +1287,7 @@ The hub configuration accepts `memory.proposal_limits`:
 | `retention_days` | 7 | Days after a terminal decision before body compaction |
 | `diagnostic_rows` | 100000 | Total rows returned by automatic diagnostics |
 | `diagnostic_ms` | 100 | Read snapshot execution deadline in milliseconds |
-| `lock_ms` | 50 | SQLite execution deadline for one writer command |
+| `lock_ms` | 50 | SQLite execution deadline for proposal admission and automatic apply |
 | `auto_principal_ms` | 1000 | Minimum interval between attempts by one principal |
 | `auto_proposal_ms` | 60000 | Minimum interval between attempts on one proposal |
 

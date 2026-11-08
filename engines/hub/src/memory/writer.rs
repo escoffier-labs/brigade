@@ -143,9 +143,11 @@ impl HubLock {
         automatic: Option<&(Authority, i64)>,
     ) -> Result<Authority, Answer> {
         let deadline = super::hardening::deadline(50);
-        let _ = self
-            .db
-            .progress_handler(1000, Some(move || Instant::now() >= deadline));
+        if automatic.is_some() {
+            self.db
+                .progress_handler(1000, Some(move || Instant::now() >= deadline))
+                .map_err(|_| Err(storage("policy-reread")))?;
+        }
         let result = (|| {
             let tx = worker::Tx(&self.db);
             match auth::still_valid(&tx, credential, admin) {
@@ -329,7 +331,16 @@ fn apply_one(
         return Err(storage("storage-error"));
     }
     let deadline = super::hardening::deadline(authority.proposal_limits.lock_ms);
-    let _ = db.progress_handler(1000, Some(move || Instant::now() >= deadline));
+    // Review and ordinary writes retain their existing admission contracts.
+    // The resource guard covers reflect-controlled automatic work and admission.
+    if matches!(&p.action,ops::Action::Proposal(c) if matches!(c.name(),"auto_apply"|"propose"))
+        && db
+            .progress_handler(1000, Some(move || Instant::now() >= deadline))
+            .is_err()
+    {
+        let _ = db.execute_batch("ROLLBACK TO command; RELEASE command");
+        return Err(storage("command-failed"));
+    }
     let result = catch_unwind(AssertUnwindSafe(|| {
         ops::apply(
             &worker::Tx(db) as &dyn WriteTx,

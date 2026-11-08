@@ -314,3 +314,21 @@ async fn sqlite_writer_scan_budget_abort_returns_specific_code_and_rolls_back() 
         )
     );
 }
+
+#[tokio::test]
+async fn reviewed_apply_retains_its_existing_budget_contract() {
+    let mut h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&json!({"proposal_limits":{"lock_ms":1}}))
+        .unwrap();
+    let db = Connection::open(h.memory()).unwrap();
+    // A reviewer is outside the reflect-controlled automatic work budget.
+    db.execute_batch("CREATE TRIGGER reviewed_work BEFORE INSERT ON memory_events WHEN new.kind='proposal.apply' BEGIN SELECT (WITH RECURSIVE work(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM work WHERE n<100000) SELECT sum(n) FROM work); END;").unwrap();
+    let applied = decide(&h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
+    assert_eq!(applied.status, 200);
+    assert_eq!(applied.body["state"], "applied");
+}
