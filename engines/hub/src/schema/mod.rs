@@ -27,8 +27,30 @@ pub fn newer_than_supported<T: crate::writer::ReadTx + ?Sized>(tx: &T) -> rusqli
     };
     Ok(version > supported_version())
 }
+/// Collapse whitespace runs to one space, then, outside quoted text, drop the
+/// space before `,` or `)` and after `(`. SQLite's ADD COLUMN splices `, col`
+/// in front of the closing parenthesis, so a newline there becomes ` ,`.
+/// lockstep.py `normalize` must stay identical (normalize-cases.json).
 fn normalize(sql: &str) -> String {
-    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    let collapsed = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = collapsed.chars().collect();
+    let mut out = String::with_capacity(collapsed.len());
+    let mut quote: Option<char> = None;
+    for (i, &ch) in chars.iter().enumerate() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+        } else if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+        } else if ch == '[' {
+            quote = Some(']');
+        } else if ch == ' ' && (out.ends_with('(') || matches!(chars.get(i + 1), Some(',' | ')'))) {
+            continue;
+        }
+        out.push(ch);
+    }
+    out
 }
 fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
@@ -153,7 +175,12 @@ pub fn check(c: &Connection) -> Result<(), String> {
     accepts(&actual)
 }
 fn accepts(actual: &Value) -> Result<(), String> {
-    let mut required: Value = serde_json::from_str(REQUIRED).map_err(|e| e.to_string())?;
+    accepts_against(
+        actual,
+        serde_json::from_str(REQUIRED).map_err(|e| e.to_string())?,
+    )
+}
+fn accepts_against(actual: &Value, mut required: Value) -> Result<(), String> {
     let variants = required
         .as_object_mut()
         .unwrap()
@@ -263,6 +290,103 @@ mod variant_tests {
             } else {
                 actual["tables"].as_object_mut().unwrap().remove(name);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod upgrade_layout_tests {
+    use super::*;
+    const PRODUCTION: &str = include_str!("../../schema/upgrade-fixtures/production-v50.sql");
+
+    #[test]
+    fn normalize_matches_lockstep_cases() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../../schema/normalize-cases.json")).unwrap();
+        for case in cases["cases"].as_array().unwrap() {
+            let input = case["input"].as_str().unwrap();
+            assert_eq!(
+                normalize(input),
+                case["output"].as_str().unwrap(),
+                "{input:?}"
+            );
+        }
+    }
+
+    /// The reviewed startup schema with `tables` replaced from a DDL script.
+    fn with_tables(ddl: &str) -> Value {
+        let mut actual: Value = serde_json::from_str(REQUIRED).unwrap();
+        actual.as_object_mut().unwrap().remove("variants");
+        actual.as_object_mut().unwrap().remove("optional");
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(ddl).unwrap();
+        for (name, table) in snapshot(&c).unwrap()["tables"].as_object().unwrap() {
+            actual["tables"][name] = table.clone();
+        }
+        actual
+    }
+
+    fn required() -> Value {
+        serde_json::from_str(REQUIRED).unwrap()
+    }
+
+    #[test]
+    fn production_upgrade_layouts_are_accepted() {
+        accepts_against(&with_tables(PRODUCTION), required()).unwrap();
+    }
+
+    #[test]
+    fn whitespace_only_normalization_refuses_production_claims() {
+        let mut actual = with_tables(PRODUCTION);
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(PRODUCTION).unwrap();
+        let raw: String = c
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE name='claims'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let legacy = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_ne!(legacy, normalize(&raw));
+        actual["tables"]["claims"]["sql"] = json!(legacy);
+        assert!(accepts_against(&actual, required()).is_err());
+    }
+
+    #[test]
+    fn production_model_policy_needs_its_recorded_variant() {
+        let actual = with_tables(PRODUCTION);
+        let mut required = required();
+        let production = actual["tables"]["model_policy"].clone();
+        let variants = required["variants"]["model_policy"].as_array_mut().unwrap();
+        let before = variants.len();
+        variants.retain(|v| *v != production);
+        assert_eq!(
+            variants.len(),
+            before - 1,
+            "production variant is recorded once"
+        );
+        assert!(accepts_against(&actual, required).is_err());
+    }
+
+    #[test]
+    fn different_schemas_are_still_refused() {
+        for (from, to) in [
+            (", session TEXT)", ")"),
+            ("expires_at REAL NOT NULL", "expires_at TEXT NOT NULL"),
+            ("enabled INTEGER NOT NULL", "enabled TEXT NOT NULL"),
+            ("t3_model TEXT NOT NULL DEFAULT ''", "t3_model TEXT"),
+            (
+                "PRIMARY KEY,\n    provider",
+                "PRIMARY KEY,\n    extra TEXT,\n    provider",
+            ),
+        ] {
+            let changed = PRODUCTION.replacen(from, to, 1);
+            assert_ne!(changed, PRODUCTION, "{from}");
+            assert!(
+                accepts_against(&with_tables(&changed), required()).is_err(),
+                "{to}"
+            );
         }
     }
 }

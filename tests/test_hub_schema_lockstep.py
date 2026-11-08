@@ -104,3 +104,87 @@ def test_recovery_floor_bump_is_in_the_rust_contract(tmp_path: Path) -> None:
         assert lockstep["compatible"](lockstep["snapshot"](conn), required)
     finally:
         conn.close()
+
+
+SCHEMA_DIR = LOCKSTEP.parent
+PRODUCTION = SCHEMA_DIR / "upgrade-fixtures/production-v50.sql"
+
+
+def test_normalize_matches_rust_cases() -> None:
+    import json
+
+    normalize = runpy.run_path(str(LOCKSTEP))["normalize"]
+    cases = json.loads((SCHEMA_DIR / "normalize-cases.json").read_text(encoding="utf-8"))["cases"]
+    assert cases
+    for case in cases:
+        assert normalize(case["input"]) == case["output"], case["input"]
+
+
+def _production_hub(tmp_path: Path, ddl: str) -> sqlite3.Connection:
+    path = tmp_path / "production.db"
+    with sqlite3.connect(path) as raw:
+        raw.executescript(ddl)
+    return fleet_hub.init_db(path)
+
+
+def test_python_init_keeps_production_layouts_and_gate_accepts_them(tmp_path: Path) -> None:
+    import json
+
+    lockstep = runpy.run_path(str(LOCKSTEP))
+    ddl = PRODUCTION.read_text(encoding="utf-8")
+    with sqlite3.connect(tmp_path / "raw.db") as raw:
+        raw.executescript(ddl)
+        before = {name: sql for name, sql in raw.execute("SELECT name, sql FROM sqlite_schema WHERE type='table'")}
+    conn = _production_hub(tmp_path, ddl)
+    try:
+        # Python's own startup accepts the layouts as-is and rewrites nothing.
+        for name in ("claims", "model_policy"):
+            stored = conn.execute("SELECT sql FROM sqlite_schema WHERE name=?", (name,)).fetchone()[0]
+            assert stored == before[name]
+        actual = lockstep["snapshot"](conn)
+    finally:
+        conn.close()
+    required = json.loads(lockstep["REQUIRED"].read_text(encoding="utf-8"))
+    assert lockstep["compatible"](actual, required)
+
+    # Without the punctuation rule, the production claims DDL matches no variant.
+    legacy = " ".join(before["claims"].split())
+    assert legacy != lockstep["normalize"](before["claims"])
+    refused = {**actual, "tables": {**actual["tables"], "claims": {**actual["tables"]["claims"], "sql": legacy}}}
+    assert not lockstep["compatible"](refused, required)
+
+    # Without its recorded variant, the production model_policy order is refused.
+    production = actual["tables"]["model_policy"]
+    variants = required["variants"]["model_policy"]
+    assert variants.count(production) == 1
+    variants.remove(production)
+    assert not lockstep["compatible"](actual, required)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "after"),
+    [
+        # init_db re-adds a missing claims column, so drop one after startup.
+        ("", "", "ALTER TABLE claims DROP COLUMN session"),
+        ("", "", "ALTER TABLE model_policy DROP COLUMN notes"),
+        ("expires_at REAL NOT NULL", "expires_at TEXT NOT NULL", ""),
+        ("enabled INTEGER NOT NULL", "enabled TEXT NOT NULL", ""),
+        ("t3_model TEXT NOT NULL DEFAULT ''", "t3_model TEXT", ""),
+    ],
+)
+def test_gate_still_refuses_different_production_schema(tmp_path: Path, old: str, new: str, after: str) -> None:
+    import json
+
+    lockstep = runpy.run_path(str(LOCKSTEP))
+    ddl = PRODUCTION.read_text(encoding="utf-8")
+    assert old in ddl
+    conn = _production_hub(tmp_path, ddl.replace(old, new, 1) if old else ddl)
+    try:
+        if after:
+            conn.execute(after)
+            conn.commit()
+        actual = lockstep["snapshot"](conn)
+    finally:
+        conn.close()
+    required = json.loads(lockstep["REQUIRED"].read_text(encoding="utf-8"))
+    assert not lockstep["compatible"](actual, required)

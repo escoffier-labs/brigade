@@ -5,7 +5,13 @@ including column order, normalized DDL, nullability, defaults, checks, keys,
 foreign keys, and indexes. It never combines per-column alternatives.
 `required.json` contains the accepted structures. `variant-inventory.json`
 records every differing field with its fresh and upgraded values and sources.
-Only whitespace in DDL is normalized. Unknown objects remain refused.
+DDL normalization collapses whitespace runs, then drops the space before `,`
+or `)` and after `(` outside quoted text. SQLite's ADD COLUMN splices `, col`
+in front of the closing parenthesis, so a table created with its `)` on its own
+line keeps a newline before the first appended comma. `lockstep.py` and
+`src/schema/mod.rs` implement the same rule, and both are tested against
+`normalize-cases.json`. Nothing else is normalized. Unknown objects remain
+refused.
 
 The fixtures cover schema versions 1 through 48 present in repository history,
 all published releases containing `fleet_hub.init_db` (v0.27.0 through v0.30.0),
@@ -13,11 +19,20 @@ the storage-parity v22/v34 captures, and supported legacy regression builders.
 Versions absent from history were never separate capturable revisions.
 The fixture header records the exact source commit or release.
 
+A hub upgraded across several releases keeps every release's ADD COLUMN
+order, which one replay of an old capture through today's `init_db` cannot
+show. `capture_upgrades.py --chains` opens one database with each listed
+revision's `init_db` in turn and records the result as a `chain-*.sql`
+fixture. `chain-v02-v03-v14-v15-v21.sql` is the path observed on the
+production hub. `production-v50.sql` holds that hub's `claims` and
+`model_policy` DDL at schema v50 (DDL only, no rows), and both fixtures
+produce the same accepted variants.
+
 | Table | Migration and possible difference from fresh |
 | --- | --- |
 | events | `_EVENTS_ADDITIVE_COLUMNS`, context repair: appended order and DDL. The v4 test builder also permits nullable original event fields. |
-| claims | `_migrate_claims_table`: pre-holder tables are recreated, lease columns append in migration order. DDL and order differ. |
-| model_policy | v8 rebuild changes the key to seat, then roster columns append. DDL and order differ. |
+| claims | `_migrate_claims_table`: pre-holder tables are recreated, lease columns append in migration order. DDL and order differ. A v2 table upgraded by v3 gets lock columns first, then harness, role, job and session. |
+| model_policy | v8 rebuild changes the key to seat, then roster columns append. DDL and order differ. A v8 to v14 table upgraded by v15 (reasoning, brigade_cli, t3_instance_id, t3_service_tier), then v21 (brigade_model), then v32 or later (t3_model) has its own order, recorded from the chain fixture. |
 | model_leases | roster linkage columns append. No residual difference in captured layouts. |
 | grokbot_jobs | `fleet_hub_grokbot.ensure_schema`: additive job columns change order and DDL. |
 | grokbot_operations | additive operation columns. No residual difference in captured layouts. |
@@ -61,6 +76,6 @@ Their indexes and complete structures remain mandatory when present.
 CI-node cache and fleet-export DDL belong to separate databases.
 
 Regenerate through `brigade work verify run`: run `capture_upgrades.py` from
-the repository root for history captures, `lockstep.py --generate` for the
+the repository root for history captures (`--chains` for chain fixtures), `lockstep.py --generate` for the
 contract, and `inventory.py` for exact differences. Lockstep tests consume
 recorded fixtures and compare against the reviewed contract, without updating it.

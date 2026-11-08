@@ -18,6 +18,30 @@ ROOT = Path(__file__).resolve().parents[3]
 REQUIRED = Path(__file__).with_name("required.json")
 
 
+def normalize(sql: str) -> str:
+    """Collapse whitespace, then drop it before `,`/`)` and after `(` outside quotes.
+
+    SQLite's ADD COLUMN splices `, col` in front of the closing parenthesis, so
+    a newline there becomes ` ,`. Rust `schema::normalize` must stay identical
+    (normalize-cases.json).
+    """
+    collapsed = " ".join(sql.split())
+    out: list[str] = []
+    quote = ""
+    for i, char in enumerate(collapsed):
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "'\"`":
+            quote = char
+        elif char == "[":
+            quote = "]"
+        elif char == " " and ((out and out[-1] == "(") or collapsed[i + 1 : i + 2] in {",", ")"}):
+            continue
+        out.append(char)
+    return "".join(out)
+
+
 def checks(sql: str) -> list[str]:
     """Extract balanced CHECK expressions, preserving nested parentheses."""
     result = []
@@ -39,7 +63,7 @@ def checks(sql: str) -> list[str]:
             elif char == ")":
                 depth -= 1
             i += 1
-        result.append(" ".join(sql[start : i - 1].split()))
+        result.append(normalize(sql[start : i - 1]))
     return sorted(result)
 
 
@@ -51,7 +75,7 @@ def snapshot(conn: sqlite3.Connection) -> dict:
     triggers = {}
     for kind, name, _, sql in objects:
         if kind == "trigger":
-            triggers[name] = " ".join(sql.split())
+            triggers[name] = normalize(sql)
         if kind != "table":
             continue
         columns = sorted([list(row)[1:] for row in conn.execute(f'PRAGMA table_xinfo("{name}")')])
@@ -64,7 +88,7 @@ def snapshot(conn: sqlite3.Connection) -> dict:
                 "origin": row[3],
                 "partial": row[4],
                 "columns": [[r[0], *r[2:]] for r in conn.execute(f'PRAGMA index_xinfo("{index}")')],
-                "sql": " ".join(((ddl[0] if ddl else None) or "").split()),
+                "sql": normalize((ddl[0] if ddl else None) or ""),
             }
         tables[name] = {
             "columns": columns,
@@ -73,7 +97,7 @@ def snapshot(conn: sqlite3.Connection) -> dict:
             "checks": checks(sql),
             "autoincrement": "AUTOINCREMENT" in sql.upper(),
             "column_order": [r[1] for r in conn.execute(f'PRAGMA table_xinfo("{name}")')],
-            "sql": " ".join(sql.split()),
+            "sql": normalize(sql),
         }
     return {
         "user_version": conn.execute("PRAGMA user_version").fetchone()[0],

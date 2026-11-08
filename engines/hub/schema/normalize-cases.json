@@ -1,0 +1,45 @@
+{
+  "_comment": "Shared by lockstep.py normalize and Rust schema::normalize; both must map each input to its output.",
+  "cases": [
+    {
+      "input": "CREATE TABLE claims (\n    target TEXT NOT NULL PRIMARY KEY,\n    expires_at REAL NOT NULL\n, lock_token TEXT, harness TEXT)",
+      "output": "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, expires_at REAL NOT NULL, lock_token TEXT, harness TEXT)"
+    },
+    {
+      "input": "CREATE TABLE t (\n    a TEXT,\n    b TEXT\n)",
+      "output": "CREATE TABLE t (a TEXT, b TEXT)"
+    },
+    {
+      "input": "CREATE TABLE t ( a TEXT , b TEXT )",
+      "output": "CREATE TABLE t (a TEXT, b TEXT)"
+    },
+    {
+      "input": "a\t\t,  b \n)",
+      "output": "a, b)"
+    },
+    {
+      "input": "CHECK ( x IN ( 'a ,b' , \"c )\" ) )",
+      "output": "CHECK (x IN ('a ,b', \"c )\"))"
+    },
+    {
+      "input": "DEFAULT 'it''s (  x' , y",
+      "output": "DEFAULT 'it''s ( x', y"
+    },
+    {
+      "input": "[col , one] , `x ( y` ( z )",
+      "output": "[col , one], `x ( y` (z)"
+    },
+    {
+      "input": "CREATE INDEX i ON t (a, b) WHERE c = ' )'",
+      "output": "CREATE INDEX i ON t (a, b) WHERE c = ' )'"
+    },
+    {
+      "input": "",
+      "output": ""
+    },
+    {
+      "input": "   ",
+      "output": ""
+    }
+  ]
+}
