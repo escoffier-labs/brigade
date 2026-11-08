@@ -47,6 +47,13 @@ def _loose(name: str) -> str:
     return SEPARATORS.sub(" ", name.casefold()).strip()
 
 
+# The hub's metadata list limits (engines/hub/src/memory/proposal_metadata.rs `list`).
+# Every alias up to them is indexed, because a dropped alias could make an unrelated
+# card look like the only match for a link that already names this card.
+MAX_ALIASES = 256
+MAX_ALIAS_BYTES = 1024
+
+
 def _names(text: str) -> tuple[list[str], list[str]]:
     """Identity names (aliases, topic) and the title, read as the hub's scalar metadata.
 
@@ -66,7 +73,9 @@ def _names(text: str) -> tuple[list[str], list[str]]:
                 raise ValueError("malformed aliases") from None
             if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
                 raise ValueError("malformed aliases")
-            into.extend(item.strip() for item in items[:64])
+            if len(items) > MAX_ALIASES or any(len(item.encode()) > MAX_ALIAS_BYTES for item in items):
+                raise ValueError("malformed aliases")
+            into.extend(item.strip() for item in items)
         else:
             into.append(value.strip("\"'"))
     return [n for n in identities if n.strip()], [n for n in titles if n.strip()]

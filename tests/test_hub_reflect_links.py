@@ -529,6 +529,23 @@ def test_an_exact_live_card_id_stays_valid_even_when_a_retired_title_matches():
     assert submissions == [] and skipped == {}
 
 
+def test_every_hub_supported_alias_is_indexed():
+    aliases = [f"name {n}" for n in range(64)] + ["Old Guide"]
+    owner = head("owner", card_text("Owner claim.", "c-dddddd", f"aliases: {json.dumps(aliases)}"))
+    other = head("other", card_text("Unrelated.", "c-eeeeee", "title: old-guide"))
+    submissions, skipped, _ = unit([head("src", card_text("See [[Old Guide]].")), owner, other])
+    assert submissions == [] and skipped == {}
+
+
+def test_aliases_beyond_the_hub_limit_are_malformed():
+    too_many = head("many", card_text("Many.", "c-dddddd", f"aliases: {json.dumps([f'a{n}' for n in range(257)])}"))
+    too_long = head("long", card_text("Long.", "c-eeeeee", f"aliases: {json.dumps(['x' * 1025])}"))
+    for card in (too_many, too_long):
+        name = "a3" if card is too_many else "x" * 1025
+        submissions, skipped, _ = unit([head("src", card_text(f"See [[{name}]].")), card])
+        assert submissions == [] and skipped == {"link_no_target": 1}
+
+
 def test_two_retired_cards_sharing_a_name_are_ambiguous_even_with_one_successor():
     heads = [
         head("src", card_text("See [[Old Guide]].")),
