@@ -100,7 +100,23 @@ def main():
     p.add_argument("--load-deadline", type=float, default=600)
     p.add_argument("--load-min", type=float, default=150)
     p.add_argument("--load-max", type=float, default=190)
+    p.add_argument(
+        "--batch-events",
+        type=int,
+        default=1,
+        help="Unique events per heartbeat POST, 1 to 1000. The default 1 is the S6 single-event write target",
+    )
+    p.add_argument(
+        "--nodes",
+        type=int,
+        default=1,
+        help="Heartbeat nodes recorded in the summary. The default 1 matches bench-node, which signs every post",
+    )
     args = p.parse_args()
+    if not 1 <= args.batch_events <= 1000:
+        p.error("batch-events must be between 1 and 1000")
+    if args.nodes < 1:
+        p.error("nodes must be at least 1")
     token = os.environ["BRIGADE_BENCH_TOKEN"]
     recipient_token = os.environ["BRIGADE_BENCH_RECEIVER_TOKEN"]
     # Require the telemetry credential before starting the synthetic fan-out.

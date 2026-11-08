@@ -203,6 +203,11 @@ python engines/hub/bench/dogfood_heartbeat.py --url "$DOGFOOD_URL" \
   --fanout-cpus "$AGENT_CPUS" --output /tmp/s6-dogfood --seconds 60
 ```
 
+`--batch-events` and `--nodes` default to 1, the single-event S6 write target
+with every post signed by `bench-node`. The script does not manage the hub's
+files, so it passes no database path and the summary records the database as
+not supplied.
+
 The script starts 170 bounded-lifetime CPU workers on the specified agent CPUs,
 waits up to ten minutes for the one-minute load average to enter 150 through
 190, then measures events with 64 clients in four S6a processes. Claims and

@@ -99,7 +99,8 @@ def metrics(url, token):
 def drive(url, db, env, output, target, args, clients):
     """Several S6a clients avoid a single Python GIL limiting the load source."""
     first_metrics = metrics(url, (env.get("BRIGADE_BENCH_METRICS_TOKEN") or env.get("BRIGADE_FLEET_TOKEN", "")))
-    initial = load.db_info(str(db))
+    # A deployment run (dogfood_heartbeat.py) observes a hub it does not manage and has no database path.
+    initial = load.db_info(None if db is None else str(db))
     processes = min(args.processes, clients)
     node_tokens = json.loads(env.get("BRIGADE_BENCH_NODE_TOKENS") or "{}")
     children = []
@@ -139,8 +140,7 @@ def drive(url, db, env, output, target, args, clients):
             str(args.batch_events),
             "--sample-interval",
             ".1",
-            "--database",
-            str(db),
+            *(["--database", str(db)] if db is not None else []),
             "--flags=--allow-admin-writes"
             + (
                 " --route-mode registration=native --route-mode heartbeat=native --route-mode claims=native --route-mode messages=native"
