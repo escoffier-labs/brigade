@@ -90,6 +90,7 @@ QUOTA_REFUSALS = {"memory_proposal_principal_quota", "memory_proposal_scope_quot
 READ_STATS_RATE_LIMITED = "memory_read_stats_rate_limited"
 READ_STATS_PAGE_MAX = 1000
 READ_STATS_FIELDS = frozenset({"card_id", "reads_7d", "reads_30d", "last_read_day", "total_reads"})
+READ_STATS_REPLY_KEYS = frozenset({"scope", "rows", "next_after", "read_counts_since_day"})
 CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _CARD_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 _EVENT_ID = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}")
@@ -603,8 +604,9 @@ def read_stats(
     audits every request. Like reflect, this refuses the admin credential: it
     asks `status` first and raises HubConfigError when the hub reports
     `credential: "admin"`. Each row holds only `card_id`, `reads_7d`,
-    `reads_30d`, `last_read_day` and `total_reads`. A reply of any other shape
-    raises HubUnavailable("malformed-read-stats"). Over the rate limit the hub
+    `reads_30d`, `last_read_day` and `total_reads`, and the reply holds exactly
+    `scope`, `rows`, `next_after` and `read_counts_since_day`. A reply of any
+    other shape raises HubUnavailable("malformed-read-stats"). Over the rate limit the hub
     answers 429 `memory_read_stats_rate_limited`, raised as a HubRefusal.
     """
     if not valid_scope(scope):
@@ -618,6 +620,9 @@ def read_stats(
     if after is not None:
         fields["after"] = after
     body = client.call("read_stats", **fields)
+    # Every key, exactly: a missing next_after must never read as the end of the listing.
+    if body.keys() != READ_STATS_REPLY_KEYS:
+        raise HubUnavailable("malformed-read-stats")
     rows = body.get("rows")
     following = body.get("next_after")
     since = body.get("read_counts_since_day")

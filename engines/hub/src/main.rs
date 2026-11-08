@@ -1549,9 +1549,9 @@ async fn start_and_serve(
         None
     };
     if let (Some(store), Some(writer)) = (&memory_store, &writer) {
-        store.attach_audit(std::sync::Arc::new(brigade_hub::memory_audit::HubAudit(
-            writer.clone(),
-        )));
+        store.attach_audit(std::sync::Arc::new(
+            brigade_hub::memory_audit::HubAudit::new(writer.clone()),
+        ));
     }
     if native("registration") {
         state.registration = Some(registration::Registration {

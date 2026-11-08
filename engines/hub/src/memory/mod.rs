@@ -147,7 +147,7 @@ pub struct Store {
     admin: String,
     proposal_cursors: Arc<proposal_cursor::Cursors>,
     read_stats_cursors: Arc<proposal_cursor::Cursors>,
-    read_stats_limiter: read_stats::Limiter,
+    read_stats_gate: read_stats::Gate,
     /// Where `read_stats` audit rows go. Without one `read_stats` is
     /// refused, never served unaudited.
     audit: std::sync::OnceLock<Arc<dyn read_stats::AuditLog>>,
@@ -260,7 +260,7 @@ impl Store {
             admin: options.admin_digest,
             proposal_cursors,
             read_stats_cursors,
-            read_stats_limiter: read_stats::Limiter::default(),
+            read_stats_gate: read_stats::Gate::default(),
             audit: std::sync::OnceLock::new(),
             clock: options.clock,
             scanner: options.scanner,
@@ -1479,8 +1479,10 @@ impl Store {
         reply
     }
 
-    /// `read_stats`: the rate limit, the read, then one audit row on the hub
-    /// file. A request whose audit row cannot be written gets a 503 and no rows.
+    /// `read_stats`: the gate, then the read and its audit row. A request the
+    /// gate admits is answered only once its own audit row is committed, else
+    /// 503 with no rows. A refused request is answered 429 at once and at most
+    /// adds to its principal's summary row.
     async fn read_stats(&self, credential: &Credential, map: &Map<String, Json>) -> Reply {
         let now_ms = self.clock.now_ms();
         let Some(audit) = self.audit.get() else {
@@ -1490,36 +1492,46 @@ impl Store {
                 "read_stats needs the hub audit log",
             );
         };
-        let reply = if !self
-            .read_stats_limiter
-            .admit(credential.principal(), now_ms)
-        {
-            read_stats::rate_limited()
-        } else {
-            let who = credential.clone();
-            let request = map.clone();
-            let cursors = self.read_stats_cursors.clone();
-            self.readers
-                .submit(move |c| read_stats::read(&Conn(c), &who, &request, &cursors, now_ms))
-                .await
-                .unwrap_or_else(|_| {
-                    Reply::new(
+        match self.read_stats_gate.decide(credential.principal(), now_ms) {
+            read_stats::Decision::Refuse(summary) => {
+                if let Some((actor, refused)) = summary {
+                    let row = read_stats::Audit::refused(actor.clone(), refused, now_ms);
+                    if !audit.append(row).await {
+                        self.read_stats_gate.unsent(&actor, refused);
+                    }
+                }
+                read_stats::rate_limited()
+            }
+            read_stats::Decision::Admit => {
+                let who = credential.clone();
+                let request = map.clone();
+                let cursors = self.read_stats_cursors.clone();
+                let reply = self
+                    .readers
+                    .submit(move |c| read_stats::read(&Conn(c), &who, &request, &cursors, now_ms))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Reply::new(
+                            503,
+                            json!({"error": "hub busy", "reason": "memory-reader-timeout"}),
+                        )
+                    });
+                let row = read_stats::Audit::new(
+                    credential,
+                    read_stats::requested_scope(map),
+                    &reply,
+                    now_ms,
+                );
+                if audit.append(row).await {
+                    reply
+                } else {
+                    error(
                         503,
-                        json!({"error": "hub busy", "reason": "memory-reader-timeout"}),
+                        "memory_action_unavailable",
+                        "read_stats audit unavailable",
                     )
-                })
-        };
-        let row =
-            read_stats::Audit::new(credential, read_stats::requested_scope(map), &reply, now_ms);
-        let written = audit.append(row).await;
-        if written {
-            reply
-        } else {
-            error(
-                503,
-                "memory_action_unavailable",
-                "read_stats audit unavailable",
-            )
+                }
+            }
         }
     }
 

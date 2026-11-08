@@ -1876,10 +1876,10 @@ as `brigade_hub_memory_read_count_dropped_total`.
 
 ### Reading the counts (`read_stats`)
 
-`read_stats` returns per-card aggregates for one scope. It needs `read` and a
-dedicated `read_stats` right, both on that scope. `read_stats` opens only
-through a grant that names the exact scope: `*`, `repo:*` and node defaults
-never carry it, and `reflect` does not imply it. A caller missing either right
+`read_stats` returns per-card aggregates for one scope. It needs one grant
+that names the exact scope and holds both `read` and `read_stats`. `read`
+from `*`, `repo:*` or a node default does not count, no wildcard carries
+`read_stats`, and `reflect` does not imply it. A caller without that grant
 gets `403 memory_grant_missing`. Grant it to a verifier principal like this:
 
 ```json
@@ -1905,16 +1905,35 @@ is refused with `400 memory_request_invalid`. Restart the listing without
 
 One principal may make one `read_stats` request per second and 600 per UTC
 day. Over that the hub answers `429 memory_read_stats_rate_limited`. A refused
-request does not use up the quota. The limit lives in memory and resets when
+request does not use up the quota. The limits live in memory and reset when
 the hub restarts.
 
-Every `read_stats` request, refused ones included, adds one row to the hub's
-`fleet_audit_log` (action `memory.read_stats`, actor and subject the caller,
-detail the scope, rows returned and HTTP status). `GET /audit` with the admin
-token lists them. The memory event log is not used, so the record does not
-replicate to card readers. A hub that cannot write the audit row answers
-`503 memory_action_unavailable` and returns no rows. The hub writer that
-records the row also starts when hub memory is the only native family.
+Every request is recorded in the hub's `fleet_audit_log`, and `GET /audit`
+with the admin token lists the rows. The memory event log is not used, so the
+record does not replicate to card readers. The rows are bounded before
+anything reaches the hub writer:
+
+| Row | When | Detail |
+|---|---|---|
+| `memory.read_stats` | Once per admitted request, whatever its answer (200, 400, 403) | `scope` when valid, `count` rows returned, `status` |
+| `memory.read_stats_refused` | At most once per principal per hour | `count` requests refused with 429 since that principal's previous summary, `status` 429 |
+
+Actor and subject are the caller. The hub writes at most 20,000 rows of both
+kinds per UTC day. Once that is spent, every `read_stats` request is refused
+with 429 until the day ends, and refusals wait in memory for the next summary.
+The hub tracks at most 4,096 principals a day. Refusals from principals past
+that share one summary under the actor `read-stats-untracked`. A restart
+forgets refusals not yet summarized. Since `fleet_audit_log` is append-only,
+this cap, not a retention sweep, bounds the table: at most 20,000
+`read_stats` rows per day.
+
+Audit rows never take writer capacity other families need. At most 4 audit
+inserts are queued or running on the hub writer at once, admission is
+non-durable, and a row that finds no free slot is dropped at once. An admitted
+request whose row is not committed is answered
+`503 memory_action_unavailable` with no rows. A summary row that is not
+committed goes back into the next summary. The hub writer also starts when hub
+memory is the only native family.
 
 Counts carry no principal, but in a scope that one principal reads they
 describe that principal's activity per card per day. Grant `read_stats` on

@@ -2812,6 +2812,11 @@ def test_read_stats_grant_and_rate_limit_answers_are_refusals():
 @pytest.mark.parametrize(
     "reply",
     [
+        # Every key is required, so a missing next_after cannot read as the last page.
+        {"scope": "fleet", "rows": [], "read_counts_since_day": 1},
+        {"scope": "fleet", "rows": [], "next_after": None},
+        {"rows": [], "next_after": None, "read_counts_since_day": 1},
+        {"scope": "fleet", "rows": [], "next_after": None, "read_counts_since_day": 1, "query": "x"},
         {
             "scope": "fleet",
             "rows": [

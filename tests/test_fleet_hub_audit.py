@@ -762,6 +762,18 @@ def test_hub_read_stats_rows_page_back_as_written(conn, actor, detail):
     assert (row["actor"], row["action"], row["subject"], row["detail"]) == (actor, "memory.read_stats", actor, detail)
 
 
+@pytest.mark.parametrize("actor", ["agent:verify", "node-1", "admin", "read-stats-untracked"])
+def test_hub_read_stats_refusal_summaries_page_back(conn, actor):
+    # One summary row per principal per hour: count is the refusals merged into it.
+    detail = {"count": 5000, "status": 429}
+    conn.execute(
+        "INSERT INTO fleet_audit_log(at,actor,action,subject,detail) VALUES(?,?,?,?,?)",
+        ("2026-11-08T00:00:00.000000+00:00", actor, "memory.read_stats_refused", actor, json.dumps(detail)),
+    )
+    row = audit.page(conn)[0]
+    assert (row["actor"], row["action"], row["detail"]) == (actor, "memory.read_stats_refused", detail)
+
+
 @pytest.mark.parametrize(
     "detail",
     [

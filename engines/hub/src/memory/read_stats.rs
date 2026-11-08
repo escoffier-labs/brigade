@@ -7,12 +7,19 @@
 //! opens it, and `reflect` does not imply it. Pages hold at most
 //! [`PAGE_MAX`] rows, ordered by card id, and continue through an opaque
 //! handle bound to the principal, the scope and the log epoch, which expires
-//! after [`CURSOR_TTL_MS`]. One principal may make one request per second and
-//! [`DAILY_MAX`] per UTC day. Every request, refused ones included, writes one
-//! row to the hub's audit log through an [`AuditLog`]. The memory event log is
-//! never used, so the record does not replicate to card readers. This module
-//! never writes the hub file itself (D23): the crate-level `memory_audit`
-//! sink does, on the hub writer, with no memory lock held.
+//! after [`CURSOR_TTL_MS`].
+//!
+//! Auditing is bounded before anything reaches the hub writer. The [`Gate`]
+//! admits one request per principal per second and [`DAILY_MAX`] per UTC day,
+//! and each admitted request, whatever its answer, gets its own audit row.
+//! Requests the gate refuses get no row of their own: each principal's
+//! refusals are merged into at most one `memory.read_stats_refused` summary row
+//! per [`SUMMARY_WINDOW_MS`]. Every row of either kind counts against
+//! [`AUDIT_DAILY_ROWS`] for the whole hub, and once that is spent every request
+//! is refused until the UTC day ends. The memory event log is never used, so
+//! the record does not replicate to card readers. This module never writes the
+//! hub file itself (D23): the crate-level `memory_audit` sink does, on the hub
+//! writer, with no memory lock held.
 use super::{Reply, auth, error, ids, invalid, proposal_cursor::Cursors, read_counts};
 use crate::writer::ReadTx;
 use rusqlite::types::Value;
@@ -27,11 +34,21 @@ pub const CURSOR_TTL_MS: i64 = 15 * 60 * 1000;
 pub const MIN_GAP_MS: i64 = 1000;
 /// Admitted requests one principal may make per UTC day.
 pub const DAILY_MAX: u32 = 600;
-/// Principals the limiter tracks at once. Past this, a new principal is
-/// refused until an earlier day's entries can be dropped.
-const PRINCIPALS: usize = 4096;
-/// The audit action. `brigade.fleet_hub_audit` accepts it on read.
+/// Principals the gate tracks at once. Past this, a new principal is refused
+/// until an earlier day's entries can be dropped, and its refusals are merged
+/// into one summary under [`UNTRACKED_ACTOR`].
+pub const PRINCIPALS: usize = 4096;
+/// At most one refusal summary row per principal per window.
+pub const SUMMARY_WINDOW_MS: i64 = 60 * 60 * 1000;
+/// `read_stats` audit rows of both kinds the hub writes per UTC day. Past
+/// this every `read_stats` request is refused and only counted in memory.
+pub const AUDIT_DAILY_ROWS: u32 = 20_000;
+/// The audit action for one admitted request. `brigade.fleet_hub_audit` accepts it.
 pub const AUDIT_ACTION: &str = "memory.read_stats";
+/// The audit action for a summary of refused requests.
+pub const REFUSED_ACTION: &str = "memory.read_stats_refused";
+/// The actor of the summary for principals the full gate could not track.
+pub const UNTRACKED_ACTOR: &str = "read-stats-untracked";
 
 /// Where `read_stats` audit rows go. `append` resolves true only once the row
 /// is committed. A request whose row is not committed is answered 503.
@@ -60,47 +77,133 @@ pub(super) fn requested_scope(map: &Map<String, Json>) -> Option<String> {
         .map(String::from)
 }
 
+#[derive(Default)]
 struct Entry {
     last_ms: i64,
     day: i64,
     count: u32,
+    /// Refusals not yet written in a summary row.
+    pending: u32,
+    /// When this principal's last summary row was handed to the audit log.
+    summary_ms: Option<i64>,
 }
-
-/// The per-principal request limit. It lives only in memory and resets on
-/// restart, which at most lets one extra day's quota through.
-#[derive(Default)]
-pub(super) struct Limiter {
-    entries: Mutex<HashMap<String, Entry>>,
-}
-impl Limiter {
-    /// True when this request is admitted. A refused request does not move
-    /// the principal's window, so waiting a second always recovers.
-    pub(super) fn admit(&self, principal: &str, now_ms: i64) -> bool {
-        let Ok(mut entries) = self.entries.lock() else {
-            return false;
-        };
-        let today = read_counts::day(now_ms);
-        if !entries.contains_key(principal) && entries.len() >= PRINCIPALS {
-            entries.retain(|_, e| e.day == today);
-            if entries.len() >= PRINCIPALS {
-                return false;
-            }
-        }
-        let entry = entries.entry(principal.to_string()).or_insert(Entry {
+impl Entry {
+    fn fresh(today: i64) -> Self {
+        Self {
             last_ms: i64::MIN,
             day: today,
-            count: 0,
-        });
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Default)]
+struct State {
+    entries: HashMap<String, Entry>,
+    /// Refusals of principals the full table could not track.
+    untracked: Entry,
+    /// UTC day and audit rows handed out on it.
+    day: i64,
+    rows: u32,
+}
+
+/// What the gate decided for one request.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Decision {
+    /// Serve the request and write its own audit row.
+    Admit,
+    /// Refuse it with 429. `Some((actor, n))`: write one summary row for `n`
+    /// refusals now, and hand them back with [`Gate::unsent`] if that fails.
+    Refuse(Option<(String, u32)>),
+}
+
+/// The per-principal request limit and the audit row budget. It lives only in
+/// memory: a restart forgets refusals not yet summarized, and can let one
+/// extra day's quota through.
+#[derive(Default)]
+pub(super) struct Gate {
+    state: Mutex<State>,
+}
+impl Gate {
+    /// A refused request does not move the principal's window, so waiting a
+    /// second always recovers while the daily budgets last.
+    pub(super) fn decide(&self, principal: &str, now_ms: i64) -> Decision {
+        let Ok(mut state) = self.state.lock() else {
+            return Decision::Refuse(None);
+        };
+        let state = &mut *state;
+        let today = read_counts::day(now_ms);
+        if state.day != today {
+            state.day = today;
+            state.rows = 0;
+        }
+        let budget = state.rows < AUDIT_DAILY_ROWS;
+        if !state.entries.contains_key(principal) && state.entries.len() >= PRINCIPALS {
+            // Earlier days' entries go. Their unsummarized refusals move to
+            // the untracked summary, so none is forgotten while the hub runs.
+            let mut moved = 0u32;
+            state.entries.retain(|_, e| {
+                let keep = e.day == today;
+                if !keep {
+                    moved = moved.saturating_add(e.pending);
+                }
+                keep
+            });
+            state.untracked.pending = state.untracked.pending.saturating_add(moved);
+        }
+        let (entry, actor) =
+            if state.entries.contains_key(principal) || state.entries.len() < PRINCIPALS {
+                let entry = state
+                    .entries
+                    .entry(principal.to_string())
+                    .or_insert_with(|| Entry::fresh(today));
+                (entry, principal)
+            } else {
+                (&mut state.untracked, UNTRACKED_ACTOR)
+            };
         if entry.day != today {
             entry.day = today;
             entry.count = 0;
         }
-        if now_ms.saturating_sub(entry.last_ms) < MIN_GAP_MS || entry.count >= DAILY_MAX {
-            return false;
+        let tracked = actor == principal;
+        if tracked
+            && budget
+            && now_ms.saturating_sub(entry.last_ms) >= MIN_GAP_MS
+            && entry.count < DAILY_MAX
+        {
+            entry.last_ms = now_ms;
+            entry.count += 1;
+            state.rows += 1;
+            return Decision::Admit;
         }
-        entry.last_ms = now_ms;
-        entry.count += 1;
-        true
+        entry.pending = entry.pending.saturating_add(1);
+        if budget
+            && entry
+                .summary_ms
+                .is_none_or(|last| now_ms.saturating_sub(last) >= SUMMARY_WINDOW_MS)
+        {
+            let refused = std::mem::take(&mut entry.pending);
+            entry.summary_ms = Some(now_ms);
+            state.rows += 1;
+            return Decision::Refuse(Some((actor.to_string(), refused)));
+        }
+        Decision::Refuse(None)
+    }
+
+    /// Refusals whose summary row was not written go back to be summarized
+    /// with the next one.
+    pub(super) fn unsent(&self, actor: &str, refused: u32) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let entry = if actor == UNTRACKED_ACTOR {
+            Some(&mut state.untracked)
+        } else {
+            state.entries.get_mut(actor)
+        };
+        if let Some(entry) = entry {
+            entry.pending = entry.pending.saturating_add(refused);
+        }
     }
 }
 
@@ -108,7 +211,7 @@ pub(super) fn rate_limited() -> Reply {
     error(
         429,
         "memory_read_stats_rate_limited",
-        "read_stats allows one request per second and 600 per day for each principal",
+        "read_stats allows one request per second and 600 per day for each principal, within a hub-wide daily audit budget",
     )
 }
 
@@ -138,13 +241,11 @@ pub(super) fn read<T: ReadTx + ?Sized>(
             None => return Ok(invalid(&format!("limit must be from 1 to {PAGE_MAX}"))),
         },
     };
-    if !auth::has_right(tx, who, Some(&scope), "read")?
-        || !auth::has_exact_right(tx, who, &scope, "read_stats")?
-    {
+    if !auth::has_exact_rights(tx, who, &scope, &["read", "read_stats"])? {
         return Ok(error(
             403,
             "memory_grant_missing",
-            "read_stats needs read and read_stats granted on this exact scope",
+            "read_stats needs one grant on this exact scope holding read and read_stats",
         ));
     }
     let epoch = match tx
@@ -241,10 +342,13 @@ pub(super) fn read<T: ReadTx + ?Sized>(
     ))
 }
 
-/// One audit row for one `read_stats` request. The detail holds
-/// the scope (when the request named a valid one), the rows returned and the
-/// HTTP status. No query, cursor, card id or count value is recorded.
+/// One audit row: an admitted request ([`AUDIT_ACTION`]) or a summary of
+/// refused ones ([`REFUSED_ACTION`]). The detail holds the scope (when an
+/// admitted request named a valid one), `count` (rows returned, or refusals
+/// merged) and the HTTP status. No query, cursor, card id or read count is
+/// recorded.
 pub struct Audit {
+    pub action: &'static str,
     pub actor: String,
     pub scope: Option<String>,
     pub rows: usize,
@@ -259,14 +363,27 @@ impl Audit {
         now_ms: i64,
     ) -> Self {
         Self {
-            // The registration audit names the admin token `admin`, so this does too.
-            actor: match who {
-                auth::Credential::Admin => "admin".into(),
-                other => other.principal().into(),
-            },
+            action: AUDIT_ACTION,
+            actor: actor(who),
             scope,
             rows: reply.body["rows"].as_array().map_or(0, Vec::len),
             status: reply.status,
+            at: ids::isoformat(now_ms),
+        }
+    }
+    /// `refused` requests by `actor`, all answered 429.
+    pub(super) fn refused(actor: String, refused: u32, now_ms: i64) -> Self {
+        Self {
+            action: REFUSED_ACTION,
+            // The gate keys the admin by its principal id. The audit log names it `admin`.
+            actor: if actor == super::ADMIN {
+                "admin".into()
+            } else {
+                actor
+            },
+            scope: None,
+            rows: refused as usize,
+            status: 429,
             at: ids::isoformat(now_ms),
         }
     }
@@ -277,5 +394,14 @@ impl Audit {
             detail["scope"] = json!(scope);
         }
         detail
+    }
+}
+
+/// The audit name of a credential. The registration audit names the admin
+/// token `admin`, so this does too.
+pub(super) fn actor(who: &auth::Credential) -> String {
+    match who {
+        auth::Credential::Admin => "admin".into(),
+        other => other.principal().into(),
     }
 }

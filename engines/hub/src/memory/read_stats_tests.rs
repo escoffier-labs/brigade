@@ -1,7 +1,10 @@
 //! Slice 2 of the memory verification plan: the `read_stats` right, its
 //! cursor, rate limit and audit rows (#2387).
 use super::{proposal_tests::clean, read_counts::day, read_stats::*, tests::*, *};
-use crate::writer as hub_writer;
+use crate::{
+    memory_audit::{HubAudit, IN_FLIGHT},
+    writer::{self as hub_writer, ApplyError, Command, WriteTx},
+};
 use rusqlite::{Connection, params};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -11,6 +14,11 @@ const OTHER_TOKEN: &str = "fake-other-agent-token";
 /// A hub with the audit table, a writer attached, a second agent principal and
 /// cards in `fleet`, a repository scope and a collection.
 async fn hub() -> Hub {
+    hub_and_writer().await.0
+}
+/// The same hub and the hub writer its audit log uses, so a test can submit
+/// another family's work to that writer.
+async fn hub_and_writer() -> (Hub, hub_writer::Writer) {
     let h = Hub::with(clean(), None);
     let db = Connection::open(&h.hub).unwrap();
     db.execute_batch(
@@ -31,7 +39,7 @@ async fn hub() -> Hub {
     h.store
         .as_ref()
         .unwrap()
-        .attach_audit(Arc::new(crate::memory_audit::HubAudit(writer)));
+        .attach_audit(Arc::new(HubAudit::new(writer.clone())));
     for (scope, card) in [
         ("fleet", "alpha"),
         ("fleet", "beta"),
@@ -51,7 +59,30 @@ async fn hub() -> Hub {
         };
         assert_eq!(put.status, 201, "{put:?}");
     }
-    h
+    (h, writer)
+}
+/// Another writer family's command: one row in a table memory never touches.
+struct Probe;
+impl Command for Probe {
+    fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+        tx.execute(
+            "INSERT INTO claims_probe(value) VALUES('other family')",
+            &[],
+        )?;
+        Ok(json!({}))
+    }
+}
+async fn other_family(writer: &hub_writer::Writer) -> bool {
+    let budget = hub_writer::Budget {
+        events: 1,
+        bytes: 64,
+        durable: false,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+    };
+    match writer.submit(Probe, budget).await {
+        Ok(answer) => matches!(answer.await, Ok(Ok(_))),
+        Err(_) => false,
+    }
 }
 async fn grant(h: &Hub, principal: &str, scope: &str, rights: &[&str]) {
     let r = h
@@ -130,6 +161,19 @@ async fn read_stats_needs_read_and_read_stats_on_the_exact_scope() {
     // `read_stats` without `read`.
     grant(&h, "agent:dot", "fleet", &["read_stats"]).await;
     assert!(denied(&stats(&h, AGENT_TOKEN, ask("fleet")).await));
+    // Exact `read_stats` with `read` from a node default, `*` or `repo:*`:
+    // both rights must sit on one grant naming the scope.
+    grant(&h, "node-1", "fleet", &["read_stats"]).await;
+    assert!(denied(&stats(&h, NODE_TOKEN, ask("fleet")).await));
+    grant(&h, "agent:dot", "*", &["read"]).await;
+    assert!(denied(&stats(&h, AGENT_TOKEN, ask("fleet")).await));
+    grant(&h, "agent:dot", "repo:*", &["read"]).await;
+    grant(&h, "agent:dot", "repo:example/one", &["read_stats"]).await;
+    assert!(denied(
+        &stats(&h, AGENT_TOKEN, ask("repo:example/one")).await
+    ));
+    grant(&h, "agent:dot", "*", &[]).await;
+    grant(&h, "agent:dot", "repo:*", &[]).await;
     // Both rights on another scope.
     grant(&h, "agent:dot", "fleet", &[]).await;
     grant(&h, "agent:dot", "repo:example/one", &["read", "read_stats"]).await;
@@ -327,22 +371,102 @@ async fn the_rate_limit_refuses_over_the_limit_and_recovers() {
     assert_eq!(h.call(AGENT_TOKEN, ask("fleet")).await.status, 200);
 }
 
+const START: i64 = 1_800_000_000_000 - 1_800_000_000_000 % read_counts::DAY_MS;
+fn admitted(gate: &Gate, principal: &str, now_ms: i64) -> bool {
+    gate.decide(principal, now_ms) == Decision::Admit
+}
+
 #[test]
 fn the_daily_limit_resets_at_the_utc_day_boundary() {
-    let limiter = Limiter::default();
-    let start = 1_800_000_000_000 - 1_800_000_000_000 % read_counts::DAY_MS;
+    let gate = Gate::default();
     for n in 0..DAILY_MAX as i64 {
-        assert!(limiter.admit("agent:dot", start + n * MIN_GAP_MS), "{n}");
+        assert!(admitted(&gate, "agent:dot", START + n * MIN_GAP_MS), "{n}");
     }
-    let over = start + DAILY_MAX as i64 * MIN_GAP_MS;
-    assert!(!limiter.admit("agent:dot", over));
-    assert!(limiter.admit("agent:other", over));
-    assert!(!limiter.admit("agent:dot", start + read_counts::DAY_MS - 1));
-    assert!(limiter.admit("agent:dot", start + read_counts::DAY_MS));
+    let over = START + DAILY_MAX as i64 * MIN_GAP_MS;
+    assert!(!admitted(&gate, "agent:dot", over));
+    assert!(admitted(&gate, "agent:other", over));
+    assert!(!admitted(
+        &gate,
+        "agent:dot",
+        START + read_counts::DAY_MS - 1
+    ));
+    assert!(admitted(&gate, "agent:dot", START + read_counts::DAY_MS));
+}
+
+#[test]
+fn refusals_merge_into_one_summary_per_principal_per_window() {
+    let gate = Gate::default();
+    assert!(admitted(&gate, "agent:dot", START));
+    // The first refusal is summarized at once, the rest of the window waits.
+    assert_eq!(
+        gate.decide("agent:dot", START),
+        Decision::Refuse(Some(("agent:dot".into(), 1)))
+    );
+    for _ in 0..10_000 {
+        assert_eq!(gate.decide("agent:dot", START), Decision::Refuse(None));
+    }
+    // Another principal's refusals are its own.
+    assert!(admitted(&gate, "agent:other", START));
+    assert_eq!(
+        gate.decide("agent:other", START),
+        Decision::Refuse(Some(("agent:other".into(), 1)))
+    );
+    // A summary that was not written goes back into the next one.
+    gate.unsent("agent:other", 1);
+    let later = START + SUMMARY_WINDOW_MS;
+    assert!(admitted(&gate, "agent:dot", later));
+    assert_eq!(
+        gate.decide("agent:dot", later),
+        Decision::Refuse(Some(("agent:dot".into(), 10_001)))
+    );
+    assert!(admitted(&gate, "agent:other", later));
+    assert_eq!(
+        gate.decide("agent:other", later),
+        Decision::Refuse(Some(("agent:other".into(), 2)))
+    );
+}
+
+#[test]
+fn the_hub_wide_row_budget_caps_audit_rows_per_day() {
+    let gate = Gate::default();
+    let mut rows = 0u32;
+    let mut last = START;
+    // Forty principals each try their whole daily quota: 24,000 requests.
+    for p in 0..40 {
+        for n in 0..DAILY_MAX as i64 {
+            last = START + n * MIN_GAP_MS;
+            match gate.decide(&format!("agent:p{p}"), last) {
+                Decision::Admit | Decision::Refuse(Some(_)) => rows += 1,
+                Decision::Refuse(None) => {}
+            }
+        }
+    }
+    assert_eq!(rows, AUDIT_DAILY_ROWS);
+    // Spent: a fresh principal is refused and adds no row, not even a summary.
+    assert_eq!(gate.decide("agent:fresh", last + 1), Decision::Refuse(None));
+    // The next UTC day starts a new budget.
+    assert!(admitted(&gate, "agent:fresh", START + read_counts::DAY_MS));
+}
+
+#[test]
+fn principals_past_the_table_share_one_untracked_summary() {
+    let gate = Gate::default();
+    for p in 0..PRINCIPALS {
+        assert!(admitted(&gate, &format!("agent:p{p}"), START));
+    }
+    assert_eq!(
+        gate.decide("agent:late", START),
+        Decision::Refuse(Some((UNTRACKED_ACTOR.into(), 1)))
+    );
+    for _ in 0..100 {
+        assert_eq!(gate.decide("agent:later", START), Decision::Refuse(None));
+    }
+    // Next day the old entries go and the late principal is tracked again.
+    assert!(admitted(&gate, "agent:late", START + read_counts::DAY_MS));
 }
 
 #[tokio::test]
-async fn every_request_writes_one_audit_row_and_no_memory_event() {
+async fn every_admitted_request_writes_one_audit_row_and_no_memory_event() {
     let h = hub().await;
     grant(&h, "agent:dot", "fleet", &["read", "read_stats"]).await;
     seed(&h, "fleet", "alpha", &[(0, 1, 0)]);
@@ -350,7 +474,7 @@ async fn every_request_writes_one_audit_row_and_no_memory_event() {
     let events = h.events();
     let before = audit_rows(&h).len();
     let mut statuses = Vec::new();
-    // Served, refused for grants, invalid, rate limited, and an admin read.
+    // Served, refused for grants, invalid, rate limited (its summary), and an admin read.
     statuses.push(stats(&h, AGENT_TOKEN, ask("fleet")).await.status);
     statuses.push(stats(&h, AGENT_TOKEN, ask("repo:example/one")).await.status);
     statuses.push(stats(&h, AGENT_TOKEN, ask("not a scope")).await.status);
@@ -367,14 +491,17 @@ async fn every_request_writes_one_audit_row_and_no_memory_event() {
             json!({"scope":"repo:example/one","count":0,"status":403}),
         ),
         ("agent:dot", json!({"count":0,"status":400})),
-        ("agent:dot", json!({"scope":"fleet","count":0,"status":429})),
+        ("agent:dot", json!({"count":1,"status":429})),
         ("node-1", json!({"scope":"fleet","count":0,"status":403})),
         ("admin", json!({"scope":"fleet","count":2,"status":200})),
     ];
-    for ((actor, action, subject, detail), (who, want)) in rows[before..].iter().zip(expected) {
+    for (n, ((actor, action, subject, detail), (who, want))) in
+        rows[before..].iter().zip(expected).enumerate()
+    {
+        let kind = if n == 3 { REFUSED_ACTION } else { AUDIT_ACTION };
         assert_eq!(
             (actor.as_str(), action.as_str(), subject.as_str()),
-            (who, AUDIT_ACTION, who)
+            (who, kind, who)
         );
         assert_eq!(detail, &want);
     }
@@ -408,4 +535,81 @@ async fn without_an_audit_writer_nothing_is_served() {
 fn read_stats_is_not_a_pressure_exempt_read() {
     // It writes an audit row, so disk pressure refuses it like a write.
     assert!(!read_only(br#"{"action":"read_stats","scope":"fleet"}"#));
+}
+
+#[tokio::test]
+async fn a_refusal_flood_keeps_audit_rows_bounded_and_other_writers_working() {
+    let (h, writer) = hub_and_writer().await;
+    grant(&h, "agent:dot", "fleet", &["read", "read_stats"]).await;
+    // A principal without read_stats floods too.
+    let before = audit_rows(&h).len();
+    assert_eq!(stats(&h, AGENT_TOKEN, ask("fleet")).await.status, 200);
+    assert_eq!(h.call(NODE_TOKEN, ask("fleet")).await.status, 403);
+    for n in 0..2000 {
+        assert_eq!(h.call(AGENT_TOKEN, ask("fleet")).await.status, 429);
+        assert_eq!(h.call(NODE_TOKEN, ask("fleet")).await.status, 429);
+        if n % 250 == 0 {
+            assert!(other_family(&writer).await, "other family refused at {n}");
+        }
+    }
+    // One row per admitted request and one summary per principal.
+    let rows = audit_rows(&h);
+    let added: Vec<_> = rows[before..]
+        .iter()
+        .map(|(actor, action, _, detail)| {
+            (actor.as_str(), action.as_str(), detail["count"].clone())
+        })
+        .collect();
+    assert_eq!(
+        added,
+        [
+            ("agent:dot", AUDIT_ACTION, json!(0)),
+            ("node-1", AUDIT_ACTION, json!(0)),
+            ("agent:dot", REFUSED_ACTION, json!(1)),
+            ("node-1", REFUSED_ACTION, json!(1)),
+        ]
+    );
+    // An hour on, the merged count arrives in the next summary.
+    h.set_clock(h.now() + SUMMARY_WINDOW_MS);
+    assert_eq!(h.call(AGENT_TOKEN, ask("fleet")).await.status, 200);
+    assert_eq!(h.call(AGENT_TOKEN, ask("fleet")).await.status, 429);
+    let last = audit_rows(&h).pop().unwrap();
+    assert_eq!(
+        (last.1.as_str(), last.3),
+        (REFUSED_ACTION, json!({"count":2000,"status":429}))
+    );
+    assert!(other_family(&writer).await);
+}
+
+#[tokio::test]
+async fn audit_rows_never_hold_more_than_their_writer_slots() {
+    let (h, writer) = hub_and_writer().await;
+    let audit = Arc::new(HubAudit::new(writer.clone()));
+    // Hold the hub file's write lock so queued audit rows cannot finish.
+    let lock = Connection::open(&h.hub).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let now = h.now();
+    let joined: Vec<_> = (0..IN_FLIGHT + 8)
+        .map(|n| {
+            let audit = audit.clone();
+            tokio::spawn(async move {
+                audit
+                    .append(Audit::refused(format!("agent:p{n}"), 1, now))
+                    .await
+            })
+        })
+        .collect();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Every row past the slots was refused at once, without queueing.
+    assert_eq!(audit.available(), 0);
+    let refused = joined.iter().filter(|h| h.is_finished()).count();
+    assert_eq!(refused, 8);
+    lock.execute_batch("COMMIT").unwrap();
+    let mut written = 0;
+    for handle in joined {
+        written += handle.await.unwrap() as usize;
+    }
+    assert_eq!(written, IN_FLIGHT);
+    assert_eq!(audit.available(), IN_FLIGHT);
+    assert!(other_family(&writer).await);
 }

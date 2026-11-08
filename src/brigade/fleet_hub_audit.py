@@ -36,8 +36,9 @@ Roles are agent or teammate. Grants are at most 64 identifiers or the exact
 wildcards *, node:*, agent:*. Count is an integer in 0..1,000,000 (not bool).
 Scope is one hub memory scope (fleet, repo:<identity>, collection:<name> or
 principal:<id>) and status is an HTTP status in 100..599 (not bool). The hub
-writes both for ``memory.read_stats``, one row per request, refused ones
-included, with the rows returned as count.
+writes ``memory.read_stats`` once per admitted request, with the rows returned
+as count, and ``memory.read_stats_refused`` at most once per principal per
+hour, with the refusals merged since the previous one as count.
 Nested/free-text fields, arbitrary keys and recognizable credentials are refused
 with value-free errors. Page cursors are SQLite nonnegative integers and limits
 are 1..500, with defaults 0 and 100. Rows contain decoded detail dictionaries.
@@ -68,6 +69,7 @@ Action = Literal[
     "hub.migration",
     "statement.upload",
     "memory.read_stats",
+    "memory.read_stats_refused",
 ]
 
 
@@ -113,6 +115,7 @@ _ACTIONS = frozenset(
         "hub.migration",
         "statement.upload",
         "memory.read_stats",
+        "memory.read_stats_refused",
     }
 )
 _ID_FIELDS = frozenset({"principal_id", "node_id", "invite_id", "hub_id", "key_id", "statement_id"})
