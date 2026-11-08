@@ -60,6 +60,8 @@ pub struct Config {
     pub dense: Option<Arc<super::dense::Index>>,
     pub proposal_limits: Arc<std::sync::RwLock<super::hardening::Limits>>,
     pub eval_weights: Arc<std::sync::RwLock<serde_json::Value>>,
+    /// Read counts the readers accumulate and this writer flushes.
+    pub read_counts: Arc<super::read_counts::ReadCounts>,
 }
 impl Config {
     pub fn new(memory: PathBuf, hub: PathBuf, admin_digest: String) -> Self {
@@ -83,6 +85,7 @@ impl Config {
             eval_weights: Arc::new(std::sync::RwLock::new(
                 super::ranking::Weights::default().json(),
             )),
+            read_counts: Arc::default(),
         }
     }
 }
@@ -117,6 +120,8 @@ pub enum Job {
     Sweep {
         now_ms: i64,
     },
+    /// Write accumulated read counts. Low priority: see [`super::read_counts::due`].
+    ReadFlush,
     /// A background index build finished; this writer replays its tail.
     Rebuilt(Box<index::Rebuilt>),
     DenseRebuilt(Box<super::dense::Rebuilt>),
@@ -260,6 +265,12 @@ impl Writer {
         self.sender
             .as_ref()
             .is_some_and(|s| s.try_send(Job::Sweep { now_ms }).is_ok())
+    }
+    /// Asks for a read-count flush. A full queue skips it; the next tick asks again.
+    pub fn flush_reads(&self) -> bool {
+        self.sender
+            .as_ref()
+            .is_some_and(|s| s.try_send(Job::ReadFlush).is_ok())
     }
 }
 
@@ -505,13 +516,17 @@ pub(crate) fn run(
     let mut dense_rebuilt: Vec<Box<super::dense::Rebuilt>> = Vec::new();
     let mut directory_synced = false;
     let mut auto_rate = super::hardening::Rate::default();
+    let mut flush_requested = false;
+    let mut flushed_last = false;
+    let mut read_cursor = super::read_counts::SweepCursor::default();
     // Index publication runs on this thread after step 5, never under a lock.
     let mut publisher = config.index.as_ref().and_then(|i| i.publisher());
     let accept = |job: Job,
                   writes: &mut VecDeque<Pending>,
                   sweeps: &mut VecDeque<i64>,
                   rebuilt: &mut Vec<Box<index::Rebuilt>>,
-                  dense_rebuilt: &mut Vec<Box<super::dense::Rebuilt>>| match job {
+                  dense_rebuilt: &mut Vec<Box<super::dense::Rebuilt>>,
+                  flush: &mut bool| match job {
         Job::Write {
             command,
             deadline,
@@ -527,6 +542,7 @@ pub(crate) fn run(
                 sweeps.push_back(now_ms);
             }
         }
+        Job::ReadFlush => *flush = true,
         Job::Rebuilt(r) => rebuilt.push(r),
         Job::DenseRebuilt(r) => dense_rebuilt.push(r),
     };
@@ -543,6 +559,7 @@ pub(crate) fn run(
                 &mut sweeps,
                 &mut rebuilt,
                 &mut dense_rebuilt,
+                &mut flush_requested,
             );
         }
         for r in rebuilt.drain(..) {
@@ -559,15 +576,34 @@ pub(crate) fn run(
             let mut m = metrics.lock().unwrap();
             m.pending_max = m.pending_max.max(writes.len() as u64);
         }
+        // Read counts flush one bounded transaction at a time, only while no
+        // write waits unless the accumulator is over three quarters full. Under
+        // that pressure, flushes and write batches alternate.
+        let busy = !writes.is_empty();
+        if !(busy && flushed_last)
+            && super::read_counts::due(flush_requested, busy, &config.read_counts)
+        {
+            flush_requested = super::read_counts::flush_once(&db, &config.read_counts)
+                .is_ok_and(|flush| flush.more);
+            flushed_last = true;
+            continue;
+        }
+        flushed_last = false;
         if writes.is_empty() {
             if let Some(now_ms) = sweeps.pop_front() {
                 if let Ok(deleted) =
                     sweep_with(&db, now_ms, &config.proposal_limits.read().unwrap())
                 {
                     metrics.lock().unwrap().sweeps += 1;
+                    let reads = super::read_counts::sweep(
+                        &db,
+                        &config.read_counts,
+                        now_ms,
+                        &mut read_cursor,
+                    );
                     // A full batch can leave expired rows behind. Run the next
                     // bounded batch while the writer is idle; writes still go first.
-                    if deleted == SWEEP_BATCH {
+                    if deleted == SWEEP_BATCH || reads.is_ok_and(|r| r.more) {
                         sweeps.push_front(now_ms);
                     }
                 }
@@ -581,6 +617,7 @@ pub(crate) fn run(
                         &mut sweeps,
                         &mut rebuilt,
                         &mut dense_rebuilt,
+                        &mut flush_requested,
                     );
                     continue;
                 }
