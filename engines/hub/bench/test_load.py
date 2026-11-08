@@ -98,9 +98,7 @@ class Driver(unittest.TestCase):
                 self.assertEqual(result["summary"]["errors"], 4)
                 self.assertTrue(
                     all(
-                        r["status"] == status
-                        and r["reason"] == "proxy-inflight-full"
-                        and r["retry_after"] == "1"
+                        r["status"] == status and r["reason"] == "proxy-inflight-full" and r["retry_after"] == "1"
                         for r in result["attempts"]
                     )
                 )
@@ -174,15 +172,8 @@ class Driver(unittest.TestCase):
         with hub(delay=0.1) as url:
             result = self.run_load(url, "--rate", "100", "--backlog", "1")
         self.assertEqual(len(result["attempts"]), 16)
-        self.assertTrue(
-            any(r["reason"] == "client-backlog-full" for r in result["attempts"])
-        )
-        self.assertTrue(
-            any(
-                r["dispatch_lag_ms"] and r["dispatch_lag_ms"] > 20
-                for r in result["attempts"]
-            )
-        )
+        self.assertTrue(any(r["reason"] == "client-backlog-full" for r in result["attempts"]))
+        self.assertTrue(any(r["dispatch_lag_ms"] and r["dispatch_lag_ms"] > 20 for r in result["attempts"]))
 
     def test_open_loop_throughput_excludes_queue_drain(self):
         # 16 arrivals at 100/s against a 100 ms server drain for about 1.6 s.
@@ -224,12 +215,34 @@ class Driver(unittest.TestCase):
         self.assertGreater(result["summary"]["attempts"], 0)
         self.assertIsNone(result["conditions"]["offered_rate"])
 
+    def test_batch_events_post_unique_lists(self):
+        bodies = []
+
+        def request(client, method, path, body):
+            if path != "/metrics":
+                bodies.append(json.loads(body))
+            return 200, b"{}", None
+
+        with patch.object(load.Client, "request", request):
+            result = self.run_load("http://127.0.0.1:9", "--batch-events", "3")
+        self.assertEqual(result["conditions"]["payload"]["events_per_post"], 3)
+        self.assertTrue(bodies and all(isinstance(b, list) and len(b) == 3 for b in bodies))
+        sequences = [event["sequence"] for body in bodies for event in body]
+        self.assertEqual(len(sequences), len(set(sequences)))
+        self.assertEqual(len({event["digest"] for body in bodies for event in body}), len(sequences))
+
     def test_benchmark_requires_the_matching_isolated_install(self):
         installed = matrix.ROOT / "src/brigade/__init__.py"
-        with patch.object(matrix.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(str(installed)))) as run:
+        with patch.object(
+            matrix.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(str(installed)))
+        ) as run:
             matrix.check_install("test-python")
             self.assertEqual(run.call_args.args[0][:2], ["test-python", "-I"])
-        with patch.object(matrix.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, '"/tmp/other/brigade/__init__.py"')):
+        with patch.object(
+            matrix.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0, '"/tmp/other/brigade/__init__.py"'),
+        ):
             with self.assertRaisesRegex(RuntimeError, "editable Brigade install"):
                 matrix.check_install("test-python")
         with patch.object(matrix.subprocess, "run", side_effect=subprocess.CalledProcessError(1, [])):

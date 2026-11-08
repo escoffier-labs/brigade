@@ -25,9 +25,7 @@ HOST = str(ipaddress.IPv4Address(2130706433))
 def percentiles(values):
     ordered = sorted(values)
     return {
-        f"p{p}": ordered[max(0, math.ceil(len(ordered) * p / 100) - 1)]
-        if ordered
-        else None
+        f"p{p}": ordered[max(0, math.ceil(len(ordered) * p / 100) - 1)] if ordered else None
         for p in (50, 90, 95, 99, 100)
     }
 
@@ -100,12 +98,7 @@ def telemetry_column(samples, column):
 
 def endpoint(url):
     parsed = urlsplit(url)
-    if (
-        parsed.scheme not in ("http", "https")
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-    ):
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("expected an http(s) endpoint without credentials")
     if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
         raise ValueError("endpoint must have no path, query or fragment")
@@ -127,11 +120,7 @@ class Client:
 
     def request(self, method, path, body):
         if self.conn is None:
-            cls = (
-                http.client.HTTPSConnection
-                if self.url.scheme == "https"
-                else http.client.HTTPConnection
-            )
+            cls = http.client.HTTPSConnection if self.url.scheme == "https" else http.client.HTTPConnection
             source = (HOST, 0) if self.url.scheme == "http" else None
             self.conn = cls(
                 self.url.hostname,
@@ -149,9 +138,7 @@ class Client:
             self.conn.request(method, path, body, headers)
             response = self.conn.getresponse()
             status = response.status
-            raw = (
-                response.read()
-            )  # A truncated body is a transport error, even after HTTP 200.
+            raw = response.read()  # A truncated body is a transport error, even after HTTP 200.
             retry_after = response.getheader("Retry-After")
             if self.connection == "close":
                 self.close()
@@ -165,6 +152,9 @@ class Client:
 def run(args):
     endpoint(args.url)
     token = os.environ.get("BRIGADE_BENCH_TOKEN", "")
+    # Optional {"node id": "token"} map. Worker i posts as node i modulo its size,
+    # so a flood is not capped by one credential's in-flight and byte shares.
+    nodes = sorted(json.loads(os.environ.get("BRIGADE_BENCH_NODE_TOKENS") or "{}").items()) or [("bench-node", token)]
     payload = Path(args.payload).read_bytes() if args.payload else None
     started = time.time()
     load_start = os.getloadavg()
@@ -175,25 +165,27 @@ def run(args):
     finish = start + args.warmup + args.seconds
     run_id = f"bench-{time.time_ns()}"
 
-    def attempt(client, number, due):
+    def attempt(client, node, number, due):
         body = payload
         if body is None and args.method == "GET":
             body = b""
         if body is None:
-            body = json.dumps(
+            events = [
                 {
-                    "node_id": "bench-node",
+                    "node_id": node,
                     "run_id": run_id,
                     "repo": "bench-repo",
                     "seat": "worker",
                     "harness": "codex",
                     "state": "run.created",
                     "ts": "2026-01-01T00:00:00Z",
-                    "sequence": number,
-                    "digest": f"bench-{number}",
-                },
-                sort_keys=True,
-            ).encode("utf-8")
+                    "sequence": sequence,
+                    "digest": f"bench-{sequence}",
+                }
+                for sequence in range(number * args.batch_events, (number + 1) * args.batch_events)
+            ]
+            # One event keeps the original single-object body. Batches stay unique.
+            body = json.dumps(events[0] if args.batch_events == 1 else events, sort_keys=True).encode("utf-8")
         begin = time.monotonic()
         record = {
             "attempt": number,
@@ -212,9 +204,7 @@ def run(args):
             if status >= 400:
                 try:
                     answer = json.loads(raw)
-                    record["reason"] = (
-                        answer.get("reason") if isinstance(answer, dict) else None
-                    )
+                    record["reason"] = answer.get("reason") if isinstance(answer, dict) else None
                 except (ValueError, UnicodeError):
                     pass
                 # Keep complete error bytes, including HTML 502/504 and responses without a reason.
@@ -236,9 +226,10 @@ def run(args):
 
     counter = 0
 
-    def worker():
+    def worker(index):
         nonlocal counter
-        client = Client(args.url, token, args.connection, args.timeout)
+        node, node_token = nodes[index % len(nodes)]
+        client = Client(args.url, node_token, args.connection, args.timeout)
         try:
             if args.mode == "closed":
                 time.sleep(max(0, start - time.monotonic()))
@@ -246,7 +237,7 @@ def run(args):
                     with lock:
                         number = counter
                         counter += 1
-                    attempt(client, number, time.monotonic())
+                    attempt(client, node, number, time.monotonic())
                     time.sleep(min(1 / args.rate, max(0, finish - time.monotonic())))
             else:
                 while True:
@@ -254,7 +245,7 @@ def run(args):
                     try:
                         if job is None:
                             return
-                        attempt(client, *job)
+                        attempt(client, node, *job)
                     finally:
                         jobs.task_done()
         finally:
@@ -264,7 +255,7 @@ def run(args):
     stop = threading.Event()
 
     def sample():
-        client = Client(args.url, token, "close", args.timeout)
+        client = Client(args.url, os.environ.get("BRIGADE_BENCH_METRICS_TOKEN", token), "close", args.timeout)
         try:
             while not stop.is_set():
                 try:
@@ -291,7 +282,7 @@ def run(args):
 
     sampler = threading.Thread(target=sample)
     sampler.start()
-    workers = [threading.Thread(target=worker) for _ in range(args.clients)]
+    workers = [threading.Thread(target=worker, args=(index,)) for index in range(args.clients)]
     for thread in workers:
         thread.start()
     if args.mode == "open":
@@ -333,9 +324,7 @@ def run(args):
     # Open-loop workers drain queued requests after the window closes. Throughput
     # counts only completions inside the window; later ones keep their latency.
     window_end = args.warmup + args.seconds
-    in_window = [
-        r for r in measured if r["completed_s"] is not None and r["completed_s"] <= window_end
-    ]
+    in_window = [r for r in measured if r["completed_s"] is not None and r["completed_s"] <= window_end]
     drained = [r["completed_s"] for r in measured if r["completed_s"] is not None]
     report = {
         "schema_version": 1,
@@ -353,9 +342,7 @@ def run(args):
         "conditions": {
             "target": args.target,
             "allotment": args.allotment,
-            "transport": "operator-tls"
-            if args.url.startswith("https:")
-            else "single-loopback-source",
+            "transport": "operator-tls" if args.url.startswith("https:") else "single-loopback-source",
             "tls_gated": False,
             "mode": args.mode,
             "connection": args.connection,
@@ -371,9 +358,9 @@ def run(args):
             "path": args.path,
             "payload": {
                 "kind": "file" if payload is not None else "unique-event-v1",
-                "sha256": hashlib.sha256(payload).hexdigest()
-                if payload is not None
-                else None,
+                "events_per_post": None if payload is not None else args.batch_events,
+                "nodes": len(nodes),
+                "sha256": hashlib.sha256(payload).hexdigest() if payload is not None else None,
             },
             "database": db_info(args.database),
             "flags": args.flags,
@@ -385,9 +372,7 @@ def run(args):
             "completed_after_window": len(latencies) - len(in_window),
             "drain_seconds": max(0.0, max(drained) - window_end) if drained else 0.0,
             "latency_ms": percentiles(latencies),
-            "mean_service_ms": statistics.mean(
-                r["service_ms"] for r in measured if r["service_ms"] is not None
-            )
+            "mean_service_ms": statistics.mean(r["service_ms"] for r in measured if r["service_ms"] is not None)
             if latencies
             else None,
         },
@@ -409,9 +394,7 @@ def db_info(path):
     return {
         "status": "observed after run",
         "main_bytes": db.stat().st_size,
-        "wal_bytes": Path(str(db) + "-wal").stat().st_size
-        if Path(str(db) + "-wal").exists()
-        else 0,
+        "wal_bytes": Path(str(db) + "-wal").stat().st_size if Path(str(db) + "-wal").exists() else 0,
     }
 
 
@@ -419,10 +402,8 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--url", required=True)
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--target", choices=("python", "rust-proxy"), required=True)
-    p.add_argument(
-        "--allotment", choices=("reference", "1cpu-512m"), default="reference"
-    )
+    p.add_argument("--target", choices=("python", "rust-proxy", "rust-native"), required=True)
+    p.add_argument("--allotment", choices=("reference", "1cpu-512m"), default="reference")
     p.add_argument("--mode", choices=("closed", "open"), default="open")
     p.add_argument("--connection", choices=("close", "keep-alive"), default="close")
     p.add_argument("--seconds", type=float, default=2)
@@ -435,6 +416,7 @@ def parser():
     p.add_argument("--path", default="/events")
     p.add_argument("--method", choices=("GET", "POST"), default="POST")
     p.add_argument("--payload")
+    p.add_argument("--batch-events", type=int, default=1, help="Unique events per generated POST body, 1 to 1000")
     p.add_argument("--database")
     p.add_argument("--flags", default="unspecified")
     return p
@@ -446,6 +428,8 @@ def main():
     for name in ("seconds", "rate", "clients", "backlog", "timeout", "sample_interval"):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
             p.error(f"{name} must be finite and positive")
+    if not 1 <= args.batch_events <= 1000:
+        p.error("batch-events must be between 1 and 1000")
     if not math.isfinite(args.warmup) or args.warmup < 0:
         p.error("warmup must be finite and nonnegative")
     args.output.write_text(json.dumps(run(args), indent=2) + "\n", encoding="utf-8")

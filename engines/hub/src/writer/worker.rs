@@ -1,6 +1,7 @@
 use super::*;
 use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::{
+    collections::VecDeque,
     panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
 };
@@ -187,6 +188,93 @@ fn apply(db: &Connection, e: &Envelope) -> Answer {
     result.map(|(value, _)| value)
 }
 
+/// An ordinary command at the head of its queue that has used half its own
+/// budget runs ahead of durable work, at most one per batch: a heartbeat after
+/// 5 s of its 10 s, a HubRetention sweep after 125 ms of its 250 ms. Half a
+/// heartbeat budget sits above the 1.2 to 3.9 s an ordinary head waits behind
+/// a saturating 1,000-event flood, so that load never pays for aging, and still
+/// leaves 5 s to commit. A 1 s threshold tripped under that flood and added a
+/// 1,000-event heartbeat to most claim batches. An aged command costs a claim
+/// at most one ordinary command in its batch.
+pub(super) fn aged(e: &Envelope, now: Instant) -> bool {
+    let budget = e.budget.deadline.saturating_duration_since(e.queued);
+    now.saturating_duration_since(e.queued) >= budget / 2
+}
+
+/// Envelopes taken off the channel, split by admission class. Batches take
+/// durable work (claims, messages, registration) first, so a claim waits for
+/// at most the batch in flight instead of every ordinary command queued ahead
+/// of it. Each class stays FIFO. Ordinary work is still bounded: an expired
+/// ordinary head is answered `writer-timeout` as soon as the worker next picks,
+/// and an aged one takes the first place in a batch. Admission still bounds
+/// both queues: an envelope keeps its slot and byte permits until answered.
+pub(super) struct Backlog {
+    durable: VecDeque<Envelope>,
+    ordinary: VecDeque<Envelope>,
+    /// This batch already took an aged ordinary command ahead of durable work.
+    aged: bool,
+    stats: Arc<WriterStats>,
+}
+impl Backlog {
+    pub(super) fn new(stats: Arc<WriterStats>) -> Self {
+        Self {
+            durable: VecDeque::new(),
+            ordinary: VecDeque::new(),
+            aged: false,
+            stats,
+        }
+    }
+    fn class(&mut self, e: &Envelope) -> &mut VecDeque<Envelope> {
+        if e.budget.durable {
+            &mut self.durable
+        } else {
+            &mut self.ordinary
+        }
+    }
+    fn drain(&mut self, receiver: &mut mpsc::Receiver<Envelope>) {
+        while let Ok(e) = receiver.try_recv() {
+            self.class(&e).push_back(e);
+        }
+        // Heartbeat deadlines follow arrival order, so shedding from the head
+        // answers each one by its deadline. Durable work is never shed here.
+        let now = Instant::now();
+        while self
+            .ordinary
+            .front()
+            .is_some_and(|e| now >= e.budget.deadline)
+        {
+            if let Some(e) = self.ordinary.pop_front() {
+                answer(e, Err(Failure::timeout(false)));
+            }
+        }
+    }
+    pub(super) fn next(&mut self, receiver: &mut mpsc::Receiver<Envelope>) -> Option<Envelope> {
+        self.drain(receiver);
+        let now = Instant::now();
+        let aged = !self.aged
+            && !self.durable.is_empty()
+            && self.ordinary.front().is_some_and(|e| aged(e, now));
+        let e = if aged {
+            self.aged = true;
+            self.ordinary.pop_front()
+        } else {
+            self.durable
+                .pop_front()
+                .or_else(|| self.ordinary.pop_front())
+        };
+        // Exact while a batch forms: the command just taken is not counted.
+        self.stats.backlog(self.len());
+        e
+    }
+    /// A command that did not fit the batch goes back to the head of its class.
+    fn defer(&mut self, e: Envelope) {
+        self.class(&e).push_front(e);
+    }
+    pub(super) fn len(&self) -> usize {
+        self.durable.len() + self.ordinary.len()
+    }
+}
+
 pub(super) fn run(
     mut db: Connection,
     mut receiver: mpsc::Receiver<Envelope>,
@@ -194,10 +282,17 @@ pub(super) fn run(
     arbiter: Arc<Arbiter>,
     stats: Arc<WriterStats>,
 ) {
-    let mut pending = None;
+    let mut backlog = Backlog::new(stats.clone());
     let mut directory_synced = false;
     let mut version = crate::schema::DataVersion::new(&db).ok();
-    while let Some(first) = pending.take().or_else(|| receiver.blocking_recv()) {
+    loop {
+        backlog.aged = false;
+        let Some(first) = backlog
+            .next(&mut receiver)
+            .or_else(|| receiver.blocking_recv())
+        else {
+            break;
+        };
         let dequeued = Instant::now();
         let lock_deadline = (Instant::now() + config.begin_wait.min(Duration::from_secs(5)))
             .min(first.budget.deadline);
@@ -244,7 +339,7 @@ pub(super) fn run(
                     || bytes + e.budget.bytes > 8 * 1024 * 1024
                     || started.elapsed() >= Duration::from_millis(50))
             {
-                pending = Some(e);
+                backlog.defer(e);
                 break;
             }
             events += e.budget.events;
@@ -277,8 +372,9 @@ pub(super) fn run(
             } else {
                 batch.push((e, result));
             }
-            next = receiver.try_recv().ok();
+            next = backlog.next(&mut receiver);
         }
+        stats.backlog(backlog.len());
         let applied = started.elapsed();
         let commit_started = Instant::now();
         let committed = !broken && db.execute_batch("COMMIT").is_ok();
@@ -308,9 +404,10 @@ pub(super) fn run(
                 }
                 Err(_) => {
                     receiver.close();
-                    if let Some(e) = pending.take() {
+                    for e in backlog.durable.drain(..).chain(backlog.ordinary.drain(..)) {
                         answer(e, Err(Failure::storage("storage-error")));
                     }
+                    stats.backlog(0);
                     while let Some(e) = receiver.blocking_recv() {
                         answer(e, Err(Failure::storage("storage-error")));
                     }
