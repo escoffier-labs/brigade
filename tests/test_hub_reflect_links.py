@@ -644,6 +644,21 @@ def test_a_malformed_card_still_collides_by_its_parseable_names():
     assert submissions == [] and skipped == {"link_invalid_metadata": 1}
 
 
+def test_a_retired_card_must_pass_admission_before_its_successor_is_followed():
+    base = successor_pair()
+    for field, value, reason in (
+        ("scan_state", "flagged", "link_untrusted_target"),
+        ("trust", "unreviewed", "link_untrusted_target"),
+    ):
+        heads = [dict(h) for h in base]
+        old = next(h for h in heads if h["card_id"] == "old")
+        old[field] = value
+        submissions, skipped, _ = unit(heads)
+        assert submissions == [] and skipped == {reason: 1}, field
+    [[op]], skipped, _ = unit(base)
+    assert op["text"].endswith("[[new]] for more.") and skipped == {}
+
+
 def test_two_retired_cards_sharing_a_name_are_ambiguous_even_with_one_successor():
     heads = [
         head("src", card_text("See [[Old Guide]].")),

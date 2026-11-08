@@ -214,14 +214,14 @@ class Index:
 
     def resolve(self, scope: str, raw: str, trust: Any) -> tuple[str | None, str | None]:
         """Return the live card a broken link should name, or the reason to skip it."""
-        target, reason = self._pick(scope, raw)
+        target, reason = self._pick(scope, raw, trust)
         if target is not None:
             reason = self._admit(scope, target, trust)
             if reason:
                 return None, reason
         return target, reason
 
-    def _pick(self, scope: str, raw: str) -> tuple[str | None, str | None]:
+    def _pick(self, scope: str, raw: str, trust: Any) -> tuple[str | None, str | None]:
         """Name the one live card a broken link should reach. Retired names use the successor rule only."""
         key = (scope, _loose(_target(raw)))
         retired, matches = self.retired.get(key, set()), self.loose.get(key, set())
@@ -229,7 +229,14 @@ class Index:
             # A retired name shared with another retired or live card has no clear owner.
             if len(retired) > 1 or matches:
                 return None, "link_ambiguous_target"
-            value = self.successor.get((scope, next(iter(retired))))
+            old = next(iter(retired))
+            # The proposal shows neither the retired card nor its retirement metadata,
+            # so the retired card must pass the same admission as the successor before
+            # its superseded_by is trusted to steer a repair.
+            refused = self._admit(scope, old, trust)
+            if refused:
+                return None, refused
+            value = self.successor.get((scope, old))
             if value is None:
                 return None, "link_no_target"
             successor = _target(value.strip("\"'"))
