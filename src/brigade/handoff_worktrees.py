@@ -79,6 +79,9 @@ _CLAIM_PREFIX = ".brigade-claim-"
 _OVERSIZE_PREFIX = ".late-oversize-"
 _CLAIM_SUFFIX = ".md.claimed"
 _RENAME_NOREPLACE = 1
+# A `.git` file holds one `gitdir:` line. Its read is bounded separately
+# from the handoff size cap.
+_GIT_MARKER_BYTES = 64 * 1024
 # A handoff modified more recently than this is still being written. It is
 # left in place and its worktree is kept.
 QUIESCENCE_SECONDS = 5.0
@@ -571,30 +574,68 @@ MAX_UNTRACKED_LIST_BYTES = 8 << 20
 UNTRACKED_LIST_SECONDS = 10.0
 
 
-def _split_inbox(parts: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Split `prefix + writer inbox` components into (prefix, inbox)."""
+def _canonical_inbox(parts: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """(prefix, canonical writer inbox) when `parts` ends in one, ignoring case."""
     for inbox in _INBOX_PARTS:
-        if parts[-len(inbox) :] == inbox:
+        tail = parts[-len(inbox) :]
+        if len(tail) == len(inbox) and tuple(p.casefold() for p in tail) == tuple(p.casefold() for p in inbox):
             return parts[: -len(inbox)], inbox
-    raise OSError("not a writer inbox path")
+    return None
 
 
-def _verified_git_dir(worktree: Path) -> Path | None:
-    """The admin git dir of `worktree`, only if it points back at `worktree`."""
+def _split_inbox(parts: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split `prefix + writer inbox` components into (prefix, canonical inbox)."""
+    found = _canonical_inbox(parts)
+    if found is None:
+        raise OSError("not a writer inbox path")
+    return found
+
+
+def _verified_git_dir(worktree: Path, root_fd: int) -> Path | None:
+    """The admin git dir of `worktree`, only if its `.git` marker is genuine.
+
+    `.git` is read without following links from the held root. In a main
+    checkout it must be the common git dir itself. In a linked worktree it
+    must be a regular file whose `gitdir:` names the admin dir, and the admin
+    dir's `gitdir` backlink must name this very `.git` file. Anything else
+    (a symlinked marker pointing at another worktree, for example) is refused.
+    """
     git_dir = _git_path(worktree, "--git-dir")
     common = git_common_dir(worktree)
     if git_dir is None or common is None:
         return None
     try:
-        own = (worktree / ".git").resolve()
+        marker = dirfd.stat_child(root_fd, ".git")
         if git_dir == common:
-            return git_dir if git_dir == own else None
-        if git_dir.parent != common / "worktrees":
+            own = os.stat(git_dir)
+            if stat.S_ISDIR(marker.st_mode) and (marker.st_dev, marker.st_ino) == (own.st_dev, own.st_ino):
+                return git_dir
             return None
-        back = Path((git_dir / "gitdir").read_text(encoding="utf-8").strip()).resolve()
+        if git_dir.parent != common / "worktrees" or not stat.S_ISREG(marker.st_mode):
+            return None
+        fd = dirfd.open_child_file(root_fd, ".git", _read_flags())
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != (marker.st_dev, marker.st_ino) or opened.st_size > _GIT_MARKER_BYTES:
+                return None
+            data = os.read(fd, _GIT_MARKER_BYTES + 1)
+        finally:
+            os.close(fd)
+        text = data.decode("utf-8").strip()
+        if not text.startswith("gitdir:"):
+            return None
+        named = Path(text[len("gitdir:") :].strip())
+        named = named if named.is_absolute() else worktree / named
+        admin, target = os.stat(named), os.stat(git_dir)
+        if (admin.st_dev, admin.st_ino) != (target.st_dev, target.st_ino):
+            return None
+        backlink = Path((git_dir / "gitdir").read_text(encoding="utf-8").strip())
+        linked = os.lstat(backlink)
     except (OSError, UnicodeDecodeError):
         return None
-    return git_dir if back == own else None
+    if not stat.S_ISREG(linked.st_mode) or (linked.st_dev, linked.st_ino) != (marker.st_dev, marker.st_ino):
+        return None
+    return git_dir
 
 
 def _pinned_git(worktree: Path, git_dir: Path, args: list[str]) -> bytes:
@@ -633,21 +674,22 @@ def _worktree_listing(worktree: Path, root_fd: int) -> tuple[list[tuple[str, ...
     nested repos and initialized submodules) are listed separately and make
     the caller keep the worktree. Any git failure or bound raises.
     """
-    git_dir = _verified_git_dir(worktree)
+    git_dir = _verified_git_dir(worktree, root_fd)
     if git_dir is None:
         raise OSError("worktree git dir could not be verified")
     # `**/` also matches at the top level, so `.claude/memory-handoffs/x.md`
     # in the checkout root is listed.
-    pathspecs = [f":(glob)**/{'/'.join(inbox)}/**" for inbox in _INBOX_PARTS]
+    # Matched without regard to case, so `.CLAUDE/memory-handoffs` is found
+    # too. The directory names are kept as listed for the no-follow walk.
+    pathspecs = [f":(glob,icase)**/{'/'.join(inbox)}/**" for inbox in _INBOX_PARTS]
     raw = _pinned_git(worktree, git_dir, ["ls-files", "--others", "-z", "--", *pathspecs])
     prefixes: set[tuple[str, ...]] = set()
     for entry in raw.split(b"\0"):
         if not entry:
             continue
         parent = tuple(os.fsdecode(entry).split("/"))[:-1]
-        for inbox in _INBOX_PARTS:
-            if parent[-len(inbox) :] == inbox:
-                prefixes.add(parent[: -len(inbox)])
+        if _canonical_inbox(parent) is not None:
+            prefixes.add(parent)
     # Directory entries in an untracked listing are repository boundaries.
     nested = _pinned_git(worktree, git_dir, ["ls-files", "--others", "-z", "--", ":(glob)**/"])
     embedded = [os.fsdecode(e).rstrip("/") for e in nested.split(b"\0") if e.endswith(b"/")]
@@ -656,29 +698,26 @@ def _worktree_listing(worktree: Path, root_fd: int) -> tuple[list[tuple[str, ...
         meta, _, path = record.partition(b"\t")
         if meta.startswith(b"160000 ") and path:
             name = os.fsdecode(path)
-            if _has_git_marker(root_fd, name):
+            if _is_present_directory(root_fd, name):
                 embedded.append(name)
     return sorted(prefixes), sorted(set(embedded))
 
 
-def _has_git_marker(root_fd: int, rel: str) -> bool:
-    """Whether `rel` under the held root holds a `.git`, checked without
-    following links. Anything unverifiable counts as present."""
+def _is_present_directory(root_fd: int, rel: str) -> bool:
+    """Whether a gitlink path is populated, checked without following links.
+
+    A populated gitlink is a boundary git will not list inside, with or
+    without a `.git` marker. A missing path is not. Anything unverifiable
+    counts as present.
+    """
     try:
         fd = _walk(root_fd, inbox_components(rel))
     except (OSError, ValueError):
         return True
     if fd is None:
         return False
-    try:
-        dirfd.stat_child(fd, ".git")
-        return True
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    finally:
-        os.close(fd)
+    os.close(fd)
+    return True
 
 
 class _Dest:
@@ -1030,9 +1069,12 @@ def _rescue_inbox(worktree: Path, root_fd: int, rel: str, dest: _Dest) -> list[R
     label = str(worktree / rel)
     try:
         parts = inbox_components(rel)
+        prefix, inbox = _split_inbox(parts)
         src_fd = _walk(root_fd, parts)
     except (OSError, ValueError):
         return [Rescue(label, "failed", reason="inbox-refused")]
+    # Deliver into the canonical inbox name ingest watches.
+    dest_parts = (*prefix, *inbox)
     if src_fd is None:
         return []
     try:
@@ -1059,10 +1101,10 @@ def _rescue_inbox(worktree: Path, root_fd: int, rel: str, dest: _Dest) -> list[R
         if tracked is None:
             return [Rescue(label, "failed", reason="tracking-unverifiable")]
         try:
-            dest.inbox(parts)
+            dest.inbox(dest_parts)
         except OSError:
             return [Rescue(label, "failed", reason="destination-unavailable")]
-        results = [r for r in (_rescue_one(src_fd, n, label, dest, parts, tracked) for n in candidates) if r]
+        results = [r for r in (_rescue_one(src_fd, n, label, dest, dest_parts, tracked) for n in candidates) if r]
         # A writer may have created a handoff (or returned to a claimed path)
         # during the pass. Anything still pending keeps the worktree.
         tracked_names = {n.casefold() for n in tracked[0]}
@@ -1115,9 +1157,9 @@ def rescue_pending_handoffs(worktree: Path, dest_root: Path | None, *, dest_fd: 
             # Git does not look inside these, so pending handoffs there are
             # invisible. Keep the worktree rather than recurse.
             return [Rescue(str(resolved / path), "failed", reason="embedded-repository") for path in embedded]
-        for prefix in prefixes:
-            for inbox in _INBOX_PARTS:
-                results.extend(_rescue_inbox(resolved, root_fd, "/".join((*prefix, *inbox)), dest))
+        # Each listed inbox directory, under the name git reported for it.
+        for inbox_dir in prefixes:
+            results.extend(_rescue_inbox(resolved, root_fd, "/".join(inbox_dir), dest))
     finally:
         dest.close()
         os.close(root_fd)

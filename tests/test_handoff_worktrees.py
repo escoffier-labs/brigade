@@ -528,7 +528,7 @@ def test_worktree_config_core_worktree_elsewhere_still_lists_inbox(tmp_path: Pat
     runguard.remove_worktree(main, linked, force=True)
     delivered = main / ".claude" / "memory-handoffs" / "pending.md"
     assert pending.is_file() or delivered.is_file()  # never deleted
-    assert listed is not None and () in listed  # the real inbox was listed
+    assert listed is not None and (".claude", "memory-handoffs") in listed  # the real inbox was listed
 
 
 def test_injected_git_config_env_is_ignored(tmp_path: Path, monkeypatch):
@@ -544,7 +544,7 @@ def test_injected_git_config_env_is_ignored(tmp_path: Path, monkeypatch):
     runguard.remove_worktree(main, linked, force=True)
     delivered = main / ".claude" / "memory-handoffs" / "pending.md"
     assert pending.is_file() or delivered.is_file()  # never deleted
-    assert listed is not None and () in listed  # the real inbox was listed
+    assert listed is not None and (".claude", "memory-handoffs") in listed  # the real inbox was listed
 
 
 def test_injected_pathspec_env_cannot_hide_inboxes(tmp_path: Path, monkeypatch):
@@ -570,7 +570,7 @@ def test_included_core_worktree_is_overridden(tmp_path: Path):
     runguard.remove_worktree(main, linked, force=True)
     delivered = main / ".claude" / "memory-handoffs" / "pending.md"
     assert pending.is_file() or delivered.is_file()  # never deleted
-    assert listed is not None and () in listed  # the real inbox was listed
+    assert listed is not None and (".claude", "memory-handoffs") in listed  # the real inbox was listed
 
 
 @needs_symlinks
@@ -593,6 +593,67 @@ def test_destination_moved_during_stability_check_keeps_worktree(tmp_path: Path,
     assert pending.read_text() == _HANDOFF.format(summary="project handoff")
     assert list(outside.iterdir()) == []
     assert "destination-moved" in capsys.readouterr().err
+
+
+# Round 11.
+
+
+@needs_symlinks
+def test_symlinked_git_marker_keeps_worktree(tmp_path: Path, capsys):
+    main = tmp_path / "main"
+    _seed(main)
+    _git(main, "init", "-q")
+    _git(main, "commit", "-q", "--allow-empty", "-m", "init")
+    victim = tmp_path / "victim"
+    donor = tmp_path / "donor"
+    _git(main, "worktree", "add", "-q", "--detach", str(victim))
+    _git(main, "worktree", "add", "-q", "--detach", str(donor))
+    pending = _handoff(victim / ".claude" / "memory-handoffs", "pending.md", "victim handoff")
+    (victim / ".git").unlink()
+    (victim / ".git").symlink_to(donor / ".git")
+
+    runguard.remove_worktree(main, victim, force=True)
+
+    assert victim.exists()
+    assert pending.read_text() == _HANDOFF.format(summary="victim handoff")
+    assert "inbox-scan-failed" in capsys.readouterr().err
+
+
+def test_populated_gitlink_without_marker_keeps_worktree(tmp_path: Path, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    module = linked / "module"
+    module.mkdir()
+    blob = (
+        subprocess.run(
+            ["git", "-C", str(main), "hash-object", "-t", "commit", "--stdin"],
+            input=b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor t <t@x> 0 +0000\ncommitter t <t@x> 0 +0000\n\nm\n",
+            capture_output=True,
+            check=True,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    _git(linked, "update-index", "--add", "--cacheinfo", f"160000,{blob},module")
+    pending = _handoff(module / ".claude" / "memory-handoffs", "pending.md", "gitlink handoff")
+    assert not (module / ".git").exists()
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert linked.exists()
+    assert pending.is_file()
+    assert "embedded-repository" in capsys.readouterr().err
+
+
+def test_uppercase_inbox_is_detected_and_never_deleted(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    upper = _handoff(linked / ".CLAUDE" / "memory-handoffs", "pending.md", "uppercase inbox")
+    dest = main / ".claude" / "memory-handoffs" / "pending.md"
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert upper.is_file() or dest.read_text() == _HANDOFF.format(summary="uppercase inbox")
+    if not linked.exists():
+        assert dest.is_file()
 
 
 # Codex 4507863008: embedded repositories keep the worktree.
