@@ -1544,9 +1544,15 @@ def _deliver_worktree_handoffs(worktree_path: Path, root: Path) -> bool:
     from . import handoff_worktrees
 
     try:
-        # Only a main checkout that owns the same common git dir as `root`.
-        dest = handoff_worktrees.main_checkout_for(worktree_path, repo=root)
-        results = handoff_worktrees.rescue_pending_handoffs(worktree_path, dest)
+        # Only a main checkout that owns the same common git dir as `root`,
+        # held open from validation through every write.
+        held = handoff_worktrees.open_main_checkout_for(worktree_path, repo=root)
+        try:
+            dest, dest_fd = held if held is not None else (None, None)
+            results = handoff_worktrees.rescue_pending_handoffs(worktree_path, dest, dest_fd=dest_fd)
+        finally:
+            if held is not None:
+                os.close(held[1])
     except Exception as exc:  # noqa: BLE001 - callers run this from finally blocks
         print(f"brigade: kept worktree {worktree_path}: handoff rescue error ({type(exc).__name__})", file=sys.stderr)
         return False

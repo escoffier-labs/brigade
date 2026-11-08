@@ -164,18 +164,18 @@ def checkout_prefix(path: Path) -> tuple[str, ...] | None:
         return None
 
 
-def main_checkout_for(path: Path, *, repo: Path | None = None) -> Path | None:
-    """`main_checkout(path)` mapped to the same subdirectory as `path`.
+def open_main_checkout_for(path: Path, *, repo: Path | None = None) -> tuple[Path, int] | None:
+    """`main_checkout(path)` mapped to `path`'s subdirectory, as (path, held fd).
 
-    None when there is no verified main checkout or the subdirectory does
-    not exist there.
+    Every prefix component is walked from the main checkout root with held
+    no-follow descriptors. The returned descriptor is that walked directory;
+    callers write relative to it and close it. None when there is no
+    verified main checkout or a component is missing or a link.
     """
     main = main_checkout(path, repo=repo)
     prefix = checkout_prefix(path)
     if main is None or prefix is None:
         return None
-    # Every prefix component must be a real directory inside the main
-    # checkout. A link anywhere on the way refuses the mapping.
     try:
         root_fd = dirfd.open_directory_chain(main, writable=False)
     except OSError:
@@ -188,11 +188,21 @@ def main_checkout_for(path: Path, *, repo: Path | None = None) -> Path | None:
         os.close(root_fd)
     if mapped_fd is None:
         return None
-    os.close(mapped_fd)
-    return main.joinpath(*prefix)
+    return main.joinpath(*prefix), mapped_fd
 
 
-def _bounded_git_output(cwd: Path, args: list[str], max_bytes: int) -> bytes | None:
+def main_checkout_for(path: Path, *, repo: Path | None = None) -> Path | None:
+    """Path form of `open_main_checkout_for`, for display and the Stop hook."""
+    held = open_main_checkout_for(path, repo=repo)
+    if held is None:
+        return None
+    os.close(held[1])
+    return held[0]
+
+
+def _bounded_git_output(
+    cwd: Path, args: list[str], max_bytes: int, timeout: float = _GIT_TIMEOUT_SECONDS
+) -> bytes | None:
     """Stdout of a git command, or None on failure, timeout or overflow."""
     try:
         proc = subprocess.Popen(
@@ -203,7 +213,7 @@ def _bounded_git_output(cwd: Path, args: list[str], max_bytes: int) -> bytes | N
         )
     except OSError:
         return None
-    timer = threading.Timer(_GIT_TIMEOUT_SECONDS, proc.kill)
+    timer = threading.Timer(timeout, proc.kill)
     timer.start()
     try:
         assert proc.stdout is not None
@@ -480,7 +490,7 @@ def _digest_index(parent: int, skip: tuple[set[str], set[tuple[int, int]]] | Non
     skip_ids = skip[1] if skip else set()
     known: set[str] = set()
     for name in dirfd.child_names(parent, MAX_INBOX_ENTRIES):
-        if not name.endswith(".md") or name.startswith(".") or name.casefold() in skip_names:
+        if not is_handoff_filename(name) or name.casefold() in skip_names:
             continue
         try:
             data, info = _read_child(parent, name)
@@ -522,11 +532,9 @@ def _tracked(inbox: Path) -> tuple[set[str], set[tuple[int, int]]] | None:
 
 
 _INBOX_PARTS = tuple(dict.fromkeys(tuple(rel.split("/")) for rel in WRITER_INBOXES.values()))
-_INBOX_HEADS = frozenset(parts[0] for parts in _INBOX_PARTS)
-# Directories never searched for inboxes during rescue.
-_SCAN_SKIP = frozenset({"node_modules", "__pycache__", "venv", "target", "dist", "build"})
-MAX_SCAN_DIRS = 20000
-MAX_SCAN_DEPTH = 8
+# Untracked-file listing used to find inboxes in a worktree being removed.
+MAX_UNTRACKED_LIST_BYTES = 8 << 20
+UNTRACKED_LIST_SECONDS = 10.0
 
 
 def _split_inbox(parts: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -537,53 +545,41 @@ def _split_inbox(parts: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ..
     raise OSError("not a writer inbox path")
 
 
-def _inbox_prefixes(root_fd: int) -> list[tuple[str, ...]]:
-    """Every directory under a held checkout root that holds a writer inbox.
+def _untracked_inbox_prefixes(worktree: Path) -> list[tuple[str, ...]]:
+    """Checkout subdirectories whose writer inbox holds an untracked file.
 
-    A no-follow, depth- and count-bounded scan, so rescue covers each inbox
-    discovery could map into this checkout (any watched subdirectory),
-    whatever ingest config is used later. Raises OSError past a bound, so the
-    caller keeps the worktree instead of guessing.
+    Git lists every untracked file, ignored ones included, without following
+    links, at any depth and in any directory. Output over
+    MAX_UNTRACKED_LIST_BYTES or a run over UNTRACKED_LIST_SECONDS raises, as
+    does any git failure, so the caller keeps the worktree.
     """
-    found: list[tuple[str, ...]] = []
-    stack: list[tuple[str, ...]] = [()]
-    visited = 0
-    while stack:
-        parts = stack.pop()
-        visited += 1
-        if visited > MAX_SCAN_DIRS:
-            raise OSError("inbox scan limit reached")
-        fd = _walk(root_fd, parts)
-        if fd is None:
+    raw = _bounded_git_output(
+        worktree,
+        ["-c", "core.fsmonitor=false", "ls-files", "--others", "-z"],
+        MAX_UNTRACKED_LIST_BYTES,
+        timeout=UNTRACKED_LIST_SECONDS,
+    )
+    if raw is None:
+        raise OSError("untracked file listing failed or exceeded its budget")
+    prefixes: set[tuple[str, ...]] = set()
+    for entry in raw.split(b"\0"):
+        if not entry:
             continue
-        try:
-            names = dirfd.child_names(fd, MAX_INBOX_ENTRIES + 1)
-            if len(names) > MAX_INBOX_ENTRIES:
-                raise OSError("directory too large to scan")
-            if _INBOX_HEADS.intersection(names):
-                found.append(parts)
-            if len(parts) >= MAX_SCAN_DEPTH:
-                continue
-            for name in names:
-                if name.startswith(".") or name in _SCAN_SKIP:
-                    continue
-                try:
-                    info = dirfd.stat_child(fd, name)
-                except FileNotFoundError:
-                    continue
-                if stat.S_ISDIR(info.st_mode):
-                    stack.append((*parts, name))
-        finally:
-            os.close(fd)
-    return sorted(found)
+        parent = tuple(os.fsdecode(entry).split("/"))[:-1]
+        for inbox in _INBOX_PARTS:
+            if parent[-len(inbox) :] == inbox:
+                prefixes.add(parent[: -len(inbox)])
+    return sorted(prefixes)
 
 
 class _Dest:
     """Destination root held open for the whole rescue transaction."""
 
-    def __init__(self, root: Path | None) -> None:
+    def __init__(self, root: Path | None, root_fd: int | None = None) -> None:
+        # `root` is only for tracking checks and messages. All writes go
+        # through `root_fd`, opened once (or handed over) and never reopened.
         self.root = root
-        self.root_fd: int | None = None
+        self.root_fd = os.dup(root_fd) if root_fd is not None else None
         self.inboxes: dict[tuple[str, ...], tuple[int, set[str], frozenset[str]]] = {}
 
     def inbox(self, parts: tuple[str, ...]) -> tuple[int, set[str], frozenset[str]]:
@@ -596,7 +592,7 @@ class _Dest:
             if self.root is None:
                 raise OSError("no verified main checkout")
             if self.root_fd is None:
-                self.root_fd = dirfd.open_directory_chain(self.root.resolve(strict=True), writable=False)
+                self.root_fd = dirfd.open_directory_chain(self.root, writable=False)
             # The checkout subdirectory must already be a real directory in
             # the main checkout. Only the inbox under it may be created.
             prefix, inbox = _split_inbox(parts)
@@ -609,7 +605,7 @@ class _Dest:
                 os.close(base)
             assert fd is not None
             try:
-                tracked = _tracked(self.root.resolve(strict=True).joinpath(*parts))
+                tracked = _tracked(self.root.joinpath(*parts))
                 if tracked is None:
                     raise OSError("destination git tracking unknown")
                 known = _known_digests(fd, tracked)
@@ -618,6 +614,22 @@ class _Dest:
                 raise
             self.inboxes[parts] = (fd, known, frozenset(n.casefold() for n in tracked[0]))
         return self.inboxes[parts]
+
+    def verify(self, parts: tuple[str, ...]) -> None:
+        """The held inbox is still the directory its path names, reached without links.
+
+        Run before a source is removed: if the destination path was swapped
+        after it was opened, the copy is not where ingest will look.
+        """
+        if self.root is None or parts not in self.inboxes:
+            raise OSError("destination not held")
+        current = dirfd.open_directory_chain(self.root.joinpath(*parts), writable=False)
+        try:
+            held, now = os.fstat(self.inboxes[parts][0]), os.fstat(current)
+        finally:
+            os.close(current)
+        if (held.st_dev, held.st_ino) != (now.st_dev, now.st_ino):
+            raise OSError("destination moved")
 
     def close(self) -> None:
         for fd, _, _ in self.inboxes.values():
@@ -685,8 +697,16 @@ def _restore_claim(src_fd: int, claim: str, name: str) -> bool:
     return False
 
 
-def _is_candidate(name: str) -> bool:
-    return name.endswith(".md") and not name.startswith(".") and name != "TEMPLATE.md"
+def is_handoff_filename(name: str) -> bool:
+    """The one handoff filename rule ingest and rescue share.
+
+    Any `.md` file except TEMPLATE.md, dot-prefixed ones included. Rescue's
+    private claim, temp and recovery names do not end in `.md`.
+    """
+    return Path(name).suffix == ".md" and name != "TEMPLATE.md"
+
+
+_is_candidate = is_handoff_filename
 
 
 def _quiet(info: os.stat_result) -> bool:
@@ -864,6 +884,11 @@ def _rescue_one(
             )
             known.add(sha)
             state = "delivered"
+        # The delivered copy must sit where ingest will look for it.
+        try:
+            dest.verify(parts)
+        except OSError:
+            return Rescue(source, "failed", reason="destination-moved")
         # Final check while the claim is still named. Unlink only if stable.
         if not _stable_since_delivery(held, delivered, sha):
             kept = _keep_claim(src_fd, held, claim, name, frozenset(n.casefold() for n in tracked_names))
@@ -946,7 +971,7 @@ def _rescue_inbox(worktree: Path, root_fd: int, rel: str, dest: _Dest) -> list[R
         os.close(src_fd)
 
 
-def rescue_pending_handoffs(worktree: Path, dest_root: Path | None) -> list[Rescue]:
+def rescue_pending_handoffs(worktree: Path, dest_root: Path | None, *, dest_fd: int | None = None) -> list[Rescue]:
     """Move pending handoffs from `worktree`'s inboxes into `dest_root`'s.
 
     Source and destination directories are held open for the whole
@@ -969,11 +994,11 @@ def rescue_pending_handoffs(worktree: Path, dest_root: Path | None) -> list[Resc
         root_fd = dirfd.open_directory_chain(resolved, writable=False)
     except OSError:
         return [Rescue(str(worktree), "failed", reason="worktree-unopenable")]
-    dest = _Dest(dest_root)
+    dest = _Dest(dest_root, dest_fd)
     results: list[Rescue] = []
     try:
         try:
-            prefixes = _inbox_prefixes(root_fd)
+            prefixes = _untracked_inbox_prefixes(resolved)
         except OSError:
             return [Rescue(str(worktree), "failed", reason="inbox-scan-failed")]
         for prefix in prefixes:

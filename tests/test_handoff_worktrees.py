@@ -454,16 +454,78 @@ def test_project_subdirectory_handoff_is_rescued_to_matching_main_directory(tmp_
     assert not pending.exists()
 
 
-def test_inbox_scan_over_budget_keeps_worktree(tmp_path: Path, monkeypatch, capsys):
+def test_untracked_listing_over_budget_keeps_worktree(tmp_path: Path, monkeypatch, capsys):
     main, linked = _repo_with_project(tmp_path)
     pending = _handoff(linked / "project" / ".claude" / "memory-handoffs", "pending.md", "project handoff")
-    monkeypatch.setattr(handoff_worktrees, "MAX_SCAN_DIRS", 1)
+    monkeypatch.setattr(handoff_worktrees, "MAX_UNTRACKED_LIST_BYTES", 8)
 
     runguard.remove_worktree(main, linked, force=True)
 
     assert linked.exists()
     assert pending.is_file()
     assert "inbox-scan-failed" in capsys.readouterr().err
+
+
+def test_dot_prefixed_handoff_is_rescued_like_ingest_accepts_it(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    dotted = _handoff(inbox, ".pending.md", "dot-prefixed handoff")
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    delivered = main / ".claude" / "memory-handoffs" / ".pending.md"
+    assert delivered.read_text() == _HANDOFF.format(summary="dot-prefixed handoff")
+    assert not dotted.exists()
+    assert not linked.exists()
+    handoffs, _ = ingest_mod._list_handoffs(delivered.parent)
+    assert delivered in handoffs
+    assert handoff_worktrees.is_handoff_filename(".pending.md")
+    assert not handoff_worktrees.is_handoff_filename(".brigade-claim-x.md.claimed")
+    assert not handoff_worktrees.is_handoff_filename(".late-oversize-x.md.recovered")
+
+
+def test_hidden_ignored_and_deep_inboxes_are_never_deleted(tmp_path: Path, capsys):
+    main, linked = _repo_with_project(tmp_path)
+    deep = tuple(f"level{i}" for i in range(12))
+    hidden = _handoff(linked / ".hidden" / "project" / ".claude" / "memory-handoffs", "hidden.md", "hidden")
+    modules = _handoff(linked / "node_modules" / "x" / ".claude" / "memory-handoffs", "modules.md", "modules")
+    deep_one = _handoff(linked.joinpath(*deep) / ".claude" / "memory-handoffs", "deep.md", "deep")
+    # The main checkout has matching directories for two of the three.
+    (main / ".hidden" / "project").mkdir(parents=True)
+    main.joinpath(*deep).mkdir(parents=True)
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert linked.exists()  # node_modules/x has no matching main directory
+    assert (main / ".hidden" / "project" / ".claude" / "memory-handoffs" / "hidden.md").is_file()
+    assert (main.joinpath(*deep) / ".claude" / "memory-handoffs" / "deep.md").is_file()
+    assert not hidden.exists() and not deep_one.exists()
+    assert modules.is_file()
+    assert "destination-unavailable" in capsys.readouterr().err
+
+
+@needs_symlinks
+def test_destination_prefix_swapped_after_validation_keeps_worktree(tmp_path: Path, monkeypatch, capsys):
+    main, linked = _repo_with_project(tmp_path)
+    pending = _handoff(linked / "project" / ".claude" / "memory-handoffs", "pending.md", "project handoff")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real = handoff_worktrees._publish_bytes
+
+    def publish(*args, **kwargs):
+        # After the destination was validated and opened, swap the prefix
+        # for a link that points outside the repository.
+        (main / "project").rename(main / "moved-project")
+        (main / "project").symlink_to(outside, target_is_directory=True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(handoff_worktrees, "_publish_bytes", publish)
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert linked.exists()
+    assert pending.read_text() == _HANDOFF.format(summary="project handoff")
+    assert list(outside.iterdir()) == []
+    assert "destination-moved" in capsys.readouterr().err
 
 
 @needs_symlinks
@@ -516,8 +578,11 @@ def test_symlinked_inbox_component_is_refused(tmp_path: Path):
     assert ingest_mod.ingest_into(source=main, owner=main, stats=stats) == 0
     assert victim.is_file()
 
-    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
-    assert [r.reason for r in results if r.state == "failed"] == ["inbox-refused"]
+    # Git lists the link itself and never descends through it, so rescue
+    # touches nothing behind it, and removing the worktree removes the link
+    # only.
+    assert handoff_worktrees.rescue_pending_handoffs(linked, main) == []
+    runguard.remove_worktree(main, linked, force=True)
     assert victim.is_file()
     assert not (main / ".claude" / "memory-handoffs" / victim.name).exists()
 

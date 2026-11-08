@@ -1062,7 +1062,7 @@ def _list_handoffs(handoffs_dir: Path) -> tuple[List[Path], List[Path]]:
     out: List[Path] = []
     tracked: List[Path] = []
     for p in sorted(handoffs_dir.iterdir()):
-        if p.is_file() and p.suffix == ".md" and p.name != "TEMPLATE.md":
+        if p.is_file() and handoff_worktrees.is_handoff_filename(p.name):
             if _is_tracked(p, tracked_files):
                 tracked.append(p)
             else:
