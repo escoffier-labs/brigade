@@ -27,6 +27,7 @@ import ipaddress
 import os
 import re
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -187,22 +188,47 @@ def health_url(host: str, port: int) -> str:
 _LISTENING = re.compile(rb"^listening on (\S+?)\r?\n?$")
 
 
-def probe_url(configured: str, reported: tuple[str, int]) -> str | None:
-    """The `/health` URL for the port brigade-hub reported, or None to refuse it.
+def resolve_host(host: str) -> frozenset[str]:
+    """The numeric addresses the configured `--host` resolves to.
 
-    Only the port comes from the child. The host is derived from the
-    configured `--host` (a wildcard probes loopback), never from the child's
-    output, and a reported host that is not loopback, a wildcard or the
-    configured host refuses the start.
+    brigade-hub binds the first address `getaddrinfo` gives for that name,
+    with no family preference, so it reports one of these. Resolved once at
+    startup. An unresolvable name gives the empty set, and then only loopback
+    and wildcard reports are accepted.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return frozenset()
+    resolved = set()
+    for *_, sockaddr in infos:
+        try:
+            resolved.add(ipaddress.ip_address(str(sockaddr[0]).split("%", 1)[0]).compressed)
+        except ValueError:
+            continue
+    return frozenset(resolved)
+
+
+def probe_url(reported: tuple[str, int], resolved: frozenset[str]) -> str | None:
+    """The `/health` URL for the address brigade-hub reported, or None to refuse it.
+
+    The probe goes only to loopback or to an address the configured `--host`
+    resolved to: a reported loopback or resolved address as reported, and a
+    wildcard bind on loopback. Any other reported host refuses the start, so
+    the child's output never chooses where the watchdog connects.
     """
     host, port = reported
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         return None
-    if not (address.is_loopback or address.is_unspecified or host == configured):
+    if address.is_unspecified:
+        target = "::1" if address.version == 6 else "127.0.0.1"
+    elif address.is_loopback or address.compressed in resolved:
+        target = address.compressed
+    else:
         return None
-    return health_url(configured, port)
+    return f"http://{'[' + target + ']' if address.version == 6 else target}:{port}/health"
 
 
 def bound_address(line: bytes) -> tuple[str, int] | None:
@@ -322,7 +348,7 @@ def run(
         )
         return _supervise(
             argv,
-            host=host,
+            resolved=resolve_host(host),
             image=image,
             detail=(
                 f"brigade-hub front, managed Python upstream; db {db_path}; "
@@ -344,7 +370,7 @@ def run(
 def _supervise(
     argv: list[str],
     *,
-    host: str = "127.0.0.1",
+    resolved: frozenset[str] = frozenset({"127.0.0.1"}),
     image: int | None = None,
     detail: str,
     interval: float,
@@ -411,7 +437,7 @@ def _supervise(
         relay.start()
         reason = _watch(
             child,
-            host=host,
+            resolved=resolved,
             bound=bound,
             detail=detail,
             interval=interval,
@@ -470,7 +496,7 @@ def _relay_stderr(child: subprocess.Popen[bytes], bound: list[tuple[str, int]]) 
 def _watch(
     child: subprocess.Popen[bytes],
     *,
-    host: str,
+    resolved: frozenset[str],
     bound: list[tuple[str, int]],
     detail: str,
     interval: float,
@@ -496,7 +522,7 @@ def _watch(
                 return f"/health did not answer within {startup:g} s of startup"
             next_check = now + POLL_SECONDS
         elif now >= next_check:
-            url = probe_url(host, bound[0])
+            url = probe_url(bound[0], resolved)
             if url is None:
                 return f"brigade-hub reported a non-loopback address {bound[0][0]!r}; refusing to probe it"
             if healthy(url):

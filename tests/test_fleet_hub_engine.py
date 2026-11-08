@@ -110,7 +110,7 @@ def test_hub_argv_keeps_every_serve_flag_and_route_modes(tmp_path):
         ("0.0.0.0", "http://127.0.0.1:3774/health"),
         ("::", "http://[::1]:3774/health"),
         ("::1", "http://[::1]:3774/health"),
-        ("100.64.0.7", "http://100.64.0.7:3774/health"),
+        ("203.0.113.7", "http://203.0.113.7:3774/health"),
     ],
 )
 def test_health_url_probes_loopback_for_wildcard_binds(host, url):
@@ -298,7 +298,7 @@ def test_a_child_reporting_a_foreign_host_is_never_probed_and_the_start_is_refus
     hub, digest = _fake_hub(
         tmp_path,
         # Replaces the prelude's line: this child claims a host on the network.
-        "sys.stderr.write('listening on 10.0.0.5:8080\\n'); sys.stderr.flush()\n" + SERVE,
+        "sys.stderr.write('listening on 198.51.100.5:8080\\n'); sys.stderr.flush()\n" + SERVE,
     )
     hub.write_text(hub.read_text().replace("listening on 127.0.0.1:3774", "starting"))
     digest = hashlib.sha256(hub.read_bytes()).hexdigest()
@@ -314,8 +314,8 @@ def test_a_child_reporting_a_foreign_host_is_never_probed_and_the_start_is_refus
     assert code == 1
     assert probed == []
     captured = capsys.readouterr()
-    assert "reported a non-loopback address '10.0.0.5'" in captured.err
-    assert "listening on 10.0.0.5" not in captured.out
+    assert "reported a non-loopback address '198.51.100.5'" in captured.err
+    assert "listening on 198.51.100.5" not in captured.out
 
 
 @pytest.mark.parametrize(
@@ -325,16 +325,83 @@ def test_a_child_reporting_a_foreign_host_is_never_probed_and_the_start_is_refus
         ("0.0.0.0", ("0.0.0.0", 4000), "http://127.0.0.1:4000/health"),
         ("::", ("::", 4000), "http://[::1]:4000/health"),
         ("::1", ("::1", 4000), "http://[::1]:4000/health"),
-        # The probe host comes from the configuration, never from the child.
-        ("127.0.0.1", ("127.0.0.2", 4000), "http://127.0.0.1:4000/health"),
-        ("100.64.0.7", ("100.64.0.7", 4000), "http://100.64.0.7:4000/health"),
-        ("127.0.0.1", ("10.0.0.5", 8080), None),
+        # Loopback is always safe to probe, where the hub reports it bound.
+        ("127.0.0.1", ("127.0.0.2", 4000), "http://127.0.0.2:4000/health"),
+        # A numeric configured host resolves to itself.
+        ("203.0.113.7", ("203.0.113.7", 4000), "http://203.0.113.7:4000/health"),
+        ("127.0.0.1", ("198.51.100.5", 8080), None),
         ("127.0.0.1", ("evil.example", 8080), None),
-        ("100.64.0.7", ("100.64.0.8", 4000), None),
+        ("203.0.113.7", ("203.0.113.8", 4000), None),
     ],
 )
-def test_probe_url_takes_only_the_port_from_the_child(configured, reported, url):
-    assert fleet_hub_engine.probe_url(configured, reported) == url
+def test_probe_url_reaches_only_loopback_or_the_configured_addresses(configured, reported, url):
+    assert fleet_hub_engine.probe_url(reported, fleet_hub_engine.resolve_host(configured)) == url
+
+
+def _resolving(monkeypatch, name: str, address: str) -> None:
+    """Make `name` resolve to one documentation address, as DNS would."""
+    real = fleet_hub_engine.socket.getaddrinfo
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        if host == name:
+            return [(fleet_hub_engine.socket.AF_INET, fleet_hub_engine.socket.SOCK_STREAM, 6, "", (address, 0))]
+        return real(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(fleet_hub_engine.socket, "getaddrinfo", getaddrinfo)
+
+
+def test_a_hostname_resolves_once_to_the_addresses_it_may_bind(monkeypatch):
+    _resolving(monkeypatch, "hub.test", "203.0.113.7")
+    resolved = fleet_hub_engine.resolve_host("hub.test")
+    assert resolved == {"203.0.113.7"}
+    assert fleet_hub_engine.probe_url(("203.0.113.7", 4000), resolved) == "http://203.0.113.7:4000/health"
+    assert fleet_hub_engine.probe_url(("203.0.113.8", 4000), resolved) is None
+    assert fleet_hub_engine.resolve_host("unresolvable.invalid") == frozenset()
+
+
+def _hostname_run(tmp_path, monkeypatch, reported: str):
+    _resolving(monkeypatch, "hub.test", "203.0.113.7")
+    hub, _ = _fake_hub(tmp_path, SERVE)
+    hub.write_text(hub.read_text().replace("listening on 127.0.0.1:3774", f"listening on {reported}"))
+    digest = hashlib.sha256(hub.read_bytes()).hexdigest()
+    probed: list[str] = []
+    code = fleet_hub_engine.run(
+        host="hub.test",
+        port=4000,
+        db_path=tmp_path / "hub.db",
+        token_file=None,
+        allow_admin_writes=False,
+        require_sealed=False,
+        deck_config_path=None,
+        trust_tailscale_identity=False,
+        trust_forwarded_proto=False,
+        hub_binary=hub,
+        hub_sha256=digest,
+        env=_watchdog_env(BRIGADE_HUB_WATCHDOG_FAILURES="1"),
+        # Healthy at first, then failing, so the watchdog ends the run.
+        healthy=lambda url: probed.append(url) or len(probed) == 1,
+        only_loopback=lambda: False,
+    )
+    return code, probed
+
+
+@linux_only
+def test_a_hostname_bound_to_its_resolved_address_is_accepted_and_probed(tmp_path, monkeypatch, capsys):
+    code, probed = _hostname_run(tmp_path, monkeypatch, "203.0.113.7:4000")
+    # The first probe succeeded and printed the banner; the watchdog stopped it later.
+    assert probed and set(probed) == {"http://203.0.113.7:4000/health"}
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "listening on 203.0.113.7:4000 (" in captured.out
+    assert "non-loopback address" not in captured.err
+
+
+@linux_only
+def test_a_hostname_child_reporting_another_address_is_refused(tmp_path, monkeypatch, capsys):
+    code, probed = _hostname_run(tmp_path, monkeypatch, "203.0.113.8:4000")
+    assert code == 1
+    assert probed == []
+    assert "reported a non-loopback address '203.0.113.8'" in capsys.readouterr().err
 
 
 def test_bound_address_reads_brigade_hub_listening_lines():
