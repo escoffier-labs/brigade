@@ -239,10 +239,11 @@ class Prepublish(unittest.TestCase):
             finally:
                 self.stop_clean(hub)
 
+    @unittest.skipIf(os.geteuid() == 0, "root reads an execute-only file, so the open cannot be made to fail")
     def test_without_its_image_descriptor_the_hub_exits_and_execs_nothing(self):
         """No pathname fallback: if /proc/self/exe cannot be opened for the
         descriptor-limit re-exec, brigade-hub exits 2 before running anything."""
-        import resource
+        import shutil
 
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
@@ -250,20 +251,20 @@ class Prepublish(unittest.TestCase):
             python = work / "python"
             python.write_text(f"#!/bin/sh\necho ran > {marker}\nexit 0\n")
             python.chmod(0o755)
+            # Execute-only: exec needs only the execute bit, but opening the
+            # image for reading, as /proc/self/exe does, is refused.
+            hub = work / "brigade-hub"
+            shutil.copyfile(BINARY, hub)
+            hub.chmod(0o111)
             env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BRIGADE_HUB_PYTHON": str(python)}
-            argv = [str(BINARY), "--host", "127.0.0.1", "--port", "0", "--db", str(work / "hub.db")]
-
-            def starved():
-                # Only stdin, stdout and stderr: the open of /proc/self/exe fails.
-                _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-                resource.setrlimit(resource.RLIMIT_NOFILE, (3, hard))
-
-            result = subprocess.run(argv, env=env, cwd=work, preexec_fn=starved, capture_output=True, timeout=30)
+            argv = [str(hub), "--host", "127.0.0.1", "--port", "0", "--db", str(work / "hub.db")]
+            result = subprocess.run(argv, env=env, cwd=work, capture_output=True, timeout=30)
             self.assertEqual(result.returncode, 2, result.stderr[-500:])
             self.assertIn(b"cannot open its own image (/proc/self/exe)", result.stderr)
             self.assertFalse(marker.exists(), "brigade-hub executed something without its image descriptor")
-            # Control: with descriptors available it re-execs through the
-            # interpreter, which the marker records, so the check above can fail.
+            # Control: a readable image re-execs through the interpreter, which
+            # the marker records, so the check above can fail.
+            hub.chmod(0o755)
             subprocess.run(argv, env=env, cwd=work, capture_output=True, timeout=30)
             self.assertTrue(marker.exists(), "the control run did not exec the interpreter")
 
