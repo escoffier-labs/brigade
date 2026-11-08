@@ -73,7 +73,12 @@ def _names(text: str) -> tuple[list[str], list[str]]:
                 raise ValueError("malformed aliases") from None
             if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
                 raise ValueError("malformed aliases")
-            if len(items) > MAX_ALIASES or any(len(item.encode()) > MAX_ALIAS_BYTES for item in items):
+            try:
+                oversized = any(len(item.encode()) > MAX_ALIAS_BYTES for item in items)
+            except UnicodeEncodeError:
+                # An unpaired surrogate is not valid UTF-8, so the hub would refuse it too.
+                raise ValueError("malformed aliases") from None
+            if len(items) > MAX_ALIASES or oversized:
                 raise ValueError("malformed aliases")
             into.extend(item.strip() for item in items)
         else:

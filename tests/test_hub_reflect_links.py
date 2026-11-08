@@ -563,6 +563,13 @@ def test_an_alias_qualified_for_another_scope_is_not_indexed():
         assert submissions == [] and skipped == {"link_no_target": 1}, alias
 
 
+def test_an_alias_with_an_unpaired_surrogate_is_malformed_not_a_crash():
+    card = head("bad", card_text("Bad.", "c-dddddd", 'aliases: ["\\ud800"]'))
+    submissions, skipped, _ = unit([head("src", card_text("See [[bad-name]].")), card])
+    assert submissions == [] and skipped == {"link_no_target": 1}
+    assert links.Index([card]).info[(SCOPE, "bad")][2] is False
+
+
 def test_two_retired_cards_sharing_a_name_are_ambiguous_even_with_one_successor():
     heads = [
         head("src", card_text("See [[Old Guide]].")),
