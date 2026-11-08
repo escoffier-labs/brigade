@@ -4,7 +4,9 @@
   `seq` watermark, the `log_epoch` and the principal they were pulled under,
   and the read scopes they cover. A rebuild goes into `replica.building/` and
   is swapped in when the pull finishes; the old replica is removed first, so
-  nothing ever answers from it again.
+  nothing ever answers from it again. The heads snapshot is named by its digest
+  (`heads-<sha256>.json`) and `meta.json` names it, so replacing `meta.json`
+  publishes both and an interrupted save leaves the previous pair intact.
 - `spool/<hub>/`: writes the hub has not acknowledged, one file per entry
   named by its time-ordered `client_event_id`, so name order is send order.
   Each hub has its own directory, so entries for one hub never block or count
@@ -48,6 +50,8 @@ BUILDING = "replica.building"
 SPOOL = "spool"
 PROPOSALS = "proposals"
 PUBLISHED = "published.json"
+LEGACY_HEADS = "heads.json"
+_HEX = frozenset("0123456789abcdef")
 LOCK = "lock"
 PULL_LOCK = "pull.lock"
 DROPPED = "dropped"
@@ -195,8 +199,18 @@ def write_json(path: Path, value: Any) -> None:
 
 
 def head_size(key: str, head: dict[str, Any]) -> int:
-    """Bytes `head` adds to `heads.json`, which is what `replica_max_mb` caps."""
+    """Bytes `head` adds to the heads snapshot, which is what `replica_max_mb` caps."""
     return len(_dumps({key: head}).encode("utf-8"))
+
+
+def heads_path(directory: Path, meta: dict[str, Any]) -> Path:
+    """The heads snapshot `meta` names, or `heads.json` for a replica saved before snapshot digests."""
+    digest = meta.get("heads_sha256")
+    if digest is None:
+        return directory / LEGACY_HEADS
+    if not (isinstance(digest, str) and len(digest) == 64 and set(digest) <= _HEX):
+        raise StoreError("invalid replica snapshot digest")
+    return directory / f"heads-{digest}.json"
 
 
 class Replica:
@@ -204,15 +218,21 @@ class Replica:
 
     def __init__(self, directory: Path) -> None:
         self.directory = directory
-        meta = read_json(directory / "meta.json", max_bytes=limits.MAX_META_BYTES) if directory.is_dir() else None
-        self.meta: dict[str, Any] = meta if isinstance(meta, dict) else {}
-        heads = (
-            limits.read_heads(directory / "heads.json", self.meta)
-            if self.meta and limits.active()
-            else read_json(directory / "heads.json")
-            if self.meta
-            else None
-        )
+        self.meta: dict[str, Any] = {}
+        heads = None
+        # A save replaces meta.json and then removes the snapshot the old one
+        # named. A reader that read the old meta.json in between retries once.
+        for _ in range(2):
+            meta = read_json(directory / "meta.json", max_bytes=limits.MAX_META_BYTES) if directory.is_dir() else None
+            self.meta = meta if isinstance(meta, dict) else {}
+            if not self.meta:
+                break
+            path = heads_path(directory, self.meta)
+            heads = limits.read_heads(path, self.meta) if limits.active() else read_json(path)
+            if heads is not None:
+                break
+        if heads is None and limits.active() and self.meta.get("heads_sha256") is not None:
+            raise StoreError("replica snapshot missing")
         self.heads: dict[str, dict[str, Any]] = heads if isinstance(heads, dict) else {}
 
     @staticmethod
@@ -273,8 +293,16 @@ class Replica:
         if len(metadata.encode("utf-8")) > limits.MAX_META_BYTES:
             raise limits.ReplicaLimitError("metadata")
         private_dir(self.directory)
-        write_json(self.directory / "heads.json", self.heads)
-        write_json(self.directory / "meta.json", self.meta)
+        # Snapshot first under its own name, then meta.json naming it: each is an
+        # atomic replace, so a reader sees the old pair or the new one, never a mix.
+        current = heads_path(self.directory, self.meta)
+        write_private(current, snapshot)
+        write_private(self.directory / "meta.json", metadata)
+        for stale in (self.directory / LEGACY_HEADS, *self.directory.glob("heads-*.json")):
+            if stale != current:
+                # A reader may hold it open on Windows; the next save removes it.
+                with contextlib.suppress(OSError):
+                    stale.unlink(missing_ok=True)
 
 
 def replica(target: Path) -> Replica:

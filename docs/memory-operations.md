@@ -1236,9 +1236,13 @@ candidate memory. They do not load an unbounded hub corpus.
 `hub_reflect_replica_limit` names the replica byte cap. Both fail closed before
 submitting proposals. Narrow the configured read scopes for a dedicated run.
 Before loading an existing replica or an interrupted rebuild, reflection
-checks the on-disk `heads.json` size. A file above the 64 MiB ceiling plus
-1 MiB of serialization slack is refused with `hub_reflect_replica_limit`
-before JSON parsing. Reflect also limits the whole selected replica to 50,000
+checks the size of every on-disk heads snapshot (`heads-<sha256>.json`, or
+`heads.json` for a replica saved by an older release). A file above the 64 MiB
+ceiling plus 1 MiB of serialization slack is refused with
+`hub_reflect_replica_limit` before JSON parsing. A save writes the new snapshot
+under its digest name and then replaces `meta.json`, which names it, so an
+interrupted save leaves the previous snapshot and metadata in place and the
+next pull continues from them. Reflect also limits the whole selected replica to 50,000
 live cards, including unscoped runs. Sync replays the log as metadata first,
 so a card put and later retired never counts toward the bound or costs a body
 fetch. Once the replay reaches the log head, sync checks the live count before

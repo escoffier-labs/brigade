@@ -214,10 +214,13 @@ def _check_replica_files(target: Path, *, scope: str | None, dry_run: bool) -> N
     """Refuse oversized on-disk snapshots before the replica loader can parse them."""
     for directory in (store.REPLICA, store.BUILDING):
         root = store.root(target) / directory
-        try:
-            size = (root / "heads.json").stat(follow_symlinks=False).st_size
-        except FileNotFoundError:
-            size = 0
+        size = 0
+        # Every snapshot generation, legacy name included, without trusting meta.json to name it.
+        for path in (root / store.LEGACY_HEADS, *(root.glob("heads-*.json") if root.is_dir() else ())):
+            try:
+                size = max(size, path.stat(follow_symlinks=False).st_size)
+            except FileNotFoundError:
+                pass
         if size > MAX_REPLICA_BYTES + REPLICA_FILE_SLACK:
             raise ReflectError(
                 "hub_reflect_replica_limit",

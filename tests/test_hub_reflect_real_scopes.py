@@ -364,12 +364,13 @@ def test_reject_without_policy_pin_is_allowed(setup, capsys, monkeypatch):
     assert len(calls) == 1 and "expected_policy_digest" not in calls[0]
 
 
+@pytest.mark.parametrize("name", ["heads.json", f"heads-{'0' * 64}.json"])
 @pytest.mark.parametrize("directory", ["replica", "replica.building"])
-def test_oversized_disk_heads_are_refused_before_parsing(setup, capsys, monkeypatch, directory):
+def test_oversized_disk_heads_are_refused_before_parsing(setup, capsys, monkeypatch, directory, name):
     from brigade import memory_hub_store as store
 
     target, hub, _ = setup
-    path = store.root(target) / directory / "heads.json"
+    path = store.root(target) / directory / name
     path.parent.mkdir(parents=True)
     with path.open("wb") as file:
         file.truncate(66 * 1024 * 1024)
@@ -392,7 +393,7 @@ def test_scoped_non_dry_run_refuses_shared_replica_without_eviction(setup, capsy
     add_group(hub, scope="repo:example")
     settings = hubc.load_settings(target)
     sync.pull(target, hubc.client_for(settings), settings)
-    path = store.root(target) / "replica" / "heads.json"
+    path = store.heads_path(store.root(target) / "replica", store.replica(target).meta)
     before = path.read_bytes()
     hub.calls.clear()
     code, report = run(target, capsys, "run", "--scope", "fleet")
