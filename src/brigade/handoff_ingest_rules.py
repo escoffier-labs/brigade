@@ -92,12 +92,14 @@ def _parse_frontmatter_block(lines: list[str]) -> tuple[dict[str, object], str |
     for line in lines:
         if not line.strip() or line.lstrip().startswith("#"):
             continue
+        stripped = line.strip()
+        # YAML allows the entries of a block list at the same indent as its key.
+        if current_list is not None and (stripped.startswith("- ") or stripped == "-"):
+            items = fields[current_list]
+            assert isinstance(items, list)
+            items.append(_strip_quotes(stripped[1:]))
+            continue
         if line[0] in " \t":
-            stripped = line.strip()
-            if current_list is not None and stripped.startswith("- "):
-                items = fields[current_list]
-                assert isinstance(items, list)
-                items.append(_strip_quotes(stripped[2:]))
             continue
         current_list = None
         if ":" not in line:
@@ -105,7 +107,7 @@ def _parse_frontmatter_block(lines: list[str]) -> tuple[dict[str, object], str |
         key, value = line.split(":", 1)
         key = _strip_quotes(key)
         if key in fields:
-            return fields, f"card frontmatter repeats the key {key!r}"
+            return fields, "card frontmatter repeats a key"
         value = value.strip()
         flow = _FLOW_LIST_RE.fullmatch(value)
         if flow:
@@ -208,16 +210,22 @@ def sha_matches(existing: bytes, expected: str) -> bool:
     return sha256_hex(existing) == expected.strip().lower()
 
 
-def document_handoff_problems(*, document: str, content: str, workspace: Path | None) -> list[str]:
-    """Problems for a no-card handoff: allow-listed target and bootstrap budget."""
-    if not safe_document_target(document):
-        return [
-            f"unsafe target document {document!r}: use one of "
-            + ", ".join(sorted(SAFE_SPECIAL_TARGETS))
-            + ", or rules/<name>.md"
-        ]
-    problem = bootstrap_budget_problem(document, content, workspace)
-    return [problem] if problem else []
+def document_destination_problem(document: str, workspace: Path | None) -> str | None:
+    """Reason a document destination is unsafe to append to, or None.
+
+    Every component below the workspace root must be a real directory or file, so a
+    permitted name such as USER.md cannot be a link that leaves the workspace.
+    """
+    if workspace is None:
+        return None
+    path = workspace
+    for part in Path(document).parts:
+        path = path / part
+        if path.is_symlink():
+            return "target document path contains a symlink; the ingester will not write through it"
+    if path.exists() and not path.is_file():
+        return "target document is not a regular file"
+    return None
 
 
 def bootstrap_budget_problem(document: str, content: str, workspace: Path | None) -> str | None:
@@ -225,8 +233,6 @@ def bootstrap_budget_problem(document: str, content: str, workspace: Path | None
     if workspace is None:
         return None
     dest = workspace / document
-    if dest.is_symlink():
-        return None
     would_exceed, budget = budgets.route_would_exceed_budget(dest, "\n\n" + content.strip() + "\n")
     if not would_exceed:
         return None

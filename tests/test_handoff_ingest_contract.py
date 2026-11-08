@@ -409,3 +409,179 @@ def test_draft_cli_fills_the_sha_and_lint_cli_accepts_the_result(tmp_path: Path,
     assert rc == 0
     path = Path(json.loads(capsys.readouterr().out)["path"])
     assert handoff_cmd.lint(target=tmp_path, paths=[path], workspace=ws, json_output=True) == 0
+
+
+# --- review round 1: publish race, block lists, symlinked documents, echo ------
+
+
+def _execute(ws: Path, handoff: Path, outcome):
+    inbox = handoff.parent
+    return ingest_mod._execute(
+        outcome,
+        handoff,
+        ws,
+        ingest_mod.parse(handoff),
+        ws / "memory" / "handoff-inbox",
+        inbox / "processed",
+        False,
+    )
+
+
+def _update_handoff(tmp_path: Path) -> tuple[Path, Path]:
+    ws = _workspace(tmp_path)
+    payload = _draft(tmp_path, action="update-card", target_card="contract-card.md", content=UPDATED)
+    return ws, Path(payload["path"])
+
+
+def test_stale_card_between_decide_and_publish_is_routed_to_review(tmp_path: Path):
+    ws, handoff = _update_handoff(tmp_path)
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
+    assert outcome.kind == "promoted"
+    card = ws / "memory" / "cards" / "contract-card.md"
+    edited = CARD + "\nA newer edit made after decide().\n"
+    card.write_text(edited, encoding="utf-8")
+    action = _execute(ws, handoff, outcome)
+    assert action.kind == "inboxed"
+    assert "no longer matches contract-card.md" in action.summary
+    assert card.read_text(encoding="utf-8") == edited
+    assert list((ws / "memory" / "handoff-inbox").glob("*.md"))
+
+
+def test_card_deleted_between_decide_and_publish_is_routed_to_review(tmp_path: Path):
+    ws, handoff = _update_handoff(tmp_path)
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
+    (ws / "memory" / "cards" / "contract-card.md").unlink()
+    action = _execute(ws, handoff, outcome)
+    assert action.kind == "inboxed"
+    assert not (ws / "memory" / "cards" / "contract-card.md").exists()
+
+
+def test_unchanged_card_is_published_under_the_expected_sha(tmp_path: Path):
+    ws, handoff = _update_handoff(tmp_path)
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
+    assert _execute(ws, handoff, outcome).kind == "promoted"
+    assert "revised" in (ws / "memory" / "cards" / "contract-card.md").read_text(encoding="utf-8")
+
+
+UNINDENTED_LIST = CARD.replace("tags: [memory, handoff]", "tags:\n- memory\n- handoff")
+
+
+def test_unindented_block_list_is_accepted_by_lint_draft_and_ingest(tmp_path: Path):
+    assert card_frontmatter_problems(UNINDENTED_LIST) == []
+    assert linting.lint_text(_handoff_text("create-card", content=UNINDENTED_LIST)).valid
+    payload = _draft(tmp_path, action="create-card", target_card="listed.md", content=UNINDENTED_LIST)
+    assert payload["valid"] is True
+    sections = ingest_mod.parse(Path(payload["path"]))
+    assert ingest_mod.decide(sections, tmp_path, promote_cards=True, route_documents=True).kind == "promoted"
+
+
+def test_unindented_list_entries_do_not_leak_into_the_next_key():
+    # A dash line after a flow list or scalar belongs to no list, so it stays invalid.
+    scalar_then_dash = CARD.replace("tags: [memory, handoff]", "tags: [memory]\n- stray")
+    assert card_frontmatter_problems(scalar_then_dash) == ["card frontmatter has a line that is not `key: value`"]
+    empty_tags = CARD.replace("tags: [memory, handoff]", "tags:\nlabel: x")
+    assert card_frontmatter_problems(empty_tags) == []  # an empty list is still a list
+
+
+def test_repeated_frontmatter_key_message_never_echoes_content():
+    leaky = CARD.replace(
+        "category: foundation\n", "category: foundation\nsecret-token-key: one\nsecret-token-key: two\n"
+    )
+    assert card_frontmatter_problems(leaky) == ["card frontmatter repeats a key"]
+    result = linting.lint_text(_handoff_text("create-card", content=leaky))
+    assert "secret-token-key" not in "\n".join(result.errors + result.warnings)
+
+
+def _escape_setup(tmp_path: Path) -> tuple[Path, Path]:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    return ws, outside
+
+
+def test_lint_and_draft_reject_a_symlinked_document_destination(tmp_path: Path):
+    ws, outside = _escape_setup(tmp_path)
+    (outside / "target.md").write_text("outside\n", encoding="utf-8")
+    (ws / "USER.md").symlink_to(outside / "target.md")
+    result = linting.lint_text(_doc_handoff_text("USER.md"), workspace=ws)
+    assert any("contains a symlink" in error for error in result.errors)
+    with pytest.raises(drafts.HandoffDraftRefused) as refused:
+        drafts.build_draft(
+            target=ws,
+            title="T",
+            summary="S.",
+            action="no-card",
+            target_document="USER.md",
+            content="x",
+            inbox=str(ws / "in"),
+        )
+    assert "contains a symlink" in refused.value.problems[0]
+
+
+def test_lint_rejects_a_symlinked_ancestor_and_a_dangling_link(tmp_path: Path):
+    ws, outside = _escape_setup(tmp_path)
+    (ws / "rules").symlink_to(outside, target_is_directory=True)
+    assert any("symlink" in e for e in linting.lint_text(_doc_handoff_text("rules/x.md"), workspace=ws).errors)
+    (ws / ".learnings").mkdir()
+    (ws / ".learnings" / "LEARNINGS.md").symlink_to(outside / "missing.md")
+    assert any(
+        "symlink" in e for e in linting.lint_text(_doc_handoff_text(".learnings/LEARNINGS.md"), workspace=ws).errors
+    )
+
+
+def test_ingest_decide_sends_a_symlinked_document_to_review(tmp_path: Path):
+    ws, outside = _escape_setup(tmp_path)
+    (outside / "target.md").write_text("outside\n", encoding="utf-8")
+    (ws / "USER.md").symlink_to(outside / "target.md")
+    sections = {
+        "type": "workflow",
+        "title": "T",
+        "summary": "S.",
+        "recommended memory action": "no-card",
+        "target document": "USER.md",
+        "suggested document content": "A note.",
+    }
+    outcome = ingest_mod.decide(sections, ws, promote_cards=True, route_documents=True)
+    assert outcome.kind == "inboxed" and "symlink" in outcome.reason
+    assert (outside / "target.md").read_text(encoding="utf-8") == "outside\n"
+
+
+def test_document_swapped_for_a_symlink_after_decide_is_not_written_through(tmp_path: Path):
+    ws, outside = _escape_setup(tmp_path)
+    (ws / "USER.md").write_text("mine\n", encoding="utf-8")
+    (outside / "target.md").write_text("outside\n", encoding="utf-8")
+    payload = drafts.build_draft(
+        target=ws,
+        title="T",
+        summary="S.",
+        action="no-card",
+        target_document="USER.md",
+        content="A note.",
+        inbox=str(ws / "in"),
+    )
+    handoff = Path(payload["path"])
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
+    assert outcome.kind == "routed"
+    (ws / "USER.md").unlink()
+    (ws / "USER.md").symlink_to(outside / "target.md")
+    action = _execute(ws, handoff, outcome)
+    assert action.kind == "inboxed"
+    assert (outside / "target.md").read_text(encoding="utf-8") == "outside\n"
+
+
+def test_document_append_creates_missing_directories_and_appends(tmp_path: Path):
+    ws, _ = _escape_setup(tmp_path)
+    payload = drafts.build_draft(
+        target=ws,
+        title="T",
+        summary="S.",
+        action="no-card",
+        target_document="rules/team.md",
+        content="Do it.",
+        inbox=str(ws / "in"),
+    )
+    handoff = Path(payload["path"])
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
+    assert _execute(ws, handoff, outcome).kind == "routed"
+    assert (ws / "rules" / "team.md").read_text(encoding="utf-8") == "\n\nDo it.\n"

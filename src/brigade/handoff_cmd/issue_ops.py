@@ -23,6 +23,7 @@ from ..handoff_ingest_rules import (
     bootstrap_budget_problem,
     card_frontmatter_problems,
     card_state_problems,
+    document_destination_problem,
     safe_document_target,
 )
 from ..localio import write_json as _write_json
@@ -591,11 +592,12 @@ def _lint_no_card_action(
     elif any(line.startswith("## ") for line in suggested_document.splitlines()):
         errors.append("Suggested document content must not contain level-2 markdown headings")
     elif ingest_routes and target_document and _valid_document_target(target_document.splitlines()[0].strip()):
+        destination_problem = document_destination_problem(target_document.splitlines()[0].strip(), workspace)
         budget_problem = bootstrap_budget_problem(
             target_document.splitlines()[0].strip(), suggested_document, workspace
         )
-        if budget_problem:
-            errors.append(budget_problem)
+        if destination_problem or budget_problem:
+            errors.append(destination_problem or str(budget_problem))
 
     for prohibited in ("Target card", EXPECTED_SHA_SECTION, "Suggested card content"):
         if prohibited in sections:

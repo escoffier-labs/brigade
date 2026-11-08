@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
+from . import dirfd
 from .card_fingerprint import (
     CardMatch,
     ensure_card_id_frontmatter,
@@ -33,9 +35,11 @@ from .handoff_ingest_rules import (
     EXPECTED_SHA_SECTION,
     SHA256_RE,
     bootstrap_budget_problem,
+    document_destination_problem,
     safe_card_name,
     read_card_bytes,
     safe_document_target,
+    sha256_hex,
     sha_matches,
 )
 from .selection import WRITER_INBOXES
@@ -80,6 +84,10 @@ _GIT_LOCATION_ENV = (
     "GIT_CEILING_DIRECTORIES",
 )
 _TRACKED_SKIP_REASON = "tracked by git or tracking unverifiable; left in place"
+
+
+class StaleCardError(OSError):
+    """The card no longer matches the expected SHA a handoff was written against."""
 
 
 class TrackedHandoffError(RuntimeError):
@@ -403,6 +411,9 @@ def decide(
             return Outcome("inboxed", reason="no-card handoff missing target document")
         if not safe_document_target(document):
             return Outcome("inboxed", reason=f"target document not in safe list: {document!r}")
+        destination_problem = document_destination_problem(document, target)
+        if destination_problem:
+            return Outcome("inboxed", reason=destination_problem)
         if not content.strip():
             return Outcome("inboxed", reason="empty document content")
         if "\n## " in ("\n" + content):
@@ -474,7 +485,9 @@ class Action:
     summary: str
 
 
-def _publish_promoted_card(dest: Path, target: Path, sections: Dict[str, str], *, dry_run: bool) -> None:
+def _publish_promoted_card(
+    dest: Path, target: Path, sections: Dict[str, str], *, dry_run: bool, expected_sha: str = ""
+) -> None:
     from contextlib import nullcontext
     import os
     import stat
@@ -508,6 +521,11 @@ def _publish_promoted_card(dest: Path, target: Path, sections: Dict[str, str], *
     # does not require proposal IO's stricter directory-descriptor capability.
     with nullcontext() if dry_run else held_file_lock(lock_path, deadline_seconds=1):
         raw = inspect(dest)
+        # decide() compared the SHA without the lock. Compare the bytes on disk again
+        # under it, so a card edited since then is never replaced by a stale handoff.
+        # The write below is bound to this revision, so it cannot change after this check.
+        if expected_sha and (raw is None or sha256_hex(dest.read_bytes()) != expected_sha):
+            raise StaleCardError("expected card SHA256 no longer matches the card")
         content = ensure_fingerprint_frontmatter(sections.get("suggested card content", "").strip() + "\n")
         existing, _ = _frontmatter(raw or "")
         existing_id = valid_card_id(existing.get("id")) or valid_card_id(existing.get("card_id"))
@@ -559,6 +577,45 @@ def _publish_promoted_card(dest: Path, target: Path, sections: Dict[str, str], *
             write_text_nofollow_atomic(dest, content, lstat_probe=probe)
 
 
+def _append_document_nofollow(target: Path, dest: Path, text: str) -> None:
+    """Append to a routed document without following a link anywhere below the workspace.
+
+    The parent directory is opened by descriptor from the resolved workspace root,
+    and the leaf is opened relative to it with no-follow. Without descriptor support
+    the path is re-checked immediately before a plain append.
+    """
+    root = target.resolve()
+    relative = dest.relative_to(target).as_posix()
+    problem = document_destination_problem(relative, root)
+    if problem:
+        raise OSError(problem)
+    resolved = root / relative
+    try:
+        flags = dirfd.file_flags(os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+        use_descriptors = dirfd.available()
+    except OSError:
+        use_descriptors = False
+    if not use_descriptors:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        with resolved.open("a", encoding="utf-8") as handle:
+            handle.write(text)
+        return
+    parent = dirfd.open_directory_chain(resolved.parent, create=True)
+    try:
+        descriptor = dirfd.open_child_file(parent, resolved.name, flags, 0o644)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise OSError("target document is not a regular file")
+            with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+                descriptor = -1
+                handle.write(text)
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+    finally:
+        os.close(parent)
+
+
 def _execute(
     outcome: Outcome,
     handoff_path: Path,
@@ -579,15 +636,23 @@ def _execute(
     if outcome.kind == "promoted":
         dest = outcome.dest
         assert dest is not None
+        expected_sha = ""
+        if sections.get("recommended memory action", "").strip().lower() == "update-card":
+            expected_sha = sections.get(EXPECTED_SHA_SECTION.lower(), "").strip().lower()
         try:
-            _publish_promoted_card(dest, target, sections, dry_run=dry_run)
+            _publish_promoted_card(dest, target, sections, dry_run=dry_run, expected_sha=expected_sha)
         except InboxLockTimeout:
             return Action("skipped", f"skip → {name} (card publication busy; retry handoff later)")
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
             # A reviewed migration may have arrived after decide(). Route the
             # original handoff for review without replacing that revision.
+            reason = (
+                f"update-card {EXPECTED_SHA_SECTION} no longer matches {dest.name}; requires review"
+                if isinstance(exc, StaleCardError)
+                else "card publication changed or became governed; requires review"
+            )
             return _execute(
-                Outcome("inboxed", reason="card publication changed or became governed; requires review"),
+                Outcome("inboxed", reason=reason),
                 handoff_path,
                 target,
                 sections,
@@ -621,9 +686,18 @@ def _execute(
         content = sections.get("suggested document content", "").strip()
         summary = f"append → {dest.relative_to(target)}  ({name})"
         if not dry_run:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with dest.open("a", encoding="utf-8") as f:
-                f.write("\n\n" + content + "\n")
+            try:
+                _append_document_nofollow(target, dest, "\n\n" + content + "\n")
+            except OSError:
+                return _execute(
+                    Outcome("inboxed", reason="document destination is linked or unwritable; requires review"),
+                    handoff_path,
+                    target,
+                    sections,
+                    inbox_dir,
+                    processed_dir,
+                    dry_run,
+                )
             _archive(handoff_path, processed_dir)
         return Action("routed", summary)
 
