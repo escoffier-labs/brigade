@@ -759,7 +759,7 @@ def _resolve_expected_sha(workspace: Path, target_card: str, explicit: str | Non
     if current is None:
         raise HandoffDraftRefused(
             [
-                f"update-card target {target_card} does not exist under {workspace / CARDS_RELATIVE}. "
+                f"update-card target card does not exist under {workspace / CARDS_RELATIVE}. "
                 "Use --action create-card or fix --target-card"
             ]
         )

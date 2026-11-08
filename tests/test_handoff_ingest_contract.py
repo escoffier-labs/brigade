@@ -8,6 +8,7 @@ without writing a file.
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 from pathlib import Path
 
@@ -16,7 +17,7 @@ import pytest
 from brigade import budgets, handoff_cmd, ingest as ingest_mod
 from brigade.handoff_cmd import drafts, linting
 from brigade.handoff_ingest_rules import (
-    _strip_yaml_comment,
+    _parse_frontmatter_block,
     card_frontmatter_problems,
     safe_card_name,
     safe_document_target,
@@ -104,7 +105,7 @@ def test_lint_rejects_malformed_expected_sha(tmp_path: Path):
 def test_lint_rejects_stale_expected_sha(tmp_path: Path):
     ws = _workspace(tmp_path)
     result = linting.lint_text(_handoff_text("update-card", sha="0" * 64), workspace=ws)
-    assert any("does not match the current contract-card.md" in error for error in result.errors)
+    assert any("does not match the current card" in error for error in result.errors)
 
 
 def test_lint_accepts_matching_expected_sha(tmp_path: Path):
@@ -330,7 +331,7 @@ def test_ingest_inboxes_an_update_card_whose_expected_sha_is_stale(tmp_path: Pat
     (ws / "memory" / "cards" / "contract-card.md").write_bytes((CARD + "\nEdited after the draft.\n").encode("utf-8"))
     outcome = ingest_mod.decide(ingest_mod.parse(Path(payload["path"])), ws, promote_cards=True, route_documents=True)
     assert outcome.kind == "inboxed"
-    assert "does not match current contract-card.md" in outcome.reason
+    assert "does not match the current card" in outcome.reason
 
 
 def test_ingest_still_promotes_update_card_without_the_optional_sha_section(tmp_path: Path):
@@ -447,7 +448,7 @@ def test_stale_card_between_decide_and_publish_is_routed_to_review(tmp_path: Pat
     card.write_bytes(edited.encode("utf-8"))
     action = _execute(ws, handoff, outcome)
     assert action.kind == "inboxed"
-    assert "no longer matches contract-card.md" in action.summary
+    assert "no longer matches the card" in action.summary
     assert card.read_text(encoding="utf-8") == edited
     assert list((ws / "memory" / "handoff-inbox").glob("*.md"))
 
@@ -614,21 +615,21 @@ def test_a_crlf_card_gets_one_sha_in_draft_lint_and_ingest(tmp_path: Path):
 def test_a_bytes_only_change_at_the_publish_boundary_is_routed_to_review(tmp_path: Path, monkeypatch):
     # Two different invalid bytes decode to the same replacement character, so a text
     # comparison cannot see the swap. Only an exact byte comparison can.
-    from brigade import card_fingerprint
-
     card = tmp_path / "memory" / "cards" / "contract-card.md"
     card.parent.mkdir(parents=True)
     card.write_bytes(CARD.encode("utf-8") + b"\xff\n")
     payload = _draft(tmp_path, action="update-card", target_card="contract-card.md", content=UPDATED)
     handoff = Path(payload["path"])
     outcome = ingest_mod.decide(ingest_mod.parse(handoff), tmp_path, promote_cards=True, route_documents=True)
-    real = card_fingerprint.write_text_nofollow_atomic
+    real = ingest_mod.dirfd.open_child_file
 
-    def swap_then_write(path, data, **kwargs):
-        card.write_bytes(CARD.encode("utf-8") + b"\xfe\n")
-        return real(path, data, **kwargs)
+    def swap_after_staging(parent, name, flags, *args, **kwargs):
+        descriptor = real(parent, name, flags, *args, **kwargs)
+        if name.startswith(".contract-card.md."):  # the staged copy was just created
+            card.write_bytes(CARD.encode("utf-8") + b"\xfe\n")
+        return descriptor
 
-    monkeypatch.setattr(card_fingerprint, "write_text_nofollow_atomic", swap_then_write)
+    monkeypatch.setattr(ingest_mod.dirfd, "open_child_file", swap_after_staging)
     action = _execute(tmp_path, handoff, outcome)
     assert action.kind == "inboxed"
     assert card.read_bytes() == CARD.encode("utf-8") + b"\xfe\n"
@@ -697,7 +698,7 @@ def test_refusal_reasons_never_contain_handoff_text(tmp_path: Path):
         assert outcome.kind in {"inboxed", "skipped"}, sections
         assert secret not in outcome.reason, outcome.reason
     anchor = ingest_mod.decide(cases[0], ws, promote_cards=True, route_documents=True)
-    assert anchor.reason == "document anchor already present in USER.md"
+    assert anchor.reason == "document anchor already present in the target document"
 
 
 def test_lint_unsafe_document_message_does_not_echo_the_target():
@@ -706,15 +707,41 @@ def test_lint_unsafe_document_message_does_not_echo_the_target():
     assert not any("SECRET-TOKEN" in e for e in result.errors)
 
 
+def _value(raw: str):
+    fields, problem = _parse_frontmatter_block([f"key: {raw}"])
+    return problem if problem else fields["key"]
+
+
+MALFORMED = "card frontmatter has a malformed value (unterminated quote or list)"
+
+
 def test_yaml_comments_are_stripped_outside_quotes_only():
-    assert _strip_yaml_comment("[memory] # indexing tags") == "[memory]"
-    assert _strip_yaml_comment("[memory]  #tight") == "[memory]"
-    assert _strip_yaml_comment("# only a comment") == ""
-    assert _strip_yaml_comment('"foundation # kept"') == '"foundation # kept"'
-    assert _strip_yaml_comment("'a # b' # dropped") == "'a # b'"
-    assert _strip_yaml_comment('"a \\" # still quoted" # dropped') == '"a \\" # still quoted"'
-    assert _strip_yaml_comment("[a#b, c]") == "[a#b, c]"
-    assert _strip_yaml_comment("it's fine # dropped") == "it's fine"
+    assert _value("[memory] # indexing tags") == ["memory"]
+    assert _value("[memory]  #tight") == ["memory"]
+    assert _value('"foundation # kept"') == "foundation # kept"
+    assert _value("'a # b' # dropped") == "a # b"
+    assert _value('"a \\" # still quoted" # dropped') == 'a " # still quoted'
+    assert _value("[a#b, c]") == ["a#b", "c"]
+    assert _value("a#b") == "a#b"
+    assert _value("[\"a # b\", 'c, d']") == ["a # b", "c, d"]
+
+
+def test_unterminated_quotes_and_lists_are_rejected_without_echoing_text():
+    for raw in ['[a, "b]', "['x # y]", '"unterminated # not a comment', "'open", "[a, b", '["a" b]', '"a" b']:
+        assert _value(raw) == MALFORMED, raw
+    assert "SECRET" not in MALFORMED
+    # The same rejection reaches lint and draft.
+    broken = CARD.replace("tags: [memory, handoff]", 'tags: [memory, "SECRET-TOKEN-9d41]')
+    assert card_frontmatter_problems(broken) == [MALFORMED]
+    assert not linting.lint_text(_handoff_text("create-card", content=broken)).valid
+
+
+def test_a_quote_inside_a_plain_scalar_is_ordinary_text():
+    assert _value("it's fine # dropped") == "it's fine"
+    assert _value('say "hi" there') == 'say "hi" there'
+    assert _value("[it's, ok]") == ["it's", "ok"]
+    plain = CARD.replace("topic: contract-card", 'topic: the card\'s "plain" topic')
+    assert card_frontmatter_problems(plain) == []
 
 
 def test_frontmatter_with_trailing_comments_is_accepted_and_empty_values_are_not():
@@ -731,3 +758,116 @@ def test_frontmatter_with_trailing_comments_is_accepted_and_empty_values_are_not
     ]
     hash_in_value = CARD.replace("category: foundation", 'category: "a # b"')
     assert card_frontmatter_problems(hash_in_value) == []
+
+
+# --- review round 3: held parent, content-free categories ----------------------
+
+
+def test_card_publication_without_a_nofollow_backend_goes_to_review_and_writes_nothing(tmp_path: Path, monkeypatch):
+    ws, handoff = _update_handoff(tmp_path)
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
+    card = ws / "memory" / "cards" / "contract-card.md"
+    before = card.read_bytes()
+    monkeypatch.setattr(ingest_mod.dirfd, "available", lambda: False)
+    assert _execute(ws, handoff, outcome).kind == "inboxed"
+    assert card.read_bytes() == before
+    assert not list(card.parent.glob(".contract-card.md.*"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs POSIX symlinks and stable inodes")
+def test_a_parent_swapped_after_it_is_held_is_never_written_through(tmp_path: Path, monkeypatch):
+    ws, handoff = _update_handoff(tmp_path)
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
+    cards = ws / "memory" / "cards"
+    moved = ws / "memory" / "cards-moved"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real = ingest_mod.dirfd.open_child_file
+
+    def swap_after_staging(parent, name, flags, *args, **kwargs):
+        descriptor = real(parent, name, flags, *args, **kwargs)
+        if name.startswith(".contract-card.md."):
+            cards.rename(moved)  # the held descriptor still points at the moved directory
+            cards.symlink_to(outside, target_is_directory=True)
+        return descriptor
+
+    monkeypatch.setattr(ingest_mod.dirfd, "open_child_file", swap_after_staging)
+    action = _execute(ws, handoff, outcome)
+    assert action.kind == "inboxed"
+    assert not list(outside.iterdir())
+    assert b"revised" not in (moved / "contract-card.md").read_bytes()
+    assert not list(moved.glob(".contract-card.md.*"))
+
+
+def test_card_publication_leaves_no_staging_file_and_keeps_the_mode(tmp_path: Path):
+    ws, handoff = _update_handoff(tmp_path)
+    card = ws / "memory" / "cards" / "contract-card.md"
+    if os.name == "posix":
+        card.chmod(0o640)
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
+    assert _execute(ws, handoff, outcome).kind == "promoted"
+    assert not list(card.parent.glob(".contract-card.md.*"))
+    if os.name == "posix":
+        assert card.stat().st_mode & 0o777 == 0o640
+
+
+def test_refusal_reasons_leave_out_fence_languages_card_names_and_targets(tmp_path: Path):
+    secret = "SECRET-TOKEN-9d41"
+    ws = _workspace(tmp_path, card=f"{secret}.md")
+    (ws / "rules").mkdir()
+    (ws / "rules" / f"{secret}.md").write_bytes(f"{secret}-anchor line\n".encode())
+    (ws / "USER.md").write_bytes(b"x" * (budgets.BOOTSTRAP_BUDGETS["USER.md"] - 10))
+    base = {"type": "workflow", "title": "T", "summary": "S."}
+    cases = {
+        "fence": {
+            **base,
+            "recommended memory action": "create-card",
+            "target card": "fence.md",
+            "suggested card content": f"```{secret}\n{CARD}\n```",
+        },
+        "sha": {
+            **base,
+            "recommended memory action": "update-card",
+            "target card": f"{secret}.md",
+            "expected card sha256": "0" * 64,
+            "suggested card content": CARD,
+        },
+        "duplicate": {
+            **base,
+            "recommended memory action": "no-card",
+            "target document": f"rules/{secret}.md",
+            "suggested document content": f"{secret}-anchor line",
+        },
+        "anchor": {
+            **base,
+            "recommended memory action": "no-card",
+            "target document": f"rules/{secret}.md",
+            "suggested document content": f"{secret}-anchor line\nand more",
+        },
+        "budget": {
+            **base,
+            "recommended memory action": "no-card",
+            "target document": "USER.md",
+            "suggested document content": "y" * 200,
+        },
+    }
+    for name, sections in cases.items():
+        outcome = ingest_mod.decide(sections, ws, promote_cards=True, route_documents=True)
+        assert outcome.kind == "inboxed", name
+        assert secret not in outcome.reason, (name, outcome.reason)
+    assert ingest_mod.decide(cases["sha"], ws, promote_cards=True, route_documents=True).reason == (
+        "update-card Expected card SHA256 does not match the current card"
+    )
+    assert ingest_mod.decide(cases["anchor"], ws, promote_cards=True, route_documents=True).reason == (
+        "document anchor already present in the target document"
+    )
+    # Lint and draft messages are content-free too.
+    stale = linting.lint_text(_handoff_text("update-card", card=f"{secret}.md", sha="0" * 64), workspace=ws)
+    assert stale.errors and not any(secret in e for e in stale.errors)
+    exists = linting.lint_text(_handoff_text("create-card", card=f"{secret}.md"), workspace=ws)
+    assert exists.errors and not any(secret in e for e in exists.errors)
+    over = linting.lint_text(_doc_handoff_text("USER.md", "y" * 200), workspace=ws)
+    assert any("bootstrap budget guard" in e for e in over.errors) and not any("USER.md" in e for e in over.errors)
+    with pytest.raises(drafts.HandoffDraftRefused) as refused:
+        _draft(tmp_path, action="update-card", target_card=f"{secret}-missing.md", content=UPDATED)
+    assert secret not in " ".join(refused.value.problems)

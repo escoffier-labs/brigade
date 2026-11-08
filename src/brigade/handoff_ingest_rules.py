@@ -41,7 +41,6 @@ EXPECTED_SHA_SECTION = "Expected card SHA256"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DATE_KEYS = ("created", "updated", "last_verified", "last_reviewed", "review_after", "expires", "fresh_until")
-_FLOW_LIST_RE = re.compile(r"^\[(?P<items>.*)\]$")
 CARDS_RELATIVE = Path("memory") / "cards"
 
 
@@ -79,37 +78,93 @@ def read_card_bytes(workspace: Path | None, name: str) -> bytes | None:
         return None
 
 
-def _strip_quotes(value: str) -> str:
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-        return value[1:-1]
-    return value
+_MALFORMED_VALUE = "card frontmatter has a malformed value (unterminated quote or list)"
 
 
-def _strip_yaml_comment(value: str) -> str:
-    """Drop a trailing ` # comment` that sits outside quotes, as YAML does.
+class _FrontmatterSyntaxError(ValueError):
+    """A frontmatter value is not valid YAML. The message never carries card text."""
 
-    A `#` only starts a comment after whitespace, so `a#b` keeps its `#`. A quote
-    only opens a quoted string at the start of a token, so an apostrophe inside a
-    plain word does not hide a later comment.
+
+def _read_scalar(text: str, start: int, stops: str) -> tuple[str, int]:
+    """Read one scalar from `start`. Returns its value and the index after it.
+
+    A quote opens a quoted string only at the start of a scalar, and a quoted string
+    must close. Inside a plain scalar a quote is an ordinary character. A `#` starts
+    a comment only after whitespace, so `a#b` keeps its `#`. A plain scalar ends at a
+    character in `stops` or at a comment.
     """
-    quote = ""
-    previous = " "
-    escaped = False
-    for index, char in enumerate(value):
-        if escaped:
-            escaped = False
-        elif quote:
-            if char == "\\" and quote == '"':
-                escaped = True
-            elif char == quote:
-                quote = ""
-        elif char in "'\"" and previous in " \t[,":
-            quote = char
-        elif char == "#" and previous in " \t":
-            return value[:index].rstrip()
-        previous = char
-    return value
+    length = len(text)
+    index = start
+    while index < length and text[index] in " \t":
+        index += 1
+    if index < length and text[index] in "'\"":
+        quote = text[index]
+        index += 1
+        chars: list[str] = []
+        while index < length:
+            char = text[index]
+            if quote == '"' and char == "\\" and index + 1 < length:
+                chars.append(text[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                if quote == "'" and text[index + 1 : index + 2] == "'":
+                    chars.append("'")
+                    index += 2
+                    continue
+                return "".join(chars), index + 1
+            chars.append(char)
+            index += 1
+        raise _FrontmatterSyntaxError("unterminated quote")
+    begin = index
+    while index < length:
+        if text[index] in stops or (text[index] == "#" and index > begin and text[index - 1] in " \t"):
+            break
+        index += 1
+    return text[begin:index].strip(), index
+
+
+def _only_comment_left(text: str, index: int) -> None:
+    """After a value, only spaces and a comment set off by whitespace may remain."""
+    rest = text[index:]
+    stripped = rest.lstrip()
+    if not stripped:
+        return
+    spaced = rest != stripped or (index > 0 and text[index - 1] in " \t")
+    if not (stripped.startswith("#") and spaced):
+        raise _FrontmatterSyntaxError("trailing characters after a value")
+
+
+def _parse_value(raw: str) -> str | list[str]:
+    """Parse the value of `key: value`: a scalar, a flow list, or "" for a block list."""
+    text = raw.strip()
+    if not text or text.startswith("#"):
+        return ""
+    if not text.startswith("["):
+        value, end = _read_scalar(text, 0, "")
+        _only_comment_left(text, end)
+        return value
+    items: list[str] = []
+    index = 1
+    while True:
+        while index < len(text) and text[index] in " \t":
+            index += 1
+        if index >= len(text):
+            raise _FrontmatterSyntaxError("unterminated list")
+        if text[index] == "]":
+            index += 1
+            break
+        value, index = _read_scalar(text, index, ",]")
+        if value:
+            items.append(value)
+        while index < len(text) and text[index] in " \t":
+            index += 1
+        if index < len(text) and text[index] == ",":
+            index += 1
+        elif index >= len(text) or text[index] != "]":
+            raise _FrontmatterSyntaxError("unterminated list")
+    _only_comment_left(text, index)
+    return items
 
 
 def _parse_frontmatter_block(lines: list[str]) -> tuple[dict[str, object], str | None]:
@@ -119,30 +174,32 @@ def _parse_frontmatter_block(lines: list[str]) -> tuple[dict[str, object], str |
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         stripped = line.strip()
-        # YAML allows the entries of a block list at the same indent as its key.
-        if current_list is not None and (stripped.startswith("- ") or stripped == "-"):
-            items = fields[current_list]
-            assert isinstance(items, list)
-            items.append(_strip_quotes(_strip_yaml_comment(stripped[1:].strip())))
-            continue
-        if line[0] in " \t":
-            continue
-        current_list = None
-        if ":" not in line:
-            return fields, "card frontmatter has a line that is not `key: value`"
-        key, value = line.split(":", 1)
-        key = _strip_quotes(key)
-        if key in fields:
-            return fields, "card frontmatter repeats a key"
-        value = _strip_yaml_comment(value.strip())
-        flow = _FLOW_LIST_RE.fullmatch(value)
-        if flow:
-            fields[key] = [_strip_quotes(item) for item in flow.group("items").split(",") if item.strip()]
-        elif value == "":
+        try:
+            # YAML allows the entries of a block list at the same indent as its key.
+            if current_list is not None and (stripped.startswith("- ") or stripped == "-"):
+                items = fields[current_list]
+                assert isinstance(items, list)
+                entry = _parse_value(stripped[1:])
+                if isinstance(entry, list):
+                    return fields, _MALFORMED_VALUE
+                items.append(entry)
+                continue
+            if line[0] in " \t":
+                continue
+            current_list = None
+            if ":" not in line:
+                return fields, "card frontmatter has a line that is not `key: value`"
+            key, value = line.split(":", 1)
+            key = _read_scalar(key, 0, "")[0] if key.strip().startswith(("'", '"')) else key.strip()
+            if key in fields:
+                return fields, "card frontmatter repeats a key"
+            parsed = _parse_value(value)
+        except _FrontmatterSyntaxError:
+            return fields, _MALFORMED_VALUE
+        fields[key] = parsed
+        if parsed == "":
             fields[key] = []
             current_list = key
-        else:
-            fields[key] = _strip_quotes(value)
     return fields, None
 
 
@@ -221,14 +278,14 @@ def card_state_problems(
                 "workspace (pass --workspace <memory workspace> to check it)"
             )
         elif existing is None:
-            errors.append(f"update-card target {target_card} does not exist in the workspace cards (use create-card)")
+            errors.append("update-card target card does not exist in the workspace cards (use create-card)")
         elif SHA256_RE.fullmatch(sha) and not sha_matches(existing, sha):
             errors.append(
-                f"update-card {EXPECTED_SHA_SECTION} does not match the current {target_card} "
+                f"update-card {EXPECTED_SHA_SECTION} does not match the current card "
                 "(the card changed after the SHA was read, re-read it)"
             )
     elif reachable and existing is not None:
-        errors.append(f"create-card target {target_card} already exists in the workspace cards (use update-card)")
+        errors.append("create-card target card already exists in the workspace cards (use update-card)")
     return errors, warnings
 
 
@@ -263,6 +320,6 @@ def bootstrap_budget_problem(document: str, content: str, workspace: Path | None
     if not would_exceed:
         return None
     return (
-        f"bootstrap budget guard: appending to {document} would exceed "
-        f"its {budget}B budget; trim the file or promote to a memory card"
+        "bootstrap budget guard: the append would exceed the target document's size budget; "
+        "trim the file or promote to a memory card"
     )
