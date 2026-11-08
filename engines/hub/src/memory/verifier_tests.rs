@@ -867,3 +867,41 @@ async fn a_failed_startup_republish_refuses_to_start_memory() {
     h.open(clean(), None);
     assert_eq!(listed_generation(&h), json!(1));
 }
+
+#[tokio::test]
+async fn a_replayed_flag_change_or_resync_announces_nothing() {
+    let h = Hub::with(clean(), None);
+    for request in [
+        json!({"action":"verifier","principal":"agent:dot","verifier":true,"client_event_id":h.id()}),
+        json!({"action":"verifier_resync","client_event_id":h.id()}),
+    ] {
+        let first = h.call(ADMIN_TOKEN, request.clone()).await;
+        assert_eq!(first.status, 200, "{first:?}");
+        let state = generation_state(&h).await;
+        assert_eq!(state["current"], true, "{state}");
+        let events = h.events();
+        for _ in 0..2 {
+            assert_eq!(h.call(ADMIN_TOKEN, request.clone()).await, first);
+        }
+        // The same id for a different request is a conflict, announced nowhere.
+        let id = request["client_event_id"].clone();
+        let other = if request["action"] == "verifier" {
+            json!({"action":"verifier_resync","client_event_id":id})
+        } else {
+            json!({"action":"verifier","principal":"node-1","verifier":true,"client_event_id":id})
+        };
+        let conflict = h.call(ADMIN_TOKEN, other).await;
+        assert_eq!(
+            code(&conflict),
+            "memory_client_event_conflict",
+            "{conflict:?}"
+        );
+        assert_eq!(generation_state(&h).await, state);
+        assert_eq!(listed_generation(&h), state["memory"]);
+        assert_eq!(h.events(), events);
+    }
+    assert_eq!(
+        generation_state(&h).await,
+        json!({"memory":2,"hub":2,"current":true})
+    );
+}

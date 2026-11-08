@@ -787,6 +787,41 @@ impl Store {
             return unavailable("no hub writer");
         };
         let _turn = self.verifier_turn.lock().await;
+        // A retry is answered from the idempotency record before anything is
+        // announced, so it never moves the hub's generation past the memory
+        // file's. Flag changes are serialized by the turn, and the writer
+        // commits before it answers, so a committed answer is visible here.
+        let (who, event, digest) = (
+            prepared.credential.principal().to_string(),
+            prepared.client_event_id.clone(),
+            prepared.request_digest.clone(),
+        );
+        let stored = match self
+            .readers
+            .submit(move |db| {
+                Conn(db).query(
+                    "SELECT request_digest,status,response FROM memory_idempotency WHERE principal=?1 AND client_event_id=?2",
+                    &[Value::Text(who), Value::Text(event)],
+                )
+            })
+            .await
+        {
+            Ok(rows) => rows,
+            Err(_) => return unavailable("memory read"),
+        };
+        if let Some(row) = stored.first() {
+            if text(&row[0]) != digest {
+                return error(
+                    409,
+                    "memory_client_event_conflict",
+                    "client_event_id was already used for a different request",
+                );
+            }
+            return Reply::new(
+                num(&row[1]).unwrap_or(200) as u16,
+                serde_json::from_str(&text(&row[2])).unwrap_or(Json::Null),
+            );
+        }
         let (announced, policy) = match self
             .hub
             .submit(|db| {
