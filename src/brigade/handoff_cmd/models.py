@@ -61,6 +61,7 @@ DEFAULT_WARNING_PATTERNS = (
     "ROUTE-SKIP",
     "NO_REPLY",
     "NO_UPDATES",
+    "PARTIAL",
     "unreachable",
     "timeout",
     "timed out",

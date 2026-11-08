@@ -957,6 +957,7 @@ def ingest_fleet(
             stats.routed,
             stats.inboxed,
             stats.skipped,
+            stats.failed,
         )
         rc = ingest_mod.ingest_into(
             source=entry.path,
@@ -979,6 +980,7 @@ def ingest_fleet(
                 "routed": stats.routed - before[3],
                 "inboxed": stats.inboxed - before[4],
                 "skipped": stats.skipped - before[5],
+                "failed": stats.failed - before[6],
             }
         )
 
@@ -989,6 +991,7 @@ def ingest_fleet(
         "routed": stats.routed,
         "inboxed": stats.inboxed,
         "skipped": stats.skipped,
+        "failed": stats.failed,
     }
     payload = {
         "target": str(target),
@@ -999,6 +1002,7 @@ def ingest_fleet(
         "repos_ingested": per_repo,
         "skipped": skipped,
         "totals": totals,
+        "status": stats.status,
     }
     mode = "DRY-RUN (pass --apply to write)" if dry_run else "applied"
     text_lines = [
@@ -1011,7 +1015,8 @@ def ingest_fleet(
         *[f"- {item['repo_id']}: skipped ({item['reason']})" for item in skipped],
         f"totals: processed={totals['processed']} promoted={totals['promoted']} "
         f"reinforced={totals['reinforced']} routed={totals['routed']} "
-        f"inboxed={totals['inboxed']} skipped={totals['skipped']}",
+        f"inboxed={totals['inboxed']} skipped={totals['skipped']} "
+        f"failed={totals['failed']} status={stats.status}",
     ]
     return emit(payload, json_output, text_lines, 0)
 

@@ -11,6 +11,7 @@
       "ROUTE-SKIP",
       "NO_REPLY",
       "NO_UPDATES",
+      "PARTIAL",
       "unreachable",
       "timeout"
     ]

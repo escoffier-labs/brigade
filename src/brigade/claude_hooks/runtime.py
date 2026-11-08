@@ -18,7 +18,7 @@ from queue import Empty
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterator
 
-from .. import localio, work_mode
+from .. import handoff_worktrees, localio, work_mode
 from ..component_paths import cache_root
 from ..isolated_exec import module_argv, trusted_cwd
 from ..wiring import expand_user_path, resolve_wired_target
@@ -1959,9 +1959,7 @@ def _is_handoff_path(target: Path, raw_path: object) -> bool:
     if not path.is_absolute():
         path = target / path
     try:
-        path = path.resolve()
-        inbox = (target / ".claude" / "memory-handoffs").resolve()
-        return path.is_relative_to(inbox)
+        return handoff_worktrees.is_handoff_path(target, path.resolve())
     except OSError:
         return False
 
@@ -2080,10 +2078,9 @@ def _receipt_since(target: Path, started_at: object, *, session_fingerprint: str
 
 def _handoff_since(target: Path, started_at: object) -> bool:
     started = localio.parse_iso_datetime(started_at)
-    inbox = target / ".claude" / "memory-handoffs"
-    if started is None or not inbox.is_dir():
+    if started is None:
         return False
-    for path in inbox.glob("*.md"):
+    for path in (p for inbox in handoff_worktrees.handoff_inboxes(target) for p in inbox.glob("*.md")):
         if path.name == "TEMPLATE.md":
             continue
         try:
@@ -2581,7 +2578,7 @@ def _handle_event(
             if handoff_target is not None:
                 records.append(
                     "If this work produced durable knowledge, write a Memory Handoff in "
-                    "`.claude/memory-handoffs/` before finishing."
+                    f"{handoff_worktrees.stop_hint(handoff_target)} before finishing."
                 )
             return _additional_context(
                 "Stop",
@@ -2598,7 +2595,7 @@ def _handle_event(
                 session_id=session_id,
                 records=[
                     "Verification is recorded. If this work produced durable knowledge, write a Memory Handoff in "
-                    "`.claude/memory-handoffs/` before finishing.",
+                    f"{handoff_worktrees.stop_hint(handoff_target)} before finishing.",
                 ],
             )
     return None

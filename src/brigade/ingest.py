@@ -9,6 +9,7 @@ Conservative by design:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -19,7 +20,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
-from . import budgets
+from . import budgets, handoff_worktrees
 from .card_fingerprint import (
     CardMatch,
     ensure_card_id_frontmatter,
@@ -71,14 +72,7 @@ SKIP_INVALID_SOURCE_CONFIG = "invalid handoff source config"
 
 # Git state that would point `git -C <inbox>` at some other repository or
 # stop discovery short of the one that owns the inbox.
-_GIT_LOCATION_ENV = (
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_COMMON_DIR",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_CEILING_DIRECTORIES",
-)
+_GIT_LOCATION_ENV = handoff_worktrees.GIT_LOCATION_ENV
 _TRACKED_SKIP_REASON = "tracked by git or tracking unverifiable; left in place"
 
 
@@ -114,7 +108,16 @@ class IngestStats:
     routed: int = 0
     inboxed: int = 0
     skipped: int = 0
+    failed: int = 0
     actions: List[str] = field(default_factory=list)
+    # sha256 of every handoff handled this run, so one handoff copied into
+    # several worktree inboxes is ingested once.
+    seen_digests: set[str] = field(default_factory=set)
+
+    @property
+    def status(self) -> str:
+        """ok, or partial when some handoffs failed and the rest still ran."""
+        return "partial" if self.failed else "ok"
 
 
 def _resolve_inbox_paths(target: Path) -> list[Path]:
@@ -130,8 +133,11 @@ def _resolve_inbox_paths(target: Path) -> list[Path]:
 
     paths: list[Path] = []
     seen: set[str] = set()
+    declared: dict[Path, list[str]] = {}
 
-    def add(path: Path) -> None:
+    def add(path: Path, root: Path | None = None, rel: str | None = None) -> None:
+        if root is not None and rel is not None:
+            declared.setdefault(root, []).append(rel)
         if not path.is_dir():
             return
         resolved = path.resolve()
@@ -143,19 +149,29 @@ def _resolve_inbox_paths(target: Path) -> list[Path]:
 
     cfg = load_config(target)
     if cfg is None:
-        add(target / ".claude" / "memory-handoffs")
+        add(target / ".claude" / "memory-handoffs", target, ".claude/memory-handoffs")
     else:
         for h in sorted(cfg.selection.harnesses):
             rel = WRITER_INBOXES.get(h)
             if rel:
-                add(target / rel)
-    for extra in _handoff_source_inbox_paths(target):
-        add(extra)
+                add(target / rel, target, rel)
+    for root, rel in _handoff_source_inboxes(target):
+        add(root / rel, root, rel)
+    # Handoffs written in a linked worktree of a watched root are found
+    # through `git worktree list`, never a directory walk.
+    for root, rels in declared.items():
+        for worktree in handoff_worktrees.linked_worktrees(root):
+            for rel in dict.fromkeys(rels):
+                add(worktree / rel)
     return paths
 
 
 def _handoff_source_inbox_paths(target: Path) -> list[Path]:
-    """Inbox directories declared in `.brigade/handoff-sources.json`.
+    return [root / rel for root, rel in _handoff_source_inboxes(target)]
+
+
+def _handoff_source_inboxes(target: Path) -> list[tuple[Path, str]]:
+    """(root, inbox) pairs declared in `.brigade/handoff-sources.json`.
 
     Raises ValueError when the file exists but cannot be read or parsed, so
     ingest does not go green while omitting configured roots.
@@ -175,7 +191,7 @@ def _handoff_source_inbox_paths(target: Path) -> list[Path]:
         config = _load_sources(target, sources_path)
     except (OSError, ValueError) as exc:
         raise ValueError(f"invalid handoff source config {sources_path}: {exc}") from exc
-    return [watched.root / watched.inbox for watched in config.watched]
+    return [(watched.root, watched.inbox) for watched in config.watched]
 
 
 def run(
@@ -243,20 +259,32 @@ def ingest_into(
 
     for handoffs_dir in handoff_dirs:
         processed_dir = handoffs_dir / "processed"
-        handoffs, tracked = _list_handoffs(handoffs_dir)
+        try:
+            handoffs, tracked = _list_handoffs(handoffs_dir)
+        except OSError as exc:
+            _record_failure(stats, handoffs_dir, exc)
+            continue
         for path in tracked:
             stats.skipped += 1
             stats.actions.append(f"skip   {path.name}  ({_TRACKED_SKIP_REASON})")
         for path in handoffs:
-            stats.processed += 1
-            sections = parse(path)
-            outcome = decide(
-                sections,
-                target=owner,
-                promote_cards=promote_cards,
-                route_documents=route_documents,
-            )
+            # One unreadable or unarchivable handoff is recorded and skipped;
+            # it must not abort the rest of the batch.
             try:
+                sha = hashlib.sha256(path.read_bytes()).hexdigest()
+                if sha in stats.seen_digests:
+                    if not dry_run:
+                        _archive(path, processed_dir)
+                    stats.skipped += 1
+                    stats.actions.append(f"skip   {path.name}  (duplicate content already handled this run)")
+                    continue
+                sections = parse(path)
+                outcome = decide(
+                    sections,
+                    target=owner,
+                    promote_cards=promote_cards,
+                    route_documents=route_documents,
+                )
                 action = _execute(
                     outcome,
                     handoff_path=path,
@@ -268,6 +296,11 @@ def ingest_into(
                 )
             except TrackedHandoffError:
                 action = Action("skipped", f"skip   {path.name}  ({_TRACKED_SKIP_REASON})")
+            except OSError as exc:
+                _record_failure(stats, path, exc)
+                continue
+            stats.seen_digests.add(sha)
+            stats.processed += 1
             stats.actions.append(action.summary)
             if action.kind == "promoted":
                 stats.promoted += 1
@@ -848,6 +881,12 @@ def _archive(src: Path, processed_dir: Path) -> Path:
     return dest
 
 
+def _record_failure(stats: IngestStats, path: Path, exc: OSError) -> None:
+    stats.failed += 1
+    detail = exc.strerror or str(exc)
+    stats.actions.append(f"fail   {path}  ({type(exc).__name__}: {detail})")
+
+
 def _report(stats: IngestStats, dry_run: bool) -> None:
     tag = "[dry-run] " if dry_run else ""
     for line in stats.actions:
@@ -856,7 +895,10 @@ def _report(stats: IngestStats, dry_run: bool) -> None:
     print(
         f"{tag}Processed {stats.processed}  Promoted {stats.promoted}  "
         f"Reinforced {stats.reinforced}  Routed {stats.routed}  "
-        f"Inboxed {stats.inboxed}  Skipped {stats.skipped}"
+        f"Inboxed {stats.inboxed}  Skipped {stats.skipped}  Failed {stats.failed}"
     )
-    if stats.processed == 0:
+    if stats.failed:
+        print(f"{tag}PARTIAL: {stats.failed} handoff(s) failed and were left in place; the rest were ingested")
+    elif stats.processed == 0:
         print(f"{tag}NO_UPDATES")
+    print(f"{tag}Status {stats.status}")

@@ -11,6 +11,7 @@ import os
 import shlex
 import shutil
 import stat
+import sys
 import tempfile
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -1523,6 +1524,8 @@ def remove_worktree(repo: Path, worktree_path: Path, *, force: bool = False) -> 
     if not worktree_path.exists():
         return
     root = git_root(repo)
+    if not _deliver_worktree_handoffs(worktree_path, root):
+        return
     args = ["worktree", "remove"]
     if force:
         args.append("--force")
@@ -1530,6 +1533,23 @@ def remove_worktree(repo: Path, worktree_path: Path, *, force: bool = False) -> 
     result = _git(root, *args, timeout=120.0)
     if result.code != 0:
         shutil.rmtree(worktree_path, ignore_errors=True)
+
+
+def _deliver_worktree_handoffs(worktree_path: Path, root: Path) -> bool:
+    """Move pending Memory Handoffs to the main checkout before removal.
+
+    Returns False when any handoff could not be delivered; the caller then
+    keeps the worktree so the handoff is not deleted with it.
+    """
+    from . import handoff_worktrees
+
+    dest = handoff_worktrees.main_checkout(worktree_path) or root
+    failed = [r for r in handoff_worktrees.rescue_pending_handoffs(worktree_path, dest) if r.state == "failed"]
+    for rescue in failed:
+        print(f"brigade: handoff not delivered from {rescue.source}: {rescue.reason}", file=sys.stderr)
+    if failed:
+        print(f"brigade: kept worktree {worktree_path} so {len(failed)} pending handoff(s) survive", file=sys.stderr)
+    return not failed
 
 
 def brigade_worktree_root() -> Path:
