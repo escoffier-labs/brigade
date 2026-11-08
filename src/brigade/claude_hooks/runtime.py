@@ -34,6 +34,7 @@ from . import (
     write_attribution,
 )
 from .fingerprint import repo_worktree_fingerprint
+from .handoff_close import HANDOFF_STOP_NOTE as _HANDOFF_STOP_NOTE, closes_nothing_durable as _closes_nothing_durable
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
 from .session_state import (
@@ -2093,30 +2094,6 @@ def _handoff_since(target: Path, started_at: object) -> bool:
         if modified >= started.timestamp():
             return True
     return False
-
-
-_HANDOFF_STOP_NOTE = (
-    "Write a Memory Handoff in `.claude/memory-handoffs/` with `brigade handoff draft` only if this work produced "
-    "knowledge the repo, git history or an existing card does not hold. Otherwise end with one line, "
-    "`Nothing durable: <reason>`."
-)
-_NOTHING_DURABLE_PREFIX = "nothing durable:"
-
-
-def _closes_nothing_durable(payload: dict[str, Any]) -> bool:
-    """True when the final assistant line is a ``Nothing durable: <reason>`` close.
-
-    Only ``last_assistant_message`` counts. User prompts, tool input and tool
-    output are never read, so quoted text from them cannot waive the note.
-    """
-    message = payload.get("last_assistant_message")
-    if not isinstance(message, str):
-        return False
-    lines = [line.strip() for line in message.splitlines() if line.strip()]
-    if not lines:
-        return False
-    last = lines[-1]
-    return last.casefold().startswith(_NOTHING_DURABLE_PREFIX) and bool(last[len(_NOTHING_DURABLE_PREFIX) :].strip())
 
 
 def _additional_context(
