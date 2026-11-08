@@ -579,6 +579,15 @@ def test_an_escaped_backtick_cannot_expose_a_code_span_to_repair():
     assert links._code_spans(doubled) == [(doubled.index("`[[old]]`"), doubled.index("`[[old]]`") + len("`[[old]]`"))]
 
 
+def test_aliases_that_only_look_scope_qualified_are_kept_as_written():
+    for alias in ("docs:v1/guide", "notes/guide", "repo:links/Not A Card Id!"):
+        keeper = head("keeper", card_text("Kept.", "c-dddddd", f"aliases: {json.dumps([alias])}"))
+        submissions, skipped, _ = unit([head("src", card_text(f"See [[{alias}]].")), keeper])
+        assert submissions == [] and skipped == {}, alias
+    assert links._scoped(SCOPE, "principal:someone/old-guide") is None
+    assert links._scoped(SCOPE, SCOPE + "/old-guide") == "old-guide"
+
+
 def test_two_retired_cards_sharing_a_name_are_ambiguous_even_with_one_successor():
     heads = [
         head("src", card_text("See [[Old Guide]].")),

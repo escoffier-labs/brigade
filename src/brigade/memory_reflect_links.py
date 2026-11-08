@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from . import memory_hub_client as hub_client
 from . import memory_proposal_io as io
 from . import memory_proposal_v2_ops as delta
 from . import memory_reflect_near as near
@@ -105,14 +106,15 @@ def _scoped(scope: str, name: str) -> str | None:
     An exact merge keeps the retired card's identity on the keeper as a scope
     qualified alias such as `repo:links/old-guide`. Links in the same scope write
     `[[old-guide]]`, so the alias is indexed in that short form. A name
-    qualified for another scope never resolves a link here.
+    qualified for another scope never resolves a link here. A name is scope
+    qualified only when it splits at its last `/` into a scope the hub accepts
+    and a valid card id. Any other alias, such as `docs:v1/guide`, is kept as
+    written.
     """
-    if name.startswith(scope + "/"):
-        return name[len(scope) + 1 :]
-    head = name.split("/", 1)[0]
-    if "/" in name and (":" in head or head == "fleet"):
-        return None
-    return name
+    owner, sep, card_id = name.rpartition("/")
+    if not sep or not hub_client.valid_scope(owner) or not hub_client.valid_card_id(card_id):
+        return name
+    return card_id if owner == scope else None
 
 
 class Index:
