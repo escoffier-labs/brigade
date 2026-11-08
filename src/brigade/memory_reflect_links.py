@@ -357,7 +357,14 @@ def ops(
                 bare = raw.strip()
                 prefix = next((p for p in PREFIXES if bare.startswith(p)), "")
                 suffix = ".md" if bare.endswith(".md") else ""
-                edits.append((start, end, lead + prefix + target + suffix + tail))
+                written = prefix + target + suffix
+                # The new link must read back, the way any link is read, as exactly the
+                # chosen card. A card id such as `guide.md` would otherwise be written as
+                # a link that `_target` reads as `guide`.
+                if index.live.get((head["scope"], _fold(_target(written)))) != {target}:
+                    _bump(skipped, "link_unrepresentable_target")
+                    continue
+                edits.append((start, end, lead + written + tail))
             if not edits:
                 continue
             wording = _wording(block, edits)

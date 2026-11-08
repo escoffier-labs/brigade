@@ -1432,6 +1432,7 @@ Anything else is counted and left alone, per link:
 | `link_ambiguous_target` | Several live cards match, or a retired name is shared with another retired or live card |
 | `link_cross_scope_target` | The only match is a live card in another scope, or the successor names another scope |
 | `link_untrusted_target` | The target card, or the successor, is not scan clean or has a different trust class from the card holding the link |
+| `link_unrepresentable_target` | The repaired link would not read back as the chosen card, for example a card id that ends in `.md` |
 | `link_invalid_metadata` | The target card has malformed `aliases` or an ambiguous metadata field |
 | `link_non_clean`, `link_unknown_trust`, `link_inactive_card` | The card holding the link fails the exact pass's scan and trust filters, or is not live |
 | `link_missing_pin` | The block holding the link has no claim anchor |

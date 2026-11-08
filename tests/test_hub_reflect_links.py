@@ -610,6 +610,12 @@ def test_a_scope_qualified_path_alias_is_read_after_its_scope():
         assert submissions == [] and skipped == {}, link
 
 
+def test_a_repair_that_would_not_read_back_as_its_target_is_skipped():
+    target = head("guide.md", card_text("Guide.", "c-dddddd", "title: Guide Name"))
+    submissions, skipped, _ = unit([head("src", card_text("See [[guide-name]].")), target])
+    assert submissions == [] and skipped == {"link_unrepresentable_target": 1}
+
+
 def test_two_retired_cards_sharing_a_name_are_ambiguous_even_with_one_successor():
     heads = [
         head("src", card_text("See [[Old Guide]].")),
