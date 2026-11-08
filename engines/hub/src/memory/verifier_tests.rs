@@ -624,3 +624,75 @@ fn version_ten_migrates_to_eleven_with_no_principal_flagged() {
     drop(db);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn a_publish_failure_refuses_the_flag_change_and_leaves_it_unflagged() {
+    let h = Hub::with(clean(), None);
+    let sidecar = verifier::sidecar(&h.memory());
+    // A non-empty directory where the list goes makes the rename fail.
+    std::fs::remove_file(&sidecar).unwrap();
+    std::fs::create_dir(&sidecar).unwrap();
+    std::fs::write(sidecar.join("blocker"), b"x").unwrap();
+    let events = h.events();
+    let r = flag(&h, "agent:dot", true).await;
+    assert_eq!(
+        (r.status, code(&r)),
+        (503, "memory_verifier_publish_failed"),
+        "{r:?}"
+    );
+    assert_eq!(principal_flag(&h, "agent:dot"), None);
+    assert!(copies(&h, "agent:dot").is_empty());
+    assert_eq!(h.events(), events);
+    grant(&h, "fleet", &["read"]).await;
+    assert_eq!(status(&h, AGENT_TOKEN).await.body["verifier"], false);
+    // Once the list can be written, the same change succeeds.
+    std::fs::remove_dir_all(&sidecar).unwrap();
+    assert_eq!(flag(&h, "agent:dot", true).await.status, 200);
+    assert_eq!(principal_flag(&h, "agent:dot"), Some(1));
+}
+
+#[tokio::test]
+async fn a_clear_keeps_the_principal_published_until_it_commits() {
+    let seen: Arc<std::sync::Mutex<Vec<Json>>> = Arc::default();
+    let path: Arc<std::sync::Mutex<Option<std::path::PathBuf>>> = Arc::default();
+    let (record, at) = (seen.clone(), path.clone());
+    let hook: writer::Hook = Arc::new(move |step| {
+        if step == writer::Step::Applied {
+            if let Some(p) = at.lock().unwrap().as_ref() {
+                let body = std::fs::read(p).unwrap();
+                record
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(&body).unwrap());
+            }
+        }
+    });
+    let h = Hub::with(clean(), Some(hook));
+    assert_eq!(flag(&h, "agent:dot", true).await.status, 200);
+    *path.lock().unwrap() = Some(verifier::sidecar(&h.memory()));
+    assert_eq!(flag(&h, "agent:dot", false).await.status, 200);
+    // Before the clear committed, the list still named the principal.
+    let before_commit = seen.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(before_commit["verifiers"], json!(["agent:dot"]));
+    let after: Json =
+        serde_json::from_slice(&std::fs::read(verifier::sidecar(&h.memory())).unwrap()).unwrap();
+    assert_eq!(after["verifiers"], json!([]));
+}
+
+#[tokio::test]
+async fn a_list_that_over_reports_after_a_lost_commit_is_repaired_on_restart() {
+    let mut h = Hub::with(clean(), None);
+    assert_eq!(flag(&h, "agent:dot", true).await.status, 200);
+    h.store.take();
+    // The state a failed commit leaves: the list was published before the
+    // commit, but the memory file never recorded the change.
+    Connection::open(h.memory())
+        .unwrap()
+        .execute_batch("DELETE FROM memory_verifiers; DELETE FROM memory_verifier_credentials;")
+        .unwrap();
+    let sidecar = verifier::sidecar(&h.memory());
+    let read = || -> Json { serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap() };
+    assert_eq!(read()["verifiers"], json!(["agent:dot"]));
+    h.open(clean(), None);
+    assert_eq!(read()["verifiers"], json!([]));
+}

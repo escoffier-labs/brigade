@@ -189,15 +189,59 @@ impl HubLock {
     }
 }
 
-/// Write the flagged principal ids beside the memory file. A failure is
-/// reported and repaired by the next flag change or start.
+/// Publish the flagged principal ids `db` sees, plus `retained`, beside the
+/// memory file.
+fn publish_set(
+    db: &Connection,
+    memory: &std::path::Path,
+    retained: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let mut list = super::verifier::principals(&worker::Tx(db)).map_err(|e| e.to_string())?;
+    list.extend(retained.iter().cloned());
+    list.sort();
+    list.dedup();
+    super::verifier::publish(memory, &list).map_err(|e| e.to_string())
+}
+
+/// Publish the committed set at startup and after a committed flag change.
+/// The list published before that commit already covers every principal the
+/// file holds flagged, so a failure here leaves a list that over-reports, which
+/// the policy writer treats as refusals. It is logged and repaired by the next
+/// flag change or start.
 fn publish_verifiers(db: &Connection, memory: &std::path::Path) {
-    let published = super::verifier::principals(&worker::Tx(db))
-        .map_err(|e| e.to_string())
-        .and_then(|list| super::verifier::publish(memory, &list).map_err(|e| e.to_string()));
-    if let Err(e) = published {
+    if let Err(e) = publish_set(db, memory, &Default::default()) {
         eprintln!("WARN memory verifier list not published: {e}");
     }
+}
+
+/// A flag change publishes inside its own savepoint, before the batch commits.
+/// The list holds what the transaction flags plus every principal this batch
+/// cleared, so a later commit failure can only over-report. If publication
+/// fails, the caller rolls the change back and the request fails.
+fn publish_pending(
+    db: &Connection,
+    memory: &std::path::Path,
+    action: &ops::Action,
+    retained: &mut std::collections::BTreeSet<String>,
+) -> Result<(), Reply> {
+    let ops::Action::Verifier {
+        principal,
+        verifier,
+    } = action
+    else {
+        return Ok(());
+    };
+    if !verifier {
+        retained.insert(principal.clone());
+    }
+    publish_set(db, memory, retained).map_err(|e| {
+        eprintln!("WARN memory verifier list not published, flag change refused: {e}");
+        ops::error(
+            503,
+            "memory_verifier_publish_failed",
+            "the verifier list could not be published for the policy writer, so the flag was not changed",
+        )
+    })
 }
 
 fn storage(reason: &'static str) -> Failure {
@@ -358,6 +402,7 @@ fn apply_one(
     authority: &Authority,
     scanner: &dyn super::scan::Scanner,
     embedder: Option<(&str, bool)>,
+    verifiers: (&std::path::Path, &mut std::collections::BTreeSet<String>),
 ) -> Answer {
     if db.execute_batch("SAVEPOINT command").is_err() {
         return Err(storage("storage-error"));
@@ -403,6 +448,16 @@ fn apply_one(
             "writer scan budget exceeded",
         )),
         _ => Err(storage("command-failed")),
+    };
+    // phase-memory-verify D4: a flag change never commits unpublished.
+    let result = match result {
+        Ok(reply) if reply.status < 400 => Ok(
+            match publish_pending(db, verifiers.0, &p.action, verifiers.1) {
+                Ok(()) => reply,
+                Err(refusal) => refusal,
+            },
+        ),
+        other => other,
     };
     let keep = matches!(&result, Ok(r) if r.status < 400);
     let finish = if keep {
@@ -750,6 +805,8 @@ pub(crate) fn run(
         hook(&config, Step::HubLocked);
         // Step 4: re-read authority and apply prepared rows under both locks.
         let mut results: Vec<(Pending, Answer)> = Vec::new();
+        // Principals this batch cleared stay published until it commits.
+        let mut cleared = std::collections::BTreeSet::new();
         let mut broken = false;
         let mut rest = batch.into_iter();
         for mut p in rest.by_ref() {
@@ -795,6 +852,7 @@ pub(crate) fn run(
                             embedder
                                 .as_ref()
                                 .map(|(id, private)| (id.as_str(), *private)),
+                            (&config.memory, &mut cleared),
                         )
                     }
                     Err(refusal) => refusal,

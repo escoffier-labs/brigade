@@ -2004,12 +2004,17 @@ The hub enforces three rules for a flagged principal:
    `reflect_principal` membership as booleans, and `capabilities` lists
    `verifier_floor`.
 
-Python never opens the memory file. After a committed flag change, while it
-still holds the hub lock, the memory writer replaces
+Python never opens the memory file. Inside each flag change's transaction,
+while it holds the hub lock and before it commits, the memory writer replaces
 `fleet-hub-memory-verifiers.json` beside the hub database with the flagged
-principal ids (owner-only, no credential material). It rewrites the file at
-every start. The Python policy writer reads it inside its own hub write
+principal ids (owner-only, no credential material). If that write fails, the
+change rolls back and the request fails with
+`503 memory_verifier_publish_failed`. A cleared principal stays in the file
+until the clear commits, and the writer republishes the committed set after
+the commit and at every start, so the file can over-report verifiers but never
+under-report them. The Python policy writer reads it inside its own hub write
 transaction, so a flag change and a policy revision are ordered by the hub
-lock. A missing file means no principal is flagged. A file that cannot be read
-or parsed refuses any policy that lists a reflect principal, with
+lock. With no memory file beside the hub database, no principal is flagged.
+Once the memory file exists, a missing, unreadable or malformed list refuses
+any policy that lists a reflect principal, with
 `memory_policy_verifier_list_unreadable`.

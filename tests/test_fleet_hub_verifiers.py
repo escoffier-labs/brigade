@@ -90,3 +90,15 @@ def test_the_policy_api_reports_the_refusal_code(conn):
         fleet_hub_policy_api.handle_policy(conn, body, caller_node=None, is_admin=True)
     assert (refused.value.status, refused.value.code) == (409, "memory_policy_verifier_listed")
     assert _revision(conn) == 1
+
+
+def test_a_missing_list_after_memory_init_refuses_a_listing_policy(conn, tmp_path):
+    (tmp_path / "fleet-hub-memory.db").write_bytes(b"")
+    with pytest.raises(fleet_hub_verifiers.VerifierListed) as refused:
+        _save(conn, ["agent:any"], expected=1)
+    assert refused.value.code == "memory_policy_verifier_list_unreadable"
+    assert "missing" in str(refused.value)
+    assert _revision(conn) == 1
+    assert _save(conn, [], expected=1)["revision"] == 2
+    _publish(conn, [])
+    assert _save(conn, ["agent:any"], expected=2)["revision"] == 3

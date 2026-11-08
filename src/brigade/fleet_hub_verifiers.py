@@ -2,17 +2,22 @@
 
 A verifier principal (docs/phase-memory-verify.md, D4) is never a member of
 ``memory.reflect_principals``. The flag lives in the Rust hub's memory file,
-which Python never opens. After each committed flag change, the memory writer
-replaces ``fleet-hub-memory-verifiers.json`` beside the hub database while it
-still holds the hub write lock, and it rewrites the file at every start.
+which Python never opens. The memory writer replaces
+``fleet-hub-memory-verifiers.json`` beside the hub database inside each flag
+change's own transaction, while it holds the hub write lock and before it
+commits, and refuses the change if publication fails. A clear keeps the
+principal listed until the clear commits. The writer republishes the
+committed set after the commit and at every start. The file can therefore
+over-report flagged principals but never under-report them.
 
 Every policy revision is written inside ``BEGIN IMMEDIATE`` on the hub
 database, and this module reads the file inside that transaction. A flag change
 that committed first is therefore visible here, and a policy revision that
 committed first is visible to the memory writer, which refuses to flag a listed
-principal. A missing file means no memory store has published a list, so no
-principal is flagged. A file that cannot be read or parsed refuses any policy
-that lists a reflect principal.
+principal. Without a memory file beside the hub database, native memory was
+never initialized and no principal is flagged. Once the memory file exists
+(this module checks only that it exists and never opens it), a missing,
+unreadable or malformed list refuses any policy that lists a reflect principal.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from typing import Any, Mapping
 from .fleet_hub import FleetHubConflict
 
 SIDECAR = "fleet-hub-memory-verifiers.json"
+MEMORY_FILE = "fleet-hub-memory.db"
 SCHEMA = "brigade.memory-verifiers.v1"
 LISTED = "memory_policy_verifier_listed"
 UNREADABLE = "memory_policy_verifier_list_unreadable"
@@ -56,7 +62,12 @@ def flagged(conn: sqlite3.Connection) -> frozenset[str]:
         with path.open("rb") as handle:
             raw = handle.read(MAX_BYTES + 1)
     except FileNotFoundError:
-        return frozenset()
+        if not path.with_name(MEMORY_FILE).exists():
+            return frozenset()
+        raise VerifierListed(
+            f"{UNREADABLE}: hub memory is initialized but its verifier list is missing",
+            code=UNREADABLE,
+        ) from None
     except OSError as exc:
         raise VerifierListed(
             f"{UNREADABLE}: the memory verifier list could not be read ({type(exc).__name__})",

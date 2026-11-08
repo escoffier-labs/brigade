@@ -560,8 +560,10 @@ file (schema 11), because D7 keeps Python out of it and the hub file's schema
 belongs to Python. Native registration binds a credential's copy through the
 memory writer before the hub issues it. Fleet policy revisions are written by
 Python, so the memory writer publishes the flagged principal ids to
-`fleet-hub-memory-verifiers.json` while it still holds the hub lock, and the
-policy writer checks that file inside its own hub write transaction. The
+`fleet-hub-memory-verifiers.json` inside the flag change's transaction, before
+it commits, and refuses the change if that write fails. The policy writer
+checks that file inside its own hub write transaction and refuses a listing
+when hub memory exists but the file is missing or unreadable. The
 operator details are in [memory-operations.md](memory-operations.md).
 
 ### Prompt injection

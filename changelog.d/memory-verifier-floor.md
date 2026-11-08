@@ -7,6 +7,7 @@
 - Every proposal from a verifier principal is Tier 2 at submit, preflight and every decision.
   Preflight reports a `verifier_floor` hold and `auto_apply` refuses the proposal. A fleet
   policy that lists a verifier in `memory.reflect_principals` is refused with
-  `memory_policy_verifier_listed`, and so is flagging a listed principal. Memory `status`
+  `memory_policy_verifier_listed`, and so is flagging a listed principal. A flag change that
+  cannot publish the verifier list for the policy writer is rolled back and refused. Memory `status`
   reports the caller's `verifier` and `reflect_principal` booleans and a `verifier_floor`
   capability.
