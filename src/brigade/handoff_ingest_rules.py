@@ -86,6 +86,32 @@ def _strip_quotes(value: str) -> str:
     return value
 
 
+def _strip_yaml_comment(value: str) -> str:
+    """Drop a trailing ` # comment` that sits outside quotes, as YAML does.
+
+    A `#` only starts a comment after whitespace, so `a#b` keeps its `#`. A quote
+    only opens a quoted string at the start of a token, so an apostrophe inside a
+    plain word does not hide a later comment.
+    """
+    quote = ""
+    previous = " "
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+        elif quote:
+            if char == "\\" and quote == '"':
+                escaped = True
+            elif char == quote:
+                quote = ""
+        elif char in "'\"" and previous in " \t[,":
+            quote = char
+        elif char == "#" and previous in " \t":
+            return value[:index].rstrip()
+        previous = char
+    return value
+
+
 def _parse_frontmatter_block(lines: list[str]) -> tuple[dict[str, object], str | None]:
     fields: dict[str, object] = {}
     current_list: str | None = None
@@ -97,7 +123,7 @@ def _parse_frontmatter_block(lines: list[str]) -> tuple[dict[str, object], str |
         if current_list is not None and (stripped.startswith("- ") or stripped == "-"):
             items = fields[current_list]
             assert isinstance(items, list)
-            items.append(_strip_quotes(stripped[1:]))
+            items.append(_strip_quotes(_strip_yaml_comment(stripped[1:].strip())))
             continue
         if line[0] in " \t":
             continue
@@ -108,7 +134,7 @@ def _parse_frontmatter_block(lines: list[str]) -> tuple[dict[str, object], str |
         key = _strip_quotes(key)
         if key in fields:
             return fields, "card frontmatter repeats a key"
-        value = value.strip()
+        value = _strip_yaml_comment(value.strip())
         flow = _FLOW_LIST_RE.fullmatch(value)
         if flow:
             fields[key] = [_strip_quotes(item) for item in flow.group("items").split(",") if item.strip()]

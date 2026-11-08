@@ -345,7 +345,7 @@ def decide(
     if stray:
         return Outcome(
             "inboxed",
-            reason=f"unknown sections present (parser may have split content): {stray}",
+            reason=f"unknown sections present ({len(stray)}); the parser may have split content",
         )
 
     if action in ("create-card", "update-card") and promote_cards:
@@ -353,7 +353,7 @@ def decide(
         content = sections.get("suggested card content", "")
         content, fence_error = normalize_suggested_card_content(content)
         if not safe_card_name(card):
-            return Outcome("inboxed", reason=f"target card name unsafe: {card!r}")
+            return Outcome("inboxed", reason="target card name unsafe")
         if fence_error:
             return Outcome("inboxed", reason=fence_error)
         if not content.lstrip().startswith("---"):
@@ -394,7 +394,7 @@ def decide(
         if sig.flagged:
             return Outcome(
                 "inboxed",
-                reason=f"injection signal in card content ({sig.count} marker(s)): {sig.markers[0]}",
+                reason=f"injection signal in card content ({sig.count} marker(s))",
             )
         # create-card only: reinforce known facts instead of filing near-duplicates.
         # update-card keeps the wholesale-replace semantic for intentional edits.
@@ -410,7 +410,7 @@ def decide(
         if not document:
             return Outcome("inboxed", reason="no-card handoff missing target document")
         if not safe_document_target(document):
-            return Outcome("inboxed", reason=f"target document not in safe list: {document!r}")
+            return Outcome("inboxed", reason="target document not in safe list")
         destination_problem = document_destination_problem(document, target)
         if destination_problem:
             return Outcome("inboxed", reason=destination_problem)
@@ -431,7 +431,7 @@ def decide(
             return Outcome("inboxed", reason=f"document content already present in {document}")
         anchor = _first_meaningful_line(content)
         if anchor and anchor in existing:
-            return Outcome("inboxed", reason=f"anchor already present in {document}: {anchor}")
+            return Outcome("inboxed", reason=f"document anchor already present in {document}")
         # Bootstrap files load into the session prefix every turn and silently
         # truncate past ~12k chars. Refuse an append that would push the file
         # over its budget; route to the inbox so a human trims or re-homes it.
@@ -442,13 +442,13 @@ def decide(
         if sig.flagged:
             return Outcome(
                 "inboxed",
-                reason=f"injection signal in document content ({sig.count} marker(s)): {sig.markers[0]}",
+                reason=f"injection signal in document content ({sig.count} marker(s))",
             )
         return Outcome("routed", dest=dest)
 
     if action == "":
         return Outcome("inboxed", reason="missing `Recommended memory action`")
-    return Outcome("skipped", reason=f"action {action!r} not auto-handled")
+    return Outcome("skipped", reason="action not auto-handled")
 
 
 def _decide_create_card_match(content: str, *, target: Path) -> Outcome | None:
@@ -500,7 +500,22 @@ def _publish_promoted_card(
         if any(parent.is_symlink() for parent in (path.parent, *path.parents)):
             raise OSError("publication parent is symlinked")
 
-    def inspect(path: Path) -> str | None:
+    def read_bytes(path: Path) -> bytes:
+        # One no-follow open: the regular-file check and the read use the same descriptor.
+        descriptor = dirfd.open_file_nofollow(path, os.O_RDONLY)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise OSError("publication must be a single-link regular file")
+            with os.fdopen(descriptor, "rb") as handle:
+                descriptor = -1
+                return handle.read()
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+
+    def inspect(path: Path) -> tuple[str, bytes] | None:
+        """The destination's exact bytes and their decoding, or None when it is absent."""
         parent_fence(path)
         try:
             metadata = path.lstat()
@@ -508,10 +523,11 @@ def _publish_promoted_card(
             return None
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise OSError("publication must be a single-link regular file")
-        text = read_text_nofollow(path)
+        data = read_bytes(path)
+        text = data.decode("utf-8", errors="replace")
         if _identity_migration_fields(text):
             raise OSError("governed destination requires review")
-        return text
+        return text, data
 
     lock_path = target / ".brigade/memory/proposals/proposal.lock"
     if not dry_run:
@@ -520,11 +536,12 @@ def _publish_promoted_card(
     # The shared helper has the established Windows fallback. Ordinary ingest
     # does not require proposal IO's stricter directory-descriptor capability.
     with nullcontext() if dry_run else held_file_lock(lock_path, deadline_seconds=1):
-        raw = inspect(dest)
-        # decide() compared the SHA without the lock. Compare the bytes on disk again
-        # under it, so a card edited since then is never replaced by a stale handoff.
-        # The write below is bound to this revision, so it cannot change after this check.
-        if expected_sha and (raw is None or sha256_hex(dest.read_bytes()) != expected_sha):
+        found = inspect(dest)
+        raw, raw_bytes = found if found is not None else (None, None)
+        # decide() compared the SHA without the lock. Hash the exact bytes read here, the
+        # same bytes the publish probes below compare, so a card edited since then is
+        # never replaced by a stale handoff and the hash and the write see one revision.
+        if expected_sha and (raw_bytes is None or sha256_hex(raw_bytes) != expected_sha):
             raise StaleCardError("expected card SHA256 no longer matches the card")
         content = ensure_fingerprint_frontmatter(sections.get("suggested card content", "").strip() + "\n")
         existing, _ = _frontmatter(raw or "")
@@ -538,7 +555,8 @@ def _publish_promoted_card(
         def probe(path: Path) -> int | None:
             # The no-follow writer invokes this both before staging and at the
             # final publish boundary. A new governed revision is never replaced.
-            if inspect(path) != raw:
+            current = inspect(path)
+            if (current[1] if current is not None else None) != raw_bytes:
                 raise OSError("publication revision changed")
             try:
                 return path.lstat().st_mode
@@ -568,7 +586,7 @@ def _publish_promoted_card(
                         return None
                     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                         raise OSError("publication leaf changed")
-                    if read_text_nofollow(path) != raw:
+                    if read_bytes(path) != raw_bytes:
                         raise OSError("publication revision changed")
                     return metadata.st_mode
 
@@ -580,26 +598,22 @@ def _publish_promoted_card(
 def _append_document_nofollow(target: Path, dest: Path, text: str) -> None:
     """Append to a routed document without following a link anywhere below the workspace.
 
-    The parent directory is opened by descriptor from the resolved workspace root,
-    and the leaf is opened relative to it with no-follow. Without descriptor support
-    the path is re-checked immediately before a plain append.
+    The parent directory is opened by descriptor from the resolved workspace root, and
+    the leaf is opened relative to it with no-follow, through the POSIX or the Windows
+    handle-relative backend. When neither backend is available this raises OSError and
+    nothing is written: a path-based append cannot close the check-then-write race.
     """
+    if not dirfd.available():
+        raise OSError("no-follow descriptor operations are unavailable; refusing a path-based append")
     root = target.resolve()
     relative = dest.relative_to(target).as_posix()
     problem = document_destination_problem(relative, root)
     if problem:
         raise OSError(problem)
     resolved = root / relative
-    try:
-        flags = dirfd.file_flags(os.O_WRONLY | os.O_APPEND | os.O_CREAT)
-        use_descriptors = dirfd.available()
-    except OSError:
-        use_descriptors = False
-    if not use_descriptors:
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        with resolved.open("a", encoding="utf-8") as handle:
-            handle.write(text)
-        return
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    if dirfd.posix_available():
+        flags = dirfd.file_flags(flags)  # adds O_NOFOLLOW; the Windows backend refuses reparse points itself
     parent = dirfd.open_directory_chain(resolved.parent, create=True)
     try:
         descriptor = dirfd.open_child_file(parent, resolved.name, flags, 0o644)

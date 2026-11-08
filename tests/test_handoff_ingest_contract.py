@@ -15,7 +15,12 @@ import pytest
 
 from brigade import budgets, handoff_cmd, ingest as ingest_mod
 from brigade.handoff_cmd import drafts, linting
-from brigade.handoff_ingest_rules import card_frontmatter_problems, safe_card_name, safe_document_target
+from brigade.handoff_ingest_rules import (
+    _strip_yaml_comment,
+    card_frontmatter_problems,
+    safe_card_name,
+    safe_document_target,
+)
 
 CARD = """---
 topic: contract-card
@@ -35,7 +40,7 @@ def _workspace(tmp_path: Path, *, card: str | None = "contract-card.md") -> Path
     cards = tmp_path / "memory" / "cards"
     cards.mkdir(parents=True)
     if card:
-        (cards / card).write_text(CARD, encoding="utf-8")
+        (cards / card).write_bytes(CARD.encode("utf-8"))
     return tmp_path
 
 
@@ -322,7 +327,7 @@ def test_a_valid_update_card_draft_is_promoted_by_ingest(tmp_path: Path):
 def test_ingest_inboxes_an_update_card_whose_expected_sha_is_stale(tmp_path: Path):
     ws = _workspace(tmp_path)
     payload = _draft(tmp_path, action="update-card", target_card="contract-card.md", content=UPDATED)
-    (ws / "memory" / "cards" / "contract-card.md").write_text(CARD + "\nEdited after the draft.\n", encoding="utf-8")
+    (ws / "memory" / "cards" / "contract-card.md").write_bytes((CARD + "\nEdited after the draft.\n").encode("utf-8"))
     outcome = ingest_mod.decide(ingest_mod.parse(Path(payload["path"])), ws, promote_cards=True, route_documents=True)
     assert outcome.kind == "inboxed"
     assert "does not match current contract-card.md" in outcome.reason
@@ -439,7 +444,7 @@ def test_stale_card_between_decide_and_publish_is_routed_to_review(tmp_path: Pat
     assert outcome.kind == "promoted"
     card = ws / "memory" / "cards" / "contract-card.md"
     edited = CARD + "\nA newer edit made after decide().\n"
-    card.write_text(edited, encoding="utf-8")
+    card.write_bytes(edited.encode("utf-8"))
     action = _execute(ws, handoff, outcome)
     assert action.kind == "inboxed"
     assert "no longer matches contract-card.md" in action.summary
@@ -585,3 +590,144 @@ def test_document_append_creates_missing_directories_and_appends(tmp_path: Path)
     outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
     assert _execute(ws, handoff, outcome).kind == "routed"
     assert (ws / "rules" / "team.md").read_text(encoding="utf-8") == "\n\nDo it.\n"
+
+
+# --- review round 2: raw bytes, fail-closed append, content-free refusals, comments --
+
+
+def test_a_crlf_card_gets_one_sha_in_draft_lint_and_ingest(tmp_path: Path):
+    card = tmp_path / "memory" / "cards" / "contract-card.md"
+    card.parent.mkdir(parents=True)
+    raw = CARD.replace("\n", "\r\n").encode("utf-8")
+    card.write_bytes(raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    payload = _draft(tmp_path, action="update-card", target_card="contract-card.md", content=UPDATED)
+    assert payload["expected_sha"] == digest
+    assert linting.lint_text(_handoff_text("update-card", sha=digest), workspace=tmp_path).valid
+    handoff = Path(payload["path"])
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), tmp_path, promote_cards=True, route_documents=True)
+    assert outcome.kind == "promoted"
+    assert _execute(tmp_path, handoff, outcome).kind == "promoted"
+    assert b"revised" in card.read_bytes()
+
+
+def test_a_bytes_only_change_at_the_publish_boundary_is_routed_to_review(tmp_path: Path, monkeypatch):
+    # Two different invalid bytes decode to the same replacement character, so a text
+    # comparison cannot see the swap. Only an exact byte comparison can.
+    from brigade import card_fingerprint
+
+    card = tmp_path / "memory" / "cards" / "contract-card.md"
+    card.parent.mkdir(parents=True)
+    card.write_bytes(CARD.encode("utf-8") + b"\xff\n")
+    payload = _draft(tmp_path, action="update-card", target_card="contract-card.md", content=UPDATED)
+    handoff = Path(payload["path"])
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), tmp_path, promote_cards=True, route_documents=True)
+    real = card_fingerprint.write_text_nofollow_atomic
+
+    def swap_then_write(path, data, **kwargs):
+        card.write_bytes(CARD.encode("utf-8") + b"\xfe\n")
+        return real(path, data, **kwargs)
+
+    monkeypatch.setattr(card_fingerprint, "write_text_nofollow_atomic", swap_then_write)
+    action = _execute(tmp_path, handoff, outcome)
+    assert action.kind == "inboxed"
+    assert card.read_bytes() == CARD.encode("utf-8") + b"\xfe\n"
+
+
+def test_document_append_without_a_nofollow_backend_goes_to_review_and_writes_nothing(tmp_path: Path, monkeypatch):
+    ws, _ = _escape_setup(tmp_path)
+    (ws / "USER.md").write_bytes(b"mine\n")
+    handoffs = []
+    for document in ("USER.md", "rules/new.md"):
+        payload = drafts.build_draft(
+            target=ws,
+            title="T",
+            summary="S.",
+            action="no-card",
+            target_document=document,
+            content="A note.",
+            inbox=str(ws / "in"),
+            draft_id=document.replace("/", "-"),
+        )
+        handoffs.append(Path(payload["path"]))
+    outcomes = [ingest_mod.decide(ingest_mod.parse(h), ws, promote_cards=True, route_documents=True) for h in handoffs]
+    assert [o.kind for o in outcomes] == ["routed", "routed"]
+    monkeypatch.setattr(ingest_mod.dirfd, "available", lambda: False)
+    for handoff, outcome in zip(handoffs, outcomes, strict=True):
+        assert _execute(ws, handoff, outcome).kind == "inboxed"
+    assert (ws / "USER.md").read_bytes() == b"mine\n"
+    assert not (ws / "rules").exists()
+
+
+def test_refusal_reasons_never_contain_handoff_text(tmp_path: Path):
+    secret = "SECRET-TOKEN-9d41"
+    ws = _workspace(tmp_path)
+    (ws / "USER.md").write_bytes(f"{secret}-anchor line\n".encode())
+    base = {"type": "workflow", "title": "T", "summary": "S."}
+    cases = [
+        {
+            **base,
+            "recommended memory action": "no-card",
+            "target document": "USER.md",
+            "suggested document content": f"{secret}-anchor line\nplus a second line",
+        },
+        {
+            **base,
+            "recommended memory action": "no-card",
+            "target document": f"{secret}.md",
+            "suggested document content": "x",
+        },
+        {**base, "recommended memory action": f"{secret}-action"},
+        {
+            **base,
+            "recommended memory action": "create-card",
+            "target card": f"{secret}/x.md",
+            "suggested card content": CARD,
+        },
+        {
+            **base,
+            "recommended memory action": "no-card",
+            "target document": "USER.md",
+            "suggested document content": "x",
+            f"{secret} heading": "body",
+        },
+    ]
+    for sections in cases:
+        outcome = ingest_mod.decide(sections, ws, promote_cards=True, route_documents=True)
+        assert outcome.kind in {"inboxed", "skipped"}, sections
+        assert secret not in outcome.reason, outcome.reason
+    anchor = ingest_mod.decide(cases[0], ws, promote_cards=True, route_documents=True)
+    assert anchor.reason == "document anchor already present in USER.md"
+
+
+def test_lint_unsafe_document_message_does_not_echo_the_target():
+    result = linting.lint_text(_doc_handoff_text("SECRET-TOKEN-9d41.md"))
+    assert any(e.startswith("unsafe target document: use one of") for e in result.errors)
+    assert not any("SECRET-TOKEN" in e for e in result.errors)
+
+
+def test_yaml_comments_are_stripped_outside_quotes_only():
+    assert _strip_yaml_comment("[memory] # indexing tags") == "[memory]"
+    assert _strip_yaml_comment("[memory]  #tight") == "[memory]"
+    assert _strip_yaml_comment("# only a comment") == ""
+    assert _strip_yaml_comment('"foundation # kept"') == '"foundation # kept"'
+    assert _strip_yaml_comment("'a # b' # dropped") == "'a # b'"
+    assert _strip_yaml_comment('"a \\" # still quoted" # dropped') == '"a \\" # still quoted"'
+    assert _strip_yaml_comment("[a#b, c]") == "[a#b, c]"
+    assert _strip_yaml_comment("it's fine # dropped") == "it's fine"
+
+
+def test_frontmatter_with_trailing_comments_is_accepted_and_empty_values_are_not():
+    commented = CARD.replace("tags: [memory, handoff]", "tags: [memory, handoff] # indexing tags").replace(
+        "category: foundation", "category: foundation # grouping"
+    )
+    assert card_frontmatter_problems(commented) == []
+    assert linting.lint_text(_handoff_text("create-card", content=commented)).valid
+    block = CARD.replace("tags: [memory, handoff]", "tags: # keep these\n- memory # one\n- handoff")
+    assert card_frontmatter_problems(block) == []
+    only_comment = CARD.replace("category: foundation", "category: # nothing here")
+    assert card_frontmatter_problems(only_comment) == [
+        "card frontmatter needs a nonempty `category` (for example `category: foundation`)"
+    ]
+    hash_in_value = CARD.replace("category: foundation", 'category: "a # b"')
+    assert card_frontmatter_problems(hash_in_value) == []

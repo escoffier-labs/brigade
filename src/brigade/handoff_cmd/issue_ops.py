@@ -581,9 +581,7 @@ def _lint_no_card_action(
         document = target_document.splitlines()[0].strip()
         if ingest_routes and not _valid_document_target(document):
             errors.append(
-                f"unsafe target document {document!r}: use one of "
-                + ", ".join(sorted(SAFE_SPECIAL_TARGETS))
-                + ", or rules/<name>.md"
+                "unsafe target document: use one of " + ", ".join(sorted(SAFE_SPECIAL_TARGETS)) + ", or rules/<name>.md"
             )
 
     suggested_document = _section_value(sections, "Suggested document content")
