@@ -94,6 +94,22 @@ def _target(raw: str) -> str:
     return name.removesuffix(".md")
 
 
+def _scoped(scope: str, name: str) -> str | None:
+    """A name as this scope's links would write it, or None when it belongs to another scope.
+
+    An exact merge keeps the retired card's identity on the keeper as a scope
+    qualified alias such as `repo:links/old-guide`. Links in the same scope write
+    `[[old-guide]]`, so the alias is indexed in that short form. A name
+    qualified for another scope never resolves a link here.
+    """
+    if name.startswith(scope + "/"):
+        return name[len(scope) + 1 :]
+    head = name.split("/", 1)[0]
+    if "/" in name and (":" in head or head == "fleet"):
+        return None
+    return name
+
+
 class Index:
     """Names of every card the run read, so a link resolves within its own scope."""
 
@@ -113,6 +129,7 @@ class Index:
                 well_formed = True
             except ValueError:
                 identities, titles, well_formed = [], [], False
+            identities = [n for n in (_scoped(scope, name) for name in identities) if n]
             self.info[(scope, card_id)] = (head.get("scan_state"), head.get("trust"), well_formed)
             if _live(head):
                 self.ids.setdefault(scope, set()).add(card_id)

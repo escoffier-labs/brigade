@@ -546,6 +546,23 @@ def test_aliases_beyond_the_hub_limit_are_malformed():
         assert submissions == [] and skipped == {"link_no_target": 1}
 
 
+def test_a_merged_scope_qualified_alias_keeps_its_link_valid():
+    keeper = head("keeper", card_text("Kept.", "c-dddddd", f"aliases: {json.dumps([SCOPE + '/old-guide'])}"))
+    other = head("other", card_text("Unrelated.", "c-eeeeee", "title: Old Guide"))
+    for link in ("old-guide", "Old Guide"):
+        submissions, skipped, _ = unit([head("src", card_text(f"See [[{link}]].")), keeper, other])
+        assert submissions == [], link
+    submissions, skipped, _ = unit([head("src", card_text("See [[old-guide]].")), keeper])
+    assert submissions == [] and skipped == {}
+
+
+def test_an_alias_qualified_for_another_scope_is_not_indexed():
+    for alias in ("repo:other/old-guide", "collection:vault/old-guide", "fleet/old-guide"):
+        keeper = head("keeper", card_text("Kept.", "c-dddddd", f"aliases: {json.dumps([alias])}"))
+        submissions, skipped, _ = unit([head("src", card_text("See [[old-guide]].")), keeper])
+        assert submissions == [] and skipped == {"link_no_target": 1}, alias
+
+
 def test_two_retired_cards_sharing_a_name_are_ambiguous_even_with_one_successor():
     heads = [
         head("src", card_text("See [[Old Guide]].")),
