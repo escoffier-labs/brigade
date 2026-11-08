@@ -618,6 +618,18 @@ def test_a_repair_that_would_not_read_back_as_its_target_is_skipped():
     assert submissions == [] and skipped == {"link_unrepresentable_target": 1}
 
 
+def test_ambiguous_retirement_metadata_is_never_a_live_target():
+    for meta in (
+        'status: superseded\nsuperseded_by: "repo:links/a"\nsuperseded_by: "repo:links/b"\ntitle: Old Guide',
+        "status: superseded\nsuperseded_by:\n  - a\n  - b\ntitle: Old Guide",
+        "status: superseded\nstatus: live\ntitle: Old Guide",
+    ):
+        bad = head("bad", card_text("Retired.", "c-dddddd", meta))
+        submissions, skipped, _ = unit([head("src", card_text("See [[Old-Guide]].")), bad])
+        assert submissions == [], meta
+        assert links.Index([bad]).info[(SCOPE, "bad")][2] is False, meta
+
+
 def test_two_retired_cards_sharing_a_name_are_ambiguous_even_with_one_successor():
     heads = [
         head("src", card_text("See [[Old Guide]].")),

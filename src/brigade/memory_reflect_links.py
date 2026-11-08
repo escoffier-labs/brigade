@@ -63,6 +63,11 @@ def _names(text: str) -> tuple[list[str], list[str]]:
     """
     identities: list[str] = []
     titles: list[str] = []
+    # Retirement fields decide whether a card is live. `near._superseded` treats an
+    # unparseable field as not retired, so an ambiguous one must fail here instead,
+    # or a retired card could be admitted as a live repair target.
+    for key in ("status", "superseded_by"):
+        near._field(text, key)
     for key, into in (("aliases", identities), ("topic", identities), ("title", titles)):
         value = near._field(text, key)
         if not value:
