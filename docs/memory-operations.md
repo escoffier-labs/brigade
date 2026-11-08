@@ -1720,10 +1720,12 @@ of day, client address or result rank is stored. The counts are not part of
 the event log, replication or any policy digest. In this release no read
 action returns them.
 
-Counting never fails or slows a read. Each hub process adds reads to an
-in-memory accumulator, and the memory writer flushes it about once a minute in
-small transactions, only while no write is waiting unless the accumulator is
-over three quarters full. A restart or crash loses counts not yet flushed.
+Counting never fails or slows a read, and flushing never delays a write. Each
+hub process adds reads to an in-memory accumulator. The memory writer flushes
+it about once a minute in small transactions, and only while nothing is
+queued. A flush or retention sweep that sees a job arrive rolls back at the
+next row boundary and yields. A full accumulator does not force a flush: new
+keys are dropped and counted. A restart or crash loses counts not yet flushed.
 
 The hub configuration accepts `memory.read_counts`:
 

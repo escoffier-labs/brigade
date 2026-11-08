@@ -30,6 +30,13 @@ pub const FLUSH_INTERVAL_MS: i64 = 60_000;
 /// Deletes run in statements of at most this many rows, so the time budget
 /// is checked between them.
 const SWEEP_CHUNK: usize = 256;
+/// How long past its time budget one stalled statement may run before the
+/// progress handler stops it, which rolls the whole transaction back. Four
+/// budgets, and never under 80 ms, so a small budget on a loaded host stops at
+/// a row or chunk boundary instead. The default 20 ms budget stops at 100 ms.
+pub(super) fn hard_margin(budget: Duration) -> Duration {
+    (budget * 4).max(Duration::from_millis(80))
+}
 
 pub const DDL: &str = "
 CREATE TABLE IF NOT EXISTS memory_read_days(
@@ -159,7 +166,9 @@ pub enum Kind {
 }
 
 /// The budgets that can bite, each one bounded telemetry label.
-pub const BUDGETS: [&str; 11] = [
+/// `write_waiting` counts flushes and sweeps that rolled back to let a
+/// queued write go first.
+pub const BUDGETS: [&str; 12] = [
     "accumulator_keys",
     "principal_card_daily",
     "principal_daily",
@@ -171,6 +180,7 @@ pub const BUDGETS: [&str; 11] = [
     "total_rows",
     "sweep_rows",
     "sweep_ms",
+    "write_waiting",
 ];
 fn budget(name: &str) -> usize {
     BUDGETS.iter().position(|b| *b == name).unwrap()
@@ -295,7 +305,9 @@ impl ReadCounts {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    /// Over three quarters of the key budget: flush even while writes wait.
+    /// Over three quarters of the key budget: ask the writer for a flush now
+    /// instead of at the next minute. The flush itself still waits for an
+    /// idle writer.
     pub fn pressed(&self) -> bool {
         let state = self.state.lock().unwrap();
         state.keys.len().saturating_mul(4) > state.limits.accumulator_keys.saturating_mul(3)
@@ -458,7 +470,22 @@ fn abandon(db: &Connection) {
 /// One bounded flush transaction on the memory writer's connection: at most
 /// `flush_rows` of the oldest keys, stopping at a row boundary once
 /// `flush_ms` has passed. Keys it did not commit go back to the accumulator.
-pub fn flush_once(db: &Connection, counts: &ReadCounts) -> rusqlite::Result<Flush> {
+///
+/// `waiting` reports queued writer work. It is checked before the lock and at
+/// every row boundary. When it turns true the flush rolls back, returns every
+/// key and yields, so a write never waits behind a flush. Rolling back costs
+/// no sync; committing would.
+pub fn flush_once(
+    db: &Connection,
+    counts: &ReadCounts,
+    waiting: &dyn Fn() -> bool,
+) -> rusqlite::Result<Flush> {
+    if waiting() {
+        return Ok(Flush {
+            written: 0,
+            more: true,
+        });
+    }
     let max = counts.limits().flush_rows;
     let (limits, batch) = counts.take(max);
     if batch.is_empty() {
@@ -472,15 +499,20 @@ pub fn flush_once(db: &Connection, counts: &ReadCounts) -> rusqlite::Result<Flus
     let deadline = Instant::now() + budget;
     // The row-boundary check below is the budget. This only stops a single
     // statement that stalls, which rolls the whole transaction back.
-    let hard = deadline + budget * 4;
+    let hard = deadline + hard_margin(budget);
     let _ = db.progress_handler(1000, Some(move || Instant::now() >= hard));
     let mut written = 0;
     let mut timed_out = false;
+    let mut yielded = false;
     let applied = (|| -> rusqlite::Result<()> {
         let mut day_rows = meta(db, "read_days_rows")?;
         let mut total_rows = meta(db, "read_totals_rows")?;
         let (start_days, start_totals) = (day_rows, total_rows);
         for (key, tally) in &batch {
+            if waiting() {
+                yielded = true;
+                return Ok(());
+            }
             if written > 0 && Instant::now() >= deadline {
                 timed_out = true;
                 break;
@@ -529,6 +561,15 @@ pub fn flush_once(db: &Connection, counts: &ReadCounts) -> rusqlite::Result<Flus
         Ok(())
     })();
     let _ = db.progress_handler(0, None::<fn() -> bool>);
+    if applied.is_ok() && yielded {
+        abandon(db);
+        counts.restore(&batch);
+        counts.stats.bump("write_waiting");
+        return Ok(Flush {
+            written: 0,
+            more: true,
+        });
+    }
     let committed = applied.and_then(|()| db.execute_batch("COMMIT"));
     if let Err(e) = committed {
         abandon(db);
@@ -553,10 +594,10 @@ pub fn flush_once(db: &Connection, counts: &ReadCounts) -> rusqlite::Result<Flus
     })
 }
 
-/// Whether the writer flushes now: only when no write waits, unless the
-/// accumulator is over three quarters full.
-pub fn due(requested: bool, writes_waiting: bool, counts: &ReadCounts) -> bool {
-    requested && (!writes_waiting || counts.pressed())
+/// Whether the writer flushes now: only when asked and no write waits, however
+/// full the accumulator is. Under pressure new keys are dropped and counted.
+pub fn due(requested: bool, writes_waiting: bool) -> bool {
+    requested && !writes_waiting
 }
 
 /// Where the totals scan for retired cards resumes. Kept by the writer.
@@ -575,24 +616,39 @@ pub struct Swept {
 /// One bounded retention transaction: expired day rows oldest first, then
 /// the totals rows of retired or vanished cards, resuming from `cursor`.
 /// Day rows and examined totals rows together stay within `sweep_rows`.
+/// Like a flush, it rolls back and yields when `waiting` turns true. Its
+/// deletes are idempotent, so the next tick redoes them.
 pub fn sweep(
     db: &Connection,
     counts: &ReadCounts,
     now_ms: i64,
     cursor: &mut SweepCursor,
+    waiting: &dyn Fn() -> bool,
 ) -> rusqlite::Result<Swept> {
     let limits = counts.limits();
+    let yielded = Swept {
+        more: true,
+        ..Swept::default()
+    };
+    if waiting() {
+        return Ok(yielded);
+    }
     crate::writer::worker::begin(db, Instant::now() + Duration::from_millis(250))?;
     let budget = Duration::from_millis(limits.sweep_ms);
     let deadline = Instant::now() + budget;
-    let hard = deadline + budget * 4;
+    let hard = deadline + hard_margin(budget);
     let _ = db.progress_handler(1000, Some(move || Instant::now() >= hard));
     let mut swept = Swept::default();
     let mut next_cursor = cursor.clone();
     let mut timed_out = false;
+    let mut gave_way = false;
     let cutoff = day(now_ms) - limits.retention_days;
     let applied = (|| -> rusqlite::Result<()> {
         while swept.days < limits.sweep_rows {
+            if waiting() {
+                gave_way = true;
+                return Ok(());
+            }
             if Instant::now() >= deadline {
                 timed_out = true;
                 return Ok(());
@@ -608,6 +664,10 @@ pub fn sweep(
             }
         }
         let room = limits.sweep_rows - swept.days;
+        if waiting() {
+            gave_way = true;
+            return Ok(());
+        }
         if room == 0 || Instant::now() >= deadline {
             timed_out |= room != 0;
             return Ok(());
@@ -646,6 +706,11 @@ pub fn sweep(
         Ok(())
     });
     let _ = db.progress_handler(0, None::<fn() -> bool>);
+    if applied.is_ok() && gave_way {
+        abandon(db);
+        counts.stats.bump("write_waiting");
+        return Ok(yielded);
+    }
     if let Err(e) = applied.and_then(|()| db.execute_batch("COMMIT")) {
         abandon(db);
         return Err(e);

@@ -266,6 +266,13 @@ impl Writer {
             .as_ref()
             .is_some_and(|s| s.try_send(Job::Sweep { now_ms }).is_ok())
     }
+    /// Jobs waiting in the channel.
+    #[cfg(test)]
+    pub(super) fn queued(&self) -> usize {
+        self.sender
+            .as_ref()
+            .map_or(0, |s| s.max_capacity() - s.capacity())
+    }
     /// Asks for a read-count flush. A full queue skips it; the next tick asks again.
     pub fn flush_reads(&self) -> bool {
         self.sender
@@ -517,7 +524,6 @@ pub(crate) fn run(
     let mut directory_synced = false;
     let mut auto_rate = super::hardening::Rate::default();
     let mut flush_requested = false;
-    let mut flushed_last = false;
     let mut read_cursor = super::read_counts::SweepCursor::default();
     // Index publication runs on this thread after step 5, never under a lock.
     let mut publisher = config.index.as_ref().and_then(|i| i.publisher());
@@ -576,30 +582,28 @@ pub(crate) fn run(
             let mut m = metrics.lock().unwrap();
             m.pending_max = m.pending_max.max(writes.len() as u64);
         }
-        // Read counts flush one bounded transaction at a time, only while no
-        // write waits unless the accumulator is over three quarters full. Under
-        // that pressure, flushes and write batches alternate.
-        let busy = !writes.is_empty();
-        if !(busy && flushed_last)
-            && super::read_counts::due(flush_requested, busy, &config.read_counts)
-        {
-            flush_requested = super::read_counts::flush_once(&db, &config.read_counts)
+        // Read counts flush one bounded transaction at a time and only while
+        // nothing is queued, however full the accumulator is. A flush that sees
+        // a job arrive rolls back and yields, so a write never waits behind it.
+        if super::read_counts::due(flush_requested, !writes.is_empty()) {
+            let waiting = || !receiver.is_empty();
+            flush_requested = super::read_counts::flush_once(&db, &config.read_counts, &waiting)
                 .is_ok_and(|flush| flush.more);
-            flushed_last = true;
             continue;
         }
-        flushed_last = false;
         if writes.is_empty() {
             if let Some(now_ms) = sweeps.pop_front() {
                 if let Ok(deleted) =
                     sweep_with(&db, now_ms, &config.proposal_limits.read().unwrap())
                 {
                     metrics.lock().unwrap().sweeps += 1;
+                    let waiting = || !receiver.is_empty();
                     let reads = super::read_counts::sweep(
                         &db,
                         &config.read_counts,
                         now_ms,
                         &mut read_cursor,
+                        &waiting,
                     );
                     // A full batch can leave expired rows behind. Run the next
                     // bounded batch while the writer is idle; writes still go first.

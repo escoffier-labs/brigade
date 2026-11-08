@@ -20,6 +20,10 @@ fn memory_db() -> Connection {
     schema::migrate(&db, 1_800_000_000_000).unwrap();
     db
 }
+/// The writer's queue probe when nothing is queued.
+fn idle() -> bool {
+    false
+}
 fn count(db: &Connection, sql: &str) -> i64 {
     db.query_row(sql, [], |r| r.get(0)).unwrap()
 }
@@ -33,7 +37,7 @@ fn meta(db: &Connection, key: &str) -> Option<String> {
 fn flush(h: &Hub) -> Connection {
     let db = worker::open(&h.memory()).unwrap();
     let counts = &h.store.as_ref().unwrap().read_counts;
-    while flush_once(&db, counts).unwrap().written > 0 {}
+    while flush_once(&db, counts, &idle).unwrap().written > 0 {}
     db
 }
 fn day_row(db: &Connection, scope: &str, card: &str) -> Option<(i64, i64)> {
@@ -300,12 +304,12 @@ fn one_principal_past_either_daily_limit_is_not_counted_and_the_limit_resets() {
     // Another principal is not held back.
     counts.record("q", &[("fleet", "a")], Kind::CardRead, now);
     let db = memory_db();
-    flush_once(&db, &counts).unwrap();
+    flush_once(&db, &counts, &idle).unwrap();
     assert_eq!(day_row(&db, "fleet", "a"), Some((0, 4)));
     assert_eq!(day_row(&db, "fleet", "d"), None);
     // The next UTC day starts both limits over.
     counts.record("p", &[("fleet", "a")], Kind::CardRead, now + DAY_MS);
-    flush_once(&db, &counts).unwrap();
+    flush_once(&db, &counts, &idle).unwrap();
     let tomorrow = day(now + DAY_MS);
     assert_eq!(
         count(
@@ -368,7 +372,7 @@ fn a_flush_stops_at_the_row_cap_and_resumes_without_double_counting() {
         );
     }
     let db = memory_db();
-    let first = flush_once(&db, &counts).unwrap();
+    let first = flush_once(&db, &counts, &idle).unwrap();
     assert_eq!(
         first,
         Flush {
@@ -384,9 +388,9 @@ fn a_flush_stops_at_the_row_cap_and_resumes_without_double_counting() {
         ),
         10
     );
-    assert_eq!(flush_once(&db, &counts).unwrap().written, 10);
+    assert_eq!(flush_once(&db, &counts, &idle).unwrap().written, 10);
     assert_eq!(
-        flush_once(&db, &counts).unwrap(),
+        flush_once(&db, &counts, &idle).unwrap(),
         Flush {
             written: 5,
             more: false
@@ -415,7 +419,7 @@ fn a_flush_stops_at_the_time_budget_commits_and_resumes() {
     let cards: Vec<(&str, &str)> = ids.iter().map(|id| ("fleet", id.as_str())).collect();
     counts.record("p", &cards, Kind::SearchHit, now);
     let db = memory_db();
-    let first = flush_once(&db, &counts).unwrap();
+    let first = flush_once(&db, &counts, &idle).unwrap();
     assert!(
         first.more && first.written > 0 && first.written < 20_000,
         "{first:?}"
@@ -426,7 +430,7 @@ fn a_flush_stops_at_the_time_budget_commits_and_resumes() {
     );
     assert_eq!(counts.stats.budget("flush_ms"), 1);
     let mut rounds = 1;
-    while flush_once(&db, &counts).unwrap().written > 0 {
+    while flush_once(&db, &counts, &idle).unwrap().written > 0 {
         rounds += 1;
     }
     assert!(rounds > 1);
@@ -453,10 +457,10 @@ fn a_failed_flush_returns_its_keys_and_counts_nothing_twice() {
     // Another connection holds the write lock past the flush's lock wait.
     let holder = Connection::open(&path).unwrap();
     holder.execute_batch("BEGIN IMMEDIATE").unwrap();
-    assert!(flush_once(&db, &counts).is_err());
+    assert!(flush_once(&db, &counts, &idle).is_err());
     assert_eq!(counts.len(), 2);
     holder.execute_batch("ROLLBACK").unwrap();
-    assert_eq!(flush_once(&db, &counts).unwrap().written, 2);
+    assert_eq!(flush_once(&db, &counts, &idle).unwrap().written, 2);
     assert!(counts.is_empty());
     assert_eq!(
         count(&db, "SELECT sum(search_hits) FROM memory_read_days"),
@@ -466,19 +470,189 @@ fn a_failed_flush_returns_its_keys_and_counts_nothing_twice() {
 }
 
 #[test]
-fn a_flush_waits_for_writes_unless_three_quarters_full() {
-    let counts = ReadCounts::new(limits(|l| l.accumulator_keys = 8));
+fn a_full_accumulator_never_flushes_while_a_write_waits() {
+    let counts = ReadCounts::new(limits(|l| l.accumulator_keys = 4));
     let now = 1_800_000_000_000;
     counts.record("p", &[("fleet", "a")], Kind::SearchHit, now);
-    assert!(due(true, false, &counts));
-    assert!(!due(true, true, &counts));
-    assert!(!due(false, false, &counts));
-    let cards: Vec<String> = (0..6).map(|n| format!("c{n}")).collect();
-    let cards: Vec<(&str, &str)> = cards.iter().map(|c| ("fleet", c.as_str())).collect();
+    assert!(due(true, false));
+    assert!(!due(true, true));
+    assert!(!due(false, false));
+    // Full: new keys are dropped and counted, and a waiting write still wins.
+    let cards = [
+        ("fleet", "b"),
+        ("fleet", "c"),
+        ("fleet", "d"),
+        ("fleet", "e"),
+    ];
     counts.record("p", &cards, Kind::SearchHit, now);
-    assert_eq!(counts.len(), 7);
+    assert_eq!(counts.len(), 4);
     assert!(counts.pressed());
-    assert!(due(true, true, &counts));
+    assert_eq!(counts.stats.dropped(), 1);
+    assert!(!due(true, true));
+}
+
+/// A probe that reports a queued job from its `after`th call on.
+fn arrives_after(after: usize) -> impl Fn() -> bool {
+    let calls = std::cell::Cell::new(0);
+    move || {
+        calls.set(calls.get() + 1);
+        calls.get() > after
+    }
+}
+
+#[test]
+fn a_flush_releases_the_lock_for_a_queued_write_and_commits_nothing() {
+    let dir = temp_dir();
+    let path = dir.join("memory.db");
+    let db = worker::open_file(&path, true).unwrap();
+    schema::migrate(&db, 1_800_000_000_000).unwrap();
+    let counts = ReadCounts::default();
+    let cards: Vec<String> = (0..10).map(|n| format!("c{n}")).collect();
+    let cards: Vec<(&str, &str)> = cards.iter().map(|c| ("fleet", c.as_str())).collect();
+    counts.record("p", &cards, Kind::SearchHit, 1_800_000_000_000);
+    // A write already queued: the flush never takes the lock.
+    let queued = flush_once(&db, &counts, &|| true).unwrap();
+    assert_eq!(
+        queued,
+        Flush {
+            written: 0,
+            more: true
+        }
+    );
+    assert!(db.is_autocommit());
+    assert_eq!(counts.len(), 10);
+    // A write arriving mid-flush: the flush rolls back at the next row
+    // boundary, and another connection can take the write lock at once.
+    let midway = flush_once(&db, &counts, &arrives_after(4)).unwrap();
+    assert_eq!(
+        midway,
+        Flush {
+            written: 0,
+            more: true
+        }
+    );
+    assert!(db.is_autocommit());
+    let writer = Connection::open(&path).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE; ROLLBACK").unwrap();
+    assert_eq!(count(&db, "SELECT count(*) FROM memory_read_days"), 0);
+    assert_eq!(meta(&db, "read_days_rows"), Some("0".into()));
+    assert_eq!(counts.stats.budget("write_waiting"), 1);
+    // Every key is back, oldest first, and lands exactly once when idle.
+    assert_eq!(counts.len(), 10);
+    assert_eq!(flush_once(&db, &counts, &idle).unwrap().written, 10);
+    assert_eq!(
+        count(&db, "SELECT sum(search_hits) FROM memory_read_days"),
+        10
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_sweep_rolls_back_for_a_queued_write() {
+    let counts = ReadCounts::default();
+    let now = 1_800_000_000_000;
+    let db = memory_db();
+    seed_days(&db, &[day(now) - 100], 1_000);
+    let mut cursor = SweepCursor::default();
+    let swept = sweep(&db, &counts, now, &mut cursor, &arrives_after(2)).unwrap();
+    assert!(swept.more && db.is_autocommit());
+    assert_eq!(count(&db, "SELECT count(*) FROM memory_read_days"), 1_000);
+    assert_eq!(meta(&db, "read_days_rows"), Some("1000".into()));
+    assert_eq!(counts.stats.budget("write_waiting"), 1);
+    assert_eq!(
+        sweep(&db, &counts, now, &mut cursor, &idle).unwrap().days,
+        1_000
+    );
+}
+
+#[tokio::test]
+async fn a_queued_write_takes_the_lock_before_a_flush_of_a_full_accumulator() {
+    use std::sync::{
+        Mutex as StdMutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    let counts: Arc<OnceLock<Arc<ReadCounts>>> = Arc::default();
+    // Each committed write batch records how many keys had been flushed.
+    let commits: Arc<StdMutex<Vec<u64>>> = Arc::default();
+    let armed = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(tokio::sync::Notify::new());
+    let (release, gate) = mpsc::channel::<()>();
+    let gate = Arc::new(StdMutex::new(Some(gate)));
+    let hook: writer::Hook = {
+        let (counts, commits, armed, paused) = (
+            counts.clone(),
+            commits.clone(),
+            armed.clone(),
+            paused.clone(),
+        );
+        Arc::new(move |step| {
+            if step == writer::Step::Committed {
+                let flushed = counts.get().map_or(0, |c| c.stats.flushed());
+                commits.lock().unwrap().push(flushed);
+            }
+            // Hold the first armed batch until the flush request and the next
+            // write are both queued behind it.
+            if step == writer::Step::Applied && armed.swap(false, Ordering::SeqCst) {
+                paused.notify_one();
+                let gate = gate.lock().unwrap().take().unwrap();
+                gate.recv().unwrap();
+            }
+        })
+    };
+    let mut h = Hub::with(clean(), Some(hook));
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&json!({"read_counts": {"accumulator_keys": 4}}))
+        .unwrap();
+    let store = h.store.as_ref().unwrap();
+    counts.set(store.read_counts.clone()).ok().unwrap();
+    let cards = [
+        ("fleet", "a"),
+        ("fleet", "b"),
+        ("fleet", "c"),
+        ("fleet", "d"),
+    ];
+    store
+        .read_counts
+        .record("p", &cards, Kind::SearchHit, h.now());
+    assert!(store.read_counts.pressed());
+    commits.lock().unwrap().clear();
+    armed.store(true, Ordering::SeqCst);
+    let first = h.put(NODE_TOKEN, "fleet", "one", None, "one");
+    let second = async {
+        paused.notified().await;
+        // Queues the flush request (and the retention sweep) ahead of the write.
+        assert!(store.sweep());
+        let put = h.put(NODE_TOKEN, "fleet", "two", None, "two");
+        tokio::pin!(put);
+        let started = std::time::Instant::now();
+        while store.writer.queued() < 3 {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "write never queued"
+            );
+            tokio::select! {
+                biased;
+                reply = &mut put => panic!("write answered while the writer was held: {reply:?}"),
+                () = tokio::task::yield_now() => {}
+            }
+        }
+        release.send(()).unwrap();
+        put.await
+    };
+    let (one, two) = tokio::join!(first, second);
+    assert_eq!((one.status, two.status), (201, 201), "{one:?} {two:?}");
+    // Both write batches committed before any read count was flushed.
+    assert_eq!(*commits.lock().unwrap(), [0, 0]);
+    let started = std::time::Instant::now();
+    while store.read_counts.stats.flushed() < 4 {
+        assert!(started.elapsed() < Duration::from_secs(10), "no idle flush");
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(*commits.lock().unwrap(), [0, 0]);
 }
 
 #[tokio::test]
@@ -511,14 +685,14 @@ fn both_row_caps_stop_new_keys_while_existing_rows_update() {
     let now = 1_800_000_000_000;
     let db = memory_db();
     counts.record("p", &[("fleet", "a"), ("fleet", "b")], Kind::SearchHit, now);
-    flush_once(&db, &counts).unwrap();
+    flush_once(&db, &counts, &idle).unwrap();
     counts.record(
         "q",
         &[("fleet", "a"), ("fleet", "c"), ("fleet", "d")],
         Kind::SearchHit,
         now,
     );
-    flush_once(&db, &counts).unwrap();
+    flush_once(&db, &counts, &idle).unwrap();
     assert_eq!(day_row(&db, "fleet", "a"), Some((2, 0)));
     assert_eq!(day_row(&db, "fleet", "c"), None);
     assert_eq!(count(&db, "SELECT count(*) FROM memory_read_days"), 2);
@@ -608,7 +782,7 @@ fn the_sweep_stays_within_its_row_budget_and_finishes_over_several_ticks() {
     )
     .unwrap();
     let mut cursor = SweepCursor::default();
-    let first = sweep(&db, &counts, now, &mut cursor).unwrap();
+    let first = sweep(&db, &counts, now, &mut cursor, &idle).unwrap();
     assert_eq!((first.days, first.more), (2_000, true));
     // Oldest first.
     assert_eq!(
@@ -621,9 +795,9 @@ fn the_sweep_stays_within_its_row_budget_and_finishes_over_several_ticks() {
         ),
         500
     );
-    let second = sweep(&db, &counts, now, &mut cursor).unwrap();
+    let second = sweep(&db, &counts, now, &mut cursor, &idle).unwrap();
     assert_eq!((second.days, second.more), (2_000, true));
-    let third = sweep(&db, &counts, now, &mut cursor).unwrap();
+    let third = sweep(&db, &counts, now, &mut cursor, &idle).unwrap();
     assert_eq!((third.days, third.more), (1_000, false));
     assert_eq!(count(&db, "SELECT count(*) FROM memory_read_days"), 10);
     assert_eq!(meta(&db, "read_days_rows"), Some("10".into()));
@@ -640,11 +814,11 @@ fn the_sweep_stops_at_its_time_budget() {
     let db = memory_db();
     seed_days(&db, &[day(now) - 100], 60_000);
     let mut cursor = SweepCursor::default();
-    let first = sweep(&db, &counts, now, &mut cursor).unwrap();
+    let first = sweep(&db, &counts, now, &mut cursor, &idle).unwrap();
     assert!(first.more && first.days < 60_000, "{first:?}");
     assert_eq!(counts.stats.budget("sweep_ms"), 1);
     let mut ticks = 1;
-    while sweep(&db, &counts, now, &mut cursor).unwrap().more {
+    while sweep(&db, &counts, now, &mut cursor, &idle).unwrap().more {
         ticks += 1;
     }
     assert!(ticks > 1);
@@ -686,12 +860,12 @@ fn the_sweep_removes_totals_of_retired_cards_resuming_across_ticks() {
     )
     .unwrap();
     let mut cursor = SweepCursor::default();
-    let first = sweep(&db, &counts, now, &mut cursor).unwrap();
+    let first = sweep(&db, &counts, now, &mut cursor, &idle).unwrap();
     assert_eq!((first.examined, first.totals), (3, 2));
     assert_eq!(cursor, SweepCursor(Some(("fleet".into(), "c2".into()))));
-    let second = sweep(&db, &counts, now, &mut cursor).unwrap();
+    let second = sweep(&db, &counts, now, &mut cursor, &idle).unwrap();
     assert_eq!((second.examined, second.totals), (3, 2));
-    let third = sweep(&db, &counts, now, &mut cursor).unwrap();
+    let third = sweep(&db, &counts, now, &mut cursor, &idle).unwrap();
     assert_eq!((third.examined, third.totals), (1, 1));
     assert_eq!(cursor, SweepCursor(None));
     let kept: Vec<String> = db
@@ -712,10 +886,19 @@ fn retention_keeps_thirty_five_days_by_default() {
     let today = day(now);
     let db = memory_db();
     seed_days(&db, &[today - 35, today - 34, today], 1);
-    sweep(&db, &counts, now, &mut SweepCursor::default()).unwrap();
+    sweep(&db, &counts, now, &mut SweepCursor::default(), &idle).unwrap();
     assert_eq!(
         count(&db, "SELECT min(day) FROM memory_read_days"),
         today - 34
     );
     assert_eq!(count(&db, "SELECT count(*) FROM memory_read_days"), 2);
+}
+
+#[test]
+fn the_hard_stop_sits_past_the_budget_with_a_floor() {
+    let ms = Duration::from_millis;
+    // The default 20 ms budget is stopped 100 ms after it starts.
+    assert_eq!(ms(20) + hard_margin(ms(20)), ms(100));
+    assert_eq!(hard_margin(ms(1)), ms(80));
+    assert_eq!(hard_margin(ms(100)), ms(400));
 }
