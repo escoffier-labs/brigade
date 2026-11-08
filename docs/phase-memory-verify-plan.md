@@ -3,7 +3,7 @@
 Design: [phase-memory-verify.md](phase-memory-verify.md). Issues: #2385
 (model-backed verification pass) and #2387 (access-weighted cadence). Sibling:
 #2386 (deterministic link repair), which shares the fairness helper from
-slice 3.
+slice 5.
 
 Each slice below is one pull request. A slice lists its dependencies, the
 files it touches, the tests it adds, and its security review focus. Every
@@ -28,45 +28,55 @@ New Python modules stay under the 2,000-line ceiling of the module size
 ratchet. Planned commands are written without the `brigade` prefix because
 they do not exist yet.
 
+Revision 2 (2026-11-08) moves the hub work ahead of every client slice. The
+verifier floor (old slice 10, now slice 3) is mandatory, and a new slice 4
+adds proposal-bound attestations and the reviewer hash read. Old slices 3 to
+9 become slices 5 to 11 with the same order.
+
 ## Integration baseline
 
 - #2383 (near-duplicate pass and per-scope fair scheduling) must be merged
-  before slice 3, which extracts its ordering into a shared helper.
-- Memory schema is at version 9 on main. Slice 1 takes version 10. If another
-  change takes 10 first, slice 1 rebases onto the next number.
-- No slice enables the pass on a live hub. Enabling follows the go/no-go steps
-  in D7 after slice 9.
+  before slice 5, which extracts its ordering into a shared helper.
+- Memory schema is at version 9 on main. Slice 1 takes version 10, and slices
+  3 and 4 take the next versions in merge order. If another change takes a
+  number first, the slice rebases onto the next one.
+- No slice submits a live proposal before slices 3 and 4 are merged and
+  deployed. Enabling the pass follows the go/no-go steps in D7 after slice 11.
 
 ## Dependency order
 
 ```text
-1 -> 2 -> 3 -> 4 -> 6 -> 7 -> 8 -> 9
-               \-> 5 ---/
-10 is optional and depends on 7
+1 -> 2 -> 5 -> 6 -> 8 -> 9 -> 10 -> 11
+          5 -> 7 -> 8
+3 -> 4 -> 9
+     4 -> 10
 ```
 
-Slices 4 and 5 can proceed in parallel after slice 3.
+Slices 3 and 4 can proceed in parallel with slices 1 and 2. Slices 6 and 7
+can proceed in parallel after slice 5.
 
-## Slice 1. Hub read counters
+## Slice 1. Hub read counters and budgets
 
-Design: D2 (what the hub records, write path, schema, retention).
+Design: D2 (what the hub records, write path and budgets, schema, retention).
 
 Changes:
 
 - `engines/hub/src/memory/schema.rs`: version 10 migration adding
   `memory_read_days` and `memory_read_totals`, and `read_counts_since_day` in
   `memory_meta`. Log epoch, proposal ids and event sequence are unchanged.
-- A new `engines/hub/src/memory/read_counts.rs`: the bounded accumulator
-  (65,536 keys), the 60-second batched flush through the existing writer,
-  saturation, and the drop counter.
+- A new `engines/hub/src/memory/read_counts.rs`: the bounded accumulator, the
+  in-memory per-principal increment limits, low-priority flushing in
+  transactions bounded by rows and SQLite execution time, resumable from the
+  oldest keys, the table row caps, and saturation.
 - The `card` read and `search` paths in `engines/hub/src/memory/mod.rs` report
   hits to the accumulator after a 200 reply. `eval: true` searches and the
   hub's own searches do not.
-- The idle retention sweep removes expired day rows and the totals rows of
-  retired cards in bounded transactions.
-- `memory_config.rs`: `memory.read_counts.retention_days`, default 35, from 7
-  to 365. Unknown keys fail configuration as today.
-- `engines/hub/src/telemetry.rs`: the bounded `read_count_dropped` label.
+- The idle retention sweep removes expired day rows oldest first and the
+  totals rows of retired cards, within its row and time budget, and resumes on
+  the next idle tick.
+- `memory_config.rs`: the `memory.read_counts` keys with their defaults and
+  ranges. Retention is 7 to 365 days, default 35.
+- `engines/hub/src/telemetry.rs`: one bounded label per budget.
 
 Tests (`engines/hub/src/memory/read_counts_tests.rs`):
 
@@ -74,47 +84,128 @@ Tests (`engines/hub/src/memory/read_counts_tests.rs`):
   proposal ids. A second start is a no-op.
 - A search reply increments `search_hits` once per returned card. A card read
   at offset 0 increments `card_reads`, and a continuation chunk does not.
-- `eval: true` searches, `log`, `status` and proposal reads leave counts
-  unchanged. Refused reads (403, 404) count nothing.
+- `eval: true` searches, `log`, `status`, proposal reads and refused reads
+  leave counts unchanged.
 - The schema holds no principal, query or time-of-day column.
-- A full accumulator drops increments and raises the telemetry label. A flush
-  writes one transaction.
-- The sweep deletes day rows past retention and totals rows of retired cards,
-  and stays within its row bound per transaction.
-- Retention outside 7 to 365 fails configuration.
+- One principal past either daily limit is served but not counted, and the
+  limit resets at the day boundary.
+- A flush stops at the row cap and at the time budget, commits, and the next
+  flush continues without double counting.
+- A flush waits while the writer queue is busy, unless the accumulator is over
+  three quarters full.
+- Both row caps stop new keys while existing rows still update.
+- The sweep stays within its budgets and finishes over several ticks.
 
-Security review focus: nothing identifying is stored, the read path cannot
-stall the writer, and the accumulator bound holds under a read flood.
+Security review focus: nothing identifying is stored, and a read flood from
+one principal cannot stall the writer or grow the tables past their caps.
 
-## Slice 2. `read_stats` read action and client
+## Slice 2. `read_stats` right, audit and client
 
 Depends on slice 1. Design: D2 (who can read the counts).
 
 Changes:
 
-- `engines/hub/src/memory/mod.rs`: route `read_stats` through the existing
-  read dispatch. It requires `read` and `reflect` on the exact scope, pages at
+- `engines/hub/src/memory/auth.rs` and the grant validation: the new
+  `read_stats` right. `reflect` does not imply it.
+- `engines/hub/src/memory/mod.rs`: route `read_stats` through the existing read
+  dispatch. It requires `read` and `read_stats` on the exact scope, pages at
   most 1,000 rows, and uses an authenticated cursor bound to the principal and
-  scope.
+  scope. A per-principal rate limit returns
+  `429 memory_read_stats_rate_limited`.
+- An audit row per request in the hub audit table
+  (`engines/hub/src/schema/audit.rs`), never in the memory event log.
 - `src/brigade/memory_hub_client.py`: a `read_stats` client call that refuses
   admin credentials, as reflect does.
 - Remote connector profiles and fleet digests do not gain the field.
 
 Tests:
 
-- `read` alone, `reflect` alone and a grant on another scope each return
-  `403 memory_grant_missing`. Both grants return rows. Collections need their
-  exact scope.
+- `read` alone, `reflect` with `read`, and a grant on another scope each
+  return `403 memory_grant_missing`. `read` with `read_stats` returns rows.
+  Collections need their exact scope.
 - An altered, expired or other-principal cursor is refused.
+- The rate limit refuses the request over the limit and recovers after it.
+- Every request, refused ones included, writes one audit row, and no memory
+  event is appended.
 - Rows hold only the documented numeric fields and card ids.
 - The client test uses the existing `FakeHub` in
   `tests/test_memory_hub_client.py`.
 - A connector profile test confirms no tool returns read counts.
 
-Security review focus: the cursor, grant checks, and whether counts open any
-existence oracle beyond what `read` already gives.
+Security review focus: the grant split from `reflect`, the cursor, the audit
+record, and the single-reader-scope note in the docs.
 
-## Slice 3. Verify folder, state, scoring and never-read report
+## Slice 3. Verifier credentials and the Tier 2 floor
+
+No dependency on slices 1 and 2. Design: D4 (verifier credentials and the
+Tier 2 floor). Mandatory before any slice submits a proposal.
+
+Changes:
+
+- The hub principal enrollment path: a `verifier` attribute set only by an
+  admin at enrollment or by an admin update, stored with the credential
+  record. The principal cannot change it.
+- `engines/hub/src/memory/proposal_tiers.rs` and `proposals.rs`: proposals
+  from a flagged principal record `verifier: true` at submit and are Tier 2 at
+  submit, preflight and every decision, whatever their ops.
+- `engines/hub/src/memory/preflight.rs`: a `verifier_floor` hold. The
+  `auto_apply` route refuses these proposals.
+- Fleet policy validation: a policy that lists a flagged principal in
+  `reflect_principals` is refused with `memory_policy_verifier_listed`, and
+  flagging a principal that a policy lists is refused.
+- The memory `status` reply: the caller's own `verifier` and
+  `reflect_principal` booleans, and a capability entry advertising the floor.
+
+Tests:
+
+- A verifier's `append_evidence` proposal stays Tier 2 under a policy that
+  lists `append_evidence` in `tier0_op_classes`.
+- Clearing the flag after submit leaves the open proposal at Tier 2 through
+  preflight and decision.
+- `auto_apply` on a verifier proposal is refused and changes nothing.
+- Both policy refusals, including a replay of the same policy write.
+- `status` reports both booleans correctly for flagged, unflagged and listed
+  principals.
+- A principal cannot set its own flag through any memory action.
+
+Security review focus: the floor cannot be bypassed through policy staleness,
+replay, flag changes or a direct `auto_apply` call.
+
+## Slice 4. Proposal-bound attestations and the reviewer hash read
+
+Depends on slice 3. Design: D5 (proposal-bound attestation state, hash read
+for reviewers).
+
+Changes:
+
+- `engines/hub/src/memory/attestation.rs`: attachments from a verifier enter
+  `pending_review` and never hold automatic apply or count as proof. The first
+  proposal from the same principal that cites the record binds it.
+- Proposal decisions in `proposals.rs`: accept moves bound records to
+  `active`. Reject, stale and compaction move them to `inert`. A sweep moves
+  records unbound after 24 hours to `inert`. Inert records free their quota
+  slot and never count as proof or as a contrary hold.
+- `engines/hub/src/memory/proposal_reads.rs`: `proposal_show` returns each
+  cited verifier manifest's evidence id, `artifact_kind`, `artifact_sha256`,
+  stance and state to callers with `review` on every target, and null fields
+  to everyone else.
+
+Tests:
+
+- A verifier's `contrary` manifest does not hold automatic apply on its card
+  while the proposal is pending.
+- Accept activates the hold. Reject, stale, compaction and the 24-hour unbound
+  sweep each make the record inert, free its slot, and leave no hold.
+- A record cannot be bound by another principal's proposal or by a second
+  proposal.
+- `proposal_show` returns the hash to a reviewer with `review` on all targets,
+  and null to a caller with `read` only or with `review` on some targets.
+- Existing non-verifier attestations behave exactly as before.
+
+Security review focus: state transitions under concurrent decisions, and that
+the hash read reveals nothing to non-reviewers.
+
+## Slice 5. Verify folder, state, scoring and never-read report
 
 Depends on slice 2 and #2383. Design: D2 (candidate score, never-read report),
 D3 (where it runs) and D6 (state file).
@@ -129,8 +220,10 @@ Changes:
   limit, and the three-failure pause counter.
 - A new `src/brigade/memory_verify_select.py`: eligibility filters, the score,
   the staleness lane, and the never-read report.
-- `[verify]` and `[[verify.workspace]]` parsing in `.brigade/memory-care.toml`.
-  The workspace file still cannot name a hub URL or credential path.
+- `[verify]` and `[[verify.workspace]]` parsing in `.brigade/memory-care.toml`,
+  including the ownership rules: one scope per root, no nested roots, and an
+  explicit `archive_projects` list. The workspace file still cannot name a hub
+  URL or credential path.
 - Commands: `memory verify status` and `memory verify run --dry-run --no-model`,
   which prints selected card ids, scores and skip counts with no text.
 
@@ -141,47 +234,56 @@ Tests (`tests/test_memory_verify_select.py`, `tests/test_memory_verify_state.py`
   other cards have far higher read counts.
 - The minimum interval and the 30-day interval for unchanged supported cards.
 - Ties follow the shared helper, and the near-duplicate tests still pass.
-- Never-read stays null until counting covers the window, then counts only
-  cards first seen before the window with no reads.
+- Never-read stays null until counting covers the window.
+- A root bound to two scopes, a nested root and a missing project list each
+  fail configuration.
 - State files over the limit, malformed or unsafe fail closed with a fixed
   reason and no text.
-- No output path prints card text.
 
-Security review focus: state file safety and the absence of text in every
-output.
+Security review focus: state file safety, ownership validation, and the
+absence of text in every output.
 
-## Slice 4. Evidence assembly
+## Slice 6. Evidence assembly with per-scope isolation
 
-Depends on slice 3. Design: D3 (inputs per card).
+Depends on slice 5. Design: D3 (inputs per card, per-scope evidence isolation,
+evidence trust and independence, abstaining before any model call).
 
 Changes:
 
-- A new `src/brigade/memory_verify_evidence.py`. It resolves cited references
-  with the resolver and evidence roots in
-  `src/brigade/memory_reflect_candidates.py`, mapped through
-  `[[verify.workspace]]`, plus evidence bundles from the local archive.
-- Related excerpts through `brigade evidence search` with a deterministic
-  query, limited to the archive projects the workspace entry names.
-- Per-item, per-card and per-run byte bounds, trust ranks, and scans of every
-  excerpt with the memory scan bundle.
-- Reason codes: `evidence_unreachable`, `evidence_flagged`, `no_evidence`.
+- A new `src/brigade/memory_verify_evidence.py`. It resolves cited paths only
+  under the card scope's roots and the evidence roots from
+  `src/brigade/memory_reflect_candidates.py`, and bundles only under the
+  scope's listed archive projects.
+- Related excerpts through `brigade evidence search`, filtered to the listed
+  projects, with a deterministic query.
+- Receipt splitting into authenticated fields and command output, with the
+  archive digest check.
+- The independence test: different files, different run ids, and no copied
+  span of 200 or more bytes.
+- Byte bounds, trust ranks, scans of every item, and the pre-call abstain
+  rule. Reason codes: `evidence_unreachable`, `evidence_flagged`,
+  `no_evidence`, `uncorroborated`.
 
 Tests (`tests/test_memory_verify_evidence.py`):
 
-- Each evidence kind resolves to the right trust rank.
-- A path outside the evidence roots, a symlink, or `..` is not read.
-- S19e-1 attested ids count as unreachable.
+- A path under no root, under two roots of the scope, or under another scope's
+  root is unreachable and never opened.
+- A bundle under an unlisted or second project is unreachable.
+- S19e-1 attested ids are unreachable.
+- A receipt whose bytes differ from the archive digest is not authenticated.
+  Its stdout is never ranked as authenticated.
+- A handoff that copies a receipt span is not independent of that receipt.
+- A card without two independent items, one authenticated, gets no model call.
+- A flagged item is dropped and recorded with its rule ids.
 - Bounds cut at the documented sizes and never split a UTF-8 sequence.
-- A flagged excerpt is dropped, and a card left with no high or medium
-  evidence becomes `no_evidence`.
-- The query depends only on the card title and block terms.
 
-Security review focus: path handling, private evidence staying on the host,
-and scan coverage of every byte that reaches a prompt.
+Security review focus: cross-scope isolation, path handling, the
+authenticated-field boundary, and scan coverage of every byte that reaches a
+prompt.
 
-## Slice 5. Isolated seat dispatch
+## Slice 7. Isolated seat dispatch
 
-Depends on slice 3. Design: D3 (seat) and D4 (private cards and connector
+Depends on slice 5. Design: D3 (seats) and D4 (private cards and connector
 audiences).
 
 Changes:
@@ -189,6 +291,8 @@ Changes:
 - A new `src/brigade/memory_verify_seat.py` that reuses roster seat
   resolution, model pinning and CLI adapters from the `brigade run --worker`
   path, without planning, synthesis, fleet claims or worktrees.
+- `propose_seat` and `confirm_seat`, refused with `verify_seat_same_model`
+  when they resolve to one model id.
 - An isolation probe per CLI adapter, run by `memory verify doctor`, that
   proves the call has no tools, no recall and an empty private working
   directory. Seats it cannot prove are refused with `verify_seat_not_isolated`.
@@ -199,7 +303,8 @@ Changes:
 
 Tests (`tests/test_memory_verify_seat.py`):
 
-- A scripted fake seat returns fixed replies and timeouts.
+- Scripted fake seats return fixed replies and timeouts.
+- Two seats pinned to one model are refused.
 - Cloud and remote seats are refused before any prompt is written.
 - Work directory and file modes are owner-only, and the files are gone after
   the call, including after a timeout.
@@ -210,18 +315,19 @@ Tests (`tests/test_memory_verify_seat.py`):
 Security review focus: the isolation probe itself, the connector boundary, and
 cleanup on every exit path.
 
-## Slice 6. Prompt contract, output validation and op mapping
+## Slice 8. Prompt contract, output validation and op mapping
 
-Depends on slices 4 and 5. Design: D3 (prompt contract, output schema,
+Depends on slices 6 and 7. Design: D3 (prompt contract, output schema,
 deterministic checks, mapping to ops) and D4 (prompt injection).
 
 Changes:
 
 - A new `src/brigade/memory_verify_contract.py`: the versioned instructions and
   their digest, nonce markers, and the `brigade.memory-verify.v1` validator.
-- Deterministic checks: exact quotes, trust rank rules, the newer-evidence rule
-  for `changed`, replacement bounds, the novelty check, supersede targets, the
-  local scan, the confidence floor and the confirmation call.
+- Deterministic checks: exact quotes, the two-item corroboration rule with one
+  quote inside authenticated fields, the newer-evidence rule for `changed`,
+  replacement bounds, the novelty check, supersede targets, the local scan,
+  the confidence floor and agreement from the confirm seat.
 - Mapping from verdicts to `replace_block`, `add_previously`,
   `supersede_card` and `append_evidence`, one card per proposal.
 
@@ -230,32 +336,35 @@ Tests (`tests/test_memory_verify_contract.py`):
 - Every verdict maps to the documented op, or to none.
 - Replies with unknown keys, unknown blocks, a wrong card id or over 16 KiB are
   rejected whole.
-- A quote that is not an exact substring, or only low-trust quotes, abstains.
+- A correction quoting one item, two dependent items, or only command output
+  abstains.
 - A replacement that adds a URL, path, host, email, code span, flag or long
   number absent from the block and quotes is rejected.
-- A confirmation call that disagrees abstains with `verify_unconfirmed`.
-- The adversarial fixtures from slice 9 produce no op through the fake seat.
+- A confirm seat that disagrees makes the block abstain with
+  `verify_unconfirmed`.
+- The adversarial and shared-source fixtures from slice 11 produce no op
+  through the fake seats.
 - A marker in card text cannot match the per-call nonce.
 
-Security review focus: the novelty check and quote rules against crafted
-inputs. This slice gets the deepest review of the set.
+Security review focus: the corroboration and novelty rules against crafted
+inputs. This slice gets the deepest review of the client set.
 
-## Slice 7. Submission, manifests, failure and the care entry
+## Slice 9. Submission, manifests, failure and the care entry
 
-Depends on slice 6. Design: D4 (keeping the pass out of Tier 0), D5
-(manifest) and D6.
+Depends on slices 3, 4 and 8. Design: D4 (verifier credentials), D5 (the
+manifest) and D6.
 
 Changes:
 
 - A new `src/brigade/memory_verify_run.py`: `memory verify run`, which reuses
   the S19d request id ledger, refusal storage and quota handling from
   `src/brigade/memory_reflect_hub.py`.
-- Manifest attachment with `evidence.attach`, `contrary` or `support` stance,
-  and the manifest scan.
-- Owner-only review packets with the 64 MiB cap and 14-day expiry.
-- The Tier 0 guard: `preflight` on a remembered proposal before the first
-  submission when one exists, and on the first new proposal of each run. A
-  satisfied policy gate pauses the job with `verify_principal_tier0_listed`.
+- The pre-run check of the `status` booleans and the floor capability, with no
+  inference from preflight hold reasons.
+- Manifest attachment with `evidence.attach`, the manifest scan, and the
+  `append_evidence` op that binds it to the proposal.
+- Owner-only review packets with trust labels and scan findings, the 64 MiB
+  cap and 14-day expiry.
 - The pending ceiling via `proposal_show` on remembered proposals.
 - The `memory-verify` care entry in `src/brigade/care_schedules.py` and
   `src/brigade/care_launchers.py`, at 11:00 by default, refusing admin
@@ -264,56 +373,62 @@ Changes:
 Tests (`tests/test_memory_verify_run.py`, with a `FakeHub` subclass in the style
 of `tests/test_memory_reflect_hub.py`):
 
+- A run against a hub without the floor, or with `verifier` false or
+  `reflect_principal` true, fails before any model call or hub write.
 - A dry run makes no hub write, writes no packet and leaves the pause counter.
 - A real run submits pinned proposals with one card each and a manifest
   `append_evidence` op.
 - Three failures pause scheduled calls, and a manual success clears them.
 - Principal and scope quota replies stop proposing without a failure.
 - A duplicate pending reply records the existing id.
-- A preflight showing a satisfied policy gate pauses the job.
 - The pending ceiling stops new proposals.
 - Installing into the reflect job's folder is refused.
 
-Security review focus: what reaches the hub, packet permissions and expiry, and
-the Tier 0 guard.
+Security review focus: what reaches the hub, packet permissions and expiry,
+and the pre-run credential check.
 
-## Slice 8. Review command and decision feedback
+## Slice 10. Review command and decision feedback
 
-Depends on slice 7. Design: D5.
+Depends on slices 4 and 9. Design: D5 (commands).
 
 Changes:
 
-- `memory verify show <proposal-id>`: reads the packet, re-resolves cited
-  files as `current`, `changed` or `missing`, and with a `review` grant checks
-  the packet digest against the manifest hash from `preflight`. Terminal and
-  `--json` output only.
+- `memory verify show <proposal-id>`: checks the local manifest's sha256
+  against the `artifact_sha256` from `proposal_show`, then the packet against
+  the manifest's `packet_sha256`, and prints nothing else on a mismatch. On a
+  match it prints per-item headers with trust rank, authentication, whether
+  the item counted toward corroboration and scan findings, then the quotes,
+  and re-resolves cited files as `current`, `changed` or `missing`. Terminal
+  and `--json` output only.
 - The next run reads remembered proposal states, stores rejections against
   card revision and evidence digest, and keeps accept and reject counts per
   verdict.
 
 Tests (`tests/test_memory_verify_show.py`):
 
-- Output fields match the packet. A tampered packet fails the digest check.
-- A changed or missing evidence file is marked.
+- A tampered manifest or packet fails the chain and prints no evidence.
+- A caller without `review` gets null hashes and the command refuses.
+- Headers show trust, authentication and findings ahead of quotes.
 - A rejected correction is not proposed again until the revision or evidence
   changes.
 - No log or state file gains text.
 
-Security review focus: the digest check and the absence of text outside the
+Security review focus: the hash chain and the absence of text outside the
 terminal.
 
-## Slice 9. Evaluation harness and seeded corpus
+## Slice 11. Evaluation harness and seeded corpus
 
-Depends on slice 8. Design: D7.
+Depends on slice 10. Design: D7.
 
 Changes:
 
-- `tests/fixtures/memory_verify_eval/`: about 60 synthetic cards with evidence
-  in the four groups and a ground-truth file. All hosts, paths and addresses
+- `tests/fixtures/memory_verify_eval/`: about 70 synthetic cards with evidence
+  in the five groups and a ground-truth file. All hosts, paths and addresses
   use reserved example values.
-- `memory verify eval --corpus <dir> --seat <seat>`: builds a scratch replica,
-  runs the pass with no submissions, and reports the D7 metrics as JSON.
-- A CI test that runs the harness with the scripted fake seat.
+- `memory verify eval --corpus <dir>`: builds a scratch replica, runs the pass
+  with the configured seats and no submissions, and reports the D7 metrics as
+  JSON, including a one-model run for the correlation comparison.
+- A CI test that runs the harness with scripted fake seats.
 - An operator section in [memory-operations.md](memory-operations.md) with
   the shadow and go/no-go steps.
 
@@ -326,28 +441,14 @@ Tests (`tests/test_memory_verify_eval.py`):
 Security review focus: the corpus holds no real private data, and the harness
 cannot be pointed at a live hub.
 
-## Slice 10. Hub-side verifier tier floor (optional)
-
-Depends on slice 7 and the answer to Q6.
-
-Changes: a policy list of verifier principals whose proposals the classifier
-always marks Tier 2, checked at submit, preflight and apply. The list narrows
-authority and grants nothing.
-
-Tests: a verifier's `append_evidence` proposal stays Tier 2 under a policy
-that lists `append_evidence` in `tier0_op_classes` and the verifier in
-`reflect_principals`. Policy digests change when the list changes.
-
-Security review focus: that the floor cannot be bypassed through policy
-staleness or replay.
-
 ## Rollout
 
-1. Merge slices 1 and 2. Upgrade every hub instance to schema 10 before
-   granting the verify principal anything.
-2. Merge slices 3 to 9. Run the seeded evaluation with the production seat
+1. Merge and deploy slices 1 to 4. Upgrade every hub instance before granting
+   the verify principal anything.
+2. Enroll the verify principal with the `verifier` flag and grant `read`,
+   `reflect` and `read_stats` on one scope. Confirm `status` shows `verifier`
+   true and `reflect_principal` false.
+3. Merge slices 5 to 11. Run the seeded evaluation with the production seats
    twice.
-3. Create the verify folder and principal with `read` and `reflect` on one
-   scope. Confirm the principal is absent from `reflect_principals`.
 4. Run shadow mode for 14 days, then live at 2 proposals per run for 28 days,
    as D7 describes. Raise the cap only after the bar is met.
