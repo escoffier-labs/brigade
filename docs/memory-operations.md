@@ -1741,13 +1741,26 @@ The hub configuration accepts `memory.read_counts`:
 | `sweep_rows` | 2000 | 1 to 100000 | The retention sweep resumes on the next idle tick |
 | `sweep_ms` | 20 | 1 to 1000 | Same |
 | `retention_days` | 35 | 7 to 365 | Day rows older than this are deleted |
+| `principals` | 64 | 1 to 4096 | Principals the daily limiter tracks at once |
+| `principal_pairs` | 2048 | 1 to 1000000 | Further distinct cards from one principal are served, not counted |
+| `limiter_pairs` | 131072 | 1 to 16777216 | Limiter entries across all principals |
 
-Unknown keys and values outside a range fail configuration. The per-principal
-limits live only in memory, key each principal by a per-process keyed hash,
-and reset at the UTC day boundary. Per-day counters saturate at 2^32 - 1.
+Unknown keys and values outside a range fail configuration, and so does a
+`limiter_pairs` below `principals` times `principal_pairs`. Every tracked
+principal can therefore use its whole share, and one principal cannot fill the
+limiter for the others. When the principal table is full, a new principal
+evicts the one with the most distinct cards, as long as that principal holds at
+least `principal_pairs / 16` cards (128 by default). An evicted principal's
+reads are served but not counted until the day resets, so eviction never
+refills its budget. When every tracked principal is lighter than that, the new
+principal's reads are served but not counted, and the loss is counted. The
+per-principal limits live only in memory, key each principal by a per-process
+keyed hash, and reset at the UTC day boundary. Per-day counters saturate at
+2^32 - 1.
 
 The idle retention sweep deletes expired day rows oldest first, then removes
 the totals rows of retired cards, within `sweep_rows` and `sweep_ms` per
-transaction. `/metrics` reports each budget that bites as
+transaction. It checks for queued work and the time budget at every totals row,
+commits partial progress at the budget, and resumes from where it stopped. `/metrics` reports each budget that bites as
 `brigade_hub_memory_read_count_budget_total{budget="..."}` and lost increments
 as `brigade_hub_memory_read_count_dropped_total`.

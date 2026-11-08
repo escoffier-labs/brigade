@@ -413,6 +413,9 @@ fn a_flush_stops_at_the_time_budget_commits_and_resumes() {
         l.flush_ms = 1;
         l.flush_rows = 100_000;
         l.principal_daily = 100_000;
+        l.principals = 1;
+        l.principal_pairs = 20_000;
+        l.limiter_pairs = 20_000;
     }));
     let now = 1_800_000_000_000;
     let ids: Vec<String> = (0..20_000).map(|n| format!("c{n:05}")).collect();
@@ -901,4 +904,223 @@ fn the_hard_stop_sits_past_the_budget_with_a_floor() {
     assert_eq!(ms(20) + hard_margin(ms(20)), ms(100));
     assert_eq!(hard_margin(ms(1)), ms(80));
     assert_eq!(hard_margin(ms(100)), ms(400));
+}
+
+fn distinct(prefix: &str, n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("{prefix}{i:05}")).collect()
+}
+fn in_fleet(ids: &[String]) -> Vec<(&str, &str)> {
+    ids.iter().map(|id| ("fleet", id.as_str())).collect()
+}
+
+#[test]
+fn one_principal_filling_its_share_never_stops_another_being_counted() {
+    let counts = ReadCounts::new(limits(|l| {
+        l.principals = 4;
+        l.principal_pairs = 8;
+        l.limiter_pairs = 32;
+    }));
+    let now = 1_800_000_000_000;
+    let heavy = distinct("h", 100);
+    counts.record("heavy", &in_fleet(&heavy), Kind::SearchHit, now);
+    assert_eq!(counts.stats.budget("principal_pairs"), 92);
+    // The second principal still has its whole share.
+    let light = distinct("l", 8);
+    counts.record("light", &in_fleet(&light), Kind::CardRead, now);
+    assert_eq!(counts.len(), 16);
+    assert_eq!(counts.stats.budget("limiter_pairs"), 0);
+    assert_eq!(counts.stats.dropped(), 0);
+    let db = memory_db();
+    flush_once(&db, &counts, &idle).unwrap();
+    assert_eq!(
+        count(&db, "SELECT sum(card_reads) FROM memory_read_days"),
+        8
+    );
+    assert_eq!(
+        count(&db, "SELECT sum(search_hits) FROM memory_read_days"),
+        8
+    );
+}
+
+#[test]
+fn a_full_principal_table_evicts_the_heaviest_and_never_a_light_user() {
+    // Two principals, 64 pairs each. A principal under 4 pairs is light.
+    let counts = ReadCounts::new(limits(|l| {
+        l.principals = 2;
+        l.principal_pairs = 64;
+        l.limiter_pairs = 128;
+    }));
+    assert_eq!(counts.limits().light_pairs(), 4);
+    let now = 1_800_000_000_000;
+    let heavy = distinct("h", 10);
+    counts.record("heavy", &in_fleet(&heavy), Kind::SearchHit, now);
+    counts.record("light", &[("fleet", "a")], Kind::SearchHit, now);
+    // A newcomer evicts the heavy principal, not the light one.
+    counts.record("new", &[("fleet", "b")], Kind::SearchHit, now);
+    assert_eq!(counts.stats.budget("principal_evicted"), 1);
+    counts.record("light", &[("fleet", "c")], Kind::SearchHit, now);
+    // The evicted principal is served but not counted for the rest of the day,
+    // so eviction never refills its budget.
+    counts.record("heavy", &[("fleet", "d")], Kind::SearchHit, now);
+    assert_eq!(counts.stats.budget("evicted_reads"), 1);
+    // Only light users left: a further newcomer is not counted, and the loss is.
+    counts.record("late", &[("fleet", "e")], Kind::SearchHit, now);
+    assert_eq!(counts.stats.budget("principals_full"), 1);
+    assert_eq!(counts.stats.dropped(), 1);
+    counts.record("light", &[("fleet", "f")], Kind::SearchHit, now);
+    let db = memory_db();
+    flush_once(&db, &counts, &idle).unwrap();
+    let counted: Vec<String> = db
+        .prepare(
+            "SELECT card_id FROM memory_read_days WHERE card_id NOT LIKE 'h%' ORDER BY card_id",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(counted, ["a", "b", "c", "f"]);
+    // The next UTC day starts everyone over.
+    counts.record("heavy", &[("fleet", "d")], Kind::SearchHit, now + DAY_MS);
+    assert_eq!(counts.len(), 1);
+}
+
+#[test]
+fn the_limiter_bound_must_cover_every_principal_share() {
+    let defaults = Limits::default();
+    assert_eq!(
+        (
+            defaults.principals,
+            defaults.principal_pairs,
+            defaults.limiter_pairs
+        ),
+        (64, 2_048, 131_072)
+    );
+    assert_eq!(defaults.light_pairs(), 128);
+    let short = json!({"read_counts": {"principals": 65}});
+    let error = Limits::parse(&short).unwrap_err();
+    assert!(error.contains("limiter_pairs"), "{error}");
+    let raised = json!({"read_counts": {"principals": 65, "limiter_pairs": 133_120}});
+    assert_eq!(Limits::parse(&raised).unwrap().principals, 65);
+}
+
+#[test]
+fn rereads_during_flushes_never_grow_the_ordering_past_the_keys() {
+    let counts = ReadCounts::new(limits(|l| {
+        l.flush_rows = 1;
+        l.principal_card_daily = 1_000_000;
+        l.principal_daily = 1_000_000;
+    }));
+    let now = 1_800_000_000_000;
+    let cards = [("fleet", "a"), ("fleet", "b"), ("fleet", "c")];
+    counts.record("p", &cards, Kind::SearchHit, now);
+    for round in 0..1_000 {
+        let (_, batch) = counts.take(1);
+        assert_eq!(batch.len(), 1);
+        // The card is read again while its key is out for a flush.
+        let (scope, card) = (batch[0].0.scope.clone(), batch[0].0.card_id.clone());
+        counts.record("p", &[(&scope, &card)], Kind::SearchHit, now);
+        counts.restore(&batch);
+        assert_eq!(counts.order_len(), counts.len(), "round {round}");
+        assert_eq!(counts.len(), 3);
+    }
+    let db = memory_db();
+    while flush_once(&db, &counts, &idle).unwrap().written > 0 {}
+    assert_eq!(
+        count(&db, "SELECT sum(search_hits) FROM memory_read_days"),
+        1_003
+    );
+    assert_eq!(counts.order_len(), 0);
+}
+
+fn seed_retired_totals(db: &Connection, n: usize) {
+    let tx = db.unchecked_transaction().unwrap();
+    tx.execute(
+        "INSERT OR IGNORE INTO memory_blobs VALUES('h',x'',0,'t')",
+        [],
+    )
+    .unwrap();
+    for card in distinct("r", n) {
+        tx.execute(
+            "INSERT INTO memory_cards(scope,card_id,revision,content_hash,state,trust,writer,writer_class,created_at,updated_at) VALUES('fleet',?1,1,'h','retired','reviewed','w','admin','t','t')",
+            [&card],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO memory_read_totals VALUES('fleet',?1,1,1,1)",
+            [&card],
+        )
+        .unwrap();
+    }
+    tx.execute(
+        "UPDATE memory_meta SET value=?1 WHERE key='read_totals_rows'",
+        [n.to_string()],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+}
+
+#[test]
+fn a_write_queued_mid_totals_sweep_commits_before_the_sweep_finishes_its_page() {
+    let dir = temp_dir();
+    let path = dir.join("memory.db");
+    let db = worker::open_file(&path, true).unwrap();
+    let now = 1_800_000_000_000;
+    schema::migrate(&db, now).unwrap();
+    seed_retired_totals(&db, 10);
+    let counts = ReadCounts::default();
+    let mut cursor = SweepCursor::default();
+    // Probe calls: before the lock, the day loop, then one per totals row. The
+    // job arrives at the third totals row, after two deletes.
+    let swept = sweep(&db, &counts, now, &mut cursor, &arrives_after(4)).unwrap();
+    assert!(swept.more && db.is_autocommit());
+    assert_eq!(cursor, SweepCursor::default());
+    assert_eq!(counts.stats.budget("write_waiting"), 1);
+    // The queued write takes the lock and commits while the page is unfinished.
+    let writer = Connection::open(&path).unwrap();
+    writer
+        .execute_batch("BEGIN IMMEDIATE; INSERT INTO memory_meta VALUES('probe','1'); COMMIT;")
+        .unwrap();
+    assert_eq!(count(&db, "SELECT count(*) FROM memory_read_totals"), 10);
+    assert_eq!(meta(&db, "read_totals_rows"), Some("10".into()));
+    // Idle again, the sweep redoes the page in full.
+    assert_eq!(
+        sweep(&db, &counts, now, &mut cursor, &idle).unwrap().totals,
+        10
+    );
+    assert_eq!(meta(&db, "read_totals_rows"), Some("0".into()));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_totals_sweep_at_its_time_budget_commits_partial_progress_and_resumes() {
+    let counts = ReadCounts::new(limits(|l| {
+        l.sweep_ms = 1;
+        l.sweep_rows = 100_000;
+    }));
+    let now = 1_800_000_000_000;
+    let db = memory_db();
+    seed_retired_totals(&db, 30_000);
+    let mut cursor = SweepCursor::default();
+    let first = sweep(&db, &counts, now, &mut cursor, &idle).unwrap();
+    assert!(
+        first.more && first.totals > 0 && first.totals < 30_000,
+        "{first:?}"
+    );
+    assert_eq!(first.examined, first.totals);
+    assert!(db.is_autocommit());
+    // What it did is committed and the cursor sits on the last row it examined.
+    let left = 30_000 - first.totals as i64;
+    assert_eq!(count(&db, "SELECT count(*) FROM memory_read_totals"), left);
+    assert_eq!(meta(&db, "read_totals_rows"), Some(left.to_string()));
+    let last = format!("r{:05}", first.examined - 1);
+    assert_eq!(cursor, SweepCursor(Some(("fleet".into(), last))));
+    assert_eq!(counts.stats.budget("sweep_ms"), 1);
+    let mut ticks = 1;
+    while sweep(&db, &counts, now, &mut cursor, &idle).unwrap().more {
+        ticks += 1;
+    }
+    assert!(ticks > 1);
+    assert_eq!(count(&db, "SELECT count(*) FROM memory_read_totals"), 0);
+    assert_eq!(meta(&db, "read_totals_rows"), Some("0".into()));
 }

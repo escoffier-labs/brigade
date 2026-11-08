@@ -13,7 +13,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value as Json;
 use std::{
-    collections::{HashMap, VecDeque, hash_map::RandomState},
+    collections::{BTreeMap, HashMap, HashSet, hash_map::RandomState},
     hash::BuildHasher,
     sync::{
         Mutex,
@@ -91,6 +91,12 @@ pub struct Limits {
     pub sweep_rows: usize,
     pub sweep_ms: u64,
     pub retention_days: i64,
+    /// Principals the daily limiter tracks at once.
+    pub principals: usize,
+    /// Distinct cards one principal may have counted per day.
+    pub principal_pairs: usize,
+    /// All limiter entries together. At least `principals * principal_pairs`.
+    pub limiter_pairs: usize,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -105,6 +111,9 @@ impl Default for Limits {
             sweep_rows: 2_000,
             sweep_ms: 20,
             retention_days: 35,
+            principals: 64,
+            principal_pairs: 2_048,
+            limiter_pairs: 131_072,
         }
     }
 }
@@ -127,6 +136,9 @@ impl Limits {
                 "accumulator_keys" => (1, 1_048_576),
                 "principal_card_daily" | "principal_daily" => (1, 1_000_000),
                 "day_rows" | "total_rows" => (1, 100_000_000),
+                "principals" => (1, 4_096),
+                "principal_pairs" => (1, 1_000_000),
+                "limiter_pairs" => (1, 16_777_216),
                 _ => return Err(format!("unknown memory.read_counts key {key:?}")),
             };
             let n = value
@@ -145,16 +157,26 @@ impl Limits {
                 "principal_card_daily" => limits.principal_card_daily = n as u32,
                 "principal_daily" => limits.principal_daily = n as u32,
                 "day_rows" => limits.day_rows = n,
+                "principals" => limits.principals = n as usize,
+                "principal_pairs" => limits.principal_pairs = n as usize,
+                "limiter_pairs" => limits.limiter_pairs = n as usize,
                 _ => limits.total_rows = n,
             }
         }
+        // Every tracked principal must be able to use its whole share, so one
+        // principal can never fill the limiter for the others.
+        if limits.limiter_pairs < limits.principals.saturating_mul(limits.principal_pairs) {
+            return Err(format!(
+                "memory.read_counts.limiter_pairs ({}) must be at least principals ({}) x principal_pairs ({})",
+                limits.limiter_pairs, limits.principals, limits.principal_pairs
+            ));
+        }
         Ok(limits)
     }
-    /// Distinct (principal, card) pairs the daily limiter tracks. The design
-    /// leaves this open; two per accumulator key keeps the limiter's memory
-    /// in proportion to the accumulator's.
-    fn limiter_keys(&self) -> usize {
-        self.accumulator_keys.saturating_mul(2)
+    /// A tracked principal with fewer distinct cards than this is a light
+    /// user and is never evicted to make room.
+    pub fn light_pairs(&self) -> usize {
+        (self.principal_pairs / 16).max(1)
     }
 }
 
@@ -167,12 +189,17 @@ pub enum Kind {
 
 /// The budgets that can bite, each one bounded telemetry label.
 /// `write_waiting` counts flushes and sweeps that rolled back to let a
-/// queued write go first.
-pub const BUDGETS: [&str; 12] = [
+/// queued write go first. `principal_evicted` counts evictions of the
+/// heaviest principal and `evicted_reads` the reads it made afterwards.
+pub const BUDGETS: [&str; 16] = [
     "accumulator_keys",
     "principal_card_daily",
     "principal_daily",
-    "limiter_keys",
+    "principal_pairs",
+    "limiter_pairs",
+    "principals_full",
+    "principal_evicted",
+    "evicted_reads",
     "contended",
     "flush_rows",
     "flush_ms",
@@ -189,8 +216,10 @@ fn budget(name: &str) -> usize {
 #[derive(Default)]
 pub struct Stats {
     budgets: [AtomicU64; BUDGETS.len()],
-    /// Increments lost to a full accumulator, a full limiter, lock
-    /// contention, the day-row cap or a failed flush.
+    /// Increments lost to a full accumulator, a full limiter or principal
+    /// table, lock contention, the day-row cap or a failed flush. Reads held
+    /// back by a principal's own limits are policy, not loss, and appear only
+    /// under their budget label.
     dropped: AtomicU64,
     flushed: AtomicU64,
     swept: AtomicU64,
@@ -237,27 +266,78 @@ impl Tally {
     }
 }
 struct Slot {
-    seq: u64,
+    seq: i64,
     tally: Tally,
+}
+
+/// One principal's daily usage, keyed by hashes only.
+#[derive(Default)]
+struct Usage {
+    total: u32,
+    pairs: HashMap<u64, u32>,
 }
 
 struct State {
     limits: Limits,
     /// The UTC day the per-principal limits belong to.
     limiter_day: i64,
-    per_principal: HashMap<u64, u32>,
-    per_pair: HashMap<u64, u32>,
+    principals: HashMap<u64, Usage>,
+    /// Principals evicted today. Their reads are served, not counted, until
+    /// the day resets, so eviction never refills a heavy principal's budget.
+    evicted: HashSet<u64>,
+    /// Pair entries across every tracked principal.
+    pair_entries: usize,
     keys: HashMap<Key, Slot>,
-    /// Oldest first. An entry whose seq no longer matches its slot is stale.
-    order: VecDeque<(u64, Key)>,
-    next: u64,
+    /// Oldest first. Holds exactly one entry per key in `keys`.
+    order: BTreeMap<i64, Key>,
+    /// Next sequence at the back (counts up) and at the front (counts down).
+    next: i64,
+    front: i64,
 }
 impl State {
-    fn insert_front(&mut self, key: Key, tally: Tally) {
+    fn insert_back(&mut self, key: Key, tally: Tally) {
         let seq = self.next;
         self.next += 1;
-        self.order.push_front((seq, key.clone()));
+        self.order.insert(seq, key.clone());
         self.keys.insert(key, Slot { seq, tally });
+    }
+    fn insert_front(&mut self, key: Key, tally: Tally) {
+        let seq = self.front;
+        self.front -= 1;
+        self.order.insert(seq, key.clone());
+        self.keys.insert(key, Slot { seq, tally });
+    }
+    /// Starts tracking `who`, evicting the heaviest principal if the table is
+    /// full and that principal is not a light user. False when there is no
+    /// room: the read is served, not counted.
+    fn track(&mut self, who: u64, stats: &Stats) -> bool {
+        if self.principals.contains_key(&who) {
+            return true;
+        }
+        if self.principals.len() >= self.limits.principals {
+            let heaviest = self
+                .principals
+                .iter()
+                .map(|(id, usage)| (usage.pairs.len(), usage.total, *id))
+                .max();
+            match heaviest {
+                Some((pairs, _, id))
+                    if pairs >= self.limits.light_pairs()
+                        && self.evicted.len() < self.limits.principals =>
+                {
+                    self.principals.remove(&id);
+                    self.pair_entries -= pairs;
+                    self.evicted.insert(id);
+                    stats.bump("principal_evicted");
+                }
+                _ => {
+                    stats.bump("principals_full");
+                    return false;
+                }
+            }
+        }
+        self.principals.insert(who, Usage::default());
+        true
     }
 }
 
@@ -277,11 +357,13 @@ impl ReadCounts {
             state: Mutex::new(State {
                 limits,
                 limiter_day: i64::MIN,
-                per_principal: HashMap::new(),
-                per_pair: HashMap::new(),
+                principals: HashMap::new(),
+                evicted: HashSet::new(),
+                pair_entries: 0,
                 keys: HashMap::new(),
-                order: VecDeque::new(),
+                order: BTreeMap::new(),
                 next: 0,
+                front: -1,
             }),
             hasher: RandomState::new(),
             stats: Stats::default(),
@@ -297,6 +379,11 @@ impl ReadCounts {
     #[cfg(test)]
     pub(super) fn hold(&self) -> impl Drop + '_ {
         self.state.lock().unwrap()
+    }
+    /// Ordering entries, which always match the keys one for one.
+    #[cfg(test)]
+    pub(super) fn order_len(&self) -> usize {
+        self.state.lock().unwrap().order.len()
     }
     /// Keys waiting for a flush.
     pub fn len(&self) -> usize {
@@ -338,13 +425,25 @@ impl ReadCounts {
             self.stats.drop_increments(cards.len() as u64);
             return;
         };
+        let state = &mut *state;
         let today = day(now_ms);
         if state.limiter_day != today {
             state.limiter_day = today;
-            state.per_principal.clear();
-            state.per_pair.clear();
+            state.principals.clear();
+            state.evicted.clear();
+            state.pair_entries = 0;
         }
         let who = self.hasher.hash_one(principal);
+        let tally = match kind {
+            Kind::SearchHit => Tally {
+                search_hits: 1,
+                card_reads: 0,
+            },
+            Kind::CardRead => Tally {
+                search_hits: 0,
+                card_reads: 1,
+            },
+        };
         for &(scope, card_id) in cards {
             let key = Key {
                 scope: scope.into(),
@@ -356,59 +455,58 @@ impl ReadCounts {
                 self.stats.drop_increments(1);
                 continue;
             }
-            if state.per_principal.get(&who).copied().unwrap_or(0) >= state.limits.principal_daily {
+            if state.evicted.contains(&who) {
+                self.stats.bump("evicted_reads");
+                continue;
+            }
+            if !state.track(who, &self.stats) {
+                self.stats.drop_increments(1);
+                continue;
+            }
+            let limits = &state.limits;
+            let usage = state.principals.get_mut(&who).unwrap();
+            if usage.total >= limits.principal_daily {
                 self.stats.bump("principal_daily");
                 continue;
             }
             let pair = self.hasher.hash_one((principal, scope, card_id));
-            let used = state.per_pair.get(&pair).copied();
-            if used.is_none() && state.per_pair.len() >= state.limits.limiter_keys() {
-                self.stats.bump("limiter_keys");
-                self.stats.drop_increments(1);
-                continue;
+            let used = usage.pairs.get(&pair).copied();
+            if used.is_none() {
+                if usage.pairs.len() >= limits.principal_pairs {
+                    self.stats.bump("principal_pairs");
+                    continue;
+                }
+                if state.pair_entries >= limits.limiter_pairs {
+                    self.stats.bump("limiter_pairs");
+                    self.stats.drop_increments(1);
+                    continue;
+                }
+                state.pair_entries += 1;
             }
-            if used.unwrap_or(0) >= state.limits.principal_card_daily {
+            if used.unwrap_or(0) >= limits.principal_card_daily {
                 self.stats.bump("principal_card_daily");
                 continue;
             }
-            *state.per_pair.entry(pair).or_default() += 1;
-            *state.per_principal.entry(who).or_default() += 1;
-            let tally = match kind {
-                Kind::SearchHit => Tally {
-                    search_hits: 1,
-                    card_reads: 0,
-                },
-                Kind::CardRead => Tally {
-                    search_hits: 0,
-                    card_reads: 1,
-                },
-            };
+            *usage.pairs.entry(pair).or_default() += 1;
+            usage.total += 1;
             if let Some(slot) = state.keys.get_mut(&key) {
                 slot.tally.add(tally);
             } else {
-                let seq = state.next;
-                state.next += 1;
-                state.order.push_back((seq, key.clone()));
-                state.keys.insert(key, Slot { seq, tally });
+                state.insert_back(key, tally);
             }
         }
     }
 
     /// Removes up to `max` of the oldest keys for a flush.
-    fn take(&self, max: usize) -> (Limits, Vec<(Key, Tally)>) {
+    pub(super) fn take(&self, max: usize) -> (Limits, Vec<(Key, Tally)>) {
         let mut state = self.state.lock().unwrap();
         let mut taken = Vec::new();
         while taken.len() < max {
-            let Some((seq, key)) = state.order.pop_front() else {
+            let Some((_, key)) = state.order.pop_first() else {
                 break;
             };
-            if state.keys.get(&key).is_some_and(|slot| slot.seq == seq) {
-                let slot = state.keys.remove(&key).unwrap();
-                taken.push((key, slot.tally));
-            }
-        }
-        if state.keys.is_empty() {
-            state.order.clear();
+            let slot = state.keys.remove(&key).expect("order matches keys");
+            taken.push((key, slot.tally));
         }
         (state.limits.clone(), taken)
     }
@@ -416,11 +514,14 @@ impl ReadCounts {
     /// Puts keys a flush did not commit back at the front, oldest first, so
     /// the next flush takes them before anything newer. A key recorded again
     /// meanwhile merges into one slot. A key with no room is lost and counted.
-    fn restore(&self, rows: &[(Key, Tally)]) {
+    pub(super) fn restore(&self, rows: &[(Key, Tally)]) {
         let mut state = self.state.lock().unwrap();
         for (key, tally) in rows.iter().rev() {
             let mut tally = *tally;
+            // A reread made a new slot meanwhile: merge it and drop its
+            // ordering entry, so `order` never outgrows `keys`.
             if let Some(slot) = state.keys.remove(key) {
+                state.order.remove(&slot.seq);
                 tally.add(slot.tally);
             } else if state.keys.len() >= state.limits.accumulator_keys {
                 self.stats.bump("accumulator_keys");
@@ -663,37 +764,47 @@ pub fn sweep(
                 break;
             }
         }
-        let room = limits.sweep_rows - swept.days;
-        if waiting() {
-            gave_way = true;
-            return Ok(());
-        }
-        if room == 0 || Instant::now() >= deadline {
-            timed_out |= room != 0;
-            return Ok(());
-        }
-        let (scope, card) = cursor.0.clone().unwrap_or_default();
-        let mut statement = db.prepare(
-            "SELECT t.scope,t.card_id,c.state IS NOT 'live' FROM memory_read_totals t LEFT JOIN memory_cards c ON c.scope=t.scope AND c.card_id=t.card_id WHERE (t.scope,t.card_id)>(?1,?2) ORDER BY t.scope,t.card_id LIMIT ?3",
-        )?;
-        let rows = statement
-            .query_map(params![scope, card, room as i64], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        swept.examined = rows.len();
-        for (scope, card_id, gone) in &rows {
-            if *gone {
-                swept.totals +=
-                    db.execute("DELETE FROM memory_read_totals WHERE scope=?1 AND card_id=?2", params![scope, card_id])?;
+        // Totals of retired or vanished cards, in pages from the cursor. Every
+        // row boundary checks for a queued job (roll back and yield) and the
+        // time budget (commit what is done, resume next tick). At least one row
+        // moves per transaction, so a small budget still makes progress.
+        let mut room = limits.sweep_rows - swept.days;
+        while room > 0 {
+            let page = SWEEP_CHUNK.min(room);
+            let (scope, card) = next_cursor.0.clone().unwrap_or_default();
+            let mut statement = db.prepare_cached(
+                "SELECT t.scope,t.card_id,c.state IS NOT 'live' FROM memory_read_totals t LEFT JOIN memory_cards c ON c.scope=t.scope AND c.card_id=t.card_id WHERE (t.scope,t.card_id)>(?1,?2) ORDER BY t.scope,t.card_id LIMIT ?3",
+            )?;
+            let rows = statement
+                .query_map(params![scope, card, page as i64], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (scope, card_id, gone) in &rows {
+                if waiting() {
+                    gave_way = true;
+                    return Ok(());
+                }
+                if swept.days + swept.examined > 0 && Instant::now() >= deadline {
+                    timed_out = true;
+                    return Ok(());
+                }
+                if *gone {
+                    swept.totals += db.execute(
+                        "DELETE FROM memory_read_totals WHERE scope=?1 AND card_id=?2",
+                        params![scope, card_id],
+                    )?;
+                }
+                swept.examined += 1;
+                next_cursor.0 = Some((scope.clone(), card_id.clone()));
+            }
+            room -= rows.len();
+            // A short page reached the end of the table: start over next time.
+            if rows.len() < page {
+                next_cursor.0 = None;
+                break;
             }
         }
-        // A short page reached the end of the table: start over next time.
-        next_cursor.0 = if rows.len() < room {
-            None
-        } else {
-            rows.last().map(|(s, c, _)| (s.clone(), c.clone()))
-        };
         Ok(())
     })()
     .and_then(|()| {
