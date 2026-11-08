@@ -12,15 +12,15 @@ directory descriptors, so neither repo metadata nor a planted link can steer
 discovery or rescue outside that repository.
 
 Rescue claims a quiet source (unmodified for QUIESCENCE_SECONDS) with an
-atomic no-replace rename, copies it, and keeps the claimed file open across
-its unlink so a late write through an older descriptor is still seen and
-republished. Residual risk: a writer that stalls longer than the quiescence
-window mid-write and then writes to the already-unlinked inode after the
-post-unlink check loses those bytes, and so does a late write whose
-recovery fails in both the destination and the source inbox (for example a
-full disk on both filesystems). Closing that needs an atomic
-publication contract for handoff writers (write a private temp, fsync,
-publish with a no-replace rename), tracked in escoffier-labs/brigade#2397.
+atomic no-replace rename, copies and publishes it, then makes a bounded
+final check (size snapshot, hash, mtime, under the ingest cap and
+FINAL_CHECK_SECONDS) while the claim is still named. It unlinks the claim
+only if that check matches the delivered copy. Otherwise the claim is renamed
+back under a recovery name and the worktree is kept. Residual risk: a write
+that lands between the final check and the unlink is lost. That needs a
+writer stalled longer than the quiescence window with a descriptor still
+open. Closing it needs an atomic publication contract for handoff writers
+(write a private temp, fsync, publish with a no-replace rename), tracked in escoffier-labs/brigade#2397.
 """
 
 from __future__ import annotations
@@ -74,6 +74,8 @@ _RENAME_NOREPLACE = 1
 # A handoff modified more recently than this is still being written. It is
 # left in place and its worktree is kept.
 QUIESCENCE_SECONDS = 5.0
+# Ceiling for the final pre-unlink check. Bytes are bounded by the ingest cap.
+FINAL_CHECK_SECONDS = 10.0
 
 
 def _git_env() -> dict[str, str]:
@@ -598,82 +600,72 @@ def _publish_bytes(dest_fd: int, raw: bytes, names: tuple[str, ...], forbidden: 
                 pass
 
 
-def _late_write(held: int, delivered: os.stat_result, sha: str) -> bool:
-    """True when the unlinked inode changed after delivery (or cannot be read).
+def _stable_since_delivery(held: int, delivered: os.stat_result, sha: str) -> bool:
+    """Bounded final check on the still-named claim before it is unlinked.
 
-    Uses a streaming hash with no size cap, so an oversized late append is
-    detected rather than raised.
+    Takes one size snapshot and hashes exactly that many bytes, under the
+    ingest size cap and FINAL_CHECK_SECONDS. True only when size, mtime and
+    hash all match the delivered copy and nothing changed during the read.
+    A growing or oversized inode, or a missed deadline, is not stable.
     """
+    started = time.monotonic()
     try:
-        after = os.fstat(held)
-        if (after.st_size, after.st_mtime_ns) != (delivered.st_size, delivered.st_mtime_ns):
-            return True
+        snapshot = os.fstat(held)
+        if (snapshot.st_size, snapshot.st_mtime_ns) != (delivered.st_size, delivered.st_mtime_ns):
+            return False
+        if snapshot.st_size > MAX_HANDOFF_BYTES:
+            return False
         os.lseek(held, 0, os.SEEK_SET)
         hasher = hashlib.sha256()
-        while chunk := os.read(held, 1 << 16):
+        remaining = snapshot.st_size
+        while remaining > 0:
+            if time.monotonic() - started > FINAL_CHECK_SECONDS:
+                return False
+            chunk = os.read(held, min(remaining, 1 << 16))
+            if not chunk:
+                return False
             hasher.update(chunk)
-        return hasher.hexdigest() != sha
+            remaining -= len(chunk)
+        after = os.fstat(held)
     except OSError:
-        return True
+        return False
+    if time.monotonic() - started > FINAL_CHECK_SECONDS:
+        return False
+    return hasher.hexdigest() == sha and (after.st_size, after.st_mtime_ns) == (snapshot.st_size, snapshot.st_mtime_ns)
 
 
-def _recover_late(directory: int, held: int, stem: str, forbidden: frozenset[str]) -> tuple[str, bool]:
-    """Stream every byte of the held inode into a new file under `directory`.
+def _keep_claim(src_fd: int, held: int, claim: str, name: str, forbidden: frozenset[str]) -> str | None:
+    """Rename a claim that changed after delivery back to a recovery name.
 
-    No ingest size cap applies: recovery keeps whatever is there. Content
-    within the cap becomes `<stem>-late-<sha>.md`. Larger content gets a
-    name ingest skips. Returns (published name, oversize). The temp file is
-    removed on any failure.
+    Never replaces anything. Within the ingest cap it becomes a pending `.md`
+    (the original name if free, else `<stem>-late-<id>.md`). Larger content
+    gets a name ingest skips. Returns the name, or None if every rename failed
+    (the claim then stays and keeps the worktree as a stale claim).
     """
-    temp = f"{_TEMP_PREFIX}{uuid.uuid4().hex}{_TEMP_SUFFIX}"
-    out = dirfd.open_child_file(directory, temp, _write_flags(), 0o644)
-    created = True
+    stem = name[: -len(".md")]
     try:
-        hasher = hashlib.sha256()
-        size = 0
+        oversize = os.fstat(held).st_size > MAX_HANDOFF_BYTES
+    except OSError:
+        oversize = True
+    if oversize:
+        names: tuple[str, ...] = (f".late-oversize-{uuid.uuid4().hex}.md.recovered",)
+    else:
+        names = (name, f"{stem}-late-{uuid.uuid4().hex[:8]}.md")
+    for target in names:
+        if target.casefold() in forbidden:
+            continue
         try:
-            os.lseek(held, 0, os.SEEK_SET)
-            while chunk := os.read(held, 1 << 16):
-                view = memoryview(chunk)
-                while view:
-                    view = view[os.write(out, view) :]
-                hasher.update(chunk)
-                size += len(chunk)
-            os.fsync(out)
-        finally:
-            os.close(out)
-        sha = hasher.hexdigest()
-        check = dirfd.open_child_file(directory, temp, _read_flags())
+            _rename_noreplace(src_fd, claim, target)
+        except FileExistsError:
+            continue
+        except OSError:
+            return None
         try:
-            verify = hashlib.sha256()
-            while chunk := os.read(check, 1 << 16):
-                verify.update(chunk)
-        finally:
-            os.close(check)
-        if verify.hexdigest() != sha:
-            raise OSError("late copy verification failed")
-        oversize = size > MAX_HANDOFF_BYTES
-        if oversize:
-            names: tuple[str, ...] = (f".late-oversize-{uuid.uuid4().hex}.md.recovered",)
-        else:
-            names = (f"{stem}-late-{sha[:12]}.md", f"{stem}-late-{uuid.uuid4().hex[:8]}.md")
-        for final in names:
-            if final.casefold() in forbidden or _child_exists(directory, final):
-                continue
-            try:
-                dirfd.replace_children(directory, temp, final, replace=False)
-            except FileExistsError:
-                continue
-            created = False
-            dirfd.fsync_directory(directory)
-            return final, oversize
-        raise FileExistsError(errno.EEXIST, "no free recovery name", names[0])
-    finally:
-        if created:
-            try:
-                dirfd.unlink_child(directory, temp)
-            except OSError:
-                pass
+            dirfd.fsync_directory(src_fd)
+        except OSError:
+            pass
+        return target
+    return None
 
 
 def _rescue_one(
@@ -721,7 +713,10 @@ def _rescue_one(
         if not _quiet(opened):
             return Rescue(source, "failed", reason="source-too-recent")
         raw = _read_fd(held)
+        delivered = os.fstat(held)
         sha = digest(raw)
+        if delivered.st_size != len(raw):
+            return Rescue(source, "failed", reason="source-changed")
         dest_fd, known, dest_tracked = dest.inbox(parts)
         published: str | None = None
         if sha in known:
@@ -735,36 +730,21 @@ def _rescue_one(
             )
             known.add(sha)
             state = "delivered"
-        # The claimed bytes must still be the bytes that were delivered.
-        if digest(_read_fd(held)) != sha:
-            return Rescue(source, "failed", reason="source-changed")
-        delivered = os.fstat(held)
+        # Final check while the claim is still named. Unlink only if stable.
+        if not _stable_since_delivery(held, delivered, sha):
+            kept = _keep_claim(src_fd, held, claim, name, frozenset(n.casefold() for n in tracked_names))
+            if kept is None:
+                return Rescue(source, "failed", reason="late-write-claim-kept")
+            claimed = False
+            return Rescue(source, "failed", dest=str(Path(label) / kept), reason="late-write-kept")
         dirfd.unlink_child(src_fd, claim)
         claimed = False
-        # From here the held handle is the only reference to these bytes. No
-        # error may close it before a late write is durable somewhere.
-        late = _late_write(held, delivered, sha)
         try:
             dirfd.fsync_directory(src_fd)
         except OSError:
             pass  # the unlink not reaching disk only re-delivers a duplicate
-        if not late:
-            dest_path = str(dest.root.joinpath(*parts, published)) if dest.root and published else None
-            return Rescue(source, state, dest=dest_path)
-        dest_root = dest.root.joinpath(*parts) if dest.root else None
-        source_tracked = frozenset(n.casefold() for n in tracked_names)
-        targets = (("dest", dest_fd, dest_root, dest_tracked), ("source", src_fd, Path(label), source_tracked))
-        for where, directory, base, forbidden in targets:
-            try:
-                kept, oversize = _recover_late(directory, held, stem, forbidden)
-            except OSError:
-                continue
-            if where == "dest":
-                reason = "late-write-oversize-recovered" if oversize else "late-write-republished"
-            else:
-                reason = "late-write-kept-in-source"
-            return Rescue(source, "failed", dest=str(base / kept) if base else None, reason=reason)
-        return Rescue(source, "failed", reason="late-write-unrecoverable")
+        dest_path = str(dest.root.joinpath(*parts, published)) if dest.root and published else None
+        return Rescue(source, state, dest=dest_path)
     except OSError:
         return Rescue(source, "failed", reason="rescue-io-error")
     finally:
