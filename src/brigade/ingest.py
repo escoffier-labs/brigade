@@ -12,14 +12,16 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Callable, Dict, List
 
-from . import budgets
+from . import dirfd
 from .card_fingerprint import (
     CardMatch,
     ensure_card_id_frontmatter,
@@ -30,22 +32,25 @@ from .card_fingerprint import (
     reinforce_existing_card,
 )
 from .handoff_content import normalize_suggested_card_content
+from .handoff_ingest_rules import (
+    EXPECTED_SHA_SECTION,
+    SHA256_RE,
+    bootstrap_budget_problem,
+    card_frontmatter_structure_problems,
+    document_destination_problem,
+    safe_card_name,
+    read_card_bytes,
+    safe_document_target,
+    sha256_hex,
+    sha_matches,
+)
 from .selection import WRITER_INBOXES
 from .untrusted import scan_untrusted
 
 SECTION_RE = re.compile(r"^##\s+(?P<name>.+?)\s*$", re.MULTILINE)
-SAFE_CARD_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.md$")
-SAFE_RULE_PATH_RE = re.compile(r"^rules/[A-Za-z0-9._-]+\.md$")
 _IDENTITY_MIGRATION_FIELDS = frozenset(
     {"aliases", "merged_from", "supersedes", "memory_proposal", "memory_proposal_sources"}
 )
-SAFE_SPECIAL_TARGETS = {
-    "TOOLS.md",
-    "USER.md",
-    ".learnings/LEARNINGS.md",
-    ".learnings/ERRORS.md",
-    ".learnings/FEATURE_REQUESTS.md",
-}
 
 # Recognized handoff sections. Any section name outside this set is a signal
 # that the parser split content at an internal `##` heading; route to inbox.
@@ -57,6 +62,7 @@ KNOWN_SECTIONS = {
     "evidence",
     "recommended memory action",
     "target card",
+    EXPECTED_SHA_SECTION.lower(),
     "suggested card content",
     "target document",
     "suggested document content",
@@ -80,6 +86,10 @@ _GIT_LOCATION_ENV = (
     "GIT_CEILING_DIRECTORIES",
 )
 _TRACKED_SKIP_REASON = "tracked by git or tracking unverifiable; left in place"
+
+
+class StaleCardError(OSError):
+    """The card no longer matches the expected SHA a handoff was written against."""
 
 
 class TrackedHandoffError(RuntimeError):
@@ -337,19 +347,21 @@ def decide(
     if stray:
         return Outcome(
             "inboxed",
-            reason=f"unknown sections present (parser may have split content): {stray}",
+            reason=f"unknown sections present ({len(stray)}); the parser may have split content",
         )
 
     if action in ("create-card", "update-card") and promote_cards:
         card = sections.get("target card", "").strip()
         content = sections.get("suggested card content", "")
         content, fence_error = normalize_suggested_card_content(content)
-        if not SAFE_CARD_NAME_RE.match(card):
-            return Outcome("inboxed", reason=f"target card name unsafe: {card!r}")
+        if not safe_card_name(card):
+            return Outcome("inboxed", reason="target card name unsafe")
         if fence_error:
             return Outcome("inboxed", reason=fence_error)
-        if not content.lstrip().startswith("---"):
-            return Outcome("inboxed", reason="card content missing YAML frontmatter")
+        # The same parser and structure rules lint and draft use, so the three agree.
+        structure = card_frontmatter_structure_problems(content)
+        if structure:
+            return Outcome("inboxed", reason="; ".join(structure))
         reserved = _identity_migration_fields(content.lstrip())
         if reserved:
             return Outcome(
@@ -373,11 +385,20 @@ def decide(
                     "inboxed",
                     reason=f"governed card identity migration requires review: {', '.join(governed)}",
                 )
+        # A stale base must not silently replace a card that changed after the
+        # writer read it. The section is optional here, `handoff lint` requires it.
+        expected = sections.get(EXPECTED_SHA_SECTION.lower(), "").strip().lower()
+        if action == "update-card" and expected:
+            current = read_card_bytes(target, card)
+            if not SHA256_RE.fullmatch(expected):
+                return Outcome("inboxed", reason=f"{EXPECTED_SHA_SECTION} is not 64 hex characters")
+            if current is not None and not sha_matches(current, expected):
+                return Outcome("inboxed", reason=f"update-card {EXPECTED_SHA_SECTION} does not match the current card")
         sig = scan_untrusted(content)
         if sig.flagged:
             return Outcome(
                 "inboxed",
-                reason=f"injection signal in card content ({sig.count} marker(s)): {sig.markers[0]}",
+                reason=f"injection signal in card content ({sig.count} marker(s))",
             )
         # create-card only: reinforce known facts instead of filing near-duplicates.
         # update-card keeps the wholesale-replace semantic for intentional edits.
@@ -392,8 +413,11 @@ def decide(
         content = sections.get("suggested document content", "")
         if not document:
             return Outcome("inboxed", reason="no-card handoff missing target document")
-        if not (document in SAFE_SPECIAL_TARGETS or SAFE_RULE_PATH_RE.match(document)):
-            return Outcome("inboxed", reason=f"target document not in safe list: {document!r}")
+        if not safe_document_target(document):
+            return Outcome("inboxed", reason="target document not in safe list")
+        destination_problem = document_destination_problem(document, target)
+        if destination_problem:
+            return Outcome("inboxed", reason=destination_problem)
         if not content.strip():
             return Outcome("inboxed", reason="empty document content")
         if "\n## " in ("\n" + content):
@@ -408,34 +432,27 @@ def decide(
         normalized_existing = _normalize_for_dedupe(existing)
         normalized_suggested = _normalize_for_dedupe(content)
         if normalized_suggested and normalized_suggested in normalized_existing:
-            return Outcome("inboxed", reason=f"document content already present in {document}")
+            return Outcome("inboxed", reason="document content already present in the target document")
         anchor = _first_meaningful_line(content)
         if anchor and anchor in existing:
-            return Outcome("inboxed", reason=f"anchor already present in {document}: {anchor}")
+            return Outcome("inboxed", reason="document anchor already present in the target document")
         # Bootstrap files load into the session prefix every turn and silently
         # truncate past ~12k chars. Refuse an append that would push the file
         # over its budget; route to the inbox so a human trims or re-homes it.
-        addition = "\n\n" + content.strip() + "\n"
-        would_exceed, budget = budgets.route_would_exceed_budget(dest, addition)
-        if would_exceed:
-            return Outcome(
-                "inboxed",
-                reason=(
-                    f"bootstrap budget guard: appending to {document} would exceed "
-                    f"its {budget}B budget; trim the file or promote to a memory card"
-                ),
-            )
+        budget_problem = bootstrap_budget_problem(document, content, target)
+        if budget_problem:
+            return Outcome("inboxed", reason=budget_problem)
         sig = scan_untrusted(content)
         if sig.flagged:
             return Outcome(
                 "inboxed",
-                reason=f"injection signal in document content ({sig.count} marker(s)): {sig.markers[0]}",
+                reason=f"injection signal in document content ({sig.count} marker(s))",
             )
         return Outcome("routed", dest=dest)
 
     if action == "":
         return Outcome("inboxed", reason="missing `Recommended memory action`")
-    return Outcome("skipped", reason=f"action {action!r} not auto-handled")
+    return Outcome("skipped", reason="action not auto-handled")
 
 
 def _decide_create_card_match(content: str, *, target: Path) -> Outcome | None:
@@ -472,12 +489,109 @@ class Action:
     summary: str
 
 
-def _publish_promoted_card(dest: Path, target: Path, sections: Dict[str, str], *, dry_run: bool) -> None:
-    from contextlib import nullcontext
-    import os
-    import stat
+def _read_card_child(parent: int, name: str) -> tuple[bytes, int] | None:
+    """Exact bytes and mode of a card read relative to a held parent, or None when absent."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if dirfd.posix_available():
+        # Non-blocking, so a card swapped for a FIFO fails the type check instead of hanging the open.
+        flags = dirfd.file_flags(flags | getattr(os, "O_NONBLOCK", 0))
+    try:
+        descriptor = dirfd.open_child_file(parent, name, flags, 0)
+    except FileNotFoundError:
+        return None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise OSError("publication must be a single-link regular file")
+        if dirfd.posix_available():
+            os.set_blocking(descriptor, True)
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            return handle.read(), metadata.st_mode
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
 
-    from .card_fingerprint import write_text_nofollow_atomic
+
+def _directory_identity(descriptor: int) -> tuple[int, int]:
+    """Volume and file index of an open directory: `st_dev` and `st_ino` on POSIX and Windows."""
+    metadata = os.fstat(descriptor)
+    return metadata.st_dev, metadata.st_ino
+
+
+def _assert_parent_unchanged(parent: int, parent_path: Path) -> None:
+    """The held directory is still the one `parent_path` names.
+
+    Windows directory handles allow delete sharing, so another process can rename the
+    directory and put a different one at the path. Reopen the path and compare stable
+    identities on every platform, so a publish into a moved directory is never reported
+    as an update of the named card.
+    """
+    current = dirfd.open_directory_chain(parent_path)
+    try:
+        same = _directory_identity(parent) == _directory_identity(current)
+    finally:
+        os.close(current)
+    if not same:
+        raise OSError("publication parent changed")
+
+
+def _write_card_descriptor_bound(
+    dest: Path,
+    target: Path,
+    check_state: Callable[[bytes | None], str | None],
+    build_content: Callable[[str | None], str],
+) -> None:
+    """Inspect and replace a card through one held parent directory, on POSIX and Windows.
+
+    The parent is opened once without following links. The leaf is read, the staged copy
+    is written and the staged copy is renamed over the leaf, all relative to that held
+    handle. If no descriptor-relative backend exists this raises and nothing is written.
+    """
+    if not dirfd.available():
+        raise OSError("no-follow descriptor operations are unavailable; refusing a path-based publish")
+    root = target.resolve()
+    parent_path = root / dest.parent.relative_to(target)
+    name = dest.name
+    parent = dirfd.open_directory_chain(parent_path, create=True)
+    staged: str | None = None
+    try:
+        found = _read_card_child(parent, name)
+        data, mode = found if found is not None else (None, None)
+        content = build_content(check_state(data)).encode("utf-8")
+        staged = f".{name}.{uuid.uuid4().hex[:12]}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        if dirfd.posix_available():
+            flags = dirfd.file_flags(flags)
+        descriptor = dirfd.open_child_file(parent, staged, flags, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            if mode is not None and hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), stat.S_IMODE(mode))
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Publication boundary: same directory, and the leaf is still the revision checked.
+        _assert_parent_unchanged(parent, parent_path)
+        again = _read_card_child(parent, name)
+        if (again[0] if again is not None else None) != data:
+            raise OSError("publication revision changed")
+        dirfd.replace_children(parent, staged, name)
+        staged = None
+        dirfd.fsync_directory(parent)
+    finally:
+        try:
+            if staged is not None:
+                dirfd.unlink_child(parent, staged)
+        except OSError:
+            pass
+        os.close(parent)
+
+
+def _publish_promoted_card(
+    dest: Path, target: Path, sections: Dict[str, str], *, dry_run: bool, expected_sha: str = ""
+) -> None:
+    from contextlib import nullcontext
+
     from .card_identity import valid_card_id
     from .inbox_lock import held_file_lock
 
@@ -485,18 +599,23 @@ def _publish_promoted_card(dest: Path, target: Path, sections: Dict[str, str], *
         if any(parent.is_symlink() for parent in (path.parent, *path.parents)):
             raise OSError("publication parent is symlinked")
 
-    def inspect(path: Path) -> str | None:
-        parent_fence(path)
-        try:
-            metadata = path.lstat()
-        except FileNotFoundError:
-            return None
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-            raise OSError("publication must be a single-link regular file")
-        text = read_text_nofollow(path)
-        if _identity_migration_fields(text):
+    def check_state(data: bytes | None) -> str | None:
+        """Decode the exact bytes, refuse a governed card or a stale SHA, return the text."""
+        text = None if data is None else data.decode("utf-8", errors="replace")
+        if text is not None and _identity_migration_fields(text):
             raise OSError("governed destination requires review")
+        # decide() compared the SHA without the lock. Hash the exact bytes read here, the
+        # same bytes the boundary probe compares, so a card edited since then is never
+        # replaced by a stale handoff.
+        if expected_sha and (data is None or sha256_hex(data) != expected_sha):
+            raise StaleCardError("expected card SHA256 no longer matches the card")
         return text
+
+    def build_content(raw: str | None) -> str:
+        content = ensure_fingerprint_frontmatter(sections.get("suggested card content", "").strip() + "\n")
+        existing, _ = _frontmatter(raw or "")
+        existing_id = valid_card_id(existing.get("id")) or valid_card_id(existing.get("card_id"))
+        return ensure_card_id_frontmatter(content, preserve_id=existing_id)
 
     lock_path = target / ".brigade/memory/proposals/proposal.lock"
     if not dry_run:
@@ -505,56 +624,53 @@ def _publish_promoted_card(dest: Path, target: Path, sections: Dict[str, str], *
     # The shared helper has the established Windows fallback. Ordinary ingest
     # does not require proposal IO's stricter directory-descriptor capability.
     with nullcontext() if dry_run else held_file_lock(lock_path, deadline_seconds=1):
-        raw = inspect(dest)
-        content = ensure_fingerprint_frontmatter(sections.get("suggested card content", "").strip() + "\n")
-        existing, _ = _frontmatter(raw or "")
-        existing_id = valid_card_id(existing.get("id")) or valid_card_id(existing.get("card_id"))
-        content = ensure_card_id_frontmatter(content, preserve_id=existing_id)
         if dry_run:
+            # Read-only preview: report what a real run would refuse, write nothing.
+            parent_fence(dest)
+            if dest.is_symlink() or (dest.exists() and not dest.is_file()):
+                raise OSError("publication must be a regular file")
+            check_state(dest.read_bytes() if dest.exists() else None)
             return
-        parent_fence(dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        _write_card_descriptor_bound(dest, target, check_state, build_content)
 
-        def probe(path: Path) -> int | None:
-            # The no-follow writer invokes this both before staging and at the
-            # final publish boundary. A new governed revision is never replaced.
-            if inspect(path) != raw:
-                raise OSError("publication revision changed")
-            try:
-                return path.lstat().st_mode
-            except FileNotFoundError:
-                return None
 
-        descriptor_mode = os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")
-        descriptor_base = next((base for base in (Path("/proc/self/fd"), Path("/dev/fd")) if base.is_dir()), None)
-        if descriptor_mode and descriptor_base is not None:
-            from .memory_proposal_io import directory
+def _append_document_nofollow(target: Path, dest: Path, text: str) -> None:
+    """Append to a routed document without following a link anywhere below the workspace.
 
-            with directory(dest.parent) as parent:
-                bound = descriptor_base / str(parent) / dest.name
-                # Check the real parent again before using the held descriptor.
-                with directory(dest.parent) as current:
-                    a, b = os.fstat(parent), os.fstat(current)
-                    if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
-                        raise OSError("publication parent changed")
-
-                # /proc/self/fd is an intentional descriptor link, so its
-                # parent check is supplied by the held directory above.
-                def descriptor_probe(path: Path) -> int | None:
-                    probe(dest)
-                    try:
-                        metadata = path.lstat()
-                    except FileNotFoundError:
-                        return None
-                    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-                        raise OSError("publication leaf changed")
-                    if read_text_nofollow(path) != raw:
-                        raise OSError("publication revision changed")
-                    return metadata.st_mode
-
-                write_text_nofollow_atomic(bound, content, lstat_probe=descriptor_probe)
-        else:
-            write_text_nofollow_atomic(dest, content, lstat_probe=probe)
+    The parent directory is opened by descriptor from the resolved workspace root, and
+    the leaf is opened relative to it with no-follow, through the POSIX or the Windows
+    handle-relative backend. When neither backend is available this raises OSError and
+    nothing is written: a path-based append cannot close the check-then-write race.
+    """
+    if not dirfd.available():
+        raise OSError("no-follow descriptor operations are unavailable; refusing a path-based append")
+    root = target.resolve()
+    relative = dest.relative_to(target).as_posix()
+    problem = document_destination_problem(relative, root)
+    if problem:
+        raise OSError(problem)
+    resolved = root / relative
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    if dirfd.posix_available():
+        # O_NOFOLLOW; the Windows backend refuses reparse points itself. O_NONBLOCK makes a FIFO
+        # fail the open (no reader) or the type check below instead of hanging.
+        flags = dirfd.file_flags(flags | getattr(os, "O_NONBLOCK", 0))
+    parent = dirfd.open_directory_chain(resolved.parent, create=True)
+    try:
+        descriptor = dirfd.open_child_file(parent, resolved.name, flags, 0o644)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise OSError("target document is not a regular file")
+            if dirfd.posix_available():
+                os.set_blocking(descriptor, True)
+            with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+                descriptor = -1
+                handle.write(text)
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+    finally:
+        os.close(parent)
 
 
 def _execute(
@@ -577,15 +693,23 @@ def _execute(
     if outcome.kind == "promoted":
         dest = outcome.dest
         assert dest is not None
+        expected_sha = ""
+        if sections.get("recommended memory action", "").strip().lower() == "update-card":
+            expected_sha = sections.get(EXPECTED_SHA_SECTION.lower(), "").strip().lower()
         try:
-            _publish_promoted_card(dest, target, sections, dry_run=dry_run)
+            _publish_promoted_card(dest, target, sections, dry_run=dry_run, expected_sha=expected_sha)
         except InboxLockTimeout:
             return Action("skipped", f"skip → {name} (card publication busy; retry handoff later)")
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
             # A reviewed migration may have arrived after decide(). Route the
             # original handoff for review without replacing that revision.
+            reason = (
+                f"update-card {EXPECTED_SHA_SECTION} no longer matches the card; requires review"
+                if isinstance(exc, StaleCardError)
+                else "card publication changed or became governed; requires review"
+            )
             return _execute(
-                Outcome("inboxed", reason="card publication changed or became governed; requires review"),
+                Outcome("inboxed", reason=reason),
                 handoff_path,
                 target,
                 sections,
@@ -619,9 +743,18 @@ def _execute(
         content = sections.get("suggested document content", "").strip()
         summary = f"append → {dest.relative_to(target)}  ({name})"
         if not dry_run:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with dest.open("a", encoding="utf-8") as f:
-                f.write("\n\n" + content + "\n")
+            try:
+                _append_document_nofollow(target, dest, "\n\n" + content + "\n")
+            except OSError:
+                return _execute(
+                    Outcome("inboxed", reason="document destination is linked or unwritable; requires review"),
+                    handoff_path,
+                    target,
+                    sections,
+                    inbox_dir,
+                    processed_dir,
+                    dry_run,
+                )
             _archive(handoff_path, processed_dir)
         return Action("routed", summary)
 

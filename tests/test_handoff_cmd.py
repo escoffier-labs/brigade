@@ -1791,6 +1791,7 @@ def test_handoff_lint_cli(tmp_path, monkeypatch):
         "guard_policy": "personal",
         "json_output": True,
         "strict": False,
+        "workspace": None,
     }
 
 

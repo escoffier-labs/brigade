@@ -36,7 +36,9 @@ example-widget.md
 
 ```markdown
 ---
-name: example-widget
+topic: example-widget
+category: fixture
+tags: [fixture]
 ---
 
 It was reverted last week because that file was wrong.
@@ -70,7 +72,8 @@ example-widget.md
 
 ## Suggested card content
 ---
-name: example-widget
+topic: example-widget
+category: fixture
 description: Placeholder card with explicit subjects only.
 tags: [fixture, readability]
 ---

@@ -11,6 +11,8 @@ brigade handoff list --target .
 brigade handoff lint --content-guard --guard-policy personal --target .
 ```
 
+Write each handoff with `brigade handoff draft --target .`. It runs the ingester's own checks first, fills `Expected card SHA256` for `update-card`, and refuses a draft that would conflict at ingest. See [Reviewed Handoff Promotion](handoff-promotion.md#writing-a-handoff).
+
 Requirements before ingest:
 
 - Brigade lint is available before ingest, and lint-failing drafts stay review items.

@@ -26,7 +26,8 @@ example-widget.md
 
 ## Suggested card content
 ---
-name: example-widget
+topic: example-widget
+category: fixture
 description: Placeholder card for readability fixture validation.
 tags: [fixture, readability]
 ---

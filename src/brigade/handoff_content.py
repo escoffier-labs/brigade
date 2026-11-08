@@ -54,7 +54,7 @@ def normalize_suggested_card_content(value: str) -> tuple[str, str | None]:
 
     language = opening[3:].strip()
     if language and language.lower() != "markdown":
-        return value, f"Suggested card content uses an unsupported Markdown fence language: {language}"
+        return value, "Suggested card content uses an unsupported Markdown fence language"
 
     fenced_lines = _without_trailing_html_comments(lines[1:])
     if not fenced_lines or fenced_lines[-1].strip() != "```":

@@ -929,7 +929,7 @@ def test_decide_inboxes_card_with_unsupported_fence_language(tmp_path):
     body = "```yaml\n---\nname: x\n---\nBody line.\n```"
     outcome = ingest_mod.decide(_card_sections(body), target=tmp_path, promote_cards=True, route_documents=True)
     assert outcome.kind == "inboxed"
-    assert outcome.reason == "Suggested card content uses an unsupported Markdown fence language: yaml"
+    assert outcome.reason == "Suggested card content uses an unsupported Markdown fence language"
 
 
 def _doc_sections(content_body):
@@ -1431,7 +1431,7 @@ def test_publication_rechecks_destination_after_promotion_decision(tmp_target, a
 
 
 @pytest.mark.parametrize("governed", [False, True])
-def test_ordinary_publication_without_directory_descriptor_capability(tmp_target, monkeypatch, governed):
+def test_publication_without_directory_descriptor_capability_fails_closed_to_review(tmp_target, monkeypatch, governed):
     inbox = _seed(tmp_target)
     body = _card_handoff_body("portable.md", "portable", "Portable assertion.")
     path = _write_handoff(inbox, "portable-publication.md", body)
@@ -1447,12 +1447,13 @@ def test_ordinary_publication_without_directory_descriptor_capability(tmp_target
     action = ingest_mod._execute(
         outcome, path, tmp_target, sections, tmp_target / "memory/review-inbox", inbox / "processed", False
     )
+    # No descriptor-relative backend means no path-based fallback: review, nothing written.
+    assert action.kind == "inboxed"
     if governed:
-        assert action.kind == "inboxed"
         assert dest.read_bytes() == before
     else:
-        assert action.kind == "promoted"
-        assert "Portable assertion" in dest.read_text()
+        assert not dest.exists()
+    assert not list(dest.parent.glob(".portable.md.*")) if dest.parent.exists() else True
 
 
 def test_busy_proposal_lock_leaves_handoff_for_retry(tmp_target, monkeypatch):

@@ -17,6 +17,15 @@ from .. import scrub
 from ..budgets import HANDOFF_BACKLOG_STALE_SECONDS
 from ..config import load_config as load_brigade_config
 from ..handoff_content import normalize_suggested_card_content
+from ..handoff_ingest_rules import (
+    EXPECTED_SHA_SECTION,
+    SAFE_SPECIAL_TARGETS,
+    bootstrap_budget_problem,
+    card_frontmatter_problems,
+    card_state_problems,
+    document_destination_problem,
+    safe_document_target,
+)
 from ..localio import write_json as _write_json
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
@@ -364,6 +373,7 @@ CANONICAL_HANDOFF_SECTION_HEADINGS: tuple[str, ...] = (
     "Evidence",
     "Recommended memory action",
     "Target card",
+    "Expected card SHA256",
     "Suggested card content",
     "Target document",
     "Suggested document content",
@@ -392,6 +402,10 @@ _SECTION_SYNONYMS: dict[str, str] = {
     "target card": "Target card",
     "card": "Target card",
     "card target": "Target card",
+    "expected card sha256": "Expected card SHA256",
+    "expected card sha": "Expected card SHA256",
+    "expected sha256": "Expected card SHA256",
+    "expected sha": "Expected card SHA256",
     "suggested card content": "Suggested card content",
     "card content": "Suggested card content",
     "target document": "Target document",
@@ -513,6 +527,9 @@ def _lint_card_action(
     sections: dict[str, str],
     errors: list[str],
     warnings: list[str],
+    *,
+    action: str = "create-card",
+    workspace: Path | None = None,
 ) -> None:
     target_card = _section_value(sections, "Target card")
     if not target_card:
@@ -527,6 +544,17 @@ def _lint_card_action(
         errors.append("card handoffs require Suggested card content")
     elif not suggested_card.startswith("---"):
         errors.append("Suggested card content must start with YAML frontmatter")
+    else:
+        errors.extend(card_frontmatter_problems(suggested_card))
+
+    state_errors, state_warnings = card_state_problems(
+        action=action,
+        target_card=target_card.splitlines()[0].strip() if target_card else "",
+        expected_sha=(_section_value(sections, EXPECTED_SHA_SECTION).splitlines() or [""])[0],
+        workspace=workspace,
+    )
+    errors.extend(state_errors)
+    warnings.extend(state_warnings)
 
     for prohibited in ("Target document", "Suggested document content"):
         if prohibited in sections:
@@ -538,30 +566,44 @@ def _lint_card_action(
         )
 
 
-def _lint_no_card_action(sections: dict[str, str], errors: list[str]) -> None:
+def _lint_no_card_action(
+    sections: dict[str, str],
+    errors: list[str],
+    *,
+    workspace: Path | None = None,
+    ingest_routes: bool = True,
+) -> None:
+    """Lint a document handoff. `ingest_routes` is False for advisory notifications ingest never routes."""
     target_document = _section_value(sections, "Target document")
     if not target_document:
         errors.append("no-card handoffs require Target document")
-    elif not _valid_document_target(target_document.splitlines()[0].strip()):
-        errors.append("Target document must be TOOLS.md, USER.md, rules/*.md, or .learnings/*.md")
+    else:
+        document = target_document.splitlines()[0].strip()
+        if ingest_routes and not _valid_document_target(document):
+            errors.append(
+                "unsafe target document: use one of " + ", ".join(sorted(SAFE_SPECIAL_TARGETS)) + ", or rules/<name>.md"
+            )
 
     suggested_document = _section_value(sections, "Suggested document content")
     if not suggested_document:
         errors.append("no-card handoffs require Suggested document content")
     elif any(line.startswith("## ") for line in suggested_document.splitlines()):
         errors.append("Suggested document content must not contain level-2 markdown headings")
+    elif ingest_routes and target_document and _valid_document_target(target_document.splitlines()[0].strip()):
+        destination_problem = document_destination_problem(target_document.splitlines()[0].strip(), workspace)
+        budget_problem = bootstrap_budget_problem(
+            target_document.splitlines()[0].strip(), suggested_document, workspace
+        )
+        if destination_problem or budget_problem:
+            errors.append(destination_problem or str(budget_problem))
 
-    for prohibited in ("Target card", "Suggested card content"):
+    for prohibited in ("Target card", EXPECTED_SHA_SECTION, "Suggested card content"):
         if prohibited in sections:
             errors.append(f"no-card handoffs must omit the {prohibited} section entirely")
 
 
 def _valid_document_target(value: str) -> bool:
-    if value.startswith("/") or ".." in Path(value).parts:
-        return False
-    if value in DOCUMENT_TARGETS:
-        return True
-    return any(value.startswith(prefix) and value.endswith(".md") for prefix in DOCUMENT_TARGET_PREFIXES)
+    return safe_document_target(value)
 
 
 def _lint_repair_for_result(result: HandoffLintResult) -> str:
