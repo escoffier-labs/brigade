@@ -1203,6 +1203,59 @@ evidence. An admin purge can clear an active contrary hold. Expired or revoked
 attestations no longer supply one.
 
 
+### Anchoring cards for hub proposals (`memory anchor`)
+
+Hub reflection and reviewed proposals can only edit a claim-anchored block.
+Every op names a `block_id` and an `expected_block_hash`, and the hub refuses an
+op whose block has no anchor. Local proposal creation mints anchors on demand,
+so a card corpus that was never proposed against carries none. A scheduled hub
+reflect job over such a corpus finds duplicates but has no block it can address,
+so it proposes nothing.
+
+`brigade memory anchor --target <workspace>` anchors the corpus up front. It
+walks the same card set that `memory search` and the hub sync push use, and it
+mints ids with the function that proposal creation calls, so the ids and the
+`claim_anchor_ids` frontmatter match what a proposal would have written.
+
+The operator flow has three steps:
+
+1. Run `brigade memory anchor --target <workspace>`. This is a dry run. It
+   reports counts only, never card text: files scanned, files and blocks that
+   would change, files already anchored, and files skipped by reason.
+2. Run it again with `--apply`. Each changed card is written through a temp file
+   in its own directory, synced, and renamed over the original, with the
+   original mode and owner kept. The card stays open and locked from the
+   content check through the rename, and the command rechecks its inode, size,
+   timestamps and bytes just before the rename. A card that changed since it
+   was scanned, or whose owner cannot be kept, is left alone and counted as
+   failed.
+   Stop every other writer of the card files before `--apply`, such as the
+   agent gateway, sync timers and open editors. The lock is advisory, and an
+   editor that saves by renaming a new file over a card does not take it. A save
+   that lands between the final recheck and the rename is overwritten. Once
+   writers are stopped, that window cannot occur.
+3. Let the normal sync push publish the anchored revisions. The command writes
+   local files only and never talks to the hub.
+
+A second `--apply` is a no-op, and a card that is already anchored stays
+byte-identical. Blocks the proposal grammar treats as opaque get no anchor.
+These are code, tables, quotes, and any card that contains HTML. A card with no
+addressable block is skipped as `opaque`.
+
+Other skip reasons are `symlink` (the card or a directory above it is a
+symlink), `outside-roots`, `read-only` (the path matches `read_only_paths`),
+`unreadable`, `byte-order-mark` (the file starts with a UTF-8 BOM, which the
+proposal parser does not strip), `too-large` (over 256 KiB before or after anchoring), `withheld`
+(a `visibility` the sync push does not publish), `unsupported-frontmatter`,
+`invalid-anchor-state` (duplicate or malformed anchors), and
+`reservation-limit` (more than 4,096 reserved anchors). `--path <glob>` limits
+the run to matching card paths and may repeat. `--limit N` changes at most N
+cards per run and reports the rest as deferred. `--json` prints the same counts
+as one object with the schema `brigade.memory-anchor.v1`.
+
+The exit code is 0 on success, 1 when `--apply` could not write a card, and 2
+for an invalid argument, a missing target, or an invalid memory-care config.
+
 ### Scheduled hub reflection (S19d)
 
 For a workspace with `[hub] mode = "read"` or `"sync"`, `brigade memory reflect
