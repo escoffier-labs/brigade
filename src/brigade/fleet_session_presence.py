@@ -55,7 +55,7 @@ CURSOR_WORK_LOOP_CONTEXT = (
     "BRIGADE WORK LOOP: In a Brigade-wired repository, invoke the global brigade-work skill before substantive "
     "work. Start with brigade work brief --target .. Run checks that should count through brigade work verify "
     "run with --capture brigade-work. Capture failures, export new receipts to MiseLedger when installed, and "
-    "finish durable work with a Memory Handoff."
+    "write a Memory Handoff only for durable knowledge, else end with `Nothing durable: <reason>`."
 )
 _CURSOR_HOOK_EVENTS = {
     "sessionStart": "start",
