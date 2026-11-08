@@ -48,22 +48,25 @@ def _loose(name: str) -> str:
 
 
 def _names(text: str) -> tuple[list[str], list[str]]:
-    """Identity names (aliases, topic) and the title, read as the hub's scalar metadata."""
+    """Identity names (aliases, topic) and the title, read as the hub's scalar metadata.
+
+    Metadata is never parsed loosely. An ambiguous field, or an alias value that
+    is not a JSON list of strings, raises ValueError and the card grants no names.
+    """
     identities: list[str] = []
     titles: list[str] = []
     for key, into in (("aliases", identities), ("topic", identities), ("title", titles)):
-        try:
-            value = near._field(text, key)
-        except ValueError:
-            continue  # An ambiguous field grants no name. The hub refuses such cards anyway.
+        value = near._field(text, key)
         if not value:
             continue
         if key == "aliases":
             try:
-                items = json.loads(value) if value.startswith("[") else [value]
+                items = json.loads(value)
             except ValueError:
-                items = [part for part in value.strip("[]").split(",")]
-            into.extend(str(item).strip("\"' ") for item in items[:64] if isinstance(item, str))
+                raise ValueError("malformed aliases") from None
+            if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+                raise ValueError("malformed aliases")
+            into.extend(item.strip() for item in items[:64])
         else:
             into.append(value.strip("\"'"))
     return [n for n in identities if n.strip()], [n for n in titles if n.strip()]
@@ -88,13 +91,20 @@ class Index:
     def __init__(self, heads: list[dict[str, Any]]) -> None:
         self.live: dict[tuple[str, str], set[str]] = {}  # (scope, folded name) -> live card ids
         self.loose: dict[tuple[str, str], set[str]] = {}  # (scope, normalized name) -> live card ids
-        self.retired: dict[tuple[str, str], set[str]] = {}  # (scope, folded identity) -> retired card ids
+        self.retired: dict[tuple[str, str], set[str]] = {}  # (scope, normalized name) -> retired card ids
         self.ids: dict[str, set[str]] = {}  # scope -> live card ids
         self.successor: dict[tuple[str, str], str] = {}  # retired card -> raw superseded_by
         self.scopes: dict[str, set[str]] = {}  # normalized name -> scopes with a live card
+        # (scope, card id) -> (scan state, trust class, metadata is well formed)
+        self.info: dict[tuple[str, str], tuple[Any, Any, bool]] = {}
         for head in heads:
             scope, card_id = head["scope"], head["card_id"]
-            identities, titles = _names(head["text"])
+            try:
+                identities, titles = _names(head["text"])
+                well_formed = True
+            except ValueError:
+                identities, titles, well_formed = [], [], False
+            self.info[(scope, card_id)] = (head.get("scan_state"), head.get("trust"), well_formed)
             if _live(head):
                 self.ids.setdefault(scope, set()).add(card_id)
                 for name in (card_id, *identities, *titles):
@@ -102,8 +112,8 @@ class Index:
                     self.loose.setdefault((scope, _loose(name)), set()).add(card_id)
                     self.scopes.setdefault(_loose(name), set()).add(scope)
                 continue
-            for name in (card_id, *identities):
-                self.retired.setdefault((scope, _fold(name)), set()).add(card_id)
+            for name in (card_id, *identities, *titles):
+                self.retired.setdefault((scope, _loose(name)), set()).add(card_id)
             try:
                 value = near._field(head["text"], "superseded_by")
             except ValueError:
@@ -111,31 +121,53 @@ class Index:
             if value:
                 self.successor[(scope, card_id)] = value
 
-    def resolve(self, scope: str, raw: str) -> tuple[str | None, str | None]:
+    def _admit(self, scope: str, card_id: str, trust: Any) -> str | None:
+        """The skip reason for a target the hub would never scan or show, or None.
+
+        A proposal names only the source card, so a repair writes a name the
+        reviewer cannot see the destination of. The target must be scan clean,
+        share the source's trust class and have well formed metadata.
+        """
+        scan, target_trust, well_formed = self.info[(scope, card_id)]
+        if not well_formed:
+            return "link_invalid_metadata"
+        if scan != "clean" or target_trust != trust:
+            return "link_untrusted_target"
+        return None
+
+    def resolve(self, scope: str, raw: str, trust: Any) -> tuple[str | None, str | None]:
         """Return the live card a broken link should name, or the reason to skip it."""
-        name = _target(raw)
-        retired = self.retired.get((scope, _fold(name)), set())
-        successors: set[str] = set()
-        elsewhere = False
-        for card_id in retired:
-            value = self.successor.get((scope, card_id))
+        target, reason = self._pick(scope, raw)
+        if target is not None:
+            reason = self._admit(scope, target, trust)
+            if reason:
+                return None, reason
+        return target, reason
+
+    def _pick(self, scope: str, raw: str) -> tuple[str | None, str | None]:
+        """Name the one live card a broken link should reach. Retired names use the successor rule only."""
+        key = (scope, _loose(_target(raw)))
+        retired, matches = self.retired.get(key, set()), self.loose.get(key, set())
+        if retired:
+            # A retired name shared with another retired or live card has no clear owner.
+            if len(retired) > 1 or matches:
+                return None, "link_ambiguous_target"
+            value = self.successor.get((scope, next(iter(retired))))
             if value is None:
-                continue
-            target = _target(value.strip("\"'"))
-            if target.startswith(scope + "/"):
-                target = target[len(scope) + 1 :]
-            if "/" in target:
-                elsewhere = True
-            elif target.lower() in self.ids.get(scope, set()):
-                successors.add(target.lower())
-        if len(successors) == 1:
-            return next(iter(successors)), None
-        matches = self.loose.get((scope, _loose(name)), set())
-        if len(successors) > 1 or len(matches) > 1:
+                return None, "link_no_target"
+            successor = _target(value.strip("\"'"))
+            if successor.startswith(scope + "/"):
+                successor = successor[len(scope) + 1 :]
+            if "/" in successor:
+                return None, "link_cross_scope_target"
+            if successor.lower() in self.ids.get(scope, set()):
+                return successor.lower(), None
+            return None, "link_no_target"
+        if len(matches) > 1:
             return None, "link_ambiguous_target"
         if matches:
             return next(iter(matches)), None
-        if elsewhere or any(other != scope for other in self.scopes.get(_loose(name), ())):
+        if any(other != scope for other in self.scopes.get(key[1], ())):
             return None, "link_cross_scope_target"
         return None, "link_no_target"
 
@@ -247,7 +279,7 @@ def ops(
                 if reason or not block.block_id:
                     _bump(skipped, reason or "link_missing_pin")
                     continue
-                target, why = index.resolve(head["scope"], raw)
+                target, why = index.resolve(head["scope"], raw, head.get("trust"))
                 if target is None:
                     _bump(skipped, why or "link_no_target")
                     continue

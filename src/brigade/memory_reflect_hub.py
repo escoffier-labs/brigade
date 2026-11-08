@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -38,6 +39,8 @@ CLUSTER_KEY = re.compile(r"[0-9a-f]{32}")
 NEAR_LANE = "near_clusters"
 LINK_LANE = "link_clusters"
 LANES = (NEAR_LANE, LINK_LANE)
+# After exact merges the two lanes alternate. The lane that goes first flips after a run that serves a proposal.
+FIRST_LANE = "first_lane"
 
 STATE_ERROR = "invalid reflect schedule state. Inspect and remove .brigade/memory/reflect/schedule.json to recover"
 
@@ -114,6 +117,8 @@ def schedule_status(target: Path) -> dict[str, Any]:
                         or any(type(value) is not int or value < 0 for value in entry)
                     ):
                         raise ValueError(STATE_ERROR)
+        if state.get(FIRST_LANE, NEAR_LANE) not in LANES:
+            raise ValueError(STATE_ERROR)
         if "last_status" in state and state["last_status"] not in ("completed", "failed"):
             raise ValueError(STATE_ERROR)
         return state
@@ -467,7 +472,13 @@ def _reflect(
         deferred = sum(len(ops) for _, ops in lane_pending[cap:])
         if deferred:
             skipped[reason] = skipped.get(reason, 0) + deferred
-    remaining = unremembered(exact) + pending_similar[:near_cap] + pending_links[:link_cap]
+    # Round robin so neither lane can starve the other under --limit or a quota refusal.
+    first = state.get(FIRST_LANE, NEAR_LANE)
+    lanes = [pending_similar[:near_cap], pending_links[:link_cap]]
+    if first == LINK_LANE:
+        lanes.reverse()
+    alternating = [item for group in itertools.zip_longest(*lanes) for item in group if item is not None]
+    remaining = unremembered(exact) + alternating
     selected = remaining[:limit]
     proposals = []
     refused = []
@@ -478,8 +489,12 @@ def _reflect(
         # Preserve unprocessed submissions under this binding across scope and limit changes.
         state.update(binding=binding, submissions=previous, **tables)
 
+        served_any = False
+
         def served(digest: str) -> None:
+            nonlocal served_any
             lane, name, key = lane_key.get(digest, ("", "", ""))
+            served_any = served_any or bool(lane)
             if key in tables.get(lane, {}).get(name, {}):
                 tables[lane][name][key][1] = now
 
@@ -541,6 +556,8 @@ def _reflect(
                 break
             if error is not None or stop:
                 break
+        if served_any:
+            state[FIRST_LANE] = NEAR_LANE if first == LINK_LANE else LINK_LANE
         # Only final refusals of ops attempted this run count, never cached skips, recovered ids or quota stops.
         if attempted and failed_ops == attempted and error is None:
             error = "all_ops_refused"

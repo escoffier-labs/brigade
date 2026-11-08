@@ -6,6 +6,7 @@ import json
 import pytest
 
 from brigade import memory_hub_client as hubc, memory_reflect_links as links, memory_reflect_near as near
+from tests.test_hub_reflect_near_duplicates import group_claim
 from tests.test_memory_reflect_hub import pytestmark as pytestmark, run, setup as setup, writes
 
 SCOPE = "repo:links"
@@ -133,8 +134,8 @@ def test_ambiguous_and_missing_targets_are_skipped_and_counted():
 def test_two_retired_cards_with_different_successors_are_ambiguous():
     heads = [
         head("src", card_text("Read [[old]].")),
-        head("old", card_text("R.", "c-bbbbbb", "status: superseded\nsuperseded_by: n1\naliases: [shared]")),
-        head("old2", card_text("R.", "c-bbbbbb", "status: superseded\nsuperseded_by: n2\naliases: [old]")),
+        head("old", card_text("R.", "c-bbbbbb", 'status: superseded\nsuperseded_by: n1\naliases: ["shared"]')),
+        head("old2", card_text("R.", "c-bbbbbb", 'status: superseded\nsuperseded_by: n2\naliases: ["old"]')),
         head("n1", card_text("N.", "c-cccccc")),
         head("n2", card_text("M.", "c-dddddd")),
     ]
@@ -387,3 +388,227 @@ def test_proposal_quota_stops_link_submissions_without_failing(setup, capsys):
 def test_config_helper_defaults(tmp_path):
     assert links.settings(tmp_path) == links.DEFAULT_MAX_PROPOSALS == 8
     assert links.MAX_PROPOSALS_LIMIT == near.MAX_PROPOSALS_LIMIT == 32
+
+
+# --- target admission: the hub never scans or shows the destination of a repair ---------------
+
+
+def with_new(**overrides):
+    heads = successor_pair()
+    heads[2].update(overrides)
+    return heads
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"scan_state": "flagged"}, {"scan_state": None}, {"trust": "imported"}, {"trust": "mystery"}],
+    ids=["flagged", "unscanned", "mixed-trust", "unknown-trust"],
+)
+def test_successor_must_be_clean_and_share_the_source_trust(overrides):
+    submissions, skipped, stats = unit(with_new(**overrides))
+    assert submissions == [] and skipped == {"link_untrusted_target": 1} and stats["repairs"] == 0
+
+
+@pytest.mark.parametrize(
+    "overrides", [{"scan_state": "flagged"}, {"trust": "agent-unreviewed"}], ids=["flagged", "mixed-trust"]
+)
+def test_name_matched_target_must_be_clean_and_share_the_source_trust(overrides):
+    new = head("g1", card_text("Gizmo claim.", "c-cccccc", "title: Gizmo Notes"), **overrides)
+    submissions, skipped, _ = unit([head("src", card_text("Read [[gizmo-notes]].")), new])
+    assert submissions == [] and skipped == {"link_untrusted_target": 1}
+
+
+def test_a_clean_same_trust_target_is_still_repaired():
+    new = head("g1", card_text("Gizmo claim.", "c-cccccc", "title: Gizmo Notes"), trust="imported")
+    source = head("src", card_text("Read [[gizmo-notes]]."), trust="imported")
+    [[op]], skipped, _ = unit([source, new])
+    assert op["text"] == "Read [[g1]]." and skipped == {}
+
+
+@pytest.mark.parametrize(
+    "aliases",
+    ["foo, bar", "[unterminated", "[1, 2]", '"just-a-string"', "{}", "[foo, bar]"],
+)
+def test_malformed_aliases_make_a_successor_unusable_and_are_counted(aliases):
+    heads = with_new()
+    heads[2]["text"] = card_text("Current claim.", "c-cccccc", f"aliases: {aliases}")
+    submissions, skipped, _ = unit(heads)
+    assert submissions == [] and skipped == {"link_invalid_metadata": 1}
+
+
+def test_malformed_aliases_grant_no_names_and_are_never_parsed_loosely():
+    new = head("g1", card_text("Gizmo claim.", "c-cccccc", "title: Gizmo Notes\naliases: Widget Log, Gizmo"))
+    for link in ("widget log", "gizmo", "gizmo notes"):
+        submissions, skipped, _ = unit([head("src", card_text(f"Read [[{link}]].")), new])
+        assert submissions == [] and skipped == {"link_no_target": 1}
+
+
+def test_ambiguous_multiline_aliases_are_malformed():
+    heads = with_new()
+    heads[2]["text"] = card_text("Current claim.", "c-cccccc", "aliases:\n  - a\n  - b")
+    submissions, skipped, _ = unit(heads)
+    assert submissions == [] and skipped == {"link_invalid_metadata": 1}
+
+
+def test_refused_targets_are_counted_without_card_text(setup, capsys):
+    target, hub, _ = setup
+    configure(target)
+    put(hub, "src", f"{SECRET} sees [[old]].")
+    retire(hub, "old", "repo:links/new")
+    put(hub, "new", "Current claim.", "c-cccccc")
+    hub.scan_states = {(SCOPE, "new"): "flagged"}
+    code, report = run(target, capsys, "run")
+    assert code == 0 and proposed(hub) == []
+    assert report["skipped_reasons"] == {"link_untrusted_target": 1}
+    assert SECRET not in json.dumps(report)
+
+
+# --- retired names: titles, topics and aliases follow the successor rule ----------------------
+
+
+def retired_guide(card_id="old", title="Old Guide", extra=""):
+    meta = f'status: superseded\nsuperseded_by: "repo:links/new"\ntitle: {title}{extra}'
+    return head(card_id, card_text("Retired claim.", "c-bbbbbb", meta))
+
+
+def test_a_retired_title_follows_the_successor():
+    for link in ("Old Guide", "old-guide", "OLD   guide"):
+        heads = [head("src", card_text(f"See [[{link}]].")), retired_guide(), head("new", card_text("N.", "c-cccccc"))]
+        [[op]], skipped, _ = unit(heads)
+        assert op["text"] == "See [[new]]." and skipped == {}
+
+
+def test_retired_topics_and_aliases_follow_the_successor():
+    for extra, link in (("\ntopic: Legacy Topic", "legacy topic"), ('\naliases: ["Older Name"]', "older-name")):
+        heads = [
+            head("src", card_text(f"See [[{link}]].")),
+            retired_guide(extra=extra),
+            head("new", card_text("N.", "c-cccccc")),
+        ]
+        [[op]], skipped, _ = unit(heads)
+        assert op["text"] == "See [[new]]." and skipped == {}
+
+
+def test_a_live_card_with_the_normalized_name_is_a_collision_not_a_redirect():
+    live = head("old-guide", card_text("Unrelated.", "c-dddddd"))
+    heads = [
+        head("src", card_text("See [[Old Guide]].")),
+        retired_guide(),
+        head("new", card_text("N.", "c-cccccc")),
+        live,
+    ]
+    submissions, skipped, _ = unit(heads)
+    assert submissions == [] and skipped == {"link_ambiguous_target": 1}
+    live["text"] = card_text("Unrelated.", "c-dddddd", "title: OLD   GUIDE")
+    live["card_id"] = "other"
+    submissions, skipped, _ = unit(heads)
+    assert submissions == [] and skipped == {"link_ambiguous_target": 1}
+
+
+def test_two_retired_cards_sharing_a_name_are_ambiguous_even_with_one_successor():
+    heads = [
+        head("src", card_text("See [[Old Guide]].")),
+        retired_guide("old-a"),
+        retired_guide("old-b"),
+        head("new", card_text("N.", "c-cccccc")),
+    ]
+    submissions, skipped, _ = unit(heads)
+    assert submissions == [] and skipped == {"link_ambiguous_target": 1}
+
+
+def test_a_retired_name_without_a_live_successor_never_falls_back_to_a_live_name():
+    heads = [
+        head("src", card_text("See [[Old Guide]].")),
+        retired_guide(),
+        head("new", card_text("N.", "c-cccccc"), state="retired"),
+    ]
+    submissions, skipped, _ = unit(heads)
+    assert submissions == [] and skipped == {"link_no_target": 1}
+
+
+def test_a_retired_title_with_a_cross_scope_successor_is_skipped():
+    old = retired_guide()
+    old["text"] = old["text"].replace("repo:links/new", f"{OTHER}/new")
+    heads = [head("src", card_text("See [[Old Guide]].")), old, head("new", card_text("N.", "c-cccccc"), scope=OTHER)]
+    submissions, skipped, _ = unit(heads)
+    assert submissions == [] and skipped == {"link_cross_scope_target": 1}
+
+
+# --- lanes alternate, so recurring near-duplicate traffic cannot starve link repairs ------------
+
+
+def near_pairs(hub, count):
+    for group in range(count):
+        for member in range(2):
+            put(hub, f"g{group}-{member}", group_claim(group, member), f"c-{0x10000 + group * 2 + member:06x}")
+
+
+def link_types(hub):
+    return [call["ops"][0]["type"] for call in proposed(hub)]
+
+
+def state_of(target):
+    return json.loads((target / ".brigade/memory/reflect/schedule.json").read_text())
+
+
+def test_limit_one_serves_both_lanes_in_turn(setup, capsys):
+    target, hub, _ = setup
+    configure(target)
+    near_pairs(hub, 10)
+    populate(hub, 1)
+    for _ in range(4):
+        assert run(target, capsys, "run", "--limit", "1")[0] == 0
+    # Ten near clusters would otherwise fill every run, so the link repair waits for them all.
+    assert link_types(hub)[:2] == ["supersede_card", "replace_block"]
+    assert set(link_types(hub)[2:]) == {"supersede_card"}
+    assert state_of(target)["first_lane"] in {"near_clusters", "link_clusters"}
+
+
+def test_quota_that_admits_one_proposal_per_run_still_reaches_link_repairs(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    configure(target)
+    near_pairs(hub, 10)
+    populate(hub, 1)
+    original = hub.do_propose
+    sent = {"run": 0}
+
+    def quota(body):
+        if sent["run"] >= 1:
+            return 429, {"code": "memory_proposal_principal_quota", "error": "full"}
+        sent["run"] += 1
+        return original(body)
+
+    monkeypatch.setattr(hub, "do_propose", quota)
+    for _ in range(3):
+        sent["run"] = 0
+        code, report = run(target, capsys, "run")
+        assert code == 0 and report["status"] == "completed"
+    assert "replace_block" in link_types(hub)
+    assert link_types(hub).index("replace_block") <= 1
+
+
+def test_a_run_that_serves_nothing_keeps_the_lane_order(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    configure(target)
+    populate(hub, 1)
+    monkeypatch.setattr(
+        hub, "do_propose", lambda body: (429, {"code": "memory_proposal_principal_quota", "error": "full"})
+    )
+    assert run(target, capsys, "run")[0] == 0
+    assert "first_lane" not in state_of(target)
+
+
+def test_lane_order_is_validated_in_the_schedule_state(setup, capsys):
+    target, hub, _ = setup
+    configure(target)
+    populate(hub, 1)
+    assert run(target, capsys, "run")[0] == 0
+    path = target / ".brigade/memory/reflect/schedule.json"
+    state = json.loads(path.read_text())
+    assert state["first_lane"] == "link_clusters"
+    state["first_lane"] = "bogus"
+    path.write_text(json.dumps(state))
+    from brigade import memory_reflect_hub as reflect
+
+    with pytest.raises(ValueError):
+        reflect.schedule_status(target)

@@ -1404,14 +1404,21 @@ card is live when its hub state is `live` and its front matter has neither
 id, alias, `topic` or `title`, compared after case folding and trimming. The
 hub card id is the file stem for migrated cards, and older ids stay as
 aliases. A link to a retired or superseded card is therefore broken too.
+Metadata is never parsed loosely. `aliases` must be a JSON list of strings.
+A card whose `aliases` is anything else, or whose `title`, `topic` or `aliases`
+field is ambiguous or multiline, grants no names and is never a repair target.
 
 The pass repoints a broken link only when exactly one live card in the same
 scope is the clear target. It tries two rules in order:
 
-1. The target is a card that an accepted supersede retired, and its
+1. The target is a card that an accepted supersede retired, by id, alias,
+   `topic` or `title` under the same normalization as rule 2, and its
    `superseded_by` names a live card in the same scope. That successor is the
-   target. Only one hop is followed, so a successor that was itself retired
-   leaves the link for rule 2.
+   target. A link that reaches a retired card by any name follows this rule
+   only. Rule 2 is never consulted for it, so a retired card without a live
+   successor counts `link_no_target`. Only one hop is followed. A name shared by
+   two retired cards, or by a retired and a live card, has no clear owner and
+   counts `link_ambiguous_target`.
 2. Exactly one live card has a card id, alias, `topic` or `title` that equals
    the target after case folding and after runs of whitespace and hyphens
    collapse to one space. `Gizmo  Notes`, `gizmo-notes` and `Gizmo Notes`
@@ -1422,13 +1429,21 @@ Anything else is counted and left alone, per link:
 | Skip reason | Meaning |
 |---|---|
 | `link_no_target` | No live card matches |
-| `link_ambiguous_target` | Several live cards, or several different successors, match |
+| `link_ambiguous_target` | Several live cards match, or a retired name is shared with another retired or live card |
 | `link_cross_scope_target` | The only match is a live card in another scope, or the successor names another scope |
+| `link_untrusted_target` | The target card, or the successor, is not scan clean or has a different trust class from the card holding the link |
+| `link_invalid_metadata` | The target card has malformed `aliases` or an ambiguous metadata field |
 | `link_non_clean`, `link_unknown_trust`, `link_inactive_card` | The card holding the link fails the exact pass's scan and trust filters, or is not live |
 | `link_missing_pin` | The block holding the link has no claim anchor |
 | `link_unreplaceable_block` | The block spans several lines or contains `^`, so the hub would refuse a one-line replacement |
 | `link_invalid_blocks` | The card's claim anchors are duplicated or invalid |
 | `link_deferred` | The per-run cap held the submission for a later run |
+
+A proposal names only the card holding the link, so the hub never scans or
+shows the destination. A repair therefore needs a target, or a successor, with
+a clean scan state and the same trust class as the source card. Otherwise the
+pass counts `link_untrusted_target` and proposes nothing, so a flagged or
+differently trusted card cannot steer a repair.
 
 Each repair is a `replace_block` op that carries only the block's wording with
 the link targets changed. It pins the card's base revision and the block hash,
@@ -1442,8 +1457,13 @@ a reviewer accepts the first.
 `[reflect] link_repair_max_proposals` (default 8, from 0 to 32) caps how many
 new link-repair submissions one run opens. A value outside the range or of
 the wrong type fails the run with `hub_reflect_config` before any hub call.
-The order is exact merges, then near-duplicate submissions, then link repairs,
-and `--limit` truncates in that order. Link-repair submissions take turns by
+After exact merges, which stay first, the near-duplicate and link-repair
+submissions alternate round robin, each lane within its own cap, and `--limit`
+truncates that sequence. `schedule.json` keeps `first_lane` (`near_clusters` or
+`link_clusters`, default near) to say which lane goes first. A run that opens
+or records at least one proposal from either lane flips it, so neither lane can
+be starved by the other under a small `--limit` or a quota refusal. A run that
+serves neither lane leaves it unchanged. Link-repair submissions take turns by
 the same rule as near-duplicate clusters. The key is a digest of the scope and
 the sorted card ids in the submission, and `schedule.json` keeps a second table,
 `link_clusters`, with the same two times per key under the same binding. A
