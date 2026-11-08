@@ -759,6 +759,7 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
                 m.commit_failures,
                 store.bucket()
             );
+            text += &store.read_count_metrics();
             let index = store.index();
             let snapshot = index.current();
             let i = index.metrics.lock().unwrap().clone();

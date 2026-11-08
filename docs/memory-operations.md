@@ -1203,11 +1203,64 @@ evidence. An admin purge can clear an active contrary hold. Expired or revoked
 attestations no longer supply one.
 
 
+### Anchoring cards for hub proposals (`memory anchor`)
+
+Hub reflection and reviewed proposals can only edit a claim-anchored block.
+Every op names a `block_id` and an `expected_block_hash`, and the hub refuses an
+op whose block has no anchor. Local proposal creation mints anchors on demand,
+so a card corpus that was never proposed against carries none. A scheduled hub
+reflect job over such a corpus finds duplicates but has no block it can address,
+so it proposes nothing.
+
+`brigade memory anchor --target <workspace>` anchors the corpus up front. It
+walks the same card set that `memory search` and the hub sync push use, and it
+mints ids with the function that proposal creation calls, so the ids and the
+`claim_anchor_ids` frontmatter match what a proposal would have written.
+
+The operator flow has three steps:
+
+1. Run `brigade memory anchor --target <workspace>`. This is a dry run. It
+   reports counts only, never card text: files scanned, files and blocks that
+   would change, files already anchored, and files skipped by reason.
+2. Run it again with `--apply`. Each changed card is written through a temp file
+   in its own directory, synced, and renamed over the original, with the
+   original mode and owner kept. The card stays open and locked from the
+   content check through the rename, and the command rechecks its inode, size,
+   timestamps and bytes just before the rename. A card that changed since it
+   was scanned, or whose owner cannot be kept, is left alone and counted as
+   failed.
+   Stop every other writer of the card files before `--apply`, such as the
+   agent gateway, sync timers and open editors. The lock is advisory, and an
+   editor that saves by renaming a new file over a card does not take it. A save
+   that lands between the final recheck and the rename is overwritten. Once
+   writers are stopped, that window cannot occur.
+3. Let the normal sync push publish the anchored revisions. The command writes
+   local files only and never talks to the hub.
+
+A second `--apply` is a no-op, and a card that is already anchored stays
+byte-identical. Blocks the proposal grammar treats as opaque get no anchor.
+These are code, tables, quotes, and any card that contains HTML. A card with no
+addressable block is skipped as `opaque`.
+
+Other skip reasons are `symlink` (the card or a directory above it is a
+symlink), `outside-roots`, `read-only` (the path matches `read_only_paths`),
+`unreadable`, `byte-order-mark` (the file starts with a UTF-8 BOM, which the
+proposal parser does not strip), `too-large` (over 256 KiB before or after anchoring), `withheld`
+(a `visibility` the sync push does not publish), `unsupported-frontmatter`,
+`invalid-anchor-state` (duplicate or malformed anchors), and
+`reservation-limit` (more than 4,096 reserved anchors). `--path <glob>` limits
+the run to matching card paths and may repeat. `--limit N` changes at most N
+cards per run and reports the rest as deferred. `--json` prints the same counts
+as one object with the schema `brigade.memory-anchor.v1`.
+
+The exit code is 0 on success, 1 when `--apply` could not write a card, and 2
+for an invalid argument, a missing target, or an invalid memory-care config.
+
 ### Scheduled hub reflection (S19d)
 
 For a workspace with `[hub] mode = "read"` or `"sync"`, `brigade memory reflect
 run --target <workspace>` pulls the hub log from the replica's sequence
-watermark and opens reviewed proposals. The current deterministic hub pass
+watermark and opens reviewed proposals. The first deterministic hub pass
 finds exact duplicate claim bodies within each configured read scope. It keeps
 opaque bytes such as code indentation, requires an existing claim anchor on
 the keeper, and pins both card revisions and the keeper's block hash. It drops
@@ -1224,6 +1277,213 @@ This pass does not invent anchors or evidence. Local reflection still derives
 its existing evidence and review candidates when hub mode is off. S19e-1 adds
 attestation and the gated automatic route. Automatic apply requires a separate call with every gate satisfied.
 Scheduled reflection only proposes.
+
+#### Near-duplicate pass
+
+After the exact pass, each configured read scope runs a deterministic
+near-duplicate pass over the same bounded heads. It reads nothing beyond the
+50,000-card and 64 MiB scope bounds described below. Each claim body is
+compared with its addressable anchors stripped, folded to lower case and split
+into words. Similarity is the Jaccard index of the two bodies' word 5-gram
+shingles. A body shorter than five words is one shingle. Cards that form an
+exact duplicate group are left to the exact pass. Cards whose front matter
+already says `status: superseded` or names `superseded_by` are left out.
+
+The threshold defaults to 0.9. Set it from 0.5 to 1.0 in
+`.brigade/memory-care.toml`:
+
+```toml
+[reflect]
+near_duplicate_threshold = 0.9
+```
+
+`near_duplicate_max_proposals` (default 8, from 0 to 32) caps how many new
+near-duplicate proposals one run opens. A value outside either range, or a
+value of the wrong type, fails the run with `hub_reflect_config` before any
+hub call.
+
+Candidate pairs come from an inverted index over a prefix of each card's
+shingles in a fixed hash order. Two cards at or above the threshold always
+share a prefix shingle, so the prefix filter alone loses no pair. A shingle
+indexed by more than 64 cards is template text and is skipped. This keeps pair
+generation close to linear in the number of cards. The report counts these
+shingles as `near_duplicate.common_shingles`. Shingles are stored as 64-bit
+hashes.
+
+Three run-wide bounds cover every scope. The index holds at most 1,000,000
+prefix entries. Pair work is charged before any dedupe: each posting list is
+charged every combination it expands to, so near-identical cards that share
+many shingles pay for each repeat. A run expands at most 200,000 combinations.
+Verifying distinct pairs reads at most 50,000,000 shingles. The first bound a
+run hits stops the near-duplicate pass for that scope and every later scope.
+The index bound counts `near_index_limit` and the pair and verification bounds
+count `near_pair_limit`. Pairs already verified still form clusters.
+
+Clusters are stars around a keeper. Cards with at least one near-duplicate are
+taken in keeper order: the least recently written card first, then the lowest
+card id on a tie. A card's hub revision is its hub log sequence, so the lowest
+revision is the oldest current write. Creating a card or rewriting one always
+takes a higher revision, so a fresh write never makes a card the keeper. Each
+keeper claims its direct near-duplicates that no earlier keeper took.
+
+The current revision is the only age the hub sends with a card. The hub does
+not expose a creation sequence, so keeper choice cannot tell an old card from
+one that a writer has left untouched while editing its neighbors. Keeper
+choice therefore assumes that writers in the scope are trusted. Such a writer
+can already edit any card in that scope directly. Every near-duplicate
+proposal is Tier 2 and needs an explicit human decision, and the reviewer
+decides whether the proposed direction is right before accepting it. Every member is therefore at or above the
+threshold against its own keeper, never only through a chain of other cards.
+
+Each member gets a `supersede_card` op. The op names the member as its card
+and the keeper as `other_card`. It pins the member's base revision and the
+hash of the member's first anchored block. `other_card` pins the keeper's base
+revision, and the hub pins every anchored block of the keeper. Accepting the
+op sets the member's `status` to `superseded` and `superseded_by` to the
+keeper. Nothing is retired or deleted. A cluster is split into submissions of
+at most seven ops, so each submission stays within the hub limits of 64 ops
+over eight cards.
+
+Eligibility follows the exact pass. A cluster with any non-clean scan state
+counts `near_non_clean`. Mixed trust counts `near_mixed_trust`. A shared trust
+class outside the known set counts `near_unknown_trust`. A keeper without an
+anchored block counts `near_missing_pin` for every member. A member without an
+anchored block counts `near_missing_pin` for its own op. A member whose
+`status` or `superseded_by` field is ambiguous or multiline counts
+`near_invalid_metadata`. Counts are per skipped op and never include card
+text.
+
+Exact merges are queued ahead of every near-duplicate submission, so they reach
+the pending quota first. After remembered submissions are removed, a run opens
+at most `near_duplicate_max_proposals` near-duplicate submissions. The ops of
+the rest count as `near_deferred` and wait for a later run. Crafted clusters
+therefore cannot use up the 32 pending proposals a principal may hold.
+
+Near-duplicate submissions take turns. Each one has a cluster key: a 128-bit
+digest of its scope and the sorted ids of its cards. The key never depends on
+card text, so rewriting members keeps it. `schedule.json` keeps one table per
+scope that maps each key to two times: when a run first saw it and when a run
+last opened its proposal, with 0 for never. Candidates are ordered by least
+recently proposed, then oldest first seen, then key. A cluster that has never
+had a proposal therefore goes ahead of every cluster that has, and rewritten
+clusters cannot keep the same slots run after run. A cluster with a remembered
+proposal keeps its entry but uses no slot. Keys not seen in a run are dropped.
+
+Every key a run observes gets an entry. Clusters are disjoint and each
+submission names at least two cards, so a scope yields at most half its
+50,000-card bound in keys, and the per-scope entry cap is that half (25,000).
+If the cap ever bound, keys would be admitted in scheduling order, so the most
+recently served keys are dropped first and a never-served key is kept ahead of
+them. A full 25,000-entry table is about 1.6 MB, within the 8 MiB state file
+limit. The tables share the ledger binding and reset with it. A dry run reads
+them but never saves them.
+
+The hub classifies `supersede_card` as Tier 2, so these proposals are never
+Tier 0 eligible and never take the automatic apply route. Each one waits for
+an explicit reviewer decision. `--dry-run` lists the supersede ops it would
+open beside the exact ops, with the skip counts and the `near_duplicate`
+counters `threshold`, `max_proposals`, `candidate_pairs`, `pair_checks`,
+`index_entries`, `clusters` and `common_shingles`.
+
+#### Broken-link repair pass
+
+After the exact and near-duplicate passes, each configured read scope runs a
+deterministic link-repair pass over the same bounded heads. It reads the
+`[[target]]`, `[[target|alias]]`, `[[target#heading]]` and
+`[[target#heading|alias]]` links in anchored claim blocks. The target ends at
+the first `#` or `|`, and the alias and heading stay as written. A folder
+prefix (`cards/` or `memory/cards/`), a `.md` extension and spaces inside the
+brackets also stay. Links in code spans, code blocks, tables, quotes, raw HTML
+and every other opaque block are never read or changed. An embed
+(`![[x]]`), an escaped link (`\[[x]]`) and a heading-only link (`[[#x]]`) are not
+card links and are ignored.
+
+A link is broken when its target matches no live card in the same scope. A
+card is live when its hub state is `live` and its front matter has neither
+`status: superseded` nor `superseded_by`. A target matches a live card by card
+id, alias, `topic` or `title`, compared after case folding and trimming. The
+hub card id is the file stem for migrated cards, and older ids stay as
+aliases. A link to a retired or superseded card is therefore broken too.
+Metadata is never parsed loosely. `aliases` must be a JSON list of strings.
+A card whose `aliases` is anything else, or whose `title`, `topic` or `aliases`
+field is ambiguous or multiline, grants no names and is never a repair target.
+
+The pass repoints a broken link only when exactly one live card in the same
+scope is the clear target. It tries two rules in order:
+
+1. The target is a card that an accepted supersede retired, by id, alias,
+   `topic` or `title` under the same normalization as rule 2, and its
+   `superseded_by` names a live card in the same scope. That successor is the
+   target. A link that reaches a retired card by any name follows this rule
+   only. Rule 2 is never consulted for it, so a retired card without a live
+   successor counts `link_no_target`. Only one hop is followed. A name shared by
+   two retired cards, or by a retired and a live card, has no clear owner and
+   counts `link_ambiguous_target`.
+2. Exactly one live card has a card id, alias, `topic` or `title` that equals
+   the target after case folding and after runs of whitespace and hyphens
+   collapse to one space. `Gizmo  Notes`, `gizmo-notes` and `Gizmo Notes`
+   all reach a card titled `Gizmo Notes`.
+
+Anything else is counted and left alone, per link:
+
+| Skip reason | Meaning |
+|---|---|
+| `link_no_target` | No live card matches |
+| `link_ambiguous_target` | Several live cards match, or a retired name is shared with another retired or live card |
+| `link_cross_scope_target` | The only match is a live card in another scope, or the successor names another scope |
+| `link_untrusted_target` | The target card, or the successor, is not scan clean or has a different trust class from the card holding the link |
+| `link_unrepresentable_target` | The repaired link would not read back as the chosen card, for example a card id that ends in `.md` |
+| `link_invalid_metadata` | The target card has malformed `aliases` or an ambiguous metadata field |
+| `link_non_clean`, `link_unknown_trust`, `link_inactive_card` | The card holding the link fails the exact pass's scan and trust filters, or is not live |
+| `link_missing_pin` | The block holding the link has no claim anchor |
+| `link_unreplaceable_block` | The block spans several lines or contains `^`, so the hub would refuse a one-line replacement |
+| `link_invalid_blocks` | The card's claim anchors are duplicated or invalid |
+| `link_deferred` | The per-run cap held the submission for a later run |
+
+A proposal names only the card holding the link, so the hub never scans or
+shows the destination. A repair therefore needs a target, or a successor, with
+a clean scan state and the same trust class as the source card. Otherwise the
+pass counts `link_untrusted_target` and proposes nothing, so a flagged or
+differently trusted card cannot steer a repair.
+
+Each repair is a `replace_block` op that carries only the block's wording with
+the link targets changed. It pins the card's base revision and the block hash,
+and the hub appends `previously X, now Y` to the card when it applies. A block
+with several repairable links gets one op. Cards go in card id order, and a
+submission holds whole cards, at most seven ops, so it stays within the hub
+limits of 64 ops over eight cards. A single card with more than seven
+repairable blocks splits across submissions, and the later ones go stale when
+a reviewer accepts the first.
+
+`[reflect] link_repair_max_proposals` (default 8, from 0 to 32) caps how many
+new link-repair submissions one run opens. A value outside the range or of
+the wrong type fails the run with `hub_reflect_config` before any hub call.
+After exact merges, which stay first, the near-duplicate and link-repair
+submissions alternate round robin, each lane within its own cap, and `--limit`
+truncates that sequence. `schedule.json` keeps `first_lane` (`near_clusters` or
+`link_clusters`, default near) to say which lane goes first. A run that opens
+or records at least one proposal from either lane flips it, so neither lane can
+be starved by the other under a small `--limit` or a quota refusal. A run that
+serves neither lane leaves it unchanged. Link-repair submissions take turns by
+the same rule as near-duplicate clusters. The key is a digest of the scope and
+the sorted card ids in the submission, and `schedule.json` keeps a second table,
+`link_clusters`, with the same two times per key under the same binding. A
+scope can yield at most one key per card, so its entry cap is the 50,000-card
+bound. A full table is about 3.1 MB, and with a full near-duplicate table it
+stays within the 8 MiB state file limit.
+
+The hub classifies `replace_block` as Tier 1 only when the old and new wording
+are plain ASCII letters, spaces and `.,!?` with identical words. Every link
+repair contains `[` in both, so it never qualifies for Tier 1 or Tier 0, and
+the hub takes it as Tier 2. Each one waits for an explicit reviewer decision
+and never takes the automatic apply route.
+
+Counts never include card text. The replacement wording is card text, so the
+report's `ops` list leaves out each op's `text`. `--dry-run` sends nothing and
+lists the ops it would open without wording, with the skip counts and the
+`link_repair` counters `max_proposals`, `links` (links read), `broken` and
+`repairs`. A real run still sends the wording to the hub, which needs it to
+review the change.
 
 Hub reflection selects scopes before deriving or bounding candidates. Each scope
 allows at most 50,000 live cards and 64 MiB of UTF-8 card text, replacing the
@@ -1300,7 +1560,10 @@ reads. It can refresh the local replica, but sends no `propose`, `decide`,
 and leaves the failure counter and pause unchanged.
 A real run saves each proposal request id before submission, retries a lost
 response with that id, and remembers acknowledged proposals to avoid opening
-them again while their base revisions stay the same. Remembered submissions
+them again while their base revisions stay the same. An exact merge is one op
+per submission and keeps its op digest. A near-duplicate submission is
+remembered by the digest of its op list, and `--limit` counts submissions.
+Remembered submissions
 survive runs with a narrower scope or smaller limit under the same hub,
 principal, log epoch and configured read scopes. Ops with a recorded proposal
 id or a stored non-retryable refusal are skipped before applying the limit,
@@ -1319,6 +1582,15 @@ skipped on later runs. Exceptions are 408, 429, expired or conflicting ids,
 and replies marked `retryable: true`. All 5xx replies and unavailable responses
 remain retryable. A stored refusal contains only the event id and refusal code,
 with no hub text.
+
+A `429` with `memory_proposal_principal_quota` or `memory_proposal_scope_quota`
+means a pending proposal quota is full. The run stops proposing, counts every
+unsent submission under `skipped_reasons.proposal_quota` and completes. A full
+quota never counts toward the pause, and later runs resume once reviewers
+decide pending proposals. A `409 memory_proposal_duplicate_pending` reply
+records the existing proposal id it names for that submission and counts
+`duplicate_pending`. It is not a refusal, and later runs skip the submission as
+already proposed.
 
 Other ops continue unless the error is an authorization refusal or the hub is
 unavailable. A run fails for transport, configuration or authorization errors,
@@ -1528,3 +1800,76 @@ use this binding.
 Scope readers without review authority receive only proposal id, state,
 decision and decision mode in proposal event payloads. This reader redaction
 also covers historical payloads without rewriting the append-only log.
+
+## Hub read counts
+
+Memory schema 10 adds per-card daily read counts for the verification cadence
+in [phase-memory-verify.md](phase-memory-verify.md) (#2387). The migration
+keeps the log epoch, proposal ids and event sequence, and records
+`read_counts_since_day` in `memory_meta`. An older hub refuses a version 10
+file, so take the usual backup before upgrading.
+
+The hub counts two things per card per UTC day. `search_hits` is one per card
+a `search` reply with status 200 returns. `card_reads` is one per `card` read
+with status 200 at offset 0. Continuation chunks, `eval: true` searches, the
+hub's own searches, `log`, `status`, proposal reads and refused reads are not
+counted. Reads answered by a local replica never reach the hub.
+
+The tables hold scope, card id, day and counts. No principal, query text, time
+of day, client address or result rank is stored. The counts are not part of
+the event log, replication or any policy digest. In this release no read
+action returns them.
+
+Counting never fails or slows a read, and flushing never delays a write. Each
+hub process adds reads to an in-memory accumulator. The memory writer flushes
+it about once a minute in small transactions, and only while nothing is
+queued. A flush or retention sweep that sees a job arrive rolls back at the
+next row boundary and yields. A full accumulator does not force a flush: new
+keys are dropped and counted. A restart or crash loses counts not yet flushed.
+
+The hub configuration accepts `memory.read_counts`:
+
+| Key | Default | Range | Effect when reached |
+|---|---:|---|---|
+| `accumulator_keys` | 65536 | 1 to 1048576 | New card-day keys are dropped and counted |
+| `principal_card_daily` | 64 | 1 to 1000000 | Reads by one principal of one card are served, not counted |
+| `principal_daily` | 20000 | 1 to 1000000 | Reads by one principal are served, not counted |
+| `flush_rows` | 2048 | 1 to 100000 | The rest wait for the next flush |
+| `flush_ms` | 20 | 1 to 1000 | The flush commits at a row boundary and resumes later |
+| `day_rows` | 1000000 | 1 to 100000000 | New day rows are not inserted. Existing rows still update |
+| `total_rows` | 250000 | 1 to 100000000 | New totals rows are not inserted. Existing rows still update |
+| `sweep_rows` | 2000 | 1 to 100000 | The retention sweep resumes on the next idle tick |
+| `sweep_ms` | 20 | 1 to 1000 | Same |
+| `retention_days` | 35 | 7 to 365 | Day rows older than this are deleted |
+| `principals` | 64 | 1 to 4096 | Principals the daily limiter tracks at once |
+| `principal_pairs` | 2048 | 1 to 1000000 | Further distinct cards from one principal are served, not counted |
+| `limiter_pairs` | 131072 | 1 to 16777216 | Limiter entries across all principals |
+
+Unknown keys and values outside a range fail configuration, and so does a
+`limiter_pairs` below `principals` times `principal_pairs`. Every tracked
+principal can therefore use its whole share, and one principal cannot fill the
+limiter for the others. A principal with fewer than `principal_pairs / 16`
+distinct cards (128 by default) is light. When the principal table is full and
+any tracked principal is not light, a new principal evicts the one with the
+most distinct cards. That principal's reads are served but not counted until
+the day resets, so eviction never refills its budget. When every tracked
+principal is light, the least recently active one leaves without being denied
+and is tracked again on its next read with its daily total intact. Its
+per-card limits start over, so it can have at most `principal_pairs / 16 - 1`
+cards counted up to `principal_card_daily` more times each that day (127 x 64
+by default). Each light principal leaves this way at most once a day, and at
+most `16 x principals` do (1,024 by default). Past that, a new principal's
+reads are served but not counted, and the loss is counted. This bounded
+inflation is accepted over leaving the rest of the fleet uncounted. The
+per-principal limits live only in memory, key each principal by a per-process
+keyed hash, and reset at the UTC day boundary. Per-day counters saturate at
+2^32 - 1.
+
+The idle retention sweep deletes expired day rows oldest first, then removes
+the totals rows of retired cards, within `sweep_rows` and `sweep_ms` per
+transaction. It checks for queued work and the time budget at every totals row,
+commits partial progress at the budget, and resumes from where it stopped. A
+sweep that uses its whole row budget in either stage runs again while the
+writer is idle. `/metrics` reports each budget that bites as
+`brigade_hub_memory_read_count_budget_total{budget="..."}` and lost increments
+as `brigade_hub_memory_read_count_dropped_total`.

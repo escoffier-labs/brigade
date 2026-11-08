@@ -297,7 +297,7 @@ async fn version_eight_upgrade_preserves_proposals_and_epoch() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        9
+        schema::USER_VERSION
     );
 }
 

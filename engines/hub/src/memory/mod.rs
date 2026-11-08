@@ -34,6 +34,9 @@ mod pytables;
 mod ranking;
 #[cfg(test)]
 mod ranking_tests;
+pub mod read_counts;
+#[cfg(test)]
+mod read_counts_tests;
 mod rescan;
 #[cfg(test)]
 mod rescan_tests;
@@ -143,6 +146,8 @@ pub struct Store {
     clock: ids::Clock,
     scanner: Arc<dyn Scanner>,
     last_sweep: std::sync::atomic::AtomicI64,
+    last_flush: std::sync::atomic::AtomicI64,
+    read_counts: Arc<read_counts::ReadCounts>,
     index: Arc<index::Index>,
     retrieval: Option<Arc<embedder::Runtime>>,
     rrf: ranking::Weights,
@@ -234,6 +239,7 @@ impl Store {
         config.dense = Some(dense.clone());
         let eval_weights = config.eval_weights.clone();
         let proposal_limits = config.proposal_limits.clone();
+        let read_counts = config.read_counts.clone();
         let writer = writer::Writer::start(config, db, options.arbiter.clone())
             .map_err(|e| e.to_string())?;
         let proposal_cursors = Arc::new(proposal_cursor::Cursors::new(&options.admin_digest));
@@ -247,6 +253,8 @@ impl Store {
             clock: options.clock,
             scanner: options.scanner,
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
+            last_flush: std::sync::atomic::AtomicI64::new(i64::MIN),
+            read_counts,
             index,
             retrieval: None,
             rrf: ranking::Weights::default(),
@@ -264,6 +272,8 @@ impl Store {
     /// Lexical mode ignores an unused embedder table, including credentials.
     pub fn configure_retrieval(&mut self, config: &Json) -> Result<(), String> {
         *self.proposal_limits.write().unwrap() = hardening::Limits::parse(config)?;
+        self.read_counts
+            .configure(read_counts::Limits::parse(config)?);
         self.rrf = ranking::Weights::parse(config.get("rrf"))?;
         self.pull_embeddings = config["embedder"]["pull"].as_bool().unwrap_or(false);
         // Absent means lexical. Present but not a string is a typo, never lexical.
@@ -743,12 +753,25 @@ impl Store {
     pub fn sweep(&self) -> bool {
         use std::sync::atomic::Ordering;
         let now = self.clock.now_ms();
+        // Read counts flush every minute, or at once past three quarters full.
+        let flushed = self.last_flush.load(Ordering::Relaxed);
+        if (flushed == i64::MIN
+            || now.saturating_sub(flushed) >= read_counts::FLUSH_INTERVAL_MS
+            || self.read_counts.pressed())
+            && self.writer.flush_reads()
+        {
+            self.last_flush.store(now, Ordering::Relaxed);
+        }
         let last = self.last_sweep.load(Ordering::Relaxed);
         if last != i64::MIN && now.saturating_sub(last) < 60_000 {
             return true;
         }
         self.last_sweep.store(now, Ordering::Relaxed);
         self.writer.sweep(now)
+    }
+    /// Read-count budgets and losses, for `/metrics`.
+    pub fn read_count_metrics(&self) -> String {
+        read_counts::render(&self.read_counts)
     }
     /// The memory reader queue, for `/metrics`.
     pub fn reader_probe(&self) -> crate::telemetry::QueueProbe {
@@ -1318,7 +1341,15 @@ impl Store {
         push: bool,
     ) -> Reply {
         let mut reply = self.search_ranked(credential, map, push).await;
-        if reply.status == 200 && map.get("eval").and_then(Json::as_bool) == Some(true) {
+        let eval = map.get("eval").and_then(Json::as_bool) == Some(true);
+        // Evaluation searches and the hub's own searches are not reads.
+        if reply.status == 200 && !eval && !push {
+            let now_ms = self.clock.now_ms();
+            let principal = credential.principal();
+            self.read_counts
+                .search(principal, &reply.body["matches"], now_ms);
+        }
+        if reply.status == 200 && eval {
             if let Ok(authority) = self.hub.submit(|db| ops::Authority::read(&Conn(db))).await {
                 reply.body["policy_revision"] = json!(authority.policy.as_ref().map(|p| p.0));
                 reply.body["policy_digest"] = json!(authority.policy.as_ref().map(|p| &p.1));
@@ -1433,6 +1464,7 @@ impl Store {
     }
 
     async fn read(&self, credential: &Credential, action: &str, map: &Map<String, Json>) -> Reply {
+        let reader = credential;
         let credential = credential.clone();
         let map = map.clone();
         let action = action.to_string();
@@ -1441,6 +1473,8 @@ impl Store {
         let indexed_seq = self.index.current().indexed_seq;
         let retrieval = self.retrieval_status();
         let is_status = action == "status";
+        let first_chunk =
+            action == "card" && map.get("offset").is_none_or(|o| o.is_null() || o == 0);
         let proposal_cursors = self.proposal_cursors.clone();
         match self
             .readers
@@ -1474,6 +1508,20 @@ impl Store {
                             json!([{"id": id, "coverage": retrieval["coverage"]}]);
                     }
                     reply.body["retrieval"] = retrieval;
+                }
+                let card = &reply.body["card"];
+                if let (true, 200, Some(scope), Some(id)) = (
+                    first_chunk,
+                    reply.status,
+                    card["scope"].as_str(),
+                    card["card_id"].as_str(),
+                ) {
+                    self.read_counts.record(
+                        reader.principal(),
+                        &[(scope, id)],
+                        read_counts::Kind::CardRead,
+                        now_ms,
+                    );
                 }
                 reply
             }
