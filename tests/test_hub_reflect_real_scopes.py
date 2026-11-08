@@ -105,7 +105,7 @@ class ProposalReads:
             return 200, {"proposal_id": self.ident, "state": "pending", "diff": None}
         if action == "decide":
             assert body["expected_policy_digest"] == "a" * 64
-            return 200, {"proposal_id": self.ident, "state": "rejected"}
+            return 200, {"proposal_id": self.ident, "state": "applied" if body["decision"] == "accept" else "rejected"}
         return self.hub(url, token, body, timeout)
 
 
@@ -134,16 +134,17 @@ def test_show_preserves_hub_redaction(setup, capsys, monkeypatch):
     assert not any(c["action"] in {"log", "card", "decide"} for c in transport.calls)
 
 
-def test_decide_sends_explicit_policy_digest(setup, capsys, monkeypatch):
+@pytest.mark.parametrize("decision,state", [("accept", "applied"), ("reject", "rejected")])
+def test_decide_sends_explicit_policy_digest(setup, capsys, monkeypatch, decision, state):
     target, hub, _ = setup
     transport = ProposalReads(hub)
     monkeypatch.setattr(hubc, "urllib_transport", transport)
     code, report = proposals(
-        target, capsys, "decide", transport.ident, "--reject", "--expected-policy-digest", "a" * 64
+        target, capsys, "decide", transport.ident, f"--{decision}", "--expected-policy-digest", "a" * 64
     )
-    assert code == 0 and report["state"] == "rejected"
+    assert code == 0 and report["state"] == state
     [request] = [c for c in transport.calls if c["action"] == "decide"]
-    assert request["decision"] == "reject"
+    assert request["decision"] == decision
     assert request["base_epoch"] == hub.epoch
     assert hubc.event_id_ms(request["client_event_id"]) is not None
 
@@ -176,10 +177,12 @@ def test_decide_policy_mismatch_never_retries_or_prints_hub_text(setup, capsys, 
         return transport(url, token, body, timeout)
 
     monkeypatch.setattr(hubc, "urllib_transport", refusal)
-    code, report = proposals(target, capsys, "decide", transport.ident, "--accept")
+    code, report = proposals(
+        target, capsys, "decide", transport.ident, "--accept", "--expected-policy-digest", "a" * 64
+    )
     assert code == 2 and report["error"] == "memory_policy_digest_mismatch"
     assert report["policy_digest"] == "b" * 64
-    assert len(calls) == 1 and "expected_policy_digest" not in calls[0]
+    assert len(calls) == 1 and calls[0]["expected_policy_digest"] == "a" * 64
     assert "private card text" not in json.dumps(report)
 
 
@@ -229,3 +232,95 @@ def test_launchd_scope_is_retained_on_reinstall(setup, capsys):
     assert cli.main(base) == 0
     capsys.readouterr()
     assert registration.read_bytes() == before
+
+
+def test_accept_requires_policy_pin_before_any_hub_call(setup, capsys):
+    target, hub, _ = setup
+    ident = hubc.event_id()
+    code, report = proposals(target, capsys, "decide", ident, "--accept")
+    assert code == 2
+    assert "--expected-policy-digest" in report["error"]
+    assert f"memory proposals show {ident}" in report["error"]
+    assert hub.calls == []
+
+
+def test_reject_without_policy_pin_is_allowed(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    transport = ProposalReads(hub)
+    calls = []
+
+    def reject(url, token, body, timeout):
+        if body["action"] == "decide":
+            calls.append(body)
+            return 200, {"proposal_id": transport.ident, "state": "rejected"}
+        return transport(url, token, body, timeout)
+
+    monkeypatch.setattr(hubc, "urllib_transport", reject)
+    assert proposals(target, capsys, "decide", transport.ident, "--reject")[0] == 0
+    assert len(calls) == 1 and "expected_policy_digest" not in calls[0]
+
+
+@pytest.mark.parametrize("directory", ["replica", "replica.building"])
+def test_oversized_disk_heads_are_refused_before_parsing(setup, capsys, monkeypatch, directory):
+    from brigade import memory_hub_store as store
+
+    target, hub, _ = setup
+    path = store.root(target) / directory / "heads.json"
+    path.parent.mkdir(parents=True)
+    with path.open("wb") as file:
+        file.truncate(66 * 1024 * 1024)
+    original = store.read_json
+
+    def forbid_heads(file):
+        assert file.name != "heads.json", "oversized heads must never be parsed"
+        return original(file)
+
+    monkeypatch.setattr(store, "read_json", forbid_heads)
+    code, report = run(target, capsys, "run")
+    assert code == 1 and report["error"] == "hub_reflect_replica_limit"
+    assert writes(hub) == []
+    assert hub.calls == []
+
+
+def test_scoped_non_dry_run_refuses_shared_replica_without_eviction(setup, capsys):
+    from brigade import memory_hub_store as store, memory_hub_sync as sync
+
+    target, hub, _ = setup
+    (target / ".brigade/memory-care.toml").write_text('[hub]\nmode="read"\nread_scopes=["fleet","repo:example"]\n')
+    add_group(hub, scope="repo:example")
+    settings = hubc.load_settings(target)
+    sync.pull(target, hubc.client_for(settings), settings)
+    path = store.root(target) / "replica" / "heads.json"
+    before = path.read_bytes()
+    hub.calls.clear()
+    code, report = run(target, capsys, "run", "--scope", "fleet")
+    assert code == 1 and report["error"] == "hub_reflect_dedicated_replica_required"
+    assert "docs/memory-operations.md#dedicated-reflect-folder" in report["reason"]
+    assert path.read_bytes() == before
+    assert hub.calls == []
+
+
+def test_care_scope_returns_to_unscoped_only_after_uninstall(setup, capsys):
+    target, _, home = setup
+    base = ["care", "install", "--entry", "memory-reflect", "--target", str(target), "--json"]
+    assert cli.main([*base, "--scope", "fleet"]) == 0
+    capsys.readouterr()
+    assert cli.main(["care", "uninstall", "--entry", "memory-reflect", "--target", str(target), "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(base) == 0
+    capsys.readouterr()
+    [unit] = (home / ".config/systemd/user").glob("*memory-reflect.service")
+    assert "--scope" not in unit.read_text()
+
+
+def test_scoped_dry_run_can_refresh_shared_replica_without_hub_writes(setup, capsys):
+    from brigade import memory_hub_sync as sync
+
+    target, hub, _ = setup
+    (target / ".brigade/memory-care.toml").write_text('[hub]\nmode="read"\nread_scopes=["fleet","repo:example"]\n')
+    add_group(hub, scope="repo:example")
+    settings = hubc.load_settings(target)
+    sync.pull(target, hubc.client_for(settings), settings)
+    code, report = run(target, capsys, "run", "--scope", "fleet", "--dry-run")
+    assert code == 0 and report["candidate_count"] == 1
+    assert writes(hub) == []

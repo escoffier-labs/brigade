@@ -24,6 +24,7 @@ pub mod index;
 pub mod ops;
 mod preflight;
 mod proposal_blocks;
+mod proposal_cursor;
 mod proposal_metadata;
 mod proposal_reads;
 mod proposal_tiers;
@@ -135,6 +136,7 @@ pub struct Store {
     readers: ReaderPool,
     hub: Arc<ReaderPool>,
     admin: String,
+    proposal_cursors: Arc<proposal_cursor::Cursors>,
     clock: ids::Clock,
     scanner: Arc<dyn Scanner>,
     last_sweep: std::sync::atomic::AtomicI64,
@@ -229,12 +231,14 @@ impl Store {
         let eval_weights = config.eval_weights.clone();
         let writer = writer::Writer::start(config, db, options.arbiter.clone())
             .map_err(|e| e.to_string())?;
+        let proposal_cursors = Arc::new(proposal_cursor::Cursors::new(&options.admin_digest));
         Ok(Self {
             writer,
             arbiter: options.arbiter,
             readers,
             hub,
             admin: options.admin_digest,
+            proposal_cursors,
             clock: options.clock,
             scanner: options.scanner,
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
@@ -1430,9 +1434,19 @@ impl Store {
         let indexed_seq = self.index.current().indexed_seq;
         let retrieval = self.retrieval_status();
         let is_status = action == "status";
+        let proposal_cursors = self.proposal_cursors.clone();
         match self
             .readers
             .submit(move |c| {
+                if matches!(action.as_str(), "proposal_list" | "proposal_show") {
+                    return proposal_reads::read(
+                        &Conn(c),
+                        &credential,
+                        &action,
+                        &map,
+                        &proposal_cursors,
+                    );
+                }
                 reads(
                     &Conn(c),
                     &credential,
@@ -1499,8 +1513,6 @@ fn reads<T: ReadTx + ?Sized>(
         "card" => &["action", "card_id", "scope", "revision", "offset"],
         "log" => &["action", "after_seq", "limit"],
         "status" => &["action", "scopes"],
-        "proposal_list" => &["action", "all", "limit", "after"],
-        "proposal_show" => &["action", "proposal_id"],
         _ => &["action"],
     };
     if let Some(k) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
@@ -1518,9 +1530,6 @@ fn reads<T: ReadTx + ?Sized>(
         .first()
         .map(|r| text(&r[0]))
         .unwrap_or_default();
-    if matches!(action, "proposal_list" | "proposal_show") {
-        return proposal_reads::read(tx, credential, action, map, &epoch);
-    }
     let int_field = |key: &str, min: i64, max: i64, default: i64| -> Result<i64, Reply> {
         match map.get(key) {
             None | Some(Json::Null) => Ok(default),

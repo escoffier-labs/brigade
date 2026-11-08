@@ -28,7 +28,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         command.add_argument("--token-file", type=Path, help="Absolute path to a private memory credential file.")
         if name == "list":
             command.add_argument("--all", action="store_true", help="Include states other than pending.")
-            command.add_argument("--after", help="Continue after this proposal id.")
+            command.add_argument("--after", help="Opaque next_after cursor returned by the hub.")
             command.add_argument("--limit", type=int, default=100, help="Page size from 1 to 100.")
         else:
             command.add_argument("proposal_id")
@@ -38,7 +38,7 @@ def register(sub: argparse._SubParsersAction) -> None:
             decision.add_argument("--reject", dest="decision", action="store_const", const="reject")
             command.add_argument(
                 "--expected-policy-digest",
-                help="Current hub policy SHA-256, or none when absent. Required after a policy change.",
+                help="Current hub policy SHA-256, or none when absent. Required for accept and after a policy change.",
             )
 
 
@@ -51,10 +51,16 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("set both --hub-url and --token-file, or neither")
     command = args.hub_proposal_command
     if command == "list":
-        if not 1 <= args.limit <= 100 or (args.after is not None and not _id(args.after)):
-            raise ValueError("list needs --limit from 1 to 100 and a valid --after proposal id")
+        if not 1 <= args.limit <= 100 or (args.after is not None and not re.fullmatch(r"p1\.[0-9a-f]{64}", args.after)):
+            raise ValueError("list needs --limit from 1 to 100 and an opaque --after cursor from list")
     elif not _id(args.proposal_id):
         raise ValueError("proposal_id must be a time-ordered id")
+    if command == "decide" and args.decision == "accept" and args.expected_policy_digest is None:
+        raise ValueError(
+            "--accept requires --expected-policy-digest. "
+            f"Get policy_digest with brigade memory proposals show {args.proposal_id} --target <reflect-folder>, "
+            "then supply that digest, or none if show reports null"
+        )
     if command == "decide" and args.expected_policy_digest is not None:
         if args.expected_policy_digest != "none" and not re.fullmatch(r"[0-9a-f]{64}", args.expected_policy_digest):
             raise ValueError("--expected-policy-digest must be a lowercase SHA-256 digest or none")

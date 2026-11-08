@@ -592,10 +592,16 @@ brigade memory proposals decide <proposal-id> --accept --expected-policy-digest 
 ```
 
 `list` defaults to pending proposals. It returns at most 100 summaries without
-diffs. Use `--limit` and the returned `next_after` as `--after` to continue.
+diffs. Use `--limit` and the returned opaque `next_after` as `--after` to continue.
+The cursor is an HMAC-authenticated handle. Scan positions stay in a bounded
+hub-local cache of 4,096 handles and are never encoded in the response.
+Handles bind the principal, hub log epoch and `--all` selection. Altered,
+expired or mismatched handles are refused. Restart a list without `--after`
+after a hub restart or cache eviction. Hidden rows still advance the scan
+without exposing their proposal ids or creation timestamps.
 A page can be empty when its proposals are outside the caller's grants.
 Continue while `next_after` is present. `--all` includes held, stale and decided
-proposals. `show` asks the hub for the stored diff. The hub returns a null diff
+proposals. Held proposals appear only with `--all`. `show` asks the hub for the stored diff. The hub returns a null diff
 unless the caller has `review` on every target scope. Missing `read` on any
 target refuses the show and hides the proposal from lists. The client never
 reconstructs a diff from card reads or replica data.
@@ -609,7 +615,11 @@ secret value. Fleet credentials and workspace credential destinations are
 refused. Use a separate reviewer credential with `read` and `review` grants.
 
 `decide` requires exactly one of `--accept` or `--reject` and reads the current
-hub epoch before sending a fresh event id. A policy-stale decision requires
+hub epoch before sending a fresh event id. `--accept` always requires
+`--expected-policy-digest`. Read `policy_digest` with `memory proposals show`
+and pass that digest, or `none` when it is null. An accept without a pin
+fails before contacting the hub and prints the show command. `--reject`
+remains available without a pin. A policy-stale decision requires
 `--expected-policy-digest` naming the current policy. Use `--expected-policy-digest none` to pin the absence
 of a policy after its removal. A digest mismatch reports
 `memory_policy_digest_mismatch` and the hub's current digest. Review that policy
@@ -1206,14 +1216,21 @@ candidate memory. They do not load an unbounded hub corpus.
 `hub_reflect_scope_limit` names the per-scope card or text limit.
 `hub_reflect_replica_limit` names the replica byte cap. Both fail closed before
 submitting proposals. Narrow the configured read scopes for a dedicated run.
-The CLI reports local failure codes and fixed reasons without card text.
+Before loading an existing replica or an interrupted rebuild, reflection
+checks the on-disk `heads.json` size. A file above the 64 MiB ceiling plus
+1 MiB of serialization slack is refused with `hub_reflect_replica_limit`
+before JSON parsing. The CLI reports local failure codes and fixed reasons
+without card text.
 
 `run --scope <scope>` selects one configured read scope before fetching card
 heads or refreshing legacy scan metadata. Status and log reads still use the
 hub's existing protocol. Other scopes' log metadata can appear in a log page,
 but the run fetches no card text and opens no proposals for those scopes.
-Narrowing a run evicts other scopes from its replica, so use a dedicated
-reflect folder instead of the sync principal's replica.
+A non-dry-run `--scope` refuses a replica whose recorded `read_scopes` include
+other scopes, with `hub_reflect_dedicated_replica_required`. It preserves the
+existing replica and points to the dedicated-folder setup below. Use that
+folder instead of the sync principal's replica. A dry run may still refresh
+the local replica, so it also belongs in the dedicated folder.
 
 `brigade memory reflect run --dry-run --target <workspace>` performs only hub
 reads. It can refresh the local replica, but sends no `propose`, `decide`,
@@ -1315,7 +1332,10 @@ brigade memory care install --target ~/memory-reflect --entry memory-reflect --s
 ```
 
 The single `--scope` matches `memory reflect run --scope`. One job uses one
-scope, which keeps its grant requirement explicit. A workspace file still
+scope, which keeps its grant requirement explicit. Reinstalling a scoped
+entry retains its scope when `--scope` is omitted. To return to an unscoped
+entry, uninstall it with `brigade memory care uninstall --entry memory-reflect
+--target <reflect-folder>`, then install again without `--scope`. A workspace file still
 chooses only mode, scopes and replica size. It cannot supply a hub URL or token
 path. This folder owns its `.brigade/memory/hub/` replica and reflect schedule
 state. Do not point the sync principal at it or reuse the sync workspace for

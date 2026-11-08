@@ -1,5 +1,5 @@
 //! Bounded operator reads. Diffs use the same review gate as proposal replays.
-use super::{Reply, auth, ids, proposals};
+use super::{Reply, auth, ids, proposal_cursor::Cursors, proposals};
 use crate::writer::ReadTx;
 use rusqlite::types::Value;
 use serde_json::{Map, Value as Json, json};
@@ -9,8 +9,19 @@ pub(super) fn read<T: ReadTx + ?Sized>(
     who: &auth::Credential,
     action: &str,
     map: &Map<String, Json>,
-    epoch: &str,
+    cursors: &Cursors,
 ) -> rusqlite::Result<Reply> {
+    let epoch = tx
+        .query("SELECT value FROM memory_meta WHERE key='log_epoch'", &[])?
+        .first()
+        .and_then(|r| {
+            if let Value::Text(value) = &r[0] {
+                Some(value.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
     let allowed: &[&str] = if action == "proposal_show" {
         &["action", "proposal_id"]
     } else {
@@ -51,9 +62,16 @@ pub(super) fn read<T: ReadTx + ?Sized>(
     };
     let after = match map.get("after") {
         None => String::new(),
-        Some(value) => match value.as_str().and_then(ids::parse_event_id) {
-            Some((id, _)) => id,
-            None => return Ok(super::invalid("after must be a time-ordered id")),
+        Some(value) => match value
+            .as_str()
+            .and_then(|handle| cursors.resolve(handle, who, &epoch, all))
+        {
+            Some(position) => position,
+            None => {
+                return Ok(super::invalid(
+                    "invalid or expired proposal cursor. Restart the list without after",
+                ));
+            }
         },
     };
     // Scan at most one page, including hidden proposals. The cursor always advances.
@@ -78,8 +96,21 @@ pub(super) fn read<T: ReadTx + ?Sized>(
             summaries.push(json!({"proposal_id":id,"state":body["state"],"tier":body["tier"],"policy_digest":body["policy_digest"]}));
         }
     }
+    let next = if rows.len() > limit {
+        let Some(handle) = last.and_then(|position| cursors.issue(position, who, &epoch, all))
+        else {
+            return Ok(super::error(
+                503,
+                "memory_cursor_unavailable",
+                "proposal pagination unavailable",
+            ));
+        };
+        Some(handle)
+    } else {
+        None
+    };
     Ok(Reply::new(
         200,
-        json!({"proposals":summaries,"next_after":if rows.len()>limit {last} else {None},"log_epoch":epoch}),
+        json!({"proposals":summaries,"next_after":next}),
     ))
 }

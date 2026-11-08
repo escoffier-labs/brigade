@@ -24,6 +24,7 @@ MAX_SCOPE_CARDS = 50_000
 MAX_SCOPE_BYTES = 64 * 1024 * 1024
 # Also bound the replica before loading candidate heads, independently of workspace settings.
 MAX_REPLICA_BYTES = 64 * 1024 * 1024
+REPLICA_FILE_SLACK = 1024 * 1024
 
 
 STATE_ERROR = "invalid reflect schedule state. Inspect and remove .brigade/memory/reflect/schedule.json to recover"
@@ -209,6 +210,31 @@ def _ops(heads: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, i
     return ops, skipped
 
 
+def _check_replica_files(target: Path, *, scope: str | None, dry_run: bool) -> None:
+    """Refuse oversized on-disk snapshots before the replica loader can parse them."""
+    for directory in (store.REPLICA, store.BUILDING):
+        root = store.root(target) / directory
+        try:
+            size = (root / "heads.json").stat(follow_symlinks=False).st_size
+        except FileNotFoundError:
+            size = 0
+        if size > MAX_REPLICA_BYTES + REPLICA_FILE_SLACK:
+            raise ReflectError(
+                "hub_reflect_replica_limit",
+                "hub reflect on-disk replica exceeds the 64 MiB ceiling plus 1 MiB serialization slack. Snapshot was not parsed",
+            )
+        if scope is not None and not dry_run:
+            meta = store.read_json(root / "meta.json")
+            scopes = meta.get("read_scopes", []) if isinstance(meta, dict) else []
+            if not isinstance(scopes, list) or not all(isinstance(name, str) for name in scopes):
+                raise ReflectError("hub_reflect_replica_invalid", "hub reflect replica has invalid read scope metadata")
+            if any(name != scope for name in scopes):
+                raise ReflectError(
+                    "hub_reflect_dedicated_replica_required",
+                    "scoped reflection requires a dedicated replica. See docs/memory-operations.md#dedicated-reflect-folder. Existing scopes were left unchanged",
+                )
+
+
 def _reflect(
     target: Path,
     settings: hubc.HubSettings,
@@ -223,6 +249,8 @@ def _reflect(
         raise ReflectError("hub_reflect_limit_invalid", "--limit must be from 1 to 100")
     if scope is not None and scope not in settings.read_scopes:
         raise ReflectError("hub_reflect_scope_invalid", "--scope must be a configured hub read scope")
+    with store.locked(target):
+        _check_replica_files(target, scope=scope, dry_run=dry_run)
     configured_scopes = settings.read_scopes
     settings = replace(
         settings,
@@ -230,10 +258,9 @@ def _reflect(
         replica_max_bytes=min(settings.replica_max_bytes, MAX_REPLICA_BYTES),
     )
     report = sync.pull(target, client, settings)
-    # A scoped pull intentionally evicts other scopes from this dedicated replica.
-    # All other warnings, including missing selected grants and capped heads, fail closed.
     warnings = list(report["warnings"])
-    if scope and report.get("dropped"):
+    # Dry runs retain the existing permission to refresh a replica's scope selection.
+    if dry_run and scope and report.get("dropped"):
         dropped = f"dropped {report['dropped']} replicated card(s) in scopes this credential can no longer read"
         warnings = [warning for warning in warnings if warning != dropped]
     if report.get("bytes", 0) > settings.replica_max_bytes or any(
@@ -248,6 +275,7 @@ def _reflect(
 
     def read_heads() -> list[dict[str, Any]]:
         with store.locked(target):
+            _check_replica_files(target, scope=scope, dry_run=dry_run)
             replica = store.replica(target)
             if (
                 not replica.belongs_to(client.identity, report["principal"])

@@ -451,3 +451,73 @@ async fn operator_proposal_reads_validate_fields_and_use_read_admission() {
     }
     assert_eq!(h.events(), before);
 }
+
+#[tokio::test]
+async fn operator_hidden_pages_use_opaque_cursors_and_refuse_tampering() {
+    let h = Hub::with(clean(), None);
+    let a = h
+        .put(ADMIN_TOKEN, "collection:private", "a", None, OLD)
+        .await;
+    let mut hidden = Vec::new();
+    for _ in 0..3 {
+        let opened = submit(
+            &h,
+            ADMIN_TOKEN,
+            vec![op("collection:private", "a", rev(&a))],
+        )
+        .await;
+        hidden.push(opened.body["proposal_id"].as_str().unwrap().to_string());
+    }
+    // This principal has no grants, so every proposal is hidden.
+    let mut after = Json::Null;
+    for page in 0..3 {
+        let mut request = json!({"action":"proposal_list","limit":1});
+        if page != 0 {
+            request["after"] = after.clone();
+        }
+        let reply = h.call(AGENT_TOKEN, request).await;
+        assert_eq!(reply.status, 200, "{reply:?}");
+        assert_eq!(reply.body["proposals"], json!([]));
+        let encoded = reply.body.to_string();
+        for id in &hidden {
+            assert!(!encoded.contains(id));
+            assert!(!encoded.contains(&id[..10]));
+        }
+        if page < 2 {
+            let cursor = reply.body["next_after"].as_str().unwrap();
+            assert!(ids::parse_event_id(cursor).is_none());
+            assert_ne!(after, reply.body["next_after"]);
+            let mut tampered = cursor.as_bytes().to_vec();
+            tampered[0] = if tampered[0] == b'a' { b'b' } else { b'a' };
+            let refused = h.call(AGENT_TOKEN, json!({"action":"proposal_list","limit":1,"after":String::from_utf8(tampered).unwrap()})).await;
+            assert_eq!(refused.status, 400);
+        } else {
+            assert!(reply.body["next_after"].is_null());
+        }
+        after = reply.body["next_after"].clone();
+    }
+}
+
+#[tokio::test]
+async fn operator_held_proposals_appear_only_with_all() {
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    let id = &opened.body["proposal_id"];
+    // The state column is authoritative for listing, as it is for proposal loads.
+    Connection::open(h.memory())
+        .unwrap()
+        .execute(
+            "UPDATE memory_proposals SET state='held' WHERE proposal_id=?1",
+            [id.as_str().unwrap()],
+        )
+        .unwrap();
+    let pending = h.call(ADMIN_TOKEN, json!({"action":"proposal_list"})).await;
+    assert_eq!(pending.status, 200);
+    assert_eq!(pending.body["proposals"], json!([]));
+    let all = h
+        .call(ADMIN_TOKEN, json!({"action":"proposal_list","all":true}))
+        .await;
+    assert_eq!(all.body["proposals"][0]["proposal_id"], *id);
+    assert_eq!(all.body["proposals"][0]["state"], "held");
+}
