@@ -709,6 +709,29 @@ def test_oversize_late_append_is_kept_under_a_skipped_name(tmp_path: Path, monke
     assert _claims(inbox) == []
 
 
+def test_oversize_recovery_file_keeps_worktree_on_later_forced_removal(tmp_path: Path, monkeypatch, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    source = _handoff(inbox, "2026-11-08-0900-slow.md", "first part")
+    monkeypatch.setattr(handoff_worktrees, "MAX_HANDOFF_BYTES", 200)
+    writer = os.open(source, os.O_WRONLY | os.O_APPEND)
+    _append_after_publish(monkeypatch, writer, b"x" * 1000 + b"\n")
+    try:
+        runguard.remove_worktree(main, linked, force=True)
+    finally:
+        os.close(writer)
+    (kept,) = list(inbox.glob(".late-oversize-*.md.recovered"))
+    first = capsys.readouterr().err
+    assert "late-write-kept" in first and kept.name in first
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert linked.exists()
+    assert kept.is_file()
+    second = capsys.readouterr().err
+    assert "recovery-file-pending" in second and kept.name in second
+
+
 def _grow_on_every_read(monkeypatch, writer: int, chunk: int, state: dict) -> None:
     """Simulate a writer faster than any reader: each module read of the
     writer's inode appends `chunk` bytes once armed (capped at 200 appends)."""

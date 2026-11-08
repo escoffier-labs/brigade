@@ -69,6 +69,9 @@ _TEMP_SUFFIX = ".tmp"
 # ingester or writer lists it, and a writer that returns to the original
 # path creates a new file instead of changing the claimed one.
 _CLAIM_PREFIX = ".brigade-claim-"
+# Oversized late bytes kept under a name ingest skips. Like a claim, it is an
+# unresolved handoff that must keep its worktree until an operator acts.
+_OVERSIZE_PREFIX = ".late-oversize-"
 _CLAIM_SUFFIX = ".md.claimed"
 _RENAME_NOREPLACE = 1
 # A handoff modified more recently than this is still being written. It is
@@ -648,7 +651,7 @@ def _keep_claim(src_fd: int, held: int, claim: str, name: str, forbidden: frozen
     except OSError:
         oversize = True
     if oversize:
-        names: tuple[str, ...] = (f".late-oversize-{uuid.uuid4().hex}.md.recovered",)
+        names: tuple[str, ...] = (f"{_OVERSIZE_PREFIX}{uuid.uuid4().hex}.md.recovered",)
     else:
         names = (name, f"{stem}-late-{uuid.uuid4().hex[:8]}.md")
     for target in names:
@@ -770,9 +773,19 @@ def _rescue_inbox(worktree: Path, root_fd: int, rel: str, dest: _Dest) -> list[R
         names = dirfd.child_names(src_fd, MAX_INBOX_ENTRIES + 1)
         if len(names) > MAX_INBOX_ENTRIES:
             return [Rescue(label, "failed", reason="inbox-too-large")]
-        # A claim left by an interrupted rescue still holds a handoff.
-        if any(n.startswith(_CLAIM_PREFIX) for n in names):
-            return [Rescue(label, "failed", reason="stale-claim")]
+        # A claim left by an interrupted rescue, or an oversize recovery file,
+        # still holds handoff bytes. Name each so an operator can resolve it.
+        held = [
+            Rescue(
+                f"{label}/{n}",
+                "failed",
+                reason="stale-claim" if n.startswith(_CLAIM_PREFIX) else "recovery-file-pending",
+            )
+            for n in sorted(names)
+            if n.startswith((_CLAIM_PREFIX, _OVERSIZE_PREFIX))
+        ]
+        if held:
+            return held
         candidates = sorted(n for n in names if _is_candidate(n))
         if not candidates:
             return []
@@ -790,7 +803,8 @@ def _rescue_inbox(worktree: Path, root_fd: int, rel: str, dest: _Dest) -> list[R
         left = [
             n
             for n in dirfd.child_names(src_fd, MAX_INBOX_ENTRIES + 1)
-            if n.startswith(_CLAIM_PREFIX) or (_is_candidate(n) and n.casefold() not in tracked_names)
+            if n.startswith((_CLAIM_PREFIX, _OVERSIZE_PREFIX))
+            or (_is_candidate(n) and n.casefold() not in tracked_names)
         ]
         if left and not any(r.state == "failed" for r in results):
             results.append(Rescue(label, "failed", reason="pending-after-rescue"))

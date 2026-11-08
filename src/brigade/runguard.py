@@ -1553,7 +1553,8 @@ def _deliver_worktree_handoffs(worktree_path: Path, root: Path) -> bool:
     failed = [r for r in results if r.state == "failed"]
     for rescue in failed:
         print(
-            f"brigade: handoff not delivered from {handoff_worktrees.safe_text(rescue.source)} [{rescue.reason}]",
+            f"brigade: handoff not delivered from {handoff_worktrees.safe_text(rescue.source)} [{rescue.reason}]"
+            + (f" kept as {handoff_worktrees.safe_text(rescue.dest)}" if rescue.dest else ""),
             file=sys.stderr,
         )
     if failed:
