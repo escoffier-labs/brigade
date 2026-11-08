@@ -104,8 +104,13 @@ def test_saved_count_and_digest_are_verified_before_decoding(tmp_path, monkeypat
 
     monkeypatch.setattr(limits, "decode_heads", forbid)
     with limits.bounded(max_cards=3, max_bytes=4096):
-        with pytest.raises(OSError):
-            store.Replica(root)
+        if forgery == "missing":
+            # Nothing to decode: the replica is unusable, so a pull rebuilds it.
+            replica = store.Replica(root)
+            assert replica.snapshot_missing and not replica.exists and replica.heads == {}
+        else:
+            with pytest.raises(OSError):
+                store.Replica(root)
     assert decoded == []
 
 
@@ -264,3 +269,47 @@ def test_legacy_snapshot_loads_and_moves_to_a_named_generation(tmp_path):
 def test_snapshot_name_from_metadata_is_never_a_path(tmp_path):
     with pytest.raises(store.StoreError, match="invalid replica snapshot digest"):
         store.heads_path(tmp_path, {"heads_sha256": "../" + "a" * 61})
+
+
+def _lose_snapshot(target):
+    settings = reflect.hubc.load_settings(target)
+    sync.pull(target, reflect.hubc.client_for(settings), settings)
+    live = store.replica(target)
+    store.heads_path(live.directory, live.meta).unlink()
+    assert store.replica_snapshot_missing(target)
+
+
+def test_reflect_rebuilds_a_replica_whose_snapshot_is_missing(setup, capsys):
+    target, hub, _ = setup
+    _lose_snapshot(target)
+    # The first run rebuilds under the reflect bounds; its rebuild warning still
+    # stops this run from proposing, as for any other rebuild.
+    code, report = run(target, capsys, "run")
+    assert code == 1 and report["error"] == "hub_reflect_replica_incomplete"
+    assert writes(hub) == []
+    live = _bounded_load(target)
+    assert not live.snapshot_missing and len(live.heads) == 2
+    _assert_consistent(live)
+    # The next scheduled run proceeds without any unbounded pull in between.
+    code, report = run(target, capsys, "run")
+    assert code == 0 and len(report["proposals"]) == 1
+    assert report["schedule"]["consecutive_failures"] == 0
+
+
+def test_reflect_rebuild_of_a_missing_snapshot_keeps_the_card_bound(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    _lose_snapshot(target)
+    monkeypatch.setattr(reflect, "MAX_SCOPE_CARDS", 1)
+    code, report = run(target, capsys, "run")
+    assert code == 1 and report["error"] == "hub_reflect_scope_limit"
+    assert writes(hub) == []
+    assert not store.replica(target).exists
+
+
+def test_reflect_rebuild_of_a_missing_snapshot_keeps_the_byte_bound(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    _lose_snapshot(target)
+    monkeypatch.setattr(reflect, "MAX_REPLICA_BYTES", 64)
+    code, report = run(target, capsys, "run")
+    assert code == 1 and report["error"] == "hub_reflect_replica_limit"
+    assert writes(hub) == []

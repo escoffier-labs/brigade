@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 
 import pytest
@@ -43,13 +44,38 @@ def test_unbounded_load_marks_the_replica_unusable(lost):
     assert store.replica_snapshot_missing(lost)
 
 
-def test_bounded_load_still_fails_closed_before_decoding(lost, monkeypatch):
+def test_bounded_load_marks_the_replica_unusable_without_decoding(lost, monkeypatch):
     def forbid(raw):
         raise AssertionError("a missing snapshot reached decoding")
 
     monkeypatch.setattr(limits, "decode_heads", forbid)
-    with limits.bounded(**BOUNDS), pytest.raises(store.StoreError, match="replica snapshot missing"):
-        store.replica(lost)
+    with limits.bounded(**BOUNDS):
+        replica = store.replica(lost)
+    assert replica.snapshot_missing
+    assert not replica.exists and replica.heads == {}
+    assert replica.watermark("anything") is None
+
+
+def test_bounded_pull_rebuilds_an_unusable_replica_from_the_hub(hub, lost):  # noqa: F811
+    _put(hub, "fleet", "y", "badger text")
+    with limits.bounded(**BOUNDS):
+        report = sync.pull(lost, client(hub), settings(lost))
+        live = store.replica(lost)
+    assert report["rebuilt"] is True
+    assert any("heads snapshot was missing" in warning for warning in report["warnings"])
+    assert not live.snapshot_missing
+    assert set(live.heads) == {store.Replica.key("fleet", "x"), store.Replica.key("fleet", "y")}
+    assert live.meta["seq"] == report["seq"] and live.meta["cards"] == 2
+    raw = store.heads_path(live.directory, live.meta).read_bytes()
+    assert live.meta["heads_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert not store.replica_snapshot_missing(lost)
+
+
+def test_bounded_rebuild_still_enforces_the_card_bound(hub, lost):  # noqa: F811
+    _put(hub, "fleet", "y", "badger text")
+    with limits.bounded(max_cards=1, max_bytes=BOUNDS["max_bytes"]), pytest.raises(limits.ReplicaLimitError):
+        sync.pull(lost, client(hub), settings(lost))
+    assert not store.replica(lost).exists
 
 
 def test_search_does_not_answer_from_an_unusable_replica_as_if_current(hub, lost):  # noqa: F811
@@ -162,18 +188,33 @@ def test_save_skips_the_directory_sync_where_unsupported(tmp_path, monkeypatch):
     assert store.Replica(replica.directory).heads == replica.heads
 
 
-def test_directory_open_failure_is_skipped(tmp_path, monkeypatch):
+def _refuse_directory_open(monkeypatch, code):
     real_open = os.open
 
     def refuse_directories(path, flags, *args, **kwargs):
         if os.path.isdir(path):
-            raise PermissionError(errno.EACCES, "cannot open a directory")
+            raise OSError(code, "cannot open a directory")
         return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(store.os, "open", refuse_directories)
+
+
+@pytest.mark.parametrize("code", [errno.EINVAL, errno.EOPNOTSUPP])
+def test_directory_open_unsupported_is_skipped(tmp_path, monkeypatch, code):
+    monkeypatch.setattr(store, "_DIR_FSYNC", True)
+    _refuse_directory_open(monkeypatch, code)
     replica = _replica_with_card(tmp_path, "one")
     replica.save()
     assert store.Replica(replica.directory).heads == replica.heads
+
+
+@pytest.mark.parametrize("code", [errno.EIO, errno.EMFILE, errno.ENFILE, errno.EACCES])
+def test_directory_open_failure_propagates(tmp_path, monkeypatch, code):
+    monkeypatch.setattr(store, "_DIR_FSYNC", True)
+    _refuse_directory_open(monkeypatch, code)
+    with pytest.raises(OSError) as raised:
+        _replica_with_card(tmp_path, "one").save()
+    assert raised.value.errno == code
 
 
 def test_directory_sync_refused_by_the_filesystem_is_skipped(tmp_path, monkeypatch):

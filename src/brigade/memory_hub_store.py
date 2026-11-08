@@ -166,19 +166,26 @@ def write_private(path: Path, data: str) -> None:
         raise
 
 
+# Errors a platform or filesystem uses to say a directory cannot be opened or
+# synced at all. Anything else (EIO, EACCES, EMFILE, ...) is a real failure.
+_DIR_SYNC_UNSUPPORTED = frozenset({errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EISDIR, errno.EBADF})
+
+
 def fsync_dir(directory: Path) -> None:
-    """Make the renames in `directory` durable. A no-op where directories cannot be opened for sync (Windows)."""
+    """Make the renames in `directory` durable. A no-op where directories cannot be synced (Windows)."""
     if not _DIR_FSYNC:
         return
     try:
         fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _CLOEXEC)
-    except OSError:
+    except OSError as exc:
+        if exc.errno not in _DIR_SYNC_UNSUPPORTED:
+            raise
         return
     try:
         os.fsync(fd)
     except OSError as exc:
         # Some filesystems refuse a directory sync; the rename itself already happened.
-        if exc.errno not in (errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EBADF):
+        if exc.errno not in _DIR_SYNC_UNSUPPORTED:
             raise
     finally:
         os.close(fd)
@@ -260,8 +267,9 @@ class Replica:
             if heads is not None:
                 break
         if heads is None and self.meta.get("heads_sha256") is not None:
-            if limits.active():
-                raise StoreError("replica snapshot missing")
+            # Bounded loads too: nothing was decoded, and a pull under the same
+            # bounds discards this replica and rebuilds it. A snapshot that is
+            # present but oversized, mismatched or not a regular file still raises.
             self.snapshot_missing = True
             self.meta = {}
         self.heads: dict[str, dict[str, Any]] = heads if isinstance(heads, dict) else {}

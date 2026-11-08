@@ -1245,16 +1245,24 @@ interrupted save leaves the previous snapshot and metadata in place and the
 next pull continues from them. The save syncs the replica directory after each
 rename (not on Windows, which cannot sync a directory), so after a power loss
 `meta.json` names a snapshot that survived. If the snapshot `meta.json` names
-is missing anyway, reflection fails closed, and every other read treats the
-replica as absent: search and `card` fall back as when no replica exists,
-`status` reports `replica_unusable`, and the next pull discards the replica and
-rebuilds it from the hub.
+is missing anyway, every read treats the replica as absent: search and `card`
+fall back as when no replica exists, `status` reports `replica_unusable`, and
+the next pull discards the replica and rebuilds it from the hub. Reflection's
+own pull does the same rebuild under the 50,000-card and 64 MiB bounds, so a
+scheduled run recovers without an unbounded `memory hub pull`. A snapshot that
+is present but oversized, does not match its recorded digest or card count, or
+is not a regular file still fails reflection before it is parsed.
 
 Downgrading Brigade past the release that introduced digest-named snapshots
-requires deleting the replica directory, `.brigade/memory/hub/replica`, before
-running the older build. That build reads `meta.json`, finds no `heads.json`,
-and would otherwise serve an empty replica at a current watermark. With the
-directory gone, its next pull rebuilds the replica from the hub.
+requires deleting both `.brigade/memory/hub/replica` and
+`.brigade/memory/hub/replica.building` before running the older build. That
+build reads `meta.json`, finds no `heads.json`, and would otherwise serve an
+empty replica at a current watermark. The building directory matters too: an
+interrupted rebuild left there holds a watermark and a digest-named snapshot,
+so the older build would resume it from that watermark with no `heads.json`
+and later publish it as a replica missing every card fetched before the
+interruption. With both directories gone, its next pull rebuilds the replica
+from the hub.
 
 Reflect also limits the whole selected replica to 50,000
 live cards, including unscoped runs. Sync replays the log as metadata first,
