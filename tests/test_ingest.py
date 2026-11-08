@@ -850,7 +850,7 @@ def test_identity_migration_handoff_is_routed_to_review(tmp_target, action, fiel
     review = reviews[0].read_text()
     assert original in review
     assert field in review
-    assert "identity migration" in review
+    assert "reason: identity-migration-fields" in review
     assert (inbox / "processed/migration-handoff.md").exists()
 
 
@@ -1161,7 +1161,7 @@ def test_create_card_exact_fingerprint_reinforces_existing(tmp_target: Path, cap
     )
     assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
     out = capsys.readouterr().out
-    assert "reinforce → memory/cards/widget-cache.md" in out
+    assert "[card-reinforced]  match=memory/cards/widget-cache.md" in out
     assert "Reinforced 1" in out
     assert not (tmp_target / "memory" / "cards" / "widget-cache-again.md").exists()
 
@@ -1217,7 +1217,7 @@ def test_create_card_near_match_proposes_reinforce_without_writing(tmp_target: P
     capsys.readouterr()
     assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
     out = capsys.readouterr().out
-    assert "near-match reinforce proposal: memory/cards/schema-flush.md" in out
+    assert "[near-match-proposal]  match=memory/cards/schema-flush.md" in out
     assert "similarity=" in out
     assert existing.read_text() == before
     assert not (tmp_target / "memory" / "cards" / "schema-flush-v2.md").exists()
@@ -1318,9 +1318,9 @@ def test_create_card_opposite_polarity_near_match_flags_contradiction(tmp_target
     )
     assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
     out = capsys.readouterr().out
-    assert "contradiction candidate vs memory/cards/foo-flag.md" in out
-    assert "opposite polarity" in out
-    assert "reinforce →" not in out
+    assert "[contradiction-candidate]  match=memory/cards/foo-flag.md" in out
+    assert "polarity=opposite" in out
+    assert "[card-reinforced]" not in out
     if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
         rows = [
             json.loads(line)
@@ -1389,13 +1389,13 @@ def test_create_card_reinforce_skips_symlinked_cards_and_preserves_outside_file(
     )
     assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
     out = capsys.readouterr().out
-    assert "reinforce → memory/cards/widget-cache.md" not in out
+    assert "[card-reinforced]" not in out
     assert "Reinforced 0" in out
     assert victim.read_bytes() == victim_bytes
 
     new_card = tmp_target / "memory" / "cards" / "widget-cache-again.md"
     assert new_card.is_file()
-    assert "promote → memory/cards/widget-cache-again.md" in out
+    assert "[card-promoted]" in out
     assert body in new_card.read_text()
 
 
@@ -1475,7 +1475,7 @@ def test_busy_proposal_lock_leaves_handoff_for_retry(tmp_target, monkeypatch):
     action = ingest_mod._execute(
         outcome, path, tmp_target, sections, tmp_target / "memory/review-inbox", inbox / "processed", False
     )
-    assert action.kind == "skipped" and "retry" in action.summary
+    assert action.kind == "skipped" and "[card-publication-busy]" in action.summary
     assert path.read_bytes() == original
     assert not (tmp_target / "memory/cards/busy.md").exists()
     assert not (inbox / "processed/busy-publication.md").exists()
@@ -1616,7 +1616,7 @@ def test_ingest_leaves_git_tracked_handoffs_in_place(tmp_target: Path):
     assert (inbox / "processed" / untracked.name).is_file()
     assert stats.processed == 1
     assert stats.skipped == 1
-    assert any("tracked by git" in line and tracked.name in line for line in stats.actions)
+    assert any("tracked-or-unverifiable" in line and tracked.name in line for line in stats.actions)
     status = _git(tmp_target, "status", "--porcelain", "--", str(tracked.relative_to(tmp_target)))
     assert status.stdout == ""
 
@@ -1855,7 +1855,7 @@ def test_ingest_rechecks_tracking_before_document_append(tmp_target: Path, monke
     assert not list((tmp_target / "memory" / "handoff-inbox").glob("*.md"))
     assert stats.skipped == 1
     assert stats.routed == stats.inboxed == 0
-    assert any(handoff.name in action and "tracking unverifiable" in action for action in stats.actions)
+    assert any(handoff.name in action and "tracked-or-unverifiable" in action for action in stats.actions)
 
     if tracking_change == "tracked":
         _git(tmp_target, "rm", "--cached", "-f", "--", str(handoff.relative_to(tmp_target)))

@@ -27,6 +27,7 @@ needs_posix_perms = pytest.mark.skipif(
     os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
     reason="needs POSIX permissions enforced for a non-root user",
 )
+needs_symlinks = pytest.mark.skipif(os.name == "nt", reason="creates POSIX symlinks")
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -61,6 +62,28 @@ def _repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
     return main, linked
 
 
+def _plain_repo(path: Path) -> Path:
+    path.mkdir(parents=True)
+    _git(path, "init", "-q")
+    _git(path, "commit", "-q", "--allow-empty", "-m", "init")
+    return path
+
+
+def _swap_source_on_first_fsync(monkeypatch, source: Path, text: str) -> None:
+    """Replace `source` with a new file the first time a copy is fsynced."""
+    real = os.fsync
+    state = {"done": False}
+
+    def fsync(fd):
+        if not state["done"]:
+            state["done"] = True
+            source.unlink()
+            source.write_text(text)
+        return real(fd)
+
+    monkeypatch.setattr(handoff_worktrees.os, "fsync", fsync)
+
+
 # A. One bad item is recorded and skipped; the rest of the batch still runs.
 
 
@@ -81,6 +104,7 @@ def test_unreadable_handoff_is_recorded_and_the_rest_ingest(tmp_target: Path, ca
     assert (inbox / "processed" / good.name).is_file()
     assert bad.is_file()
     assert "Failed 1" in out
+    assert "[io-error]" in out
     assert "PARTIAL" in out
     assert "Status partial" in out
 
@@ -108,7 +132,7 @@ def test_read_only_inbox_fails_its_items_without_aborting_other_inboxes(tmp_path
     assert stats.status == "partial"
     assert locked.is_file()
     assert not good.exists()
-    assert any(line.startswith("fail") and str(locked) in line for line in stats.actions)
+    assert any(line.startswith("fail") and locked.name in line for line in stats.actions)
 
 
 def test_clean_run_reports_ok(tmp_target: Path, capsys):
@@ -118,6 +142,83 @@ def test_clean_run_reports_ok(tmp_target: Path, capsys):
     out = capsys.readouterr().out
     assert "Status ok" in out
     assert "PARTIAL" not in out
+
+
+# Daybreak 3: malformed text is a per-item failure; guard failures stay fatal.
+
+
+def test_invalid_utf8_is_a_per_item_failure(tmp_target: Path, capsys):
+    inbox = _seed(tmp_target)
+    bad = inbox / "2026-11-08-0900-bad-bytes.md"
+    bad.write_bytes(b"# Memory Handoff\n\n## Summary\n\xff\xfe broken\n")
+    good = _handoff(inbox, "2026-11-08-0901-good.md", "good")
+
+    assert ingest_mod.run(tmp_target) == 0
+    out = capsys.readouterr().out
+    assert bad.is_file()
+    assert not good.exists()
+    assert "[invalid-encoding]" in out
+    assert "Status partial" in out
+
+
+def test_parse_value_error_is_a_per_item_failure(tmp_target: Path, monkeypatch, capsys):
+    inbox = _seed(tmp_target)
+    bad = _handoff(inbox, "2026-11-08-0900-bad.md", "bad")
+    good = _handoff(inbox, "2026-11-08-0901-good.md", "good")
+    real_parse = ingest_mod.parse
+
+    def parse(path):
+        if path.name == bad.name:
+            raise ValueError("malformed fence")
+        return real_parse(path)
+
+    monkeypatch.setattr(ingest_mod, "parse", parse)
+    assert ingest_mod.run(tmp_target) == 0
+    out = capsys.readouterr().out
+    assert bad.is_file()
+    assert not good.exists()
+    assert "[invalid-content]" in out
+    assert "malformed fence" not in out
+
+
+def test_guard_failure_in_decide_stays_fatal(tmp_target: Path, monkeypatch):
+    inbox = _seed(tmp_target)
+    _handoff(inbox, "2026-11-08-0900-a.md", "a")
+
+    def decide(*args, **kwargs):
+        raise RuntimeError("guard invariant broken")
+
+    monkeypatch.setattr(ingest_mod, "decide", decide)
+    with pytest.raises(RuntimeError):
+        ingest_mod.run(tmp_target)
+
+
+# Daybreak 4: logs and review receipts carry codes, never handoff fields.
+
+
+def test_untrusted_fields_stay_out_of_logs_and_receipts(tmp_target: Path, capsys):
+    inbox = _seed(tmp_target)
+    name = "2026-11-08-0900-evil\x1b[31m.md"
+    (inbox / name).write_text(
+        "# Memory Handoff\n\n## Recommended memory action\ncreate-card\n\n"
+        "## Target card\nSENTINEL-TARGET\x07/../x.md\n\n"
+        "## Suggested card content\n---\ntopic: t\n---\nSENTINEL-CONTENT\n"
+    )
+
+    assert ingest_mod.run(tmp_target, promote_cards=True, route_documents=True) == 0
+    out = capsys.readouterr().out
+    assert "[unsafe-card-name]" in out
+    assert "SENTINEL-TARGET" not in out
+    assert "SENTINEL-CONTENT" not in out
+    assert "\x1b" not in out and "\x07" not in out
+    assert "\\x1b" in out
+    reviews = list((tmp_target / "memory" / "handoff-inbox").glob("*.md"))
+    assert len(reviews) == 1
+    header = reviews[0].read_text().split("-->", 1)[0]
+    assert "reason: unsafe-card-name" in header
+    assert "SENTINEL-TARGET" not in header
+    assert "\x1b" not in header
+    assert "\x1b" not in reviews[0].name
 
 
 # B. Linked worktree inboxes are found through git and deduped by content.
@@ -146,20 +247,108 @@ def test_same_handoff_in_two_worktrees_ingests_once(tmp_path: Path):
     assert ingest_mod.ingest_into(source=main, owner=main, stats=stats) == 0
     assert stats.processed == 1
     assert stats.skipped == 1
-    assert any("duplicate content" in line for line in stats.actions)
+    assert any("[duplicate-content]" in line for line in stats.actions)
     assert (copy.parent / "processed" / copy.name).is_file()
 
 
+# Daybreak 1: linked inboxes must stay inside the configured repository.
+
+
+def test_worktree_metadata_pointing_at_another_repo_is_ignored(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    foreign = _plain_repo(tmp_path / "foreign")
+    victim = _handoff(foreign / ".claude" / "memory-handoffs", "2026-11-08-0900-victim.md", "victim")
+    admin = main / ".git" / "worktrees" / "evil"
+    admin.mkdir(parents=True)
+    (admin / "gitdir").write_text(str(foreign / ".git") + "\n")
+    (admin / "HEAD").write_text((main / ".git" / "HEAD").read_text())
+    (admin / "commondir").write_text("../..\n")
+    assert str(foreign) in _git(main, "worktree", "list", "--porcelain")
+
+    found = handoff_worktrees.linked_worktrees(main)
+    assert linked.resolve() in found
+    assert foreign.resolve() not in found
+    stats = ingest_mod.IngestStats()
+    assert ingest_mod.ingest_into(source=main, owner=main, stats=stats) == 0
+    assert victim.is_file()
+
+
+@needs_symlinks
+def test_symlinked_inbox_component_is_refused(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    outside = tmp_path / "outside"
+    victim = _handoff(outside / "memory-handoffs", "2026-11-08-0900-victim.md", "victim")
+    (linked / ".claude").symlink_to(outside, target_is_directory=True)
+
+    assert handoff_worktrees.contained_inbox(linked, ".claude/memory-handoffs") is None
+    stats = ingest_mod.IngestStats()
+    assert ingest_mod.ingest_into(source=main, owner=main, stats=stats) == 0
+    assert victim.is_file()
+
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+    assert [r.reason for r in results if r.state == "failed"] == ["inbox-refused"]
+    assert victim.is_file()
+    assert not (main / ".claude" / "memory-handoffs" / victim.name).exists()
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "/etc/memory-handoffs",
+        "C:/x/memory-handoffs",
+        "//server/share",
+        "a/../memory-handoffs",
+        "./memory-handoffs",
+        "a\\b",
+        "\uff41/memory-handoffs",  # fullwidth "a", changes under NFKC
+        "e\u0301/memory-handoffs",  # decomposed accent, changes under NFC
+        "a\x1b/memory-handoffs",
+        "",
+    ],
+)
+def test_inbox_components_reject_unsafe_paths(rel: str):
+    with pytest.raises(ValueError):
+        handoff_worktrees.inbox_components(rel)
+
+
+def test_inbox_components_accept_plain_relative_path():
+    assert handoff_worktrees.inbox_components(".claude/memory-handoffs") == (".claude", "memory-handoffs")
+
+
+def test_main_checkout_requires_the_configured_repo(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    other = _plain_repo(tmp_path / "other")
+    assert handoff_worktrees.main_checkout(linked, repo=main) == main.resolve()
+    assert handoff_worktrees.main_checkout(linked, repo=other) is None
+    assert handoff_worktrees.main_checkout(main) is None
+
+
+# Daybreak 5: `git worktree list` is read with byte and record bounds.
+
+
+def test_worktree_list_over_byte_limit_fails_closed(tmp_path: Path, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    assert handoff_worktrees.linked_worktrees(main, max_bytes=16) == []
+    assert "exceeded" in capsys.readouterr().err
+    assert handoff_worktrees.linked_worktrees(main) == [linked.resolve()]
+
+
+def test_worktree_records_stop_at_the_limit():
+    raw = b"".join(b"worktree /tmp/wt%d\0HEAD 0\0detached\0\0" % i for i in range(300))
+    assert len(handoff_worktrees._worktree_records(raw, 256)) == 256
+
+
 def test_worktree_discovery_is_bounded(tmp_path: Path):
-    main = tmp_path / "main"
-    main.mkdir()
-    _git(main, "init", "-q")
-    _git(main, "commit", "-q", "--allow-empty", "-m", "init")
+    main = _plain_repo(tmp_path / "main")
     for index in range(3):
         _git(main, "worktree", "add", "-q", "--detach", str(tmp_path / f"wt{index}"))
-    assert len(handoff_worktrees.linked_worktrees(main, limit=2)) == 2
+    # The main checkout is the first record, so two records hold one linked tree.
+    assert len(handoff_worktrees.linked_worktrees(main, limit=2)) == 1
     assert len(handoff_worktrees.linked_worktrees(main)) == 3
     assert handoff_worktrees.linked_worktrees(tmp_path / "not-a-repo") == []
+
+
+# Worktree removal delivers pending handoffs first.
 
 
 def test_remove_worktree_delivers_pending_handoffs_first(tmp_path: Path):
@@ -179,9 +368,10 @@ def test_remove_worktree_delivers_pending_handoffs_first(tmp_path: Path):
     assert (dest / fresh.name).read_text() == fresh_text
     assert not (dest / "2026-11-08-0901-dup.md").exists()
     assert clash.read_text() == _HANDOFF.format(summary="main copy")
-    renamed = [p for p in dest.glob("2026-11-08-0902-clash-*.md")]
+    renamed = list(dest.glob("2026-11-08-0902-clash-*.md"))
     assert len(renamed) == 1
     assert renamed[0].read_text() == _HANDOFF.format(summary="worktree copy")
+    assert not list(dest.glob(".brigade-rescue-*"))
 
 
 @needs_posix_perms
@@ -207,6 +397,96 @@ def test_remove_worktree_leaves_tracked_handoffs_to_git(tmp_path: Path):
 
     assert handoff_worktrees.rescue_pending_handoffs(linked, main) == []
     assert not (main / ".claude" / "memory-handoffs" / tracked.name).exists()
+
+
+def test_rescue_without_verified_destination_keeps_the_handoff(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-pending.md", "pending")
+    results = handoff_worktrees.rescue_pending_handoffs(linked, None)
+    assert [r.state for r in results] == ["failed"]
+    assert pending.is_file()
+
+
+# Daybreak 2: the source must still be the copied file at unlink time.
+
+
+def test_source_swapped_during_rescue_is_kept(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    source = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-raced.md", "original")
+    _swap_source_on_first_fsync(monkeypatch, source, "replacement written mid-rescue")
+
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    assert [r.state for r in results] == ["failed"]
+    assert source.read_text() == "replacement written mid-rescue"
+
+
+def test_source_swapped_during_removal_keeps_worktree(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    source = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-raced.md", "original")
+    _swap_source_on_first_fsync(monkeypatch, source, "replacement written mid-rescue")
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert source.read_text() == "replacement written mid-rescue"
+
+
+# Codex 6: broken git metadata is not "nothing tracked".
+
+
+def test_broken_git_metadata_does_not_move_a_committed_handoff(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    committed = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-committed.md", "committed")
+    _git(linked, "add", "-f", "--", str(committed.relative_to(linked)))
+    _git(linked, "commit", "-q", "-m", "track")
+    (linked / ".git").write_text("gitdir: " + str(tmp_path / "missing-admin-dir") + "\n")
+
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    assert [r.state for r in results] == ["failed"]
+    assert committed.is_file()
+    assert not (main / ".claude" / "memory-handoffs" / committed.name).exists()
+
+
+# Codex 7: an unreadable destination index is a failed rescue, not a raise.
+
+
+@needs_posix_perms
+def test_unlistable_processed_archive_is_a_failed_rescue(tmp_path: Path, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-pending.md", "pending")
+    processed = main / ".claude" / "memory-handoffs" / "processed"
+    processed.mkdir(parents=True, exist_ok=True)
+    processed.chmod(0)
+    try:
+        results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+        runguard.remove_worktree(main, linked, force=True)
+    finally:
+        processed.chmod(0o755)
+
+    assert [r.state for r in results] == ["failed"]
+    assert pending.is_file()
+    assert "kept worktree" in capsys.readouterr().err
+
+
+# Codex 8: a rescued handoff appears in the inbox only when complete.
+
+
+def test_failed_copy_leaves_no_partial_handoff(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-pending.md", "pending")
+    dest = main / ".claude" / "memory-handoffs"
+    before = {p.name for p in dest.iterdir()}
+
+    def fsync(fd):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(handoff_worktrees.os, "fsync", fsync)
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    assert [r.state for r in results] == ["failed"]
+    assert pending.is_file()
+    assert {p.name for p in dest.iterdir()} == before
 
 
 # C. A session in a linked worktree is pointed at the main checkout's inbox.

@@ -5,21 +5,38 @@ an ingester that only watches the main checkout never sees it. These helpers
 let ingest find sibling worktree inboxes (bounded by `git worktree list`, never
 a directory walk), let worktree removal deliver pending handoffs to the main
 checkout first, and tell hooks which inbox outlives the worktree.
+
+Every path git reports is checked against the configured repository's own
+common git dir, and every inbox component is opened through held, no-follow
+directory descriptors, so neither repo metadata nor a planted link can steer
+discovery or rescue outside that repository.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import subprocess
+import sys
+import threading
+import unicodedata
+import uuid
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
+from . import dirfd
 from .selection import WRITER_INBOXES
 
-# Upper bound on linked worktrees considered per repository. A repo with more
-# than this many live worktrees is unusual; the rest are skipped, not walked.
+# Linked worktrees considered per repository; records past this are never
+# resolved or stat'ed.
 MAX_WORKTREES = 256
+# `git worktree list` output larger than this is refused (fail closed).
+MAX_WORKTREE_LIST_BYTES = 1 << 20
+# Directory entries read from one inbox. A source inbox past this is refused;
+# a destination index past it dedupes only the entries it read.
+MAX_INBOX_ENTRIES = 8192
+MAX_HANDOFF_BYTES = 1 << 20
 _GIT_TIMEOUT_SECONDS = 20
 # Git state that would point `git -C <dir>` at another repository.
 GIT_LOCATION_ENV = (
@@ -31,17 +48,24 @@ GIT_LOCATION_ENV = (
     "GIT_CEILING_DIRECTORIES",
 )
 CLAUDE_INBOX = WRITER_INBOXES["claude"]
+# Ingesters list only `*.md`, so a partial rescue copy is never read.
+_TEMP_PREFIX = ".brigade-rescue-"
+_TEMP_SUFFIX = ".tmp"
+
+
+def _git_env() -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_ENV}
+    env["LC_ALL"] = "C"
+    return env
 
 
 def _git(cwd: Path, *args: str) -> str | None:
-    env = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_ENV}
-    env["LC_ALL"] = "C"
     try:
         result = subprocess.run(
             ["git", "-C", str(cwd), *args],
             capture_output=True,
             text=True,
-            env=env,
+            env=_git_env(),
             timeout=_GIT_TIMEOUT_SECONDS,
             check=False,
         )
@@ -52,49 +76,194 @@ def _git(cwd: Path, *args: str) -> str | None:
     return result.stdout
 
 
-def main_checkout(path: Path) -> Path | None:
+def _git_path(path: Path, flag: str) -> Path | None:
+    out = _git(path, "rev-parse", "--path-format=absolute", flag)
+    value = out.rstrip("\n") if out is not None else ""
+    if not value or "\n" in value:
+        return None
+    try:
+        return Path(value).resolve(strict=True)
+    except OSError:
+        return None
+
+
+def git_common_dir(path: Path) -> Path | None:
+    """Resolved common git dir of the repository containing `path`."""
+    return _git_path(path, "--git-common-dir")
+
+
+def main_checkout(path: Path, *, repo: Path | None = None) -> Path | None:
     """Return the main working tree when `path` sits in a linked worktree.
 
-    Returns None for a main checkout, a bare repository, a path outside git,
-    or a main checkout that no longer exists on disk.
+    The common dir must be a real `.git` directory whose parent checkout
+    reports that same common dir as its own git dir, and `path`'s git dir must
+    be one of its `worktrees/<name>` admin dirs. With `repo`, the common dir
+    must also be `repo`'s. Anything else returns None.
     """
-    out = _git(path, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir")
-    if out is None:
+    git_dir = _git_path(path, "--git-dir")
+    common = git_common_dir(path)
+    if git_dir is None or common is None or git_dir == common:
         return None
-    lines = [line for line in out.splitlines() if line.strip()]
-    if len(lines) != 2:
+    if common.name != ".git" or git_dir.parent != common / "worktrees":
         return None
-    git_dir, common_dir = (Path(line).resolve() for line in lines)
-    if git_dir == common_dir or common_dir.name != ".git":
+    main = common.parent
+    try:
+        if not stat.S_ISDIR((main / ".git").lstat().st_mode):
+            return None
+    except OSError:
         return None
-    main = common_dir.parent
-    return main if main.is_dir() else None
+    if _git_path(main, "--git-dir") != common or git_common_dir(main) != common:
+        return None
+    if repo is not None and git_common_dir(repo) != common:
+        return None
+    return main
 
 
-def linked_worktrees(root: Path, *, limit: int = MAX_WORKTREES) -> list[Path]:
-    """Existing working trees of `root`'s repository other than `root` itself."""
-    out = _git(root, "worktree", "list", "--porcelain")
-    if out is None:
+def _bounded_git_output(cwd: Path, args: list[str], max_bytes: int) -> bytes | None:
+    """Stdout of a git command, or None on failure, timeout or overflow."""
+    try:
+        proc = subprocess.Popen(
+            ["git", "-C", str(cwd), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=_git_env(),
+        )
+    except OSError:
+        return None
+    timer = threading.Timer(_GIT_TIMEOUT_SECONDS, proc.kill)
+    timer.start()
+    try:
+        assert proc.stdout is not None
+        data = proc.stdout.read(max_bytes + 1)
+        overflow = len(data) > max_bytes
+        if overflow:
+            proc.kill()
+        proc.stdout.close()
+        returncode = proc.wait()
+    finally:
+        timer.cancel()
+    if overflow or returncode != 0:
+        return None
+    return data
+
+
+def _worktree_records(raw: bytes, limit: int) -> list[bytes]:
+    """Worktree paths from `--porcelain -z` output, at most `limit` records."""
+    paths: list[bytes] = []
+    for field in raw.split(b"\0"):
+        if field.startswith(b"worktree "):
+            paths.append(field[len(b"worktree ") :])
+            if len(paths) >= limit:
+                break
+    return paths
+
+
+def linked_worktrees(root: Path, *, limit: int = MAX_WORKTREES, max_bytes: int = MAX_WORKTREE_LIST_BYTES) -> list[Path]:
+    """Linked working trees of `root`'s repository other than `root` itself.
+
+    Output over `max_bytes` is refused outright. Only the first `limit`
+    records are considered, and each must resolve to a directory whose own
+    common git dir is `root`'s.
+    """
+    common = git_common_dir(root)
+    if common is None:
+        return []
+    raw = _bounded_git_output(root, ["worktree", "list", "--porcelain", "-z"], max_bytes)
+    if raw is None:
+        print(f"brigade: git worktree list failed or exceeded {max_bytes} bytes for {root}", file=sys.stderr)
         return []
     try:
-        own = root.resolve()
+        own = root.resolve(strict=True)
     except OSError:
         return []
     found: list[Path] = []
-    for line in out.splitlines():
-        if not line.startswith("worktree "):
+    for value in _worktree_records(raw, limit):
+        candidate = Path(os.fsdecode(value))
+        if not candidate.is_absolute():
             continue
-        candidate = Path(line[len("worktree ") :])
         try:
-            resolved = candidate.resolve()
+            resolved = candidate.resolve(strict=True)
         except OSError:
             continue
         if resolved == own or not resolved.is_dir():
             continue
+        # Worktree metadata can name any directory. Keep only checkouts that
+        # really belong to this repository.
+        if git_common_dir(resolved) != common:
+            continue
         found.append(resolved)
-        if len(found) >= limit:
-            break
     return found
+
+
+def inbox_components(rel: str) -> tuple[str, ...]:
+    """Validate a repo-relative inbox path and split it into components.
+
+    Rejects absolute, drive-qualified and UNC paths, `.`/`..`, separators
+    other than `/`, control characters and components that change under
+    Unicode normalization.
+    """
+    if not isinstance(rel, str) or not rel or "\\" in rel or "\x00" in rel:
+        raise ValueError("inbox path is not a plain relative path")
+    windows = PureWindowsPath(rel)
+    if rel.startswith("/") or windows.drive or windows.root:
+        raise ValueError("inbox path is absolute")
+    parts = tuple(rel.split("/"))
+    for part in parts:
+        if part in ("", ".", "..") or ":" in part:
+            raise ValueError("inbox path component is not contained")
+        if unicodedata.normalize("NFC", part) != part or unicodedata.normalize("NFKC", part) != part:
+            raise ValueError("inbox path component is ambiguous under Unicode normalization")
+        if any(unicodedata.category(char).startswith("C") for char in part):
+            raise ValueError("inbox path component has control characters")
+    return parts
+
+
+def _walk(root_fd: int, parts: tuple[str, ...], *, create: bool = False) -> int | None:
+    """Open `parts` under a held root without following any link.
+
+    Returns None when a component is missing and `create` is False. A link,
+    junction, reparse point or non-directory component raises OSError.
+    """
+    current = os.dup(root_fd)
+    try:
+        for part in parts:
+            try:
+                child = dirfd.open_child_directory(current, part)
+            except FileNotFoundError:
+                if not create:
+                    return None
+                try:
+                    dirfd.mkdir_child(current, part, 0o755)
+                except FileExistsError:
+                    pass
+                child = dirfd.open_child_directory(current, part)
+            os.close(current)
+            current = child
+        result, current = current, -1
+        return result
+    finally:
+        if current >= 0:
+            os.close(current)
+
+
+def contained_inbox(worktree: Path, rel: str) -> Path | None:
+    """`worktree/rel` when every component is a real directory, else None."""
+    try:
+        parts = inbox_components(rel)
+        root_fd = dirfd.open_directory_chain(worktree.resolve(strict=True), writable=False)
+    except (OSError, ValueError):
+        return None
+    try:
+        inbox_fd = _walk(root_fd, parts)
+    except OSError:
+        print(f"brigade: refusing linked inbox {worktree / rel}: a component is not a plain directory", file=sys.stderr)
+        return None
+    finally:
+        os.close(root_fd)
+    if inbox_fd is None:
+        return None
+    os.close(inbox_fd)
+    return worktree.joinpath(*parts)
 
 
 def handoff_inbox(target: Path) -> Path:
@@ -114,109 +283,6 @@ def handoff_inboxes(target: Path) -> tuple[Path, ...]:
     return (own,) if preferred == own else (own, preferred)
 
 
-def digest(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def _tracked_names(inbox: Path) -> set[str] | None:
-    out = _git(inbox, "ls-files", "-z", "--", ".")
-    if out is None:
-        # Outside a work tree nothing is tracked. Any other failure is unknown.
-        return set() if _git(inbox, "rev-parse", "--is-inside-work-tree") is None else None
-    return {name for name in out.split("\0") if name and "/" not in name}
-
-
-def pending_handoffs(inbox: Path) -> list[Path]:
-    """Untracked handoff files waiting in `inbox` (never git-tracked copies).
-
-    Raises OSError when git tracking cannot be checked, so a caller about to
-    delete the inbox keeps it instead of guessing.
-    """
-    if not inbox.is_dir():
-        return []
-    tracked = _tracked_names(inbox)
-    if tracked is None:
-        raise OSError(f"git tracking check failed for {inbox}")
-    pending: list[Path] = []
-    for path in sorted(inbox.iterdir()):
-        if path.suffix != ".md" or path.name == "TEMPLATE.md" or path.name.startswith("."):
-            continue
-        if path.is_symlink() or not path.is_file() or path.name in tracked:
-            continue
-        pending.append(path)
-    return pending
-
-
-@dataclass(frozen=True)
-class Rescue:
-    source: Path
-    state: str  # delivered | duplicate | failed
-    dest: Path | None = None
-    reason: str = ""
-
-
-def _known_digests(dest_inbox: Path) -> set[str]:
-    known: set[str] = set()
-    for folder in (dest_inbox, dest_inbox / "processed"):
-        if not folder.is_dir():
-            continue
-        for path in folder.iterdir():
-            if path.suffix != ".md" or path.is_symlink() or not path.is_file():
-                continue
-            try:
-                known.add(digest(path.read_bytes()))
-            except OSError:
-                continue
-    return known
-
-
-def rescue_pending_handoffs(worktree: Path, dest_root: Path) -> list[Rescue]:
-    """Move pending handoffs from `worktree`'s inboxes into `dest_root`'s.
-
-    Content already present in the destination inbox or its processed archive
-    counts as delivered once (dedupe by sha256). A name clash with different
-    content gets a digest suffix. The source is removed only after the copy is
-    verified, so a failure leaves the original in place.
-    """
-    results: list[Rescue] = []
-    if worktree.resolve() == dest_root.resolve():
-        return results
-    for rel in dict.fromkeys(WRITER_INBOXES.values()):
-        try:
-            pending = pending_handoffs(worktree / rel)
-        except OSError as exc:
-            results.append(Rescue(worktree / rel, "failed", reason=f"{type(exc).__name__}: {exc}"))
-            continue
-        if not pending:
-            continue
-        dest_inbox = dest_root / rel
-        known = _known_digests(dest_inbox)
-        for source in pending:
-            try:
-                raw = source.read_bytes()
-                sha = digest(raw)
-                if sha in known:
-                    source.unlink()
-                    results.append(Rescue(source, "duplicate", reason="content already in destination"))
-                    continue
-                dest_inbox.mkdir(parents=True, exist_ok=True)
-                dest = dest_inbox / source.name
-                if dest.exists():
-                    dest = dest_inbox / f"{source.stem}-{sha[:12]}{source.suffix}"
-                with dest.open("xb") as handle:
-                    handle.write(raw)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                if digest(dest.read_bytes()) != sha:
-                    raise OSError(f"copy verification failed for {dest}")
-                source.unlink()
-                known.add(sha)
-                results.append(Rescue(source, "delivered", dest=dest))
-            except OSError as exc:
-                results.append(Rescue(source, "failed", reason=f"{type(exc).__name__}: {exc}"))
-    return results
-
-
 def is_handoff_path(target: Path, path: Path) -> bool:
     """True when resolved `path` sits in an inbox a session at `target` may use."""
     own = (target / CLAUDE_INBOX).resolve()
@@ -232,3 +298,286 @@ def stop_hint(target: Path) -> str:
     if preferred == target / CLAUDE_INBOX:
         return f"`{CLAUDE_INBOX}/`"
     return f"`{preferred}/` (the main checkout, so it outlives this worktree)"
+
+
+def digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def safe_text(value: object, limit: int = 160) -> str:
+    """Printable ASCII rendering of an untrusted name for logs and receipts."""
+    text = str(value).encode("unicode_escape", "backslashreplace").decode("ascii")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+@dataclass(frozen=True)
+class Rescue:
+    source: str
+    state: str  # delivered | duplicate | failed
+    dest: str | None = None
+    reason: str = ""  # stable reason code
+
+
+def _read_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+
+
+def _write_flags() -> int:
+    return (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+
+
+def _read_child(parent: int, name: str) -> tuple[bytes, os.stat_result]:
+    """Read a regular file through a no-follow handle; return bytes and fstat."""
+    fd = dirfd.open_child_file(parent, name, _read_flags())
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("not a regular file")
+        if info.st_size > MAX_HANDOFF_BYTES:
+            raise OSError("handoff exceeds size limit")
+        chunks: list[bytes] = []
+        remaining = MAX_HANDOFF_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 65536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > MAX_HANDOFF_BYTES:
+            raise OSError("handoff exceeds size limit")
+        return data, info
+    finally:
+        os.close(fd)
+
+
+def _child_exists(parent: int, name: str) -> bool:
+    try:
+        dirfd.stat_child(parent, name)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _digest_index(parent: int) -> set[str]:
+    """sha256 of the `*.md` files directly under a held directory (bounded)."""
+    known: set[str] = set()
+    for name in dirfd.child_names(parent, MAX_INBOX_ENTRIES):
+        if not name.endswith(".md") or name.startswith("."):
+            continue
+        try:
+            data, _ = _read_child(parent, name)
+        except OSError:
+            continue
+        known.add(digest(data))
+    return known
+
+
+def _known_digests(dest_fd: int) -> set[str]:
+    known = _digest_index(dest_fd)
+    try:
+        processed = dirfd.open_child_directory(dest_fd, "processed", writable=False)
+    except FileNotFoundError:
+        return known
+    try:
+        known |= _digest_index(processed)
+    finally:
+        os.close(processed)
+    return known
+
+
+def _tracked(inbox: Path) -> tuple[set[str], set[tuple[int, int]]] | None:
+    """Names and identities git tracks in `inbox`; None when unknown.
+
+    A confirmed non-repository yields empty sets. Broken git metadata or a
+    failing git command yields None, never "nothing tracked".
+    """
+    from .ingest import _git_tracked_files
+
+    return _git_tracked_files(inbox)
+
+
+class _Dest:
+    """Destination root held open for the whole rescue transaction."""
+
+    def __init__(self, root: Path | None) -> None:
+        self.root = root
+        self.root_fd: int | None = None
+        self.inboxes: dict[tuple[str, ...], tuple[int, set[str]]] = {}
+
+    def inbox(self, parts: tuple[str, ...]) -> tuple[int, set[str]]:
+        if parts not in self.inboxes:
+            if self.root is None:
+                raise OSError("no verified main checkout")
+            if self.root_fd is None:
+                self.root_fd = dirfd.open_directory_chain(self.root.resolve(strict=True), writable=False)
+            fd = _walk(self.root_fd, parts, create=True)
+            assert fd is not None
+            try:
+                known = _known_digests(fd)
+            except BaseException:
+                os.close(fd)
+                raise
+            self.inboxes[parts] = (fd, known)
+        return self.inboxes[parts]
+
+    def close(self) -> None:
+        for fd, _ in self.inboxes.values():
+            os.close(fd)
+        if self.root_fd is not None:
+            os.close(self.root_fd)
+
+
+def _identity(info: os.stat_result) -> tuple[int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _rescue_one(
+    src_fd: int,
+    name: str,
+    label: str,
+    dest: _Dest,
+    parts: tuple[str, ...],
+    tracked: tuple[set[str], set[tuple[int, int]]],
+) -> Rescue | None:
+    source = f"{label}/{name}"
+    tracked_names, tracked_ids = tracked
+    if name.casefold() in {n.casefold() for n in tracked_names}:
+        return None
+    dest_fd: int | None = None
+    temp: str | None = None
+    try:
+        before = dirfd.stat_child(src_fd, name)
+        if not stat.S_ISREG(before.st_mode):
+            return Rescue(source, "failed", reason="not-regular-file")
+        if (before.st_dev, before.st_ino) in tracked_ids:
+            return None
+        raw, opened = _read_child(src_fd, name)
+        if os.name == "posix" and (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            return Rescue(source, "failed", reason="source-changed")
+        sha = digest(raw)
+        dest_fd, known = dest.inbox(parts)
+        published: str | None = None
+        if sha in known:
+            state = "duplicate"
+        else:
+            temp = f"{_TEMP_PREFIX}{uuid.uuid4().hex}{_TEMP_SUFFIX}"
+            out = dirfd.open_child_file(dest_fd, temp, _write_flags(), 0o644)
+            try:
+                view = memoryview(raw)
+                while view:
+                    view = view[os.write(out, view) :]
+                os.fsync(out)
+            finally:
+                os.close(out)
+            copied, _ = _read_child(dest_fd, temp)
+            if digest(copied) != sha:
+                return Rescue(source, "failed", reason="copy-verification-failed")
+            stem = name[: -len(".md")]
+            for final in dict.fromkeys((name, f"{stem}-{sha[:12]}.md")):
+                if _child_exists(dest_fd, final):
+                    continue
+                try:
+                    dirfd.replace_children(dest_fd, temp, final, replace=False)
+                except FileExistsError:
+                    continue
+                published, temp = final, None
+                break
+            if published is None:
+                return Rescue(source, "failed", reason="destination-collision")
+            dirfd.fsync_directory(dest_fd)
+            known.add(sha)
+            state = "delivered"
+        # The source must be the file we copied, right up to the unlink.
+        if _identity(dirfd.stat_child(src_fd, name)) != _identity(before):
+            return Rescue(source, "failed", reason="source-changed")
+        dirfd.unlink_child(src_fd, name)
+        dirfd.fsync_directory(src_fd)
+        dest_path = str(dest.root.joinpath(*parts, published)) if dest.root and published else None
+        return Rescue(source, state, dest=dest_path)
+    except OSError:
+        return Rescue(source, "failed", reason="rescue-io-error")
+    finally:
+        if temp is not None and dest_fd is not None:
+            try:
+                dirfd.unlink_child(dest_fd, temp)
+            except OSError:
+                pass
+
+
+def _rescue_inbox(worktree: Path, root_fd: int, rel: str, dest: _Dest) -> list[Rescue]:
+    label = str(worktree / rel)
+    try:
+        parts = inbox_components(rel)
+        src_fd = _walk(root_fd, parts)
+    except (OSError, ValueError):
+        return [Rescue(label, "failed", reason="inbox-refused")]
+    if src_fd is None:
+        return []
+    try:
+        names = dirfd.child_names(src_fd, MAX_INBOX_ENTRIES + 1)
+        if len(names) > MAX_INBOX_ENTRIES:
+            return [Rescue(label, "failed", reason="inbox-too-large")]
+        candidates = sorted(n for n in names if n.endswith(".md") and not n.startswith(".") and n != "TEMPLATE.md")
+        if not candidates:
+            return []
+        tracked = _tracked(worktree.joinpath(*parts))
+        if tracked is None:
+            return [Rescue(label, "failed", reason="tracking-unverifiable")]
+        try:
+            dest.inbox(parts)
+        except OSError:
+            return [Rescue(label, "failed", reason="destination-unavailable")]
+        results = [_rescue_one(src_fd, name, label, dest, parts, tracked) for name in candidates]
+        return [result for result in results if result is not None]
+    except OSError:
+        return [Rescue(label, "failed", reason="inbox-unreadable")]
+    finally:
+        os.close(src_fd)
+
+
+def rescue_pending_handoffs(worktree: Path, dest_root: Path | None) -> list[Rescue]:
+    """Move pending handoffs from `worktree`'s inboxes into `dest_root`'s.
+
+    Source and destination directories are held open for the whole
+    transaction. Each copy is written to a temp name the ingesters ignore,
+    fsynced, verified and published without replacing anything. The source
+    is unlinked only if it is still the file that was copied. Content already
+    in the destination inbox or its `processed/` archive is not copied twice.
+    Every problem is a `failed` result, never an exception, so the caller can
+    keep the worktree. With no verified `dest_root`, pending handoffs fail.
+    """
+    try:
+        resolved = worktree.resolve(strict=True)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return [Rescue(str(worktree), "failed", reason="worktree-unresolvable")]
+    if dest_root is not None and dest_root.resolve() == resolved:
+        return []
+    try:
+        root_fd = dirfd.open_directory_chain(resolved, writable=False)
+    except OSError:
+        return [Rescue(str(worktree), "failed", reason="worktree-unopenable")]
+    dest = _Dest(dest_root)
+    results: list[Rescue] = []
+    try:
+        for rel in dict.fromkeys(WRITER_INBOXES.values()):
+            results.extend(_rescue_inbox(resolved, root_fd, rel, dest))
+    finally:
+        dest.close()
+        os.close(root_fd)
+    return results

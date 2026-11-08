@@ -1543,10 +1543,19 @@ def _deliver_worktree_handoffs(worktree_path: Path, root: Path) -> bool:
     """
     from . import handoff_worktrees
 
-    dest = handoff_worktrees.main_checkout(worktree_path) or root
-    failed = [r for r in handoff_worktrees.rescue_pending_handoffs(worktree_path, dest) if r.state == "failed"]
+    try:
+        # Only a main checkout that owns the same common git dir as `root`.
+        dest = handoff_worktrees.main_checkout(worktree_path, repo=root)
+        results = handoff_worktrees.rescue_pending_handoffs(worktree_path, dest)
+    except Exception as exc:  # noqa: BLE001 - callers run this from finally blocks
+        print(f"brigade: kept worktree {worktree_path}: handoff rescue error ({type(exc).__name__})", file=sys.stderr)
+        return False
+    failed = [r for r in results if r.state == "failed"]
     for rescue in failed:
-        print(f"brigade: handoff not delivered from {rescue.source}: {rescue.reason}", file=sys.stderr)
+        print(
+            f"brigade: handoff not delivered from {handoff_worktrees.safe_text(rescue.source)} [{rescue.reason}]",
+            file=sys.stderr,
+        )
     if failed:
         print(f"brigade: kept worktree {worktree_path} so {len(failed)} pending handoff(s) survive", file=sys.stderr)
     return not failed
