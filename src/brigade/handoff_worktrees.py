@@ -21,6 +21,11 @@ that lands between the final check and the unlink is lost. That needs a
 writer stalled longer than the quiescence window with a descriptor still
 open. Closing it needs an atomic publication contract for handoff writers
 (write a private temp, fsync, publish with a no-replace rename), tracked in escoffier-labs/brigade#2397.
+
+Known conservative limit: git does not look inside an embedded repository
+(an untracked nested repo, at any depth and in ignored trees too) or an
+initialized submodule, so a worktree holding one is always kept and
+reported as `embedded-repository`, whether or not it holds a handoff.
 """
 
 from __future__ import annotations
@@ -81,10 +86,39 @@ QUIESCENCE_SECONDS = 5.0
 FINAL_CHECK_SECONDS = 10.0
 
 
-def _git_env() -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_ENV}
+# Environment that could point git at another repository, work tree or
+# config, or change how pathspecs match.
+_GIT_STRIP_ENV = (
+    *GIT_LOCATION_ENV,
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+)
+
+
+def sanitized_git_env() -> dict[str, str]:
+    """Process environment for git with injected config and locations removed.
+
+    System and global config are off too, so only the repository's own
+    config applies, and callers pin the work tree explicitly where it counts.
+    """
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in _GIT_STRIP_ENV and not k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
+    }
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["LC_ALL"] = "C"
     return env
+
+
+_git_env = sanitized_git_env
 
 
 def _git(cwd: Path, *args: str) -> str | None:
@@ -545,27 +579,67 @@ def _split_inbox(parts: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ..
     raise OSError("not a writer inbox path")
 
 
-def _untracked_inbox_prefixes(worktree: Path) -> list[tuple[str, ...]]:
-    """Checkout subdirectories whose writer inbox holds an untracked file.
+def _verified_git_dir(worktree: Path) -> Path | None:
+    """The admin git dir of `worktree`, only if it points back at `worktree`."""
+    git_dir = _git_path(worktree, "--git-dir")
+    common = git_common_dir(worktree)
+    if git_dir is None or common is None:
+        return None
+    try:
+        own = (worktree / ".git").resolve()
+        if git_dir == common:
+            return git_dir if git_dir == own else None
+        if git_dir.parent != common / "worktrees":
+            return None
+        back = Path((git_dir / "gitdir").read_text(encoding="utf-8").strip()).resolve()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return git_dir if back == own else None
 
-    Git lists untracked files, ignored ones included, without following
-    links, at any depth and in any directory. Pathspecs keep the output to
-    files under a writer inbox, so a large ignored tree (node_modules, .venv)
-    does not count against the budget. Output over MAX_UNTRACKED_LIST_BYTES
-    or a run over UNTRACKED_LIST_SECONDS raises, as does any git failure, so
-    the caller keeps the worktree.
+
+def _pinned_git(worktree: Path, git_dir: Path, args: list[str]) -> bytes:
+    """Bounded git output with the git dir and work tree pinned.
+
+    Explicit --git-dir and --work-tree (and core.worktree) override any
+    core.worktree from repository, worktree or included config, and the
+    environment is sanitized. Raises on failure or over a bound.
     """
-    # `**/` also matches at the top level, so `.claude/memory-handoffs/x.md`
-    # in the checkout root is listed.
-    pathspecs = [f":(glob)**/{'/'.join(inbox)}/**" for inbox in _INBOX_PARTS]
     raw = _bounded_git_output(
         worktree,
-        ["-c", "core.fsmonitor=false", "ls-files", "--others", "-z", "--", *pathspecs],
+        [
+            f"--git-dir={git_dir}",
+            f"--work-tree={worktree}",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            f"core.worktree={worktree}",
+            *args,
+        ],
         MAX_UNTRACKED_LIST_BYTES,
         timeout=UNTRACKED_LIST_SECONDS,
     )
     if raw is None:
-        raise OSError("untracked file listing failed or exceeded its budget")
+        raise OSError("git listing failed or exceeded its budget")
+    return raw
+
+
+def _worktree_listing(worktree: Path, root_fd: int) -> tuple[list[tuple[str, ...]], list[str]]:
+    """(inbox prefixes holding untracked files, embedded repositories).
+
+    Git lists untracked files, ignored ones included, without following
+    links. Pathspecs keep the output to writer inbox files, so a large
+    ignored tree (node_modules, .venv) does not count against the budget.
+    Git does not descend into an embedded repository, so those (untracked
+    nested repos and initialized submodules) are listed separately and make
+    the caller keep the worktree. Any git failure or bound raises.
+    """
+    git_dir = _verified_git_dir(worktree)
+    if git_dir is None:
+        raise OSError("worktree git dir could not be verified")
+    # `**/` also matches at the top level, so `.claude/memory-handoffs/x.md`
+    # in the checkout root is listed.
+    pathspecs = [f":(glob)**/{'/'.join(inbox)}/**" for inbox in _INBOX_PARTS]
+    raw = _pinned_git(worktree, git_dir, ["ls-files", "--others", "-z", "--", *pathspecs])
     prefixes: set[tuple[str, ...]] = set()
     for entry in raw.split(b"\0"):
         if not entry:
@@ -574,7 +648,37 @@ def _untracked_inbox_prefixes(worktree: Path) -> list[tuple[str, ...]]:
         for inbox in _INBOX_PARTS:
             if parent[-len(inbox) :] == inbox:
                 prefixes.add(parent[: -len(inbox)])
-    return sorted(prefixes)
+    # Directory entries in an untracked listing are repository boundaries.
+    nested = _pinned_git(worktree, git_dir, ["ls-files", "--others", "-z", "--", ":(glob)**/"])
+    embedded = [os.fsdecode(e).rstrip("/") for e in nested.split(b"\0") if e.endswith(b"/")]
+    stage = _pinned_git(worktree, git_dir, ["ls-files", "-s", "-z"])
+    for record in stage.split(b"\0"):
+        meta, _, path = record.partition(b"\t")
+        if meta.startswith(b"160000 ") and path:
+            name = os.fsdecode(path)
+            if _has_git_marker(root_fd, name):
+                embedded.append(name)
+    return sorted(prefixes), sorted(set(embedded))
+
+
+def _has_git_marker(root_fd: int, rel: str) -> bool:
+    """Whether `rel` under the held root holds a `.git`, checked without
+    following links. Anything unverifiable counts as present."""
+    try:
+        fd = _walk(root_fd, inbox_components(rel))
+    except (OSError, ValueError):
+        return True
+    if fd is None:
+        return False
+    try:
+        dirfd.stat_child(fd, ".git")
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
 
 
 class _Dest:
@@ -889,11 +993,6 @@ def _rescue_one(
             )
             known.add(sha)
             state = "delivered"
-        # The delivered copy must sit where ingest will look for it.
-        try:
-            dest.verify(parts)
-        except OSError:
-            return Rescue(source, "failed", reason="destination-moved")
         # Final check while the claim is still named. Unlink only if stable.
         if not _stable_since_delivery(held, delivered, sha):
             kept = _keep_claim(src_fd, held, claim, name, frozenset(n.casefold() for n in tracked_names))
@@ -901,6 +1000,12 @@ def _rescue_one(
                 return Rescue(source, "failed", reason="late-write-claim-kept")
             claimed = False
             return Rescue(source, "failed", dest=str(Path(label) / kept), reason="late-write-kept")
+        # The delivered copy must still sit where ingest will look for it,
+        # checked last, right before the source is removed.
+        try:
+            dest.verify(parts)
+        except OSError:
+            return Rescue(source, "failed", reason="destination-moved")
         dirfd.unlink_child(src_fd, claim)
         claimed = False
         try:
@@ -1003,9 +1108,13 @@ def rescue_pending_handoffs(worktree: Path, dest_root: Path | None, *, dest_fd: 
     results: list[Rescue] = []
     try:
         try:
-            prefixes = _untracked_inbox_prefixes(resolved)
+            prefixes, embedded = _worktree_listing(resolved, root_fd)
         except OSError:
             return [Rescue(str(worktree), "failed", reason="inbox-scan-failed")]
+        if embedded:
+            # Git does not look inside these, so pending handoffs there are
+            # invisible. Keep the worktree rather than recurse.
+            return [Rescue(str(resolved / path), "failed", reason="embedded-repository") for path in embedded]
         for prefix in prefixes:
             for inbox in _INBOX_PARTS:
                 results.extend(_rescue_inbox(resolved, root_fd, "/".join((*prefix, *inbox)), dest))

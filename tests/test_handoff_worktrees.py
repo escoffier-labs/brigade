@@ -505,6 +505,136 @@ def test_large_ignored_tree_does_not_block_removal(tmp_path: Path, monkeypatch):
     assert not linked.exists()
 
 
+# Round 10: git config cannot redirect the listing.
+
+
+def _listed_prefixes(worktree: Path) -> list[tuple[str, ...]]:
+    root_fd = os.open(worktree.resolve(), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        return handoff_worktrees._worktree_listing(worktree.resolve(), root_fd)[0]
+    finally:
+        os.close(root_fd)
+
+
+def test_worktree_config_core_worktree_elsewhere_still_lists_inbox(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "pending.md", "pending")
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    _git(linked, "config", "extensions.worktreeConfig", "true")
+    _git(linked, "config", "--worktree", "core.worktree", str(decoy))
+
+    listed = None if not hasattr(handoff_worktrees, "_worktree_listing") else _listed_prefixes(linked)
+    runguard.remove_worktree(main, linked, force=True)
+    delivered = main / ".claude" / "memory-handoffs" / "pending.md"
+    assert pending.is_file() or delivered.is_file()  # never deleted
+    assert listed is not None and () in listed  # the real inbox was listed
+
+
+def test_injected_git_config_env_is_ignored(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "pending.md", "pending")
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.worktree")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(decoy))
+
+    listed = None if not hasattr(handoff_worktrees, "_worktree_listing") else _listed_prefixes(linked)
+    runguard.remove_worktree(main, linked, force=True)
+    delivered = main / ".claude" / "memory-handoffs" / "pending.md"
+    assert pending.is_file() or delivered.is_file()  # never deleted
+    assert listed is not None and () in listed  # the real inbox was listed
+
+
+def test_injected_pathspec_env_cannot_hide_inboxes(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "pending.md", "pending")
+    monkeypatch.setenv("GIT_LITERAL_PATHSPECS", "1")  # would make `:(glob)` match nothing
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert pending.is_file() or (main / ".claude" / "memory-handoffs" / "pending.md").is_file()
+
+
+def test_included_core_worktree_is_overridden(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "pending.md", "pending")
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    included = tmp_path / "included.gitconfig"
+    included.write_text(f"[core]\n\tworktree = {decoy}\n")
+    _git(main, "config", "includeIf.gitdir:**/worktrees/**.path", str(included))
+
+    listed = None if not hasattr(handoff_worktrees, "_worktree_listing") else _listed_prefixes(linked)
+    runguard.remove_worktree(main, linked, force=True)
+    delivered = main / ".claude" / "memory-handoffs" / "pending.md"
+    assert pending.is_file() or delivered.is_file()  # never deleted
+    assert listed is not None and () in listed  # the real inbox was listed
+
+
+@needs_symlinks
+def test_destination_moved_during_stability_check_keeps_worktree(tmp_path: Path, monkeypatch, capsys):
+    main, linked = _repo_with_project(tmp_path)
+    pending = _handoff(linked / "project" / ".claude" / "memory-handoffs", "pending.md", "project handoff")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real = handoff_worktrees._stable_since_delivery
+
+    def stable(*args, **kwargs):
+        (main / "project").rename(main / "moved-project")
+        (main / "project").symlink_to(outside, target_is_directory=True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(handoff_worktrees, "_stable_since_delivery", stable)
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert linked.exists()
+    assert pending.read_text() == _HANDOFF.format(summary="project handoff")
+    assert list(outside.iterdir()) == []
+    assert "destination-moved" in capsys.readouterr().err
+
+
+# Codex 4507863008: embedded repositories keep the worktree.
+
+
+def test_embedded_repo_with_pending_inbox_keeps_worktree(tmp_path: Path, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    nested = linked / "project"
+    nested.mkdir()
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    pending = _handoff(nested / ".claude" / "memory-handoffs", "pending.md", "nested")
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert linked.exists()
+    assert pending.is_file()
+    err = capsys.readouterr().err
+    assert "embedded-repository" in err and "project" in err
+
+
+def test_embedded_repo_inside_ignored_tree_keeps_worktree(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    (linked / ".gitignore").write_text("vendor/\n")
+    nested = linked / "vendor" / "lib"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert linked.exists()  # documented conservative limit, even with no inbox
+
+
+def test_worktree_without_embedded_repo_is_still_removed(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    (linked / "vendor").mkdir()
+    (linked / "vendor" / "file.txt").write_text("plain untracked\n")
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert not linked.exists()
+
+
 def test_hidden_ignored_and_deep_inboxes_are_never_deleted(tmp_path: Path, capsys):
     main, linked = _repo_with_project(tmp_path)
     deep = tuple(f"level{i}" for i in range(12))

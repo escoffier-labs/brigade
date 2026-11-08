@@ -932,8 +932,8 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
     An absent git binary or a directory outside any work tree yields an empty
     set. Any other failure returns None so callers can fail closed.
     """
-    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_ENV}
-    env["LC_ALL"] = "C"
+    # Rescue relies on this check too: no injected config or location.
+    env = handoff_worktrees.sanitized_git_env()
     env["GIT_DISCOVERY_ACROSS_FILESYSTEM"] = "true"
     try:
         directory = directory.resolve()
