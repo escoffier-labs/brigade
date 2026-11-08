@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -654,6 +655,67 @@ def test_uppercase_inbox_is_detected_and_never_deleted(tmp_path: Path):
     assert upper.is_file() or dest.read_text() == _HANDOFF.format(summary="uppercase inbox")
     if not linked.exists():
         assert dest.is_file()
+
+
+# Round 12: git cannot be redirected by renaming a tree into the path.
+
+
+def _swap_in_decoy(linked: Path) -> Path:
+    """Move the real worktree away and put a decoy tree at its path."""
+    real = linked.with_name(linked.name + "-real")
+    linked.rename(real)
+    linked.mkdir()
+    (linked / "decoy.txt").write_text("decoy\n")
+    return real
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="pins git through /proc/self/fd")
+def test_tree_swapped_in_before_listing_cannot_redirect_git(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-real.md", "real handoff")
+    real_pinned = handoff_worktrees._pinned_git
+    state: dict = {}
+
+    def pinned(*args, **kwargs):
+        if "real" not in state:
+            state["real"] = _swap_in_decoy(linked)
+        return real_pinned(*args, **kwargs)
+
+    monkeypatch.setattr(handoff_worktrees, "_pinned_git", pinned)
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    reasons = [(r.state, r.reason) for r in results]
+    # Git listed the real tree's inbox (the decoy has none). The later
+    # path-based tracking check sees the decoy and fails closed, so the
+    # handoff is kept rather than delivered, and the moved path keeps the
+    # worktree.
+    assert ("failed", "inbox-scan-failed") not in reasons
+    assert any(r.source.endswith(".claude/memory-handoffs") for r in results)
+    assert ("failed", "worktree-moved") in reasons
+    real_copy = state["real"] / ".claude" / "memory-handoffs" / "2026-11-08-0900-real.md"
+    delivered = main / ".claude" / "memory-handoffs" / "2026-11-08-0900-real.md"
+    assert real_copy.is_file() or delivered.read_text() == _HANDOFF.format(summary="real handoff")
+    assert (linked / "decoy.txt").read_text() == "decoy\n"
+
+
+def test_path_based_listing_post_check_keeps_worktree_on_swap(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-real.md", "real handoff")
+    monkeypatch.setattr(handoff_worktrees, "_proc_fd_paths", lambda: False, raising=False)
+    real_bounded = handoff_worktrees._bounded_git_output
+    state: dict = {}
+
+    def bounded(cwd, args, *rest, **kwargs):
+        if "real" not in state and "ls-files" in args:
+            state["real"] = _swap_in_decoy(linked)
+        return real_bounded(cwd, args, *rest, **kwargs)
+
+    monkeypatch.setattr(handoff_worktrees, "_bounded_git_output", bounded)
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    assert [(r.state, r.reason) for r in results] == [("failed", "inbox-scan-failed")]
+    assert (state["real"] / ".claude" / "memory-handoffs" / "2026-11-08-0900-real.md").is_file()
+    assert (linked / "decoy.txt").read_text() == "decoy\n"
 
 
 # Codex 4507863008: embedded repositories keep the worktree.

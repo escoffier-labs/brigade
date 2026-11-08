@@ -26,6 +26,14 @@ Known conservative limit: git does not look inside an embedded repository
 (an untracked nested repo, at any depth and in ignored trees too) or an
 initialized submodule, so a worktree holding one is always kept and
 reported as `embedded-repository`, whether or not it holds a handoff.
+
+Git is pointed at the held worktree and admin directories. On Linux that
+is through `/proc/self/fd`, so renaming another tree into either path does
+not redirect it. Other platforms pass the paths and compare both
+directories with the held descriptors after git exits, which catches a
+swap that is still in place but not one that is swapped back before git
+exits. An actor able to rename those directories can already delete the
+handoff directly, so rescue guards against accidental loss, not that.
 """
 
 from __future__ import annotations
@@ -238,7 +246,11 @@ def main_checkout_for(path: Path, *, repo: Path | None = None) -> Path | None:
 
 
 def _bounded_git_output(
-    cwd: Path, args: list[str], max_bytes: int, timeout: float = _GIT_TIMEOUT_SECONDS
+    cwd: Path,
+    args: list[str],
+    max_bytes: int,
+    timeout: float = _GIT_TIMEOUT_SECONDS,
+    pass_fds: tuple[int, ...] = (),
 ) -> bytes | None:
     """Stdout of a git command, or None on failure, timeout or overflow."""
     try:
@@ -247,6 +259,7 @@ def _bounded_git_output(
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env=_git_env(),
+            pass_fds=pass_fds,
         )
     except OSError:
         return None
@@ -638,30 +651,57 @@ def _verified_git_dir(worktree: Path, root_fd: int) -> Path | None:
     return git_dir
 
 
-def _pinned_git(worktree: Path, git_dir: Path, args: list[str]) -> bytes:
+def _proc_fd_paths() -> bool:
+    """Whether `/proc/self/fd/<n>` names an open directory (Linux)."""
+    return sys.platform.startswith("linux") and Path("/proc/self/fd").is_dir()
+
+
+def _pinned_git(worktree: Path, git_dir: Path, args: list[str], *, root_fd: int, admin_fd: int) -> bytes:
     """Bounded git output with the git dir and work tree pinned.
 
     Explicit --git-dir and --work-tree (and core.worktree) override any
     core.worktree from repository, worktree or included config, and the
-    environment is sanitized. Raises on failure or over a bound.
+    environment is sanitized. On Linux both point at the held descriptors
+    through `/proc/self/fd`, so renaming another tree into either path
+    cannot redirect git. Elsewhere git gets the paths and both directories
+    are compared with the held descriptors after git exits. Raises on
+    failure, over a bound, or on an identity mismatch.
     """
+    fds: tuple[int, ...]
+    if _proc_fd_paths():
+        work, admin = f"/proc/self/fd/{root_fd}", f"/proc/self/fd/{admin_fd}"
+        cwd, fds = Path(work), (root_fd, admin_fd)
+    else:
+        work, admin = str(worktree), str(git_dir)
+        cwd, fds = worktree, ()
     raw = _bounded_git_output(
-        worktree,
+        cwd,
         [
-            f"--git-dir={git_dir}",
-            f"--work-tree={worktree}",
+            f"--git-dir={admin}",
+            f"--work-tree={work}",
             "-c",
             "core.fsmonitor=false",
             "-c",
-            f"core.worktree={worktree}",
+            f"core.worktree={work}",
             *args,
         ],
         MAX_UNTRACKED_LIST_BYTES,
         timeout=UNTRACKED_LIST_SECONDS,
+        pass_fds=fds,
     )
     if raw is None:
         raise OSError("git listing failed or exceeded its budget")
+    if not fds:
+        _same_directory(worktree, root_fd)
+        _same_directory(git_dir, admin_fd)
     return raw
+
+
+def _same_directory(path: Path, fd: int) -> None:
+    """Raise unless `path` still names the directory held open as `fd`."""
+    now, held = os.stat(path), os.fstat(fd)
+    if (now.st_dev, now.st_ino) != (held.st_dev, held.st_ino):
+        raise OSError("directory changed during git listing")
 
 
 def _worktree_listing(worktree: Path, root_fd: int) -> tuple[list[tuple[str, ...]], list[str]]:
@@ -677,12 +717,25 @@ def _worktree_listing(worktree: Path, root_fd: int) -> tuple[list[tuple[str, ...
     git_dir = _verified_git_dir(worktree, root_fd)
     if git_dir is None:
         raise OSError("worktree git dir could not be verified")
+    admin_fd = dirfd.open_directory_chain(git_dir, writable=False)
+    try:
+        # The held admin dir must be the one just verified.
+        _same_directory(git_dir, admin_fd)
+        return _list_with(worktree, git_dir, root_fd, admin_fd)
+    finally:
+        os.close(admin_fd)
+
+
+def _list_with(worktree: Path, git_dir: Path, root_fd: int, admin_fd: int) -> tuple[list[tuple[str, ...]], list[str]]:
+    def git(args: list[str]) -> bytes:
+        return _pinned_git(worktree, git_dir, args, root_fd=root_fd, admin_fd=admin_fd)
+
     # `**/` also matches at the top level, so `.claude/memory-handoffs/x.md`
     # in the checkout root is listed.
     # Matched without regard to case, so `.CLAUDE/memory-handoffs` is found
     # too. The directory names are kept as listed for the no-follow walk.
     pathspecs = [f":(glob,icase)**/{'/'.join(inbox)}/**" for inbox in _INBOX_PARTS]
-    raw = _pinned_git(worktree, git_dir, ["ls-files", "--others", "-z", "--", *pathspecs])
+    raw = git(["ls-files", "--others", "-z", "--", *pathspecs])
     prefixes: set[tuple[str, ...]] = set()
     for entry in raw.split(b"\0"):
         if not entry:
@@ -691,9 +744,9 @@ def _worktree_listing(worktree: Path, root_fd: int) -> tuple[list[tuple[str, ...
         if _canonical_inbox(parent) is not None:
             prefixes.add(parent)
     # Directory entries in an untracked listing are repository boundaries.
-    nested = _pinned_git(worktree, git_dir, ["ls-files", "--others", "-z", "--", ":(glob)**/"])
+    nested = git(["ls-files", "--others", "-z", "--", ":(glob)**/"])
     embedded = [os.fsdecode(e).rstrip("/") for e in nested.split(b"\0") if e.endswith(b"/")]
-    stage = _pinned_git(worktree, git_dir, ["ls-files", "-s", "-z"])
+    stage = git(["ls-files", "-s", "-z"])
     for record in stage.split(b"\0"):
         meta, _, path = record.partition(b"\t")
         if meta.startswith(b"160000 ") and path:
@@ -1160,6 +1213,12 @@ def rescue_pending_handoffs(worktree: Path, dest_root: Path | None, *, dest_fd: 
         # Each listed inbox directory, under the name git reported for it.
         for inbox_dir in prefixes:
             results.extend(_rescue_inbox(resolved, root_fd, "/".join(inbox_dir), dest))
+        # The caller removes the worktree by path, so the path must still
+        # name the tree that was rescued.
+        try:
+            _same_directory(resolved, root_fd)
+        except OSError:
+            results.append(Rescue(str(worktree), "failed", reason="worktree-moved"))
     finally:
         dest.close()
         os.close(root_fd)
