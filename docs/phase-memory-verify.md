@@ -21,7 +21,9 @@ counters (D2). The open questions became decisions at the end.
 Revision 3 (2026-11-08) answers the second security review: the verifier flag
 belongs to the principal and every credential it holds (D4), a manifest binds
 only to a proposal for the exact card, scope and revision it checked (D5), and
-non-reviewers cannot see how many manifests a proposal binds (D5).
+non-reviewers cannot see how many manifests a proposal binds (D5). It also
+requires the two seats to agree on the exact resulting op, not only the
+verdict (D3, check 9).
 
 ## Why
 
@@ -397,8 +399,17 @@ the reviewer decides whether it is true:
 8. Only `high` confidence produces an op. `medium`, `low` and `insufficient`
    abstain and are counted by verdict.
 9. The confirm seat repeats the call with the evidence order shuffled and a
-   fresh nonce. The verdict must match, and its replacement must pass the same
-   checks. Otherwise the block abstains with `verify_unconfirmed`.
+   fresh nonce, and its reply must pass checks 1 to 8 on its own. The two
+   seats must then agree on the resulting operation, not only the verdict:
+   the same op type, the same `other_card` for `supersede_card`, and for
+   `replace_block` or `add_previously` the same text after normalization.
+   Normalization only strips claim anchors (` ^c-xxxxxx`) and leading and
+   trailing whitespace, and collapses each run of internal whitespace to one
+   space. Case, punctuation and wording must match. A block whose seats
+   disagree on any of these abstains with `seat_disagreement`. A confirm reply
+   that fails checks 1 to 8 abstains with `verify_unconfirmed`. When the seats
+   agree, the proposal carries the proposing seat's exact text, so every
+   proposed byte is text the confirming model also produced.
 
 These checks catch malformed, ungrounded and steered replies. They cannot
 prove the evidence right, so every op still waits for a reviewer.
@@ -544,7 +555,7 @@ into another.
 | Risk | Mitigation |
 |---|---|
 | Model follows instructions in data | Tool-free seats with no recall, nonce markers, and a reply limited to a strict schema. The model cannot act, only answer. |
-| Wrong correction | High confidence only, exact quotes, two independent items with one authenticated, agreement from a separately pinned model, and a reviewer who sees the trust labels. |
+| Wrong correction | High confidence only, exact quotes, two independent items with one authenticated, the same op and text from a separately pinned model, and a reviewer who sees the trust labels. |
 | Planted command, URL, path or host | The novelty check rejects any such token that is not in the block or a quote. Command output cannot satisfy the authenticated-evidence rule. The hub scan rejects blocked content. |
 | Queue flooding | At most 4 new proposals per run and 8 pending for the principal. A rejected correction is not proposed again until the card revision or cited evidence changes. |
 | Chosen supersede target | Targets come only from the client's related-card list for that call, in the same scope, live and newer. |

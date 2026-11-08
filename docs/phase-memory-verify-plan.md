@@ -32,8 +32,8 @@ Revision 2 (2026-11-08) moves the hub work ahead of every client slice. The
 verifier floor (old slice 10, now slice 3) is mandatory, and a new slice 4
 adds proposal-bound attestations and the reviewer hash read. Old slices 3 to
 9 become slices 5 to 11 with the same order. Revision 3 makes the verifier
-flag principal-level in slice 3, and adds exact card binding and a hidden
-manifest list to slice 4.
+flag principal-level in slice 3, adds exact card binding and a hidden
+manifest list to slice 4, and requires op-level seat agreement in slice 8.
 
 ## Integration baseline
 
@@ -367,7 +367,9 @@ Changes:
 - Deterministic checks: exact quotes, the two-item corroboration rule with one
   quote inside authenticated fields, the newer-evidence rule for `changed`,
   replacement bounds, the novelty check, supersede targets, the local scan,
-  the confidence floor and agreement from the confirm seat.
+  the confidence floor, and agreement between the seats on the resulting op
+  (op type, supersede target, and text after anchor and whitespace
+  normalization).
 - Mapping from verdicts to `replace_block`, `add_previously`,
   `supersede_card` and `append_evidence`, one card per proposal.
 
@@ -380,8 +382,18 @@ Tests (`tests/test_memory_verify_contract.py`):
   abstains.
 - A replacement that adds a URL, path, host, email, code span, flag or long
   number absent from the block and quotes is rejected.
-- A confirm seat that disagrees makes the block abstain with
+- A confirm seat with a different verdict makes the block abstain with
+  `seat_disagreement`, and one whose reply fails the checks abstains with
   `verify_unconfirmed`.
+- Both seats say `contradicted` with replacements that differ in wording,
+  case or punctuation: the block abstains with `seat_disagreement`.
+- Replacements that differ only in claim anchors, surrounding whitespace or
+  internal whitespace runs agree, and the proposal carries the proposing
+  seat's exact bytes.
+- Both seats say `superseded` with different `other_card` targets: the block
+  abstains with `seat_disagreement`.
+- One seat proposes `replace_block` and the other `add_previously` for the
+  same block: the block abstains with `seat_disagreement`.
 - The adversarial and shared-source fixtures from slice 11 produce no op
   through the fake seats.
 - A marker in card text cannot match the per-call nonce.
