@@ -1224,8 +1224,11 @@ The operator flow has three steps:
    would change, files already anchored, and files skipped by reason.
 2. Run it again with `--apply`. Each changed card is written through a temp file
    in its own directory, synced, and renamed over the original, with the
-   original mode kept. A card that changed since it was scanned is left alone
-   and counted as failed.
+   original mode and owner kept. The card stays open and locked from the
+   content check through the rename, and the command rechecks its inode, size,
+   timestamps and bytes just before the rename. A card that changed since it
+   was scanned, or whose owner cannot be kept, is left alone and counted as
+   failed.
 3. Let the normal sync push publish the anchored revisions. The command writes
    local files only and never talks to the hub.
 
@@ -1236,7 +1239,8 @@ addressable block is skipped as `opaque`.
 
 Other skip reasons are `symlink` (the card or a directory above it is a
 symlink), `outside-roots`, `read-only` (the path matches `read_only_paths`),
-`unreadable`, `too-large` (over 256 KiB before or after anchoring), `withheld`
+`unreadable`, `byte-order-mark` (the file starts with a UTF-8 BOM, which the
+proposal parser does not strip), `too-large` (over 256 KiB before or after anchoring), `withheld`
 (a `visibility` the sync push does not publish), `unsupported-frontmatter`,
 `invalid-anchor-state` (duplicate or malformed anchors), and
 `reservation-limit` (more than 4,096 reserved anchors). `--path <glob>` limits

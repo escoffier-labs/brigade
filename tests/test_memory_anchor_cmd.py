@@ -333,3 +333,89 @@ def test_replacement_failure_cleans_up_and_keeps_original(tmp_path, monkeypatch)
         memory_anchor_cmd._replace(path, change)
     assert path.read_bytes() == original
     assert not [p for p in path.parent.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_same_inode_edit_before_rename_is_refused(tmp_path, monkeypatch):
+    target = tmp_path / "ws"
+    path = make_card(target, "inplace", "In place claim.")
+    reason, change = memory_anchor_cmd._plan_file(path, f"{CARDS}/inplace.md")
+    assert reason is None and change is not None
+    edited = b"---\ntopic: inplace\n---\nAn editor wrote this into the same inode.\n"
+    real = memory_anchor_cmd._keep_owner
+    inode = path.stat().st_ino
+
+    def edit_then_keep(fd, before):
+        # Runs after the content check and the temp write, before the final recheck.
+        with open(path, "r+b") as handle:
+            handle.write(edited)
+            handle.truncate()
+        real(fd, before)
+
+    monkeypatch.setattr(memory_anchor_cmd, "_keep_owner", edit_then_keep)
+    with pytest.raises(OSError, match="changed since it was scanned"):
+        memory_anchor_cmd._replace(path, change)
+    assert path.stat().st_ino == inode
+    assert path.read_bytes() == edited
+    assert not [p for p in path.parent.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_byte_order_mark_card_is_skipped_unchanged(tmp_path, capsys):
+    target = tmp_path / "ws"
+    path = target / CARDS / "bom.md"
+    path.parent.mkdir(parents=True)
+    original = b"\xef\xbb\xbf---\ntopic: bom\nscope: repo\nevidence: []\n---\nBOM claim.\n"
+    path.write_bytes(original)
+    code, payload = run(target, "--apply", "--json", capsys=capsys)
+    assert code == 0
+    assert payload["files_skipped"]["byte-order-mark"] == 1
+    assert payload["files_changed"] == 0
+    assert path.read_bytes() == original
+
+
+def test_locked_card_is_refused(tmp_path, capsys):
+    fcntl = pytest.importorskip("fcntl")
+    target = tmp_path / "ws"
+    path = make_card(target, "locked", "Locked claim.")
+    original = path.read_bytes()
+    with open(path, "rb") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        code, payload = run(target, "--apply", "--json", capsys=capsys)
+    assert code == 1
+    assert payload["files_failed"] == 1 and payload["files_changed"] == 0
+    assert path.read_bytes() == original
+
+
+def test_owner_that_cannot_be_kept_refuses_the_card(tmp_path, monkeypatch):
+    out = tmp_path / "temp"
+    out.write_bytes(b"x")
+    fd = os.open(out, os.O_RDONLY)
+    try:
+        created = os.fstat(fd)
+        fields = list(created)
+        fields[4] = created.st_uid + 1  # st_uid of a different owner
+        foreign = os.stat_result(fields)
+
+        def refuse(*args, **kwargs):
+            raise PermissionError("not permitted")
+
+        monkeypatch.setattr(os, "fchown", refuse)
+        with pytest.raises(OSError, match="cannot keep the card's owner"):
+            memory_anchor_cmd._keep_owner(fd, foreign)
+        memory_anchor_cmd._keep_owner(fd, created)
+    finally:
+        os.close(fd)
+
+
+def test_owner_failure_leaves_the_card_and_no_temp(tmp_path, capsys, monkeypatch):
+    target = tmp_path / "ws"
+    path = make_card(target, "owned", "Owned claim.")
+    original = path.read_bytes()
+
+    def refuse(fd, before):
+        raise OSError("cannot keep the card's owner")
+
+    monkeypatch.setattr(memory_anchor_cmd, "_keep_owner", refuse)
+    code, payload = run(target, "--apply", "--json", capsys=capsys)
+    assert code == 1 and payload["files_failed"] == 1
+    assert path.read_bytes() == original
+    assert not [p for p in path.parent.iterdir() if p.name.endswith(".tmp")]

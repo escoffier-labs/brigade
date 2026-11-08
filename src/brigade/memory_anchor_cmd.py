@@ -12,6 +12,7 @@ prints card text.
 
 from __future__ import annotations
 
+import codecs
 import fnmatch
 import json
 import os
@@ -35,6 +36,7 @@ SKIP_REASONS = (
     "outside-roots",
     "read-only",
     "unreadable",
+    "byte-order-mark",
     "too-large",
     "withheld",
     "unsupported-frontmatter",
@@ -111,6 +113,10 @@ def _plan_file(path: Path, rel: str) -> tuple[str | None, _Change | None]:
     try:
         original = io.read_bytes(path, limit=io.MAX_CARD_BYTES)
         assert original is not None
+        # The shared proposal parser does not strip a BOM, so it would miss the
+        # frontmatter fence and anchor frontmatter lines as claims. Leave these alone.
+        if original.startswith(codecs.BOM_UTF8):
+            return "byte-order-mark", None
         text = original.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         return "unreadable", None
@@ -146,50 +152,88 @@ def _plan_file(path: Path, rel: str) -> tuple[str | None, _Change | None]:
 def _replace(path: Path, change: _Change) -> None:
     """Atomically swap in `change.updated`, only while the file still holds `change.original`.
 
-    The temp file lives in the card's directory, is fsynced before the rename,
-    and takes the original mode (and owner when permitted). A file swapped for
-    a symlink or another inode since the plan is refused.
+    The card stays open and, where flock exists, exclusively locked from the
+    content check until after the rename. Immediately before the rename the
+    command rechecks the inode, size, mtime, ctime and bytes, so an edit to the
+    same inode after the scan is refused instead of overwritten. The temp file
+    lives in the card's directory, is fsynced before the rename, and takes the
+    original mode and owner. A card whose owner cannot be kept is refused.
     """
     with io.directory(path.parent) as parent:
         name = path.name
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         try:
+            _lock(fd)
             before = os.fstat(fd)
             if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                 raise OSError("card must be a regular single-link file")
-            current = b""
-            while chunk := os.read(fd, 65536):
-                current += chunk
-                if len(current) > io.MAX_CARD_BYTES:
-                    raise OSError("card changed since it was scanned")
-        finally:
-            os.close(fd)
-        if current != change.original:
-            raise OSError("card changed since it was scanned")
-        temp = f".{name}.anchor-{secrets.token_hex(4)}.tmp"
-        out = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
-        try:
+            if _read_all(fd) != change.original:
+                raise OSError("card changed since it was scanned")
+            temp = f".{name}.anchor-{secrets.token_hex(4)}.tmp"
+            out = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
             try:
-                _write_all(out, change.updated)
-                os.fchmod(out, stat.S_IMODE(before.st_mode))
                 try:
-                    os.fchown(out, before.st_uid, before.st_gid)
+                    _write_all(out, change.updated)
+                    os.fchmod(out, stat.S_IMODE(before.st_mode))
+                    _keep_owner(out, before)
+                    os.fsync(out)
+                finally:
+                    os.close(out)
+                live = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if (live.st_dev, live.st_ino) != (before.st_dev, before.st_ino):
+                    raise OSError("card was replaced since it was scanned")
+                if _stamp(os.fstat(fd)) != _stamp(before) or _read_all(fd) != change.original:
+                    raise OSError("card changed since it was scanned")
+                os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
+            except BaseException:
+                try:
+                    os.unlink(temp, dir_fd=parent)
                 except OSError:
                     pass
-                os.fsync(out)
-            finally:
-                os.close(out)
-            live = os.stat(name, dir_fd=parent, follow_symlinks=False)
-            if (live.st_dev, live.st_ino) != (before.st_dev, before.st_ino):
-                raise OSError("card was replaced since it was scanned")
-            os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
-        except BaseException:
-            try:
-                os.unlink(temp, dir_fd=parent)
-            except OSError:
-                pass
-            raise
+                raise
+        finally:
+            os.close(fd)
         os.fsync(parent)
+
+
+def _lock(fd: int) -> None:
+    """Take a cooperative exclusive lock so lock-aware writers and other runs wait."""
+    try:
+        import fcntl
+    except ImportError:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        raise OSError("card is locked by another writer") from exc
+
+
+def _read_all(fd: int) -> bytes:
+    os.lseek(fd, 0, os.SEEK_SET)
+    data = b""
+    while chunk := os.read(fd, 65536):
+        data += chunk
+        if len(data) > io.MAX_CARD_BYTES:
+            raise OSError("card changed since it was scanned")
+    return data
+
+
+def _stamp(info: os.stat_result) -> tuple[int, int, int]:
+    return (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _keep_owner(fd: int, before: os.stat_result) -> None:
+    """Give the temp file the card's owner, or refuse the card rather than change it."""
+    created = os.fstat(fd)
+    if (created.st_uid, created.st_gid) == (before.st_uid, before.st_gid):
+        return
+    try:
+        os.fchown(fd, before.st_uid, before.st_gid)
+    except OSError as exc:
+        raise OSError("cannot keep the card's owner") from exc
+    kept = os.fstat(fd)
+    if (kept.st_uid, kept.st_gid) != (before.st_uid, before.st_gid):
+        raise OSError("cannot keep the card's owner")
 
 
 def _write_all(fd: int, data: bytes) -> None:
