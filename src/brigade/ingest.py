@@ -88,6 +88,10 @@ class StaleCardError(OSError):
     """The card no longer matches the expected SHA a handoff was written against."""
 
 
+class ChangedHandoffError(OSError):
+    """The handoff's bytes differ from the snapshot that was delivered."""
+
+
 class TrackedHandoffError(RuntimeError):
     """A handoff git tracks (or may track) must never be moved out of place."""
 
@@ -290,17 +294,20 @@ def ingest_into(
             # One unreadable or unarchivable handoff is recorded and skipped;
             # it must not abort the rest of the batch.
             try:
-                sha = hashlib.sha256(path.read_bytes()).hexdigest()
+                # One read. The digest, the parse and every delivered copy
+                # come from these bytes, so the digest names what was handled.
+                snapshot = path.read_bytes()
+                sha = hashlib.sha256(snapshot).hexdigest()
                 if sha in stats.seen_digests:
                     if not dry_run:
-                        _archive(path, processed_dir)
+                        _archive(path, processed_dir, sha)
                     stats.skipped += 1
                     stats.actions.append(_summary("skip", path.name, "duplicate-content"))
                     continue
                 # Bad bytes or malformed structure belong to this handoff
                 # only. Guard and invariant failures further on stay fatal.
                 try:
-                    sections = parse(path)
+                    sections = parse(path, snapshot)
                 except UnicodeDecodeError:
                     _record_failure(stats, path, "invalid-encoding")
                     continue
@@ -321,9 +328,15 @@ def ingest_into(
                     inbox_dir=inbox_dir,
                     processed_dir=processed_dir,
                     dry_run=dry_run,
+                    snapshot=snapshot,
                 )
             except TrackedHandoffError:
                 action = Action("skipped", _summary("skip", path.name, _TRACKED_SKIP_CODE))
+            except ChangedHandoffError:
+                # Changed since it was read: what was delivered is not what
+                # sits here, so leave it pending and do not count the digest.
+                _record_failure(stats, path, "handoff-changed")
+                continue
             except OSError:
                 _record_failure(stats, path, "io-error")
                 continue
@@ -347,9 +360,9 @@ def ingest_into(
     return 0
 
 
-def parse(path: Path) -> Dict[str, str]:
+def parse(path: Path, data: bytes | None = None) -> Dict[str, str]:
     """Split a handoff into sections keyed by lowercased ## heading."""
-    body = path.read_text(encoding="utf-8")
+    body = data.decode("utf-8") if data is not None else path.read_text(encoding="utf-8")
     sections: Dict[str, str] = {}
     last_name = None
     last_pos = 0
@@ -776,11 +789,13 @@ def _execute(
     inbox_dir: Path,
     processed_dir: Path,
     dry_run: bool,
+    snapshot: bytes | None = None,
 ) -> Action:
     from .inbox_lock import InboxLockTimeout
     from .memory_evidence_log import log_match
 
     name = handoff_path.name
+    snapshot_sha = hashlib.sha256(snapshot).hexdigest() if snapshot is not None else None
     # Re-check before destination writes as well as at the final archive boundary.
     if not dry_run and _is_tracked(handoff_path, _git_tracked_files(handoff_path.parent)):
         raise TrackedHandoffError(f"refusing to ingest git-tracked handoff {handoff_path}")
@@ -813,10 +828,11 @@ def _execute(
                 inbox_dir,
                 processed_dir,
                 dry_run,
+                snapshot,
             )
         summary = _summary("promote", name, outcome.code)
         if not dry_run:
-            _archive(handoff_path, processed_dir)
+            _archive(handoff_path, processed_dir, snapshot_sha)
         return Action("promoted", summary)
 
     if outcome.kind == "reinforced":
@@ -830,7 +846,7 @@ def _execute(
                 today=date.today(),
                 evidence_pointer=evidence_pointer,
             )
-            log_match(target, outcome.match, _archive(handoff_path, processed_dir))
+            log_match(target, outcome.match, _archive(handoff_path, processed_dir, snapshot_sha))
         return Action("reinforced", summary)
 
     if outcome.kind == "routed":
@@ -854,8 +870,9 @@ def _execute(
                     inbox_dir,
                     processed_dir,
                     dry_run,
+                    snapshot,
                 )
-            _archive(handoff_path, processed_dir)
+            _archive(handoff_path, processed_dir, snapshot_sha)
         return Action("routed", summary)
 
     if outcome.kind in ("inboxed", "skipped"):
@@ -868,14 +885,14 @@ def _execute(
             inbox_dir.mkdir(parents=True, exist_ok=True)
             # Copy the original file verbatim so reviewers see what the
             # harness actually wrote, not a reconstruction.
-            original = handoff_path.read_text(encoding="utf-8")
+            original = snapshot.decode("utf-8") if snapshot is not None else handoff_path.read_text(encoding="utf-8")
             header = (
                 f"<!-- routed from {handoff_worktrees.safe_text(handoff_path.name)}\n"
                 f"     reason: {outcome.code}{_match_meta(outcome, target)}\n     routed-at: {slug} -->\n\n"
             )
             dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
             log_match(target, outcome.match, dest)
-            _archive(handoff_path, processed_dir)
+            _archive(handoff_path, processed_dir, snapshot_sha)
         # Both inboxed and skipped are now archived; classify them uniformly.
         return Action("inboxed", summary)
 
@@ -1070,10 +1087,12 @@ def _list_handoffs(handoffs_dir: Path) -> tuple[List[Path], List[Path]]:
     return out, tracked
 
 
-def _archive(src: Path, processed_dir: Path) -> Path:
+def _archive(src: Path, processed_dir: Path, expected_sha: str | None = None) -> Path:
     # Re-check right before the move: a file tracked after listing must stay.
     if _is_tracked(src, _git_tracked_files(src.parent)):
         raise TrackedHandoffError(f"refusing to archive git-tracked handoff {src}")
+    if expected_sha is not None and hashlib.sha256(src.read_bytes()).hexdigest() != expected_sha:
+        raise ChangedHandoffError(f"handoff changed since it was read: {src.name}")
     processed_dir.mkdir(parents=True, exist_ok=True)
     dest = processed_dir / src.name
     if dest.exists():

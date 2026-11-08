@@ -1834,8 +1834,8 @@ def test_ingest_rechecks_tracking_before_document_append(tmp_target: Path, monke
 
     with monkeypatch.context() as patch:
 
-        def change_tracking_after_listing(path: Path):
-            sections = real_parse(path)
+        def change_tracking_after_listing(path: Path, *args):
+            sections = real_parse(path, *args)
             if tracking_change == "tracked":
                 _git(tmp_target, "add", "-f", "--", str(path.relative_to(tmp_target)))
             else:

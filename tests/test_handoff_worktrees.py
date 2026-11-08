@@ -182,10 +182,10 @@ def test_parse_value_error_is_a_per_item_failure(tmp_target: Path, monkeypatch, 
     good = _handoff(inbox, "2026-11-08-0901-good.md", "good")
     real_parse = ingest_mod.parse
 
-    def parse(path):
+    def parse(path, *args):
         if path.name == bad.name:
             raise ValueError("malformed fence")
-        return real_parse(path)
+        return real_parse(path, *args)
 
     monkeypatch.setattr(ingest_mod, "parse", parse)
     assert ingest_mod.run(tmp_target) == 0
@@ -194,6 +194,35 @@ def test_parse_value_error_is_a_per_item_failure(tmp_target: Path, monkeypatch, 
     assert not good.exists()
     assert "[invalid-content]" in out
     assert "malformed fence" not in out
+
+
+def test_handoff_changed_after_read_is_never_archived_undelivered(tmp_target: Path, monkeypatch):
+    inbox = _seed(tmp_target)
+    a = _handoff(inbox, "2026-11-08-0900-a.md", "X-CONTENT")
+    b = _handoff(inbox, "2026-11-08-0901-b.md", "X-CONTENT")
+    real_parse = ingest_mod.parse
+    state = {"done": False}
+
+    def parse(path, *args):
+        if path.name == a.name and not state["done"]:
+            state["done"] = True
+            a.write_text(_HANDOFF.format(summary="Y-CONTENT"))  # writer changes a.md mid-ingest
+        return real_parse(path, *args)
+
+    monkeypatch.setattr(ingest_mod, "parse", parse)
+    assert ingest_mod.run(tmp_target) == 0
+
+    drafts = [d.read_text() for d in (tmp_target / "memory" / "handoff-inbox").glob("*.md")]
+    assert any("X-CONTENT" in d for d in drafts)  # X was delivered
+    processed = inbox / "processed"
+    archived = [p.read_text() for p in processed.glob("*.md")] if processed.is_dir() else []
+    if any("X-CONTENT" in text for text in archived):
+        assert any("X-CONTENT" in d for d in drafts)
+    # a.md now holds Y, which was never delivered, so it stays pending. b.md
+    # held X and was delivered or archived after X was delivered.
+    assert a.read_text() == _HANDOFF.format(summary="Y-CONTENT")
+    assert not b.exists() or "X-CONTENT" in b.read_text()
+    assert not any("Y-CONTENT" in text for text in archived)
 
 
 def test_guard_failure_in_decide_stays_fatal(tmp_target: Path, monkeypatch):
