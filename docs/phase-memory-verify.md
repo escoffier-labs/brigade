@@ -393,7 +393,14 @@ the reviewer decides whether it is true:
    `previously` text must appear in the original block or in a quote. A reply
    that adds one is rejected with `verify_novel_token`.
 6. `superseded_by` must be one of the related card ids supplied for that call,
-   live, in the same scope and with a newer head revision.
+   live, in the same scope and with a newer head revision. `superseded` may
+   produce an op only for a card with exactly one claim block.
+   `supersede_card` retires the whole card and the mirror then drops it, so
+   on a card with several claim blocks it would remove claims the verdict
+   never covered. The related-card input of ids and titles also cannot show
+   that the successor holds those other claims. A `superseded` verdict on a
+   multi-block card therefore abstains with `supersede_partial`, which the run
+   report counts.
 7. The replacement and history text are scanned locally with the hub's bundle
    before submission, and the hub scans them again on `propose`.
 8. Only `high` confidence produces an op. `medium`, `low` and `insufficient`
@@ -425,7 +432,7 @@ prove the evidence right, so every op still waits for a reviewer.
 | `contradicted` | `replace_block` with the replacement | The hub appends `previously X, now Y`, so the old wording stays in history. |
 | `changed` | `replace_block` with the replacement | Same op. The verdict is kept in the manifest so reviewers can tell a wrong claim from a stale one. |
 | `history` | `add_previously` with the `previously` text | The claim is current, but cited older evidence records a different earlier value a reader may meet. |
-| `superseded` | `supersede_card` with the related card as `other_card` | The newer card already holds the corrected claim. |
+| `superseded` | `supersede_card` with the related card as `other_card` | Single-claim-block cards only (check 6). The newer card already holds the corrected claim. A multi-block card abstains with `supersede_partial`. |
 | `supported` with uncited support | `append_evidence` | Only with `[verify] propose_confirmations = true`, default false. |
 | `supported` otherwise | None | Recorded in local state as verified. |
 

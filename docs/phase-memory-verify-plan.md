@@ -394,6 +394,9 @@ Tests (`tests/test_memory_verify_contract.py`):
   is rejected by check 4 before agreement is tested.
 - Replacements that differ in spacing inside a code span, or in a non-ASCII
   whitespace character, abstain with `seat_disagreement`.
+- A `superseded` verdict on a card with two or more claim blocks abstains
+  with `supersede_partial` and opens no `supersede_card`, while the same
+  verdict on a single-block card can.
 - Both seats say `superseded` with different `other_card` targets: the block
   abstains with `seat_disagreement`.
 - One seat proposes `replace_block` and the other `add_previously` for the
