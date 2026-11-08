@@ -577,18 +577,84 @@ Use this when importing a vault into a collection the workspace also reads: excl
 
 ## Reviewed proposals on hub memory
 
-The Rust hub accepts `propose`, `decide` and `rollback` on `POST /memory`.
+The Rust hub accepts `propose`, `decide`, `rollback`, `proposal_list` and
+`proposal_show` on `POST /memory`.
 These actions are separate from the Python client's existing
 `memory hub proposals list` and `drop`, which manage local conflict proposals.
-S19a adds no Python submission or decision subcommands.
+Use `brigade memory proposals` for hub proposals:
 
-Every request carries a fresh time-ordered `client_event_id`. Repeating the
+```bash
+brigade memory proposals list --target <reflect-folder>
+brigade memory proposals list --all --target <reflect-folder>
+brigade memory proposals show <proposal-id> --target <reflect-folder>
+brigade memory proposals decide <proposal-id> --reject --target <reflect-folder>
+brigade memory proposals decide <proposal-id> --accept --expected-policy-digest <sha256> --target <reflect-folder>
+```
+
+`list` defaults to pending proposals. Global listing requires the explicit
+operator capability `list_proposals` granted on `*`. A principal without that
+capability always receives an empty list and null cursor, independently of
+hidden proposal counts. This gate keeps each request's scan bounded without
+turning empty pages into a visibility oracle. Scoped `read` and `review`
+grants alone do not permit global listing. Listing operators may observe global
+pagination shape, but still need `read` on every target to see a summary.
+
+An administrator grants the listing capability separately from scoped card access:
+
+```json
+{"action":"grant","principal":"agent:reviewer","scope":"*","rights":["list_proposals"],"client_event_id":"<26-character time-ordered id>"}
+```
+
+The command returns at most 100 summaries without
+diffs. Use `--limit` and the returned opaque `next_after` as `--after` to continue.
+The cursor is an HMAC-authenticated handle. Scan positions stay in a bounded
+hub-local cache of 4,096 handles and are never encoded in the response.
+Each principal can hold at most 64 handles. Repeated requests for the same
+position, epoch and filter reuse the handle. A principal can evict only its
+own oldest handle. If the global cache is full, a new principal's request is
+refused instead of evicting another principal's handles.
+Handles bind the principal, hub log epoch and `--all` selection. Altered,
+expired or mismatched handles are refused. Restart a list without `--after`
+after a hub restart or eviction of a principal's own old handle. Listing
+operators' scans advance over hidden rows without exposing their ids or
+creation timestamps.
+A page can be empty when its proposals are outside the caller's grants.
+Continue while `next_after` is present. `--all` includes held, stale and decided
+proposals. Held proposals appear only with `--all`. `show` asks the hub for the stored diff. The hub returns a null diff
+unless the caller has `review` on every target scope. Missing `read` on any
+target refuses the show and hides the proposal from lists. The client never
+reconstructs a diff from card reads or replica data.
+
+These commands use explicit memory credentials from the user-level
+`[memory_hub]` table or the `BRIGADE_MEMORY_HUB_URL` and
+`BRIGADE_MEMORY_HUB_TOKEN_FILE` environment pair. Alternatively, supply both
+`--hub-url https://hub.example.test` and `--token-file /path/to/private-token`.
+The file must be absolute, private and owned by the user. No option accepts a
+secret value. Fleet credentials and workspace credential destinations are
+refused. Use a separate reviewer credential with `read` and `review` grants.
+
+`decide` requires exactly one of `--accept` or `--reject` and reads the current
+hub epoch before sending a fresh event id. `--accept` always requires
+`--expected-policy-digest`. Read `policy_digest` with `memory proposals show`
+and pass that digest, or `none` when it is null. An accept without a pin
+fails before contacting the hub and prints the show command. `--reject`
+remains available without a pin. A policy-stale decision requires
+`--expected-policy-digest` naming the current policy. Use `--expected-policy-digest none` to pin the absence
+of a policy after its removal. A digest mismatch reports
+`memory_policy_digest_mismatch` and the hub's current digest. Review that policy
+before resubmitting. The CLI never retries a decision under a changed policy.
+Self-review and all other hub decision gates remain enforced by the hub.
+Decision output contains only the proposal id, state and reason, without a diff.
+
+Every write request carries a fresh time-ordered `client_event_id`. Repeating the
 same request under the same principal returns its committed response. Reusing
 an id for different bytes is refused. Expired ids are refused before replay.
 Authorization is checked again before a stored diff is returned.
 
 | Action | Request fields in addition to `action` and `client_event_id` | Target-scope grant |
 |---|---|---|
+| `proposal_list` | `all`, `limit`, `after` (all optional, no event id) | `list_proposals` on `*` to list, plus `read` on every target to see a summary |
+| `proposal_show` | `proposal_id` (no event id) | `read` on every target, with `review` required for diff text |
 | `propose` | `base_epoch`, `ops` | `read` and `reflect` on every addressed card, including `other_card` |
 | `decide` | `proposal_id`, `base_epoch`, `decision` (`accept` or `reject`), `expected_policy_digest` (required when re-deciding after a policy change) | `read` and `review` on every addressed card |
 | `rollback` | `proposal_id` of an applied proposal, `base_epoch` | `read` and `review` on every addressed card |
@@ -1159,6 +1225,75 @@ its existing evidence and review candidates when hub mode is off. S19e-1 adds
 attestation and the gated automatic route. Automatic apply requires a separate call with every gate satisfied.
 Scheduled reflection only proposes.
 
+Hub reflection selects scopes before deriving or bounding candidates. Each scope
+allows at most 50,000 live cards and 64 MiB of UTF-8 card text, replacing the
+local reflection limit of 1,024 files. Duplicate grouping runs one scope at a
+time. The replica also stays within the smaller of `[hub] replica_max_mb`
+(default 50 MiB) and a fixed 64 MiB reflect ceiling. These bounds accommodate
+tens of thousands of ordinary cards while bounding the snapshot and derived
+candidate memory. They do not load an unbounded hub corpus.
+`hub_reflect_scope_limit` names the per-scope card or text limit.
+`hub_reflect_replica_limit` names the replica byte cap. Both fail closed before
+submitting proposals. Narrow the configured read scopes for a dedicated run.
+Before loading an existing replica or an interrupted rebuild, reflection
+checks the size of every on-disk heads snapshot (`heads-<sha256>.json`, or
+`heads.json` for a replica saved by an older release). A file above the 64 MiB
+ceiling plus 1 MiB of serialization slack is refused with
+`hub_reflect_replica_limit` before JSON parsing. A save writes the new snapshot
+under its digest name and then replaces `meta.json`, which names it, so an
+interrupted save leaves the previous snapshot and metadata in place and the
+next pull continues from them. The save syncs the replica directory after each
+rename (not on Windows, which cannot sync a directory), so after a power loss
+`meta.json` names a snapshot that survived. If the snapshot `meta.json` names
+is missing anyway, every read treats the replica as absent: search and `card`
+fall back as when no replica exists, `status` reports `replica_unusable`, and
+the next pull discards the replica and rebuilds it from the hub. Reflection's
+own pull does the same rebuild under the 50,000-card and 64 MiB bounds, so a
+scheduled run recovers without an unbounded `memory hub pull`. A snapshot that
+is present but oversized, does not match its recorded digest or card count, or
+is not a regular file still fails reflection before it is parsed.
+
+Downgrading Brigade past the release that introduced digest-named snapshots
+requires deleting both `.brigade/memory/hub/replica` and
+`.brigade/memory/hub/replica.building` before running the older build. That
+build reads `meta.json`, finds no `heads.json`, and would otherwise serve an
+empty replica at a current watermark. The building directory matters too: an
+interrupted rebuild left there holds a watermark and a digest-named snapshot,
+so the older build would resume it from that watermark with no `heads.json`
+and later publish it as a replica missing every card fetched before the
+interruption. With both directories gone, its next pull rebuilds the replica
+from the hub.
+
+Reflect also limits the whole selected replica to 50,000
+live cards, including unscoped runs. Sync replays the log as metadata first,
+so a card put and later retired never counts toward the bound or costs a body
+fetch. Once the replay reaches the log head, sync checks the live count before
+fetching any full body, and saves check it again before serialization. A reviewed
+proposal's apply or rollback event does not say whether its card ended live
+or retired, so sync counts it as live while that still fits the bound. Only
+when its state decides the bound does sync read that card revision once,
+metadata plus at most one text chunk, and a card found retired is dropped
+without a body fetch. Accepted deduplication therefore never blocks a
+rebuild. The deferred
+log metadata has its own byte budget, and exceeding it fails with
+`hub_reflect_replica_limit`. The watermark advances only after the bodies land. Each save records a card count
+and snapshot digest. Reads validate the stored count against a streaming count
+and digest before decoding the full heads dictionary, including legacy
+snapshots without count metadata. A false low count cannot bypass the bound.
+`meta.json` is limited to 8 MiB before parsing. Ordinary sync replicas retain
+their configured byte limits and can hold more cards outside a reflect run.
+The CLI reports local failure codes and fixed reasons without card text.
+
+`run --scope <scope>` selects one configured read scope before fetching card
+heads or refreshing legacy scan metadata. Status and log reads still use the
+hub's existing protocol. Other scopes' log metadata can appear in a log page,
+but the run fetches no card text and opens no proposals for those scopes.
+A non-dry-run `--scope` refuses a replica whose recorded `read_scopes` include
+other scopes, with `hub_reflect_dedicated_replica_required`. It preserves the
+existing replica and points to the dedicated-folder setup below. Use that
+folder instead of the sync principal's replica. A dry run may still refresh
+the local replica, so it also belongs in the dedicated folder.
+
 `brigade memory reflect run --dry-run --target <workspace>` performs only hub
 reads. It can refresh the local replica, but sends no `propose`, `decide`,
 `rollback` or card write. It reports the proposed ops and current pause state,
@@ -1194,8 +1329,8 @@ ops count as a successful run.
 Install the optional daily entry with:
 
 ```bash
-brigade memory care install --target <workspace> --entry memory-reflect
-brigade care status --target <workspace> --entry memory-reflect
+brigade memory care install --target <reflect-folder> --entry memory-reflect --scope repo:example
+brigade care status --target <reflect-folder> --entry memory-reflect
 ```
 
 The entry runs at 10:00 local time and uses the existing care installer:
@@ -1240,6 +1375,52 @@ and refuses fleet node-token fallback before contacting the hub. A workspace
 may choose scopes and hub mode, but never the hub URL or credential path.
 Reflect refuses admin credentials.
 
+### Dedicated reflect folder
+
+Create a separate folder, such as `~/memory-reflect`, with this file at
+`.brigade/memory-care.toml`:
+
+```toml
+[hub]
+mode = "read"
+read_scopes = ["repo:example"]
+replica_max_mb = 50
+```
+
+Use the same exact scope when installing the entry:
+
+```bash
+brigade memory care install --target ~/memory-reflect --entry memory-reflect --scope repo:example
+```
+
+The single `--scope` matches `memory reflect run --scope`. One job uses one
+scope, which keeps its grant requirement explicit. Reinstalling a scoped
+entry retains its scope when `--scope` is omitted. The Windows replacement
+command inspects the saved Task Scheduler action before replacing it and
+preserves one valid scope. Ambiguous or invalid saved scopes refuse replacement. To return to an unscoped
+entry, uninstall it with `brigade memory care uninstall --entry memory-reflect
+--target <reflect-folder>`, then install again without `--scope`. A workspace file still
+chooses only mode, scopes and replica size. It cannot supply a hub URL or token
+path. This folder owns its `.brigade/memory/hub/` replica and reflect schedule
+state. Do not point the sync principal at it or reuse the sync workspace for
+reflection.
+
+Use the service name printed by install to create a user-level systemd drop-in
+with `systemctl --user edit <service-name>`. Set paths and URL there:
+
+```ini
+[Service]
+Environment="BRIGADE_MEMORY_HUB_URL=https://hub.example.test"
+Environment="BRIGADE_MEMORY_HUB_TOKEN_FILE=%h/.config/brigade/reflect-token"
+```
+
+Keep the credential bytes in that private, user-owned token file, outside the
+reflect folder. Use a principal with only `read` and `reflect` on `repo:example`.
+The drop-in stays outside Brigade's managed service block. Reload the user
+manager and enable the timer using the commands printed by install. For a
+manual dry run, set the same environment pair in the invoking shell. A successful
+manual non-dry run resumes a paused job.
+
 The installed timer sets only `PATH`. Configure `[memory_hub]` in the user's
 `fleet.toml` for scheduled jobs unless you import the environment pair into the
 user service manager. A custom `BRIGADE_HOME` must also be available there if
@@ -1257,7 +1438,7 @@ on that scope, so retain other rights only when that principal needs them.
 The scheduled job needs `read` plus `reflect` on each target scope. It needs
 neither `write` nor `review`. Collections require their own exact scope grant.
 Read access alone allows a dry run, but never proposal submission.
-Partial `reflect` grants across configured `read_scopes` will pause the job
+Without `--scope`, partial `reflect` grants across configured `read_scopes` will pause the job
 after repeated authorization failures.
 
 `brigade memory reflect rollback <proposal-id> --target <workspace>` requests

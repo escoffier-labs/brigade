@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from . import care_patrol, care_schedules, managed_block, memory_cmd, runbook_cmd
-from .care_launchers import entry_argv, explicit_workspace, runbook_argv
+from .care_launchers import entry_argv, explicit_workspace, persisted_scope, runbook_argv, scoped_entries
 from .care_windows import create_command as _windows_create_command, task_run as _schtasks_task_run
 from .isolated_exec import trusted_cwd
 
@@ -77,6 +77,7 @@ class CareEntry:
     shell: str | None = None  # multi-command shell body without cd/PATH
     runbook_id: str | None = None
     requires_existing_runbook: bool = False
+    reflect_scope: str | None = None
 
 
 # Schedules and recipes mirror docs/scheduled-care.md. Where a shipped
@@ -986,6 +987,7 @@ def _launchd_plists(
     result: dict[str, bytes] = {}
     for entry in selected:
         label = f"dev.brigade.care.{identity}.{entry.entry_id}"
+        entry = persisted_scope(entry, _launchd_dir(home) / f"{label}.plist", "launchd")
         payload: dict[str, Any] = {
             "Label": label,
             "ProgramArguments": entry_argv(entry, workspace),
@@ -1137,6 +1139,7 @@ def install(
     home: Path | None = None,
     entry_ids: list[str] | None = None,
     schedule_specs: list[str] | None = None,
+    scope: str | None = None,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -1148,6 +1151,11 @@ def install(
     entries, entry_error = _resolve_selected_entries(entry_ids)
     if entries is None:
         print(f"error: {entry_error}", file=sys.stderr)
+        return 2
+    try:
+        entries = scoped_entries(target, entries, scope)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
     runbook_error = _required_runbook_error(target, entries)
     if runbook_error:
@@ -1379,6 +1387,7 @@ def _systemd_unit_bodies(
     for entry in selected:
         service_name = f"brigade-care-{identity}-{entry.entry_id}.service"
         timer_name = f"brigade-care-{identity}-{entry.entry_id}.timer"
+        entry = persisted_scope(entry, _systemd_user_dir(home) / service_name, "systemd")
         exec_start = "ExecStart=" + " ".join(
             _systemd_quote_value(arg.replace("$", "$$")) for arg in entry_argv(entry, workspace)
         )

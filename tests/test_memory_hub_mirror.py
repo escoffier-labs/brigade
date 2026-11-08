@@ -301,7 +301,7 @@ def test_missing_replica_heads_never_wipes_mirror(setup, monkeypatch):
     card(replica)
     run(setup)
     before = {p.name: p.read_bytes() for p in out.iterdir()}
-    (replica.directory / "heads.json").unlink()
+    store.heads_path(replica.directory, replica.meta).unlink()
 
     def down(*_):
         raise hubc.HubUnavailable("unreachable")
@@ -1269,11 +1269,12 @@ def test_refresh_that_would_pass_the_replica_cap_changes_nothing(setup):
     held = store.replica(target)
     # Room for the legacy head as it is, not for the metadata the refresh adds.
     tight = dataclasses.replace(settings, replica_max_bytes=held.bytes() + 10)
-    before = (held.directory / "heads.json").read_bytes(), (held.directory / "meta.json").read_bytes()
+    heads = store.heads_path(held.directory, held.meta)
+    before = heads.read_bytes(), (held.directory / "meta.json").read_bytes()
     with pytest.raises(hubc.HubConfigError, match="cap"):
         sync.refresh_scan_metadata(target, client, tight)
     after = store.replica(target)
-    assert (after.directory / "heads.json").read_bytes() == before[0]
+    assert heads.read_bytes() == before[0]
     assert (after.directory / "meta.json").read_bytes() == before[1]
     assert all("scan_state" not in head for head in after.heads.values())
     # Within the cap the same refresh still works.

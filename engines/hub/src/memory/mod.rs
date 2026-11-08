@@ -25,7 +25,9 @@ pub mod index;
 pub mod ops;
 mod preflight;
 mod proposal_blocks;
+mod proposal_cursor;
 mod proposal_metadata;
+mod proposal_reads;
 mod proposal_tiers;
 pub mod proposals;
 mod pytables;
@@ -137,6 +139,7 @@ pub struct Store {
     readers: ReaderPool,
     hub: Arc<ReaderPool>,
     admin: String,
+    proposal_cursors: Arc<proposal_cursor::Cursors>,
     clock: ids::Clock,
     scanner: Arc<dyn Scanner>,
     last_sweep: std::sync::atomic::AtomicI64,
@@ -184,7 +187,7 @@ pub fn read_only(body: &[u8]) -> bool {
     serde_json::from_slice::<Json>(body).is_ok_and(|v| {
         matches!(
             v.get("action").and_then(Json::as_str),
-            Some("card" | "log" | "search" | "status")
+            Some("card" | "log" | "search" | "status" | "proposal_list" | "proposal_show")
         )
     })
 }
@@ -233,12 +236,14 @@ impl Store {
         let proposal_limits = config.proposal_limits.clone();
         let writer = writer::Writer::start(config, db, options.arbiter.clone())
             .map_err(|e| e.to_string())?;
+        let proposal_cursors = Arc::new(proposal_cursor::Cursors::new(&options.admin_digest));
         Ok(Self {
             writer,
             arbiter: options.arbiter,
             readers,
             hub,
             admin: options.admin_digest,
+            proposal_cursors,
             clock: options.clock,
             scanner: options.scanner,
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
@@ -780,7 +785,9 @@ impl Store {
         };
         let action = map.get("action").and_then(Json::as_str).unwrap_or("");
         match action {
-            "card" | "log" | "status" => self.read(credential, action, map).await,
+            "card" | "log" | "status" | "proposal_list" | "proposal_show" => {
+                self.read(credential, action, map).await
+            }
             "search" => self.search(credential, map).await,
             "preflight" => self.preflight(credential, map).await,
             "reindex" | "embed_lease" | "embed_submit" | "embed_failed" => {
@@ -1434,9 +1441,19 @@ impl Store {
         let indexed_seq = self.index.current().indexed_seq;
         let retrieval = self.retrieval_status();
         let is_status = action == "status";
+        let proposal_cursors = self.proposal_cursors.clone();
         match self
             .readers
             .submit(move |c| {
+                if matches!(action.as_str(), "proposal_list" | "proposal_show") {
+                    return proposal_reads::read(
+                        &Conn(c),
+                        &credential,
+                        &action,
+                        &map,
+                        &proposal_cursors,
+                    );
+                }
                 reads(
                     &Conn(c),
                     &credential,

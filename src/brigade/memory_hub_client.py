@@ -322,7 +322,9 @@ def _refuse_fleet_credential(
                 raise HubConfigError(refusal)
 
 
-def _memory_hub_override(fleet: dict[str, str] | None) -> tuple[str, str, str] | None:
+def _memory_hub_override(
+    fleet: dict[str, str] | None, *, credential_pair: tuple[str, Path] | None = None
+) -> tuple[str, str, str] | None:
     """`(hub_url, token, source)` when memory has its own hub, else None to use the fleet settings.
 
     The environment pair outranks `[memory_hub]`. Each pair is all or nothing,
@@ -334,7 +336,10 @@ def _memory_hub_override(fleet: dict[str, str] | None) -> tuple[str, str, str] |
     config = _user_config()
     env_url = os.environ.get(ENV_HUB_URL, "").strip()
     env_file = os.environ.get(ENV_HUB_TOKEN_FILE, "").strip()
-    if env_url or env_file:
+    if credential_pair is not None:
+        url, path = credential_pair
+        source, url_name, file_name = "cli-file", "--hub-url", "--token-file"
+    elif env_url or env_file:
         for name, other, value in (
             (ENV_HUB_URL, ENV_HUB_TOKEN_FILE, env_url),
             (ENV_HUB_TOKEN_FILE, ENV_HUB_URL, env_file),
@@ -368,7 +373,9 @@ def _memory_hub_override(fleet: dict[str, str] | None) -> tuple[str, str, str] |
     return url.rstrip("/"), token, source
 
 
-def load_settings(target: Path, *, fleet: dict[str, str] | None = None) -> HubSettings:
+def load_settings(
+    target: Path, *, fleet: dict[str, str] | None = None, credential_pair: tuple[str, Path] | None = None
+) -> HubSettings:
     """Settings for `target`. `fleet` stands in for the fleet settings: `hub_url`, `node_token`, `admin_token`.
 
     A memory override (see the module docstring) replaces the fleet values. In
@@ -398,7 +405,11 @@ def load_settings(target: Path, *, fleet: dict[str, str] | None = None) -> HubSe
         raise HubConfigError("[hub] replica_max_mb must be a positive integer")
     if mode == "off":
         return HubSettings(mode=mode, scope=scope, read_scopes=read_scopes, replica_max_bytes=max_mb * 1024 * 1024)
-    override = _memory_hub_override(fleet)
+    override = (
+        _memory_hub_override(fleet, credential_pair=credential_pair)
+        if credential_pair is not None
+        else _memory_hub_override(fleet)
+    )
     if override is not None:
         hub_url, token, source = override
     else:

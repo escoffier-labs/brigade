@@ -314,7 +314,11 @@ def test_narrow_run_preserves_unprocessed_submissions(setup, capsys, narrow):
     add_group(hub, scope="repo:example")
     assert run(target, capsys, "run")[0] == 0
     assert len(writes(hub)) == 2
-    assert run(target, capsys, "run", *narrow)[0] == 0
+    code, report = run(target, capsys, "run", *narrow)
+    if narrow[0] == "--scope":
+        assert code == 1 and report["error"] == "hub_reflect_dedicated_replica_required"
+    else:
+        assert code == 0
     assert run(target, capsys, "run")[0] == 0
     assert len(writes(hub)) == 2
 
@@ -505,7 +509,8 @@ def test_narrow_run_preserves_unprocessed_pending_id(setup, capsys, monkeypatch)
 
     monkeypatch.setattr(hub, "do_propose", lose_response_once)
     assert run(target, capsys, "run")[0] == 1
-    assert run(target, capsys, "run", "--scope", "fleet")[0] == 0
+    code, report = run(target, capsys, "run", "--scope", "fleet")
+    assert code == 1 and report["error"] == "hub_reflect_dedicated_replica_required"
     assert run(target, capsys, "run")[0] == 0
     assert len(attempts) == 2 and attempts[0] == attempts[1]
 

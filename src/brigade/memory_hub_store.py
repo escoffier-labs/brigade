@@ -4,7 +4,13 @@
   `seq` watermark, the `log_epoch` and the principal they were pulled under,
   and the read scopes they cover. A rebuild goes into `replica.building/` and
   is swapped in when the pull finishes; the old replica is removed first, so
-  nothing ever answers from it again.
+  nothing ever answers from it again. The heads snapshot is named by its digest
+  (`heads-<sha256>.json`) and `meta.json` names it, so replacing `meta.json`
+  publishes both and an interrupted save leaves the previous pair intact. The
+  directory is synced after each rename, so a power loss never keeps a
+  `meta.json` that names a snapshot whose entry was lost. A `meta.json` whose
+  named snapshot is gone anyway marks the replica unusable: reads treat it as
+  absent and the next pull rebuilds it.
 - `spool/<hub>/`: writes the hub has not acknowledged, one file per entry
   named by its time-ordered `client_event_id`, so name order is send order.
   Each hub has its own directory, so entries for one hub never block or count
@@ -30,6 +36,7 @@ included, out of Git.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -39,6 +46,8 @@ import stat
 from pathlib import Path
 from typing import Any, Iterator
 
+from . import memory_hub_replica_limits as limits
+
 PARENT_REL = ".brigade/memory"
 ROOT_REL = ".brigade/memory/hub"
 REPLICA = "replica"
@@ -46,6 +55,8 @@ BUILDING = "replica.building"
 SPOOL = "spool"
 PROPOSALS = "proposals"
 PUBLISHED = "published.json"
+LEGACY_HEADS = "heads.json"
+_HEX = frozenset("0123456789abcdef")
 LOCK = "lock"
 PULL_LOCK = "pull.lock"
 DROPPED = "dropped"
@@ -54,6 +65,8 @@ SPOOL_CAP = 10_000
 LOCK_DEADLINE_SECONDS = 30.0
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+# Windows cannot open a directory to sync it.
+_DIR_FSYNC = os.name != "nt"
 
 
 class StoreError(OSError):
@@ -132,14 +145,18 @@ def pulling(target: Path, *, deadline_seconds: float | None = None) -> Iterator[
 
 
 def write_private(path: Path, data: str) -> None:
-    """Write `data` as UTF-8 to a 0600 file through a temporary name and an atomic replace."""
+    """Write `data` as UTF-8 to a 0600 file through a temporary name and an atomic replace.
+
+    Newlines are written untranslated, so the file holds exactly `data`'s bytes on
+    every platform and a digest of the serialized text matches the file.
+    """
     private_dir(path.parent)
     if path.is_symlink():
         raise StoreError(f"{path} is a symlink")
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC, 0o600)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
@@ -149,21 +166,51 @@ def write_private(path: Path, data: str) -> None:
         raise
 
 
-def read_private(path: Path) -> str | None:
+# Errors a platform or filesystem uses to say a directory cannot be opened or
+# synced at all. Anything else (EIO, EACCES, EMFILE, ...) is a real failure.
+_DIR_SYNC_UNSUPPORTED = frozenset({errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EISDIR, errno.EBADF})
+
+
+def fsync_dir(directory: Path) -> None:
+    """Make the renames in `directory` durable. A no-op where directories cannot be synced (Windows)."""
+    if not _DIR_FSYNC:
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _CLOEXEC)
+    except OSError as exc:
+        if exc.errno not in _DIR_SYNC_UNSUPPORTED:
+            raise
+        return
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        # Some filesystems refuse a directory sync; the rename itself already happened.
+        if exc.errno not in _DIR_SYNC_UNSUPPORTED:
+            raise
+    finally:
+        os.close(fd)
+
+
+def read_private(path: Path, *, max_bytes: int | None = None) -> str | None:
     if path.is_symlink():
         raise StoreError(f"{path} is a symlink")
     try:
-        fd = os.open(path, os.O_RDONLY | _NOFOLLOW | _CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | _NOFOLLOW | _CLOEXEC | getattr(os, "O_NONBLOCK", 0))
     except FileNotFoundError:
         return None
     with os.fdopen(fd, "r", encoding="utf-8") as handle:
         if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
             raise StoreError(f"{path} is not a regular file")
-        return handle.read()
+        if max_bytes is not None and os.fstat(handle.fileno()).st_size > max_bytes:
+            raise limits.ReplicaLimitError("metadata")
+        raw = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
+        if max_bytes is not None and len(raw.encode("utf-8")) > max_bytes:
+            raise limits.ReplicaLimitError("metadata")
+        return raw
 
 
-def read_json(path: Path) -> Any:
-    raw = read_private(path)
+def read_json(path: Path, *, max_bytes: int | None = None) -> Any:
+    raw = read_private(path, max_bytes=max_bytes)
     if raw is None:
         return None
     try:
@@ -184,8 +231,18 @@ def write_json(path: Path, value: Any) -> None:
 
 
 def head_size(key: str, head: dict[str, Any]) -> int:
-    """Bytes `head` adds to `heads.json`, which is what `replica_max_mb` caps."""
+    """Bytes `head` adds to the heads snapshot, which is what `replica_max_mb` caps."""
     return len(_dumps({key: head}).encode("utf-8"))
+
+
+def heads_path(directory: Path, meta: dict[str, Any]) -> Path:
+    """The heads snapshot `meta` names, or `heads.json` for a replica saved before snapshot digests."""
+    digest = meta.get("heads_sha256")
+    if digest is None:
+        return directory / LEGACY_HEADS
+    if not (isinstance(digest, str) and len(digest) == 64 and set(digest) <= _HEX):
+        raise StoreError("invalid replica snapshot digest")
+    return directory / f"heads-{digest}.json"
 
 
 class Replica:
@@ -193,9 +250,28 @@ class Replica:
 
     def __init__(self, directory: Path) -> None:
         self.directory = directory
-        meta = read_json(directory / "meta.json") if directory.is_dir() else None
-        self.meta: dict[str, Any] = meta if isinstance(meta, dict) else {}
-        heads = read_json(directory / "heads.json") if self.meta else None
+        self.meta: dict[str, Any] = {}
+        # meta.json names a snapshot that is gone: the heads are lost, so this
+        # replica has no watermark and answers nothing until a pull rebuilds it.
+        self.snapshot_missing = False
+        heads = None
+        # A save replaces meta.json and then removes the snapshot the old one
+        # named. A reader that read the old meta.json in between retries once.
+        for _ in range(2):
+            meta = read_json(directory / "meta.json", max_bytes=limits.MAX_META_BYTES) if directory.is_dir() else None
+            self.meta = meta if isinstance(meta, dict) else {}
+            if not self.meta:
+                break
+            path = heads_path(directory, self.meta)
+            heads = limits.read_heads(path, self.meta) if limits.active() else read_json(path)
+            if heads is not None:
+                break
+        if heads is None and self.meta.get("heads_sha256") is not None:
+            # Bounded loads too: nothing was decoded, and a pull under the same
+            # bounds discards this replica and rebuilds it. A snapshot that is
+            # present but oversized, mismatched or not a regular file still raises.
+            self.snapshot_missing = True
+            self.meta = {}
         self.heads: dict[str, dict[str, Any]] = heads if isinstance(heads, dict) else {}
 
     @staticmethod
@@ -246,17 +322,43 @@ class Replica:
         return sum(head_size(key, head) for key, head in self.heads.items())
 
     def save(self) -> None:
-        private_dir(self.directory)
-        write_json(self.directory / "heads.json", self.heads)
+        limits.check_count(len(self.heads))
+        snapshot = _dumps(self.heads) + "\n"
         self.meta["cards"] = len(self.heads)
+        self.meta["heads_sha256"] = hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
         self.meta["bytes"] = self.bytes()
         self.meta["full"] = bool(self.missing)
-        write_json(self.directory / "meta.json", self.meta)
+        metadata = _dumps(self.meta) + "\n"
+        if len(metadata.encode("utf-8")) > limits.MAX_META_BYTES:
+            raise limits.ReplicaLimitError("metadata")
+        private_dir(self.directory)
+        # Snapshot first under its own name, then meta.json naming it: each is an
+        # atomic replace, so a reader sees the old pair or the new one, never a mix.
+        current = heads_path(self.directory, self.meta)
+        write_private(current, snapshot)
+        fsync_dir(self.directory)
+        write_private(self.directory / "meta.json", metadata)
+        # Durable before the previous snapshot goes, so a power loss keeps a pair meta.json can name.
+        fsync_dir(self.directory)
+        for stale in (self.directory / LEGACY_HEADS, *self.directory.glob("heads-*.json")):
+            if stale != current:
+                # A reader may hold it open on Windows; the next save removes it.
+                with contextlib.suppress(OSError):
+                    stale.unlink(missing_ok=True)
 
 
 def replica(target: Path) -> Replica:
     """The replica that may answer reads. Absent while a rebuild is in progress."""
     return Replica(root(target) / REPLICA)
+
+
+def replica_snapshot_missing(target: Path) -> bool:
+    """Whether the live replica's `meta.json` names a heads snapshot that is gone. Reads only `meta.json`."""
+    directory = root(target) / REPLICA
+    meta = read_json(directory / "meta.json", max_bytes=limits.MAX_META_BYTES) if directory.is_dir() else None
+    if not isinstance(meta, dict) or meta.get("heads_sha256") is None:
+        return False
+    return not heads_path(directory, meta).is_file()
 
 
 def has_watermark(target: Path, hub: str) -> bool:

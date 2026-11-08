@@ -134,9 +134,13 @@ def _readable_heads(
     """The replica's readable heads and the principal it was pulled as. Takes `store.locked` and nothing else."""
     with store.locked(target):
         replica = store.replica(target)
+        if replica.snapshot_missing:
+            raise hubc.HubConfigError("replica heads are missing or inconsistent, mirror unchanged")
         if replica.watermark(client.identity) is None or not replica.meta.get("principal"):
             raise hubc.HubUnavailable("hub and usable replica unavailable, mirror unchanged")
-        if not (replica.directory / "heads.json").is_file() or replica.meta.get("cards") != len(replica.heads):
+        if not store.heads_path(replica.directory, replica.meta).is_file() or replica.meta.get("cards") != len(
+            replica.heads
+        ):
             raise hubc.HubConfigError("replica heads are missing or inconsistent, mirror unchanged")
         if replica.missing:
             raise hubc.HubConfigError("replica is incomplete. Increase [hub] replica_max_mb and pull, mirror unchanged")

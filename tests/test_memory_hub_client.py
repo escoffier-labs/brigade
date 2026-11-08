@@ -1006,17 +1006,17 @@ def test_a_cold_rebuild_writes_heads_a_few_times(hub, tmp_path, monkeypatch):
         _put(hub, "fleet", f"c{number}", f"card {number}")
     monkeypatch.setattr(sync, "LOG_PAGE", 1)
     writes: list[str] = []
-    original = store.write_json
+    original = store.write_private
 
-    def counting(path, value):
+    def counting(path, data):
         writes.append(path.name)
-        original(path, value)
+        original(path, data)
 
-    monkeypatch.setattr(store, "write_json", counting)
+    monkeypatch.setattr(store, "write_private", counting)
     sync.pull(reader, client(hub), settings(reader))
     assert len(store.replica(reader).heads) == 12
     # One empty write when the rebuild starts and one at the end, not one per page.
-    assert writes.count("heads.json") == 2
+    assert len([name for name in writes if name.startswith("heads-")]) == 2
 
 
 def test_cards_left_out_for_the_cap_come_back_when_space_frees(hub, tmp_path):

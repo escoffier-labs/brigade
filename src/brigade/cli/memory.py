@@ -20,6 +20,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .. import memory_hub_cmd
 
     memory_hub_cmd.register(memory_sub)
+    from .. import memory_hub_proposals
+
+    memory_hub_proposals.register(memory_sub)
     from .. import memory_embed
 
     memory_embed.register(memory_sub)
@@ -411,6 +414,10 @@ def dispatch(args) -> int:
         from .. import memory_hub_cmd
 
         return memory_hub_cmd.dispatch(args)
+    if args.memory_command == "proposals":
+        from .. import memory_hub_proposals
+
+        return memory_hub_proposals.dispatch(args)
     if args.memory_command == "proposal":
         from .. import memory_proposals
         import json

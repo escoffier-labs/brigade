@@ -331,3 +331,247 @@ async fn self_accept_is_refused_for_forward_and_compensation_proposers_except_ad
         );
     }
 }
+
+#[tokio::test]
+async fn operator_proposal_reads_redact_diffs_and_recheck_all_target_grants() {
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let b = h
+        .put(ADMIN_TOKEN, "collection:example", "b", None, OLD)
+        .await;
+    let opened = submit(
+        &h,
+        ADMIN_TOKEN,
+        vec![
+            op("fleet", "a", rev(&a)),
+            op("collection:example", "b", rev(&b)),
+        ],
+    )
+    .await;
+    let id = &opened.body["proposal_id"];
+    grant(&h, "fleet", &["read", "reflect"]).await;
+    let denied = h
+        .call(
+            AGENT_TOKEN,
+            json!({"action":"proposal_show","proposal_id":id}),
+        )
+        .await;
+    assert_eq!(denied.status, 403, "{denied:?}");
+    let hidden = h.call(AGENT_TOKEN, json!({"action":"proposal_list"})).await;
+    assert_eq!(hidden.status, 200, "{hidden:?}");
+    assert_eq!(hidden.body["proposals"], json!([]));
+    grant(&h, "collection:example", &["read"]).await;
+    let before = h.events();
+    let redacted = h
+        .call(
+            AGENT_TOKEN,
+            json!({"action":"proposal_show","proposal_id":id}),
+        )
+        .await;
+    assert_eq!(redacted.status, 200, "{redacted:?}");
+    assert!(redacted.body["diff"].is_null());
+    assert!(redacted.body["targets"][0]["after_hash"].is_null());
+    for scope in ["fleet", "collection:example"] {
+        grant(&h, scope, &["read", "review"]).await;
+    }
+    let shown = h
+        .call(
+            AGENT_TOKEN,
+            json!({"action":"proposal_show","proposal_id":id}),
+        )
+        .await;
+    assert!(shown.body["diff"].as_str().unwrap().contains(OLD));
+    let event_count = h.events();
+    assert!(event_count >= before);
+    grant(&h, "collection:example", &[]).await;
+    let revoked = h
+        .call(
+            AGENT_TOKEN,
+            json!({"action":"proposal_show","proposal_id":id}),
+        )
+        .await;
+    assert_eq!(revoked.status, 403, "{revoked:?}");
+    assert_eq!(stored(&h, id)["state"], "pending");
+}
+
+#[tokio::test]
+async fn operator_proposal_list_defaults_pending_and_pages_without_diffs() {
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let one = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    // Identical pending proposals are refused as duplicates, so vary the text.
+    let mut distinct = op("fleet", "a", rev(&a));
+    distinct["text"] = json!("Use the targeted gate.");
+    let two = submit(&h, ADMIN_TOKEN, vec![distinct]).await;
+    let rejected = h.call(ADMIN_TOKEN, json!({"action":"decide","proposal_id":one.body["proposal_id"],"decision":"reject","base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
+    assert_eq!(rejected.body["state"], "rejected");
+    let before = h.events();
+    let pending = h.call(ADMIN_TOKEN, json!({"action":"proposal_list"})).await;
+    assert_eq!(pending.status, 200, "{pending:?}");
+    assert_eq!(pending.body["proposals"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        pending.body["proposals"][0]["proposal_id"],
+        two.body["proposal_id"]
+    );
+    assert!(pending.body["proposals"][0].get("diff").is_none());
+    let first = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"proposal_list","all":true,"limit":1}),
+        )
+        .await;
+    let cursor = &first.body["next_after"];
+    assert!(cursor.is_string(), "{first:?}");
+    let next = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"proposal_list","all":true,"limit":1,"after":cursor}),
+        )
+        .await;
+    assert_eq!(next.body["proposals"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        first.body["proposals"][0]["proposal_id"],
+        next.body["proposals"][0]["proposal_id"]
+    );
+    assert_eq!(h.events(), before);
+}
+
+#[tokio::test]
+async fn operator_proposal_reads_validate_fields_and_use_read_admission() {
+    let h = Hub::with(clean(), None);
+    let before = h.events();
+    for request in [
+        json!({"action":"proposal_list","all":"yes"}),
+        json!({"action":"proposal_list","limit":0}),
+        json!({"action":"proposal_list","limit":101}),
+        json!({"action":"proposal_list","after":"invalid"}),
+        json!({"action":"proposal_list","unexpected":true}),
+        json!({"action":"proposal_show","proposal_id":"invalid"}),
+    ] {
+        assert!(read_only(&serde_json::to_vec(&request).unwrap()));
+        let reply = h.call(ADMIN_TOKEN, request).await;
+        assert_eq!(reply.status, 400, "{reply:?}");
+    }
+    assert_eq!(h.events(), before);
+}
+
+#[tokio::test]
+async fn operator_hidden_pages_use_opaque_cursors_and_refuse_tampering() {
+    let h = Hub::with(clean(), None);
+    let a = h
+        .put(ADMIN_TOKEN, "collection:private", "a", None, OLD)
+        .await;
+    let mut hidden = Vec::new();
+    for n in 0..3 {
+        // Identical pending proposals are refused as duplicates, so vary the text.
+        let mut distinct = op("collection:private", "a", rev(&a));
+        distinct["text"] = json!(format!("Use the targeted gate {n}."));
+        let opened = submit(&h, ADMIN_TOKEN, vec![distinct]).await;
+        hidden.push(opened.body["proposal_id"].as_str().unwrap().to_string());
+    }
+    // Explicit operators may scan global proposal population, but still need
+    // target read grants to see summaries.
+    grant(&h, "*", &["list_proposals"]).await;
+    let mut after = Json::Null;
+    for page in 0..3 {
+        let mut request = json!({"action":"proposal_list","limit":1});
+        if page != 0 {
+            request["after"] = after.clone();
+        }
+        let reply = h.call(AGENT_TOKEN, request).await;
+        assert_eq!(reply.status, 200, "{reply:?}");
+        assert_eq!(reply.body["proposals"], json!([]));
+        let encoded = reply.body.to_string();
+        for id in &hidden {
+            assert!(!encoded.contains(id));
+            assert!(!encoded.contains(&id[..10]));
+        }
+        if page < 2 {
+            let cursor = reply.body["next_after"].as_str().unwrap();
+            assert!(ids::parse_event_id(cursor).is_none());
+            assert_ne!(after, reply.body["next_after"]);
+            let mut tampered = cursor.as_bytes().to_vec();
+            tampered[0] = if tampered[0] == b'a' { b'b' } else { b'a' };
+            let refused = h.call(AGENT_TOKEN, json!({"action":"proposal_list","limit":1,"after":String::from_utf8(tampered).unwrap()})).await;
+            assert_eq!(refused.status, 400);
+        } else {
+            assert!(reply.body["next_after"].is_null());
+        }
+        after = reply.body["next_after"].clone();
+    }
+}
+
+#[tokio::test]
+async fn operator_held_proposals_appear_only_with_all() {
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    let id = &opened.body["proposal_id"];
+    // The state column is authoritative for listing, as it is for proposal loads.
+    Connection::open(h.memory())
+        .unwrap()
+        .execute(
+            "UPDATE memory_proposals SET state='held' WHERE proposal_id=?1",
+            [id.as_str().unwrap()],
+        )
+        .unwrap();
+    let pending = h.call(ADMIN_TOKEN, json!({"action":"proposal_list"})).await;
+    assert_eq!(pending.status, 200);
+    assert_eq!(pending.body["proposals"], json!([]));
+    let all = h
+        .call(ADMIN_TOKEN, json!({"action":"proposal_list","all":true}))
+        .await;
+    assert_eq!(all.body["proposals"][0]["proposal_id"], *id);
+    assert_eq!(all.body["proposals"][0]["state"], "held");
+}
+
+#[tokio::test]
+async fn grantless_listing_has_no_hidden_population_oracle() {
+    let h = Hub::with(clean(), None);
+    for count in 0..3 {
+        if count > 0 {
+            let a = h
+                .put(
+                    ADMIN_TOKEN,
+                    "collection:hidden",
+                    &format!("card-{count}"),
+                    None,
+                    OLD,
+                )
+                .await;
+            submit(
+                &h,
+                ADMIN_TOKEN,
+                vec![op("collection:hidden", &format!("card-{count}"), rev(&a))],
+            )
+            .await;
+        }
+        for all in [false, true] {
+            let reply = h
+                .call(
+                    AGENT_TOKEN,
+                    json!({"action":"proposal_list","limit":1,"all":all}),
+                )
+                .await;
+            assert_eq!(reply.status, 200);
+            assert_eq!(reply.body, json!({"proposals":[],"next_after":null}));
+        }
+    }
+    // A scoped review grant is not the global operator capability.
+    grant(
+        &h,
+        "collection:hidden",
+        &["read", "review", "list_proposals"],
+    )
+    .await;
+    let scoped = h
+        .call(AGENT_TOKEN, json!({"action":"proposal_list","limit":1}))
+        .await;
+    assert_eq!(scoped.body, json!({"proposals":[],"next_after":null}));
+    grant(&h, "*", &["list_proposals"]).await;
+    let operator = h
+        .call(AGENT_TOKEN, json!({"action":"proposal_list","limit":1}))
+        .await;
+    assert_eq!(operator.body["proposals"].as_array().unwrap().len(), 1);
+    assert!(operator.body["next_after"].is_string());
+}
