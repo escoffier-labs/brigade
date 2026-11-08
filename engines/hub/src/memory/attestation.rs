@@ -313,6 +313,7 @@ pub struct Proof {
     pub principals: BTreeSet<String>,
     pub contrary: bool,
     pub complete: bool,
+    pub expires_ms: Option<i64>,
 }
 fn live<T: ReadTx + ?Sized>(
     tx: &T,
@@ -434,6 +435,13 @@ pub fn resolve<T: ReadTx + ?Sized>(
             {
                 continue;
             }
+            let observed = if let Value::Integer(ms) = row[4] {
+                ms
+            } else {
+                0
+            };
+            let expiry = observed.saturating_add(window * 1000);
+            proof.expires_ms = Some(proof.expires_ms.map_or(expiry, |old| old.min(expiry)));
             proof.hashes.insert(id, ops::s(&row[3]));
             proof.credentials.insert(ops::s(&row[2]));
             if principal != string(body, "proposer") {

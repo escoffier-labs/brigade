@@ -160,6 +160,7 @@ pub struct Authority {
     pub valid_credentials: std::collections::BTreeSet<String>,
     pub admin_credential: String,
     pub retrieval: Option<super::retrieval_eval::Live>,
+    pub proposal_limits: super::hardening::Limits,
 }
 
 impl Authority {
