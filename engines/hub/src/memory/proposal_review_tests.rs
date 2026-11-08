@@ -399,7 +399,10 @@ async fn operator_proposal_list_defaults_pending_and_pages_without_diffs() {
     let h = Hub::with(clean(), None);
     let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
     let one = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
-    let two = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    // Identical pending proposals are refused as duplicates, so vary the text.
+    let mut distinct = op("fleet", "a", rev(&a));
+    distinct["text"] = json!("Use the targeted gate.");
+    let two = submit(&h, ADMIN_TOKEN, vec![distinct]).await;
     let rejected = h.call(ADMIN_TOKEN, json!({"action":"decide","proposal_id":one.body["proposal_id"],"decision":"reject","base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
     assert_eq!(rejected.body["state"], "rejected");
     let before = h.events();
@@ -459,13 +462,11 @@ async fn operator_hidden_pages_use_opaque_cursors_and_refuse_tampering() {
         .put(ADMIN_TOKEN, "collection:private", "a", None, OLD)
         .await;
     let mut hidden = Vec::new();
-    for _ in 0..3 {
-        let opened = submit(
-            &h,
-            ADMIN_TOKEN,
-            vec![op("collection:private", "a", rev(&a))],
-        )
-        .await;
+    for n in 0..3 {
+        // Identical pending proposals are refused as duplicates, so vary the text.
+        let mut distinct = op("collection:private", "a", rev(&a));
+        distinct["text"] = json!(format!("Use the targeted gate {n}."));
+        let opened = submit(&h, ADMIN_TOKEN, vec![distinct]).await;
         hidden.push(opened.body["proposal_id"].as_str().unwrap().to_string());
     }
     // Explicit operators may scan global proposal population, but still need
