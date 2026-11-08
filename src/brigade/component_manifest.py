@@ -27,7 +27,18 @@ KNOWN_COMPONENT_IDS: tuple[str, ...] = (
     "brigade-code-graph-mcp",
     "brigade-evidence",
     "sessionfind",
+    "brigade-hub",
 )
+# Components a release publishes for fewer platforms than SUPPORTED_PLATFORMS.
+# brigade-hub supervises its Python upstream with Linux process controls
+# (PR_SET_PDEATHSIG), so it ships for Linux only.
+COMPONENT_PLATFORMS: dict[str, tuple[str, ...]] = {"brigade-hub": ("linux-amd64", "linux-arm64")}
+# Components `brigade setup` installs only on request (`--component`), or keeps
+# when an earlier setup installed them. Hub hosts opt in; other hosts never
+# download the hub.
+OPT_IN_COMPONENT_IDS: frozenset[str] = frozenset({"brigade-hub"})
+# What a plain `brigade setup` installs, in KNOWN_COMPONENT_IDS order.
+DEFAULT_COMPONENT_IDS: tuple[str, ...] = tuple(cid for cid in KNOWN_COMPONENT_IDS if cid not in OPT_IN_COMPONENT_IDS)
 # Legacy wire keys remain readable through v0.32.
 COMPONENT_FAMILIES = {
     "graphtrail": "brigade-code-graph",
@@ -67,7 +78,7 @@ def manifest_component_ids(manifest: ComponentManifest) -> tuple[str, ...]:
 # release. The bundled compatibility manifest carries them with empty assets so
 # the loader accepts the manifest before the first release that publishes them;
 # `brigade setup` skips them until a release manifest pins real native assets.
-UNPUBLISHED_COMPONENT_IDS: frozenset[str] = frozenset({"agent-notify"})
+UNPUBLISHED_COMPONENT_IDS: frozenset[str] = frozenset({"agent-notify", "brigade-hub"})
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _PLATFORM = re.compile(r"^(linux|darwin|windows)-(amd64|arm64)$")
@@ -259,6 +270,11 @@ def resolve_asset(manifest: ComponentManifest, component_id: str, platform: str)
     return asset
 
 
+def component_platforms(name: str) -> tuple[str, ...]:
+    """The platforms a release publishes ``name`` for."""
+    return COMPONENT_PLATFORMS.get(family_id(name), SUPPORTED_PLATFORMS)
+
+
 def published_component_ids(manifest: ComponentManifest) -> tuple[str, ...]:
     """Return the known components that have pinned native assets in ``manifest``.
 
@@ -377,7 +393,7 @@ def _validate_asset_coverage(name: str, assets: dict[str, ComponentAsset]) -> No
             raise ValueError(f"component {name!r} must publish assets for every supported platform")
         return
     published = set(assets)
-    expected = set(SUPPORTED_PLATFORMS)
+    expected = set(component_platforms(name))
     if published != expected:
         missing = ", ".join(sorted(expected - published))
         extra = ", ".join(sorted(published - expected))

@@ -60,6 +60,8 @@ pub struct Wake {
     reading: AtomicUsize,
     /// Watch-thread iterations, for tests that order a commit against a tick.
     ticks: AtomicUsize,
+    /// Set at shutdown: every wait returns at once (S10's drain).
+    closing: std::sync::atomic::AtomicBool,
     limits: Limits,
 }
 impl Wake {
@@ -69,6 +71,7 @@ impl Wake {
             waiting: AtomicUsize::new(0),
             reading: AtomicUsize::new(0),
             ticks: AtomicUsize::new(0),
+            closing: std::sync::atomic::AtomicBool::new(false),
             limits,
         }
     }
@@ -101,6 +104,18 @@ impl Wake {
         let slot = state.recipients.entry(recipient.to_string()).or_default();
         slot.epoch += 1;
         slot.notify.notify_waiters();
+    }
+    /// Shutdown: wake every waiter and make every later wait return at once,
+    /// so each long poll answers its current page within the drain.
+    pub fn close(&self) {
+        let state = self.state.lock().unwrap();
+        self.closing.store(true, Ordering::SeqCst);
+        for slot in state.recipients.values() {
+            slot.notify.notify_waiters();
+        }
+    }
+    pub fn closing(&self) -> bool {
+        self.closing.load(Ordering::SeqCst)
     }
     pub fn waiting(&self) -> usize {
         self.waiting.load(Ordering::SeqCst)
@@ -137,7 +152,7 @@ impl Wake {
         let notify = {
             let mut state = self.state.lock().unwrap();
             let slot = state.recipients.entry(recipient.to_string()).or_default();
-            if slot.epoch != mark {
+            if slot.epoch != mark || self.closing() {
                 return;
             }
             slot.notify.clone()
@@ -145,7 +160,7 @@ impl Wake {
         let notified = notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        if self.epoch(recipient) != mark {
+        if self.epoch(recipient) != mark || self.closing() {
             return;
         }
         let _ = tokio::time::timeout_at(deadline, notified).await;
@@ -291,6 +306,37 @@ mod tests {
         )
         .await;
         assert!(started.elapsed() < Duration::from_millis(100));
+    }
+    #[tokio::test]
+    async fn close_ends_every_wait_at_once() {
+        let wake = Arc::new(Wake::new(Limits::for_connections(4096)));
+        let mark = wake.epoch("node-b");
+        let _waiter = wake.register("node-b", None).unwrap();
+        let started = std::time::Instant::now();
+        let waiting = {
+            let wake = wake.clone();
+            tokio::spawn(async move {
+                wake.wait(
+                    "node-b",
+                    mark,
+                    tokio::time::Instant::now() + Duration::from_secs(20),
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        wake.close();
+        waiting.await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // A wait that starts after the close does not block either.
+        wake.wait(
+            "node-c",
+            wake.epoch("node-c"),
+            tokio::time::Instant::now() + Duration::from_secs(20),
+        )
+        .await;
+        assert!(wake.closing());
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
     #[tokio::test]
     async fn a_commit_between_the_first_read_and_registration_still_wakes() {

@@ -9,4 +9,7 @@ python3 tests/transport.py
 python3 tests/admission.py
 python3 tests/claims.py
 python3 tests/memory_peak.py
+python3 tests/upstream_restart.py
+python3 tests/engine_rollback.py
+python3 tests/prepublish.py
 cargo +1.85.0 check --locked

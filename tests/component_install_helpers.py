@@ -55,6 +55,11 @@ def smoke_stub_script(name: str) -> str:
             '    print("sessionfind <query> ...")\n'
             "    raise SystemExit(0)\nraise SystemExit(1)\n"
         )
+    if name == "brigade-hub":
+        return (
+            '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--version"]:\n'
+            '    print("brigade-hub 0.1.0")\n    raise SystemExit(0)\nraise SystemExit(1)\n'
+        )
     if name == "agent-notify":
         return (
             '#!/usr/bin/env python3\nimport json, sys\nif sys.argv[1:] == ["version", "--json"]:\n'
@@ -108,7 +113,7 @@ def write_test_manifest(path: Path, *, brigade_version: str) -> component_manife
     components: dict[str, object] = {}
     for component_id in component_manifest.KNOWN_COMPONENT_IDS:
         assets: dict[str, object] = {}
-        for platform in component_manifest.SUPPORTED_PLATFORMS:
+        for platform in component_manifest.component_platforms(component_id):
             _, byte_size, sha256 = fixture_payload(component_id, platform=platform)
             asset = test_manifest_asset(component_id, platform=platform)
             assert asset.byte_size == byte_size
@@ -142,6 +147,8 @@ def write_test_manifest(path: Path, *, brigade_version: str) -> component_manife
 def all_fixture_payloads(*, platform: str = "linux-amd64") -> dict[str, bytes]:
     payloads: dict[str, bytes] = {}
     for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        if platform not in component_manifest.component_platforms(component_id):
+            continue
         payload, _, _ = fixture_payload(component_id, platform=platform)
         asset = test_manifest_asset(component_id, platform=platform)
         payloads[asset.download_url] = payload
@@ -256,7 +263,7 @@ def write_release_manifest(
         if component_id == drop_component:
             continue
         assets: dict[str, object] = {}
-        for platform in component_manifest.SUPPORTED_PLATFORMS:
+        for platform in component_manifest.component_platforms(component_id):
             _, byte_size, sha256 = fixture_payload(component_id, platform=platform)
             asset_name = fixture_asset_name(component_id, platform=platform)
             assets[platform] = {
@@ -289,6 +296,8 @@ def all_release_payloads(*, tag: str, platform: str = "linux-amd64") -> dict[str
     """``FakeOpener`` payloads keyed by the real Brigade release asset URLs."""
     payloads: dict[str, bytes] = {}
     for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        if platform not in component_manifest.component_platforms(component_id):
+            continue
         payload, _, _ = fixture_payload(component_id, platform=platform)
         payloads[release_component_asset_url(component_id, tag=tag, platform=platform)] = payload
     return payloads

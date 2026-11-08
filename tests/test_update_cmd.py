@@ -24,7 +24,7 @@ def _manifest() -> bytes:
     components = {}
     for component in component_manifest.KNOWN_COMPONENT_IDS:
         assets = {}
-        for platform in component_manifest.SUPPORTED_PLATFORMS:
+        for platform in component_manifest.component_platforms(component):
             name = f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
             payload = name.encode()
             assets[platform] = {
@@ -65,7 +65,8 @@ def _pre_agent_notify_manifest() -> bytes:
     """
     components = {}
     for component in component_manifest.KNOWN_COMPONENT_IDS:
-        if component == "agent-notify":
+        # The last stable release also predates brigade-hub.
+        if component in ("agent-notify", "brigade-hub"):
             continue
         assets = {}
         for platform in component_manifest.SUPPORTED_PLATFORMS:
@@ -728,14 +729,14 @@ def test_release_manifest_still_rejects_missing_agent_notify_without_beta_handof
 
     # Strict validation (no compatibility handoff) rejects the missing
     # agent-notify entry, preserving the stable/release invariant.
-    with pytest.raises(ValueError, match="missing required components: agent-notify"):
+    with pytest.raises(ValueError, match="missing required components: agent-notify, brigade-hub"):
         update_cmd.validate_release_manifest_bytes(release)
 
     # The narrowly named compatibility mode is the only path that accepts it,
-    # and only because agent-notify is currently unpublished.
+    # and only because agent-notify and brigade-hub are registered unpublished.
     accepted = update_cmd.validate_release_manifest_bytes(release, allow_compatible_stable_manifest=True)
     assert "agent-notify" not in accepted.components
-    assert set(accepted.components) == set(component_manifest.KNOWN_COMPONENT_IDS) - {"agent-notify"}
+    assert set(accepted.components) == set(component_manifest.KNOWN_COMPONENT_IDS) - {"agent-notify", "brigade-hub"}
 
 
 def test_release_manifest_compatibility_mode_rejects_missing_published_component():

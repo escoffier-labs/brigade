@@ -27,7 +27,10 @@ FROM rust:1.85.0-slim-bookworm@sha256:1829c432be4a592f3021501334d3fcca24f238432b
 
 COPY --from=source /src /src
 WORKDIR /src/engines/hub
-RUN cargo build --locked --release --bin brigade-hub
+# The checksum file lets `fleet serve --engine rust --hub-sha256-file` verify
+# the binary it runs against the one this stage built.
+RUN cargo build --locked --release --bin brigade-hub \
+    && sha256sum target/release/brigade-hub > target/release/brigade-hub.sha256
 
 FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS python-hub
 
@@ -56,11 +59,14 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 ENTRYPOINT ["brigade", "fleet", "serve"]
 CMD ["--host", "0.0.0.0", "--port", "3774", "--db", "/var/lib/brigade/fleet-hub.db", "--token-file", "/run/secrets/admin_token"]
 
-# The Python hub plus the Rust front. brigade-hub starts the Python hub as its
-# managed upstream with this interpreter. The recipe's entrypoint runs it.
+# The Python hub plus the Rust front: `brigade fleet serve --engine rust`
+# verifies the binary against its recorded checksum, then runs brigade-hub,
+# which starts the Python hub as its managed upstream with this interpreter.
 FROM python-hub AS dogfood
 
 COPY --from=hub-build /src/engines/hub/target/release/brigade-hub /usr/local/bin/brigade-hub
+COPY --from=hub-build /src/engines/hub/target/release/brigade-hub.sha256 /usr/local/share/brigade/brigade-hub.sha256
 ENV BRIGADE_HUB_PYTHON=/usr/local/bin/python3
+ENTRYPOINT ["brigade", "fleet", "serve", "--engine", "rust", "--hub-binary", "/usr/local/bin/brigade-hub", "--hub-sha256-file", "/usr/local/share/brigade/brigade-hub.sha256"]
 
 FROM python-hub

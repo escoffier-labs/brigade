@@ -21,6 +21,19 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 RECIPE = ROOT / "ops" / "fleet-hub"
+# The hub service's entrypoint since S10: the Rust engine, checked against the
+# checksum the image recorded at build time.
+ENGINE_ENTRYPOINT = [
+    "brigade",
+    "fleet",
+    "serve",
+    "--engine",
+    "rust",
+    "--hub-binary",
+    "/usr/local/bin/brigade-hub",
+    "--hub-sha256-file",
+    "/usr/local/share/brigade/brigade-hub.sha256",
+]
 
 
 def _load(name: str, path: Path):
@@ -319,9 +332,10 @@ def test_compose_config_holder_layout_no_ports_and_gpu_only_in_the_profile(proje
     assert hub["environment"]["BRIGADE_FLEET_FINDINGS_KEY_FILE"] == "/run/secrets/findings_key"
     assert {item["source"] for item in hub["secrets"]} == {"admin_token", "findings_key"}
     assert full["services"]["backup"]["network_mode"] == "none"
-    # Compose renders the Rust front as written: the dogfood target, the wrapper and memory native.
+    # Compose renders the Rust front as written: the dogfood target, the Rust engine and memory native.
     assert hub["build"]["target"] == "dogfood"
-    assert hub["entrypoint"] == ["python", "/brigade/entry.py"]
+    assert hub["entrypoint"] == ENGINE_ENTRYPOINT
+    assert hub["environment"]["BRIGADE_HUB_WATCHDOG_NETNS"] == "1"
     assert hub["command"][hub["command"].index("--route-mode") + 1] == "memory=native"
     assert full["services"]["backup"]["entrypoint"] == ["python", "/brigade/backup.py"]
     assert "--db" not in full["services"]["backup"]["command"]
@@ -806,11 +820,19 @@ def test_containerfile_builds_brigade_hub_in_a_pinned_rust_stage_and_copies_only
     build = _stage_body(text, "hub-build")
     assert "COPY --from=source /src /src" in build
     assert "cargo build --locked --release --bin brigade-hub" in build
+    assert "sha256sum target/release/brigade-hub > target/release/brigade-hub.sha256" in build
     dogfood = _stage_body(text, "dogfood")
     assert images["dogfood"] == "python-hub"
     copies = [line for line in dogfood.splitlines() if line.startswith("COPY ")]
-    assert copies == ["COPY --from=hub-build /src/engines/hub/target/release/brigade-hub /usr/local/bin/brigade-hub"]
+    # The binary and the checksum the engine verifies it against, nothing else.
+    assert copies == [
+        "COPY --from=hub-build /src/engines/hub/target/release/brigade-hub /usr/local/bin/brigade-hub",
+        "COPY --from=hub-build /src/engines/hub/target/release/brigade-hub.sha256"
+        " /usr/local/share/brigade/brigade-hub.sha256",
+    ]
     assert "ENV BRIGADE_HUB_PYTHON=/usr/local/bin/python3" in dogfood
+    entry = next(line for line in dogfood.splitlines() if line.startswith("ENTRYPOINT "))
+    assert json.loads(entry.removeprefix("ENTRYPOINT ")) == ENGINE_ENTRYPOINT
     # The default target is the Python-only image. A builder that skips
     # unused stages builds it without compiling Rust; the legacy builder does not.
     assert stages[-1] == ("python-hub", None)
@@ -821,8 +843,10 @@ def test_containerfile_builds_brigade_hub_in_a_pinned_rust_stage_and_copies_only
 def test_compose_hub_runs_brigade_hub_with_the_s31_flags_and_memory_native():
     text = (RECIPE / "compose.yaml").read_text(encoding="utf-8")
     assert "      target: dogfood\n" in text
-    assert '    entrypoint: ["python", "/brigade/entry.py"]\n' in text
-    assert "      - ./hub:/brigade:ro\n" in text
+    assert _service_list("hub", "entrypoint") == ENGINE_ENTRYPOINT
+    # The hub service no longer mounts the interim wrapper; the backup job keeps its script.
+    assert "./hub:/brigade:ro" not in _service_list("hub", "volumes")
+    assert "./hub:/brigade:ro" in _service_list("backup", "volumes")
     command = _service_list("hub", "command")
     assert command[:2] == ["--host", "127.0.0.1"]
     assert command[command.index("--db") + 1] == "/var/lib/brigade/fleet-hub.db"
@@ -1051,7 +1075,9 @@ def test_memory_check_fails_on_a_hub_without_the_native_route(monkeypatch, capsy
     assert first["status"] == "FAIL" and "memory=native" in first["detail"]["hint"]
 
 
-entry = _load("brigade_hub_entry", RECIPE / "hub" / "entry.py")
+# `fleet serve --engine rust` (S10) replaced the interim hub/entry.py wrapper.
+# These drive its supervisor the way the container runs it.
+from brigade import fleet_hub_engine as engine  # noqa: E402
 
 FAKE_HUB = """
 import http.server, signal, sys, threading
@@ -1073,11 +1099,22 @@ if mode == "crash":
     sys.exit(3)
 done = threading.Event()
 signal.signal(signal.SIGTERM, lambda *_: done.set())
-# entry.py starts the hub with TERM and INT blocked; like brigade-hub, unblock them
-# once the handler is in place, or the stop is never delivered.
+# fleet serve starts the hub with TERM and INT blocked; like brigade-hub, unblock
+# them once the handler is in place, or the stop is never delivered.
 signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM, signal.SIGINT})
 done.wait(30)
 sys.exit(0 if mode == "clean" else 5)
+"""
+
+SUPERVISE = """
+import sys
+from brigade import fleet_hub_engine as engine
+port = int(sys.argv[sys.argv.index("--port") + 1])
+banner = f"{engine.STARTED} 127.0.0.1:{port} (brigade-hub front, managed Python upstream; db x; route modes memory=native)"
+sys.exit(engine._supervise(
+    sys.argv[1:], url=engine.health_url("127.0.0.1", port), banner=banner, interval=1.0, failures=3,
+    startup=30.0, watch_namespace=False, healthy=engine.healthy, only_loopback=engine.only_loopback,
+))
 """
 
 
@@ -1089,18 +1126,18 @@ def _free_port():
         return sock.getsockname()[1]
 
 
-def _run_entry(tmp_path, mode, *, stop):
+def _run_engine(tmp_path, mode, *, stop):
     import signal
 
     fake = tmp_path / "brigade-hub"
     fake.write_text(f"#!{sys.executable}\n{FAKE_HUB}", encoding="utf-8")
     fake.chmod(0o755)
     port = _free_port()
-    argv = ["--host", "127.0.0.1", "--port", str(port), "--db", "/var/lib/brigade/fleet-hub.db"]
+    argv = [str(fake), "--host", "127.0.0.1", "--port", str(port), "--db", "/var/lib/brigade/fleet-hub.db"]
     argv += ["--route-mode", "memory=native", "--fake", mode]
     proc = subprocess.Popen(
-        [sys.executable, str(RECIPE / "hub" / "entry.py"), *argv],
-        env={**os.environ, "BRIGADE_HUB_BIN": str(fake)},
+        [sys.executable, "-c", SUPERVISE, *argv],
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
         stdout=subprocess.PIPE,
         text=True,
     )
@@ -1112,8 +1149,8 @@ def _run_entry(tmp_path, mode, *, stop):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
-def test_entry_writes_the_lines_the_s31_checks_read_on_a_clean_stop(tmp_path, monkeypatch):
-    code, out = _run_entry(tmp_path, "clean", stop=True)
+def test_engine_writes_the_lines_the_s31_checks_read_on_a_clean_stop(tmp_path, monkeypatch):
+    code, out = _run_engine(tmp_path, "clean", stop=True)
     assert code == 0
     lines = out.splitlines()
     assert lines[0].startswith(checks.HUB_STARTED + " 127.0.0.1:")
@@ -1126,20 +1163,20 @@ def test_entry_writes_the_lines_the_s31_checks_read_on_a_clean_stop(tmp_path, mo
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
 @pytest.mark.parametrize(("mode", "stop", "expected"), [("crash", False, 3), ("unclean", True, 5)])
-def test_entry_passes_a_failure_through_without_the_clean_exit_line(tmp_path, mode, stop, expected):
-    code, out = _run_entry(tmp_path, mode, stop=stop)
+def test_engine_passes_a_failure_through_without_the_clean_exit_line(tmp_path, mode, stop, expected):
+    code, out = _run_engine(tmp_path, mode, stop=stop)
     assert code == expected
     assert checks.HUB_STOPPED not in out
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
-def test_entry_forwards_a_stop_that_lands_while_the_child_is_spawning(monkeypatch, capsys):
+def test_engine_forwards_a_stop_that_lands_while_the_child_is_spawning(monkeypatch, capsys):
     import signal
 
     sent = []
 
     class Child:
-        def __init__(self, argv):
+        def __init__(self, argv, **_kwargs):
             # The stop lands mid-spawn: the handler runs before `child` is bound.
             os.kill(os.getpid(), signal.SIGTERM)
 
@@ -1153,9 +1190,19 @@ def test_entry_forwards_a_stop_that_lands_while_the_child_is_spawning(monkeypatc
             return 0
 
     previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
-    monkeypatch.setattr(entry.subprocess, "Popen", Child)
+    monkeypatch.setattr(engine.subprocess, "Popen", Child)
     try:
-        code = entry.main(["--host", "127.0.0.1", "--port", "1"])
+        code = engine._supervise(
+            ["brigade-hub"],
+            url="http://127.0.0.1:1/health",
+            banner="unused",
+            interval=1.0,
+            failures=3,
+            startup=30.0,
+            watch_namespace=False,
+            healthy=lambda _url: False,
+            only_loopback=lambda: False,
+        )
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
@@ -1179,7 +1226,7 @@ sys.exit(4)
 
 
 @pytest.mark.skipif(not Path("/proc/self/status").exists(), reason="reads the child's signal mask from procfs")
-def test_entry_starts_the_hub_with_stop_signals_blocked_so_a_pending_stop_waits(tmp_path, monkeypatch, capsys):
+def test_engine_starts_the_hub_with_stop_signals_blocked_so_a_pending_stop_waits(tmp_path, monkeypatch, capsys):
     import signal
 
     fake = tmp_path / "brigade-hub"
@@ -1187,17 +1234,26 @@ def test_entry_starts_the_hub_with_stop_signals_blocked_so_a_pending_stop_waits(
     fake.chmod(0o755)
     real = subprocess.Popen
 
-    def popen(argv):
+    def popen(argv, **kwargs):
         # The stop lands during the spawn; it is held, then forwarded.
         os.kill(os.getpid(), signal.SIGTERM)
-        return real(argv)
+        return real(argv, **kwargs)
 
     previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
     mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
-    monkeypatch.setattr(entry, "HUB", str(fake))
-    monkeypatch.setattr(entry.subprocess, "Popen", popen)
+    monkeypatch.setattr(engine.subprocess, "Popen", popen)
     try:
-        code = entry.main(["--host", "127.0.0.1", "--port", "1", str(tmp_path / "mask")])
+        code = engine._supervise(
+            [str(fake), str(tmp_path / "mask")],
+            url="http://127.0.0.1:1/health",
+            banner="unused",
+            interval=1.0,
+            failures=3,
+            startup=30.0,
+            watch_namespace=False,
+            healthy=lambda _url: False,
+            only_loopback=lambda: False,
+        )
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
@@ -1210,11 +1266,6 @@ def test_entry_starts_the_hub_with_stop_signals_blocked_so_a_pending_stop_waits(
     assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == mask
 
 
-def test_entry_reads_the_hub_flags_and_maps_signal_deaths():
-    argv = ["--host", "::1", "--port=3999", "--route-mode", "memory=native", "--route-mode=claims=proxy"]
-    assert entry.option(argv, "--host", "x") == "::1"
-    assert entry.option(argv, "--port", "3774") == "3999"
-    assert entry.option(argv, "--db", "default") == "default"
-    assert entry.route_modes(argv) == ["memory=native", "claims=proxy"]
-    assert entry.exit_code(-9) == 137 and entry.exit_code(2) == 2
-    assert (entry.STARTED, entry.STOPPED) == (checks.HUB_STARTED, checks.HUB_STOPPED)
+def test_engine_maps_signal_deaths_and_writes_the_checked_lines():
+    assert engine.exit_code(-9) == 137 and engine.exit_code(2) == 2
+    assert (engine.STARTED, engine.STOPPED) == (checks.HUB_STARTED, checks.HUB_STOPPED)

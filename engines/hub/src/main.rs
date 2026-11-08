@@ -64,6 +64,15 @@ const DRAIN: Duration = Duration::from_secs(25);
 /// recipe's 40 s `stop_grace_period`.
 const UPSTREAM_STOP: Duration = Duration::from_secs(10);
 const STOPPED_DURING_STARTUP: &str = "stop signal during startup; the hub never served";
+/// First delay before restarting a dead managed upstream while a native family
+/// serves. It doubles after each failed or short-lived start, up to
+/// `RESTART_MAX`, and returns to this value after `RESTART_STABLE` of uptime.
+const RESTART_MIN: Duration = Duration::from_secs(1);
+const RESTART_MAX: Duration = Duration::from_secs(30);
+const RESTART_STABLE: Duration = Duration::from_secs(60);
+/// Families whose native handlers keep serving while the upstream is down.
+/// Health and metrics are always local and do not count.
+const RESTART_FAMILIES: [&str; 5] = ["registration", "heartbeat", "claims", "messages", "memory"];
 
 /// Block or unblock SIGTERM and SIGINT on the calling thread. `main` blocks
 /// them first, the descriptor-limit re-exec keeps them blocked (the mask and
@@ -186,6 +195,7 @@ async fn stop_upstream(child: &mut Child) -> Result<(), String> {
 #[derive(Parser, Debug)]
 #[command(
     name = "brigade-hub",
+    version,
     infer_long_args = true,
     args_override_self = true
 )]
@@ -375,7 +385,10 @@ struct App {
     telemetry: Arc<brigade_hub::telemetry::Telemetry>,
     admin_digest: Option<[u8; 32]>,
     shadow_db: Option<std::path::PathBuf>,
-    upstream: String,
+    /// The managed upstream's origin, empty while it is down or restarting
+    /// (S10), so proxied routes answer 502 `upstream-down`.
+    upstream: Arc<std::sync::RwLock<String>>,
+    upstream_restarts: Arc<std::sync::atomic::AtomicU64>,
     client: HttpClient,
     budgets: admission::Budgets,
     lookup: Option<admission::Lookup>,
@@ -400,7 +413,8 @@ impl App {
             telemetry: Arc::default(),
             admin_digest: None,
             shadow_db: None,
-            upstream,
+            upstream: Arc::new(std::sync::RwLock::new(upstream)),
+            upstream_restarts: Arc::default(),
             client,
             budgets: admission::Budgets::default(),
             lookup: None,
@@ -711,16 +725,21 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
             );
         }
         let mut text = app.telemetry.render();
+        let up = app
+            .ready
+            .lock()
+            .unwrap()
+            .is_some_and(|last| last.elapsed() < Duration::from_secs(5));
+        // Webhook delivery runs in the Python upstream, so it pauses, with its
+        // outbox rows kept, whenever the upstream is down.
         text += &format!(
-            "brigade_hub_proxy_buffer_fallback_total {}\nbrigade_hub_upstream_up {}\n",
+            "brigade_hub_proxy_buffer_fallback_total {}\nbrigade_hub_upstream_up {}\nbrigade_hub_webhook_delivery_paused {}\nbrigade_hub_upstream_restarts_total {}\n",
             app.buffer_fallbacks
                 .load(std::sync::atomic::Ordering::Relaxed),
-            u8::from(
-                app.ready
-                    .lock()
-                    .unwrap()
-                    .is_some_and(|last| last.elapsed() < Duration::from_secs(5))
-            )
+            u8::from(up),
+            u8::from(!up),
+            app.upstream_restarts
+                .load(std::sync::atomic::Ordering::Relaxed),
         );
         if let Some(storage) = &app.storage {
             let m = storage.metrics.lock().unwrap();
@@ -1045,7 +1064,8 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         req.headers_mut()
             .insert("x-brigade-upstream-key", app.upstream_key.clone());
     }
-    let origin = match app.upstream.parse::<axum::http::Uri>() {
+    let upstream = app.upstream.read().unwrap().clone();
+    let origin = match upstream.parse::<axum::http::Uri>() {
         Ok(uri) => uri,
         Err(_) => return upstream_error(StatusCode::BAD_GATEWAY, "upstream-down", browser),
     };
@@ -1198,7 +1218,13 @@ async fn upstream(
         }
         return Ok(url.trim_end_matches('/').into());
     }
-    let upstream_args = if let Some(clock) = &config.test_clock_file {
+    let child = slot.insert(spawn_managed(managed_args(config), key)?);
+    announced(child, client, key).await
+}
+
+/// The managed upstream's argv after the interpreter.
+fn managed_args(config: &Config) -> Vec<String> {
+    if let Some(clock) = &config.test_clock_file {
         let mut args = vec![
             "-c".to_owned(),
             include_str!("../../../registry/skills/verify-brigade/hub_clock.py").to_owned(),
@@ -1210,24 +1236,55 @@ async fn upstream(
         args
     } else {
         config.python_args(0)
-    };
+    }
+}
+
+/// Start the managed upstream again after it died (S10). On failure the
+/// child is stopped before the error returns. Dropping this future, on a stop
+/// signal, kills a child still starting.
+async fn restart_managed(
+    config: &Config,
+    client: &HttpClient,
+    key: &str,
+) -> Result<(Child, String), String> {
+    let mut child = spawn_managed(managed_args(config), key)?;
+    match announced(&mut child, client, key).await {
+        Ok(url) => Ok((child, url)),
+        Err(e) => {
+            if matches!(child.try_wait(), Ok(None)) {
+                let _ = stop_upstream(&mut child).await;
+            }
+            Err(e)
+        }
+    }
+}
+
+/// The restart delay after `current`: doubled, up to `RESTART_MAX`.
+fn doubled(current: Duration) -> Duration {
+    (current * 2).min(RESTART_MAX)
+}
+
+/// Spawn the managed Python upstream with its per-start key.
+fn spawn_managed(upstream_args: Vec<String>, key: &str) -> Result<Child, String> {
     let mut command = Command::from(python_command(&python_interpreter()));
     let parent = libc::pid_t::try_from(std::process::id()).map_err(|e| e.to_string())?;
     // SAFETY: the hook makes only async-signal-safe calls.
     unsafe { command.pre_exec(move || upstream_child(parent)) };
-    let child = slot.insert(
-        command
-            .args(upstream_args)
-            .env("BRIGADE_HUB_MANAGED_LOOPBACK", key)
-            .env("BRIGADE_HUB_UPSTREAM_KEY", key)
-            .env("BRIGADE_HUB_CHECKPOINT_OWNER", "rust")
-            // Outside the terminal's foreground group a read would stop it.
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| e.to_string())?,
-    );
+    command
+        .args(upstream_args)
+        .env("BRIGADE_HUB_MANAGED_LOOPBACK", key)
+        .env("BRIGADE_HUB_UPSTREAM_KEY", key)
+        .env("BRIGADE_HUB_CHECKPOINT_OWNER", "rust")
+        // Outside the terminal's foreground group a read would stop it.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| e.to_string())
+}
+
+/// Read the managed upstream's port announcement and wait for its `/health`.
+async fn announced(child: &mut Child, client: &HttpClient, key: &str) -> Result<String, String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let stdout = child.stdout.take().ok_or("missing upstream stdout")?;
     let mut lines = BufReader::new(stdout).lines();
@@ -1500,7 +1557,7 @@ async fn start_and_serve(
     let cpu = brigade_hub::read::CpuPool::default();
     let mut state = App::new(
         upstream,
-        client,
+        client.clone(),
         config.trust_tailscale_identity,
         config.trust_forwarded_proto,
     );
@@ -1586,8 +1643,15 @@ async fn start_and_serve(
     let probe = state.clone();
     tokio::spawn(async move {
         loop {
+            let origin = probe.upstream.read().unwrap().clone();
+            if origin.is_empty() {
+                // Down or restarting: nothing to probe.
+                *probe.ready.lock().unwrap() = None;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
             let request = Request::builder()
-                .uri(format!("{}/health", probe.upstream))
+                .uri(format!("{origin}/health"))
                 .header("x-brigade-upstream-key", &probe.upstream_key)
                 .header("x-brigade-client-address", Ipv4Addr::LOCALHOST.to_string())
                 .body(Body::empty())
@@ -1602,6 +1666,16 @@ async fn start_and_serve(
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
+    // Once a family is native, a dead managed upstream is restarted with
+    // backoff while that family keeps serving (S10). With every family
+    // proxied, the hub exits and the service manager restarts both.
+    let restarts = config.upstream.is_none()
+        && RESTART_FAMILIES
+            .iter()
+            .any(|family| state.modes.get(family) == brigade_hub::modes::Mode::Native);
+    let origin = state.upstream.clone();
+    let restart_count = state.upstream_restarts.clone();
+    let waiters = state.messages.as_ref().map(|m| m.wake.clone());
     let app = Router::new().fallback(any(handle)).with_state(state);
     let sources = Arc::<Counts>::default();
     let mut tasks = tokio::task::JoinSet::new();
@@ -1611,11 +1685,52 @@ async fn start_and_serve(
     if signals.arrived().await {
         return Err(STOPPED_DURING_STARTUP.into());
     }
+    let mut backoff = RESTART_MIN;
+    let mut started = Some(tokio::time::Instant::now());
+    let mut delay: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+    type Restart<'a> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<(Child, String), String>> + 'a>>;
+    let mut restarting: Option<Restart<'_>> = None;
     loop {
         tokio::select! {
             _ = signals.recv() => break,
             status = async { match child.as_mut() { Some(c) => c.wait().await, None => std::future::pending().await } } => {
-                return Err(format!("managed upstream exited: {status:?}"));
+                if !restarts {
+                    return Err(format!("managed upstream exited: {status:?}"));
+                }
+                *child = None;
+                origin.write().unwrap().clear();
+                // A run past RESTART_STABLE starts a new series at RESTART_MIN.
+                if started.take().is_some_and(|at| at.elapsed() >= RESTART_STABLE) {
+                    backoff = RESTART_MIN;
+                }
+                eprintln!(
+                    "managed upstream exited: {status:?}; native families keep serving, restarting it in {} s",
+                    backoff.as_secs()
+                );
+                delay = Some(Box::pin(tokio::time::sleep(backoff)));
+                backoff = doubled(backoff);
+            },
+            _ = async { match delay.as_mut() { Some(d) => d.await, None => std::future::pending().await } } => {
+                delay = None;
+                restarting = Some(Box::pin(restart_managed(config, &client, key)));
+            },
+            result = async { match restarting.as_mut() { Some(r) => r.await, None => std::future::pending().await } } => {
+                restarting = None;
+                match result {
+                    Ok((next, url)) => {
+                        restart_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        eprintln!("managed upstream restarted on {url}");
+                        *child = Some(next);
+                        *origin.write().unwrap() = url;
+                        started = Some(tokio::time::Instant::now());
+                    }
+                    Err(e) => {
+                        eprintln!("managed upstream restart failed: {e}; next attempt in {} s", backoff.as_secs());
+                        delay = Some(Box::pin(tokio::time::sleep(backoff)));
+                        backoff = doubled(backoff);
+                    }
+                }
             },
             _ = tasks.join_next(), if !tasks.is_empty() => {},
             accepted = listener.accept() => {
@@ -1640,9 +1755,14 @@ async fn start_and_serve(
             }
         }
     }
-    // Idle keep-alive connections close now. In-flight requests finish
-    // within the drain deadline.
+    // Idle keep-alive connections close now, and every native long poll
+    // answers its current page at once. In-flight requests finish within the
+    // drain deadline. A restart still starting is dropped, which kills it.
+    drop(restarting);
     let _ = stop.send(true);
+    if let Some(wake) = &waiters {
+        wake.close();
+    }
     let drain = async { while tasks.join_next().await.is_some() {} };
     if tokio::time::timeout(DRAIN, drain).await.is_err() {
         tasks.abort_all();
@@ -1806,6 +1926,21 @@ fn main() {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+    #[test]
+    fn restart_backoff_doubles_to_its_cap() {
+        let mut delay = RESTART_MIN;
+        let mut seen = vec![];
+        for _ in 0..8 {
+            seen.push(delay.as_secs());
+            delay = doubled(delay);
+        }
+        assert_eq!(seen, [1, 2, 4, 8, 16, 30, 30, 30]);
+        assert!(
+            RESTART_FAMILIES
+                .iter()
+                .all(|f| !matches!(*f, "health" | "metrics"))
+        );
+    }
     #[test]
     fn upstream_keys_are_validated_once() {
         assert!(parse_upstream_key("", true).is_err());

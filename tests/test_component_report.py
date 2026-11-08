@@ -377,8 +377,10 @@ def test_version_components_missing_state(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert out.startswith(f"brigade {brigade.__version__}\n")
     assert "platform: linux-amd64" in out
-    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+    for component_id in component_manifest.DEFAULT_COMPONENT_IDS:
         assert f"{component_id}: missing" in out
+    # An optional component this host never installed is not listed.
+    assert "brigade-hub" not in out
 
 
 def test_version_components_json_is_single_document(tmp_path, monkeypatch, capsys):
@@ -391,7 +393,7 @@ def test_version_components_json_is_single_document(tmp_path, monkeypatch, capsy
     assert payload["manifest"]["schema_version"] == 1
     assert payload["platform"] == "linux-amd64"
     assert payload["status_precedence"] == list(component_report.STATUS_PRECEDENCE)
-    assert len(payload["components"]) == len(component_manifest.KNOWN_COMPONENT_IDS)
+    assert len(payload["components"]) == len(component_manifest.DEFAULT_COMPONENT_IDS)
     assert all(item["status"] == "missing" for item in payload["components"])
     assert all("expected_asset_name" in item for item in payload["components"])
     assert all("asset_name" not in item for item in payload["components"])
@@ -511,7 +513,7 @@ def test_inspect_components_unsupported_system(tmp_path, monkeypatch):
     report = component_report.inspect_components(env=env, system="solaris")
     assert report.platform is None
     assert "unsupported component path platform system" in (report.platform_error or "")
-    assert len(report.components) == len(component_manifest.KNOWN_COMPONENT_IDS)
+    assert len(report.components) == len(component_manifest.DEFAULT_COMPONENT_IDS)
     assert all(component.status == "unsupported" for component in report.components)
 
 
@@ -522,7 +524,7 @@ def test_inspect_components_missing_data_root(tmp_path, monkeypatch):
     assert report.platform is None
     assert report.platform_error == "component data root requires HOME"
     assert report.state_file_status == "missing"
-    assert len(report.components) == len(component_manifest.KNOWN_COMPONENT_IDS)
+    assert len(report.components) == len(component_manifest.DEFAULT_COMPONENT_IDS)
     assert all(component.status == "unsupported" for component in report.components)
 
 

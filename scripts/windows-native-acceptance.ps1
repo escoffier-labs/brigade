@@ -719,9 +719,14 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
     }
     $legacyIds = @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
     $platforms = @("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
-    if (@($manifest.components.PSObject.Properties).Count -ne 5) { throw "release manifest must contain exactly five components" }
+    # Optional components ship in the manifest for fewer platforms, and a
+    # plain setup never installs them: brigade-hub publishes Linux assets only.
+    $optionalIds = @("brigade-hub")
+    $hubPlatforms = @("linux-amd64", "linux-arm64")
+    $componentCount = @($manifest.components.PSObject.Properties).Count
+    if ($componentCount -lt 5 -or $componentCount -gt 6) { throw "release manifest must contain the five default components and at most brigade-hub" }
     foreach ($property in $manifest.components.PSObject.Properties) {
-        if (@($legacyIds | Where-Object { $_ -ceq $property.Name }).Count -ne 1) { throw "invalid release component ID" }
+        if (@(($legacyIds + $optionalIds) | Where-Object { $_ -ceq $property.Name }).Count -ne 1) { throw "invalid release component ID" }
     }
     $expected = @{}
     foreach ($componentId in $legacyIds) {
@@ -743,6 +748,21 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
             $expected[$name] = $asset.sha256
         }
     }
+    $hub = $manifest.components."brigade-hub"
+    if ($hub) {
+        if ($hub.source.repository -cne "escoffier-labs/brigade" -or $hub.source.release_tag -cne $tag) {
+            throw "release manifest component brigade-hub does not point to escoffier-labs/brigade@$tag"
+        }
+        if (@($hub.assets.PSObject.Properties).Count -ne 2) { throw "release manifest has invalid brigade-hub platform matrix" }
+        foreach ($platform in $hubPlatforms) {
+            $asset = $hub.assets.$platform
+            $name = "brigade-hub-$platform"
+            if (-not $asset -or $asset.asset_name -cne $name -or $asset.sha256 -cnotmatch '^[0-9a-f]{64}$') { throw "release manifest has invalid asset metadata" }
+            if ($asset.download_url -cne "$base/$name") { throw "release manifest has moving or wrong URL for $name" }
+            if ($checksums[$name] -cne $asset.sha256) { throw "checksums mismatch for $name" }
+            $expected[$name] = $asset.sha256
+        }
+    }
     $aliases = @{}
     foreach ($componentId in @("graphtrail", "graphtrail-mcp", "miseledger")) {
         foreach ($platform in $platforms) {
@@ -751,14 +771,14 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
             $aliases[$name] = $true
         }
     }
-    if ($checksums.Count -eq 41) {
+    if ($checksums.Count -eq ($expected.Count + 1 + $aliases.Count)) {
         foreach ($name in $aliases.Keys) {
             if (-not $checksums.ContainsKey($name)) { throw "release checksums must contain exactly the complete legacy alias matrix" }
             $expected[$name] = $checksums[$name]
         }
     }
     if ($checksums.Count -ne ($expected.Count + 1) -or -not $checksums.ContainsKey("component-manifest-v1.json")) {
-        throw "release checksums must contain exactly 25 or 40 native assets and component-manifest-v1.json"
+        throw "release checksums must contain exactly the manifest's native assets and component-manifest-v1.json"
     }
     foreach ($name in $checksums.Keys) {
         if ($name -cne "component-manifest-v1.json" -and -not $expected.ContainsKey($name)) { throw "unexpected release asset: $name" }

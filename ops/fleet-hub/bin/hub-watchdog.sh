@@ -1,7 +1,9 @@
 #!/bin/sh
-# Host watchdog for the Python-only recipe, run every 10 s by
-# systemd/brigade-hub-watchdog.timer until `fleet serve --engine rust` (S10)
-# carries the same rules inside the container. Docker does not restart an
+# Host watchdog, run every 10 s by systemd/brigade-hub-watchdog.timer. Since
+# S10, `fleet serve --engine rust` applies the same two rules inside the hub
+# container and exits, which the restart policy acts on. This stays as the
+# backstop for a container whose process cannot run them: a hung exec or a
+# hub image without the Rust engine. Docker does not restart an
 # unhealthy container, so this restarts the hub container after LIMIT
 # consecutive checks in which /health fails, or after LIMIT consecutive
 # checks that find no network interface but loopback in the hub's namespace

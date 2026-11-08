@@ -11,9 +11,18 @@ from pathlib import Path
 from typing import Any
 
 
-COMPONENT_IDS = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
+COMPONENT_IDS = (
+    "agent-notify",
+    "brigade-code-graph",
+    "brigade-code-graph-mcp",
+    "brigade-evidence",
+    "brigade-hub",
+    "sessionfind",
+)
 LEGACY_ALIASES = ("graphtrail", "graphtrail-mcp", "miseledger")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
+# Mirrors component_manifest.COMPONENT_PLATFORMS: brigade-hub ships for Linux only.
+COMPONENT_PLATFORMS = {"brigade-hub": ("linux-amd64", "linux-arm64")}
 REPOSITORY = "escoffier-labs/brigade"
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
@@ -23,8 +32,12 @@ def asset_name(component: str, platform: str) -> str:
     return f"{component}-{platform}{suffix}"
 
 
+def platforms(component: str) -> tuple[str, ...]:
+    return COMPONENT_PLATFORMS.get(component, SUPPORTED_PLATFORMS)
+
+
 def expected_asset_names() -> set[str]:
-    return {asset_name(component, platform) for component in COMPONENT_IDS for platform in SUPPORTED_PLATFORMS}
+    return {asset_name(component, platform) for component in COMPONENT_IDS for platform in platforms(component)}
 
 
 def sha256(path: Path) -> str:
@@ -68,7 +81,7 @@ def generate_manifest(
     native_digests = {name: sha256(assets_dir / name) for name in sorted(native_names)}
     for component in COMPONENT_IDS:
         assets: dict[str, Any] = {}
-        for platform in SUPPORTED_PLATFORMS:
+        for platform in platforms(component):
             name = asset_name(component, platform)
             path = assets_dir / name
             digest = native_digests[name]

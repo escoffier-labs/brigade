@@ -114,6 +114,49 @@ jobs:
           path: release-assets/
           if-no-files-found: error
 
+  build-hub-native:
+    # brigade-hub ships for Linux only: it supervises its Python upstream with
+    # Linux process controls. Each target builds and passes the pre-publication
+    # acceptance on its own runner before anything is published.
+    name: brigade-hub native (${{ matrix.platform }})
+    needs: validate-release
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            runner: ubuntu-latest
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install this Brigade for the managed Python upstream
+        run: python -m pip install -e .
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - name: Build exact brigade-hub binary
+        working-directory: engines/hub
+        run: cargo build --release --locked --bin brigade-hub
+      - name: Pre-publication acceptance on the built artifact
+        env:
+          BRIGADE_HUB_BINARY: ${{ github.workspace }}/engines/hub/target/release/brigade-hub
+        run: python engines/hub/tests/prepublish.py -v
+      - name: Stage brigade-hub binary
+        run: |
+          mkdir -p release-assets
+          cp engines/hub/target/release/brigade-hub "release-assets/brigade-hub-${{ matrix.platform }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rust-hub-${{ matrix.platform }}
+          path: release-assets/
+          if-no-files-found: error
+
   build-go-native:
     name: Go native (${{ matrix.platform }})
     needs: validate-release
@@ -224,7 +267,7 @@ jobs:
           if-no-files-found: error
 
   assemble-release:
-    needs: [build-rust-native, build-go-native, build-agent-notify-native]
+    needs: [build-rust-native, build-hub-native, build-go-native, build-agent-notify-native]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -251,13 +294,13 @@ jobs:
           COMMIT: ${{ github.sha }}
         run: |
           mkdir release-assets
-          test "$(find downloaded -type f | wc -l)" -eq 40
+          test "$(find downloaded -type f | wc -l)" -eq 42
           test -z "$(find downloaded -type f -printf '%f\n' | sort | uniq -d)"
           find downloaded -type f -exec cp {} release-assets/ \;
           python scripts/generate_component_manifest.py --tag "$TAG" --commit "$COMMIT" \
             --assets-dir release-assets --output release-assets/component-manifest-v1.json \
             --checksums-output release-assets/checksums.txt
-          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 42
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 44
       - uses: actions/attest@v4
         with:
           subject-path: |
@@ -301,6 +344,8 @@ jobs:
             release-assets/brigade-evidence-darwin-amd64
             release-assets/brigade-evidence-darwin-arm64
             release-assets/brigade-evidence-windows-amd64.exe
+            release-assets/brigade-hub-linux-amd64
+            release-assets/brigade-hub-linux-arm64
             release-assets/component-manifest-v1.json
       - uses: actions/upload-artifact@v7
         with:
@@ -392,7 +437,7 @@ jobs:
         run: |
           mkdir release-assets
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release-assets
-          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 42
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 44
           (cd release-assets && sha256sum --check checksums.txt)
           python scripts/verify_component_manifest_provenance.py --manifest release-assets/component-manifest-v1.json
           while read -r _digest asset; do

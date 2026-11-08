@@ -13,8 +13,21 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "generate_component_manifest.py"
-COMPONENTS = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
+COMPONENTS = (
+    "agent-notify",
+    "brigade-code-graph",
+    "brigade-code-graph-mcp",
+    "brigade-evidence",
+    "brigade-hub",
+    "sessionfind",
+)
 PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
+# brigade-hub ships for Linux only.
+LINUX = ("linux-amd64", "linux-arm64")
+
+
+def _platforms(component: str) -> tuple[str, ...]:
+    return LINUX if component == "brigade-hub" else PLATFORMS
 
 
 @pytest.fixture()
@@ -34,7 +47,7 @@ def _asset_name(component: str, platform: str) -> str:
 def _write_inventory(root: Path) -> set[str]:
     names: set[str] = set()
     for component in (*COMPONENTS, "graphtrail", "graphtrail-mcp", "miseledger"):
-        for platform in PLATFORMS:
+        for platform in _platforms(component):
             name = _asset_name(component, platform)
             (root / name).write_bytes(name.encode())
             names.add(name)
@@ -67,7 +80,7 @@ def test_generator_writes_stable_unified_release_manifest_and_checksums(generato
             "repository": "escoffier-labs/brigade",
             "release_tag": "v1.2.3",
         }
-        assert set(manifest["components"][component]["assets"]) == set(PLATFORMS)
+        assert set(manifest["components"][component]["assets"]) == set(_platforms(component))
         for platform, asset in manifest["components"][component]["assets"].items():
             assert asset["asset_name"] == _asset_name(component, platform)
             assert asset["download_url"] == (
@@ -77,6 +90,22 @@ def test_generator_writes_stable_unified_release_manifest_and_checksums(generato
 
     checksum_names = {line.split()[1] for line in checksums_path.read_text().splitlines()}
     assert checksum_names == expected_names | {"component-manifest-v1.json"}
+
+
+@pytest.mark.parametrize("name", ["brigade-hub-darwin-arm64", "brigade-hub-windows-amd64.exe"])
+def test_generator_rejects_a_brigade_hub_asset_outside_linux(generator_module, tmp_path, name):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _write_inventory(assets)
+    (assets / name).write_bytes(b"not shipped")
+    with pytest.raises(ValueError, match="unexpected native assets: " + name.replace(".", r"\.")):
+        generator_module.generate_manifest(
+            tag="v1.2.3",
+            commit="a" * 40,
+            assets_dir=assets,
+            output=tmp_path / "manifest.json",
+            checksums_output=tmp_path / "checksums.txt",
+        )
 
 
 def test_generator_rejects_missing_extra_or_duplicate_native_assets(generator_module, tmp_path):
@@ -132,7 +161,8 @@ def test_generator_additive_inventory_preserves_primary_manifest_and_hashes_ever
     assert output.read_bytes() == legacy_manifest
     assert generator_module.expected_asset_names() <= legacy
     entries = dict(line.split()[::-1] for line in checksums.read_text().splitlines())
-    assert len(entries) == 41
+    # 40 native assets for the full-matrix components, 2 for brigade-hub, and the manifest.
+    assert len(entries) == 43
     assert set(entries) == legacy | aliases | {output.name}
     for name in legacy | aliases:
         assert entries[name] == hashlib.sha256((assets / name).read_bytes()).hexdigest()

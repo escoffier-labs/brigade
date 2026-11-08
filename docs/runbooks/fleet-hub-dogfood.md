@@ -8,8 +8,9 @@ hub is not production: no production node points at it, and it holds dogfood
 data only. Production stays on the LXC hub host
 ([Fleet hub on a Proxmox LXC](fleet-hub-proxmox.md)). The hub container runs
 the Rust hub, `brigade-hub`, in front of the Python hub, with hub memory
-served natively. S10 replaces the recipe's entrypoint with the planned
-`fleet serve --engine rust`.
+served natively, through `brigade fleet serve --engine rust` (S10). Moving a
+hub from the Python engine to the Rust one, and back, is
+[Rust hub cutover and rollback](fleet-hub-rust-engine.md).
 
 Machines are named by role. Replace every angle-bracket value. Host-specific
 values (core numbers, devices, the compose account, the front's name) belong
@@ -25,7 +26,7 @@ each one before anyone runs it. The scripted acceptance checks are in
 | Container | Network | Role |
 |---|---|---|
 | `netns` (holder) | compose default network and the internal `embed` network | Owns the network namespace. Runs only a pause process with no health check and an OOM score adjustment of -1000, so nothing restarts it. |
-| `hub` | `service:netns` | `brigade-hub` bound to `127.0.0.1:3774` in managed mode, with `--route-mode memory=native`. It starts `brigade fleet serve` as its child on an ephemeral loopback port, and the child refuses any request without the key `brigade-hub` generates at each start. Memory lives in `fleet-hub-memory.db` beside `fleet-hub.db` on the state volume. No GPU, no published port. |
+| `hub` | `service:netns` | `brigade fleet serve --engine rust`, which checks `brigade-hub` against the checksum the image recorded and runs it bound to `127.0.0.1:3774` in managed mode, with `--route-mode memory=native`. `brigade-hub` starts `brigade fleet serve` as its child on an ephemeral loopback port, and the child refuses any request without the key `brigade-hub` generates at each start. Memory lives in `fleet-hub-memory.db` beside `fleet-hub.db` on the state volume. No GPU, no published port. |
 | `front` | `service:netns` | The private network's HTTPS front. Terminates HTTPS with the certificate the private network issues for its own name and forwards to `127.0.0.1:3774`, so the hub's peer is loopback, as on the LXC hub host. SSH stays off. |
 | `embedder` | `embed` only (internal) | Only under the `gpu` profile. One GPU through a device reservation, its own model volume, no published port. The hub reaches it as `http://embedder:11434`. |
 | `backup` | none | One-shot `brigade fleet backup`, started hourly by a timer. |
@@ -122,8 +123,7 @@ configuration it could not probe, offers only R1 models, and never
 overwrites an existing secret. It writes `.env`, `config/hub.toml` and the
 secrets, and creates the backup directory with mode 0700.
 
-`config/hub.toml` is mounted into the hub for the planned `--config` (S10,
-S15). Neither hub reads it yet, so on this hub both modes answer from BM25. The mode switch below already works on the files and the
+`config/hub.toml` is mounted into the hub for the planned `--config` (S15). Neither hub reads it yet, so on this hub both modes answer from BM25. The mode switch below already works on the files and the
 containers, and S15 adds the status fields.
 
 Put the private network's auth key in `secrets/front-authkey` (tagged, not
@@ -216,10 +216,19 @@ backfill covers every live card, then `hybrid`. BM25 answers in the meantime.
   containers in no order the recipe relies on, and a joiner it starts before
   the holder fails. Compose starts the holder first and starts any joiner that
   failed.
-- The watchdog timer (`brigade-hub-watchdog.timer`, every 10 s) restarts the
-  hub container after 3 failed `/health` checks, or after 3 checks that find
-  only loopback in its namespace. Docker never restarts an unhealthy
-  container by itself.
+- `fleet serve --engine rust` runs the same two checks inside the hub
+  container every 10 s: after 3 failed `/health` checks, or 3 checks that
+  find only loopback in its namespace (`BRIGADE_HUB_WATCHDOG_NETNS=1` in the
+  recipe), it stops `brigade-hub` and exits 1, and the restart policy starts
+  the hub again. The watchdog timer (`brigade-hub-watchdog.timer`, every
+  10 s) stays as the backstop and restarts the hub container on the same
+  rules when the process inside cannot act, such as a hung exec. Docker
+  never restarts an unhealthy container by itself.
+- With a native family (memory here), `brigade-hub` restarts a Python hub
+  that died, after 1 s and then doubling to 30 s, while the native routes keep
+  serving. Proxied routes answer `502 upstream-down` and `/ready` answers 503
+  until it is back. With every family proxied, `brigade-hub` exits instead and
+  the restart policy restarts both.
 - `stop_grace_period: 40s` covers the hub's shutdown. The Docker stop timeout
   drop-in and `"shutdown-timeout": 45` keep a host shutdown from cutting it
   short. On SIGTERM `brigade-hub` stops accepting and drains for at most
@@ -231,10 +240,11 @@ backfill covers every live card, then `hybrid`. BM25 answers in the meantime.
   may not have installed its handler yet. It then ends by that SIGTERM's
   default action, without its own shutdown, and `brigade-hub` exits 2. The
   Python hub runs in its own process group, so a Ctrl-C or a signal to the
-  whole group reaches only `brigade-hub`, which stops it once. When it exits 0 after a stop, the recipe's entrypoint
-  (`hub/entry.py`) logs `brigade fleet hub stopped cleanly`, which the restart
-  and UPS checks look for. It logs `brigade fleet hub listening on` once
-  `/health` answers.
+  whole group reaches only `brigade-hub`, which stops it once. Native long
+  polls answer their current page when the drain starts. When `brigade-hub`
+  exits 0 after a stop, `fleet serve --engine rust` logs
+  `brigade fleet hub stopped cleanly`, which the restart and UPS checks look
+  for. It logs `brigade fleet hub listening on` once `/health` answers.
 - Fence the hub with `touch hub.fenced && docker compose stop hub front` in
   the project directory. The boot unit and the watchdog leave the hub down
   while `hub.fenced` exists, so the fence survives a reboot or a Docker
