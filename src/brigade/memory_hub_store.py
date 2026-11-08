@@ -6,7 +6,11 @@
   is swapped in when the pull finishes; the old replica is removed first, so
   nothing ever answers from it again. The heads snapshot is named by its digest
   (`heads-<sha256>.json`) and `meta.json` names it, so replacing `meta.json`
-  publishes both and an interrupted save leaves the previous pair intact.
+  publishes both and an interrupted save leaves the previous pair intact. The
+  directory is synced after each rename, so a power loss never keeps a
+  `meta.json` that names a snapshot whose entry was lost. A `meta.json` whose
+  named snapshot is gone anyway marks the replica unusable: reads treat it as
+  absent and the next pull rebuilds it.
 - `spool/<hub>/`: writes the hub has not acknowledged, one file per entry
   named by its time-ordered `client_event_id`, so name order is send order.
   Each hub has its own directory, so entries for one hub never block or count
@@ -32,6 +36,7 @@ included, out of Git.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -60,6 +65,8 @@ SPOOL_CAP = 10_000
 LOCK_DEADLINE_SECONDS = 30.0
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+# Windows cannot open a directory to sync it.
+_DIR_FSYNC = os.name != "nt"
 
 
 class StoreError(OSError):
@@ -159,6 +166,24 @@ def write_private(path: Path, data: str) -> None:
         raise
 
 
+def fsync_dir(directory: Path) -> None:
+    """Make the renames in `directory` durable. A no-op where directories cannot be opened for sync (Windows)."""
+    if not _DIR_FSYNC:
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _CLOEXEC)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        # Some filesystems refuse a directory sync; the rename itself already happened.
+        if exc.errno not in (errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EBADF):
+            raise
+    finally:
+        os.close(fd)
+
+
 def read_private(path: Path, *, max_bytes: int | None = None) -> str | None:
     if path.is_symlink():
         raise StoreError(f"{path} is a symlink")
@@ -219,6 +244,9 @@ class Replica:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
         self.meta: dict[str, Any] = {}
+        # meta.json names a snapshot that is gone: the heads are lost, so this
+        # replica has no watermark and answers nothing until a pull rebuilds it.
+        self.snapshot_missing = False
         heads = None
         # A save replaces meta.json and then removes the snapshot the old one
         # named. A reader that read the old meta.json in between retries once.
@@ -231,8 +259,11 @@ class Replica:
             heads = limits.read_heads(path, self.meta) if limits.active() else read_json(path)
             if heads is not None:
                 break
-        if heads is None and limits.active() and self.meta.get("heads_sha256") is not None:
-            raise StoreError("replica snapshot missing")
+        if heads is None and self.meta.get("heads_sha256") is not None:
+            if limits.active():
+                raise StoreError("replica snapshot missing")
+            self.snapshot_missing = True
+            self.meta = {}
         self.heads: dict[str, dict[str, Any]] = heads if isinstance(heads, dict) else {}
 
     @staticmethod
@@ -297,7 +328,10 @@ class Replica:
         # atomic replace, so a reader sees the old pair or the new one, never a mix.
         current = heads_path(self.directory, self.meta)
         write_private(current, snapshot)
+        fsync_dir(self.directory)
         write_private(self.directory / "meta.json", metadata)
+        # Durable before the previous snapshot goes, so a power loss keeps a pair meta.json can name.
+        fsync_dir(self.directory)
         for stale in (self.directory / LEGACY_HEADS, *self.directory.glob("heads-*.json")):
             if stale != current:
                 # A reader may hold it open on Windows; the next save removes it.
@@ -308,6 +342,15 @@ class Replica:
 def replica(target: Path) -> Replica:
     """The replica that may answer reads. Absent while a rebuild is in progress."""
     return Replica(root(target) / REPLICA)
+
+
+def replica_snapshot_missing(target: Path) -> bool:
+    """Whether the live replica's `meta.json` names a heads snapshot that is gone. Reads only `meta.json`."""
+    directory = root(target) / REPLICA
+    meta = read_json(directory / "meta.json", max_bytes=limits.MAX_META_BYTES) if directory.is_dir() else None
+    if not isinstance(meta, dict) or meta.get("heads_sha256") is None:
+        return False
+    return not heads_path(directory, meta).is_file()
 
 
 def has_watermark(target: Path, hub: str) -> bool:

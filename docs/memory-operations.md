@@ -1242,7 +1242,21 @@ ceiling plus 1 MiB of serialization slack is refused with
 `hub_reflect_replica_limit` before JSON parsing. A save writes the new snapshot
 under its digest name and then replaces `meta.json`, which names it, so an
 interrupted save leaves the previous snapshot and metadata in place and the
-next pull continues from them. Reflect also limits the whole selected replica to 50,000
+next pull continues from them. The save syncs the replica directory after each
+rename (not on Windows, which cannot sync a directory), so after a power loss
+`meta.json` names a snapshot that survived. If the snapshot `meta.json` names
+is missing anyway, reflection fails closed, and every other read treats the
+replica as absent: search and `card` fall back as when no replica exists,
+`status` reports `replica_unusable`, and the next pull discards the replica and
+rebuilds it from the hub.
+
+Downgrading Brigade past the release that introduced digest-named snapshots
+requires deleting the replica directory, `.brigade/memory/hub/replica`, before
+running the older build. That build reads `meta.json`, finds no `heads.json`,
+and would otherwise serve an empty replica at a current watermark. With the
+directory gone, its next pull rebuilds the replica from the hub.
+
+Reflect also limits the whole selected replica to 50,000
 live cards, including unscoped runs. Sync replays the log as metadata first,
 so a card put and later retired never counts toward the bound or costs a body
 fetch. Once the replay reaches the log head, sync checks the live count before

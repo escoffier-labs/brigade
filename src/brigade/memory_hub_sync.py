@@ -311,6 +311,11 @@ def _prepare(
             report["warnings"].append("memory now uses another hub; the old replica was discarded and is being rebuilt")
         else:
             report["warnings"].append("the hub's log_epoch changed; the old replica was discarded and is being rebuilt")
+    elif live.snapshot_missing:
+        # meta.json outlived the snapshot it names: the heads are gone, so start over.
+        store.discard_replica(target)
+        report["rebuilt"] = True
+        report["warnings"].append("the replica's heads snapshot was missing; it was discarded and is being rebuilt")
     elif forget_other_principal(target, hub, principal):
         # The replica was pulled with another credential's grants.
         report["rebuilt"] = True
@@ -1398,6 +1403,9 @@ def status(target: Path, settings: hubc.HubSettings, client: hubc.MemoryHubClien
     report["replica"] = {key: live.meta.get(key) for key in keys} if live.exists else None
     if live.exists:
         report["replica"]["missing"] = len(live.missing)
+    if live.snapshot_missing:
+        report["replica_unusable"] = "snapshot-missing"
+        report["warnings"].append("the replica's heads snapshot is missing, so no read uses it; run memory hub pull")
     report["replica_rebuilding"] = rebuilding.exists
     hub = client.identity if client is not None else None
     report["spool"] = store.spool_count(target, hub) if hub else store.spool_count(target)
