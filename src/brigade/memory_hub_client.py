@@ -565,7 +565,8 @@ class MemoryHubClient:
             if action == "rescan" and status != 200:
                 raise HubRefusal(status, {"code": "memory_rescan_status", "error": "rescan requires HTTP 200"})
             return payload
-        if status == 429 and payload.get("code") in QUOTA_REFUSALS:
+        code = payload.get("code")
+        if status == 429 and isinstance(code, str) and code in QUOTA_REFUSALS:
             raise HubRefusal(status, payload)
         if 300 <= status < 400 or status in _UNAVAILABLE_STATUSES:
             # A redirect is never followed with the credential, and 408 or 429
