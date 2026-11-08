@@ -27,7 +27,8 @@ example-widget.md
 
 ## Suggested card content
 ---
-name: example-widget
+topic: example-widget
+category: fixture
 description: Placeholder card documenting the 2026-08-05 guard rollout.
 tags: [fixture, readability]
 ---

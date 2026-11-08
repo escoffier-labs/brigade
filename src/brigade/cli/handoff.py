@@ -52,6 +52,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_handoff_lint.add_argument(
         "--guard-policy", default="personal", help="Content Guard policy name or path for --content-guard."
     )
+    p_handoff_lint.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Memory workspace whose cards and bootstrap documents the ingester reads. Defaults to --target.",
+    )
     p_handoff_lint.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_lint.add_argument(
         "--strict",
@@ -81,6 +87,17 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_handoff_draft.add_argument("--target-card", default=None, help="Target card filename for card handoffs.")
     p_handoff_draft.add_argument(
         "--target-document", default=".learnings/LEARNINGS.md", help="Target document for no-card handoffs."
+    )
+    p_handoff_draft.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Memory workspace holding memory/cards and bootstrap documents. Defaults to --target.",
+    )
+    p_handoff_draft.add_argument(
+        "--expected-sha",
+        default=None,
+        help="SHA-256 of the current card for update-card. Looked up in --workspace when omitted.",
     )
     p_handoff_draft.add_argument(
         "--content",
@@ -285,6 +302,7 @@ def _dispatch_impl(args) -> int:
             guard_policy=args.guard_policy,
             json_output=args.json,
             strict=args.strict,
+            workspace=args.workspace,
         )
     if args.handoff_command == "draft":
         return handoff_cmd.draft(
@@ -305,6 +323,8 @@ def _dispatch_impl(args) -> int:
             guard=args.guard,
             guard_policy=args.guard_policy,
             json_output=args.json,
+            workspace=args.workspace,
+            expected_sha=args.expected_sha,
         )
     if args.handoff_command == "list":
         return handoff_cmd.list_drafts(

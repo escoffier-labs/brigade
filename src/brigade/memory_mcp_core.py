@@ -439,6 +439,8 @@ class MemoryTools:
                 evidence=evidence,
                 inbox=inbox,
             )
+        except handoff_drafts.HandoffDraftRefused as exc:
+            return {"written": False, "errors": exc.problems}, True
         except ValueError as exc:
             message = str(exc)
             for flag, arg in _DRAFT_FLAG_ARGS:
