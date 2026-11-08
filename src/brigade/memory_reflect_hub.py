@@ -258,7 +258,7 @@ def _reflect(
     if scope is not None and scope not in settings.read_scopes:
         raise ReflectError("hub_reflect_scope_invalid", "--scope must be a configured hub read scope")
     try:
-        near_limit = near.threshold(target)
+        near_limit, near_cap = near.settings(target)
     except near.ThresholdError as exc:
         raise ReflectConfigError(str(exc)) from None
     with store.locked(target):
@@ -319,34 +319,46 @@ def _reflect(
         sync.refresh_scan_metadata(target, client, settings)
         heads = read_heads()
         check_bounds()
-    # Each submission is one propose request. Exact merges stay one op each.
-    submissions: list[list[dict[str, Any]]] = []
+    # Each submission is one propose request. Exact merges stay one op each and
+    # always come before every near-duplicate submission, so they get the quota first.
+    exact: list[list[dict[str, Any]]] = []
+    similar: list[list[dict[str, Any]]] = []
     skipped: dict[str, int] = {}
     budget = near.Budget()
     for name in settings.read_scopes:
         scoped = [head for head in heads if head["scope"] == name]
         scope_ops, scope_skips = _ops(scoped)
-        submissions.extend([op] for op in scope_ops)
+        exact.extend([op] for op in scope_ops)
         # The near pass runs after the exact pass and leaves exact groups to it.
         near_ops, near_skips = near.ops(scoped, limit=near_limit, budget=budget)
-        submissions.extend(near_ops)
+        similar.extend(near_ops)
         for reason, count in (*scope_skips.items(), *near_skips.items()):
             skipped[reason] = skipped.get(reason, 0) + count
     binding = io.sha256(
         io.json_bytes([client.identity, report["principal"], report["log_epoch"], list(configured_scopes)])
     )
     previous = dict(state.get("submissions", {})) if state.get("binding") == binding else {}
-    remaining = []
-    for ops in submissions:
-        # A single op keeps its historical digest, so remembered submissions survive upgrades.
-        digest = io.sha256(io.json_bytes(ops[0] if len(ops) == 1 else ops))
-        remembered = previous.get(digest, {})
-        if remembered.get("proposal_id"):
-            skipped["already_proposed"] = skipped.get("already_proposed", 0) + 1
-        elif remembered.get("refused"):
-            skipped["refused"] = skipped.get("refused", 0) + 1
-        else:
-            remaining.append((digest, ops))
+
+    def unremembered(submissions: list[list[dict[str, Any]]]) -> list[tuple[str, list[dict[str, Any]]]]:
+        fresh = []
+        for ops in submissions:
+            # A single op keeps its historical digest, so remembered submissions survive upgrades.
+            digest = io.sha256(io.json_bytes(ops[0] if len(ops) == 1 else ops))
+            remembered = previous.get(digest, {})
+            if remembered.get("proposal_id"):
+                skipped["already_proposed"] = skipped.get("already_proposed", 0) + 1
+            elif remembered.get("refused"):
+                skipped["refused"] = skipped.get("refused", 0) + 1
+            else:
+                fresh.append((digest, ops))
+        return fresh
+
+    pending_similar = unremembered(similar)
+    # Cap new near-duplicate proposals per run so crafted clusters cannot drain the pending quota.
+    deferred = sum(len(ops) for _, ops in pending_similar[near_cap:])
+    if deferred:
+        skipped["near_deferred"] = skipped.get("near_deferred", 0) + deferred
+    remaining = unremembered(exact) + pending_similar[:near_cap]
     selected = remaining[:limit]
     proposals = []
     refused = []
@@ -426,7 +438,7 @@ def _reflect(
         "proposals": proposals,
         "refused_ops": refused,
         "seq": report["seq"],
-        "near_duplicate": {"threshold": near_limit, **budget.stats},
+        "near_duplicate": {"threshold": near_limit, "max_proposals": near_cap, **budget.stats},
     }
     if error:
         payload["error"] = error

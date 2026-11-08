@@ -29,8 +29,14 @@ SHINGLE_WORDS = 5
 # A shingle indexed by more cards than this is template text, not evidence of
 # duplication. Dropping it keeps pair generation near-linear in the corpus.
 POSTING_CAP = 64
-# Distinct candidate pairs verified per run, across every scope.
+# Run-wide work bounds across every scope. Pair work is charged for every
+# combination a posting list expands to, before any dedupe or size filter.
 MAX_PAIRS = 200_000
+MAX_INDEX_ENTRIES = 1_000_000
+# Shingles read while verifying distinct pairs (both sides of each intersection).
+MAX_VERIFY_SHINGLES = 50_000_000
+DEFAULT_MAX_PROPOSALS = 8
+MAX_PROPOSALS_LIMIT = 32
 # Hub submission bounds: 1 to 64 ops over at most eight cards. Each op names
 # one superseded card plus the keeper, so a chunk holds at most seven others.
 MAX_OPS = 64
@@ -40,14 +46,14 @@ WORD = re.compile(r"\w+")
 
 
 class ThresholdError(ValueError):
-    """The [reflect] near-duplicate threshold is missing a valid value."""
+    """A [reflect] near-duplicate setting is missing a valid value."""
 
 
-def threshold(target: Path) -> float:
-    """Read `[reflect] near_duplicate_threshold` from memory-care.toml."""
+def settings(target: Path) -> tuple[float, int]:
+    """Read the `[reflect]` threshold and per-run proposal cap from memory-care.toml."""
     raw = io.read_bytes(target / CONFIG, absent=True)
     if raw is None:
-        return DEFAULT_THRESHOLD
+        return DEFAULT_THRESHOLD, DEFAULT_MAX_PROPOSALS
     try:
         data = tomllib.loads(raw.decode("utf-8-sig"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError):
@@ -60,7 +66,12 @@ def threshold(target: Path) -> float:
         raise ThresholdError(
             f"[reflect] near_duplicate_threshold must be a number from {MIN_THRESHOLD} to {MAX_THRESHOLD}"
         )
-    return float(value)
+    cap = table.get("near_duplicate_max_proposals", DEFAULT_MAX_PROPOSALS)
+    if isinstance(cap, bool) or not isinstance(cap, int) or not 0 <= cap <= MAX_PROPOSALS_LIMIT:
+        raise ThresholdError(
+            f"[reflect] near_duplicate_max_proposals must be an integer from 0 to {MAX_PROPOSALS_LIMIT}"
+        )
+    return float(value), cap
 
 
 @dataclass
@@ -68,9 +79,23 @@ class Budget:
     """Run-wide work counters, shared by every scope's pass."""
 
     pairs: int = field(default_factory=lambda: MAX_PAIRS)
+    index: int = field(default_factory=lambda: MAX_INDEX_ENTRIES)
+    verify: int = field(default_factory=lambda: MAX_VERIFY_SHINGLES)
+    # Set once any bound is hit. Later scopes then skip the near pass entirely.
+    stopped: bool = False
     stats: dict[str, int] = field(
-        default_factory=lambda: {"candidate_pairs": 0, "pair_checks": 0, "clusters": 0, "common_shingles": 0}
+        default_factory=lambda: {
+            "candidate_pairs": 0,
+            "pair_checks": 0,
+            "index_entries": 0,
+            "clusters": 0,
+            "common_shingles": 0,
+        }
     )
+
+    def stop(self, reason: str, skipped: dict[str, int]) -> None:
+        self.stopped = True
+        skipped[reason] = skipped.get(reason, 0) + 1
 
 
 def shingles(body: str) -> array:
@@ -131,11 +156,18 @@ def _pairs(sets: list[array], limit: float, budget: Budget, skipped: dict[str, i
 
     Every card indexes only its first n - ceil(t*n) + 1 shingles in hash order.
     Two sets with Jaccard >= t always share a token in those prefixes, so the
-    filter loses no pair except through the posting-list cap.
+    filter loses no pair except through the posting-list cap. Hitting any
+    work bound stops the pass and keeps only the edges verified so far.
     """
     index: dict[int, list[int]] = {}
     for position, values in enumerate(sets):
-        for token in values[: len(values) - _required(len(values), limit) + 1]:
+        prefix = values[: len(values) - _required(len(values), limit) + 1]
+        if len(prefix) > budget.index:
+            budget.stop("near_index_limit", skipped)
+            return []
+        budget.index -= len(prefix)
+        budget.stats["index_entries"] += len(prefix)
+        for token in prefix:
             index.setdefault(token, []).append(position)
     seen: set[tuple[int, int]] = set()
     edges: list[tuple[int, int]] = []
@@ -144,23 +176,29 @@ def _pairs(sets: list[array], limit: float, budget: Budget, skipped: dict[str, i
         if len(posting) > POSTING_CAP:
             budget.stats["common_shingles"] += 1
             continue
+        # Charge every combination up front, including ones dedupe drops later.
+        combinations = len(posting) * (len(posting) - 1) // 2
+        if combinations > budget.pairs:
+            budget.stop("near_pair_limit", skipped)
+            return edges
+        budget.pairs -= combinations
+        budget.stats["pair_checks"] += combinations
         for offset, left in enumerate(posting):
             for right in posting[offset + 1 :]:
-                budget.stats["pair_checks"] += 1
                 pair = (left, right)
                 if pair in seen:
                     continue
+                seen.add(pair)
                 small, large = sorted((len(sets[left]), len(sets[right])))
                 if small < _required(large, limit):
                     continue
-                if budget.pairs <= 0:
-                    skipped["near_pair_limit"] = skipped.get("near_pair_limit", 0) + 1
+                if small + large > budget.verify:
+                    budget.stop("near_pair_limit", skipped)
                     return edges
-                budget.pairs -= 1
+                budget.verify -= small + large
                 budget.stats["candidate_pairs"] += 1
-                seen.add(pair)
                 shared = len(set(sets[left]).intersection(sets[right]))
-                if shared >= _required(len(sets[left]) + len(sets[right]) - shared, limit):
+                if shared >= _required(small + large - shared, limit):
                     edges.append(pair)
     return edges
 
@@ -178,10 +216,14 @@ def ops(
     """Return supersede submissions for one scope's heads, and counted skips.
 
     Exact duplicate groups belong to the exact pass and are left out here.
-    Clusters are stars: the keeper is the most recently revised card (highest
+    Clusters are stars: the keeper is the least recently written card (lowest
     hub revision, which is the log sequence), ties to the lowest card id, and
-    each member is a direct near-duplicate of that keeper.
+    each member is a direct near-duplicate of that keeper. A new card or a
+    rewrite always takes a higher revision, so it can never become a keeper.
     """
+    skipped: dict[str, int] = {}
+    if budget.stopped:
+        return [], skipped
     bodies: dict[str, list[dict[str, Any]]] = {}
     for head in sorted(heads, key=lambda h: h["card_id"]):
         body = delta.claim_body(head["text"])
@@ -193,12 +235,11 @@ def ops(
         if len(group) == 1 and values:
             cards.append(group[0])
             sets.append(values)
-    skipped: dict[str, int] = {}
     neighbours: dict[int, set[int]] = {}
     for left, right in _pairs(sets, limit, budget, skipped):
         neighbours.setdefault(left, set()).add(right)
         neighbours.setdefault(right, set()).add(left)
-    order = sorted(neighbours, key=lambda i: (-cards[i]["revision"], cards[i]["card_id"]))
+    order = sorted(neighbours, key=lambda i: (cards[i]["revision"], cards[i]["card_id"]))
     assigned: set[int] = set()
     submissions: list[list[dict[str, Any]]] = []
     for position in order:

@@ -1244,23 +1244,35 @@ The threshold defaults to 0.9. Set it from 0.5 to 1.0 in
 near_duplicate_threshold = 0.9
 ```
 
-A value outside that range, or a value that is not a number, fails the run
-with `hub_reflect_config` before any hub call.
+`near_duplicate_max_proposals` (default 8, from 0 to 32) caps how many new
+near-duplicate proposals one run opens. A value outside either range, or a
+value of the wrong type, fails the run with `hub_reflect_config` before any
+hub call.
 
 Candidate pairs come from an inverted index over a prefix of each card's
 shingles in a fixed hash order. Two cards at or above the threshold always
 share a prefix shingle, so the prefix filter alone loses no pair. A shingle
 indexed by more than 64 cards is template text and is skipped. This keeps pair
 generation close to linear in the number of cards. The report counts these
-shingles as `near_duplicate.common_shingles`. A run verifies at most 200,000
-distinct candidate pairs across all scopes. Reaching that budget stops the
-pass for the current scope and counts `near_pair_limit`.
+shingles as `near_duplicate.common_shingles`. Shingles are stored as 64-bit
+hashes.
+
+Three run-wide bounds cover every scope. The index holds at most 1,000,000
+prefix entries. Pair work is charged before any dedupe: each posting list is
+charged every combination it expands to, so near-identical cards that share
+many shingles pay for each repeat. A run expands at most 200,000 combinations.
+Verifying distinct pairs reads at most 50,000,000 shingles. The first bound a
+run hits stops the near-duplicate pass for that scope and every later scope.
+The index bound counts `near_index_limit` and the pair and verification bounds
+count `near_pair_limit`. Pairs already verified still form clusters.
 
 Clusters are stars around a keeper. Cards with at least one near-duplicate are
-taken in keeper order: the most recently revised card first, then the lowest
-card id on a tie. A card's hub revision is its hub log sequence, so the highest
-revision is the latest write. Each keeper claims its direct near-duplicates
-that no earlier keeper took. Every member is therefore at or above the
+taken in keeper order: the least recently written card first, then the lowest
+card id on a tie. A card's hub revision is its hub log sequence, so the lowest
+revision is the oldest current write. Creating a card or rewriting one always
+takes a higher revision, so a writer in the scope cannot make its card the
+keeper and have established cards superseded in its favor. Each keeper claims
+its direct near-duplicates that no earlier keeper took. Every member is therefore at or above the
 threshold against its own keeper, never only through a chain of other cards.
 
 Each member gets a `supersede_card` op. The op names the member as its card
@@ -1281,12 +1293,18 @@ anchored block counts `near_missing_pin` for its own op. A member whose
 `near_invalid_metadata`. Counts are per skipped op and never include card
 text.
 
+Exact merges are queued ahead of every near-duplicate submission, so they reach
+the pending quota first. After remembered submissions are removed, a run opens
+at most `near_duplicate_max_proposals` near-duplicate submissions. The ops of
+the rest count as `near_deferred` and wait for a later run. Crafted clusters
+therefore cannot use up the 32 pending proposals a principal may hold.
+
 The hub classifies `supersede_card` as Tier 2, so these proposals are never
 Tier 0 eligible and never take the automatic apply route. Each one waits for
 an explicit reviewer decision. `--dry-run` lists the supersede ops it would
 open beside the exact ops, with the skip counts and the `near_duplicate`
-counters `threshold`, `candidate_pairs`, `pair_checks`, `clusters` and
-`common_shingles`.
+counters `threshold`, `max_proposals`, `candidate_pairs`, `pair_checks`,
+`index_entries`, `clusters` and `common_shingles`.
 
 Hub reflection selects scopes before deriving or bounding candidates. Each scope
 allows at most 50,000 live cards and 64 MiB of UTF-8 card text, replacing the

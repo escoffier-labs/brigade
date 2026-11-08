@@ -53,15 +53,15 @@ def test_cluster_at_threshold_opens_pinned_supersede(setup, capsys):
     [call] = proposed(hub)
     [op] = call["ops"]
     older, newer = hub.cards[(SCOPE, "older")], hub.cards[(SCOPE, "newer")]
-    block = f"{words(23)}. ^c-aaaaaa"
+    block = f"{words(23, 'other')}. ^c-bbbbbb"
     assert op == {
         "type": "supersede_card",
         "scope": SCOPE,
-        "card_id": "older",
-        "base_revision": older["revision"],
-        "block_id": "c-aaaaaa",
+        "card_id": "newer",
+        "base_revision": newer["revision"],
+        "block_id": "c-bbbbbb",
         "expected_block_hash": hashlib.sha256(block.encode()).hexdigest(),
-        "other_card": {"scope": SCOPE, "card_id": "newer", "base_revision": newer["revision"]},
+        "other_card": {"scope": SCOPE, "card_id": "older", "base_revision": older["revision"]},
     }
     assert report["near_duplicate"]["clusters"] == 1
     assert report["near_duplicate"]["threshold"] == 0.9
@@ -90,7 +90,7 @@ def test_threshold_outside_allowed_range_fails_before_hub_calls(setup, capsys, v
     assert hub.calls == []
 
 
-def test_keeper_is_most_recent_revision_then_lowest_card_id():
+def test_keeper_is_least_recent_revision_then_lowest_card_id():
     texts = {name: card_text(words(40, name), anchor(i)) for i, name in enumerate(("a", "b", "c"))}
     submissions, skipped = near.ops(
         [head("a", texts["a"], 7), head("b", texts["b"], 9), head("c", texts["c"], 8)],
@@ -99,8 +99,8 @@ def test_keeper_is_most_recent_revision_then_lowest_card_id():
     )
     assert skipped == {}
     [ops] = submissions
-    assert {op["other_card"]["card_id"] for op in ops} == {"b"}
-    assert [op["card_id"] for op in ops] == ["a", "c"]
+    assert {op["other_card"]["card_id"] for op in ops} == {"a"}
+    assert [op["card_id"] for op in ops] == ["b", "c"]
     tied, _ = near.ops(
         [head("c", texts["c"], 5), head("a", texts["a"], 5), head("b", texts["b"], 5)],
         limit=0.9,
@@ -139,17 +139,17 @@ def test_unknown_trust_shared_by_the_whole_cluster_is_skipped():
 
 
 def test_unanchored_keeper_skips_cluster_and_unanchored_member_skips_its_op():
-    keeper = head("k", f"---\nevidence: []\n---\n{words(40, 'k')}.\n", 9)
+    keeper = head("k", f"---\nevidence: []\n---\n{words(40, 'k')}.\n", 0)
     members = [head(name, card_text(words(40, name), anchor(i)), i + 1) for i, name in enumerate("ab")]
     assert near.ops([keeper, *members], limit=0.9, budget=near.Budget()) == ([], {"near_missing_pin": 2})
-    keeper = head("k", card_text(words(40, "k"), "c-00000f"), 9)
+    keeper = head("k", card_text(words(40, "k"), "c-00000f"), 0)
     unanchored = head("u", f"---\nevidence: []\n---\n{words(40, 'u')}.\n", 3)
     [ops], skipped = near.ops([keeper, *members, unanchored], limit=0.9, budget=near.Budget())
     assert [op["card_id"] for op in ops] == ["a", "b"] and skipped == {"near_missing_pin": 1}
 
 
 def test_ambiguous_member_metadata_skips_only_that_op():
-    keeper = head("k", card_text(words(40, "k"), "c-00000f"), 9)
+    keeper = head("k", card_text(words(40, "k"), "c-00000f"), 0)
     good = head("a", card_text(words(40, "a"), anchor(1)), 1)
     bad = head("b", card_text(words(40, "b"), anchor(2), meta="status: |\n  active"), 2)
     [ops], skipped = near.ops([keeper, good, bad], limit=0.9, budget=near.Budget())
@@ -157,7 +157,7 @@ def test_ambiguous_member_metadata_skips_only_that_op():
 
 
 def test_exact_and_superseded_cards_are_left_out():
-    keeper = head("k", card_text(words(40, "k"), "c-00000f"), 9)
+    keeper = head("k", card_text(words(40, "k"), "c-00000f"), 0)
     twins = [head(name, card_text(words(40, "twin"), anchor(i)), i + 1) for i, name in enumerate("ab")]
     retired = head("s", card_text(words(40, "s"), anchor(5), meta="status: superseded"), 5)
     pointer = head("p", card_text(words(40, "p"), anchor(6), meta="superseded_by: repo:near/k"), 6)
@@ -176,7 +176,7 @@ def test_large_cluster_splits_within_eight_cards_per_submission(setup, capsys):
     for call in calls:
         cards = {op["card_id"] for op in call["ops"]} | {op["other_card"]["card_id"] for op in call["ops"]}
         assert len(cards) <= near.MAX_CARDS and len(call["ops"]) <= near.MAX_OPS
-        assert {op["other_card"]["card_id"] for op in call["ops"]} == {"card-09"}
+        assert {op["other_card"]["card_id"] for op in call["ops"]} == {"card-00"}
     assert run(target, capsys, "run")[1]["skipped_reasons"] == {"already_proposed": 2}
 
 
@@ -248,6 +248,7 @@ def test_dry_run_reports_near_ops_without_proposing(setup, capsys):
 def pair_checks(count, cap, monkeypatch):
     """Cards sharing a 30-word template and a unique 3-word tail (Jaccard 0.81)."""
     monkeypatch.setattr(near, "POSTING_CAP", cap)
+    monkeypatch.setattr(near, "MAX_PAIRS", 10**9)
     template = " ".join(f"common{i}" for i in range(30))
     heads = [
         head(f"card-{i:04d}", card_text(f"{template} u{i}a u{i}b u{i}c", anchor(i + 1)), i + 1) for i in range(count)
@@ -276,7 +277,7 @@ def test_candidate_pair_budget_is_counted(monkeypatch):
     budget = near.Budget()
     submissions, skipped = near.ops(heads, limit=0.9, budget=budget)
     assert len(submissions) <= 1 and skipped == {"near_pair_limit": 1}
-    assert budget.stats["candidate_pairs"] == 1
+    assert budget.stats["pair_checks"] <= 1 and budget.stats["candidate_pairs"] <= 1
     monkeypatch.setattr(near, "MAX_PAIRS", 1000)
     assert len(near.ops(heads, limit=0.9, budget=near.Budget())[0]) == 3
 
@@ -308,3 +309,88 @@ def test_client_keeps_coded_quota_refusals_and_other_429s_unavailable(code):
         client = hubc.MemoryHubClient("https://hub.example.test", "token", transport=answer(body))
         with pytest.raises(hubc.HubUnavailable):
             client.call("propose", ops=[])
+
+
+def crafted(count=64, shared=400):
+    """Near-identical cards sharing hundreds of shingles, each with its own last word."""
+    body = " ".join(f"shared{i}" for i in range(shared))
+    return [head(f"card-{i:03d}", card_text(f"{body} tail{i}", anchor(i + 1)), i + 1) for i in range(count)]
+
+
+def test_pair_budget_charges_every_generated_combination(monkeypatch):
+    heads = crafted()
+    budget = near.Budget()
+    submissions, skipped = near.ops(heads, limit=0.9, budget=budget)
+    # Dozens of shared prefix shingles each expand to 64 * 63 / 2 combinations.
+    assert budget.stats["pair_checks"] > 20 * 2016 and budget.stats["pair_checks"] <= near.MAX_PAIRS
+    assert budget.stats["candidate_pairs"] <= 2016  # Dedupe verifies each distinct pair once.
+    assert skipped == {} and sum(len(ops) for ops in submissions) == 63
+    monkeypatch.setattr(near, "MAX_PAIRS", 10_000)
+    budget = near.Budget()
+    submissions, skipped = near.ops(heads, limit=0.9, budget=budget)
+    assert budget.stats["pair_checks"] <= 10_000 and skipped == {"near_pair_limit": 1}
+    assert budget.stopped
+    # A stopped pass does no further work in later scopes.
+    assert near.ops(heads, limit=0.9, budget=budget) == ([], {})
+    assert budget.stats["pair_checks"] <= 10_000
+
+
+def test_index_entry_cap_stops_the_pass(monkeypatch):
+    monkeypatch.setattr(near, "MAX_INDEX_ENTRIES", 100)
+    budget = near.Budget()
+    assert near.ops(crafted(), limit=0.9, budget=budget) == ([], {"near_index_limit": 1})
+    assert budget.stats["index_entries"] <= 100 and budget.stats["pair_checks"] == 0
+
+
+def test_verification_cap_stops_the_pass(monkeypatch):
+    monkeypatch.setattr(near, "MAX_VERIFY_SHINGLES", 2000)
+    budget = near.Budget()
+    _, skipped = near.ops(crafted(), limit=0.9, budget=budget)
+    assert skipped == {"near_pair_limit": 1} and budget.stats["candidate_pairs"] <= 3
+
+
+def test_rewritten_or_new_card_never_becomes_keeper(setup, capsys):
+    target, hub, _ = setup
+    configure(target)
+    put(hub, "established", words(40, "one"), "c-aaaaaa")
+    put(hub, "a-rewritten", words(40, "two"), "c-bbbbbb")
+    put(hub, "a-rewritten", words(40, "three"), "c-bbbbbb")  # a later write never promotes a card
+    put(hub, "a-fresh", words(40, "four"), "c-cccccc")
+    code, report = run(target, capsys, "run", "--dry-run")
+    assert code == 0
+    assert {op["other_card"]["card_id"] for op in report["ops"]} == {"established"}
+    assert {op["card_id"] for op in report["ops"]} == {"a-rewritten", "a-fresh"}
+
+
+def test_per_run_near_proposal_cap_defers_the_rest(setup, capsys):
+    target, hub, _ = setup
+    configure(target)
+    near_groups(hub, 10)
+    code, report = run(target, capsys, "run")
+    assert code == 0 and len(report["proposals"]) == 8
+    assert report["skipped_reasons"] == {"near_deferred": 2}
+    assert report["near_duplicate"]["max_proposals"] == 8
+    code, report = run(target, capsys, "run")
+    assert len(report["proposals"]) == 2 and report["skipped_reasons"] == {"already_proposed": 8}
+    configure(target, "[reflect]\nnear_duplicate_max_proposals = 0\n")
+    for group in (10, 11):
+        for member in range(2):
+            put(hub, f"g{group}-{member}", group_claim(group, member), anchor(group * 2 + member + 1))
+    assert run(target, capsys, "run", "--dry-run")[1]["skipped_reasons"]["near_deferred"] == 2
+
+
+@pytest.mark.parametrize("value", ["-1", "33", "1.5", "true"])
+def test_near_proposal_cap_outside_range_fails_before_hub_calls(setup, capsys, value):
+    target, hub, _ = setup
+    configure(target, f"[reflect]\nnear_duplicate_max_proposals = {value}\n")
+    code, report = run(target, capsys, "run")
+    assert code == 1 and report["code"] == "hub_reflect_config"
+    assert "near_duplicate_max_proposals" in report["error"] and hub.calls == []
+
+
+def test_exact_merges_come_before_near_duplicates(setup, capsys):
+    target, hub, _ = setup
+    (target / ".brigade/memory-care.toml").write_text(f'[hub]\nmode="read"\nread_scopes=["{SCOPE}","fleet"]\n')
+    near_groups(hub, 1)
+    code, report = run(target, capsys, "run", "--limit", "1")
+    assert code == 0 and [op["type"] for op in report["ops"]] == ["merge_exact_duplicates"]
