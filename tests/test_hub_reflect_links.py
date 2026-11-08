@@ -588,6 +588,15 @@ def test_aliases_that_only_look_scope_qualified_are_kept_as_written():
     assert links._scoped(SCOPE, SCOPE + "/old-guide") == "old-guide"
 
 
+def test_a_path_form_alias_keeps_its_owner():
+    for alias in ("cards/old-guide.md", "memory/cards/old-guide", "old-guide.md"):
+        keeper = head("keeper", card_text("Kept.", "c-dddddd", f"aliases: {json.dumps([alias])}"))
+        other = head("other", card_text("Unrelated.", "c-eeeeee", "title: Old Guide"))
+        for link in (alias, "old-guide"):
+            submissions, skipped, _ = unit([head("src", card_text(f"See [[{link}]].")), keeper, other])
+            assert submissions == [] and skipped == {}, (alias, link)
+
+
 def test_two_retired_cards_sharing_a_name_are_ambiguous_even_with_one_successor():
     heads = [
         head("src", card_text("See [[Old Guide]].")),

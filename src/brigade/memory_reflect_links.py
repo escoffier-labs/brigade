@@ -137,6 +137,10 @@ class Index:
             except ValueError:
                 identities, titles, well_formed = [], [], False
             identities = [n for n in (_scoped(scope, name) for name in identities) if n]
+            # Index names the way `_target` reads a link, so a path-form alias such as
+            # `cards/old-guide.md` matches `[[cards/old-guide.md]]` and keeps its owner.
+            identities = [_target(n) for n in identities]
+            titles = [_target(n) for n in titles]
             self.info[(scope, card_id)] = (head.get("scan_state"), head.get("trust"), well_formed)
             if _live(head):
                 self.ids.setdefault(scope, set()).add(card_id)
