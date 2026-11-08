@@ -147,6 +147,37 @@ def main_checkout(path: Path, *, repo: Path | None = None) -> Path | None:
     return main
 
 
+def checkout_prefix(path: Path) -> tuple[str, ...] | None:
+    """Components of `path` below its checkout's top level, () at the top.
+
+    None when git cannot say or the prefix is not a plain relative path.
+    """
+    out = _git(path, "rev-parse", "--show-prefix")
+    if out is None:
+        return None
+    value = out.rstrip("\n").rstrip("/")
+    if not value:
+        return ()
+    try:
+        return inbox_components(value)
+    except ValueError:
+        return None
+
+
+def main_checkout_for(path: Path, *, repo: Path | None = None) -> Path | None:
+    """`main_checkout(path)` mapped to the same subdirectory as `path`.
+
+    None when there is no verified main checkout or the subdirectory does
+    not exist there.
+    """
+    main = main_checkout(path, repo=repo)
+    prefix = checkout_prefix(path)
+    if main is None or prefix is None:
+        return None
+    mapped = main.joinpath(*prefix)
+    return mapped if mapped.is_dir() and not mapped.is_symlink() else None
+
+
 def _bounded_git_output(cwd: Path, args: list[str], max_bytes: int) -> bytes | None:
     """Stdout of a git command, or None on failure, timeout or overflow."""
     try:
@@ -200,9 +231,10 @@ def linked_worktrees(root: Path, *, limit: int = MAX_WORKTREES, max_bytes: int =
     if raw is None:
         print(f"brigade: git worktree list failed or exceeded {max_bytes} bytes for {root}", file=sys.stderr)
         return []
-    try:
-        own = root.resolve(strict=True)
-    except OSError:
+    # Compare against the checkout's top level, so a subdirectory root does
+    # not count its own checkout as a sibling.
+    own = _git_path(root, "--show-toplevel")
+    if own is None:
         return []
     found: list[Path] = []
     for value in _worktree_records(raw, limit):
@@ -300,7 +332,7 @@ def handoff_inbox(target: Path) -> Path:
     A linked worktree points at the main checkout's inbox, which survives the
     worktree's deletion and is the inbox an ingester already watches.
     """
-    main = main_checkout(target)
+    main = main_checkout_for(target)
     return (main if main is not None else target) / CLAUDE_INBOX
 
 
@@ -336,6 +368,20 @@ def safe_text(value: object, limit: int = 160) -> str:
     """Printable ASCII rendering of an untrusted name for logs and receipts."""
     text = str(value).encode("unicode_escape", "backslashreplace").decode("ascii")
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def safe_path(value: object, limit: int = 160) -> str:
+    """Escaped path for warnings that never loses its final name.
+
+    Only the directory part is shortened, from the middle, so an operator
+    still sees which file to act on.
+    """
+    text = str(value).encode("unicode_escape", "backslashreplace").decode("ascii")
+    head, sep, name = text.rpartition("/")
+    if len(text) <= limit or not sep:
+        return text
+    room = max(limit - len(name) - 4, 16)
+    return head[: room // 2] + "..." + head[-(room - room // 2) :] + "/" + name
 
 
 @dataclass(frozen=True)

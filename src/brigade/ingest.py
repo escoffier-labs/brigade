@@ -81,6 +81,7 @@ SKIP_INVALID_SOURCE_CONFIG = "invalid handoff source config"
 _GIT_LOCATION_ENV = handoff_worktrees.GIT_LOCATION_ENV
 _TRACKED_SKIP_CODE = "tracked-or-unverifiable"
 _MAX_DRAFT_SUFFIX = 1000
+_HANDLED_KINDS = frozenset({"promoted", "reinforced", "routed", "inboxed"})
 
 
 class StaleCardError(OSError):
@@ -171,9 +172,14 @@ def _resolve_inbox_paths(target: Path) -> list[Path]:
     # Handoffs written in a linked worktree of a watched root are found
     # through `git worktree list`, never a directory walk.
     for root, rels in declared.items():
+        # A root below its checkout's top level maps to the same subdirectory
+        # in each linked checkout, walked without following links.
+        prefix = handoff_worktrees.checkout_prefix(root)
+        if prefix is None:
+            continue
         for worktree in handoff_worktrees.linked_worktrees(root):
             for rel in dict.fromkeys(rels):
-                inbox = handoff_worktrees.contained_inbox(worktree, rel)
+                inbox = handoff_worktrees.contained_inbox(worktree, "/".join((*prefix, rel)))
                 if inbox is not None:
                     add(inbox)
     return paths
@@ -321,7 +327,11 @@ def ingest_into(
             except OSError:
                 _record_failure(stats, path, "io-error")
                 continue
-            stats.seen_digests.add(sha)
+            # Only content that was published, appended or archived counts as
+            # handled. A retryable skip leaves the handoff pending, so a later
+            # identical copy must not be archived as its duplicate.
+            if action.kind in _HANDLED_KINDS:
+                stats.seen_digests.add(sha)
             stats.processed += 1
             stats.actions.append(action.summary)
             if action.kind == "promoted":

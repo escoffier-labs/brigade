@@ -1545,7 +1545,7 @@ def _deliver_worktree_handoffs(worktree_path: Path, root: Path) -> bool:
 
     try:
         # Only a main checkout that owns the same common git dir as `root`.
-        dest = handoff_worktrees.main_checkout(worktree_path, repo=root)
+        dest = handoff_worktrees.main_checkout_for(worktree_path, repo=root)
         results = handoff_worktrees.rescue_pending_handoffs(worktree_path, dest)
     except Exception as exc:  # noqa: BLE001 - callers run this from finally blocks
         print(f"brigade: kept worktree {worktree_path}: handoff rescue error ({type(exc).__name__})", file=sys.stderr)
@@ -1553,8 +1553,8 @@ def _deliver_worktree_handoffs(worktree_path: Path, root: Path) -> bool:
     failed = [r for r in results if r.state == "failed"]
     for rescue in failed:
         print(
-            f"brigade: handoff not delivered from {handoff_worktrees.safe_text(rescue.source)} [{rescue.reason}]"
-            + (f" kept as {handoff_worktrees.safe_text(rescue.dest)}" if rescue.dest else ""),
+            f"brigade: handoff not delivered [{rescue.reason}] from {handoff_worktrees.safe_path(rescue.source)}"
+            + (f" kept as {handoff_worktrees.safe_path(rescue.dest)}" if rescue.dest else ""),
             file=sys.stderr,
         )
     if failed:

@@ -307,6 +307,98 @@ def test_same_handoff_in_two_worktrees_ingests_once(tmp_path: Path):
     assert (copy.parent / "processed" / copy.name).is_file()
 
 
+# Codex 4507705655: a retryable skip is not handled content.
+
+_CARD = """\
+# Memory Handoff
+
+## Type
+decision
+
+## Title
+Lock busy
+
+## Recommended memory action
+create-card
+
+## Target card
+lock-busy.md
+
+## Suggested card content
+---
+topic: lock-busy
+category: test
+tags: [test]
+---
+
+# Lock busy
+
+Retry fact.
+"""
+
+
+def test_retryable_skip_does_not_mark_identical_handoffs_handled(tmp_path: Path):
+    from brigade import inbox_lock
+
+    main, linked = _repo_with_worktree(tmp_path)
+    in_main = main / ".claude" / "memory-handoffs" / "2026-11-08-0900-card.md"
+    in_main.write_text(_CARD)
+    in_linked = linked / ".claude" / "memory-handoffs" / "2026-11-08-0900-card-copy.md"
+    in_linked.parent.mkdir(parents=True)
+    in_linked.write_text(_CARD)
+    lock = main / ".brigade/memory/proposals/proposal.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+
+    with inbox_lock.held_file_lock(lock, deadline_seconds=5):
+        stats = ingest_mod.IngestStats()
+        assert ingest_mod.ingest_into(source=main, owner=main, stats=stats, promote_cards=True) == 0
+
+    card = main / "memory" / "cards" / "lock-busy.md"
+    assert not card.exists()
+    assert in_main.is_file() and in_linked.is_file()
+    assert not list((main / ".claude" / "memory-handoffs" / "processed").glob("*.md"))
+    assert not list((linked / ".claude" / "memory-handoffs" / "processed").glob("*.md"))
+    # The pending main copy is content ingest will read, so the linked copy
+    # may count as its duplicate. Either way the bytes stay recoverable.
+    rescued = handoff_worktrees.rescue_pending_handoffs(linked, main)
+    assert [r.state for r in rescued] in (["delivered"], ["duplicate"])
+    assert in_main.is_file()
+
+    stats = ingest_mod.IngestStats()
+    assert ingest_mod.ingest_into(source=main, owner=main, stats=stats, promote_cards=True) == 0
+    assert stats.promoted == 1
+    assert "Retry fact." in card.read_text()
+
+
+# Codex 4507705659: a subdirectory root keeps its subdirectory in siblings.
+
+
+def test_subdirectory_root_maps_into_linked_checkouts(tmp_path: Path):
+    main = tmp_path / "main"
+    project = main / "project"
+    project.mkdir(parents=True)
+    (project / "README.md").write_text("project\n")
+    _git(main, "init", "-q")
+    _git(main, "add", "project/README.md")
+    _git(main, "commit", "-q", "-m", "init")
+    linked = tmp_path / "linked"
+    _git(main, "worktree", "add", "-q", "--detach", str(linked))
+    _seed(project)
+    intended = _handoff(linked / "project" / ".claude" / "memory-handoffs", "2026-11-08-0900-intended.md", "intended")
+    unrelated = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-unrelated.md", "unrelated")
+
+    paths = ingest_mod._resolve_inbox_paths(project)
+    assert intended.parent.resolve() in paths
+    assert unrelated.parent.resolve() not in paths
+
+    stats = ingest_mod.IngestStats()
+    assert ingest_mod.ingest_into(source=project, owner=project, stats=stats) == 0
+    assert not intended.exists()
+    assert unrelated.is_file()
+    assert handoff_worktrees.main_checkout_for(linked / "project", repo=main) == project.resolve()
+    assert handoff_worktrees.main_checkout_for(linked / "project", repo=main) != main.resolve()
+
+
 # Daybreak 1: linked inboxes must stay inside the configured repository.
 
 
@@ -709,8 +801,18 @@ def test_oversize_late_append_is_kept_under_a_skipped_name(tmp_path: Path, monke
     assert _claims(inbox) == []
 
 
+def _long_base(tmp_path: Path, length: int = 200) -> Path:
+    """A directory whose absolute path is about `length` characters, like CI's tmp paths."""
+    base = tmp_path
+    while len(str(base)) < length:
+        base = base / ("d" * min(60, length - len(str(base))))
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
 def test_oversize_recovery_file_keeps_worktree_on_later_forced_removal(tmp_path: Path, monkeypatch, capsys):
-    main, linked = _repo_with_worktree(tmp_path)
+    main, linked = _repo_with_worktree(_long_base(tmp_path))
+    assert len(str(linked)) >= 200
     inbox = linked / ".claude" / "memory-handoffs"
     source = _handoff(inbox, "2026-11-08-0900-slow.md", "first part")
     monkeypatch.setattr(handoff_worktrees, "MAX_HANDOFF_BYTES", 200)
@@ -730,6 +832,17 @@ def test_oversize_recovery_file_keeps_worktree_on_later_forced_removal(tmp_path:
     assert kept.is_file()
     second = capsys.readouterr().err
     assert "recovery-file-pending" in second and kept.name in second
+
+
+def test_safe_path_keeps_the_final_name_whole():
+    name = ".late-oversize-" + "a" * 32 + ".md.recovered"
+    path = "/tmp/" + "x" * 300 + "/linked/.claude/memory-handoffs/" + name
+    shown = handoff_worktrees.safe_path(path)
+    assert shown.endswith("/" + name)
+    assert "..." in shown and shown.startswith("/tmp/")
+    assert len(shown) <= 160 + len(name)
+    assert handoff_worktrees.safe_path("/short/" + name) == "/short/" + name
+    assert "\\x1b" in handoff_worktrees.safe_path("/tmp/a\x1b/" + name)
 
 
 def _grow_on_every_read(monkeypatch, writer: int, chunk: int, state: dict) -> None:
