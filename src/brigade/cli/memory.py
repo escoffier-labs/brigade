@@ -303,7 +303,13 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Workspace whose memory cards are anchored."
     )
     p_memory_anchor.add_argument(
-        "--apply", action="store_true", help="Rewrite the cards. Without it, report counts and change nothing."
+        "--apply",
+        action="store_true",
+        help=(
+            "Rewrite the cards. Without it, report counts and change nothing. "
+            "Stop other card writers first: an editor that saves by renaming a new file "
+            "over a card in the final instant before the swap can lose that save."
+        ),
     )
     p_memory_anchor.add_argument(
         "--path",

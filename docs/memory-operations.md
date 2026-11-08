@@ -1229,6 +1229,11 @@ The operator flow has three steps:
    timestamps and bytes just before the rename. A card that changed since it
    was scanned, or whose owner cannot be kept, is left alone and counted as
    failed.
+   Stop every other writer of the card files before `--apply`, such as the
+   agent gateway, sync timers and open editors. The lock is advisory, and an
+   editor that saves by renaming a new file over a card does not take it. A save
+   that lands between the final recheck and the rename is overwritten. Once
+   writers are stopped, that window cannot occur.
 3. Let the normal sync push publish the anchored revisions. The command writes
    local files only and never talks to the hub.
 
