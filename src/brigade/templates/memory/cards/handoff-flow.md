@@ -12,7 +12,7 @@ Side harnesses write Memory Handoffs to their own writer inbox ({{handoff_inboxe
 
 1. Side harness finishes a substantial task.
 2. Closeout rule fires: "did this session produce durable knowledge?"
-3. If yes, the harness writes `{{handoff_inbox}}<YYYY-MM-DD-HHMM>-<slug>.md` using `TEMPLATE.md`.
+3. If yes, the harness writes the handoff with `brigade handoff draft --target .` (see Writing a handoff below). Hand-copying `TEMPLATE.md` into `{{handoff_inbox}}<YYYY-MM-DD-HHMM>-<slug>.md` is the fallback.
 4. The ingester (run by the memory owner) parses each handoff.
 5. Handoffs route to: a memory card, an appendable document, or the review inbox.
 6. Processed handoffs move to the inbox's `processed/` folder.
@@ -29,15 +29,33 @@ Only three handoff shapes can silently mutate canonical memory. Everything else 
 
 **Card auto-promotion:**
 - `Recommended memory action` is `create-card` or `update-card`.
-- `Target card` matches `^[A-Za-z0-9._-]+\.md$` (no path traversal).
-- `Suggested card content` starts with YAML frontmatter.
+- `Target card` is a bare filename that starts with a letter or digit and ends in `.md` (no path traversal).
+- `Suggested card content` starts with YAML frontmatter that has a `title` or `topic`, a `category`, and `tags` as a list.
+- `update-card` also carries `Expected card SHA256`, the SHA-256 of the card as it is now. A stale SHA means the card changed after it was read, and the handoff waits for review.
 - `Target document` and `Suggested document content` sections are omitted entirely.
 
 **Document routing:**
 - `Recommended memory action` is `no-card`.
-- `Target document` is one of: `TOOLS.md`, `USER.md`, `rules/*.md`, `.learnings/*.md`.
+- `Target document` is one of: `TOOLS.md`, `USER.md`, `rules/<name>.md`, `.learnings/LEARNINGS.md`, `.learnings/ERRORS.md`, `.learnings/FEATURE_REQUESTS.md`.
+- Appending to a bootstrap document (`USER.md`, `TOOLS.md`) must stay inside that file's size budget.
 - `Suggested document content` has no `##` headings (would parse as new sections).
 - `Target card` and `Suggested card content` sections are omitted entirely.
+
+## Writing a handoff
+
+Write handoffs with `brigade handoff draft`. It runs the ingester's own checks before it writes anything, so a handoff that would conflict at ingest is refused with one line per problem and no file is left behind.
+
+```bash
+# new durable note
+brigade handoff draft --target . --title "Short title" --summary "One sentence." \
+  --target-document .learnings/LEARNINGS.md --content "### Short title\n\nWhat the next agent needs."
+
+# update an existing card: the expected SHA is read from the live card
+brigade handoff draft --target . --title "Short title" --summary "One sentence." \
+  --action update-card --target-card project-context.md --content-file new-card.md
+```
+
+When the cards live in a different directory than `--target`, pass `--workspace <memory workspace>`. When that workspace is not reachable from this machine, pass `--expected-sha <sha256 of the current card>` instead. `brigade handoff lint --workspace <memory workspace>` runs the same checks on a file written some other way.
 
 ## Closeout instruction
 
@@ -45,8 +63,8 @@ The harness must be told to write handoffs without prompting. Put this in the ha
 
 ```text
 At the end of any substantial task, check whether the session produced durable
-knowledge. If yes, create a Memory Handoff in `{{handoff_inbox}}`
-using the standard format. Do this without waiting to be reminded.
+knowledge. If yes, write a Memory Handoff with `brigade handoff draft --target .`
+(it lands in `{{handoff_inbox}}`). Do this without waiting to be reminded.
 ```
 
 ## Verification

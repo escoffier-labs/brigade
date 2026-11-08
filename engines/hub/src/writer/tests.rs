@@ -50,6 +50,7 @@ fn batch_with_stats(path: &Path, commands: Vec<Sql>, stats: Arc<WriterStats>) ->
                 reply: Some(reply),
                 _permits: vec![],
                 arbiter: arbiter.clone(),
+                queued: Instant::now(),
             })
             .unwrap_or_else(|_| panic!("queue"));
         replies.push(receiver);
@@ -122,6 +123,7 @@ fn actual_sqlite_full_never_acknowledges_lost_rows() {
         reply: Some(reply),
         _permits: vec![],
         arbiter,
+        queued: Instant::now(),
     };
     // The SQLite FULL error really aborts the outer transaction.
     assert!(super::worker::test_apply(&db, &e).is_err());
@@ -460,6 +462,7 @@ fn batch_budgets_and_no_linger() {
                 reply: Some(reply),
                 _permits: vec![],
                 arbiter: arbiter.clone(),
+                queued: Instant::now(),
             })
             .unwrap_or_else(|_| panic!("queue"));
         replies.push(r);
@@ -568,6 +571,7 @@ fn second_abort_fails_prior_commands_instead_of_replaying_again() {
                 reply: Some(reply),
                 _permits: vec![],
                 arbiter: arbiter.clone(),
+                queued: Instant::now(),
             })
             .unwrap_or_else(|_| panic!("queue"));
         replies.push(r);
@@ -788,4 +792,468 @@ fn aborted_batches_count_once_per_batch() {
     let snapshot = aborted.snapshot();
     assert_eq!((snapshot.batch_size, snapshot.aborted_batches), (2, 1));
     assert!(snapshot.commit_seconds > 0.0);
+}
+
+#[tokio::test]
+async fn heartbeat_bytes_leave_durable_admission_reserve() {
+    let path = fixture();
+    let arbiter = Arc::new(Arbiter::default());
+    let turn = arbiter
+        .acquire(Lane::Memory, Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let writer = start_fixture(Config::new(path.clone()), arbiter).unwrap();
+    let mut heartbeat = budget(false);
+    heartbeat.bytes = 8 * 1024 * 1024;
+    let mut accepted = Vec::new();
+    for _ in 0..7 {
+        accepted.push(
+            writer
+                .submit(Sql("INSERT INTO rows(value) VALUES(random())"), heartbeat)
+                .await
+                .unwrap(),
+        );
+    }
+    let refused = writer
+        .submit(Sql("INSERT INTO rows(value) VALUES(random())"), heartbeat)
+        .await;
+    assert!(matches!(
+        refused,
+        Err(Failure {
+            status: 503,
+            reason: "writer-queue-full"
+        })
+    ));
+    let mut claim = budget(true);
+    claim.bytes = 8 * 1024 * 1024;
+    claim.deadline = Instant::now() + Duration::from_secs(1);
+    let reply = writer
+        .submit(Sql("INSERT INTO rows(value) VALUES('claim')"), claim)
+        .await
+        .unwrap();
+    assert_eq!(writer.bytes.available_permits(), 0);
+    drop(turn);
+    for reply in accepted {
+        assert!(reply.await.unwrap().is_ok());
+    }
+    assert!(reply.await.unwrap().is_ok());
+    assert_eq!(values(&path), 8);
+}
+
+#[test]
+fn commit_histogram_has_sum() {
+    let stats = Arc::new(WriterStats::default());
+    stats.batch(1, Duration::ZERO, Some(Duration::from_millis(2)), false);
+    stats.batch(1, Duration::ZERO, Some(Duration::from_millis(21)), true);
+    let telemetry = crate::telemetry::Telemetry::default();
+    telemetry.attach_writer(stats);
+    let text = telemetry.render();
+    assert_eq!(metric(&text, "writer_commit_duration_seconds_count"), 2.0);
+    assert!((metric(&text, "writer_commit_duration_seconds_sum") - 0.023).abs() < 1e-9);
+}
+
+#[test]
+fn durable_commands_run_ahead_of_queued_ordinary_work() {
+    // Three ordinary maximum-size commands queue ahead of one claim-sized
+    // durable command. Each ordinary command fills a batch on its own, so FIFO
+    // order would commit the durable command fourth.
+    let path = fixture();
+    let arbiter = Arc::new(Arbiter::default());
+    let (sender, receiver) = mpsc::channel(100);
+    let mut replies = Vec::new();
+    for (value, durable) in [
+        ("first", false),
+        ("second", false),
+        ("third", false),
+        ("claim", true),
+    ] {
+        if durable {
+            arbiter.durable(1);
+        }
+        let (reply, answer) = oneshot::channel();
+        let sql: &'static str =
+            Box::leak(format!("INSERT INTO rows(value) VALUES('{value}')").into_boxed_str());
+        sender
+            .try_send(Envelope {
+                command: Box::new(Sql(sql)),
+                budget: Budget {
+                    bytes: if durable { 100 } else { 8 * 1024 * 1024 },
+                    ..budget(durable)
+                },
+                reply: Some(reply),
+                _permits: vec![],
+                arbiter: arbiter.clone(),
+                queued: Instant::now(),
+            })
+            .unwrap_or_else(|_| panic!("queue"));
+        replies.push(answer);
+    }
+    drop(sender);
+    let stats = Arc::new(WriterStats::default());
+    worker::run(
+        worker::open(&path).unwrap(),
+        receiver,
+        Config::new(path.clone()),
+        arbiter,
+        stats.clone(),
+    );
+    for reply in replies {
+        assert!(reply.blocking_recv().unwrap().is_ok());
+    }
+    let db = Connection::open(&path).unwrap();
+    let order: Vec<String> = db
+        .prepare("SELECT value FROM rows ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(order, ["claim", "first", "second", "third"]);
+    assert_eq!(stats.snapshot().queue_depth, 0);
+}
+
+fn ordered_values(path: &Path) -> Vec<Option<String>> {
+    Connection::open(path)
+        .unwrap()
+        .prepare("SELECT value FROM rows ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// Durable work that keeps its own class non-empty at every pick: each command
+/// inserts a NULL row, then queues its successor until `stop` is set or a
+/// safety cap passes. Batches close on their 50 ms window, so the chain spans
+/// many batches.
+struct Chain {
+    sender: mpsc::Sender<Envelope>,
+    arbiter: Arc<Arbiter>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    until: Instant,
+}
+impl Chain {
+    fn envelope(self) -> Envelope {
+        self.arbiter.durable(1);
+        let arbiter = self.arbiter.clone();
+        Envelope {
+            command: Box::new(self),
+            budget: budget(true),
+            reply: None,
+            _permits: vec![],
+            arbiter,
+            queued: Instant::now(),
+        }
+    }
+}
+impl Command for Chain {
+    fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+        tx.execute("INSERT INTO rows(value) VALUES(NULL)", &[])?;
+        std::thread::sleep(Duration::from_millis(2));
+        if !self.stop.load(Ordering::Relaxed) && Instant::now() < self.until {
+            let next = Chain {
+                sender: self.sender.clone(),
+                arbiter: self.arbiter.clone(),
+                stop: self.stop.clone(),
+                until: self.until,
+            };
+            let _ = self.sender.try_send(next.envelope());
+        }
+        Ok(Json::Null)
+    }
+}
+
+/// Starts a worker thread behind a durable chain with `ordinary` queued after
+/// its first command. The chain stops once the returned flag is set.
+fn behind_durable_chain(
+    path: &Path,
+    ordinary: Vec<(&'static str, Budget, Instant)>,
+) -> (
+    Arc<std::sync::atomic::AtomicBool>,
+    Vec<oneshot::Receiver<Answer>>,
+    std::thread::JoinHandle<()>,
+) {
+    let arbiter = Arc::new(Arbiter::default());
+    let (sender, receiver) = mpsc::channel(100);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let chain = Chain {
+        sender: sender.clone(),
+        arbiter: arbiter.clone(),
+        stop: stop.clone(),
+        until: Instant::now() + Duration::from_secs(15),
+    };
+    sender
+        .try_send(chain.envelope())
+        .unwrap_or_else(|_| panic!("queue"));
+    let mut replies = Vec::new();
+    for (sql, budget, queued) in ordinary {
+        let (reply, answer) = oneshot::channel();
+        sender
+            .try_send(Envelope {
+                command: Box::new(Sql(sql)),
+                budget,
+                reply: Some(reply),
+                _permits: vec![],
+                arbiter: arbiter.clone(),
+                queued,
+            })
+            .unwrap_or_else(|_| panic!("queue"));
+        replies.push(answer);
+    }
+    drop(sender);
+    let db = worker::open(path).unwrap();
+    let config = Config::new(path.to_path_buf());
+    let handle =
+        std::thread::spawn(move || worker::run(db, receiver, config, arbiter, Arc::default()));
+    (stop, replies, handle)
+}
+
+#[test]
+fn starved_ordinary_work_is_shed_at_its_deadline_or_aged_ahead() {
+    // Strict durable priority alone would answer neither command while the
+    // chain runs: the expired one would hold its permits and the heartbeat
+    // would wait out its 10 s deadline. Aging runs it at 5 s instead.
+    let path = fixture();
+    let start = Instant::now();
+    let expired = Budget {
+        deadline: start.checked_sub(Duration::from_millis(1)).unwrap(),
+        ..budget(false)
+    };
+    let heartbeat = budget(false);
+    let (stop, replies, worker) = behind_durable_chain(
+        &path,
+        vec![
+            (
+                "INSERT INTO rows(value) VALUES('expired')",
+                expired,
+                start.checked_sub(Duration::from_secs(10)).unwrap(),
+            ),
+            (
+                "INSERT INTO rows(value) VALUES('ordinary')",
+                heartbeat,
+                start,
+            ),
+        ],
+    );
+    let mut replies = replies.into_iter();
+    let shed = replies.next().unwrap().blocking_recv().unwrap();
+    assert_eq!(shed, Err(Failure::timeout(false)));
+    assert!(start.elapsed() < Duration::from_secs(1), "answered at once");
+    let answered = replies.next().unwrap().blocking_recv().unwrap();
+    let waited = start.elapsed();
+    // Let the chain run a little past the heartbeat before stopping it.
+    std::thread::sleep(Duration::from_millis(200));
+    stop.store(true, Ordering::Relaxed);
+    worker.join().unwrap();
+    assert!(answered.is_ok(), "{answered:?}");
+    assert!(
+        waited >= Duration::from_secs(5),
+        "aged, not drained: {waited:?}"
+    );
+    let remaining = heartbeat.deadline.saturating_duration_since(start + waited);
+    assert!(remaining > Duration::from_secs(4), "{waited:?}");
+    let order = ordered_values(&path);
+    assert!(!order.contains(&Some("expired".into())));
+    let at = order
+        .iter()
+        .position(|v| v.as_deref() == Some("ordinary"))
+        .unwrap();
+    assert!(order[..at].iter().filter(|v| v.is_none()).count() > 1);
+    assert!(
+        order[at + 1..].iter().any(Option::is_none),
+        "durable work was still queued when the heartbeat ran"
+    );
+}
+
+#[test]
+fn short_budget_ordinary_work_ages_at_half_its_budget() {
+    // A HubRetention sweep has 250 ms and ages at 125 ms. This 1 s budget
+    // follows the same half-budget rule with more slack for a loaded runner.
+    let path = fixture();
+    let start = Instant::now();
+    let sweep = Budget {
+        deadline: start + Duration::from_secs(1),
+        ..budget(false)
+    };
+    let (stop, replies, worker) = behind_durable_chain(
+        &path,
+        vec![("INSERT INTO rows(value) VALUES('sweep')", sweep, start)],
+    );
+    let answered = replies.into_iter().next().unwrap().blocking_recv().unwrap();
+    let waited = start.elapsed();
+    stop.store(true, Ordering::Relaxed);
+    worker.join().unwrap();
+    assert!(answered.is_ok(), "{answered:?}");
+    assert!(waited >= Duration::from_millis(500), "{waited:?}");
+    assert!(ordered_values(&path).contains(&Some("sweep".into())));
+}
+
+#[test]
+fn deferred_durable_command_keeps_its_place_ahead_of_ordinary_work() {
+    // The second claim overflows the first batch's byte budget and is deferred.
+    // It must return to the durable head: deferred into the ordinary class, it
+    // would run after the third claim.
+    let path = fixture();
+    let arbiter = Arc::new(Arbiter::default());
+    let (sender, receiver) = mpsc::channel(100);
+    let mut replies = Vec::new();
+    for (value, durable, bytes) in [
+        ("one", true, 8 * 1024 * 1024),
+        ("two", true, 8 * 1024 * 1024),
+        ("three", true, 100),
+        ("ordinary", false, 100),
+    ] {
+        if durable {
+            arbiter.durable(1);
+        }
+        let (reply, answer) = oneshot::channel();
+        let sql: &'static str =
+            Box::leak(format!("INSERT INTO rows(value) VALUES('{value}')").into_boxed_str());
+        sender
+            .try_send(Envelope {
+                command: Box::new(Sql(sql)),
+                budget: Budget {
+                    bytes,
+                    ..budget(durable)
+                },
+                reply: Some(reply),
+                _permits: vec![],
+                arbiter: arbiter.clone(),
+                queued: Instant::now(),
+            })
+            .unwrap_or_else(|_| panic!("queue"));
+        replies.push(answer);
+    }
+    drop(sender);
+    worker::run(
+        worker::open(&path).unwrap(),
+        receiver,
+        Config::new(path.clone()),
+        arbiter,
+        Arc::default(),
+    );
+    for reply in replies {
+        assert!(reply.blocking_recv().unwrap().is_ok());
+    }
+    let order: Vec<_> = ordered_values(&path).into_iter().flatten().collect();
+    assert_eq!(order, ["one", "two", "three", "ordinary"]);
+}
+
+#[test]
+fn queue_depth_counts_arrivals_during_a_batch() {
+    // The first command enqueues four more while it applies, so they reach the
+    // channel after the batch began. The second records the gauge while the
+    // other three wait in the backlog of the same batch.
+    struct Enqueue(std::sync::Mutex<Option<(mpsc::Sender<Envelope>, Vec<Envelope>)>>);
+    impl Command for Enqueue {
+        fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+            tx.execute("INSERT INTO rows(value) VALUES('enqueue')", &[])?;
+            if let Some((sender, envelopes)) = self.0.lock().unwrap().take() {
+                for e in envelopes {
+                    sender.try_send(e).unwrap_or_else(|_| panic!("queue"));
+                }
+            }
+            Ok(Json::Null)
+        }
+    }
+    struct Probe(Arc<WriterStats>, Arc<AtomicUsize>);
+    impl Command for Probe {
+        fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+            tx.execute("INSERT INTO rows(value) VALUES('probe')", &[])?;
+            self.1
+                .store(self.0.snapshot().queue_depth, Ordering::Relaxed);
+            Ok(Json::Null)
+        }
+    }
+    let path = fixture();
+    let arbiter = Arc::new(Arbiter::default());
+    let stats = Arc::new(WriterStats::default());
+    let seen = Arc::new(AtomicUsize::new(usize::MAX));
+    let (sender, receiver) = mpsc::channel(100);
+    let mut replies = Vec::new();
+    let mut envelope = |command: Box<dyn Command>| {
+        let (reply, answer) = oneshot::channel();
+        replies.push(answer);
+        Envelope {
+            command,
+            budget: budget(false),
+            reply: Some(reply),
+            _permits: vec![],
+            arbiter: arbiter.clone(),
+            queued: Instant::now(),
+        }
+    };
+    let mut later = vec![envelope(Box::new(Probe(stats.clone(), seen.clone())))];
+    for n in 0..3 {
+        let sql: &'static str =
+            Box::leak(format!("INSERT INTO rows(value) VALUES('later-{n}')").into_boxed_str());
+        later.push(envelope(Box::new(Sql(sql))));
+    }
+    let first = envelope(Box::new(Enqueue(std::sync::Mutex::new(Some((
+        sender.clone(),
+        later,
+    ))))));
+    sender.try_send(first).unwrap_or_else(|_| panic!("queue"));
+    drop(sender);
+    worker::run(
+        worker::open(&path).unwrap(),
+        receiver,
+        Config::new(path.clone()),
+        arbiter,
+        stats.clone(),
+    );
+    for reply in replies {
+        assert!(reply.blocking_recv().unwrap().is_ok());
+    }
+    assert_eq!(seen.load(Ordering::Relaxed), 3);
+    assert_eq!(stats.snapshot().queue_depth, 0);
+    assert_eq!(values(&path), 5);
+}
+
+#[test]
+fn one_pick_sheds_every_expired_ordinary_head() {
+    // Aging would also reach an expired head, but only one per batch. Shedding
+    // answers the whole expired run at one pick and frees its permits.
+    let arbiter = Arc::new(Arbiter::default());
+    let stats = Arc::new(WriterStats::default());
+    let (sender, mut receiver) = mpsc::channel(100);
+    let now = Instant::now();
+    let send = |value: &str, durable: bool, deadline: Instant, queued: Instant| {
+        if durable {
+            arbiter.durable(1);
+        }
+        let (reply, answer) = oneshot::channel();
+        let sql: &'static str =
+            Box::leak(format!("INSERT INTO rows(value) VALUES('{value}')").into_boxed_str());
+        sender
+            .try_send(Envelope {
+                command: Box::new(Sql(sql)),
+                budget: Budget {
+                    deadline,
+                    ..budget(durable)
+                },
+                reply: Some(reply),
+                _permits: vec![],
+                arbiter: arbiter.clone(),
+                queued,
+            })
+            .unwrap_or_else(|_| panic!("queue"));
+        answer
+    };
+    let past = now.checked_sub(Duration::from_millis(1)).unwrap();
+    let long_ago = now.checked_sub(Duration::from_secs(10)).unwrap();
+    let mut claim = send("claim", true, now + Duration::from_secs(10), now);
+    let mut shed: Vec<_> = (0..50)
+        .map(|n| send(&format!("expired-{n}"), false, past, long_ago))
+        .collect();
+    let mut heartbeat = send("heartbeat", false, now + Duration::from_secs(10), now);
+    let mut backlog = worker::Backlog::new(stats.clone());
+    let first = backlog.next(&mut receiver).unwrap();
+    assert!(first.budget.durable, "the claim, not an aged expired head");
+    for answer in &mut shed {
+        assert_eq!(answer.try_recv().unwrap(), Err(Failure::timeout(false)));
+    }
+    assert_eq!(backlog.len(), 1);
+    assert_eq!(stats.snapshot().queue_depth, 1);
+    assert!(heartbeat.try_recv().is_err() && claim.try_recv().is_err());
 }

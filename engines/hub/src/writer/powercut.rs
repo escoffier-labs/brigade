@@ -670,6 +670,7 @@ fn writer_creation_cut(cut: usize, skip: bool) -> (usize, bool, bool) {
             reply: Some(reply),
             _permits: vec![],
             arbiter: arbiter.clone(),
+            queued: Instant::now(),
         })
         .unwrap_or_else(|_| panic!("queue"));
     drop(sender);
@@ -836,6 +837,7 @@ fn run_command(
             reply: Some(reply),
             _permits: vec![],
             arbiter: arbiter.clone(),
+            queued: Instant::now(),
         })
         .unwrap_or_else(|_| panic!("queue"));
     drop(sender);

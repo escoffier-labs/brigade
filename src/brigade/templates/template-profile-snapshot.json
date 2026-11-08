@@ -573,22 +573,22 @@
         "sha256": "ce4f1abf5735263eb6a33fa46dbece8e4e885c457120df70fff3cebe6ca3a9c3"
       },
       {
-        "byte_size": 1424,
+        "byte_size": 1660,
         "dst": ".claude/memory-handoffs/TEMPLATE.md",
         "rendered": true,
-        "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
+        "sha256": "5d1cfcb92ba69300e8194bbb7636f64aec1a2a445ac0e2b6e9551aca41323c88"
       },
       {
-        "byte_size": 4850,
+        "byte_size": 4859,
         "dst": "AGENTS.md",
         "rendered": true,
-        "sha256": "1f34736aae498024c8793ee5deea765ce3ef1c910b4d704656749ade4aea78e1"
+        "sha256": "50d71f7495953b384b246fea5f2b4d58b65d38cee31198b7a6f248b16b5573b5"
       },
       {
-        "byte_size": 2216,
+        "byte_size": 2562,
         "dst": "CLAUDE.md",
         "rendered": true,
-        "sha256": "e33b63334b7ca776b5a41b47f7d4be16303a27147dd10e61053260a4e1efe8ff"
+        "sha256": "d74a39083998a405c9d9cb89a9f339e544020e9bbff73d93ede218d69949495e"
       },
       {
         "byte_size": 6331,
@@ -617,28 +617,28 @@
         "sha256": "ce4f1abf5735263eb6a33fa46dbece8e4e885c457120df70fff3cebe6ca3a9c3"
       },
       {
-        "byte_size": 1424,
+        "byte_size": 1660,
         "dst": ".claude/memory-handoffs/TEMPLATE.md",
         "rendered": true,
-        "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
+        "sha256": "5d1cfcb92ba69300e8194bbb7636f64aec1a2a445ac0e2b6e9551aca41323c88"
       },
       {
-        "byte_size": 4850,
+        "byte_size": 4859,
         "dst": "AGENTS.md",
         "rendered": true,
-        "sha256": "1f34736aae498024c8793ee5deea765ce3ef1c910b4d704656749ade4aea78e1"
+        "sha256": "50d71f7495953b384b246fea5f2b4d58b65d38cee31198b7a6f248b16b5573b5"
       },
       {
-        "byte_size": 2216,
+        "byte_size": 2562,
         "dst": "CLAUDE.md",
         "rendered": true,
-        "sha256": "e33b63334b7ca776b5a41b47f7d4be16303a27147dd10e61053260a4e1efe8ff"
+        "sha256": "d74a39083998a405c9d9cb89a9f339e544020e9bbff73d93ede218d69949495e"
       },
       {
-        "byte_size": 2210,
+        "byte_size": 2468,
         "dst": "INSTALL_FOR_AGENTS.md",
         "rendered": true,
-        "sha256": "92630c7db302eeea5993187d9a9772972f2d569284a66e1ef98ea46449f3756b"
+        "sha256": "46aa429bbcee2ce7b3521aa53e89787a437f39ed2e2dd79d0c40db2a26306aa0"
       },
       {
         "byte_size": 6331,
@@ -697,28 +697,28 @@
         "sha256": "ce4f1abf5735263eb6a33fa46dbece8e4e885c457120df70fff3cebe6ca3a9c3"
       },
       {
-        "byte_size": 1424,
+        "byte_size": 1660,
         "dst": ".claude/memory-handoffs/TEMPLATE.md",
         "rendered": true,
-        "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
+        "sha256": "5d1cfcb92ba69300e8194bbb7636f64aec1a2a445ac0e2b6e9551aca41323c88"
       },
       {
-        "byte_size": 1424,
+        "byte_size": 1660,
         "dst": ".codex/memory-handoffs/TEMPLATE.md",
         "rendered": true,
-        "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
+        "sha256": "5d1cfcb92ba69300e8194bbb7636f64aec1a2a445ac0e2b6e9551aca41323c88"
       },
       {
-        "byte_size": 10904,
+        "byte_size": 10913,
         "dst": "AGENTS.md",
         "rendered": true,
-        "sha256": "3ccca6bf43922366d9395c8e31d784c809eededdc19ec9019fe9820c09ff227b"
+        "sha256": "1220b31c86e718322ff96fe0620f2ce82b5c286d27836253d0bd003694cfab80"
       },
       {
-        "byte_size": 3226,
+        "byte_size": 3572,
         "dst": "CLAUDE.md",
         "rendered": true,
-        "sha256": "2ab6e4d9a8dcd24d5c063eac56439f61c29bffedbe6102f2057cde66e3b0664a"
+        "sha256": "44bc485766a5752fee701846709fb9ef5bd20489976a1d4e126ace7432ea54cd"
       },
       {
         "byte_size": 1578,
@@ -733,10 +733,10 @@
         "sha256": "f9d92ede54fd60564cb2b39dc776491111498f2b2f45ebbb0c5de759c6f8bd02"
       },
       {
-        "byte_size": 4431,
+        "byte_size": 4689,
         "dst": "INSTALL_FOR_AGENTS.md",
         "rendered": true,
-        "sha256": "3a7e9a3aa2677f0c2d5bcff46a3e7b65414deaa3fffb397b41dd5cb015bc6d0d"
+        "sha256": "a14b5f242f20856bed0a035499549f07717cc3e842c38582a15afa17b9b008b1"
       },
       {
         "byte_size": 5029,
@@ -793,10 +793,10 @@
         "sha256": "094d37f8e9f9e3abf8883fbc412e18bfa4de6fdff5528a2afb5d9bfbddcecafa"
       },
       {
-        "byte_size": 3258,
+        "byte_size": 4870,
         "dst": "memory/cards/handoff-flow.md",
         "rendered": true,
-        "sha256": "996140feb4a54265732c01c0b8f37e14479d4df14ecf938122b0a9901fae5ca1"
+        "sha256": "084828d7855a2481c7b7775212921e6e6eaae83edaaa299ac74e7218ed7c8d1e"
       },
       {
         "byte_size": 2080,
@@ -865,10 +865,10 @@
         "sha256": "b2cf1874706813d40114192884450c374589b2b26fdb819f44aedd5008166970"
       },
       {
-        "byte_size": 7994,
+        "byte_size": 8319,
         "dst": "skills/brigade-work/SKILL.md",
         "rendered": true,
-        "sha256": "ae3b978cef71a4c9146e3b5d54503538b6ca7cc6cd90073815a2c43845477540"
+        "sha256": "957ad4650c42790128a23101b079c2569f91d810878c4d6a8e3df8c9ddc3127d"
       },
       {
         "byte_size": 5347,

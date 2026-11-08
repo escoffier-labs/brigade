@@ -47,7 +47,7 @@ See `memory/cards/workspace-file-maintenance.md`. Memory owner updates the named
 
 ## Memory Handoff (Mandatory)
 
-If a session discovers durable knowledge - architecture decisions, workflow changes, non-obvious fixes, setup gotchas, security findings, reusable commands, durable research, or user preferences - create a handoff at the end of the task.
+Write a handoff only for knowledge the repo, git history or a card lacks: a root cause, a decision with its reason, a new operational fact, a stated preference. Check `brigade memory search` first. Else end with `Nothing durable: <reason>`.
 
 Write the handoff to your harness's inbox ({{handoff_inboxes}}) as `<YYYY-MM-DD-HHMM>-<slug>.md` using the format in that inbox's `TEMPLATE.md`. If the template is missing, run `brigade handoff-template` to print it.
 
@@ -59,7 +59,7 @@ This repo or workspace is Brigade-wired, so real work flows THROUGH Brigade and 
 - **Start:** `brigade work brief --target .` (or `brigade daily status --target .`) to see pending work before deciding what to do.
 - **Verify through Brigade, not raw:** when a test or check result should count, run `brigade work verify run --target . --command "<your test>"` instead of running it bare. This writes a receipt with the real exit code.
 - **Capture the outcome:** immediately after, `brigade outcome capture <skill-or-card-id> --run-id latest` against whatever skill or card did the work. A failure is signal too.
-- **Finish:** write the Memory Handoff (above).
+- **Finish:** Memory Handoff only if durable (above).
 
 Running tests raw produces no signal. If `brigade outcome rank --target .` ever says "ranking: none", the loop is not being fed - this is the difference between Brigade installed and Brigade used.
 

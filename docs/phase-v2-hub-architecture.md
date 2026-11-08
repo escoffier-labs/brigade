@@ -452,7 +452,17 @@ loop:
   writes use D23.
 - Durable commands: claim acquire, renew and release, fence updates, node add
   and revoke, principal add, grant and revoke. The writer queue keeps 512 of
-  its 4,096 slots for them, so event floods cannot crowd them out. A durable
+  its 4,096 slots for them, so event floods cannot crowd them out. Each batch
+  takes queued durable commands before ordinary ones, so a claim waits for the
+  batch in flight, not for every event batch queued ahead of it. Ordinary work
+  still has a bound under sustained durable load. An ordinary command at the
+  head of its queue that has used half its own budget (5 s of a heartbeat's
+  10 s) takes the first place in the next batch, one per batch. An ordinary
+  command whose deadline passes while it waits at the head gets `503
+  writer-timeout` at the worker's next pick, which also frees its queue
+  permits. A HubRetention sweep (250 ms) therefore still runs under a durable
+  backlog unless heartbeats are queued ahead of it, and then it expires and
+  retries on the next tick, as it did in arrival order. A durable
   command is never shed with 503. If it cannot get a slot or its deadline
   passes, it gets `504 {"error": "hub busy", "reason": "writer-timeout"}`,
   which a v1 claim client handles like an unreachable hub.

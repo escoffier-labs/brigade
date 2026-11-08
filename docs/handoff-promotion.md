@@ -56,6 +56,22 @@ Raw private chat fields are rejected by default, including `raw_text`, `raw_mess
 
 Promoted imports preserve the local handoff path, target document, promotion timestamp, and source fingerprint for review.
 
+## Writing A Handoff
+
+Write handoffs with `brigade handoff draft`, not by hand. Before it writes anything it runs the checks the ingester runs, so it cannot produce the handoffs that otherwise end up as ingest conflicts:
+
+| Ingest conflict | What `draft` does |
+|---|---|
+| `update-card` without the expected SHA | Reads the target card in the workspace and writes `## Expected card SHA256` for you |
+| Stale expected SHA | Refuses when `--expected-sha` no longer matches the live card |
+| Missing frontmatter, `category`, `title` or `topic`, or `tags` | Refuses and names the missing field |
+| Unsafe card name | Refuses names with a path, a leading dot or a non-`.md` ending |
+| Unsafe target document | Refuses anything outside `USER.md`, `TOOLS.md`, `rules/<name>.md` and the three `.learnings` files |
+| Bootstrap size guard | Refuses an append that would push `USER.md` or `TOOLS.md` over its budget |
+| No recognizable sections | Cannot happen, `draft` always writes the canonical sections |
+
+A refused draft prints one `error: draft refused, nothing written:` line per problem and exits 2. `--workspace` points at the memory workspace when it is not `--target`. `--expected-sha` supplies the SHA when the workspace is not reachable, and `draft` says so by name if it needs one of the two. `brigade handoff lint` applies the same rules to files written another way, and `--workspace` works there too.
+
 ## Draft Queue Review
 
 `brigade handoff list` discovers pending drafts from `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, `.antigravity/memory-handoffs/`, `.pi/memory-handoffs/`, `.cursor/memory-handoffs/`, `.aider/memory-handoffs/`, `.goose/memory-handoffs/`, `.continue/memory-handoffs/`, `.copilot/memory-handoffs/`, `.qwen/memory-handoffs/`, `.kimi/memory-handoffs/`, `.adal/memory-handoffs/`, `.openhands/memory-handoffs/`, `.grok/memory-handoffs/`, `.amp/memory-handoffs/`, `.crush/memory-handoffs/`, `.hermes/memory-handoffs/`, and inboxes declared in `.brigade/handoff-sources.json`. Each draft summary includes:

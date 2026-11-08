@@ -18,6 +18,13 @@ from typing import Any
 from .. import scrub
 from ..budgets import HANDOFF_BACKLOG_STALE_SECONDS
 from ..config import load_config as load_brigade_config
+from ..handoff_ingest_rules import (
+    CARDS_RELATIVE,
+    cards_dir,
+    read_card_bytes,
+    safe_card_name,
+    sha256_hex,
+)
 from ..localio import write_json as _write_json
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
@@ -727,6 +734,38 @@ def _render_bullets(items: list[str]) -> str:
     return "\n".join(f"- {item.strip()}" for item in items if item.strip())
 
 
+class HandoffDraftRefused(ValueError):
+    """The draft would fail ingest. Nothing was written; `problems` holds one line per cause."""
+
+    def __init__(self, problems: list[str]) -> None:
+        super().__init__("; ".join(problems))
+        self.problems = problems
+
+
+def _resolve_expected_sha(workspace: Path, target_card: str, explicit: str | None) -> str:
+    """The SHA-256 an update-card handoff must carry, from --expected-sha or the live card."""
+    if explicit is not None and explicit.strip():
+        return explicit.strip().lower()
+    if not safe_card_name(target_card):
+        return ""  # lint reports the unsafe name; there is no card to look up
+    if cards_dir(workspace) is None:
+        raise HandoffDraftRefused(
+            [
+                f"cannot fill the expected SHA: no {CARDS_RELATIVE.as_posix()} directory under {workspace}. "
+                "Pass --workspace <memory workspace> or --expected-sha <sha256 of the current card>"
+            ]
+        )
+    current = read_card_bytes(workspace, target_card)
+    if current is None:
+        raise HandoffDraftRefused(
+            [
+                f"update-card target card does not exist under {workspace / CARDS_RELATIVE}. "
+                "Use --action create-card or fix --target-card"
+            ]
+        )
+    return sha256_hex(current)
+
+
 def _render_handoff_draft(
     *,
     handoff_type: str,
@@ -738,6 +777,7 @@ def _render_handoff_draft(
     target_card: str | None,
     target_document: str | None,
     suggested_content: str,
+    expected_sha: str = "",
 ) -> str:
     parts = [
         "# Memory Handoff",
@@ -761,6 +801,8 @@ def _render_handoff_draft(
     parts.extend(["", "## Recommended memory action", "", action])
     if action in CARD_ACTIONS:
         parts.extend(["", "## Target card", "", str(target_card or "").strip()])
+        if action == "update-card":
+            parts.extend(["", "## Expected card SHA256", "", expected_sha])
         parts.extend(["", "## Suggested card content", "", suggested_content.strip()])
     else:
         parts.extend(["", "## Target document", "", str(target_document or "").strip()])
@@ -786,8 +828,16 @@ def build_draft(
     force: bool = False,
     guard: bool = False,
     guard_policy: str = "personal",
+    workspace: Path | None = None,
+    expected_sha: str | None = None,
 ) -> dict[str, Any]:
-    """Write one handoff draft and return its payload. Raises ValueError on bad input."""
+    """Write one handoff draft and return its payload. Raises ValueError on bad input.
+
+    The draft is linted with the ingester's own rules before anything is written.
+    A draft that would fail ingest raises HandoffDraftRefused and leaves no file.
+    `workspace` (default: `target`) is where cards and bootstrap documents live, and
+    update-card fills `Expected card SHA256` from the live card there.
+    """
     action = action.strip().casefold()
     if action not in HANDOFF_ACTIONS:
         raise ValueError("--action must be one of: " + ", ".join(HANDOFF_ACTIONS))
@@ -806,6 +856,8 @@ def build_draft(
     suggested_content = _read_suggested_content(content, content_file)
     if not suggested_content:
         raise ValueError("suggested content is empty")
+    workspace_root = (workspace or target).expanduser().resolve()
+    sha = _resolve_expected_sha(workspace_root, target_card or "", expected_sha) if action == "update-card" else ""
     inbox_path, inbox_label = _draft_inbox_path(target, inbox)
     created_at = _iso_from_timestamp()
     timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
@@ -821,7 +873,11 @@ def build_draft(
         target_card=target_card,
         target_document=target_document,
         suggested_content=suggested_content,
+        expected_sha=sha,
     )
+    preflight = _linting_mod.lint_text(text, path=path, workspace=workspace_root)
+    if not preflight.valid:
+        raise HandoffDraftRefused(list(preflight.errors))
     inbox_path.mkdir(parents=True, exist_ok=True)
     if force:
         # Overwrite by writing a private temp file and renaming it over the draft.
@@ -861,7 +917,7 @@ def build_draft(
                     raise ValueError(f"handoff draft already exists: {path}") from exc
             finally:
                 Path(tmp_name).unlink(missing_ok=True)
-    lint_result = _linting_mod.lint_file(path)
+    lint_result = _linting_mod.lint_file(path, workspace=workspace_root)
     guard_result = _linting_mod._guard_handoff_path(path, target=target, policy=guard_policy) if guard else None
     return {
         "target": str(target),
@@ -872,6 +928,7 @@ def build_draft(
         "action": action,
         "target_card": target_card,
         "target_document": target_document,
+        "expected_sha": sha or None,
         "lint": lint_result.as_dict(),
         "content_guard": guard_result,
         "valid": lint_result.valid and (guard_result is None or guard_result.get("exit_code") == 0),
@@ -897,6 +954,8 @@ def draft(
     guard: bool = False,
     guard_policy: str = "personal",
     json_output: bool = False,
+    workspace: Path | None = None,
+    expected_sha: str | None = None,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -920,7 +979,15 @@ def draft(
             force=force,
             guard=guard,
             guard_policy=guard_policy,
+            workspace=workspace,
+            expected_sha=expected_sha,
         )
+    except HandoffDraftRefused as exc:
+        if json_output:
+            print(json.dumps({"valid": False, "written": False, "errors": exc.problems}, indent=2, sort_keys=True))
+        for problem in exc.problems:
+            print(f"error: draft refused, nothing written: {problem}", file=sys.stderr)
+        return 2
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

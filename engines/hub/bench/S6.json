@@ -1,0 +1,963 @@
+{
+  "binary_sha256": "1f4c46ca790fde9fc6f76e2f748cfc33e2d8009cd0efc6599aa6a7365563940b",
+  "pinned_candidate": {
+    "binary_sha256": "cbd0a8f69fa9715ec136a31e50168171f90d5dd1c14f8b65d8160252d9d22272",
+    "notes": "Histogram and exact-key session end fix present. Inclusive body budget and control-key compatibility fixes not yet present."
+  },
+  "machine": "Intel Core Ultra 9 285, 24 cores, Linux 6.17.0, Python 3.12.3, ext4",
+  "qualification": "Shared host. Every attempt remains in local S6a client reports. Lower and failed observations are retained.",
+  "comparisons": [
+    {
+      "phase": "exploratory-reference",
+      "run": 1,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 16,
+        "seconds": 8.0,
+        "warmup": 2.0,
+        "connection": "close",
+        "server_cpus": null,
+        "client_cpus": null,
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 465.25,
+        "errors": 0,
+        "transport_errors": null,
+        "p99_ms": 534.2008040001929,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 1771.875,
+        "errors": 0,
+        "transport_errors": null,
+        "p99_ms": 65.5374429998119,
+        "commit_p99_bucket_upper_ms": null
+      }
+    },
+    {
+      "phase": "exploratory-reference",
+      "run": 2,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 16,
+        "seconds": 8.0,
+        "warmup": 2.0,
+        "connection": "close",
+        "server_cpus": null,
+        "client_cpus": null,
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 342.0,
+        "errors": 0,
+        "transport_errors": null,
+        "p99_ms": 733.878877999814,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 1882.625,
+        "errors": 0,
+        "transport_errors": null,
+        "p99_ms": 60.44624699961787,
+        "commit_p99_bucket_upper_ms": null
+      }
+    },
+    {
+      "phase": "exploratory-reference",
+      "run": 1,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 256,
+        "seconds": 8.0,
+        "warmup": 2.0,
+        "connection": "close",
+        "server_cpus": null,
+        "client_cpus": null,
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 219.625,
+        "errors": 179569,
+        "transport_errors": null,
+        "p99_ms": 37.431468999784556,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 6506.375,
+        "errors": 128432,
+        "transport_errors": null,
+        "p99_ms": 79.86177599968869,
+        "commit_p99_bucket_upper_ms": null
+      }
+    },
+    {
+      "phase": "exploratory-reference",
+      "run": 2,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 256,
+        "seconds": 8.0,
+        "warmup": 2.0,
+        "connection": "close",
+        "server_cpus": null,
+        "client_cpus": null,
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 172.125,
+        "errors": 221197,
+        "transport_errors": null,
+        "p99_ms": 7.69878199980667,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 10984.875,
+        "errors": 75339,
+        "transport_errors": null,
+        "p99_ms": 41.418577000058576,
+        "commit_p99_bucket_upper_ms": null
+      }
+    },
+    {
+      "phase": "exploratory-reference",
+      "run": 1,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 64,
+        "seconds": 8.0,
+        "warmup": 2.0,
+        "connection": "close",
+        "server_cpus": null,
+        "client_cpus": null,
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 208.625,
+        "errors": 186578,
+        "transport_errors": null,
+        "p99_ms": 4.071981999913987,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 12093.75,
+        "errors": 0,
+        "transport_errors": null,
+        "p99_ms": 36.3933549997455,
+        "commit_p99_bucket_upper_ms": null
+      }
+    },
+    {
+      "phase": "exploratory-reference",
+      "run": 2,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 64,
+        "seconds": 8.0,
+        "warmup": 2.0,
+        "connection": "close",
+        "server_cpus": null,
+        "client_cpus": null,
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 46.5,
+        "errors": 205161,
+        "transport_errors": null,
+        "p99_ms": 0.617845999840938,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 3362.625,
+        "errors": 0,
+        "transport_errors": null,
+        "p99_ms": 144.57932000004803,
+        "commit_p99_bucket_upper_ms": null
+      }
+    },
+    {
+      "phase": "exploratory-constrained",
+      "run": 1,
+      "conditions": {
+        "allotment": "1cpu-512m",
+        "clients": 16,
+        "seconds": 8.0,
+        "warmup": 2.0,
+        "connection": "close",
+        "server_cpus": null,
+        "client_cpus": null,
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 126.0,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 2034.3946010002583,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 1782.0,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 81.55510500000673,
+        "commit_p99_bucket_upper_ms": null
+      }
+    },
+    {
+      "phase": "exploratory-constrained",
+      "run": 2,
+      "conditions": {
+        "allotment": "1cpu-512m",
+        "clients": 16,
+        "seconds": 8.0,
+        "warmup": 2.0,
+        "connection": "close",
+        "server_cpus": null,
+        "client_cpus": null,
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 250.625,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 934.2974440000944,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 346.75,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 132.53241400025217,
+        "commit_p99_bucket_upper_ms": null
+      }
+    },
+    {
+      "phase": "exploratory-constrained",
+      "run": 1,
+      "conditions": {
+        "allotment": "1cpu-512m",
+        "clients": 64,
+        "seconds": 8.0,
+        "warmup": 2.0,
+        "connection": "close",
+        "server_cpus": null,
+        "client_cpus": null,
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 86.875,
+        "errors": 204941,
+        "transport_errors": 204941,
+        "p99_ms": 0.6606900001315807,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 659.25,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 613.6129319997963,
+        "commit_p99_bucket_upper_ms": null
+      }
+    },
+    {
+      "phase": "exploratory-constrained",
+      "run": 2,
+      "conditions": {
+        "allotment": "1cpu-512m",
+        "clients": 64,
+        "seconds": 8.0,
+        "warmup": 2.0,
+        "connection": "close",
+        "server_cpus": null,
+        "client_cpus": null,
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 15.5,
+        "errors": 218818,
+        "transport_errors": 218803,
+        "p99_ms": 0.5371490001380153,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 7046.125,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 17.9368459998841,
+        "commit_p99_bucket_upper_ms": null
+      }
+    },
+    {
+      "phase": "exploratory-mixed",
+      "run": 1,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 64,
+        "seconds": 8.0,
+        "warmup": 2.0,
+        "connection": "close",
+        "server_cpus": null,
+        "client_cpus": null,
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 230.25,
+        "errors": 166746,
+        "transport_errors": 166746,
+        "p99_ms": 7.00224000001981,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 7624.125,
+        "errors": 14722,
+        "transport_errors": 0,
+        "p99_ms": 75.2208639996752,
+        "commit_p99_bucket_upper_ms": null
+      }
+    },
+    {
+      "phase": "exploratory-mixed",
+      "run": 2,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 64,
+        "seconds": 8.0,
+        "warmup": 2.0,
+        "connection": "close",
+        "server_cpus": null,
+        "client_cpus": null,
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 19.125,
+        "errors": 214638,
+        "transport_errors": 214628,
+        "p99_ms": 0.5342449999261589,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 669.75,
+        "errors": 20072,
+        "transport_errors": 0,
+        "p99_ms": 179.70896899987565,
+        "commit_p99_bucket_upper_ms": null
+      }
+    },
+    {
+      "phase": "pinned-reference",
+      "run": 1,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 64,
+        "seconds": 30.0,
+        "warmup": 5.0,
+        "connection": "close",
+        "server_cpus": "0-1",
+        "client_cpus": "4-7",
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 330.3666666666667,
+        "errors": 409465,
+        "transport_errors": 409460,
+        "p99_ms": 17.979969999942114,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 5569.766666666666,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 67.19253599931108,
+        "commit_p99_bucket_upper_ms": 50.0
+      }
+    },
+    {
+      "phase": "pinned-reference",
+      "run": 2,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 64,
+        "seconds": 30.0,
+        "warmup": 5.0,
+        "connection": "close",
+        "server_cpus": "0-1",
+        "client_cpus": "4-7",
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 366.6666666666667,
+        "errors": 375335,
+        "transport_errors": 375330,
+        "p99_ms": 26.16228500028228,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 5980.866666666667,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 61.85141600053612,
+        "commit_p99_bucket_upper_ms": 25.0
+      }
+    },
+    {
+      "phase": "pinned-constrained",
+      "run": 1,
+      "conditions": {
+        "allotment": "1cpu-512m",
+        "clients": 16,
+        "seconds": 30.0,
+        "warmup": 5.0,
+        "connection": "close",
+        "server_cpus": "0",
+        "client_cpus": "4-7",
+        "cgroup_limits": {
+          "cpu_max": [
+            "100000",
+            "100000"
+          ],
+          "memory_max": "536870912"
+        }
+      },
+      "before": {
+        "ok_per_second": 387.1,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 933.8288889994146,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 3720.5333333333333,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 38.68292300012399,
+        "commit_p99_bucket_upper_ms": 20.0
+      }
+    },
+    {
+      "phase": "pinned-constrained",
+      "run": 2,
+      "conditions": {
+        "allotment": "1cpu-512m",
+        "clients": 16,
+        "seconds": 30.0,
+        "warmup": 5.0,
+        "connection": "close",
+        "server_cpus": "0",
+        "client_cpus": "4-7",
+        "cgroup_limits": {
+          "cpu_max": [
+            "100000",
+            "100000"
+          ],
+          "memory_max": "536870912"
+        }
+      },
+      "before": {
+        "ok_per_second": 388.03333333333336,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 933.7393799996789,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 2630.4,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 57.378628000151366,
+        "commit_p99_bucket_upper_ms": 25.0
+      }
+    },
+    {
+      "phase": "pinned-mixed",
+      "run": 1,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 64,
+        "seconds": 15.0,
+        "warmup": 3.0,
+        "connection": "close",
+        "server_cpus": "0-1",
+        "client_cpus": "4-7",
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 290.1333333333333,
+        "errors": 181085,
+        "transport_errors": 181079,
+        "p99_ms": 24.543859000004886,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 6147.8,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 55.6273140000485,
+        "commit_p99_bucket_upper_ms": 25.0
+      }
+    },
+    {
+      "phase": "pinned-mixed",
+      "run": 2,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 64,
+        "seconds": 15.0,
+        "warmup": 3.0,
+        "connection": "close",
+        "server_cpus": "0-1",
+        "client_cpus": "4-7",
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 415.6,
+        "errors": 184903,
+        "transport_errors": 184903,
+        "p99_ms": 38.181947999873955,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 6154.266666666666,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 53.42870699951163,
+        "commit_p99_bucket_upper_ms": 25.0
+      }
+    },
+    {
+      "phase": "pinned-256",
+      "run": 1,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 256,
+        "seconds": 5.0,
+        "warmup": 1.0,
+        "connection": "close",
+        "server_cpus": "0-1",
+        "client_cpus": "4-7",
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 242.2,
+        "errors": 55673,
+        "transport_errors": 55673,
+        "p99_ms": 1039.0612249993865,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 1563.6,
+        "errors": 35787,
+        "transport_errors": 0,
+        "p99_ms": 90.10167799988267,
+        "commit_p99_bucket_upper_ms": 50.0
+      }
+    },
+    {
+      "phase": "pinned-256",
+      "run": 2,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 256,
+        "seconds": 5.0,
+        "warmup": 1.0,
+        "connection": "close",
+        "server_cpus": "0-1",
+        "client_cpus": "4-7",
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 398.8,
+        "errors": 46390,
+        "transport_errors": 46390,
+        "p99_ms": 1043.3234120000634,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 7629.8,
+        "errors": 5776,
+        "transport_errors": 0,
+        "p99_ms": 107.49214999941614,
+        "commit_p99_bucket_upper_ms": 20.0
+      }
+    },
+    {
+      "phase": "head-reference",
+      "run": 1,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 64,
+        "seconds": 15.0,
+        "warmup": 3.0,
+        "connection": "close",
+        "server_cpus": "0-1",
+        "client_cpus": "4-7",
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 294.93333333333334,
+        "errors": 192216,
+        "transport_errors": 192216,
+        "p99_ms": 21.15447999949538,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 4096.333333333333,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 82.50904399938008,
+        "commit_p99_bucket_upper_ms": 50.0
+      }
+    },
+    {
+      "phase": "head-reference",
+      "run": 2,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 64,
+        "seconds": 15.0,
+        "warmup": 3.0,
+        "connection": "close",
+        "server_cpus": "0-1",
+        "client_cpus": "4-7",
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 215.13333333333333,
+        "errors": 112288,
+        "transport_errors": 112287,
+        "p99_ms": 84.3842330004918,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 3161.3333333333335,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 140.406181999424,
+        "commit_p99_bucket_upper_ms": 50.0
+      }
+    },
+    {
+      "phase": "head-constrained",
+      "run": 1,
+      "conditions": {
+        "allotment": "1cpu-512m",
+        "clients": 32,
+        "seconds": 15.0,
+        "warmup": 3.0,
+        "connection": "close",
+        "server_cpus": "0",
+        "client_cpus": "4-7",
+        "cgroup_limits": {
+          "cpu_max": [
+            "100000",
+            "100000"
+          ],
+          "memory_max": "536870912"
+        }
+      },
+      "before": {
+        "ok_per_second": 158.8,
+        "errors": 38,
+        "transport_errors": 31,
+        "p99_ms": 3170.5365689995233,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 4854.933333333333,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 56.7402820006464,
+        "commit_p99_bucket_upper_ms": 50.0
+      }
+    },
+    {
+      "phase": "head-constrained",
+      "run": 2,
+      "conditions": {
+        "allotment": "1cpu-512m",
+        "clients": 32,
+        "seconds": 15.0,
+        "warmup": 3.0,
+        "connection": "close",
+        "server_cpus": "0",
+        "client_cpus": "4-7",
+        "cgroup_limits": {
+          "cpu_max": [
+            "100000",
+            "100000"
+          ],
+          "memory_max": "536870912"
+        }
+      },
+      "before": {
+        "ok_per_second": 137.4,
+        "errors": 25,
+        "transport_errors": 17,
+        "p99_ms": 3342.247276999842,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 4412.133333333333,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 50.67665299975488,
+        "commit_p99_bucket_upper_ms": 20.0
+      }
+    },
+    {
+      "phase": "head-mixed",
+      "run": 1,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 64,
+        "seconds": 8.0,
+        "warmup": 2.0,
+        "connection": "close",
+        "server_cpus": "0-1",
+        "client_cpus": "4-7",
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 167.125,
+        "errors": 110117,
+        "transport_errors": 110117,
+        "p99_ms": 6.873956000163162,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 4744.75,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 91.86121400034608,
+        "commit_p99_bucket_upper_ms": 50.0
+      }
+    },
+    {
+      "phase": "head-mixed",
+      "run": 2,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 64,
+        "seconds": 8.0,
+        "warmup": 2.0,
+        "connection": "close",
+        "server_cpus": "0-1",
+        "client_cpus": "4-7",
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 272.5,
+        "errors": 19937,
+        "transport_errors": 19937,
+        "p99_ms": 1022.6717739997184,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 3130.25,
+        "errors": 0,
+        "transport_errors": 0,
+        "p99_ms": 86.63047300069593,
+        "commit_p99_bucket_upper_ms": 50.0
+      }
+    },
+    {
+      "phase": "head-256",
+      "run": 1,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 256,
+        "seconds": 3.0,
+        "warmup": 1.0,
+        "connection": "close",
+        "server_cpus": "0-1",
+        "client_cpus": "4-7",
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 46.333333333333336,
+        "errors": 34954,
+        "transport_errors": 34954,
+        "p99_ms": 1036.1762279999311,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 947.3333333333334,
+        "errors": 19635,
+        "transport_errors": 0,
+        "p99_ms": 145.9015520003959,
+        "commit_p99_bucket_upper_ms": 250.0
+      }
+    },
+    {
+      "phase": "head-256",
+      "run": 2,
+      "conditions": {
+        "allotment": "reference",
+        "clients": 256,
+        "seconds": 3.0,
+        "warmup": 1.0,
+        "connection": "close",
+        "server_cpus": "0-1",
+        "client_cpus": "4-7",
+        "cgroup_limits": null
+      },
+      "before": {
+        "ok_per_second": 388.3333333333333,
+        "errors": 19603,
+        "transport_errors": 19603,
+        "p99_ms": 1040.1738380005554,
+        "commit_p99_bucket_upper_ms": null
+      },
+      "after": {
+        "ok_per_second": 8010.666666666667,
+        "errors": 1696,
+        "transport_errors": 0,
+        "p99_ms": 105.73681799996848,
+        "commit_p99_bucket_upper_ms": 20.0
+      }
+    }
+  ],
+  "mixed": [
+    {
+      "phase": "exploratory-mixed",
+      "run": 1,
+      "sampled_lock_wait_ms": {
+        "p50": 0.007572,
+        "p90": 0.01887,
+        "p95": 0.022526,
+        "p99": 0.047653,
+        "p100": 0.047653
+      },
+      "claims": {
+        "ok": 9,
+        "error_count": 21,
+        "error_bodies": [
+          "{\"error\":\"hub busy\",\"reason\":\"credential-inflight-full\"}"
+        ]
+      },
+      "python_preference": {
+        "ok": 9,
+        "error_count": 21,
+        "error_bodies": [
+          "{\"error\": \"hub database error: database is locked\"}",
+          "{\"error\":\"hub busy\",\"reason\":\"credential-inflight-full\"}"
+        ]
+      }
+    },
+    {
+      "phase": "exploratory-mixed",
+      "run": 2,
+      "sampled_lock_wait_ms": {
+        "p50": 0.016405999999999997,
+        "p90": 0.023244,
+        "p95": 0.023621,
+        "p99": 113.65176100000001,
+        "p100": 113.65176100000001
+      },
+      "claims": {
+        "ok": 2,
+        "error_count": 60,
+        "error_bodies": [
+          "{\"error\":\"hub busy\",\"reason\":\"credential-inflight-full\"}"
+        ]
+      },
+      "python_preference": {
+        "ok": 3,
+        "error_count": 59,
+        "error_bodies": [
+          "{\"error\": \"hub database error: database is locked\"}",
+          "{\"error\":\"hub busy\",\"reason\":\"credential-inflight-full\"}"
+        ]
+      }
+    },
+    {
+      "phase": "pinned-mixed",
+      "run": 1,
+      "sampled_lock_wait_ms": {
+        "p50": 0.0054280000000000005,
+        "p90": 0.014527,
+        "p95": 0.018224999999999998,
+        "p99": 0.026275,
+        "p100": 0.26454099999999997
+      },
+      "claims": {
+        "ok": 42,
+        "error_count": 0,
+        "error_bodies": []
+      },
+      "python_preference": {
+        "ok": 40,
+        "error_count": 2,
+        "error_bodies": [
+          "{\"error\": \"hub database error: database is locked\"}"
+        ]
+      }
+    },
+    {
+      "phase": "pinned-mixed",
+      "run": 2,
+      "sampled_lock_wait_ms": {
+        "p50": 0.004021,
+        "p90": 0.013886,
+        "p95": 0.015943,
+        "p99": 0.020590999999999998,
+        "p100": 7.500186
+      },
+      "claims": {
+        "ok": 29,
+        "error_count": 0,
+        "error_bodies": []
+      },
+      "python_preference": {
+        "ok": 28,
+        "error_count": 1,
+        "error_bodies": [
+          "{\"error\": \"hub database error: database is locked\"}"
+        ]
+      }
+    },
+    {
+      "phase": "head-mixed",
+      "run": 1,
+      "sampled_lock_wait_ms": {
+        "p50": 0.00415,
+        "p90": 0.01713,
+        "p95": 0.019446,
+        "p99": 0.021869,
+        "p100": 63.719703
+      },
+      "claims": {
+        "ok": 23,
+        "error_count": 0,
+        "error_bodies": []
+      },
+      "python_preference": {
+        "ok": 22,
+        "error_count": 1,
+        "error_bodies": [
+          "{\"error\": \"hub database error: database is locked\"}"
+        ]
+      }
+    },
+    {
+      "phase": "head-mixed",
+      "run": 2,
+      "sampled_lock_wait_ms": {
+        "p50": 0.0067469999999999995,
+        "p90": 0.016343,
+        "p95": 0.018132,
+        "p99": 0.026341,
+        "p100": 0.040611999999999995
+      },
+      "claims": {
+        "ok": 20,
+        "error_count": 0,
+        "error_bodies": []
+      },
+      "python_preference": {
+        "ok": 20,
+        "error_count": 0,
+        "error_bodies": []
+      }
+    }
+  ]
+}

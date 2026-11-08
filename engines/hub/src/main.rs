@@ -1,6 +1,7 @@
 //! S3 transport front. Python remains the authority for route semantics and storage.
 mod admission;
 mod claims_route;
+mod heartbeat;
 mod memory_config;
 mod memory_route;
 mod messages_route;
@@ -394,6 +395,7 @@ struct App {
     lookup: Option<admission::Lookup>,
     registration: Option<registration::Registration>,
     claims: Option<claims_route::Claims>,
+    heartbeat: Option<heartbeat::Heartbeat>,
     messages: Option<messages_route::Messages>,
     /// None: memory is not configured and `/memory` is proxied like any unknown path.
     memory: Option<memory_route::MemoryRoute>,
@@ -420,6 +422,7 @@ impl App {
             lookup: None,
             registration: None,
             claims: None,
+            heartbeat: None,
             messages: None,
             memory: None,
             trust_identity,
@@ -865,6 +868,16 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
             .await
         {
             Ok(value) => value,
+            // A checked reader can refuse a malformed fence schema before the
+            // route runs. Read-only heartbeat falls through to Python, which
+            // authenticates and returns the authoritative database error.
+            Err(())
+                if app.heartbeat.is_some()
+                    && req.method() == "GET"
+                    && matches!(req.uri().path(), "/status" | "/sessions") =>
+            {
+                None
+            }
             Err(()) => return busy("credential-lookup"),
         },
         None => None,
@@ -919,6 +932,16 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         },
         None => None,
     };
+    let heartbeat = app
+        .heartbeat
+        .as_ref()
+        .filter(|_| heartbeat::Heartbeat::route(parts.method.as_str(), parts.uri.path()))
+        .filter(|_| !query_names_token(parts.uri.query()));
+    if let Some(route) = heartbeat {
+        if let Some(refusal) = route.auth(&parts).await {
+            return refusal;
+        }
+    }
     let messages = app
         .messages
         .as_ref()
@@ -996,6 +1019,13 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         // The same serde_json gap as registration: Python answers those bodies.
         if body.is_empty() || serde_json::from_slice::<serde_json::Value>(&body).is_ok() {
             if let Some(response) = claims.handle(&parts, node, &body).await {
+                return response;
+            }
+        }
+    }
+    if let Some(route) = heartbeat {
+        if body.is_empty() || serde_json::from_slice::<serde_json::Value>(&body).is_ok() {
+            if let Some(response) = route.handle(&parts, &body).await {
                 return response;
             }
         }
@@ -1580,18 +1610,37 @@ async fn start_and_serve(
     }
     state.lookup = Some(admission::Lookup::new(readers.clone(), &admin));
     let native = |family| state.modes.get(family) == brigade_hub::modes::Mode::Native;
-    // One S4a writer per file, shared by every native family. It owns the writer metrics.
-    let writer = if native("registration") || native("claims") || native("messages") {
-        let writer = brigade_hub::writer::Writer::start(
+    let families =
+        native("registration") || native("claims") || native("messages") || native("heartbeat");
+    let memory_store = match &state.memory {
+        Some(memory_route::MemoryRoute::Store(store)) => Some(store.clone()),
+        _ => None,
+    };
+    // One S4a writer per file, shared by every native family and by memory's
+    // `read_stats` audit rows. It owns the writer metrics when a family is native.
+    let start = || {
+        brigade_hub::writer::Writer::start(
             brigade_hub::writer::Config::new(path.clone()),
             arbiter.clone(),
         )
-        .map_err(|_| "native writer unavailable")?;
+    };
+    let writer = if families {
+        let writer = start().map_err(|_| "native writer unavailable")?;
         state.telemetry.attach_writer(writer.stats());
         Some(writer)
+    } else if memory_store.is_some() {
+        // Memory alone never fails startup over it: `read_stats` refuses instead.
+        start()
+            .inspect_err(|_| eprintln!("WARN memory read_stats unavailable: no hub writer"))
+            .ok()
     } else {
         None
     };
+    if let (Some(store), Some(writer)) = (&memory_store, &writer) {
+        store.attach_audit(std::sync::Arc::new(
+            brigade_hub::memory_audit::HubAudit::new(writer.clone()),
+        ));
+    }
     if native("registration") {
         state.registration = Some(registration::Registration {
             readers: readers.clone(),
@@ -1629,6 +1678,17 @@ async fn start_and_serve(
             policy,
             wake,
         ));
+    }
+    if native("heartbeat") {
+        state.heartbeat = Some(heartbeat::Heartbeat {
+            readers: readers.clone(),
+            writer: writer.clone().unwrap(),
+            admin: registration::digest(&admin),
+            clock: native_clock.clone(),
+            allow_admin_writes: config.allow_admin_writes,
+            events: brigade_hub::claims::events_enabled(),
+            stale_after: heartbeat::stale_after(config.deck_config.as_deref()).await?,
+        });
     }
     if native("claims") {
         state.claims = Some(claims_route::Claims {

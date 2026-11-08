@@ -987,6 +987,7 @@ fn only_the_memory_writer_holds_both_locks() {
                 "UPDATE nodes",
                 "fleet_policy_meta SET",
                 "crate::writer::Writer",
+                "fleet_audit_log",
             ] {
                 if text.contains(needle) {
                     offenders.push(format!("{rel}: {needle}"));
