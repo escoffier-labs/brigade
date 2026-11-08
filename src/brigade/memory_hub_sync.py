@@ -97,23 +97,33 @@ def _card_text(
     parts: list[str] = []
     card: dict[str, Any] = {}
     while offset is not None:
-        try:
-            body = client.call("card", scope=scope, card_id=card_id, revision=revision, offset=offset)
-        except hubc.HubRefusal as exc:
-            if exc.code == "memory_card_not_found":
-                return None
-            if exc.code == "memory_grant_missing":
-                raise _ScopeRefused(scope) from exc
-            raise
-        if str(body.get("log_epoch") or "") != epoch:
-            # A restore between the log page and this read: revision numbers are
-            # reissued, so this text may be another card version entirely.
-            raise _EpochMoved
-        card = hubc.obj(body.get("card"))
+        chunk = _card_chunk(client, scope, card_id, revision, offset, epoch)
+        if chunk is None:
+            return None
+        card = chunk
         parts.append(str(card.get("text", "")))
         following = card.get("next_offset")
         offset = following if isinstance(following, int) and following > offset else None
     return {**card, "text": "".join(parts)}
+
+
+def _card_chunk(
+    client: hubc.MemoryHubClient, scope: str, card_id: str, revision: int, offset: int, epoch: str
+) -> dict[str, Any] | None:
+    """One `card` read: the revision's metadata and at most one text chunk. None when the hub has no such card."""
+    try:
+        body = client.call("card", scope=scope, card_id=card_id, revision=revision, offset=offset)
+    except hubc.HubRefusal as exc:
+        if exc.code == "memory_card_not_found":
+            return None
+        if exc.code == "memory_grant_missing":
+            raise _ScopeRefused(scope) from exc
+        raise
+    if str(body.get("log_epoch") or "") != epoch:
+        # A restore between the log page and this read: revision numbers are
+        # reissued, so this text may be another card version entirely.
+        raise _EpochMoved
+    return hubc.obj(body.get("card"))
 
 
 def pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> dict[str, Any]:
@@ -344,7 +354,7 @@ def _follow(
     Under reflect's replica bounds the log is replayed as metadata first, so
     a card put and later retired never counts or costs a body fetch. The
     live-card bound is checked once the replay reaches the log head, before
-    any body is read, and the watermark moves only after the bodies land.
+    any full body is read, and the watermark moves only after the bodies land.
     """
     watermark = int(replica.meta.get("seq") or 0)
     new_scopes = readable - set(replica.meta.get("read_scopes") or [])
@@ -400,7 +410,7 @@ def _follow(
             # Bounded progress for a long rebuild; the full write happens once at the end.
             save()
     if deferred is not None:
-        store.limits.check_count(deferred.live)
+        deferred.settle(client, epoch=epoch, readable=readable, report=report, save=save)
         for key, event in deferred.ordered():
             if event["scope"] not in readable:
                 continue  # refused earlier in this drain
@@ -421,6 +431,13 @@ def _follow(
     _refill(client, replica, settings, epoch=epoch, used=used, readable=readable, report=report, save=save)
 
 
+# Head-changing kinds whose resulting state the log event does not carry. A
+# reviewed `proposal.apply` or `proposal.rollback` can leave its card live or
+# retired (accepted deduplication retires the duplicate), and only the card
+# revision says which. `card.trust` is in the schema but no hub emits it.
+_KNOWN_STATE = {"card.put": True, "card.import": True, "card.retire": False}
+
+
 class _Deferred:
     """The last log event per key, as metadata only, and how many cards it leaves live.
 
@@ -431,32 +448,90 @@ class _Deferred:
     def __init__(self, replica: store.Replica) -> None:
         self.replica = replica
         self.events: dict[str, dict[str, Any]] = {}
-        self.live = len(replica.heads)
         self.used = 0
-
-    def _delta(self, key: str, event: dict[str, Any]) -> int:
-        return (event["kind"] != "card.retire") - (key in self.replica.heads)
 
     @staticmethod
     def _cost(key: str) -> int:
         return len(key.encode("utf-8")) + store.limits.REPLAY_ENTRY_OVERHEAD
 
     def add(self, key: str, event: dict[str, Any]) -> None:
-        previous = self.events.pop(key, None)
-        if previous is not None:
-            self.live -= self._delta(key, previous)
+        if self.events.pop(key, None) is not None:
             self.used -= self._cost(key)
         compact = {name: event[name] for name in ("kind", "scope", "card_id", "revision")}
         if compact["kind"] == "card.retire" and key not in self.replica.heads and key not in self.replica.missing:
             return  # put and retired within this replay: nothing to fetch or drop
         self.events[key] = compact
-        self.live += self._delta(key, compact)
         self.used += self._cost(key)
         store.limits.check_replay(self.used)
+
+    def settle(
+        self,
+        client: hubc.MemoryHubClient,
+        *,
+        epoch: str,
+        readable: set[str],
+        report: dict[str, Any],
+        save: Callable[[], None],
+    ) -> None:
+        """Enforce the live-card bound at the log head, before any full body is read.
+
+        Events of a known kind settle from the log alone. A proposal event's
+        card counts as live while the bound holds either way; only when its
+        state decides the bound is it read at its revision, one `card` call
+        returning metadata and at most one text chunk. Reads stop once the
+        bound is decided: when the cards known live exceed it, or when every
+        card possibly live fits it. A card found retired replays as a
+        retirement, with no further read.
+        """
+        lower = len(self.replica.heads)
+        unknown: list[str] = []
+        for key, event in self.events.items():
+            if event["scope"] not in readable:
+                continue
+            lower -= key in self.replica.heads
+            live = event.get("live", _KNOWN_STATE.get(event["kind"]))
+            if live is None:
+                unknown.append(key)
+            else:
+                lower += live
+        upper = lower + len(unknown)
+        for key in unknown:
+            if store.limits.within_count(upper) or not store.limits.within_count(lower):
+                break
+            event = self.events[key]
+            try:
+                card = _card_chunk(client, event["scope"], event["card_id"], event["revision"], 0, epoch)
+            except _ScopeRefused as exc:
+                _refuse_scope(replica=self.replica, readable=readable, report=report, save=save, scope=exc.scope)
+                self.settle(client, epoch=epoch, readable=readable, report=report, save=save)
+                return
+            event["live"] = card is not None and card.get("state") != "retired"
+            if event["live"]:
+                lower += 1
+                continue
+            upper -= 1
+            if key in self.replica.heads or key in self.replica.missing:
+                event["kind"] = "card.retire"  # drops the head without a body fetch
+            else:
+                del self.events[key]
+        store.limits.check_count(upper)
 
     def ordered(self) -> list[tuple[str, dict[str, Any]]]:
         """Retirements first, so their heads free count and bytes before any body is fetched."""
         return sorted(self.events.items(), key=lambda item: item[1]["kind"] != "card.retire")
+
+
+def _refuse_scope(
+    *, replica: store.Replica, readable: set[str], report: dict[str, Any], save: Callable[[], None], scope: str
+) -> None:
+    """Take a scope the hub refused out of `readable` and drop its heads, saving the narrowed replica at once."""
+    readable.discard(scope)
+    replica.retain_scopes(readable)
+    replica.meta["read_scopes"] = sorted(set(replica.meta.get("read_scopes") or []) & readable)
+    save()
+    report["warnings"].append(
+        f"the hub refused {scope} during the pull; its replicated cards were dropped and it is not readable"
+    )
 
 
 def _apply(
@@ -491,13 +566,7 @@ def _apply(
     try:
         card = _card_text(client, event["scope"], event["card_id"], event["revision"], epoch)
     except _ScopeRefused as exc:
-        readable.discard(exc.scope)
-        replica.retain_scopes(readable)
-        replica.meta["read_scopes"] = sorted(set(replica.meta.get("read_scopes") or []) & readable)
-        save()
-        report["warnings"].append(
-            f"the hub refused {exc.scope} during the pull; its replicated cards were dropped and it is not readable"
-        )
+        _refuse_scope(replica=replica, readable=readable, report=report, save=save, scope=exc.scope)
         return replica.bytes()
     if card is None or card.get("state") == "retired":
         return used

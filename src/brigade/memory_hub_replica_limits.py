@@ -34,9 +34,13 @@ def bounded(*, max_cards: int, max_bytes: int) -> Iterator[None]:
         _LIMITS.reset(token)
 
 
-def check_count(count: int) -> None:
+def within_count(count: int) -> bool:
     limits = _LIMITS.get()
-    if limits is not None and count > limits[0]:
+    return limits is None or count <= limits[0]
+
+
+def check_count(count: int) -> None:
+    if not within_count(count):
         raise ReplicaLimitError("cards")
 
 

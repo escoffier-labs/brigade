@@ -1242,7 +1242,13 @@ before JSON parsing. Reflect also limits the whole selected replica to 50,000
 live cards, including unscoped runs. Sync replays the log as metadata first,
 so a card put and later retired never counts toward the bound or costs a body
 fetch. Once the replay reaches the log head, sync checks the live count before
-fetching any body, and saves check it again before serialization. The deferred
+fetching any full body, and saves check it again before serialization. A reviewed
+proposal's apply or rollback event does not say whether its card ended live
+or retired, so sync counts it as live while that still fits the bound. Only
+when its state decides the bound does sync read that card revision once,
+metadata plus at most one text chunk, and a card found retired is dropped
+without a body fetch. Accepted deduplication therefore never blocks a
+rebuild. The deferred
 log metadata has its own byte budget, and exceeding it fails with
 `hub_reflect_replica_limit`. The watermark advances only after the bodies land. Each save records a card count
 and snapshot digest. Reads validate the stored count against a streaming count

@@ -69,6 +69,72 @@ def test_live_cards_above_bound_refuse_before_any_body_fetch(setup, capsys, monk
     assert writes(hub) == []
 
 
+def _proposal_apply(hub, card_id, state):
+    """A reviewed proposal's head change. Like the hub's, the log event names no resulting state."""
+    hub._commit("proposal.apply", "fleet", card_id, hub.cards[("fleet", card_id)]["text"], state, hubc.event_id())
+
+
+def test_proposal_retirement_does_not_count_toward_bound(setup, capsys, monkeypatch):
+    from brigade import memory_hub_sync as sync
+
+    target, hub, _ = setup
+    monkeypatch.setattr(reflect, "MAX_SCOPE_CARDS", 2)
+    monkeypatch.setattr(sync, "LOG_PAGE", 1)
+    hub._commit("card.put", "fleet", "c", "Unique c", "live", hubc.event_id())
+    _proposal_apply(hub, "c", "retired")  # accepted merge_exact_duplicates retires the duplicate
+    code, report = run(target, capsys, "run")
+    assert code == 0 and "error" not in report
+    fetched = [call["card_id"] for call in hub.calls if call["action"] == "card"]
+    assert fetched.count("c") == 1  # one state read for c, no body fetch after it
+
+
+def test_live_proposal_apply_still_counts_toward_bound(setup, capsys, monkeypatch):
+    from brigade import memory_hub_sync as sync
+
+    target, hub, _ = setup
+    monkeypatch.setattr(reflect, "MAX_SCOPE_CARDS", 2)
+    monkeypatch.setattr(sync, "LOG_PAGE", 1)
+    hub._commit("card.put", "fleet", "c", "Unique c", "live", hubc.event_id())
+    _proposal_apply(hub, "c", "live")
+    code, report = run(target, capsys, "run")
+    assert code == 1 and report["error"] == "hub_reflect_scope_limit"
+    assert [call["card_id"] for call in hub.calls if call["action"] == "card"] == ["c"]
+    assert writes(hub) == []
+
+
+def test_scope_refused_during_state_read_drops_the_scope(setup, capsys, monkeypatch):
+    from brigade import memory_hub_sync as sync
+
+    target, hub, _ = setup
+    monkeypatch.setattr(reflect, "MAX_SCOPE_CARDS", 2)
+    monkeypatch.setattr(sync, "LOG_PAGE", 1)
+    hub._commit("card.put", "fleet", "c", "Unique c", "live", hubc.event_id())
+    _proposal_apply(hub, "c", "retired")
+    original = hub.do_card
+
+    def refuse_c(body):
+        if body["card_id"] == "c":
+            return 403, {"error": "no read grant", "code": "memory_grant_missing"}
+        return original(body)
+
+    monkeypatch.setattr(hub, "do_card", refuse_c)
+    code, report = run(target, capsys, "run")
+    assert code == 1 and report["error"] == "hub_reflect_replica_incomplete"
+    assert [call["card_id"] for call in hub.calls if call["action"] == "card"] == ["c"]
+    assert writes(hub) == []
+
+
+def test_proposal_apply_under_bound_needs_no_state_read(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    monkeypatch.setattr(reflect, "MAX_SCOPE_CARDS", 3)
+    hub._commit("card.put", "fleet", "c", "Unique c", "live", hubc.event_id())
+    _proposal_apply(hub, "c", "retired")
+    code, report = run(target, capsys, "run")
+    assert code == 0 and "error" not in report
+    fetched = [call["card_id"] for call in hub.calls if call["action"] == "card"]
+    assert fetched.count("c") == 1  # c's body read finds it retired; no separate state read
+
+
 def test_replay_metadata_bound_fails_closed(setup, capsys, monkeypatch):
     from brigade import memory_hub_store as store
 
