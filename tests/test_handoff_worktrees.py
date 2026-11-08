@@ -484,6 +484,27 @@ def test_dot_prefixed_handoff_is_rescued_like_ingest_accepts_it(tmp_path: Path):
     assert not handoff_worktrees.is_handoff_filename(".late-oversize-x.md.recovered")
 
 
+def test_large_ignored_tree_does_not_block_removal(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    (linked / ".gitignore").write_text("node_modules/\n")
+    bulk = linked / "node_modules"
+    for package in range(30):
+        directory = bulk / f"package-{package:03d}" / "lib"
+        directory.mkdir(parents=True)
+        for index in range(100):
+            (directory / f"module-{index:03d}.js").write_text("")
+    full = subprocess.run(
+        ["git", "-C", str(linked), "ls-files", "--others", "-z"], capture_output=True, check=True
+    ).stdout
+    budget = 16 * 1024
+    assert len(full) > budget  # the unfiltered listing alone would fail closed
+    monkeypatch.setattr(handoff_worktrees, "MAX_UNTRACKED_LIST_BYTES", budget)
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert not linked.exists()
+
+
 def test_hidden_ignored_and_deep_inboxes_are_never_deleted(tmp_path: Path, capsys):
     main, linked = _repo_with_project(tmp_path)
     deep = tuple(f"level{i}" for i in range(12))

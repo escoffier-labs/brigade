@@ -548,14 +548,19 @@ def _split_inbox(parts: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ..
 def _untracked_inbox_prefixes(worktree: Path) -> list[tuple[str, ...]]:
     """Checkout subdirectories whose writer inbox holds an untracked file.
 
-    Git lists every untracked file, ignored ones included, without following
-    links, at any depth and in any directory. Output over
-    MAX_UNTRACKED_LIST_BYTES or a run over UNTRACKED_LIST_SECONDS raises, as
-    does any git failure, so the caller keeps the worktree.
+    Git lists untracked files, ignored ones included, without following
+    links, at any depth and in any directory. Pathspecs keep the output to
+    files under a writer inbox, so a large ignored tree (node_modules, .venv)
+    does not count against the budget. Output over MAX_UNTRACKED_LIST_BYTES
+    or a run over UNTRACKED_LIST_SECONDS raises, as does any git failure, so
+    the caller keeps the worktree.
     """
+    # `**/` also matches at the top level, so `.claude/memory-handoffs/x.md`
+    # in the checkout root is listed.
+    pathspecs = [f":(glob)**/{'/'.join(inbox)}/**" for inbox in _INBOX_PARTS]
     raw = _bounded_git_output(
         worktree,
-        ["-c", "core.fsmonitor=false", "ls-files", "--others", "-z"],
+        ["-c", "core.fsmonitor=false", "ls-files", "--others", "-z", "--", *pathspecs],
         MAX_UNTRACKED_LIST_BYTES,
         timeout=UNTRACKED_LIST_SECONDS,
     )
