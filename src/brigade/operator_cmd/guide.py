@@ -34,7 +34,7 @@ def guide_payload(*, profile: str = "internal-dogfood") -> dict[str, Any]:
         "onboarding_command": "brigade operator quickstart --target .",
         "tool_sync_command": "brigade operator sync-tools --target .",
         "handoff_expectations": [
-            "Write a Memory Handoff when Brigade usage, setup, readiness waivers, or repo workflow changes.",
+            "Write a Memory Handoff only when the work produced durable knowledge, such as a root cause, a decision with its reason, or a new operational fact. Otherwise end with `Nothing durable: <reason>`.",
             "Include concrete commands, what changed, what remains manual, and any local-only setup assumption.",
             "Do not copy raw .brigade evidence into committed docs.",
         ],

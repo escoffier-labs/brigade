@@ -134,9 +134,13 @@ Format: trigger, then the rule, then what to do instead.
 
 ## Memory Handoff
 
-At the end of any substantial task that produced durable knowledge (root
-causes, decisions, gotchas), write a handoff to `.claude/memory-handoffs/`
-using the format in `.claude/memory-handoffs/TEMPLATE.md`.
+Write a handoff only when the session produced knowledge a later session
+cannot get from the repo, git history or an existing card: a root cause, a
+decision with its reason, a new operational fact, or a stated preference. Run
+`brigade memory search` first and update that card where one exists. Write it
+with `brigade handoff draft` (format in `.claude/memory-handoffs/TEMPLATE.md`).
+If nothing qualifies, end with one line, `Nothing durable: <reason>`, and write
+no file. A code or config edit alone is not a reason.
 
 ## Cursor Cloud specific instructions
 

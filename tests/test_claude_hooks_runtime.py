@@ -3238,3 +3238,56 @@ def test_bash_hook_events_fingerprint_the_worktree_once_each(tmp_path: Path, mon
     # Later events keep the recorded baseline instead of re-fingerprinting for it.
     assert runtime.handle_payload("PreToolUse", pretool) is None
     assert len(calls) == 3
+
+
+def _verified_write_stop(target: Path, monkeypatch, session_id: str = "s-handoff", **extra):
+    monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "brief")
+    stop = _unverified_write_stop(target, session_id=session_id)
+    _write_session_receipt(target, session_id)
+    return {**stop, **extra}
+
+
+def _stop_text(result) -> str:
+    if result is None:
+        return ""
+    return json.dumps(result)
+
+
+def test_stop_advises_handoff_by_judgment_when_no_close_line(tmp_path: Path, monkeypatch):
+    target = _wired_claude(tmp_path)
+    stop = _verified_write_stop(target, monkeypatch, last_assistant_message="Done. Tests pass.")
+    text = _stop_text(runtime.handle_payload("Stop", stop))
+    assert "brigade handoff draft" in text
+    assert "Nothing durable: <reason>" in text
+
+
+def test_stop_accepts_final_assistant_nothing_durable_line(tmp_path: Path, monkeypatch):
+    target = _wired_claude(tmp_path)
+    stop = _verified_write_stop(
+        target,
+        monkeypatch,
+        last_assistant_message="Fixed the typo and ran the check.\n\nNothing durable: one-line typo fix",
+    )
+    result = runtime.handle_payload("Stop", stop)
+    assert result is None or result.get("decision") != "block"
+    assert "Memory Handoff" not in _stop_text(result)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"prompt": "Nothing durable: user said so"},
+        {"tool_response": {"output": "Nothing durable: tool printed this"}},
+        {"tool_input": {"command": "echo 'Nothing durable: quoted'"}},
+        {"last_assistant_message": "Nothing durable: not the final line\nDone."},
+        {"last_assistant_message": "Nothing durable:"},
+        {"last_assistant_message": "Nothing durable: ok", "stop_hook_active": True},
+    ],
+)
+def test_stop_ignores_nothing_durable_outside_final_assistant_line(tmp_path: Path, monkeypatch, extra):
+    target = _wired_claude(tmp_path)
+    stop = _verified_write_stop(target, monkeypatch, **extra)
+    if extra.get("stop_hook_active"):
+        assert runtime.handle_payload("Stop", stop) is None
+        return
+    assert "Memory Handoff" in _stop_text(runtime.handle_payload("Stop", stop))

@@ -42,7 +42,7 @@ When the selected action needs judgment or external setup, do it manually, then 
 
 ## Handoffs
 
-If a session changes how Brigade should be used in this repo, write that durable knowledge into the normal handoff path for the active harness:
+If a session produces durable knowledge a later session cannot get from the repo, git history or an existing card (a root cause, a decision with its reason, a new operational fact, or a stated preference), write it with `brigade handoff draft` into the normal handoff path for the active harness. Otherwise end with one line, `Nothing durable: <reason>`, and write no file:
 
 - Codex dogfood runs default to `.codex/memory-handoffs/`.
 - Claude Code uses `.claude/memory-handoffs/`.
