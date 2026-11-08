@@ -55,41 +55,54 @@ MAX_ALIASES = 256
 MAX_ALIAS_BYTES = 1024
 
 
-def _names(text: str) -> tuple[list[str], list[str]]:
-    """Identity names (aliases, topic) and the title, read as the hub's scalar metadata.
+def _aliases(value: str) -> list[str]:
+    """A JSON list of alias strings within the hub's limits, else ValueError."""
+    try:
+        items = json.loads(value)
+    except ValueError:
+        raise ValueError("malformed aliases") from None
+    if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+        raise ValueError("malformed aliases")
+    try:
+        oversized = any(len(item.encode()) > MAX_ALIAS_BYTES for item in items)
+    except UnicodeEncodeError:
+        # An unpaired surrogate is not valid UTF-8, so the hub would refuse it too.
+        raise ValueError("malformed aliases") from None
+    if len(items) > MAX_ALIASES or oversized:
+        raise ValueError("malformed aliases")
+    return [item.strip() for item in items]
 
-    Metadata is never parsed loosely. An ambiguous field, or an alias value that
-    is not a JSON list of strings, raises ValueError and the card grants no names.
+
+def _names(text: str) -> tuple[list[str], list[str], bool]:
+    """Identity names (aliases, topic), the title, and whether all metadata is well formed.
+
+    Metadata is never parsed loosely. Each field is read on its own: an ambiguous
+    field, or an alias value that is not a JSON list of strings within the hub's
+    limits, contributes no names and marks the card malformed. Names from the
+    fields that do parse are still returned, so a malformed card still collides
+    with another card of the same name. A malformed card is never a repair target.
+
+    Retirement fields decide whether a card is live. `near._superseded` treats an
+    unparseable field as not retired, so an ambiguous one marks the card malformed
+    here, or a retired card could be admitted as a live repair target.
     """
     identities: list[str] = []
     titles: list[str] = []
-    # Retirement fields decide whether a card is live. `near._superseded` treats an
-    # unparseable field as not retired, so an ambiguous one must fail here instead,
-    # or a retired card could be admitted as a live repair target.
+    well_formed = True
     for key in ("status", "superseded_by"):
-        near._field(text, key)
+        try:
+            near._field(text, key)
+        except ValueError:
+            well_formed = False
     for key, into in (("aliases", identities), ("topic", identities), ("title", titles)):
-        value = near._field(text, key)
-        if not value:
-            continue
-        if key == "aliases":
-            try:
-                items = json.loads(value)
-            except ValueError:
-                raise ValueError("malformed aliases") from None
-            if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
-                raise ValueError("malformed aliases")
-            try:
-                oversized = any(len(item.encode()) > MAX_ALIAS_BYTES for item in items)
-            except UnicodeEncodeError:
-                # An unpaired surrogate is not valid UTF-8, so the hub would refuse it too.
-                raise ValueError("malformed aliases") from None
-            if len(items) > MAX_ALIASES or oversized:
-                raise ValueError("malformed aliases")
-            into.extend(item.strip() for item in items)
-        else:
-            into.append(value.strip("\"'"))
-    return [n for n in identities if n.strip()], [n for n in titles if n.strip()]
+        try:
+            value = near._field(text, key)
+            if not value:
+                continue
+            into.extend(_aliases(value) if key == "aliases" else [value.strip("\"'")])
+        except ValueError:
+            well_formed = False
+    return [n for n in identities if n.strip()], [n for n in titles if n.strip()], well_formed
 
 
 def _live(head: dict[str, Any]) -> bool:
@@ -149,11 +162,7 @@ class Index:
         self.info: dict[tuple[str, str], tuple[Any, Any, bool]] = {}
         for head in heads:
             scope, card_id = head["scope"], head["card_id"]
-            try:
-                identities, titles = _names(head["text"])
-                well_formed = True
-            except ValueError:
-                identities, titles, well_formed = [], [], False
+            identities, titles, well_formed = _names(head["text"])
             identities = [n for n in (_scoped(scope, name) for name in identities) if n]
             # Index names the way `_target` reads a link, so a path-form alias such as
             # `cards/old-guide.md` matches `[[cards/old-guide.md]]` and keeps its owner.

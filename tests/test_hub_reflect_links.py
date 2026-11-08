@@ -438,9 +438,13 @@ def test_malformed_aliases_make_a_successor_unusable_and_are_counted(aliases):
 
 def test_malformed_aliases_grant_no_names_and_are_never_parsed_loosely():
     new = head("g1", card_text("Gizmo claim.", "c-cccccc", "title: Gizmo Notes\naliases: Widget Log, Gizmo"))
-    for link in ("widget log", "gizmo", "gizmo notes"):
+    for link in ("widget log", "gizmo"):
         submissions, skipped, _ = unit([head("src", card_text(f"Read [[{link}]].")), new])
         assert submissions == [] and skipped == {"link_no_target": 1}
+    # The title still parses, so a link written as the title already reaches the card.
+    submissions, skipped, _ = unit([head("src", card_text("Read [[gizmo notes]].")), new])
+    assert submissions == [] and skipped == {}
+    assert links.Index([new]).info[(SCOPE, "g1")][2] is False
 
 
 def test_ambiguous_multiline_aliases_are_malformed():
@@ -628,6 +632,16 @@ def test_ambiguous_retirement_metadata_is_never_a_live_target():
         submissions, skipped, _ = unit([head("src", card_text("See [[Old-Guide]].")), bad])
         assert submissions == [], meta
         assert links.Index([bad]).info[(SCOPE, "bad")][2] is False, meta
+
+
+def test_a_malformed_card_still_collides_by_its_parseable_names():
+    bad = head("bad", card_text("Bad.", "c-dddddd", "status: superseded\nstatus: live\ntitle: Old Guide"))
+    other = head("other", card_text("Other.", "c-eeeeee", "title: old-guide"))
+    # `OLD   guide` matches neither title exactly, so it goes through the collision check.
+    submissions, skipped, _ = unit([head("src", card_text("See [[OLD   guide]].")), bad, other])
+    assert submissions == [] and skipped == {"link_ambiguous_target": 1}
+    submissions, skipped, _ = unit([head("src", card_text("See [[OLD   guide]].")), bad])
+    assert submissions == [] and skipped == {"link_invalid_metadata": 1}
 
 
 def test_two_retired_cards_sharing_a_name_are_ambiguous_even_with_one_successor():
