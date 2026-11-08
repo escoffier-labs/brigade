@@ -206,6 +206,55 @@ async fn read_without_review_gets_no_legacy_proposal_diagnostics_from_log() {
     }
     let admin = h.call(ADMIN_TOKEN, json!({"action":"log"})).await;
     assert!(admin.body.to_string().contains("after_hash"));
+
+    let (automatic, id) = super::attestation_tests::ready().await;
+    super::retrieval_eval_tests::record_current(&automatic).await;
+    let applied = automatic
+        .call(
+            ADMIN_TOKEN,
+            super::attestation_tests::auto_request(&automatic, &id).await,
+        )
+        .await;
+    assert_eq!(applied.body["state"], "applied");
+    grant(&automatic, "fleet", &["read"]).await;
+    let admin = automatic.call(ADMIN_TOKEN, json!({"action":"log"})).await;
+    let audit = admin.body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "proposal.apply" && e["payload"]["decision_mode"] == "automatic")
+        .unwrap();
+    assert!(
+        !audit["payload"]["gates"]["attesting_credentials"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(audit["payload"]["gates"]["retrieval_eval_record"].is_object());
+    let reader = automatic.call(AGENT_TOKEN, json!({"action":"log"})).await;
+    let mut seen = std::collections::BTreeSet::new();
+    for event in reader.body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| proposals::string(e, "kind").starts_with("proposal."))
+    {
+        seen.insert(proposals::string(event, "kind"));
+        let payload = event["payload"].to_string();
+        for key in [
+            "after_hash",
+            "before_hash",
+            "pins",
+            "attesting_credentials",
+            "retrieval_eval_record",
+            "auto_apply_gates",
+        ] {
+            assert!(!payload.contains(key), "{key}");
+        }
+    }
+    for kind in ["proposal.open", "proposal.apply", "proposal.decide"] {
+        assert!(seen.contains(kind));
+    }
 }
 #[tokio::test]
 async fn version_eight_upgrade_preserves_proposals_and_epoch() {
