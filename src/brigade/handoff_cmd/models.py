@@ -17,6 +17,7 @@ from .. import scrub
 from ..budgets import HANDOFF_BACKLOG_STALE_SECONDS
 from ..config import load_config as load_brigade_config
 from ..localio import write_json as _write_json
+from ..handoff_ingest_rules import SAFE_CARD_NAME_RE
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 from .readability import ReadabilityFinding
 
@@ -44,7 +45,7 @@ NO_CARD_ACTION = "no-card"
 
 HANDOFF_ACTIONS = (*CARD_ACTIONS, NO_CARD_ACTION)
 
-CARD_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9._-]+\.md$")
+CARD_TARGET_PATTERN = SAFE_CARD_NAME_RE
 
 DOCUMENT_TARGETS = ("TOOLS.md", "USER.md")
 
