@@ -106,15 +106,22 @@ def _scoped(scope: str, name: str) -> str | None:
     An exact merge keeps the retired card's identity on the keeper as a scope
     qualified alias such as `repo:links/old-guide`. Links in the same scope write
     `[[old-guide]]`, so the alias is indexed in that short form. A name
-    qualified for another scope never resolves a link here. A name is scope
-    qualified only when it splits at its last `/` into a scope the hub accepts
-    and a valid card id. Any other alias, such as `docs:v1/guide`, is kept as
-    written.
+    qualified for another scope never resolves a link here.
+
+    A name is scope qualified only when some `/` splits it into a scope the hub
+    accepts and a card path that `_target` reduces to a valid card id. Each
+    split is tried from the left, because a repo scope contains a `/` itself
+    and the card path can carry a `cards/` prefix or `.md`. So
+    `repo:links/cards/old-guide.md` is `old-guide` in `repo:links`. Any other
+    alias, such as `docs:v1/guide`, is kept as written.
     """
-    owner, sep, card_id = name.rpartition("/")
-    if not sep or not hub_client.valid_scope(owner) or not hub_client.valid_card_id(card_id):
-        return name
-    return card_id if owner == scope else None
+    at = name.find("/")
+    while at > 0:
+        owner, card_id = name[:at], _target(name[at + 1 :])
+        if hub_client.valid_scope(owner) and hub_client.valid_card_id(card_id):
+            return card_id if owner == scope else None
+        at = name.find("/", at + 1)
+    return name
 
 
 class Index:

@@ -597,6 +597,19 @@ def test_a_path_form_alias_keeps_its_owner():
             assert submissions == [] and skipped == {}, (alias, link)
 
 
+def test_a_scope_qualified_path_alias_is_read_after_its_scope():
+    assert links._scoped(SCOPE, SCOPE + "/cards/old-guide.md") == "old-guide"
+    assert links._scoped(SCOPE, SCOPE + "/memory/cards/old-guide") == "old-guide"
+    assert links._scoped("repo:owner/name", "repo:owner/name/cards/old-guide.md") == "old-guide"
+    assert links._scoped(SCOPE, "repo:other/cards/old-guide.md") is None
+    assert links._scoped(SCOPE, "docs:v1/guide") == "docs:v1/guide"
+    keeper = head("keeper", card_text("Kept.", "c-dddddd", f"aliases: {json.dumps([SCOPE + '/cards/old-guide.md'])}"))
+    other = head("other", card_text("Unrelated.", "c-eeeeee", "title: Old Guide"))
+    for link in ("old-guide", "cards/old-guide.md"):
+        submissions, skipped, _ = unit([head("src", card_text(f"See [[{link}]].")), keeper, other])
+        assert submissions == [] and skipped == {}, link
+
+
 def test_two_retired_cards_sharing_a_name_are_ambiguous_even_with_one_successor():
     heads = [
         head("src", card_text("See [[Old Guide]].")),
