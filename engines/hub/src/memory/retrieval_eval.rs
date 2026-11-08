@@ -65,6 +65,35 @@ fn members<T: ReadTx + ?Sized>(tx: &T, scope: &str) -> rusqlite::Result<BTreeMap
     Ok(tx.query("SELECT card_id,content_hash FROM memory_cards WHERE scope=?1 AND state='live' ORDER BY card_id", &[ops::t(scope)])?
         .iter().map(|row| (ops::s(&row[0]).to_string(), ops::s(&row[1]).to_string())).collect())
 }
+/// Includes missing vectors and their exact bytes, so coverage and replacements bind.
+pub(super) fn dense_identity<T: ReadTx + ?Sized>(
+    tx: &T,
+    scope: &str,
+    embedder: &str,
+) -> rusqlite::Result<Json> {
+    let rows=tx.query("SELECT c.content_hash,v.embedder_id,v.normalizer_version,v.vector FROM memory_cards c JOIN memory_vectors v ON v.content_hash=c.content_hash AND v.embedder_id=?2 AND v.normalizer_version=1 WHERE c.scope=?1 AND c.state='live' ORDER BY c.card_id",&[ops::t(scope),ops::t(embedder)])?;
+    let mut covered = 0;
+    let pairs: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            let vector = if let Value::Blob(bytes) = &r[3] {
+                covered += 1;
+                json!(ids::sha256_hex(bytes))
+            } else {
+                Json::Null
+            };
+            json!([ops::s(&r[0]), r.get(1).map(ops::s), vector])
+        })
+        .collect();
+    let seq = tx.query(
+        "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='memory_vector_log'),0)",
+        &[],
+    )?;
+    Ok(
+        json!({"embedder_id":embedder,"vector_log_seq":if let Value::Integer(n)=seq[0][0]{n}else{0},"coverage_count":covered,"digest":ids::sha256_hex(ids::canonical(&json!(pairs)).as_bytes())}),
+    )
+}
+
 fn member_pairs(members: &BTreeMap<String, String>) -> Vec<(&str, &str)> {
     members
         .iter()
@@ -257,6 +286,18 @@ pub fn record(
             "live scoped members do not match the evaluated corpus identity",
         ));
     }
+    let dense = if r.mode == "hybrid" {
+        Some(dense_identity(
+            tx,
+            string(binding(r), "scope"),
+            a.retrieval
+                .as_ref()
+                .and_then(|r| r.embedder_id.as_deref())
+                .unwrap_or(""),
+        )?)
+    } else {
+        None
+    };
     let payload = json!({"report_sha256":r.digest,"mode":r.mode,"gate":r.body["gate"]["name"],"passed":r.passed});
     let seq = ops::append(
         tx,
@@ -275,8 +316,8 @@ pub fn record(
         },
     )?;
     let credential = &a.admin_credential;
-    tx.execute("INSERT INTO memory_retrieval_evals(record_seq,mode,report_sha256,report_json,principal,credential_id,created_ms,evaluated_ms,corpus_members) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", &[
-        Value::Integer(seq),ops::t(r.mode),ops::t(&r.digest),ops::t(&r.raw),ops::t(p.credential.principal()),ops::t(credential),Value::Integer(p.now_ms),Value::Integer(r.evaluated_ms),ops::t(&ids::canonical(&json!(member_pairs(&snapshot))))])?;
+    tx.execute("INSERT INTO memory_retrieval_evals(record_seq,mode,report_sha256,report_json,principal,credential_id,created_ms,evaluated_ms,corpus_members,dense_identity) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", &[
+        Value::Integer(seq),ops::t(r.mode),ops::t(&r.digest),ops::t(&r.raw),ops::t(p.credential.principal()),ops::t(credential),Value::Integer(p.now_ms),Value::Integer(r.evaluated_ms),ops::t(&ids::canonical(&json!(member_pairs(&snapshot)))),dense.map(|d|ops::t(&d.to_string())).unwrap_or(Value::Null)])?;
     Ok(Reply::new(
         201,
         json!({"record_seq":seq,"report_sha256":r.digest,"mode":r.mode,"passed":r.passed}),
@@ -298,7 +339,7 @@ pub fn hold<T: ReadTx + ?Sized>(
     } else {
         "lexical"
     };
-    let rows=tx.query("SELECT report_json,report_sha256,corpus_members FROM memory_retrieval_evals WHERE mode=?1 ORDER BY record_seq DESC LIMIT 1",&[ops::t(mode)])?;
+    let rows=tx.query("SELECT report_json,report_sha256,corpus_members,dense_identity FROM memory_retrieval_evals WHERE mode=?1 ORDER BY record_seq DESC LIMIT 1",&[ops::t(mode)])?;
     let Some(row) = rows.first() else {
         return Ok(Some("retrieval_eval_unbound"));
     };
@@ -355,6 +396,17 @@ pub fn hold<T: ReadTx + ?Sized>(
     };
     if reason.is_some() {
         return Ok(reason);
+    }
+    if mode == "hybrid" {
+        let current = dense_identity(
+            tx,
+            string(b, "scope"),
+            live.embedder_id.as_deref().unwrap_or(""),
+        )?;
+        let stored = serde_json::from_str::<Json>(&ops::s(&row[3])).unwrap_or(Json::Null);
+        if current != stored {
+            return Ok(Some("retrieval_eval_vector_changed"));
+        }
     }
     let seq = b["indexed_seq"].as_i64().unwrap();
     let high = tx.query("SELECT COALESCE(MAX(seq),0) FROM memory_events", &[])?;
@@ -421,4 +473,24 @@ pub fn summary<T: ReadTx + ?Sized>(tx: &T, a: &Authority) -> rusqlite::Result<Js
     };
     let rows=tx.query("SELECT record_seq,report_sha256 FROM memory_retrieval_evals WHERE mode=?1 ORDER BY record_seq DESC LIMIT 1",&[ops::t(mode)])?;
     Ok(rows.first().map(|r|json!({"record_seq":if let Value::Integer(n)=r[0]{n}else{0},"report_sha256":ops::s(&r[1])})).unwrap_or(Json::Null))
+}
+
+pub(super) fn expires<T: ReadTx + ?Sized>(tx: &T, a: &Authority) -> rusqlite::Result<Option<i64>> {
+    let mode = if a
+        .retrieval
+        .as_ref()
+        .is_some_and(|r| r.embedder_id.is_some())
+    {
+        "hybrid"
+    } else {
+        "lexical"
+    };
+    let rows=tx.query("SELECT evaluated_ms FROM memory_retrieval_evals WHERE mode=?1 ORDER BY record_seq DESC LIMIT 1",&[ops::t(mode)])?;
+    Ok(rows.first().and_then(|r| {
+        if let Value::Integer(ms) = r[0] {
+            Some(ms.saturating_add(MAX_AGE_MS))
+        } else {
+            None
+        }
+    }))
 }

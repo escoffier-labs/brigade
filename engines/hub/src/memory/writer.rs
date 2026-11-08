@@ -28,6 +28,7 @@ use tokio::sync::{mpsc, oneshot};
 /// Step boundaries of the protocol, for interleaving tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
+    AutoPrepared,
     MemoryLocked,
     HubLocked,
     Applied,
@@ -57,6 +58,7 @@ pub struct Config {
     /// The lexical index this writer publishes after each committed batch.
     pub index: Option<Arc<index::Index>>,
     pub dense: Option<Arc<super::dense::Index>>,
+    pub proposal_limits: Arc<std::sync::RwLock<super::hardening::Limits>>,
     pub eval_weights: Arc<std::sync::RwLock<serde_json::Value>>,
 }
 impl Config {
@@ -77,6 +79,7 @@ impl Config {
             hook: None,
             index: None,
             dense: None,
+            proposal_limits: Arc::new(std::sync::RwLock::new(super::hardening::Limits::default())),
             eval_weights: Arc::new(std::sync::RwLock::new(
                 super::ranking::Weights::default().json(),
             )),
@@ -137,20 +140,41 @@ impl HubLock {
         credential: &Credential,
         admin: &str,
         policy: bool,
+        automatic: Option<&(Authority, i64)>,
     ) -> Result<Authority, Answer> {
-        let tx = worker::Tx(&self.db);
-        match auth::still_valid(&tx, credential, admin) {
-            Ok(Ok(())) => {}
-            Ok(Err(refusal)) => return Err(Ok(refusal)),
-            Err(_) => return Err(Err(storage("credential-reread"))),
-        }
-        // A policy that cannot be read under the lock refuses the command. No
-        // policy row at all means no policy is configured.
-        if policy {
-            Authority::with_credentials(&tx, admin).map_err(|_| Err(storage("policy-reread")))
-        } else {
-            Ok(Authority::default())
-        }
+        let deadline = super::hardening::deadline(50);
+        let _ = self
+            .db
+            .progress_handler(1000, Some(move || Instant::now() >= deadline));
+        let result = (|| {
+            let tx = worker::Tx(&self.db);
+            match auth::still_valid(&tx, credential, admin) {
+                Ok(Ok(())) => {}
+                Ok(Err(refusal)) => return Err(Ok(refusal)),
+                Err(_) => return Err(Err(storage("credential-reread"))),
+            }
+            // A policy that cannot be read under the lock refuses the command. No
+            // policy row at all means no policy is configured.
+            if let Some((prepared, version)) = automatic {
+                let current = self
+                    .db
+                    .pragma_query_value(None, "data_version", |r| r.get::<_, i64>(0))
+                    .map_err(|_| Err(storage("policy-reread")))?;
+                if current == *version {
+                    return Ok(prepared.clone());
+                }
+                // A changed authority file invalidates the prepared proof. No
+                // credential enumeration or evidence resolution under this lock.
+                return Authority::read(&tx).map_err(|_| Err(storage("policy-reread")));
+            }
+            if policy {
+                Authority::with_credentials(&tx, admin).map_err(|_| Err(storage("policy-reread")))
+            } else {
+                Ok(Authority::default())
+            }
+        })();
+        let _ = self.db.progress_handler(0, None::<fn() -> bool>);
+        result
     }
     /// Ends the read-only hub transaction. Nothing was written to roll back.
     fn release(&self) {
@@ -241,6 +265,7 @@ struct Pending {
     command: Box<Prepared>,
     deadline: Instant,
     reply: oneshot::Sender<Answer>,
+    auto_authority: Option<(Authority, i64)>,
 }
 fn answer(p: Pending, result: Answer) {
     let _ = p.reply.send(result);
@@ -248,7 +273,15 @@ fn answer(p: Pending, result: Answer) {
 
 /// Rows one retention transaction deletes at most.
 const SWEEP_BATCH: usize = 256;
+#[cfg(test)]
 pub(super) fn sweep(db: &Connection, now_ms: i64) -> rusqlite::Result<usize> {
+    sweep_with(db, now_ms, &super::hardening::Limits::default())
+}
+fn sweep_with(
+    db: &Connection,
+    now_ms: i64,
+    limits: &super::hardening::Limits,
+) -> rusqlite::Result<usize> {
     worker::begin(db, Instant::now() + Duration::from_millis(250))?;
     // At most 256 rows or 20 ms per transaction, never under the hub lock.
     let deadline = Instant::now() + Duration::from_millis(20);
@@ -261,7 +294,8 @@ pub(super) fn sweep(db: &Connection, now_ms: i64) -> rusqlite::Result<usize> {
         let jobs = db.execute("DELETE FROM memory_embed_jobs WHERE (content_hash,embedder_id) IN (SELECT content_hash,embedder_id FROM memory_embed_jobs WHERE state='done' AND finished_ms < ?1 LIMIT ?2)", rusqlite::params![now_ms - 7*24*3600*1000, (SWEEP_BATCH-n) as i64])?;
         // Keep the newest log rows. A matrix further behind reloads in full.
         let log = db.execute("DELETE FROM memory_vector_log WHERE seq IN (SELECT seq FROM memory_vector_log WHERE seq <= (SELECT max(seq) FROM memory_vector_log) - ?1 ORDER BY seq LIMIT ?2)", rusqlite::params![super::dense::LOG_KEEP, (SWEEP_BATCH - n - jobs) as i64])?;
-        Ok(n + jobs + log)
+        let compacted=super::hardening::compact(db,now_ms,limits,SWEEP_BATCH-n-jobs-log)?;
+        Ok(n + jobs + log + compacted)
     });
     let _ = db.progress_handler(0, None::<fn() -> bool>);
     match deleted {
@@ -294,6 +328,8 @@ fn apply_one(
     if db.execute_batch("SAVEPOINT command").is_err() {
         return Err(storage("storage-error"));
     }
+    let deadline = super::hardening::deadline(authority.proposal_limits.lock_ms);
+    let _ = db.progress_handler(1000, Some(move || Instant::now() >= deadline));
     let result = catch_unwind(AssertUnwindSafe(|| {
         ops::apply(
             &worker::Tx(db) as &dyn WriteTx,
@@ -303,11 +339,26 @@ fn apply_one(
             embedder,
         )
     }));
+    let _ = db.progress_handler(0, None::<fn() -> bool>);
+    let interrupted = matches!(&result,Ok(Err(e)) if e.sqlite_error_code()==Some(ErrorCode::OperationInterrupted));
     if db.is_autocommit() {
-        return Err(storage("storage-error"));
+        return if interrupted {
+            Ok(ops::error(
+                503,
+                "memory_auto_apply_budget_exceeded",
+                "writer scan budget exceeded",
+            ))
+        } else {
+            Err(storage("storage-error"))
+        };
     }
     let result = match result {
         Ok(Ok(reply)) => Ok(reply),
+        _ if interrupted => Ok(ops::error(
+            503,
+            "memory_auto_apply_budget_exceeded",
+            "writer scan budget exceeded",
+        )),
         _ => Err(storage("command-failed")),
     };
     let keep = matches!(&result, Ok(r) if r.status < 400);
@@ -331,6 +382,104 @@ fn reopen(config: &Config) -> rusqlite::Result<Connection> {
     Ok(db)
 }
 
+fn prepare_auto(
+    cmd: &mut super::proposals::Command,
+    who: &Credential,
+    event: &str,
+    hub: &HubLock,
+    config: &Config,
+    rate: &mut super::hardening::Rate,
+) -> Option<(Authority, i64)> {
+    use super::hardening as h;
+    use serde_json::json;
+    let Ok(body) = &mut cmd.draft else {
+        return None;
+    };
+    let mut prepared_authority = None;
+    let limits = config.proposal_limits.read().unwrap().clone();
+    let result = (|| -> rusqlite::Result<Option<Reply>> {
+        let db = Connection::open_with_flags(
+            &config.memory,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        db.execute_batch("BEGIN")?;
+        let tx = worker::Tx(&db);
+        // Committed retries need no diagnostic work and retain replay semantics.
+        if !crate::writer::ReadTx::query(
+            &tx,
+            "SELECT 1 FROM memory_idempotency WHERE principal=?1 AND client_event_id=?2",
+            &[ops::t(who.principal()), ops::t(event)],
+        )?
+        .is_empty()
+        {
+            return Ok(None);
+        }
+        if body["state"] != "pending" {
+            return Ok(None);
+        }
+        if !rate.admit(
+            who.principal(),
+            super::proposals::string(body, "proposal_id"),
+            config.clock.now_ms(),
+            &limits,
+        ) {
+            return Ok(Some(ops::error(
+                429,
+                "memory_auto_apply_rate_limited",
+                "automatic apply attempt rate exceeded",
+            )));
+        }
+        let deadline = h::deadline(limits.diagnostic_ms);
+        db.progress_handler(1000, Some(move || Instant::now() >= deadline))?;
+        hub.db
+            .progress_handler(1000, Some(move || Instant::now() >= deadline))?;
+        let budget = h::Budget {
+            db: &db,
+            remaining: std::cell::Cell::new(limits.diagnostic_rows),
+            deadline,
+        };
+        let hub_version = hub
+            .db
+            .pragma_query_value(None, "data_version", |r| r.get::<_, i64>(0))?;
+        let mut a = Authority::read(&worker::Tx(&hub.db))?;
+        a.retrieval = Some(super::retrieval_eval::Live {
+            indexed_seq: config.index.as_ref().map_or(0, |i| i.current().indexed_seq),
+            embedder_id: config.dense.as_ref().and_then(|d| d.active_id()),
+            weights: config.eval_weights.read().unwrap().clone(),
+        });
+        let report = if let Some(reason) = h::cheap(&budget, body, &a)? {
+            super::hardening::held(body, reason)
+        } else {
+            let retrieval = a.retrieval.clone();
+            a = Authority::with_credentials(&worker::Tx(&hub.db), &config.admin_digest)?;
+            a.retrieval = retrieval;
+            super::preflight::evaluate(
+                &budget,
+                body,
+                &a,
+                config.scanner.as_ref(),
+                config.clock.now_ms(),
+            )?
+        };
+        prepared_authority = Some((a.clone(), hub_version));
+        body["_auto_snapshot"] = json!({"report":report,"token":h::token(&budget)?,"authority":h::authority_digest(&a),"proposal_sha256":super::ids::sha256_hex(super::ids::canonical(body).as_bytes()),"now_ms":config.clock.now_ms()});
+        Ok(None)
+    })();
+    let _ = hub.db.progress_handler(0, None::<fn() -> bool>);
+    match result {
+        Ok(Some(r)) => cmd.draft = Err(r),
+        Ok(None) => (),
+        Err(_) => {
+            cmd.draft = Err(ops::error(
+                503,
+                "memory_auto_apply_budget_exceeded",
+                "automatic diagnostics exceeded their read budget",
+            ))
+        }
+    }
+    prepared_authority
+}
+
 pub(crate) fn run(
     mut db: Connection,
     hub: HubLock,
@@ -344,6 +493,7 @@ pub(crate) fn run(
     let mut rebuilt: Vec<Box<index::Rebuilt>> = Vec::new();
     let mut dense_rebuilt: Vec<Box<super::dense::Rebuilt>> = Vec::new();
     let mut directory_synced = false;
+    let mut auto_rate = super::hardening::Rate::default();
     // Index publication runs on this thread after step 5, never under a lock.
     let mut publisher = config.index.as_ref().and_then(|i| i.publisher());
     let accept = |job: Job,
@@ -359,6 +509,7 @@ pub(crate) fn run(
             command,
             deadline,
             reply,
+            auto_authority: None,
         }),
         Job::Sweep { now_ms } => {
             if sweeps.len() < 4 {
@@ -399,7 +550,9 @@ pub(crate) fn run(
         }
         if writes.is_empty() {
             if let Some(now_ms) = sweeps.pop_front() {
-                if let Ok(deleted) = sweep(&db, now_ms) {
+                if let Ok(deleted) =
+                    sweep_with(&db, now_ms, &config.proposal_limits.read().unwrap())
+                {
                     metrics.lock().unwrap().sweeps += 1;
                     // A full batch can leave expired rows behind. Run the next
                     // bounded batch while the writer is idle; writes still go first.
@@ -428,6 +581,11 @@ pub(crate) fn run(
         let mut batch: Vec<Pending> = Vec::new();
         let mut bytes = 0;
         while let Some(next) = writes.front() {
+            let automatic =
+                matches!(&next.command.action,ops::Action::Proposal(c) if c.name()=="auto_apply");
+            if automatic && !batch.is_empty() {
+                break;
+            }
             let size = next.command.action.new_bytes();
             if !batch.is_empty()
                 && (batch.len() >= config.max_commands || bytes + size > config.max_new_bytes)
@@ -441,9 +599,32 @@ pub(crate) fn run(
             }
             bytes += size;
             batch.push(next);
+            if automatic {
+                break;
+            }
         }
         if batch.is_empty() {
             continue;
+        }
+        // Corpus diagnostics run in a separate read snapshot before either writer lock.
+        for pending in &mut batch {
+            if let ops::Action::Proposal(cmd) = &mut pending.command.action {
+                if cmd.name() == "auto_apply" {
+                    pending.auto_authority = prepare_auto(
+                        cmd,
+                        &pending.command.credential,
+                        &pending.command.client_event_id,
+                        &hub,
+                        &config,
+                        &mut auto_rate,
+                    );
+                }
+            }
+        }
+        if batch.iter().any(
+            |p| matches!(&p.command.action,ops::Action::Proposal(cmd) if cmd.name()=="auto_apply"),
+        ) {
+            hook(&config, Step::AutoPrepared);
         }
         // Step 2: the memory lock.
         if let Err(e) = worker::begin(&db, Instant::now() + config.memory_wait) {
@@ -512,9 +693,11 @@ pub(crate) fn run(
                 let result = match hub.reread(
                     &p.command.credential,
                     &config.admin_digest,
-                    p.command.action.needs_policy(),
+                    p.command.action.needs_policy() && !matches!(&p.command.action,ops::Action::Proposal(c) if c.name()=="auto_apply"),
+                    p.auto_authority.as_ref(),
                 ) {
                     Ok(mut authority) => {
+                        authority.proposal_limits = config.proposal_limits.read().unwrap().clone();
                         authority.retrieval =
                             config
                                 .index
@@ -600,7 +783,11 @@ pub(crate) fn run(
             continue;
         }
         let _ = db.execute_batch("ROLLBACK");
-        for (p, _) in results {
+        for (p, result) in results {
+            if matches!(&result,Ok(r) if r.body["code"]=="memory_auto_apply_budget_exceeded") {
+                answer(p, result);
+                continue;
+            }
             answer(
                 p,
                 Err(storage(if broken {

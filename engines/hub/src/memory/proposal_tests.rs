@@ -202,12 +202,9 @@ async fn target_scope_grants_guard_propose_decide_apply_and_rollback_including_c
             403
         );
         grant(&h, scope, &["read", "reflect"]).await;
-        assert_eq!(
-            submit(&h, AGENT_TOKEN, vec![op(scope, "a", rev(&a))])
-                .await
-                .status,
-            201
-        );
+        let mut distinct = op(scope, "a", rev(&a));
+        distinct["text"] = json!("Use the targeted gate.");
+        assert_eq!(submit(&h, AGENT_TOKEN, vec![distinct]).await.status, 201);
         assert_eq!(
             decide(&h, AGENT_TOKEN, &opened.body["proposal_id"])
                 .await
@@ -783,11 +780,21 @@ async fn policy_removal_binds_decision_to_absence_instead_of_old_digest() {
 async fn claimed_higher_tiers_are_ignored_and_mixed_ops_take_highest_tier() {
     let h = Hub::with(clean(), None);
     let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let mut existing = Json::Null;
     for claimed in [json!(2), json!("unknown"), json!({"tier":0})] {
         let mut evidence = evidence_op("fleet", "a", rev(&a));
         evidence["tier"] = claimed.clone();
         let r = h.call(ADMIN_TOKEN, json!({"action":"propose","tier":claimed,"ops":[evidence],"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
-        assert_eq!(r.status, 201, "{r:?}");
+        if existing.is_null() {
+            assert_eq!(r.status, 201);
+            existing = r.body["proposal_id"].clone();
+        } else {
+            assert_eq!(
+                (r.status, code(&r)),
+                (409, "memory_proposal_duplicate_pending")
+            );
+            assert_eq!(r.body["proposal_id"], existing);
+        }
         assert_eq!(r.body["tier"], 0);
     }
     for reverse in [false, true] {

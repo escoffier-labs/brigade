@@ -2,7 +2,7 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 8;
+pub const USER_VERSION: i64 = 9;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
@@ -190,6 +190,7 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
         c.execute_batch("BEGIN IMMEDIATE").map_err(err)?;
         let created = (|| {
             c.execute_batch(&ddl())?;
+            super::hardening::migrate(c)?;
             let meta = [
                 ("log_epoch", super::ids::mint(now_ms)),
                 ("normalizer_version", NORMALIZER_VERSION.into()),
@@ -241,6 +242,9 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     }
     if version < 8 {
         step_with(c, 8, super::retrieval_eval::migrate).map_err(err)?;
+    }
+    if version < 9 {
+        step_with(c, 9, super::hardening::migrate).map_err(err)?;
     }
     for table in TABLES {
         let present: Option<i64> = c

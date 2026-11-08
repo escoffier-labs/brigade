@@ -275,6 +275,13 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         "proof_evidence_count":if proof.complete{json!(proof.hashes.len())}else{Json::Null},"proof_source_group_count":if proof.complete{json!(proof.principals.len())}else{Json::Null},"attesting_credentials":proof.credentials,"evidence_sha256":proof.hashes,"evaluation_sha256":null,"checks":checks
     });
     report["retrieval_eval_record"] = super::retrieval_eval::summary(tx, authority)?;
+    let eval_expiry = super::retrieval_eval::expires(tx, authority)?;
+    report["valid_until_ms"] = json!(
+        proof
+            .expires_ms
+            .unwrap_or(now)
+            .min(eval_expiry.unwrap_or(now))
+    );
     // Bind the diagnostic facts, not an unverified proof or promotion permit.
     bind_evaluation(&mut report);
     Ok(report)
@@ -326,6 +333,13 @@ pub fn read<T: ReadTx + ?Sized>(
         return Ok(r);
     }
     let body = proposals::load(tx, string(request, "proposal_id"))?.unwrap();
+    if body["compacted"] == true {
+        return Ok(ops::error(
+            409,
+            "memory_proposal_compacted",
+            "proposal body retention expired, immutable audit retained",
+        ));
+    }
     let mut report = evaluate(tx, &body, authority, scanner, now)?;
     redact(tx, who, &body, &mut report)?;
     Ok(Reply::new(200, report))
