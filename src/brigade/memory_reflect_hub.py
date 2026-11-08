@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -17,6 +18,7 @@ from . import memory_hub_sync as sync
 from . import memory_proposal_io as io
 from . import memory_proposal_v2_ops as delta
 from . import memory_reflect_candidates as derive
+from . import memory_reflect_links as links
 from . import memory_reflect_near as near
 from .inbox_lock import held_file_lock
 
@@ -32,8 +34,13 @@ REPLICA_FILE_SLACK = 1024 * 1024
 # Hub quota refusals end proposing for this run without counting as a failure.
 QUOTA_REFUSALS = hubc.QUOTA_REFUSALS
 DUPLICATE_PENDING = "memory_proposal_duplicate_pending"
-# Near-duplicate cluster keys are 128-bit digests of a scope and card ids, never card text.
+# Fair scheduling lanes. Keys are 128-bit digests of a scope and card ids, never card text.
 CLUSTER_KEY = re.compile(r"[0-9a-f]{32}")
+NEAR_LANE = "near_clusters"
+LINK_LANE = "link_clusters"
+LANES = (NEAR_LANE, LINK_LANE)
+# After exact merges the two lanes alternate. The lane that goes first flips after a run that serves a proposal.
+FIRST_LANE = "first_lane"
 
 STATE_ERROR = "invalid reflect schedule state. Inspect and remove .brigade/memory/reflect/schedule.json to recover"
 
@@ -89,26 +96,29 @@ def schedule_status(target: Path) -> dict[str, Any]:
                 or ("proposal_id" in pending and "refused" in pending)
             ):
                 raise ValueError(STATE_ERROR)
-        schedule = state.get("near_clusters", {})
-        if not isinstance(schedule, dict) or (schedule and "binding" not in state):
-            raise ValueError(STATE_ERROR)
-        for scope_name, entries in schedule.items():
-            if (
-                not isinstance(scope_name, str)
-                or not scope_name
-                or len(scope_name) > 512
-                or not isinstance(entries, dict)
-                or len(entries) > _cluster_cap()
-            ):
+        for lane in LANES:
+            schedule = state.get(lane, {})
+            if not isinstance(schedule, dict) or (schedule and "binding" not in state):
                 raise ValueError(STATE_ERROR)
-            for key, entry in entries.items():
+            for scope_name, entries in schedule.items():
                 if (
-                    CLUSTER_KEY.fullmatch(key) is None
-                    or not isinstance(entry, list)
-                    or len(entry) != 2
-                    or any(type(value) is not int or value < 0 for value in entry)
+                    not isinstance(scope_name, str)
+                    or not scope_name
+                    or len(scope_name) > 512
+                    or not isinstance(entries, dict)
+                    or len(entries) > _lane_cap(lane)
                 ):
                     raise ValueError(STATE_ERROR)
+                for key, entry in entries.items():
+                    if (
+                        CLUSTER_KEY.fullmatch(key) is None
+                        or not isinstance(entry, list)
+                        or len(entry) != 2
+                        or any(type(value) is not int or value < 0 for value in entry)
+                    ):
+                        raise ValueError(STATE_ERROR)
+        if state.get(FIRST_LANE, NEAR_LANE) not in LANES:
+            raise ValueError(STATE_ERROR)
         if "last_status" in state and state["last_status"] not in ("completed", "failed"):
             raise ValueError(STATE_ERROR)
         return state
@@ -155,18 +165,32 @@ def _submission_digest(ops: list[dict[str, Any]]) -> str:
 
 
 def _cluster_key(ops: list[dict[str, Any]]) -> str:
-    """Name a near-duplicate submission by scope and card ids, so rewrites keep its key."""
-    ids = {op["card_id"] for op in ops} | {op["other_card"]["card_id"] for op in ops}
+    """Name a submission by scope and card ids, so rewrites keep its key."""
+    ids = {op["card_id"] for op in ops} | {op["other_card"]["card_id"] for op in ops if "other_card" in op}
     return io.sha256(io.json_bytes([ops[0]["scope"], sorted(ids)]))[:32]
 
 
 def _cluster_cap() -> int:
-    """Most cluster keys one scope can yield, so every observed key gets an entry.
+    """Most near-duplicate keys one scope can yield, so every observed key gets an entry.
 
     Clusters are disjoint and every submission names at least two of its
     cluster's cards, so a scope has at most half its card bound in keys.
     """
     return MAX_SCOPE_CARDS // 2
+
+
+def _link_cluster_cap() -> int:
+    """Most link-repair keys one scope can yield. A submission can name a single card."""
+    return MAX_SCOPE_CARDS
+
+
+def _lane_cap(lane: str) -> int:
+    return (_cluster_cap if lane == NEAR_LANE else _link_cluster_cap)()
+
+
+def _redacted(op: dict[str, Any]) -> dict[str, Any]:
+    """An op for a report. Replacement wording is card text, so reports never carry it."""
+    return {key: value for key, value in op.items() if key != "text"}
 
 
 def _client(target: Path) -> tuple[hubc.HubSettings, hubc.MemoryHubClient]:
@@ -306,6 +330,7 @@ def _reflect(
         raise ReflectError("hub_reflect_scope_invalid", "--scope must be a configured hub read scope")
     try:
         near_limit, near_cap = near.settings(target)
+        link_cap = links.settings(target)
     except near.ThresholdError as exc:
         raise ReflectConfigError(str(exc)) from None
     with store.locked(target):
@@ -367,11 +392,14 @@ def _reflect(
         heads = read_heads()
         check_bounds()
     # Each submission is one propose request. Exact merges stay one op each and
-    # always come before every near-duplicate submission, so they get the quota first.
+    # always come before every near-duplicate and link-repair submission, so they get the quota first.
     exact: list[list[dict[str, Any]]] = []
     similar: list[list[dict[str, Any]]] = []
+    relinked: list[list[dict[str, Any]]] = []
     skipped: dict[str, int] = {}
     budget = near.Budget()
+    link_stats = {"links": 0, "broken": 0, "repairs": 0}
+    link_index = links.Index(heads)
     for name in settings.read_scopes:
         scoped = [head for head in heads if head["scope"] == name]
         scope_ops, scope_skips = _ops(scoped)
@@ -379,7 +407,10 @@ def _reflect(
         # The near pass runs after the exact pass and leaves exact groups to it.
         near_ops, near_skips = near.ops(scoped, limit=near_limit, budget=budget)
         similar.extend(near_ops)
-        for reason, count in (*scope_skips.items(), *near_skips.items()):
+        # The link pass runs last and resolves each link only within its own scope.
+        link_ops, link_skips = links.ops(scoped, index=link_index, stats=link_stats)
+        relinked.extend(link_ops)
+        for reason, count in (*scope_skips.items(), *near_skips.items(), *link_skips.items()):
             skipped[reason] = skipped.get(reason, 0) + count
     binding = io.sha256(
         io.json_bytes([client.identity, report["principal"], report["log_epoch"], list(configured_scopes)])
@@ -401,36 +432,53 @@ def _reflect(
 
     # Fair scheduling: least recently proposed cluster first, then oldest first seen, then key.
     # Keys are card ids, so rewriting members never resets a cluster's place in line.
-    # Entries are [first_seen_ms, proposed_ms] per scope and key, with 0 for never proposed.
+    # Entries are [first_seen_ms, proposed_ms] per lane, scope and key, with 0 for never proposed.
     now = _now_ms()
-    known = state.get("near_clusters", {}) if state.get("binding") == binding else {}
-    near_key = {_submission_digest(ops): (ops[0]["scope"], _cluster_key(ops)) for ops in similar}
-    clusters: dict[str, dict[str, list[int]]] = {}
-    for scope_name, key in near_key.values():
-        entry = known.get(scope_name, {}).get(key)
-        clusters.setdefault(scope_name, {})[key] = list(entry) if entry else [now, 0]
+    lane_key: dict[str, tuple[str, str, str]] = {}
+    tables: dict[str, dict[str, dict[str, list[int]]]] = {}
+    for lane, submissions in ((NEAR_LANE, similar), (LINK_LANE, relinked)):
+        known = state.get(lane, {}) if state.get("binding") == binding else {}
+        table: dict[str, dict[str, list[int]]] = {}
+        for ops in submissions:
+            name, key = ops[0]["scope"], _cluster_key(ops)
+            lane_key[_submission_digest(ops)] = (lane, name, key)
+            entry = known.get(name, {}).get(key)
+            table.setdefault(name, {})[key] = list(entry) if entry else [now, 0]
+        tables[lane] = table
 
     def priority(key: str, entry: list[int]) -> tuple[int, int, str]:
         return entry[1], entry[0], key
 
     # Keys not seen this run are dropped. The cap never binds for observed keys, but if it
     # did, keys are admitted in scheduling order, so the most recently served go first.
-    clusters = {
-        name: dict(sorted(entries.items(), key=lambda item: priority(*item))[: _cluster_cap()])
-        for name, entries in clusters.items()
-    }
+    for lane, table in tables.items():
+        tables[lane] = {
+            name: dict(sorted(entries.items(), key=lambda item: priority(*item))[: _lane_cap(lane)])
+            for name, entries in table.items()
+        }
 
     def turn(ops: list[dict[str, Any]]) -> tuple[int, int, str]:
-        name, key = near_key[_submission_digest(ops)]
-        return priority(key, clusters[name].get(key, [now, 0]))
+        lane, name, key = lane_key[_submission_digest(ops)]
+        return priority(key, tables[lane].get(name, {}).get(key, [now, 0]))
 
     pending_similar = unremembered(sorted(similar, key=turn))
-    # Cap new near-duplicate proposals per run so crafted clusters cannot drain the pending quota.
+    pending_links = unremembered(sorted(relinked, key=turn))
+    # Cap new near-duplicate and link-repair proposals per run so crafted cards cannot drain the pending quota.
     # A cluster with a remembered proposal keeps its place but does not use a slot.
-    deferred = sum(len(ops) for _, ops in pending_similar[near_cap:])
-    if deferred:
-        skipped["near_deferred"] = skipped.get("near_deferred", 0) + deferred
-    remaining = unremembered(exact) + pending_similar[:near_cap]
+    for reason, lane_pending, cap in (
+        ("near_deferred", pending_similar, near_cap),
+        ("link_deferred", pending_links, link_cap),
+    ):
+        deferred = sum(len(ops) for _, ops in lane_pending[cap:])
+        if deferred:
+            skipped[reason] = skipped.get(reason, 0) + deferred
+    # Round robin so neither lane can starve the other under --limit or a quota refusal.
+    first = state.get(FIRST_LANE, NEAR_LANE)
+    lanes = [pending_similar[:near_cap], pending_links[:link_cap]]
+    if first == LINK_LANE:
+        lanes.reverse()
+    alternating = [item for group in itertools.zip_longest(*lanes) for item in group if item is not None]
+    remaining = unremembered(exact) + alternating
     selected = remaining[:limit]
     proposals = []
     refused = []
@@ -439,12 +487,16 @@ def _reflect(
     attempted = len(selected)
     if not dry_run:
         # Preserve unprocessed submissions under this binding across scope and limit changes.
-        state.update(binding=binding, submissions=previous, near_clusters=clusters)
+        state.update(binding=binding, submissions=previous, **tables)
+
+        served_any = False
 
         def served(digest: str) -> None:
-            name, key = near_key.get(digest, ("", ""))
-            if key in clusters.get(name, {}):
-                clusters[name][key][1] = now
+            nonlocal served_any
+            lane, name, key = lane_key.get(digest, ("", "", ""))
+            served_any = served_any or bool(lane)
+            if key in tables.get(lane, {}).get(name, {}):
+                tables[lane][name][key][1] = now
 
         for position, (digest, ops) in enumerate(selected):
             stop = False
@@ -504,6 +556,8 @@ def _reflect(
                 break
             if error is not None or stop:
                 break
+        if served_any:
+            state[FIRST_LANE] = NEAR_LANE if first == LINK_LANE else LINK_LANE
         # Only final refusals of ops attempted this run count, never cached skips, recovered ids or quota stops.
         if attempted and failed_ops == attempted and error is None:
             error = "all_ops_refused"
@@ -514,11 +568,12 @@ def _reflect(
         "candidate_count": len(selected),
         "skipped_ops": sum(skipped.values()),
         "skipped_reasons": skipped,
-        "ops": [op for _, ops in selected for op in ops],
+        "ops": [_redacted(op) for _, ops in selected for op in ops],
         "proposals": proposals,
         "refused_ops": refused,
         "seq": report["seq"],
         "near_duplicate": {"threshold": near_limit, "max_proposals": near_cap, **budget.stats},
+        "link_repair": {"max_proposals": link_cap, **link_stats},
     }
     if error:
         payload["error"] = error
