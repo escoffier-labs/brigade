@@ -385,8 +385,8 @@ the reviewer decides whether it is true:
    output or low-rank excerpts can add context but cannot meet this rule.
 3. `changed` needs its quoting evidence to be newer than the head revision's
    log time.
-4. A replacement must differ from the block, stay a single paragraph with no
-   newline or `^`, and be at most 1.5 times the block length plus 200 bytes,
+4. A replacement or `previously` text must differ from the block, stay a
+   single paragraph with no newline, carriage return or `^`, and be at most 1.5 times the block length plus 200 bytes,
    within the hub's 8,192-byte limit.
 5. Novelty check: every URL, path, host-like name, email address, code span,
    command-line flag and number of three or more digits in a replacement or
@@ -403,13 +403,17 @@ the reviewer decides whether it is true:
    seats must then agree on the resulting operation, not only the verdict:
    the same op type, the same `other_card` for `supersede_card`, and for
    `replace_block` or `add_previously` the same text after normalization.
-   Normalization only strips claim anchors (` ^c-xxxxxx`) and leading and
-   trailing whitespace, and collapses each run of internal whitespace to one
-   space. Case, punctuation and wording must match. A block whose seats
+   Check 4 already holds both texts to one newline-free paragraph.
+   Normalization then only strips claim anchors (` ^c-xxxxxx`) and leading
+   and trailing ASCII spaces and tabs, and collapses each internal run of ASCII
+   spaces and tabs to one space. It never touches characters inside a code
+   span, so spacing in code must match exactly. Case, punctuation, other
+   whitespace characters and wording must match. A block whose seats
    disagree on any of these abstains with `seat_disagreement`. A confirm reply
    that fails checks 1 to 8 abstains with `verify_unconfirmed`. When the seats
-   agree, the proposal carries the proposing seat's exact text, so every
-   proposed byte is text the confirming model also produced.
+   agree, the proposal carries the proposing seat's exact text. The confirming
+   model's text matches it once anchors and ASCII space and tab runs outside
+   code spans are normalized. The bytes themselves can differ in those places.
 
 These checks catch malformed, ungrounded and steered replies. They cannot
 prove the evidence right, so every op still waits for a reviewer.

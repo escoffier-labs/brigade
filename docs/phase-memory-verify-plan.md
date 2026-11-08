@@ -387,9 +387,13 @@ Tests (`tests/test_memory_verify_contract.py`):
   `verify_unconfirmed`.
 - Both seats say `contradicted` with replacements that differ in wording,
   case or punctuation: the block abstains with `seat_disagreement`.
-- Replacements that differ only in claim anchors, surrounding whitespace or
-  internal whitespace runs agree, and the proposal carries the proposing
+- Replacements that differ only in claim anchors or in runs of ASCII spaces
+  and tabs outside code spans agree, and the proposal carries the proposing
   seat's exact bytes.
+- A replacement or `previously` text containing a newline or carriage return
+  is rejected by check 4 before agreement is tested.
+- Replacements that differ in spacing inside a code span, or in a non-ASCII
+  whitespace character, abstain with `seat_disagreement`.
 - Both seats say `superseded` with different `other_card` targets: the block
   abstains with `seat_disagreement`.
 - One seat proposes `replace_block` and the other `add_previously` for the
