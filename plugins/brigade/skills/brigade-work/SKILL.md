@@ -70,7 +70,7 @@ brigade operator checkup --target .   # doctors + graph ok / ledger ok / last br
 ```
 
 ### 5. Finish: handoff, and let the ratchet run
-At session end, write a Memory Handoff for any durable knowledge (use your handoff inbox's `TEMPLATE.md`; `brigade handoff-template` prints it). The ratchet then closes itself, on a schedule or by hand:
+At session end, write a Memory Handoff only for knowledge a later session cannot get from the repo, git history or an existing card: a root cause, a decision with its reason, a new operational fact, or a stated preference. Run `brigade memory search` first, update that card where one exists, and write it with `brigade handoff draft`. If nothing qualifies, end with one line, `Nothing durable: <reason>`, and write no file. A code or config edit alone is not a reason. The ratchet then closes itself, on a schedule or by hand:
 ```bash
 brigade outcome rank --target .            # most-proven skills first (and brief_hit when present)
 brigade outcome reconcile --target .       # dry-run; --apply promotes a proven skill / rolls back a regressed one across harnesses

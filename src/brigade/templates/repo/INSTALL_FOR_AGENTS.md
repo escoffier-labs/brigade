@@ -11,7 +11,7 @@ You have just entered a Brigade-wired repo. Here is how to operate.
 
 ## Memory contract
 
-The canonical memory owner here is **{{memory_owner_name}}**. If you produce durable knowledge during this session - architecture decisions, workflow changes, root causes, gotchas, security findings, reusable commands - write a Memory Handoff in your harness's inbox ({{handoff_inboxes}}) using its `TEMPLATE.md` before you finish.
+The canonical memory owner here is **{{memory_owner_name}}**. Write a Memory Handoff in your harness's inbox ({{handoff_inboxes}}) only when the session produced knowledge a later session cannot get from the repo, git history or an existing card: a root cause, a decision with its reason, a new operational fact, or a stated preference. Check `brigade memory search` first, and write it with `brigade handoff draft`. If nothing qualifies, end with one line, `Nothing durable: <reason>`, and write no file. A code or config edit alone is not a reason.
 
 Do not edit `rules/*.md` or `.learnings/*.md` directly unless the user explicitly asks. The ingester routes handoffs into those files.
 
@@ -22,7 +22,7 @@ Brigade is dormant until real work flows through it: installed-and-unused, its o
 - `brigade work brief --target .` at the start, to see pending work before deciding what to do.
 - When a test or check result should count, run it through Brigade: `brigade work verify run --target . --command "<your test>"` (not raw).
 - Right after, `brigade outcome capture <skill-or-card-id> --run-id latest` against whatever skill or card did the work. Failures are signal too.
-- Memory Handoff at the end (above).
+- Memory Handoff only if durable (above), else `Nothing durable: <reason>`.
 
 Make sure the built-in skills are actually loaded in your harness. `brigade init` wires `brigade-work` and `ultra-work-scout` into selected harnesses, including Codex at `.codex/skills/`. This is the difference between Brigade installed and Brigade used.
 

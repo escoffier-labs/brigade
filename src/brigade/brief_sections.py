@@ -49,7 +49,7 @@ FULL_SECTIONS: tuple[str, ...] = (
 _SESSION_CLOSE_ITEMS: tuple[str, ...] = (
     'Verify captured through Brigade? (`brigade work verify run --target . --command "..." --capture brigade-work`)',
     "Outcome recorded? (`brigade outcome capture <skill-or-card-id> --run-id latest`)",
-    "Memory Handoff written when durable knowledge was produced?",
+    "Memory Handoff written only for durable knowledge, or closed with `Nothing durable: <reason>`?",
 )
 # Yolo mode (#2233) keeps handoffs available on request and drops verification wording.
 _YOLO_SESSION_CLOSE_ITEMS: tuple[str, ...] = (
@@ -116,7 +116,9 @@ def render_key_commands_section() -> str:
         "### Start here\n\n"
         "1. Run `brigade work brief --target .` and follow it before editing.\n"
         "2. Run counting checks through Brigade, not raw.\n"
-        "3. After substantial work, write a Memory Handoff; never edit canonical memory directly.\n"
+        "3. Write a Memory Handoff only for durable knowledge the repo, git history or a card does not hold, "
+        "using `brigade handoff draft`. Otherwise end with `Nothing durable: <reason>`. "
+        "Never edit canonical memory directly.\n"
     )
 
 
@@ -125,7 +127,7 @@ def render_hard_rules_section() -> str:
         "### Hard rules\n\n"
         "- Verify through Brigade when the result should count.\n"
         "- Capture outcomes (failures included) so the ledger stays honest.\n"
-        "- Handoff at the end of substantial work.\n"
+        "- Handoff only for durable knowledge. A code or config edit alone is not a reason.\n"
     )
 
 
@@ -144,8 +146,12 @@ def render_work_loop_section() -> str:
         "Run counting checks through "
         '`brigade work verify run --target . --command "<command>" --capture brigade-work`, '
         "capturing failures as evidence so the outcome ledger stays honest.\n\n"
-        "After substantial work, create a Memory Handoff through the standard "
-        "canonical-owner flow and never edit canonical memory directly.\n"
+        "Write a Memory Handoff only when the session produced knowledge a later session cannot get "
+        "from the repo, git history or an existing card: a root cause, a decision with its reason, a "
+        "new operational fact, or a stated preference. Run `brigade memory search` first and update "
+        "that card where one exists. Write it with `brigade handoff draft`, never by editing canonical "
+        "memory. If nothing qualifies, end with one line, `Nothing durable: <reason>`. A code or "
+        "config edit alone is not a reason.\n"
     )
 
 

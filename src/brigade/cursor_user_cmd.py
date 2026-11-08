@@ -174,7 +174,7 @@ alwaysApply: true
 
 # Brigade work loop
 
-In a Brigade-wired repository, invoke the global `brigade-work` skill before substantive work. Start with `brigade work brief --target .`. Run checks that should count through `brigade work verify run --target . --command "<test command>" --capture brigade-work`. Capture failures too, export new receipts to MiseLedger when it is installed, and finish durable work with a Memory Handoff.
+In a Brigade-wired repository, invoke the global `brigade-work` skill before substantive work. Start with `brigade work brief --target .`. Run checks that should count through `brigade work verify run --target . --command "<test command>" --capture brigade-work`. Capture failures too, export new receipts to MiseLedger when it is installed, and write a Memory Handoff only for durable knowledge, else end with `Nothing durable: <reason>`.
 """
 
 
