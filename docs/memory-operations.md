@@ -1306,17 +1306,23 @@ at most `near_duplicate_max_proposals` near-duplicate submissions. The ops of
 the rest count as `near_deferred` and wait for a later run. Crafted clusters
 therefore cannot use up the 32 pending proposals a principal may hold.
 
-Near-duplicate submissions take turns. Each one has a cluster key: a digest of
-its scope and the sorted ids of its cards. The key never depends on card text,
-so rewriting members keeps it. `schedule.json` records, per key, when a run
-first saw it (`first_seen_ms`) and when a run last opened its proposal
-(`proposed_ms`). Candidates are ordered by least recently proposed, then
-oldest first seen, then key. A cluster that has never had a proposal therefore
-goes ahead of every cluster that has, and rewritten clusters cannot keep the
-same slots run after run. A cluster with a remembered proposal keeps its entry
-but uses no slot. Keys not seen in a run are dropped, and at most 4,096 entries
-are kept, oldest first seen first. The entries hold digests and times only.
-These entries share the ledger binding, so they reset with it. A dry run reads
+Near-duplicate submissions take turns. Each one has a cluster key: a 128-bit
+digest of its scope and the sorted ids of its cards. The key never depends on
+card text, so rewriting members keeps it. `schedule.json` keeps one table per
+scope that maps each key to two times: when a run first saw it and when a run
+last opened its proposal, with 0 for never. Candidates are ordered by least
+recently proposed, then oldest first seen, then key. A cluster that has never
+had a proposal therefore goes ahead of every cluster that has, and rewritten
+clusters cannot keep the same slots run after run. A cluster with a remembered
+proposal keeps its entry but uses no slot. Keys not seen in a run are dropped.
+
+Every key a run observes gets an entry. Clusters are disjoint and each
+submission names at least two cards, so a scope yields at most half its
+50,000-card bound in keys, and the per-scope entry cap is that half (25,000).
+If the cap ever bound, keys would be admitted in scheduling order, so the most
+recently served keys are dropped first and a never-served key is kept ahead of
+them. A full 25,000-entry table is about 1.6 MB, within the 8 MiB state file
+limit. The tables share the ledger binding and reset with it. A dry run reads
 them but never saves them.
 
 The hub classifies `supersede_card` as Tier 2, so these proposals are never

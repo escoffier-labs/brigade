@@ -401,8 +401,8 @@ def proposed_groups(calls):
     return {op["other_card"]["card_id"].split("-")[0] for call in calls for op in call["ops"]}
 
 
-def clusters_state(target):
-    return json.loads((target / ".brigade/memory/reflect/schedule.json").read_text())["near_clusters"]
+def clusters_state(target, scope=SCOPE):
+    return json.loads((target / ".brigade/memory/reflect/schedule.json").read_text())["near_clusters"].get(scope, {})
 
 
 def test_rewritten_clusters_cannot_starve_unserved_ones(setup, capsys):
@@ -435,12 +435,11 @@ def test_cluster_keys_survive_rewrites_and_drop_when_clusters_go(setup, capsys, 
     near_groups(hub, 2)
     assert run(target, capsys, "run")[0] == 0
     first = clusters_state(target)
-    assert len(first) == 2 and {entry["first_seen_ms"] for entry in first.values()} == {1_000}
-    assert all(entry["proposed_ms"] == 1_000 for entry in first.values())
+    assert len(first) == 2 and all(entry == [1_000, 1_000] for entry in first.values())
     put(hub, "g0-1", group_claim(0, "rewrite"), anchor(2))
     assert run(target, capsys, "run")[0] == 0
     second = clusters_state(target)
-    assert {key: entry["first_seen_ms"] for key, entry in second.items()} == {key: 1_000 for key in first}
+    assert {key: entry[0] for key, entry in second.items()} == {key: 1_000 for key in first}
     put(hub, "g1-1", " ".join(f"unrelated{i}" for i in range(50)), anchor(4))
     assert run(target, capsys, "run")[0] == 0
     third = clusters_state(target)
@@ -448,15 +447,64 @@ def test_cluster_keys_survive_rewrites_and_drop_when_clusters_go(setup, capsys, 
     assert SECRET not in json.dumps(third)
 
 
+def test_every_observed_cluster_key_gets_a_durable_entry(setup, capsys, monkeypatch):
+    from brigade import memory_reflect_hub as reflect
+
+    # Lower the scope card bound. The cluster cap follows it, and 20 cards fill the scope.
+    monkeypatch.setattr(reflect, "MAX_SCOPE_CARDS", 20)
+    assert reflect._cluster_cap() == 10
+    target, hub, _ = setup
+    configure(target)
+    near_groups(hub, 10)
+    code, report = run(target, capsys, "run")
+    assert code == 0 and report["near_duplicate"]["clusters"] == 10
+    assert len(report["proposals"]) == 8 and report["skipped_reasons"] == {"near_deferred": 2}
+    entries = clusters_state(target)
+    assert len(entries) == 10
+    assert sorted(entry[1] > 0 for entry in entries.values()) == [False] * 2 + [True] * 8
+
+
+def test_forced_overflow_still_serves_every_cluster(setup, capsys, monkeypatch):
+    from brigade import memory_reflect_hub as reflect
+
+    clock = iter(range(1_000, 100_000, 1_000))
+    monkeypatch.setattr(reflect, "_now_ms", lambda: next(clock))
+    monkeypatch.setattr(reflect, "_cluster_cap", lambda: 3)
+    target, hub, _ = setup
+    configure(target, "[reflect]\nnear_duplicate_max_proposals = 1\n")
+    near_groups(hub, 4)
+    served = set()
+    for round_number in range(4):
+        before = len(proposed(hub))
+        assert run(target, capsys, "run")[0] == 0
+        served |= proposed_groups(proposed(hub)[before:])
+        assert len(clusters_state(target)) <= 3
+        # The writer rewrites a member of every cluster, so no proposal is ever remembered.
+        for group in range(4):
+            put(hub, f"g{group}-1", group_claim(group, f"rewrite{round_number}"), anchor(group * 2 + 2))
+    assert served == {"g0", "g1", "g2", "g3"}
+
+
+def test_worst_case_cluster_schedule_stays_small():
+    from brigade import memory_proposal_io as io, memory_reflect_hub as reflect
+
+    entries = {f"{i:032x}": [9_999_999_999_999, 9_999_999_999_999] for i in range(reflect._cluster_cap())}
+    size = len(io.json_bytes({"binding": "a" * 64, "near_clusters": {SCOPE: entries}}))
+    assert len(entries) == 25_000 and size < 2 * 1024 * 1024
+
+
 @pytest.mark.parametrize(
     "clusters",
     [
         [],
-        {"x": {"first_seen_ms": 1}},
-        {"a" * 64: {}},
-        {"a" * 64: {"first_seen_ms": -1}},
-        {"a" * 64: {"first_seen_ms": True}},
-        {"a" * 64: {"first_seen_ms": 1, "card_text": 1}},
+        {SCOPE: []},
+        {SCOPE: {"x": [1, 0]}},
+        {SCOPE: {"a" * 64: [1, 0]}},
+        {SCOPE: {"a" * 32: [1]}},
+        {SCOPE: {"a" * 32: [-1, 0]}},
+        {SCOPE: {"a" * 32: [True, 0]}},
+        {SCOPE: {"a" * 32: {"first_seen_ms": 1}}},
+        {"": {"a" * 32: [1, 0]}},
     ],
 )
 def test_invalid_cluster_state_is_refused(setup, capsys, clusters):

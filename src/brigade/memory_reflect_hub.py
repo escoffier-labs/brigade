@@ -32,8 +32,8 @@ REPLICA_FILE_SLACK = 1024 * 1024
 # Hub quota refusals end proposing for this run without counting as a failure.
 QUOTA_REFUSALS = hubc.QUOTA_REFUSALS
 DUPLICATE_PENDING = "memory_proposal_duplicate_pending"
-# Near-duplicate clusters remembered for fair scheduling. Entries carry ids only, never card text.
-MAX_CLUSTER_ENTRIES = 4096
+# Near-duplicate cluster keys are 128-bit digests of a scope and card ids, never card text.
+CLUSTER_KEY = re.compile(r"[0-9a-f]{32}")
 
 STATE_ERROR = "invalid reflect schedule state. Inspect and remove .brigade/memory/reflect/schedule.json to recover"
 
@@ -89,22 +89,26 @@ def schedule_status(target: Path) -> dict[str, Any]:
                 or ("proposal_id" in pending and "refused" in pending)
             ):
                 raise ValueError(STATE_ERROR)
-        clusters = state.get("near_clusters", {})
-        if (
-            not isinstance(clusters, dict)
-            or (clusters and "binding" not in state)
-            or len(clusters) > MAX_CLUSTER_ENTRIES
-        ):
+        schedule = state.get("near_clusters", {})
+        if not isinstance(schedule, dict) or (schedule and "binding" not in state):
             raise ValueError(STATE_ERROR)
-        for key, entry in clusters.items():
+        for scope_name, entries in schedule.items():
             if (
-                not _digest(key)
-                or not isinstance(entry, dict)
-                or "first_seen_ms" not in entry
-                or set(entry) - {"first_seen_ms", "proposed_ms"}
-                or any(type(value) is not int or value < 0 for value in entry.values())
+                not isinstance(scope_name, str)
+                or not scope_name
+                or len(scope_name) > 512
+                or not isinstance(entries, dict)
+                or len(entries) > _cluster_cap()
             ):
                 raise ValueError(STATE_ERROR)
+            for key, entry in entries.items():
+                if (
+                    CLUSTER_KEY.fullmatch(key) is None
+                    or not isinstance(entry, list)
+                    or len(entry) != 2
+                    or any(type(value) is not int or value < 0 for value in entry)
+                ):
+                    raise ValueError(STATE_ERROR)
         if "last_status" in state and state["last_status"] not in ("completed", "failed"):
             raise ValueError(STATE_ERROR)
         return state
@@ -153,7 +157,16 @@ def _submission_digest(ops: list[dict[str, Any]]) -> str:
 def _cluster_key(ops: list[dict[str, Any]]) -> str:
     """Name a near-duplicate submission by scope and card ids, so rewrites keep its key."""
     ids = {op["card_id"] for op in ops} | {op["other_card"]["card_id"] for op in ops}
-    return io.sha256(io.json_bytes([ops[0]["scope"], sorted(ids)]))
+    return io.sha256(io.json_bytes([ops[0]["scope"], sorted(ids)]))[:32]
+
+
+def _cluster_cap() -> int:
+    """Most cluster keys one scope can yield, so every observed key gets an entry.
+
+    Clusters are disjoint and every submission names at least two of its
+    cluster's cards, so a scope has at most half its card bound in keys.
+    """
+    return MAX_SCOPE_CARDS // 2
 
 
 def _client(target: Path) -> tuple[hubc.HubSettings, hubc.MemoryHubClient]:
@@ -388,19 +401,28 @@ def _reflect(
 
     # Fair scheduling: least recently proposed cluster first, then oldest first seen, then key.
     # Keys are card ids, so rewriting members never resets a cluster's place in line.
+    # Entries are [first_seen_ms, proposed_ms] per scope and key, with 0 for never proposed.
     now = _now_ms()
     known = state.get("near_clusters", {}) if state.get("binding") == binding else {}
-    near_key = {_submission_digest(ops): _cluster_key(ops) for ops in similar}
-    clusters = {key: dict(known.get(key) or {"first_seen_ms": now}) for key in near_key.values()}
-    # Drop clusters not seen this run and bound the rest, oldest first.
-    clusters = dict(
-        sorted(clusters.items(), key=lambda item: (item[1]["first_seen_ms"], item[0]))[:MAX_CLUSTER_ENTRIES]
-    )
+    near_key = {_submission_digest(ops): (ops[0]["scope"], _cluster_key(ops)) for ops in similar}
+    clusters: dict[str, dict[str, list[int]]] = {}
+    for scope_name, key in near_key.values():
+        entry = known.get(scope_name, {}).get(key)
+        clusters.setdefault(scope_name, {})[key] = list(entry) if entry else [now, 0]
+
+    def priority(key: str, entry: list[int]) -> tuple[int, int, str]:
+        return entry[1], entry[0], key
+
+    # Keys not seen this run are dropped. The cap never binds for observed keys, but if it
+    # did, keys are admitted in scheduling order, so the most recently served go first.
+    clusters = {
+        name: dict(sorted(entries.items(), key=lambda item: priority(*item))[: _cluster_cap()])
+        for name, entries in clusters.items()
+    }
 
     def turn(ops: list[dict[str, Any]]) -> tuple[int, int, str]:
-        key = near_key[_submission_digest(ops)]
-        entry = clusters.get(key, {"first_seen_ms": now})
-        return entry.get("proposed_ms", 0), entry["first_seen_ms"], key
+        name, key = near_key[_submission_digest(ops)]
+        return priority(key, clusters[name].get(key, [now, 0]))
 
     pending_similar = unremembered(sorted(similar, key=turn))
     # Cap new near-duplicate proposals per run so crafted clusters cannot drain the pending quota.
@@ -420,8 +442,9 @@ def _reflect(
         state.update(binding=binding, submissions=previous, near_clusters=clusters)
 
         def served(digest: str) -> None:
-            if digest in near_key and near_key[digest] in clusters:
-                clusters[near_key[digest]]["proposed_ms"] = now
+            name, key = near_key.get(digest, ("", ""))
+            if key in clusters.get(name, {}):
+                clusters[name][key][1] = now
 
         for position, (digest, ops) in enumerate(selected):
             stop = False
