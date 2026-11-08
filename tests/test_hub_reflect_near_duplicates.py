@@ -305,7 +305,8 @@ def test_client_keeps_coded_quota_refusals_and_other_429s_unavailable(code):
     with pytest.raises(hubc.HubRefusal) as refusal:
         client.call("propose", ops=[])
     assert refusal.value.status == 429 and refusal.value.code == code
-    for body in ({}, {"code": "rate_limited"}):
+    # Any other 429, including a code of the wrong type, stays on the unavailable fallback path.
+    for body in ({}, {"code": "rate_limited"}, {"code": ["rate_limited"]}, {"code": {"a": 1}}, {"code": 7}):
         client = hubc.MemoryHubClient("https://hub.example.test", "token", transport=answer(body))
         with pytest.raises(hubc.HubUnavailable):
             client.call("propose", ops=[])
@@ -394,3 +395,74 @@ def test_exact_merges_come_before_near_duplicates(setup, capsys):
     near_groups(hub, 1)
     code, report = run(target, capsys, "run", "--limit", "1")
     assert code == 0 and [op["type"] for op in report["ops"]] == ["merge_exact_duplicates"]
+
+
+def proposed_groups(calls):
+    return {op["other_card"]["card_id"].split("-")[0] for call in calls for op in call["ops"]}
+
+
+def clusters_state(target):
+    return json.loads((target / ".brigade/memory/reflect/schedule.json").read_text())["near_clusters"]
+
+
+def test_rewritten_clusters_cannot_starve_unserved_ones(setup, capsys):
+    target, hub, _ = setup
+    configure(target)
+    near_groups(hub, 10)
+    code, report = run(target, capsys, "run")
+    assert code == 0 and len(report["proposals"]) == 8
+    served = proposed_groups(proposed(hub))
+    waiting = {f"g{group}" for group in range(10)} - served
+    assert len(waiting) == 2
+    # Rewriting members changes every digest of the served clusters, but not their card ids.
+    for group in sorted(served):
+        number = int(group[1:])
+        put(hub, f"{group}-1", group_claim(number, "rewrite"), anchor(number * 2 + 2))
+    before = len(proposed(hub))
+    code, report = run(target, capsys, "run")
+    assert code == 0 and len(report["proposals"]) == 8
+    assert waiting <= proposed_groups(proposed(hub)[before:])
+    assert report["skipped_reasons"] == {"near_deferred": 2}
+
+
+def test_cluster_keys_survive_rewrites_and_drop_when_clusters_go(setup, capsys, monkeypatch):
+    from brigade import memory_reflect_hub as reflect
+
+    clock = iter(range(1_000, 10_000, 1_000))
+    monkeypatch.setattr(reflect, "_now_ms", lambda: next(clock))
+    target, hub, _ = setup
+    configure(target)
+    near_groups(hub, 2)
+    assert run(target, capsys, "run")[0] == 0
+    first = clusters_state(target)
+    assert len(first) == 2 and {entry["first_seen_ms"] for entry in first.values()} == {1_000}
+    assert all(entry["proposed_ms"] == 1_000 for entry in first.values())
+    put(hub, "g0-1", group_claim(0, "rewrite"), anchor(2))
+    assert run(target, capsys, "run")[0] == 0
+    second = clusters_state(target)
+    assert {key: entry["first_seen_ms"] for key, entry in second.items()} == {key: 1_000 for key in first}
+    put(hub, "g1-1", " ".join(f"unrelated{i}" for i in range(50)), anchor(4))
+    assert run(target, capsys, "run")[0] == 0
+    third = clusters_state(target)
+    assert len(third) == 1 and set(third) < set(first)
+    assert SECRET not in json.dumps(third)
+
+
+@pytest.mark.parametrize(
+    "clusters",
+    [
+        [],
+        {"x": {"first_seen_ms": 1}},
+        {"a" * 64: {}},
+        {"a" * 64: {"first_seen_ms": -1}},
+        {"a" * 64: {"first_seen_ms": True}},
+        {"a" * 64: {"first_seen_ms": 1, "card_text": 1}},
+    ],
+)
+def test_invalid_cluster_state_is_refused(setup, capsys, clusters):
+    from brigade import memory_reflect_hub as reflect
+
+    target, hub, _ = setup
+    reflect._save(target, {"consecutive_failures": 0, "paused": False, "binding": "b" * 64, "near_clusters": clusters})
+    assert run(target, capsys, "status")[1]["schedule"]["paused"]
+    assert run(target, capsys, "run")[0] == 2 and hub.calls == []

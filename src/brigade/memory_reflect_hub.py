@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -31,6 +32,8 @@ REPLICA_FILE_SLACK = 1024 * 1024
 # Hub quota refusals end proposing for this run without counting as a failure.
 QUOTA_REFUSALS = hubc.QUOTA_REFUSALS
 DUPLICATE_PENDING = "memory_proposal_duplicate_pending"
+# Near-duplicate clusters remembered for fair scheduling. Entries carry ids only, never card text.
+MAX_CLUSTER_ENTRIES = 4096
 
 STATE_ERROR = "invalid reflect schedule state. Inspect and remove .brigade/memory/reflect/schedule.json to recover"
 
@@ -86,6 +89,22 @@ def schedule_status(target: Path) -> dict[str, Any]:
                 or ("proposal_id" in pending and "refused" in pending)
             ):
                 raise ValueError(STATE_ERROR)
+        clusters = state.get("near_clusters", {})
+        if (
+            not isinstance(clusters, dict)
+            or (clusters and "binding" not in state)
+            or len(clusters) > MAX_CLUSTER_ENTRIES
+        ):
+            raise ValueError(STATE_ERROR)
+        for key, entry in clusters.items():
+            if (
+                not _digest(key)
+                or not isinstance(entry, dict)
+                or "first_seen_ms" not in entry
+                or set(entry) - {"first_seen_ms", "proposed_ms"}
+                or any(type(value) is not int or value < 0 for value in entry.values())
+            ):
+                raise ValueError(STATE_ERROR)
         if "last_status" in state and state["last_status"] not in ("completed", "failed"):
             raise ValueError(STATE_ERROR)
         return state
@@ -120,6 +139,21 @@ def _save(target: Path, state: dict[str, Any]) -> None:
                 os.unlink(temporary.name, dir_fd=parent)
             except FileNotFoundError:
                 pass
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _submission_digest(ops: list[dict[str, Any]]) -> str:
+    # A single op keeps its historical digest, so remembered submissions survive upgrades.
+    return io.sha256(io.json_bytes(ops[0] if len(ops) == 1 else ops))
+
+
+def _cluster_key(ops: list[dict[str, Any]]) -> str:
+    """Name a near-duplicate submission by scope and card ids, so rewrites keep its key."""
+    ids = {op["card_id"] for op in ops} | {op["other_card"]["card_id"] for op in ops}
+    return io.sha256(io.json_bytes([ops[0]["scope"], sorted(ids)]))
 
 
 def _client(target: Path) -> tuple[hubc.HubSettings, hubc.MemoryHubClient]:
@@ -342,8 +376,7 @@ def _reflect(
     def unremembered(submissions: list[list[dict[str, Any]]]) -> list[tuple[str, list[dict[str, Any]]]]:
         fresh = []
         for ops in submissions:
-            # A single op keeps its historical digest, so remembered submissions survive upgrades.
-            digest = io.sha256(io.json_bytes(ops[0] if len(ops) == 1 else ops))
+            digest = _submission_digest(ops)
             remembered = previous.get(digest, {})
             if remembered.get("proposal_id"):
                 skipped["already_proposed"] = skipped.get("already_proposed", 0) + 1
@@ -353,8 +386,25 @@ def _reflect(
                 fresh.append((digest, ops))
         return fresh
 
-    pending_similar = unremembered(similar)
+    # Fair scheduling: least recently proposed cluster first, then oldest first seen, then key.
+    # Keys are card ids, so rewriting members never resets a cluster's place in line.
+    now = _now_ms()
+    known = state.get("near_clusters", {}) if state.get("binding") == binding else {}
+    near_key = {_submission_digest(ops): _cluster_key(ops) for ops in similar}
+    clusters = {key: dict(known.get(key) or {"first_seen_ms": now}) for key in near_key.values()}
+    # Drop clusters not seen this run and bound the rest, oldest first.
+    clusters = dict(
+        sorted(clusters.items(), key=lambda item: (item[1]["first_seen_ms"], item[0]))[:MAX_CLUSTER_ENTRIES]
+    )
+
+    def turn(ops: list[dict[str, Any]]) -> tuple[int, int, str]:
+        key = near_key[_submission_digest(ops)]
+        entry = clusters.get(key, {"first_seen_ms": now})
+        return entry.get("proposed_ms", 0), entry["first_seen_ms"], key
+
+    pending_similar = unremembered(sorted(similar, key=turn))
     # Cap new near-duplicate proposals per run so crafted clusters cannot drain the pending quota.
+    # A cluster with a remembered proposal keeps its place but does not use a slot.
     deferred = sum(len(ops) for _, ops in pending_similar[near_cap:])
     if deferred:
         skipped["near_deferred"] = skipped.get("near_deferred", 0) + deferred
@@ -367,7 +417,12 @@ def _reflect(
     attempted = len(selected)
     if not dry_run:
         # Preserve unprocessed submissions under this binding across scope and limit changes.
-        state.update(binding=binding, submissions=previous)
+        state.update(binding=binding, submissions=previous, near_clusters=clusters)
+
+        def served(digest: str) -> None:
+            if digest in near_key and near_key[digest] in clusters:
+                clusters[near_key[digest]]["proposed_ms"] = now
+
         for position, (digest, ops) in enumerate(selected):
             stop = False
             for attempt in range(2):
@@ -390,6 +445,7 @@ def _reflect(
                         existing = exc.body.get("proposal_id")
                         if _event_id(existing):
                             pending["proposal_id"] = existing
+                            served(digest)
                         else:
                             pending["refused"] = code
                         _save(target, state)
@@ -419,6 +475,7 @@ def _reflect(
                 if not _event_id(opened.get("proposal_id")) or opened.get("state") not in ("pending", "held"):
                     raise ReflectError("hub_reflect_proposal_invalid", "hub returned no open reflect proposal")
                 pending["proposal_id"] = opened["proposal_id"]
+                served(digest)
                 _save(target, state)
                 proposals.append({"proposal_id": pending["proposal_id"]})
                 break

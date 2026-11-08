@@ -1270,9 +1270,16 @@ Clusters are stars around a keeper. Cards with at least one near-duplicate are
 taken in keeper order: the least recently written card first, then the lowest
 card id on a tie. A card's hub revision is its hub log sequence, so the lowest
 revision is the oldest current write. Creating a card or rewriting one always
-takes a higher revision, so a writer in the scope cannot make its card the
-keeper and have established cards superseded in its favor. Each keeper claims
-its direct near-duplicates that no earlier keeper took. Every member is therefore at or above the
+takes a higher revision, so a fresh write never makes a card the keeper. Each
+keeper claims its direct near-duplicates that no earlier keeper took.
+
+The current revision is the only age the hub sends with a card. The hub does
+not expose a creation sequence, so keeper choice cannot tell an old card from
+one that a writer has left untouched while editing its neighbors. Keeper
+choice therefore assumes that writers in the scope are trusted. Such a writer
+can already edit any card in that scope directly. Every near-duplicate
+proposal is Tier 2 and needs an explicit human decision, and the reviewer
+decides whether the proposed direction is right before accepting it. Every member is therefore at or above the
 threshold against its own keeper, never only through a chain of other cards.
 
 Each member gets a `supersede_card` op. The op names the member as its card
@@ -1298,6 +1305,19 @@ the pending quota first. After remembered submissions are removed, a run opens
 at most `near_duplicate_max_proposals` near-duplicate submissions. The ops of
 the rest count as `near_deferred` and wait for a later run. Crafted clusters
 therefore cannot use up the 32 pending proposals a principal may hold.
+
+Near-duplicate submissions take turns. Each one has a cluster key: a digest of
+its scope and the sorted ids of its cards. The key never depends on card text,
+so rewriting members keeps it. `schedule.json` records, per key, when a run
+first saw it (`first_seen_ms`) and when a run last opened its proposal
+(`proposed_ms`). Candidates are ordered by least recently proposed, then
+oldest first seen, then key. A cluster that has never had a proposal therefore
+goes ahead of every cluster that has, and rewritten clusters cannot keep the
+same slots run after run. A cluster with a remembered proposal keeps its entry
+but uses no slot. Keys not seen in a run are dropped, and at most 4,096 entries
+are kept, oldest first seen first. The entries hold digests and times only.
+These entries share the ledger binding, so they reset with it. A dry run reads
+them but never saves them.
 
 The hub classifies `supersede_card` as Tier 2, so these proposals are never
 Tier 0 eligible and never take the automatic apply route. Each one waits for
