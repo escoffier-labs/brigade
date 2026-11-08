@@ -1691,6 +1691,7 @@ One route, `POST /memory`, with an `action` field, the same style as
 | Action | Grant | Request | Success |
 |---|---|---|---|
 | `search` | read | `query` (at most 256 characters after normalization, and at most 4,096 UTF-8 bytes as sent, a separate guard on the work normalization does with its own `memory_query_invalid` message), `limit` (1 to 20, default 10), `mode` (`auto`, `lexical`, `hybrid`), `query_source` (`prompt`, `cwd`, `explicit`), optional `scopes`, `sources` and `min_seq` | `200 {matches, retrieval: {mode, degraded, stale}, indexed_seq}`. A query with no word characters is matched literally, in answer order, reading at most 1,000 cards or 4 MiB of card text, and also stopping at `limit` matches when more cards are visible than that budget. `match_count` is exact when every visible card fits the budget. `retrieval.truncated: true` marks a scan that stopped before the last visible card: its `matches` equal a full scan's first `limit`, and its `match_count` is a lower bound |
+| `retrieval_eval.record` | admin | `report_json` (exact S17 digest preimage, at most 512 KiB), `report_sha256`, `client_event_id` | `201 {record_seq, report_sha256, mode, passed}`. Append-only and audited. Failed reports are stored but hold automatic apply |
 | `card` | read | `card_id`, optional `scope`, `revision` and `offset` | `200 {card: {scope, card_id, revision, content_hash, text, next_offset, trust, seq}}`, text in 30,000-character chunks as Dot's `memory_card` returns it. Without `scope`, an id readable in two scopes answers `409 memory_card_ambiguous` with the scopes |
 | `put` | write on the scope | `scope`, `card_id`, `base_revision`, `base_epoch` (required when `base_revision` is set), `text`, `origin`, `client_event_id` | `201 {event: {seq, revision, content_hash, trust}, log_epoch}` |
 | `retire` | write on the scope | `scope`, `card_id`, `base_revision`, `base_epoch`, `reason`, `client_event_id` | `200 {event, log_epoch}` |
@@ -1735,6 +1736,7 @@ Tables in `fleet-hub-memory.db`:
 | `memory_embed_jobs` | `(content_hash, embedder_id)` | state, lease holder and expiry, attempts, last error code |
 | `memory_proposals` | `proposal_id` | state, tier, ops, pinned block hashes, evidence references, base revisions, policy digest, dry-run diff, decision |
 | `memory_evidence` | `(namespace, local_id)` | artifact digest, attesting credential, observation time, revocation state (S19e) |
+| `memory_retrieval_evals` | `record_seq` | append-only admin R0/R1-public report bytes, stable digest, configured mode, credential audit id, recording and evaluated times, and evaluated scoped member snapshot (S19e-2, schema 8) |
 | `memory_handoffs` | `handoff_id` | submitted handoffs waiting for review |
 | `memory_grants` | `(principal, scope)` | rights |
 | `memory_idempotency` | `(principal, client_event_id)` | request digest, response, time |
@@ -1881,20 +1883,42 @@ hub copies its semantics from `src/brigade/memory_bm25.py` and
    for its current content is left out of the dense list and stays findable
    lexically.
 5. Fuse with reciprocal rank fusion: score = sum over lists of
-   weight / (60 + rank), weights 1.0 until the eval says otherwise.
+   weight / (60 + rank), weights 1.0 until the eval says otherwise. The
+   `[memory.rrf]` setting is operator-only and hub-wide. Workspace files and
+   search requests cannot change it. Bad weights in the default `hub.toml`
+   make the memory route unavailable, including in lexical mode. Bad weights
+   in an explicit `--memory-config` stop startup.
 6. Collapse lineage: cards linked by `supersede_card` or
    `merge_exact_duplicates`, and handoff-derived items from one chain, appear
-   once, as the newest live head.
+   once per live terminal head. Only reviewed, policy-promoted or imported
+   cards can assert links, and both endpoints must retain one of those trust
+   levels. An unreviewed successor rewrite or revival cannot replace its
+   reviewed predecessor. References written as `scope/card_id` must name
+   the source card's scope. Separate live successors are preserved. Cycles
+   resolve each terminal strongly connected component independently using its
+   newest non-flagged head event seq, and flagged cards never replace another
+   head. Push collapse uses only eligible heads, members and assertion owners,
+   preserving an eligible predecessor when its successor is withheld.
+   Resolved forward and reverse neighbours live on immutable index snapshots.
+   A query walks only components reached from its top hits, probing at most
+   512 nodes including its initial candidates. Overflow returns the eligible
+   input hits uncollapsed and reports the overflow and uncollapsed-hit count.
+   Bare and scoped ids retain filename-like suffixes. Only workspace file
+   paths strip the file extension.
 7. Demote repetitive automated sources: versions that are still
    `agent-unreviewed` and came from a `scheduled` or `worker` writer sort after
    every other match, unless the query sets `sources: ["automation"]`.
    Reviewed, promoted and imported cards are never demoted. The writer class
-   comes from the credential's registered class. The `origin` hint on an event
+   comes from the credential's registered class. Until principals have a
+   registered writer class, every Principal credential is treated as automated.
+   The `origin` hint on an event
    can lower it and never raise it. Node tokens serve people and timers on one
    machine, so a node write's class comes from its hint, which affects ranking
    only.
 8. Return at most 20 matches with `scope`, `card_id`, `revision`, `title`,
    `summary`, `tags`, `score`, `content_hash`, `trust` and each list's rank.
+   A collapsed head's revision and hash identify the head. Its score and list
+   ranks come from the matched chain member that supplied the hit.
    The response says which mode ran (`lexical`, `hybrid`, or
    `lexical-fallback` when a configured embedder could not answer) and why a
    hybrid query degraded (`embedder-timeout`, `embedder-unavailable`,
@@ -1925,7 +1949,10 @@ adapters: `hub-lexical` and `hub-hybrid`. Each starts a `brigade-hub` on a
 loopback port with a temporary memory database loaded from the fixture. They
 report "skipped" when the binary or an embedding server is missing, like the
 `semantic` adapter does today. A gate run requires them. Private gold sets run
-through `--fixture-root` and report aggregate numbers only. Every gate record
+through `--fixture-root` and report aggregate numbers only. Eval requests explicitly set `eval: true` for policy and corpus bindings.
+Ordinary searches do neither read. A scope's live count and a digest of its
+sorted `(card_id, content_hash)` pairs bind the exact evaluated corpus, and
+external runs reject extra cards. Every gate record
 names the `indexed_seq`, index format version, scorer version and policy
 revision it ran against, so a Tier 0 gate can tell whether its eval record
 still applies.
@@ -1940,7 +1967,9 @@ Measured so far, with untuned RRF weights (#2217): only the 8B hybrid passes
 both private halves of R1, with hit@5 gains of 0.20 to 0.26 over BM25 under
 the three judges and keyword R@5 0.034 below BM25, inside the 0.05 limit. The
 0.6B hybrid gains 0.13 to 0.24 on hit@5 but loses 0.075 on keyword R@5. S17
-tunes the weights and runs the public-fixture half. Until R1 passes for a
+tunes the weights and runs the public-fixture half. The code runner and its
+metadata bindings are documented in [the eval harness](../evals/memory-retrieval/README.md#hub-adapters-and-s17-runner).
+The S17 code slice leaves candidate R1 runs and the S16b decision to operations. Until R1 passes for a
 model, setup does not offer it for `hybrid`, and an install without such a
 model starts in BM25 mode ([Retrieval modes](#retrieval-modes)).
 
@@ -2316,8 +2345,9 @@ Local state: #1856 is open. Reflect candidates and proposal v2 ops exist
 `memory_proposal_v2_ops.py`). Local candidate logic marks Tier 2 when it is
 review-only and Tier 0 otherwise. S19a added reviewed Rust hub proposals.
 S19b adds the hub classifier, Tier 1, and the policy `memory` section with
-digest binding. Calibration records, blast caps, cooldowns and the
-`care install` entry remain later work. #2187 adds `brigade memory reflect preflight`, a diagnostic
+digest binding. S19c adds diagnostic gates, including a one-card blast cap
+and a 24-hour per-card cooldown from hub proposal history. S19d adds the optional `memory-reflect` care entry and hub rollback requests.
+Calibration records remain later work. #2187 adds `brigade memory reflect preflight`, a diagnostic
 Tier 0 report (`brigade.memory-tier0-preflight.v1`) that always says
 `eligible=false`. S19a to S19e build the tier rules on hub memory in five PRs,
 and the local implementation of #1856 can reuse their tests.
@@ -2365,7 +2395,7 @@ Reflect stays a batch job (#1856). On a hub-backed workspace:
    appends a compensating proposal containing the previous revision's content
    and trust, pinned to the applied revision as its base. It changes no card
    immediately, even for a reviewer. The compensation waits for a separate
-   `decide`, like every proposal until S19e (D25, Q6), and goes through the same
+   `decide`, including after S19e-1 (D25, Q6), and goes through the same
    compare-and-set and block-pin checks at apply. If a card moved after the
    original apply or while the compensation waited for review, the compensation
    ends `stale` and changes no card. The reviewer sees the reason.
@@ -2385,8 +2415,8 @@ constructed from the writer-loaded applied body and opens with a null decision.
 Blocked and input-specific failed scans at decide persist `held` with a reason
 and no card changes. The new `memory_proposals.decided_by` column records the
 deciding principal. The hub exposes no separate or automatic apply route.
-The Python client additions for submitting and deciding hub proposals remain a
-later slice. Its existing `memory hub proposals` commands manage local conflict
+S19d adds Python submission from scheduled reflection and a hub rollback
+command. Explicit decisions still use the hub API. Its existing `memory hub proposals` commands manage local conflict
 proposals only.
 
 S19b classifies under the memory writer lock on open and again on decide.
@@ -2406,9 +2436,10 @@ apply authority, and every proposal still requires explicit review.
 The fleet policy's optional `memory` object accepts `auto_apply` (false only),
 `tier0_op_classes` (a bounded list of `append_evidence` or
 `merge_exact_duplicates`) and `reflect_principals` (a bounded list of
-principal ids). Both lists are stored and digest-bound but are not enforced
-until S19c. Setting them does not narrow Tier 0 classification today, even
-when a list is empty. The lists default to empty. Unknown fields and invalid
+principal ids). S19c enforces both lists in the Tier 0 gate. Every op class
+must be listed and the proposer must be a listed principal. Both lists default
+to empty and deny Tier 0 eligibility. They do not change the classifier's edit
+tier or restrict an explicit reviewed decision. Unknown fields and invalid
 values are refused. Saving auto-apply as true returns 422 without storing a policy revision. Omitting the section
 preserves older digests. A present section enters the canonical fleet policy
 digest, so edits invalidate pending acceptances.
@@ -2429,33 +2460,200 @@ but a supplied expectation must match there too. Acceptance then retries all
 checks, including self-review, target grants and moved heads. A moved head
 leaves the proposal stale with `memory_base_mismatch`. Idempotent replay
 retains the first stale response. Other stale reasons still require a new
-proposal. S19c owns preflight and the remaining gates, S19d owns scheduling, and S19e owns attestation and auto-apply.
+proposal. S19c adds read-only preflight and rechecks its hub facts inside the
+apply transaction. S19d owns scheduling. S19e-1 adds attestation, ownership and the gated
+automatic route. S19e-2 supplies the bound retrieval evaluation that remains
+required before that route can apply in production.
 
 | Tier 0 gate | Source of truth on the hub |
 |---|---|
 | Policy enables the op class | `memory` section of the current fleet policy revision. Its digest is bound into the proposal and re-read under the authority lock |
-| Proof: at least 3 distinct evidence ids from at least 2 sources, no contrary ids | attested evidence (S19e): distinct namespaced ids, with sources counted as distinct attesting credentials, never as names written in the proposal |
-| Sources trusted and scan-clean | the attesting credentials appear in the policy's reflect principals, and every touched version scans clean |
-| Retrieval eval gate passed | the latest R0 or R1 record for the active mode, bound to `indexed_seq`, index format, scorer version and policy revision |
-| Blast cap and per-card cooldown | `memory_proposals` history, read inside the apply transaction |
+| Proof: at least 3 distinct evidence ids from at least 2 sources, no contrary ids | attested evidence (S19e): distinct namespaced ids, with sources counted as distinct attesting principals other than the proposer, never as names written in the proposal |
+| Sources trusted and scan-clean | the attesting principals appear in the policy's reflect principals, and every touched version scans clean |
+| Retrieval eval gate passed | the latest admin-recorded R0 or R1-public report for the configured mode, bound to `indexed_seq`, index format, scorer version, policy revision and digest, epoch, scope, corpus and weights, plus hybrid embedder identity. At most min(5, floor(min(snapshot_count, live_count) / 50)) changed cards, with head events also counted for default ranking, unchanged targets since indexing, and a 24-hour run expiry apply |
+| Blast cap and per-card cooldown | `memory_events` history (`proposal.apply` and `proposal.rollback`), read inside the apply transaction |
 | Brigade is the configured memory owner | the policy's curation section names the hub. With an external owner or a handoff-only policy, reflect emits proposals and never applies |
 | Preflight agrees | the hub `preflight` action returns the #2187 report schema, filled from hub facts, read-only |
 
-Evidence attestation (S19e). An `evidence.attach` event carries a namespaced
-id, the artifact kind, the SHA-256 of the artifact bytes and its observation
-time, plus the bytes themselves for artifacts up to 64 KiB. The attesting
-principal comes from the credential. Proof counts distinct ids attested by
-distinct credentials within the policy's freshness window. When a credential
-is revoked, its attestations stop counting. Until S19e lands, the hub refuses
-a policy whose `memory` section enables auto-apply (422), and every proposal
-waits for review (D25, Q6).
+S19c `preflight` accepts only `action` and `proposal_id`. It requires `read`
+on every target scope, including retained source cards, and never uses the
+memory writer. It returns the #2187 report fields with the proposal id as
+`candidate_id`, the fleet policy digest as `policy_sha256`, and scoped card
+hashes as `source_sha256`. Local-only run and workspace fields are null or
+empty. `evaluation_sha256` binds the reported diagnostic facts. It grants no
+authority. The report remains `diagnostic_only=true`, `eligible=false` and
+`status=held`. The automatic route recomputes every gate inside its transaction.
+It requires a current admin-recorded retrieval evaluation from S19e-2.
+
+The report checks the op and proposer allowlists, computed tier, exact pins,
+base revisions, policy binding, trust and scan state. Its diagnostic limits
+match #2187: three evidence ids, two source groups, one changed card and a
+24-hour cooldown. The blast count includes actual content and state changes.
+Cooldown reads head-changing apply and rollback events from hub history. The
+fleet policy does not expose overrides for these limits. Unattested strings
+supply no proof count. S19e-1 resolves evidence from immutable, scoped records
+and checks `memory.curation_owner`. Missing legacy workspace or freshness
+bindings retain `evidence_authority_unbound`. Missing ownership retains
+`owner_authority_unbound`. Missing retrieval records retain `retrieval_eval_unbound`.
+
+Reviewed apply recomputes the report under both writer locks before changing a
+card. A moved base or pin returns `stale`. Changed trust or an input scan state
+change returns `held`. Result scans still run before the first write.
+Policy allowlists, blast caps, cooldown and missing promotion authority hold
+Tier 0 eligibility while an explicit reviewer can accept a reviewed edit.
+The stored decision body retains this report. The reviewed apply boundary
+requires `decide: accept` for every tier. S19e-1 adds a separate `auto_apply`
+action that requires every gate, including retrieval evaluation, to pass.
+A failed automatic attempt returns its held report without rewriting the
+proposal or appending a decision event. It changes no card or vector. Automatic writes preserve the existing trusted class and reject
+`agent-unreviewed`, flagged and non-clean inputs. Tier 1 and Tier 2 remain
+review-only. Calibration records are outside S19e-1.
+
+Evidence attestation (S19e-1). The `evidence.attach` memory action requires
+read and reflect on its target scope. Reflect already authorizes supplying
+proposal inputs, so it also authorizes attesting evidence. The action binds an
+immutable full id `<principal>/<workspace_id>/<local_id>` to one scoped card.
+Its fields are `scope`, `card_id`, `workspace_id`, `evidence_id`,
+`artifact_kind`, `artifact_sha256`, `observed_at` (Unix milliseconds),
+`artifact_base64` and `client_event_id`. Optional `stance` is `support` (the
+default), `contrary` or `negative`. The principal and credential audit id come
+from authentication. A caller cannot supply either identity. The SHA-256 is
+checked against the decoded raw bytes, with no text normalization. This slice
+accepts artifacts up to 64 KiB and refuses larger artifacts. Only UTF-8 artifacts with a current clean scan and a nonempty ruleset are
+accepted. Binary, private, flagged and unscanned artifacts are refused.
+Events carry metadata, never artifact bytes.
+
+Proof resolves only complete ids in the proposal's `workspace_id` and the
+record's target scope and card. Suffixes and aliases never resolve. The hub
+checks credential validity, read and reflect grants, the policy principal
+allowlist, freshness, artifact digest and a current clean scan. Revocation or
+credential rotation stops earlier attestations from counting. Only ids added to a changed card supply the evidence count. Distinct
+attesting principal ids other than the proposer supply the source count.
+Credential audit ids remain in the audit record. A live contrary or negative
+record on any target holds apply across every workspace, even when the
+proposal omits that reference. Supporting records remain workspace-bound.
+Evaluation reads metadata first and fetches only qualifying artifact payloads.
+More than 64 selected metadata rows hold evaluation until an admin purges records.
+
+The digest-bound `memory` policy accepts `curation_owner` as `hub`, `external`
+or `handoff-only`, and `evidence_freshness_seconds` as an integer from 1 through
+31536000. Automatic apply defaults off. Enabling `auto_apply` requires explicit
+hub ownership, freshness and nonempty op-class and reflect-principal allowlists.
+External ownership and handoff-only allow proposals but never automatic apply.
+Omitted new fields preserve older policy digests and behavior.
+
+The `auto_apply` action takes a proposal id, base epoch and client event id.
+It requires read and reflect on every target. Under both writer locks it
+re-reads the policy and all active attesting credentials, then evaluates every
+gate inside the apply transaction. It never accepts a caller-supplied preflight
+report. Automatic apply events identify the decision mode, evaluated gates,
+policy digest and attesting credential audit ids without card text. They use
+the same compensating-proposal rollback path as reviewed applies.
+
+Attachments are refused at 64 active records per scope, card and workspace,
+or eight active records per principal per scoped card across all workspaces.
+Eight limits one principal to one eighth of a full workspace bucket.
+An admin can send `evidence.purge` with `evidence_id` and `client_event_id`.
+It tombstones the record, clears its stored artifact bytes and appends an
+`evidence.purge` audit event. Purged records supply no proof or contrary hold
+and free capacity. Their ids cannot be reused. Physical deletion remains
+blocked, and all other attestation fields remain immutable.
+
+Automatic replies require review on every target to expose proposed diffs,
+after-hashes, evidence hashes, credential audit ids, candidate and delta hashes
+or reflect principals. The hub redacts these fields before caching a reply
+and rechecks permissions on replay. It rebinds the visible evaluation digest.
+Compensating proposals are refused with 409 on the automatic route.
+
+An admin can send `auto_apply_switch` with `enabled: false` and a client event
+id. This persistent memory flag takes effect on the next automatic transaction
+without editing policy. The switch emits `memory.auto_apply_switch`.
+Re-enabling it does not clear any other gate.
+
+S19e-2 is done. The admin-only `retrieval_eval.record` memory action accepts
+the exact S17 digest preimage in `report_json` and the harness digest in
+`report_sha256`. It verifies raw bytes and complete bindings, stores failed
+reports too, and appends an audit event without report text. Schema 7 added
+the append-only record table. Schema 8 adds `evaluated_ms` and an immutable
+scoped `(card_id, content_hash)` member snapshot, verified against the report
+corpus identity at record time. Migration preserves old bytes and timestamps.
+Legacy records hold with `retrieval_eval_snapshot_missing` until replaced
+because their evaluated member sets cannot be reconstructed safely. A legacy
+id whose timestamp cannot be read gets an ordering floor of recording time
+plus the five-minute admission allowance. The unit-test retrieval seam is removed. The digest
+checks integrity, not authentication. The admin credential is the trust root.
+Rust rechecks R0 ordered-ranking digests and score parity, and R1-public's
+k=5, non-regression and strict paraphrase or abbreviation improvement from
+the reported metrics. Compact reports retain ranking digests without query
+text or card ids. Full query rows must match those digests when present.
+The optional digest-bound `memory.retrieval_eval.fixture_digest` pins the
+approved fixture. Invalid or mismatched pins hold apply.
+
+Recording requires a strictly newer evaluation time than `MAX(evaluated_ms)`
+for that mode, without parsing previous report bytes. An unreadable newest
+row holds apply but does not block recording a newer valid report. Older or equal times return `memory_retrieval_eval_superseded`
+with 409. Admission also refuses expired runs and times beyond five minutes
+of future skew, matching the client-event-id skew allowance. An admitted
+future run still holds apply until its evaluation time. That time sets the
+mode ordering floor for at most five minutes. An accurate-clock run inside
+that window is refused as superseded until it exceeds the stored floor.
+
+The latest record for the configured mode must pass R0 or R1-public and match
+the log epoch, index format, scorer, policy revision and digest, scope, corpus
+identity and RRF weights. Hybrid requires the configured embedder identity,
+including when runtime search falls back to lexical. R1-public establishes no
+private model qualification. Inside the apply transaction under the hub lock,
+the sequence must be no newer than the live index or committed log. The
+scoped member difference from the stored snapshot may contain at most
+`min(5, floor(min(snapshot_count, live_count) / 50))` changed cards. The
+smaller snapshot/live count sets the denominator, so additions cannot raise
+the limit. Either count below 50 allows zero drift. For raw lexical R0,
+additions, removals and content-hash changes count. For default R1-public,
+union that difference with every in-scope card having a head-changing event
+since `indexed_seq`, including trust flips, reverts and same-bytes recreates.
+Each card counts once even if it appears in both sets. Default ranking uses
+trust-gated lineage, head sequence and source demotion. Excess drift holds with
+`retrieval_eval_drift_exceeded`. Every touched card must be outside that
+difference and have no head-changing event since `indexed_seq`, including a
+content revert or trust-only edit. Otherwise the gate holds with
+`retrieval_eval_target_drifted`.
+
+Unrelated trust-only changes spend no budget for raw ranking. Blast cap and
+cooldown remain in force. The budget bounds how much the corpus changes.
+It does not bound how much ranking changes, and even an allowed change can
+remove a target from retrieval results. Each replacement record used to
+authorize apply needs a fresh passing evaluation. Budgets do not stack
+across records. Cross-scope writes spend no budget. `Snapshot::score` in
+`engines/hub/src/memory/index.rs` filters document frequency and sums document
+counts and token totals over only the allowed scopes. `search::run` in
+`engines/hub/src/memory/search.rs` builds that mask from requested scopes.
+BM25 IDF and length normalization for the bound single-scope run are therefore
+independent of writes elsewhere. Multiple independent applies may share one
+record within budget. The newest record per mode still binds only one scope.
+Non-head audit events do not consume the budget. A run expires after 24 hours
+from the timestamp in its harness `evaluation_id` even with no writes.
+Each mismatch returns a specific `retrieval_eval_*` hold code.
+
+Automatic apply stays off by default. A missing persistent switch row means
+enabled, so operators first send `auto_apply_switch` with `enabled: false`.
+Then enable policy, run the S17 harness against that final revision, record
+the report, inspect preflight and explicitly switch on. The full procedure
+and byte envelope are in
+[memory operations](memory-operations.md#bound-retrieval-evaluation-s19e-2).
+
+Contrary holds intentionally need fresh read and reflect grants without
+`reflect_principals` membership. Expired or revoked attestations no longer
+hold. An admin purge can clear an active hold. Held automatic replies report
+the persisted pending state. Replaying the same client event id returns the
+cached held answer. A new id is required to re-evaluate.
 
 Invariant tests, in S19a to S19e:
 
 - A Tier 1 op never auto-applies without a calibration record. A mutation
   test removes the check and must fail.
 - Tier 2 always waits for review.
-- Auto-apply cannot be enabled before S19e.
+- Auto-apply policy enablement requires the S19e-1 ownership and proof contract.
+  Automatic application also requires the bound S19e-2 evaluation.
 - A failed worker call, invalid ops, a failed eval gate or a failed write
   leaves every card revision and every vector byte-identical and records
   `failed`. Repeated failures pause the scheduled job until a success.
@@ -3480,7 +3678,8 @@ next number.
 | S19b | Tier classifier and the policy `memory` section with digest binding | S19a | Implemented: claimed tiers are ignored. Flagged, cross-scope, mixed-trust, newer-human-edit and unproven cases are Tier 2. Each decision binds the current policy digest. A policy edit requires a fresh decision. Auto-apply stays disabled | S16b, S20 |
 | S19c | Tier 0 gate engine: the hub `preflight` action, blockers re-verified inside the apply transaction, the invariant tests, and auto-apply refused until S19e | S19b, #2187 | Every invariant in [Reflect](#reflect-proposals-and-promotion-on-hub-memory) that does not need attestation passes, including the Tier 1 mutation test and the test that auto-apply cannot be enabled. No op can target anything but a card block | S20, S26 |
 | S19d | Scheduled reflect on hub memory: the `memory-reflect` entry in `care install`, pause after repeated failures, `memory reflect rollback` against the hub | S19c, S14 | `memory reflect run --dry-run` writes nothing to the hub. Three failures in a row pause the timer until a success | S19e, S27 |
-| S19e | Evidence attestation and hub Tier 0 auto-apply under policy | S19c | Fabricated, unresolved and cross-workspace aliased evidence never counts. A revoked credential's attestations stop counting. Auto-apply runs only when every gate holds and must not raise trust on `agent-unreviewed` heads without a trust gate | S19d, S27 |
+| S19e-1 | Evidence attestation, curation ownership and the gated hub Tier 0 auto-apply route | S19c | Fabricated, unresolved, cross-workspace aliased and revoked evidence never counts. All gates block automatic apply, including tier, allowlists, blast cap, cooldown, trust and scans. The admin kill switch persists. Done. Audit and compensating rollback used a unit-test retrieval seam at delivery. Bound retrieval records replace it in the completed implementation | S19e-2, S27 |
+| S19e-2 | Bound retrieval evaluation record (R0/R1 bound to `indexed_seq`, index format, scorer version and policy revision) | S19e-1, S17 | The final retrieval gate is satisfied only by a trusted record matching the active mode, index and policy. Done. Admin-only append-only records, digest and live transaction bindings, bounded scoped content and membership drift, unchanged targets, 24-hour expiry and real automatic apply tests replace the final production hold | S27 |
 | S20 | Card import: dry run, idempotent, keeps card ids, deduplicates by content hash, skips `visibility: private` | S14, S18 | A second import appends nothing. The dry run lists exactly what the real run appends. Imported versions need a clean scan and the `import` grant | S16b, S17, S19b |
 | S21 | `memory answer`: client-side rerank through a read-only seat | S17 | R2 report. Off by default unless R2 passes | after 0.31.0 |
 
@@ -3511,7 +3710,8 @@ wave 5:  S10  S13b  S18
 wave 6:  S14  S15  S19a
 wave 7:  S17  S20  S19b  S23  S24  S25
 wave 8:  S16b  S19c  S26  S21
-wave 9:  S19d  S19e  S27
+wave 9:  S19d  S19e-1  S27
+wave 10: S19e-2
 after phase 3:  S11, then S12a to S12i one family per PR, S28 after S12g
 gated, outside the release:  S32 after S31, S6 and S16b, with the maintainer's go-ahead
 
@@ -3573,7 +3773,8 @@ S19a: S13a S18
 S19b: S19a
 S19c: S19b #2187
 S19d: S19c S14
-S19e: S19c
+S19e-1: S19c
+S19e-2: S19e-1 S17
 S20: S14 S18
 S21: S17
 S22a: none
@@ -3616,6 +3817,22 @@ The questions this gate depended on, Q1, Q2 and Q6, are decided (2026-11-04):
 - After the release: S11 (contract v2), S12a to S12i (cold families), S19d,
   S19e, S21, S27 as soon as S23 to S26 are live, and S28 after S12g.
 
+## Proposal security hardening (#2379)
+
+Before granting `reflect`, memory schema 9 adds per principal and per scope
+pending quotas, retained byte quotas and digest-based pending deduplication.
+Seven-day terminal retention replaces proposal text and diffs with immutable
+audit records. Append-only event history is preserved.
+
+Automatic apply stays off by default. Cheap immutable gates precede budgeted
+read snapshot diagnostics. The writer rechecks compact freshness bindings and
+target facts, with a SQLite progress budget for remaining scans. Per principal
+and per proposal attempt limits bound repeated requests. Hybrid evaluation
+records bind the dense snapshot and hold on vector changes. Proposal log
+payloads require review authority for hashes and diagnostic details, including
+historical events. Configuration, refusal codes and retention limits are in
+[memory operations](memory-operations.md#hub-proposal-resource-limits).
+
 ## Risks
 
 | Risk | Effect | Mitigation |
@@ -3631,7 +3848,7 @@ The questions this gate depended on, Q1, Q2 and Q6, are decided (2026-11-04):
 | The WAL grows without bound | The disk fills | Maintenance checkpoints, upstream mode, capped read transactions, disk-pressure admission |
 | Pushed memory carries prompt injection between agents | One agent's text steers another | Trust rule (D24), push only reviewed, promoted or imported versions with a clean scan, invisible and bidi characters blocked, role-override text flagged, a second scan at prompt load, `content_trust: "untrusted"`, summaries only within size caps |
 | The scanner is unavailable | Nothing can be promoted or pushed | Fails closed by design, and S18a and S18 are on the release path |
-| Fabricated evidence drives a promotion | A bad card reaches every agent | Hub auto-apply off until attestation (S19e), Tier 0 limits, blast cap, cooldown, compensating rollback |
+| Fabricated evidence drives a promotion | A bad card reaches every agent | Hub auto-apply held until attestation and bound retrieval evaluation (S19e-1, S19e-2), Tier 0 limits, blast cap, cooldown, compensating rollback |
 | Query and card text reach an embedding server on another host or a provider | A privacy boundary outside the hub | Loopback, allowlisted private endpoints or an allowlisted HTTPS endpoint the operator names, a bearer token, only normalized query text and normalizer-1 card text, embed jobs only for scanned versions, guard-blocked queries never sent, nothing sent while the scanner is unavailable, and status naming the endpoint's host (D30) |
 | The hub becomes a single point of failure for memory | Agents lose recall when it is down | Local replica and labeled fallback, spooled writes, `off` mode unchanged |
 | Index memory under the 512 MB allotment | Out of memory during an embedder change or a rebuild at 20,000 cards | Measured in S13b, S15 and S16a. Today's corpus is far below the limit: a 4,096-dimension matrix is about 31 MB at 1,891 cards. At 20,000 cards two such matrices pass the allotment, so the runbook raises the production container's memory from S15's measured peaks before the card count gets there |
@@ -3696,7 +3913,7 @@ Q4 from the first draft
    on the hub file.
 - **Q6, hub reflect scope (D25).** Closed 2026-11-04. The maintainer decided:
    0.31.0 ships with hub reflect limited to proposals and review, and Tier 0
-   auto-apply on the hub stays off until evidence attestation (S19e) lands
+   auto-apply on the hub stays held until evidence attestation and bound retrieval evaluation (S19e-1, S19e-2) land
    after the release. Local evidence ids cannot be checked on the hub, and a
    promoted card reaches every agent.
 - **Q7, #2210 timing (D27).** Build hub work dependency edges and the ready

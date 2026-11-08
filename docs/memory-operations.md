@@ -114,6 +114,17 @@ its default rules with the connector's injection rules. Repository policies,
 baselines and allow comments do not apply. `status.scan.ruleset_version` and
 `memory_meta.scan_ruleset_version` identify the bundle by version and digest.
 
+The bundle includes SHA-256 pins of the complete Python and Rust scanner
+implementation files, with LF line endings. Rust scanner tests live outside the
+pinned file. Edits to that test file do not change the ID. Regenerate the bundle with
+`python scripts/memory_scan_bundle.py` after an implementation edit, then refresh
+the shared fixture with `python tests/test_memory_scan_nfkc.py --write`.
+CI checks those source pins and shared verdicts. Runtime scanners hash only the
+shipped bundle, so a locally patched scanner still reports that bundle's ID.
+The pins do not cover library versions or behavior in PCRE2,
+`unicode-normalization`, Python `re`, or Python `unicodedata`. The separate
+Unicode version pin and normalization parity tests remain in place.
+
 | Input or operation | Result |
 |---|---|
 | Blocking guard rule, bidi control, invisible operator, embedded BOM or tag character | `422 memory_content_blocked` with rule ids only. No bytes are stored |
@@ -267,6 +278,78 @@ The `memory-scan` Cargo feature is enabled by default. A build with
 `--no-default-features` has no scanner and serves pending writes and explicit
 searches only. Restarting with the scanner does not promote or rescan old
 versions automatically. A later authorized write scans its exact bytes.
+
+After a ruleset ID change, update the client and hub together, then run the
+admin receipt refresh:
+
+```bash
+brigade memory rescan --target . --admin-token-file /path/to/admin-token --limit 4 --until-done
+```
+
+Without `--until-done`, the command sends one `POST /memory` request with action
+`rescan` using the explicit admin token file, as `memory reindex` does. Non-admin credentials receive `403`.
+The JSON response contains `ruleset_version`, `scanned`, counts by verdict,
+`complete`, `next_after`, `principal`, and `scanned_at`. Repeat until `complete` is true.
+`--until-done` does this with fresh client event IDs, a short pause between
+batches, and a final JSON summary of batch, hash and verdict totals. It exits
+non-zero on any non-200 reply, zero progress before completion, or the iteration
+cap. The cap starts at live heads divided by the count limit, rounded up, plus
+16. Short byte-budget batches can extend it, up to live heads plus 16.
+Each batch scans at most 16 distinct live content hashes, with a default of 4
+and a 512 KiB byte budget. A supported card can fill the byte budget on its own.
+The next request selects live heads still missing a current-ID receipt, so no
+cursor is needed for an ordinary drain, and identical blobs shared by several
+cards are scanned once.
+The scan uses the exact stored UTF-8 bytes without normalizing them again.
+
+The action writes only new `(content_hash, ruleset_version)` receipts and one
+`memory_meta` audit record keyed by `scan_rescan:<now_ms>:<client_event_id>` per nonempty
+batch. The record holds the ruleset ID, verdict counts, admin principal and
+time, without card text. These audit rows accumulate in `memory_meta`, about
+one per nonempty batch, with no automatic pruning.
+A scanner failure gets a current-ID `pending` receipt marked `scan-failed`
+and is counted under `counts.failed`. It remains excluded from push. After
+fixing a scanner runtime or library problem, an admin can retry these receipts
+under the same ruleset ID:
+
+```bash
+brigade memory rescan --target . --admin-token-file /path/to/admin-token --retry-failed --until-done
+```
+
+The API flag is `retry_failed: true`, default false. It selects current-ID
+receipts only when their state is `pending` and rule IDs are exactly
+`["scan-failed"]`, alongside hashes missing a receipt. A successful retry
+replaces the receipt through the normal scan upsert. Retry drains pass the
+`next_after` cursor back as `after`, so each hash is tried once per pass even
+when the scanner keeps failing. A completed pass may still report failed hashes.
+
+A missing blob gets `blob-missing`, and an invalid UTF-8 blob gets
+`blob-not-utf8`. Both stay `pending`, count under `counts.corrupt`, and produce
+a structured warning with the content hash and rule ID, without card text.
+Valid SQLite TEXT blobs are accepted as UTF-8 too. These corruption receipts
+are excluded from `--retry-failed` and stay closed to push. Inspect the hash in
+the hub warnings and repair the storage fault. `--until-done` finishes the
+remaining drain, prints a distinct corruption error line, and exits non-zero
+when its total corrupt count is positive. Reply and audit counters contain
+hash counts only. An engine availability or ruleset mismatch still refuses
+the request.
+Retries with the same client event ID replay the saved response. Once all live
+heads have receipts, a new request reports zero scans and writes nothing.
+
+Card bytes, trust, revisions, revision `scan_state`, and the event log stay
+unchanged. A changed verdict is recorded in the new receipt and its batch
+count. Connector push still requires both a clean revision scan state and a
+clean current-ID receipt, so rescan does not promote trust or make a previously
+private revision eligible by itself. Old receipts remain historical evidence.
+Explicit reads continue to work during rollout. Import refuses mixed client and
+hub IDs, while native `Store::push` excludes old receipts until this refresh.
+Unchanged cards cannot refresh receipts through ordinary CLI import or push.
+
+Rescan leaves existing vectors and embedding jobs unchanged. An embedded card
+that becomes flagged, blocked or private keeps its vector, so explicit non-push
+hybrid search can still rank it. Prompt-source search rescans each hit and
+withholds flagged or blocked content. Changing vector retention is a separate
+decision.
 
 Searches with `query_source: "prompt"` scan the returned fields and card bytes
 again. Any finding except a private one replaces the match with
@@ -463,7 +546,7 @@ brigade memory hub import --scope fleet --yes ~/Notes              # first impor
 brigade memory hub import --scope fleet ~/Notes                    # a second run appends nothing
 ```
 
-`import` takes Markdown files and folders. A folder is searched recursively for `.md` files. These are skipped and counted in the summary's `discovery` line: dot directories (`.obsidian`, `.git`, `.trash`), any folder holding the mirror marker `.brigade-memory-mirror.json` or projection marker `.brigade-memory-projection.json`, symlinks met while walking, and anything matching a repeatable `--exclude <glob>`. Each marker is checked in the argument's folder and every ancestor, and on the resolved real path, so subfolders, notes inside, and symlinked arguments into either owned folder are skipped. Mirror folders count under `mirror_dirs`; projections count under `projection_dirs`. Until existing vaults are projected again to write the marker, use `--exclude "Brigade Memory"`. Dot files such as `.draft.md` are imported, and only dot directories are skipped. A symlinked argument is followed, but a link met while walking is not.
+`import` takes Markdown files and folders. A folder is searched recursively for `.md` files. These are skipped and counted in the summary's `discovery` line: dot directories (`.obsidian`, `.git`, `.trash`), any folder holding the mirror marker `.brigade-memory-mirror.json` or projection marker `.brigade-memory-projection.json`, symlinks met while walking, and anything matching a repeatable `--exclude <glob>`. Each marker is checked in the argument's folder and every ancestor, and on the resolved real path, so subfolders, notes inside, and symlinked arguments into either owned folder are skipped. Mirror folders count under `mirror_dirs`. Projections count under `projection_dirs`. Until existing vaults are projected again to write the marker, use `--exclude "Brigade Memory"`. Dot files such as `.draft.md` are imported, and only dot directories are skipped. A symlinked argument is followed, but a link met while walking is not.
 
 A glob is matched against the path relative to the import root with case-sensitive `fnmatch`, so `Templates/` does not cover `templates/`. `*` crosses `/`. A glob without a `/` (a trailing one is dropped) also matches a file or folder name, which is how to match a folder at any depth: `Templates` or `Templates/` skips every folder with that name, and everything under it. A glob with a `/` is anchored at the root, so `Projects/Templates/` skips only that folder, and `*/Templates` matches a folder named `Templates` one or more levels down but not a top-level one.
 
@@ -494,18 +577,84 @@ Use this when importing a vault into a collection the workspace also reads: excl
 
 ## Reviewed proposals on hub memory
 
-The Rust hub accepts `propose`, `decide` and `rollback` on `POST /memory`.
+The Rust hub accepts `propose`, `decide`, `rollback`, `proposal_list` and
+`proposal_show` on `POST /memory`.
 These actions are separate from the Python client's existing
 `memory hub proposals list` and `drop`, which manage local conflict proposals.
-S19a adds no Python submission or decision subcommands.
+Use `brigade memory proposals` for hub proposals:
 
-Every request carries a fresh time-ordered `client_event_id`. Repeating the
+```bash
+brigade memory proposals list --target <reflect-folder>
+brigade memory proposals list --all --target <reflect-folder>
+brigade memory proposals show <proposal-id> --target <reflect-folder>
+brigade memory proposals decide <proposal-id> --reject --target <reflect-folder>
+brigade memory proposals decide <proposal-id> --accept --expected-policy-digest <sha256> --target <reflect-folder>
+```
+
+`list` defaults to pending proposals. Global listing requires the explicit
+operator capability `list_proposals` granted on `*`. A principal without that
+capability always receives an empty list and null cursor, independently of
+hidden proposal counts. This gate keeps each request's scan bounded without
+turning empty pages into a visibility oracle. Scoped `read` and `review`
+grants alone do not permit global listing. Listing operators may observe global
+pagination shape, but still need `read` on every target to see a summary.
+
+An administrator grants the listing capability separately from scoped card access:
+
+```json
+{"action":"grant","principal":"agent:reviewer","scope":"*","rights":["list_proposals"],"client_event_id":"<26-character time-ordered id>"}
+```
+
+The command returns at most 100 summaries without
+diffs. Use `--limit` and the returned opaque `next_after` as `--after` to continue.
+The cursor is an HMAC-authenticated handle. Scan positions stay in a bounded
+hub-local cache of 4,096 handles and are never encoded in the response.
+Each principal can hold at most 64 handles. Repeated requests for the same
+position, epoch and filter reuse the handle. A principal can evict only its
+own oldest handle. If the global cache is full, a new principal's request is
+refused instead of evicting another principal's handles.
+Handles bind the principal, hub log epoch and `--all` selection. Altered,
+expired or mismatched handles are refused. Restart a list without `--after`
+after a hub restart or eviction of a principal's own old handle. Listing
+operators' scans advance over hidden rows without exposing their ids or
+creation timestamps.
+A page can be empty when its proposals are outside the caller's grants.
+Continue while `next_after` is present. `--all` includes held, stale and decided
+proposals. Held proposals appear only with `--all`. `show` asks the hub for the stored diff. The hub returns a null diff
+unless the caller has `review` on every target scope. Missing `read` on any
+target refuses the show and hides the proposal from lists. The client never
+reconstructs a diff from card reads or replica data.
+
+These commands use explicit memory credentials from the user-level
+`[memory_hub]` table or the `BRIGADE_MEMORY_HUB_URL` and
+`BRIGADE_MEMORY_HUB_TOKEN_FILE` environment pair. Alternatively, supply both
+`--hub-url https://hub.example.test` and `--token-file /path/to/private-token`.
+The file must be absolute, private and owned by the user. No option accepts a
+secret value. Fleet credentials and workspace credential destinations are
+refused. Use a separate reviewer credential with `read` and `review` grants.
+
+`decide` requires exactly one of `--accept` or `--reject` and reads the current
+hub epoch before sending a fresh event id. `--accept` always requires
+`--expected-policy-digest`. Read `policy_digest` with `memory proposals show`
+and pass that digest, or `none` when it is null. An accept without a pin
+fails before contacting the hub and prints the show command. `--reject`
+remains available without a pin. A policy-stale decision requires
+`--expected-policy-digest` naming the current policy. Use `--expected-policy-digest none` to pin the absence
+of a policy after its removal. A digest mismatch reports
+`memory_policy_digest_mismatch` and the hub's current digest. Review that policy
+before resubmitting. The CLI never retries a decision under a changed policy.
+Self-review and all other hub decision gates remain enforced by the hub.
+Decision output contains only the proposal id, state and reason, without a diff.
+
+Every write request carries a fresh time-ordered `client_event_id`. Repeating the
 same request under the same principal returns its committed response. Reusing
 an id for different bytes is refused. Expired ids are refused before replay.
 Authorization is checked again before a stored diff is returned.
 
 | Action | Request fields in addition to `action` and `client_event_id` | Target-scope grant |
 |---|---|---|
+| `proposal_list` | `all`, `limit`, `after` (all optional, no event id) | `list_proposals` on `*` to list, plus `read` on every target to see a summary |
+| `proposal_show` | `proposal_id` (no event id) | `read` on every target, with `review` required for diff text |
 | `propose` | `base_epoch`, `ops` | `read` and `reflect` on every addressed card, including `other_card` |
 | `decide` | `proposal_id`, `base_epoch`, `decision` (`accept` or `reject`), `expected_policy_digest` (required when re-deciding after a policy change) | `read` and `review` on every addressed card |
 | `rollback` | `proposal_id` of an applied proposal, `base_epoch` | `read` and `review` on every addressed card |
@@ -538,8 +687,9 @@ Supported typed ops are `replace_block` and `add_previously` with `text`,
 `scope`, `card_id` and `base_revision`. Metadata edits require simple scalar
 fields or JSON string lists and refuse ambiguous or multiline fields,
 including YAML block scalars even when a blank line precedes their continuation. Evidence
-ids must be namespaced. They remain unverified citations and never increment
-proof counts or authorize auto-apply. Attestation arrives in S19e. Duplicate
+ids must be namespaced. Strings alone never increment proof counts or
+authorize automatic apply. S19e-1 resolves them against credential-attested
+records. Duplicate
 merges compare the body bytes exactly after stripping addressable anchors,
 retire the other card and retain its content in revision history. Whitespace in
 opaque blocks, including Python code indentation, is preserved in comparison.
@@ -579,7 +729,8 @@ Flagged versions or op text, cross-scope targets, mixed trust, unknown trust,
 private or unavailable scans and any edit newer than the base revision force
 Tier 2. This includes newer human edits. A changed head still fails the
 compare-and-set and never applies. Tier 0 describes an edit only. Every tier
-waits for an explicit reviewer decision and there is no Tier 0 apply path.
+waits for an explicit reviewer decision or the fully gated Tier 0 route.
+Automatic apply defaults off and requires a current bound retrieval evaluation.
 
 Fleet policy accepts an optional top-level `memory` object:
 
@@ -594,11 +745,12 @@ Fleet policy accepts an optional top-level `memory` object:
 ```
 
 Both lists default to empty. Unknown fields, invalid list entries and
-non-boolean `auto_apply` values are refused. Saving `auto_apply: true` returns
-422 and stores no revision. `tier0_op_classes` and `reflect_principals` are
-stored and digest-bound but are not enforced until S19c. Setting either list
-does not narrow Tier 0 classification today, even when the list is empty.
-Neither list grants apply authority in S19b. Omitting `memory` preserves
+non-boolean `auto_apply` values are refused. Saving `auto_apply: true` requires
+the explicit ownership and evidence contract described in S19e-1 below. `tier0_op_classes` and `reflect_principals` are
+enforced by the Tier 0 gate. Every op class and the proposer must appear in
+their respective lists. Empty lists deny Tier 0 eligibility. The lists do not
+change an edit's computed tier or restrict an explicit reviewer decision.
+Neither list grants apply authority. Omitting `memory` preserves
 older policy digests. When present, the normalized section
 is included in the whole fleet policy digest, so any memory policy edit
 changes that digest.
@@ -646,6 +798,70 @@ changes no card. Compensation writes new revisions rather than rewinding the
 append-only log. Memory schema v4 adds `memory_proposals` and preserves v3
 cards, revisions, `log_epoch` and sequence continuity during migration.
 The new table's `decided_by` column records the deciding principal.
+
+### Hub Tier 0 preflight
+
+Send `{"action":"preflight","proposal_id":"<proposal id>"}` to the memory
+endpoint. The credential needs `read` on every target scope. It needs no
+`reflect` or `review` grant. The action returns the
+`brigade.memory-tier0-preflight.v1` report and writes no proposal, event,
+idempotency entry, card or vector.
+
+The report keeps #2187's fields. `candidate_id` names the hub proposal,
+`policy_sha256` is the current fleet policy digest, and `source_sha256` maps
+scoped card ids to their base content hashes. Local run and workspace fields
+are null or empty. `evaluation_sha256` hashes the diagnostic facts. It is
+never a promotion permit. The hub reports actual pins, revisions, trust,
+scan state and computed tier. Policy allowlists are checked against stored
+ops and the authenticated proposer recorded at submit. `candidate_sha256`,
+`delta_sha256` and `policy_limits.reflect_principals` are null unless the caller
+also has `review` on every target scope. The evaluation fingerprint binds only
+the visible report.
+
+| Gate | Hold reasons on the hub |
+|---|---|
+| `policy` | `policy_missing`, `policy_invalid`, `class_disabled`, `reflect_principal_disabled` |
+| `candidate` | `tier_requires_review` |
+| `snapshot` | `policy_changed`, `memory_epoch_changed`, `card_missing`, `memory_base_mismatch`, `pinned_content_changed`, `pinned_block_changed` |
+| `delta` | `delta_requires_review`, `blast_cap_exceeded` |
+| `evidence_floor`, `source_group_floor` | `proof_binding_incomplete` |
+| `card_trust` | `memory_trust_changed`, `memory_input_scan_unbound`, `memory_input_scan_held`, `card_trust_denied` |
+| `scan` | `scan_not_clean` |
+| `host` | `card_target_invalid` |
+| `evidence_authority`, `owner_authority` | The corresponding `*_unbound` reason |
+| `retrieval_eval` | `retrieval_eval_unbound`, failed or expired report, or a specific live binding mismatch as described below |
+| `cooldown_history` | `cooldown_active` |
+
+A satisfied gate uses `<gate>_satisfied`. `host` reruns the typed op schema
+against stored ops to check the card-block target boundary. Diagnostic limits
+match local preflight defaults:
+at least three evidence ids from two sources, at most one changed card, and a
+24-hour per-card cooldown from head-changing apply and rollback events. The
+current fleet policy has no limit overrides. S19e-1 resolves attested proof and
+curation ownership. Older proposals without workspace or freshness bindings
+retain null proof counts and an evidence-authority hold. Missing ownership
+retains its unbound hold. A missing or mismatched retrieval record also holds
+automatic apply. Every diagnostic report remains
+`diagnostic_only=true` and `eligible=false`.
+
+At reviewed apply the hub reruns these checks inside the memory transaction
+with the current policy document read under the hub lock. It saves the report
+in the decision body and reply. A changed base or pin makes the proposal stale.
+Changed trust or an input scan state change holds it. Every output scans before
+any card changes. The policy allowlists and diagnostic promotion limits do not
+prevent an explicit reviewer from accepting an otherwise valid reviewed edit.
+The reviewed apply boundary requires `decide: accept` at every tier.
+Automatic apply is held when any automatic gate fails.
+S19e-1 supplies attestation and the gated route described below.
+The stored `opened_tier` keeps the tier computed when the proposal opened,
+while `tier` records the latest decision-time classification.
+
+A proposal opened before S19c may have no `before_scan` binding. Acceptance
+holds it with `memory_input_scan_unbound`, without changing any card or filling
+in a binding. Repeated acceptance stays held. A reviewer can reject the old
+proposal with `decide: reject`, then submit a new `propose` against the current
+card heads. The new proposal records the input scan binding and still requires
+a separate reviewed acceptance. No scan state is backfilled into the old proposal.
 
 ## Evidence projection and identity audit
 
@@ -733,3 +949,582 @@ Safe targeted handoffs may auto-file under owner policy. `brigade ingest` stages
 The Center dashboard Memory Operations view reads `memory topology --json` and paginated `memory inventory --json`. It does not perform filesystem writes, cron installs, or card body reads beyond the inventory contract.
 
 Related: [memory care](memory-care.md), [handoff promotion](handoff-promotion.md), [outcome scoring](outcome-scoring.md), [comparison](comparison.md).
+
+
+### Attestation and automatic-apply holds (S19e-1)
+
+The native memory API accepts `evidence.attach` for a scoped card with read
+and reflect grants. Supply `workspace_id`, the full
+`<authenticated-principal>/<workspace_id>/<local_id>` as `evidence_id`,
+`artifact_kind`, lowercase raw-byte `artifact_sha256`, `observed_at` in Unix
+milliseconds, `artifact_base64` and a fresh `client_event_id`. The byte limit
+is 64 KiB. Observation times in the future, mismatched hashes, namespace
+substitution and duplicate ids are refused. Retrying the identical client
+event id replays the original response. Artifacts are immutable and never
+returned through the log. The optional `stance` is `support`, `contrary` or
+`negative`. Contrary and negative records hold automatic apply across every
+workspace for that scoped card, even when omitted from the proposal references.
+
+Proposals may supply `workspace_id`. Supporting evidence must resolve under
+that exact workspace, scope and card. Proof needs three newly added ids on changed cards and two
+distinct currently valid attesting principals named in `reflect_principals`,
+excluding the proposer from the source count.
+The hub rechecks grants, raw bytes, current scans, freshness and credential
+revocation at preflight and apply. Credential rotation invalidates old proof.
+Only clean UTF-8 evidence is accepted. Attach refuses 64 active records per
+scoped card and workspace, and eight per principal per scoped card across
+workspaces. The principal cap reserves the remaining workspace slots for
+other attesters. The bounded evaluator reads metadata first and holds beyond
+64 selected rows. Artifact bytes are fetched only after cheap checks pass.
+
+An admin can tombstone an attestation and clear its payload through the API:
+
+```json
+{"action": "evidence.purge", "evidence_id": "agent:example/workspace-a/receipt", "client_event_id": "<fresh-event-id>"}
+```
+
+The `evidence.purge` event retains the record identity. Purged records cannot
+count as proof or hold a card through contrary evidence. They free quota,
+but their ids cannot be reused. Other record fields remain immutable and
+physical deletion remains blocked. The same client event id replays the
+original result. This is a logical purge, with no claim of forensic erasure.
+
+The fleet policy `memory` section supports these additional fields:
+
+```json
+{
+  "auto_apply": false,
+  "curation_owner": "hub",
+  "evidence_freshness_seconds": 86400,
+  "tier0_op_classes": ["append_evidence"],
+  "reflect_principals": ["agent:example"]
+}
+```
+
+`curation_owner` is `hub`, `external` or `handoff-only`. Freshness is an integer
+from 1 through 31536000 seconds. Enabling automatic apply requires explicit
+hub ownership, freshness and both nonempty allowlists. Older policies remain
+off, with their original digests when the new fields are omitted.
+
+The `auto_apply` memory action takes `proposal_id`, `base_epoch` and
+`client_event_id`, with read and reflect required on every target. Every gate
+is a blocker inside the transaction. A blocked attempt leaves the proposal
+pending for a human decision and changes no card or vector. The attempt
+returns its held report without rewriting the proposal or appending a
+`proposal.decide` event. Only Tier 0,
+clean cards in a previously trusted class are eligible. Automatic writes
+preserve that class. They never raise trust on `agent-unreviewed` cards.
+The one-card blast cap and 24-hour cooldown remain fixed.
+
+Automatic replies expose proposed diffs and after-hashes only to callers with
+review on every target. The same check protects evidence hashes, credential
+audit ids, candidate and delta hashes and reflect principals. Redaction runs
+before storing the idempotent reply and again on replay, with the evaluation
+digest rebound to visible fields. The automatic route refuses compensating
+proposals with 409, so rollback continues through a reviewed decision.
+
+An admin can disable automatic apply immediately through the memory API:
+
+```json
+{"action": "auto_apply_switch", "enabled": false, "client_event_id": "<fresh-event-id>"}
+```
+
+The switch persists across restarts and the next apply transaction reads it.
+Its audit event kind is `memory.auto_apply_switch`.
+`enabled: true` clears only this switch. Policy and every other gate still
+apply. Successful automatic decisions record their mode, gates, policy digest
+and credential audit ids without card text. `rollback` opens the existing
+compensating proposal, which still needs a separate reviewed decision.
+
+### Bound retrieval evaluation (S19e-2)
+
+Automatic apply defaults off. An admin records an S17 R0 or R1-public report
+through `POST /memory`, action `retrieval_eval.record`, with `report_json`,
+`report_sha256` and a fresh `client_event_id`. `report_json` is the exact
+UTF-8 digest preimage: the harness report without its `digest` field, serialized
+with sorted keys, compact separators and ASCII escaping. `report_sha256` is
+the harness `digest`. The hub hashes these raw bytes without normalization.
+This digest is an integrity check, not authentication. The admin credential
+is the trust root for the submitted fixture, results and evaluation time.
+Use `record_report` below to preserve Python float and Unicode serialization.
+Reports are limited to 512 KiB. Use `--aggregate-only` for larger fixtures.
+The harness retains an ordered-ranking digest per adapter in compact reports.
+Rust compares those digests for R0 parity, checks them against query rows when
+present, and rechecks score parity. R1-public requires k=5, no regression
+overall or in any category, and strict improvement in paraphrase or
+abbreviation across hit rate, MRR, precision or recall. Missing, nonnumeric,
+out-of-range or incomplete metric slices cannot pass. A submitted failure
+stays failed even if its metrics meet the thresholds.
+
+The hub requires the run's `evaluation_id`, fixture digest, complete adapter
+binding and a well-formed gate result. It stores valid failed reports too.
+Records are append-only and emit `retrieval_eval.record` audit events without
+report text. Each record stores its evaluated time in `evaluated_ms`. New
+evaluation times must be strictly greater than `MAX(evaluated_ms)` for the
+mode, checked in the write transaction without parsing older report bytes.
+An unreadable newest report holds apply but can be replaced by a newer valid
+report. Older or equal times return
+`409 memory_retrieval_eval_superseded` without appending a record or audit
+event. Replaying an identical client event id remains idempotent.
+The newest record for the configured mode wins. A failed newest
+record holds automatic apply even if an older record passed. R1-public is the
+public harness gate. Recording it does not establish private model qualification.
+
+The apply transaction rechecks the record under the hub authority lock. Its
+mode, log epoch, index format, scorer version, policy revision and digest,
+RRF weights and scope must match. At record time the hub verifies the exact
+scoped corpus identity and stores its sorted `(card_id, content_hash)` member
+set with the append-only record. At apply time it compares that snapshot
+with the live corpus using the drift budget below. Hybrid also requires
+the same configured embedder identity, even during lexical fallback. A lexical
+record never authorizes a configured hybrid hub.
+
+The optional policy field `memory.retrieval_eval.fixture_digest` pins an
+approved fixture's 64-character lowercase SHA-256 digest. It is included in
+the policy digest and must match the report at apply. Omitting it leaves
+fixture selection to the admin. Invalid policy pins hold the gate.
+
+The drift budget allows at most
+`min(5, floor(min(snapshot_count, live_count) / 50))` changed cards in the
+bound scope. The denominator is the smaller of the evaluated snapshot count
+and current live count, so additions cannot raise the limit. If either count
+is below 50, the budget is zero.
+
+For raw lexical R0 ranking, additions, removals and content-hash changes each
+count once per card. Unrelated trust-only changes consume no budget. For
+default R1-public ranking, the counted set also includes every in-scope card
+with a head-changing event since `indexed_seq`. Trust flips, content reverts
+and same-bytes recreates therefore spend budget even when their hashes still
+match the snapshot. A card in both sets counts once. Default ranking uses
+trust-gated lineage, head sequence and source demotion. The existing blast
+cap and per-card cooldown still apply.
+
+The budget bounds how much the corpus changes. It does not bound how much
+ranking changes. Even an allowed change can move a target out of retrieval
+results. Each replacement record used to authorize apply needs a fresh
+passing evaluation. Budgets do not stack across records.
+
+A proposal's touched cards must be outside that difference and have no
+head-changing event after `indexed_seq`, including a trust-only change or a
+content change later reverted. Violations hold with
+`retrieval_eval_target_drifted`. Other drift above the budget holds with
+`retrieval_eval_drift_exceeded`. The checks repeat inside the apply
+transaction under the hub authority lock.
+
+Writes outside the bound scope do not count. Lexical document counts, token
+totals and document frequency use only the query's allowed scopes, so BM25
+IDF and length normalization for a single-scope evaluation are unaffected.
+The newest record per mode still binds one scope. Recording scope B replaces
+scope A's record for that mode. Multiple independent applies can share one
+record while their counted changes stay within the budget.
+
+The evaluated sequence must be covered by the live index and must not
+exceed the committed log. Audit events, evidence attachments and proposal
+opens may advance the log without consuming drift budget. Schema 8 preserves
+old report bytes and evaluated times. Legacy records have no evaluated
+member snapshot and hold with `retrieval_eval_snapshot_missing` until a
+new run is recorded. The upgrade never reconstructs a snapshot from current
+heads. An unreadable legacy evaluation id gets a conservative ordering floor
+of its recording time plus the five-minute admission allowance.
+The run expires 24 hours after the timestamp in its harness `evaluation_id`,
+even with no writes. Record admission rejects already-expired runs and times
+more than five minutes in the future. The five-minute allowance matches
+client-event-id admission and bounds clock skew. An admitted future run
+still holds apply until its evaluation time arrives. It also sets the
+ordering floor for its mode. An accurate-clock run inside that window is
+refused as superseded until its evaluation time exceeds that floor. The
+future-skew window lasts at most five minutes. Recording the same old
+bytes again cannot extend expiry or replace a newer failed run. Rerun when
+drift exceeds the budget, a target changes, retrieval configuration or policy
+changes, or the run expires.
+Specific `retrieval_eval_*` reason codes identify failed, expired, future-dated,
+future sequence, target drift, excess corpus drift, missing snapshot, epoch,
+format, scorer, policy, embedder, weights, scope or corpus mismatches. Missing
+records retain `retrieval_eval_unbound`.
+
+Operator procedure:
+
+1. Explicitly switch automatic apply off before enabling policy:
+
+   ```json
+   {"action":"auto_apply_switch","enabled":false,"client_event_id":"<fresh-event-id>"}
+   ```
+
+   A missing switch row means enabled. Policy still defaults off, but an
+   absent row is not a persistent hold.
+
+2. Enable the policy with explicit hub ownership, evidence freshness and both
+   nonempty allowlists. Set the optional approved fixture pin here. Every
+   policy edit invalidates earlier evaluation bindings.
+
+3. Run the S17 gate against that final policy revision, using an explicit read
+   credential and a fixture snapshot matching the selected live scope. Run R0
+   for lexical, or R1 for hybrid with `--candidate-embedder`. A disposable
+   fixture hub report cannot authorize another hub.
+
+   ```bash
+   python -m brigade.memory_retrieval_eval --gate R0 --hub-url "$HUB_URL" --hub-token-file "$READ_TOKEN_FILE" --hub-scope fleet --fixture-root "$FIXTURE_ROOT" --aggregate-only --json > retrieval-report.json
+   ```
+
+4. Record the report using an explicit admin client. The helper verifies its
+   existing integrity digest before sending and never substitutes a new one.
+
+   ```python
+   import json
+   from pathlib import Path
+   from brigade.memory_hub_client import MemoryHubClient
+   from brigade.memory_retrieval_eval.hub import record_report
+
+   client = MemoryHubClient(hub_url, Path(admin_token_file).read_text().strip())
+   record_report(client, json.loads(Path("retrieval-report.json").read_text()))
+   ```
+
+5. Inspect proposal preflight under the final policy. The switch remains a
+   blocker until cleared. Repair any other hold before continuing. A proposal
+   opened under an older policy retains its policy-change hold.
+
+6. Clear the persistent switch when ready, with a fresh client event id:
+
+   ```json
+   {"action":"auto_apply_switch","enabled":true,"client_event_id":"<fresh-event-id>"}
+   ```
+
+   Clearing it changes no policy revision and overrides no other gate.
+
+A failed automatic attempt returns the persisted pending proposal state and
+its attempt reason. It never claims an unpersisted terminal transition.
+Replaying a held `auto_apply` with the same `client_event_id` returns its cached
+held answer. Mint a new id to re-evaluate after recording or repairing a gate.
+
+Contrary holds intentionally require only a fresh valid credential with read
+and reflect on the scoped card. Membership in `reflect_principals` is not
+required. Any reflect grantee can hold a card in its scope through contrary
+evidence. An admin purge can clear an active contrary hold. Expired or revoked
+attestations no longer supply one.
+
+
+### Scheduled hub reflection (S19d)
+
+For a workspace with `[hub] mode = "read"` or `"sync"`, `brigade memory reflect
+run --target <workspace>` pulls the hub log from the replica's sequence
+watermark and opens reviewed proposals. The current deterministic hub pass
+finds exact duplicate claim bodies within each configured read scope. It keeps
+opaque bytes such as code indentation, requires an existing claim anchor on
+the keeper, and pins both card revisions and the keeper's block hash. It drops
+candidates it cannot translate. A whole duplicate group must have clean scan
+states and one known trust class. Mixed-trust groups are skipped, and non-clean
+cards wait for S19e evidence attestation. The keeper is the lowest card id in
+an eligible group. Skipped ops are counted by reason without card text.
+A group missing pins or valid metadata is also skipped. A pass with no
+translatable candidates is a successful no-op. Legacy replicas refresh missing
+scan metadata from the hub before deriving candidates. Any heads still missing
+scan state after the refresh stay skipped.
+
+This pass does not invent anchors or evidence. Local reflection still derives
+its existing evidence and review candidates when hub mode is off. S19e-1 adds
+attestation and the gated automatic route. Automatic apply requires a separate call with every gate satisfied.
+Scheduled reflection only proposes.
+
+Hub reflection selects scopes before deriving or bounding candidates. Each scope
+allows at most 50,000 live cards and 64 MiB of UTF-8 card text, replacing the
+local reflection limit of 1,024 files. Duplicate grouping runs one scope at a
+time. The replica also stays within the smaller of `[hub] replica_max_mb`
+(default 50 MiB) and a fixed 64 MiB reflect ceiling. These bounds accommodate
+tens of thousands of ordinary cards while bounding the snapshot and derived
+candidate memory. They do not load an unbounded hub corpus.
+`hub_reflect_scope_limit` names the per-scope card or text limit.
+`hub_reflect_replica_limit` names the replica byte cap. Both fail closed before
+submitting proposals. Narrow the configured read scopes for a dedicated run.
+Before loading an existing replica or an interrupted rebuild, reflection
+checks the size of every on-disk heads snapshot (`heads-<sha256>.json`, or
+`heads.json` for a replica saved by an older release). A file above the 64 MiB
+ceiling plus 1 MiB of serialization slack is refused with
+`hub_reflect_replica_limit` before JSON parsing. A save writes the new snapshot
+under its digest name and then replaces `meta.json`, which names it, so an
+interrupted save leaves the previous snapshot and metadata in place and the
+next pull continues from them. The save syncs the replica directory after each
+rename (not on Windows, which cannot sync a directory), so after a power loss
+`meta.json` names a snapshot that survived. If the snapshot `meta.json` names
+is missing anyway, every read treats the replica as absent: search and `card`
+fall back as when no replica exists, `status` reports `replica_unusable`, and
+the next pull discards the replica and rebuilds it from the hub. Reflection's
+own pull does the same rebuild under the 50,000-card and 64 MiB bounds, so a
+scheduled run recovers without an unbounded `memory hub pull`. A snapshot that
+is present but oversized, does not match its recorded digest or card count, or
+is not a regular file still fails reflection before it is parsed.
+
+Downgrading Brigade past the release that introduced digest-named snapshots
+requires deleting both `.brigade/memory/hub/replica` and
+`.brigade/memory/hub/replica.building` before running the older build. That
+build reads `meta.json`, finds no `heads.json`, and would otherwise serve an
+empty replica at a current watermark. The building directory matters too: an
+interrupted rebuild left there holds a watermark and a digest-named snapshot,
+so the older build would resume it from that watermark with no `heads.json`
+and later publish it as a replica missing every card fetched before the
+interruption. With both directories gone, its next pull rebuilds the replica
+from the hub.
+
+Reflect also limits the whole selected replica to 50,000
+live cards, including unscoped runs. Sync replays the log as metadata first,
+so a card put and later retired never counts toward the bound or costs a body
+fetch. Once the replay reaches the log head, sync checks the live count before
+fetching any full body, and saves check it again before serialization. A reviewed
+proposal's apply or rollback event does not say whether its card ended live
+or retired, so sync counts it as live while that still fits the bound. Only
+when its state decides the bound does sync read that card revision once,
+metadata plus at most one text chunk, and a card found retired is dropped
+without a body fetch. Accepted deduplication therefore never blocks a
+rebuild. The deferred
+log metadata has its own byte budget, and exceeding it fails with
+`hub_reflect_replica_limit`. The watermark advances only after the bodies land. Each save records a card count
+and snapshot digest. Reads validate the stored count against a streaming count
+and digest before decoding the full heads dictionary, including legacy
+snapshots without count metadata. A false low count cannot bypass the bound.
+`meta.json` is limited to 8 MiB before parsing. Ordinary sync replicas retain
+their configured byte limits and can hold more cards outside a reflect run.
+The CLI reports local failure codes and fixed reasons without card text.
+
+`run --scope <scope>` selects one configured read scope before fetching card
+heads or refreshing legacy scan metadata. Status and log reads still use the
+hub's existing protocol. Other scopes' log metadata can appear in a log page,
+but the run fetches no card text and opens no proposals for those scopes.
+A non-dry-run `--scope` refuses a replica whose recorded `read_scopes` include
+other scopes, with `hub_reflect_dedicated_replica_required`. It preserves the
+existing replica and points to the dedicated-folder setup below. Use that
+folder instead of the sync principal's replica. A dry run may still refresh
+the local replica, so it also belongs in the dedicated folder.
+
+`brigade memory reflect run --dry-run --target <workspace>` performs only hub
+reads. It can refresh the local replica, but sends no `propose`, `decide`,
+`rollback` or card write. It reports the proposed ops and current pause state,
+and leaves the failure counter and pause unchanged.
+A real run saves each proposal request id before submission, retries a lost
+response with that id, and remembers acknowledged proposals to avoid opening
+them again while their base revisions stay the same. Remembered submissions
+survive runs with a narrower scope or smaller limit under the same hub,
+principal, log epoch and configured read scopes. Ops with a recorded proposal
+id or a stored non-retryable refusal are skipped before applying the limit,
+so old submissions do not block new candidates. Stored refusals appear in
+`skipped_reasons.refused` and a card revision change makes a new op eligible.
+An expired or conflicting request id is discarded, then the op is retried once
+with a fresh id in the same run. If that retry also has an expired or
+conflicting id, the next run starts with another fresh id.
+After a lost response, replacing an expired id can open a duplicate proposal
+that a reviewer should reject.
+
+An op refusal is recorded by digest and code only. Non-auth 4xx proposal
+refusals, including `memory_content_blocked`, `memory_proposal_invalid` and
+`memory_base_mismatch`, are stored under the binding and op digest. They are
+skipped on later runs. Exceptions are 408, 429, expired or conflicting ids,
+and replies marked `retryable: true`. All 5xx replies and unavailable responses
+remain retryable. A stored refusal contains only the event id and refusal code,
+with no hub text.
+
+Other ops continue unless the error is an authorization refusal or the hub is
+unavailable. A run fails for transport, configuration or authorization errors,
+or when every op attempted in that run is newly refused after any id retry.
+Stored refusals do not count toward that rule. Mixed successful and refused
+ops count as a successful run.
+
+Install the optional daily entry with:
+
+```bash
+brigade memory care install --target <reflect-folder> --entry memory-reflect --scope repo:example
+brigade care status --target <reflect-folder> --entry memory-reflect
+```
+
+The entry runs at 10:00 local time and uses the existing care installer:
+a user systemd timer on Linux, a LaunchAgent on macOS, or a printed Task
+Scheduler plan on Windows. Follow the installer's activation commands.
+Reflection retains the local reflect command's safe directory-descriptor
+requirement and refuses to run where those operations are unavailable.
+`--schedule memory-reflect=<value>` uses the selected backend's existing
+schedule syntax. The isolated launcher pins the installed Brigade package,
+passes an absolute workspace target, and invokes `memory reflect run --hub
+--scheduled`. It never invokes a decision or apply command. `--hub` refuses
+disabled hub settings rather than switching to local cards.
+
+A failure means a non-dry reflect run exits non-zero. For runs that can safely write
+workspace state, `.brigade/memory/reflect/schedule.json` records consecutive
+failures. Three failures pause scheduled reflection. While paused, scheduler
+triggers return `paused` without reading or writing the hub. The scheduler
+registration stays installed. Both `memory reflect status` and `memory care
+status` show the counter and pause. `care status` also shows them on the
+`memory-reflect` entry. Unsafe or unreadable state fails closed.
+
+To resume, fix the reported fault and run `brigade memory reflect run --hub
+--target <workspace>` manually. Only a successful non-dry manual run clears a
+pause. A scheduled success before the pause threshold resets the consecutive
+failure count. Dry runs, status queries, timer reinstalls and skipped triggers
+do not clear a pause. If state cannot be written safely, the command fails and cannot
+record that failure. Lock contention also refuses the concurrent run without
+changing the active run's counter.
+
+If `memory reflect status` reports invalid schedule state, stop concurrent
+reflect runs, inspect `.brigade/memory/reflect/schedule.json`, then remove that
+file and run reflect manually. This discards the pause counter and remembered
+submission ids, so inspect existing hub proposals before resuming to avoid
+opening duplicates. Invalid JSON, malformed bindings and malformed submission
+entries are refused cleanly without contacting the hub.
+
+Credentials use the existing hub client. Configure `[memory_hub] hub_url` and
+`node_token_file` in the user's `~/.brigade/fleet.toml`, or set both
+`BRIGADE_MEMORY_HUB_URL` and `BRIGADE_MEMORY_HUB_TOKEN_FILE`. The environment
+pair takes precedence. Reflect requires one of these explicit memory settings
+and refuses fleet node-token fallback before contacting the hub. A workspace
+may choose scopes and hub mode, but never the hub URL or credential path.
+Reflect refuses admin credentials.
+
+### Dedicated reflect folder
+
+Create a separate folder, such as `~/memory-reflect`, with this file at
+`.brigade/memory-care.toml`:
+
+```toml
+[hub]
+mode = "read"
+read_scopes = ["repo:example"]
+replica_max_mb = 50
+```
+
+Use the same exact scope when installing the entry:
+
+```bash
+brigade memory care install --target ~/memory-reflect --entry memory-reflect --scope repo:example
+```
+
+The single `--scope` matches `memory reflect run --scope`. One job uses one
+scope, which keeps its grant requirement explicit. Reinstalling a scoped
+entry retains its scope when `--scope` is omitted. The Windows replacement
+command inspects the saved Task Scheduler action before replacing it and
+preserves one valid scope. Ambiguous or invalid saved scopes refuse replacement. To return to an unscoped
+entry, uninstall it with `brigade memory care uninstall --entry memory-reflect
+--target <reflect-folder>`, then install again without `--scope`. A workspace file still
+chooses only mode, scopes and replica size. It cannot supply a hub URL or token
+path. This folder owns its `.brigade/memory/hub/` replica and reflect schedule
+state. Do not point the sync principal at it or reuse the sync workspace for
+reflection.
+
+Use the service name printed by install to create a user-level systemd drop-in
+with `systemctl --user edit <service-name>`. Set paths and URL there:
+
+```ini
+[Service]
+Environment="BRIGADE_MEMORY_HUB_URL=https://hub.example.test"
+Environment="BRIGADE_MEMORY_HUB_TOKEN_FILE=%h/.config/brigade/reflect-token"
+```
+
+Keep the credential bytes in that private, user-owned token file, outside the
+reflect folder. Use a principal with only `read` and `reflect` on `repo:example`.
+The drop-in stays outside Brigade's managed service block. Reload the user
+manager and enable the timer using the commands printed by install. For a
+manual dry run, set the same environment pair in the invoking shell. A successful
+manual non-dry run resumes a paused job.
+
+The installed timer sets only `PATH`. Configure `[memory_hub]` in the user's
+`fleet.toml` for scheduled jobs unless you import the environment pair into the
+user service manager. A custom `BRIGADE_HOME` must also be available there if
+the settings live outside the default user directory. The installer does not
+copy credentials or shell environment variables into unit files.
+
+An operator adds a scoped grant on the hub, for example:
+
+```json
+{"action":"grant","principal":"node:example","scope":"repo:example","rights":["read","reflect"],"client_event_id":"<26-character time-ordered id>"}
+```
+
+Use the enrolled credential's actual principal id. A grant replaces its rights
+on that scope, so retain other rights only when that principal needs them.
+The scheduled job needs `read` plus `reflect` on each target scope. It needs
+neither `write` nor `review`. Collections require their own exact scope grant.
+Read access alone allows a dry run, but never proposal submission.
+Without `--scope`, partial `reflect` grants across configured `read_scopes` will pause the job
+after repeated authorization failures.
+
+`brigade memory reflect rollback <proposal-id> --target <workspace>` requests
+the hub's compensating proposal. This separate operator action requires `read`
+plus `review` on every original target scope. It sends the observed log epoch
+and never restores card text directly. The compensation waits for another
+explicit decision, with the same hub scope, self-review, revision and pin
+checks as S19a.
+
+
+## Hub proposal resource limits
+
+Automatic apply remains off by default. Grant `reflect` only after upgrading
+all hub instances to memory schema 9. The migration retains the log epoch,
+proposal ids and event sequence. Existing hybrid evaluation records have no
+dense binding and hold until a new evaluation is recorded. Lexical reports
+retain their existing contract.
+
+The hub configuration accepts `memory.proposal_limits`:
+
+| Key | Default | Purpose |
+|---|---:|---|
+| `pending_per_principal` | 32 | Pending and held proposals owned by one principal |
+| `pending_per_scope` | 128 | Pending and held proposals touching one scope |
+| `bytes_per_principal` | 67108864 | Retained proposal body bytes, including terminal audits |
+| `bytes_per_scope` | 268435456 | Retained body bytes charged in full to every target scope |
+| `retention_days` | 7 | Days after a terminal decision before body compaction |
+| `diagnostic_rows` | 100000 | Total rows returned by automatic diagnostics |
+| `diagnostic_ms` | 100 | Read snapshot execution deadline in milliseconds |
+| `lock_ms` | 50 | SQLite execution deadline for proposal admission and automatic apply |
+| `auto_principal_ms` | 1000 | Minimum interval between attempts by one principal |
+| `auto_proposal_ms` | 60000 | Minimum interval between attempts on one proposal |
+
+Limits must be positive integers. Unknown keys fail configuration. Retention
+is capped at 365 days. The pending defaults allow a review batch of 32 proposals
+per principal and four such batches per scope. The byte defaults bound retained
+storage separately from counts, with four principal byte budgets per scope.
+Seven days keeps a weekly rollback window for applied bodies. A scope is
+charged the full body for a proposal
+that touches it. Audits continue to count toward the byte quota, so accumulating
+terminal records cannot evade admission.
+
+Each quota dimension (pending count and retained bytes, per principal and per
+scope) is checked separately inside the writer transaction. A write passes a
+dimension when the usage it leaves is within the limit or no higher than the
+usage before it. A new proposal always adds a pending row and bytes, so
+admission needs room under every limit. A decision that moves a proposal out of
+pending lowers the pending count, so reviewers can reject or accept a backlog
+left above a lowered limit, or above the defaults after an upgrade, one
+proposal at a time. The same decision still records audit bytes, so it is
+refused when those bytes would cross a byte limit the store was within. A store
+already above a byte limit must raise that limit before it can record further
+decisions that grow its bytes.
+
+An identical pending proposal is detected by its epoch, target cards with base
+revisions, operations and policy digest. The hub returns HTTP 409 with
+`memory_proposal_duplicate_pending` and the existing `proposal_id`. Principal
+and scope quota refusals return HTTP 429 with `memory_proposal_principal_quota`
+or `memory_proposal_scope_quota`. These refusals leave no event, blob, proposal
+or idempotency row. New proposed text enters the blob table only when applied.
+
+Idle retention sweeps compact rejected, stale and applied bodies in bounded
+transactions. The immutable audit retains proposal and card ids, revisions,
+content and body digests, policy digests, state, decision, actor and timestamps.
+It drops text, operations, pins, diffs and diagnostic reports. Event rows remain
+append-only. A compacted proposal cannot be changed or rolled back. Rollback
+needs the retained body and therefore has the same retention window.
+
+Automatic apply checks policy enablement, the kill switch and the stored Tier 0
+classification before evidence resolution or corpus diagnostics. Eligible
+candidates receive diagnostics in a read snapshot with row and time limits.
+Under the writer lock, compact event and vector high water marks, authority
+digests, expiry times and target facts must still match. Any intervening memory
+event or vector change conservatively holds with `auto_apply_snapshot_changed`,
+even outside the target scope. SQLite progress handlers bound remaining scans.
+`memory_auto_apply_budget_exceeded` refuses exhausted work without a write.
+`memory_auto_apply_rate_limited` refuses attempts inside either interval. The
+bounded rate cache is in memory and resets on hub restart. Committed retries
+retain their existing idempotency behavior.
+
+Hybrid records retain the active embedder id, vector log sequence, coverage
+count and a digest of scoped live content hashes and exact vector identities.
+A changed vector snapshot holds with `retrieval_eval_vector_changed`. The
+vector log high water mark survives log retention. Lexical evaluation does not
+use this binding.
+
+Scope readers without review authority receive only proposal id, state,
+decision and decision mode in proposal event payloads. This reader redaction
+also covers historical payloads without rewriting the append-only log.

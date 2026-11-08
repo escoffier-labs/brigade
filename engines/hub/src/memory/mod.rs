@@ -8,20 +8,39 @@
 //! Writes and prompt loads use the versioned guard scanner (S18).
 //! Embedding and dense retrieval use the S18 scan gate (S15).
 //! Reviewed proposals, atomic decisions and rollback use [`proposals`] (S19a).
+mod attestation;
+#[cfg(test)]
+mod attestation_review_tests;
+#[cfg(test)]
+mod attestation_tests;
 pub mod auth;
 pub mod dense;
 pub mod embedder;
 pub mod embedding;
 #[cfg(test)]
 mod embedding_tests;
+mod hardening;
 pub mod ids;
 pub mod index;
 pub mod ops;
+mod preflight;
 mod proposal_blocks;
+mod proposal_cursor;
 mod proposal_metadata;
+mod proposal_reads;
 mod proposal_tiers;
 pub mod proposals;
 mod pytables;
+mod ranking;
+#[cfg(test)]
+mod ranking_tests;
+mod rescan;
+#[cfg(test)]
+mod rescan_tests;
+pub mod retrieval_eval;
+mod retrieval_eval_gates;
+#[cfg(test)]
+mod retrieval_eval_tests;
 pub mod scan;
 pub mod schema;
 pub mod search;
@@ -33,9 +52,13 @@ mod collection_tests;
 #[cfg(test)]
 mod embedder_tests;
 #[cfg(test)]
+mod hardening_tests;
+#[cfg(test)]
 mod lexical_tests;
 #[cfg(test)]
 mod powercut;
+#[cfg(test)]
+mod preflight_tests;
 #[cfg(test)]
 mod private_tests;
 #[cfg(test)]
@@ -83,8 +106,6 @@ const DENSE_LOAD_FAILED: &str = "dense-load-failed";
 const DENSE_NOT_LOADED: &str = "dense-not-loaded";
 const IDLE_MIN: Duration = Duration::from_secs(1);
 const IDLE_MAX: Duration = Duration::from_secs(30);
-/// Actions in the route table that later slices build.
-const LATER: &[&str] = &["preflight"];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reply {
@@ -118,11 +139,15 @@ pub struct Store {
     readers: ReaderPool,
     hub: Arc<ReaderPool>,
     admin: String,
+    proposal_cursors: Arc<proposal_cursor::Cursors>,
     clock: ids::Clock,
     scanner: Arc<dyn Scanner>,
     last_sweep: std::sync::atomic::AtomicI64,
     index: Arc<index::Index>,
     retrieval: Option<Arc<embedder::Runtime>>,
+    rrf: ranking::Weights,
+    eval_weights: Arc<std::sync::RwLock<Json>>,
+    proposal_limits: Arc<std::sync::RwLock<hardening::Limits>>,
     dense: Arc<dense::Index>,
     coverage: std::sync::RwLock<embedding::Coverage>,
     /// Woken by a committed `put`, so an idle scheduler starts at once.
@@ -162,7 +187,7 @@ pub fn read_only(body: &[u8]) -> bool {
     serde_json::from_slice::<Json>(body).is_ok_and(|v| {
         matches!(
             v.get("action").and_then(Json::as_str),
-            Some("card" | "log" | "search" | "status")
+            Some("card" | "log" | "search" | "status" | "proposal_list" | "proposal_show")
         )
     })
 }
@@ -204,21 +229,29 @@ impl Store {
         );
         config.hook = options.hook;
         config.scanner = options.scanner.clone();
+        config.clock = options.clock.clone();
         config.index = Some(index.clone());
         config.dense = Some(dense.clone());
+        let eval_weights = config.eval_weights.clone();
+        let proposal_limits = config.proposal_limits.clone();
         let writer = writer::Writer::start(config, db, options.arbiter.clone())
             .map_err(|e| e.to_string())?;
+        let proposal_cursors = Arc::new(proposal_cursor::Cursors::new(&options.admin_digest));
         Ok(Self {
             writer,
             arbiter: options.arbiter,
             readers,
             hub,
             admin: options.admin_digest,
+            proposal_cursors,
             clock: options.clock,
             scanner: options.scanner,
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
             index,
             retrieval: None,
+            rrf: ranking::Weights::default(),
+            eval_weights,
+            proposal_limits,
             dense,
             coverage: std::sync::RwLock::new(embedding::Coverage::default()),
             embed_wake: Arc::new(tokio::sync::Notify::new()),
@@ -230,6 +263,8 @@ impl Store {
     }
     /// Lexical mode ignores an unused embedder table, including credentials.
     pub fn configure_retrieval(&mut self, config: &Json) -> Result<(), String> {
+        *self.proposal_limits.write().unwrap() = hardening::Limits::parse(config)?;
+        self.rrf = ranking::Weights::parse(config.get("rrf"))?;
         self.pull_embeddings = config["embedder"]["pull"].as_bool().unwrap_or(false);
         // Absent means lexical. Present but not a string is a typo, never lexical.
         let retrieval = match config.get("retrieval") {
@@ -265,6 +300,7 @@ impl Store {
             self.dense
                 .set_private_ok(embedding::private_ok(&runtime.config));
         }
+        *self.eval_weights.write().unwrap() = self.rrf.json();
         let live = self
             .index
             .current()
@@ -749,26 +785,78 @@ impl Store {
         };
         let action = map.get("action").and_then(Json::as_str).unwrap_or("");
         match action {
-            "card" | "log" | "status" => self.read(credential, action, map).await,
+            "card" | "log" | "status" | "proposal_list" | "proposal_show" => {
+                self.read(credential, action, map).await
+            }
             "search" => self.search(credential, map).await,
+            "preflight" => self.preflight(credential, map).await,
             "reindex" | "embed_lease" | "embed_submit" | "embed_failed" => {
                 self.embedding_request(credential, action, &raw).await
             }
-            "propose" | "decide" | "rollback" => {
+            "propose" | "decide" | "rollback" | "auto_apply" => {
                 self.proposal_request(credential, action, map, &raw).await
             }
-            "put" | "import" | "retire" | "handoff" | "capture" | "grant" => {
-                match self.prepare(credential, action, map, &raw) {
-                    Ok(prepared) => self.write(prepared).await,
-                    Err(reply) => reply,
-                }
-            }
-            a if LATER.contains(&a) => error(
-                501,
-                "memory_action_unavailable",
-                "this memory action is not available on this hub yet",
-            ),
+            "put"
+            | "import"
+            | "retire"
+            | "handoff"
+            | "capture"
+            | "grant"
+            | "rescan"
+            | "evidence.attach"
+            | "evidence.purge"
+            | "auto_apply_switch"
+            | "retrieval_eval.record" => match self.prepare(credential, action, map, &raw) {
+                Ok(prepared) => self.write(prepared).await,
+                Err(reply) => reply,
+            },
             _ => invalid("unknown memory action"),
+        }
+    }
+    async fn preflight(&self, credential: &Credential, map: &Map<String, Json>) -> Reply {
+        if map
+            .keys()
+            .any(|k| !["action", "proposal_id"].contains(&k.as_str()))
+            || map
+                .get("proposal_id")
+                .and_then(Json::as_str)
+                .is_none_or(|id| ids::parse_event_id(id).is_none())
+        {
+            return invalid("preflight requires only a proposal_id");
+        }
+        let admin = self.admin.clone();
+        let mut authority = match self
+            .hub
+            .submit(move |db| ops::Authority::with_credentials(&Conn(db), &admin))
+            .await
+        {
+            Ok(a) => a,
+            Err(_) => return error(503, "memory_action_unavailable", "policy read unavailable"),
+        };
+        authority.retrieval = Some(retrieval_eval::Live {
+            indexed_seq: self.index.current().indexed_seq,
+            embedder_id: self.dense.active_id(),
+            weights: self.rrf.json(),
+        });
+        let who = credential.clone();
+        let request = Json::Object(map.clone());
+        let scanner = self.scanner.clone();
+        let now = self.clock.now_ms();
+        match self
+            .readers
+            .submit(move |db| {
+                // ReaderPool already pins one deferred, query-only snapshot.
+                // No writer, event, idempotency entry or index refresh is involved.
+                preflight::read(&Conn(db), &who, &request, &authority, scanner.as_ref(), now)
+            })
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => error(
+                503,
+                "memory_action_unavailable",
+                "preflight read unavailable",
+            ),
         }
     }
     async fn proposal_request(
@@ -844,7 +932,33 @@ impl Store {
         raw: &Json,
     ) -> Result<Prepared, Reply> {
         let allowed: &[&str] = match action {
-            "propose" => &["action", "base_epoch", "ops", "client_event_id", "tier"],
+            "propose" => &[
+                "action",
+                "base_epoch",
+                "ops",
+                "client_event_id",
+                "tier",
+                "workspace_id",
+            ],
+            "auto_apply" => &["action", "proposal_id", "base_epoch", "client_event_id"],
+            "auto_apply_switch" => &["action", "enabled", "client_event_id"],
+            "evidence.purge" => &["action", "evidence_id", "client_event_id"],
+            "retrieval_eval.record" => {
+                &["action", "report_json", "report_sha256", "client_event_id"]
+            }
+            "evidence.attach" => &[
+                "action",
+                "scope",
+                "card_id",
+                "workspace_id",
+                "evidence_id",
+                "artifact_kind",
+                "artifact_sha256",
+                "observed_at",
+                "artifact_base64",
+                "stance",
+                "client_event_id",
+            ],
             "decide" => &[
                 "action",
                 "proposal_id",
@@ -873,6 +987,13 @@ impl Store {
                 "reason",
                 "client_event_id",
             ],
+            "rescan" => &[
+                "action",
+                "limit",
+                "retry_failed",
+                "after",
+                "client_event_id",
+            ],
             "handoff" => &["action", "text", "kind", "client_event_id"],
             "capture" => &[
                 "action",
@@ -887,11 +1008,15 @@ impl Store {
         if let Some(k) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
             return Err(invalid(&format!("unknown field {k:?} for {action}")));
         }
-        if action == "grant" && *credential != Credential::Admin {
+        if matches!(
+            action,
+            "grant" | "rescan" | "auto_apply_switch" | "evidence.purge" | "retrieval_eval.record"
+        ) && *credential != Credential::Admin
+        {
             return Err(error(
                 403,
                 "memory_grant_missing",
-                "the admin token is required to change memory grants",
+                "the admin token is required for this memory action",
             ));
         }
         let now_ms = self.clock.now_ms();
@@ -970,7 +1095,47 @@ impl Store {
             }
         };
         let action = match action {
-            "propose" | "decide" | "rollback" => {
+            "retrieval_eval.record" => Action::RetrievalEval(retrieval_eval::prepare(raw)?),
+            "evidence.purge" => Action::EvidencePurge(short("evidence_id", 1024, true)?.unwrap()),
+            "auto_apply_switch" => Action::AutoApplySwitch(
+                map.get("enabled")
+                    .and_then(Json::as_bool)
+                    .ok_or_else(|| invalid("enabled must be a boolean"))?,
+            ),
+            "evidence.attach" => Action::Evidence(attestation::prepare(raw, credential, now_ms)?),
+            "rescan" => {
+                let limit = match map.get("limit") {
+                    None => 4,
+                    Some(value) => value
+                        .as_u64()
+                        .filter(|n| (1..=16).contains(n))
+                        .ok_or_else(|| invalid("limit must be an integer from 1 to 16"))?,
+                };
+                let retry_failed = match map.get("retry_failed") {
+                    None => false,
+                    Some(value) => value
+                        .as_bool()
+                        .ok_or_else(|| invalid("retry_failed must be a boolean"))?,
+                };
+                let after = match map.get("after") {
+                    None => None,
+                    Some(Json::String(value))
+                        if value.len() == 64
+                            && value
+                                .bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+                    {
+                        Some(value.clone())
+                    }
+                    _ => return Err(invalid("after must be a lowercase SHA-256 hash")),
+                };
+                Action::Rescan {
+                    limit: limit as usize,
+                    retry_failed,
+                    after,
+                }
+            }
+            "propose" | "decide" | "rollback" | "auto_apply" => {
                 if action != "propose"
                     && str_field("proposal_id")
                         .and_then(ids::parse_event_id)
@@ -984,6 +1149,15 @@ impl Store {
                         422,
                         "memory_auto_apply_disabled",
                         "a reviewer must explicitly accept or reject the proposal",
+                    ));
+                }
+                if action == "propose"
+                    && map
+                        .get("workspace_id")
+                        .is_some_and(|v| v.as_str().is_none_or(|s| !attestation::component(s)))
+                {
+                    return Err(invalid(
+                        "workspace_id must be a bounded namespace component",
                     ));
                 }
                 Action::Proposal(proposals::Command {
@@ -1143,10 +1317,27 @@ impl Store {
         map: &Map<String, Json>,
         push: bool,
     ) -> Reply {
+        let mut reply = self.search_ranked(credential, map, push).await;
+        if reply.status == 200 && map.get("eval").and_then(Json::as_bool) == Some(true) {
+            if let Ok(authority) = self.hub.submit(|db| ops::Authority::read(&Conn(db))).await {
+                reply.body["policy_revision"] = json!(authority.policy.as_ref().map(|p| p.0));
+                reply.body["policy_digest"] = json!(authority.policy.as_ref().map(|p| &p.1));
+            }
+        }
+        reply
+    }
+
+    async fn search_ranked(
+        &self,
+        credential: &Credential,
+        map: &Map<String, Json>,
+        push: bool,
+    ) -> Reply {
         let mut request = match search::parse(map) {
             Ok(r) => r,
             Err(reply) => return reply,
         };
+        request.weights = self.rrf;
         request.push = push;
         request.prompt |= push;
         let snapshot = match request.min_seq {
@@ -1215,7 +1406,7 @@ impl Store {
                     request.dense = Some((matrix, vector));
                     let credential = credential.clone();
                     let scanner = self.scanner.clone();
-                    if let Ok(hybrid) = self
+                    if let Ok(mut hybrid) = self
                         .readers
                         .submit(move |db| {
                             search::run(
@@ -1228,6 +1419,7 @@ impl Store {
                         })
                         .await
                     {
+                        hybrid.body["embedder_id"] = json!(runtime.config.id.key());
                         return hybrid;
                     }
                     reply.body["retrieval"]["mode"] = json!("lexical-fallback");
@@ -1249,9 +1441,19 @@ impl Store {
         let indexed_seq = self.index.current().indexed_seq;
         let retrieval = self.retrieval_status();
         let is_status = action == "status";
+        let proposal_cursors = self.proposal_cursors.clone();
         match self
             .readers
             .submit(move |c| {
+                if matches!(action.as_str(), "proposal_list" | "proposal_show") {
+                    return proposal_reads::read(
+                        &Conn(c),
+                        &credential,
+                        &action,
+                        &map,
+                        &proposal_cursors,
+                    );
+                }
                 reads(
                     &Conn(c),
                     &credential,
@@ -1430,6 +1632,29 @@ fn reads<T: ReadTx + ?Sized>(
                 };
                 next = seq;
                 if visible {
+                    let mut payload =
+                        serde_json::from_str::<Json>(&text(&r[12])).unwrap_or(Json::Null);
+                    if text(&r[3]).starts_with("proposal.") {
+                        let mut review = match &r[5] {
+                            Value::Text(scope) => {
+                                proposals::scoped_right(tx, credential, scope, "review")?
+                            }
+                            _ => *credential == Credential::Admin,
+                        };
+                        if let Some(cards) = payload["cards"].as_array() {
+                            for card in cards {
+                                review &= proposals::scoped_right(
+                                    tx,
+                                    credential,
+                                    proposals::string(card, "scope"),
+                                    "review",
+                                )?;
+                            }
+                        }
+                        if !review {
+                            payload = json!({"proposal_id":payload["proposal_id"],"state":payload["state"],"decision":payload["decision"],"decision_mode":payload["decision_mode"]});
+                        }
+                    }
                     events.push(json!({
                         "seq": seq,
                         "event_id": text(&r[1]),
@@ -1443,7 +1668,7 @@ fn reads<T: ReadTx + ?Sized>(
                         "content_hash": nullable(&r[9]),
                         "trust": nullable(&r[10]),
                         "origin": nullable(&r[11]),
-                        "payload": serde_json::from_str::<Json>(&text(&r[12])).unwrap_or(Json::Null),
+                        "payload": payload,
                         "policy_digest": nullable(&r[13]),
                         "created_at": text(&r[14]),
                     }));

@@ -234,6 +234,9 @@ def search_payload(
                 lists["replica"] = replica
             if incomplete:
                 retrieval["replica_incomplete"] = True
+            if not replica and store.replica_snapshot_missing(target):
+                retrieval["replica_unusable"] = "snapshot-missing"
+                notes.append("the replica's heads snapshot is missing, so it was not used; run memory hub pull")
         retrieval["fallback"] = sorted(lists)
     except hubc.HubRefusal as exc:
         # The hub refused this credential or request: answer from local cards only.

@@ -93,6 +93,7 @@ fn scorer_matches_python_goldens() {
             texts.insert(hash.clone(), s(&card["text"]).to_string());
             builder.apply(
                 vec![Change::Live(Card {
+                    automated: false,
                     scope: s(&card["scope"]).into(),
                     card_id: s(&card["card_id"]).into(),
                     revision: i as i64 + 1,
@@ -665,6 +666,7 @@ async fn a_deeply_nested_card_indexes_and_survives_restart() {
 #[test]
 fn literal_queries_read_a_bounded_part_of_a_large_corpus() {
     let cards = (0..20_000).map(|n| Card {
+        automated: false,
         scope: "fleet".into(),
         card_id: format!("card-{n:05}"),
         revision: n + 1,
@@ -707,6 +709,7 @@ fn literal_queries_read_a_bounded_part_of_a_large_corpus() {
     // A corpus under every bound is scanned in full.
     let few = Builder::from_cards(
         (0..10).map(|n| Card {
+            automated: false,
             scope: "fleet".into(),
             card_id: format!("c{n}"),
             revision: n + 1,
@@ -727,6 +730,7 @@ fn literal_queries_read_a_bounded_part_of_a_large_corpus() {
 
 fn literal_card(scope: &str, card_id: &str, n: i64) -> Card {
     Card {
+        automated: false,
         scope: scope.into(),
         card_id: card_id.into(),
         revision: n,
@@ -866,6 +870,7 @@ async fn a_truncated_literal_scan_is_reported() {
 
 fn card(n: usize) -> Card {
     Card {
+        automated: false,
         scope: "fleet".into(),
         card_id: format!("card-{n:05}"),
         revision: n as i64 + 1,

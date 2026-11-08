@@ -20,6 +20,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .. import memory_hub_cmd
 
     memory_hub_cmd.register(memory_sub)
+    from .. import memory_hub_proposals
+
+    memory_hub_proposals.register(memory_sub)
     from .. import memory_embed
 
     memory_embed.register(memory_sub)
@@ -49,6 +52,17 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_memory_care = memory_sub.add_parser("care", help="Scan local memory cards for refresh risk.")
     memory_care_sub = p_memory_care.add_subparsers(dest="memory_care_command", metavar="<memory-care-command>")
     memory_care_sub.required = True
+    from . import care
+
+    scheduler = argparse.ArgumentParser(add_help=False)
+    scheduler_sub = scheduler.add_subparsers()
+    care.register(scheduler_sub)
+    care_parser = scheduler_sub.choices["care"]
+    care_actions = next(a for a in care_parser._actions if isinstance(a, argparse._SubParsersAction))
+    for name in ("install", "uninstall"):
+        command = memory_care_sub.add_parser(name, parents=[care_actions.choices[name]], add_help=False)
+        command.set_defaults(memory_care_scheduler=True)
+
     p_memory_care_init = memory_care_sub.add_parser("init", help="Write local memory-care config.")
     p_memory_care_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_memory_care_init.add_argument("--force", action="store_true", help="Overwrite an existing memory-care config.")
@@ -384,7 +398,7 @@ def register(sub: argparse._SubParsersAction) -> None:
 
 
 def dispatch(args) -> int:
-    if args.memory_command in {"embed-worker", "reindex"}:
+    if args.memory_command in {"embed-worker", "reindex", "rescan"}:
         from .. import memory_embed
 
         return memory_embed.dispatch(args)
@@ -400,6 +414,10 @@ def dispatch(args) -> int:
         from .. import memory_hub_cmd
 
         return memory_hub_cmd.dispatch(args)
+    if args.memory_command == "proposals":
+        from .. import memory_hub_proposals
+
+        return memory_hub_proposals.dispatch(args)
     if args.memory_command == "proposal":
         from .. import memory_proposals
         import json
@@ -516,6 +534,11 @@ def dispatch(args) -> int:
         return memory_vault.doctor(target=args.target, json_output=args.json)
 
     if args.memory_command == "care":
+        if getattr(args, "memory_care_scheduler", False):
+            from . import care
+
+            args.care_command = args.memory_care_command
+            return care.dispatch(args)
         if args.memory_care_command == "init":
             return memory_cmd.init(
                 target=args.target,

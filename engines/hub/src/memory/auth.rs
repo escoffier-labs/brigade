@@ -7,7 +7,14 @@ use std::collections::BTreeSet;
 use subtle::ConstantTimeEq;
 
 pub const RIGHTS: &[&str] = &[
-    "read", "write", "handoff", "embed", "reflect", "review", "import",
+    "read",
+    "write",
+    "handoff",
+    "embed",
+    "reflect",
+    "review",
+    "import",
+    "list_proposals",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]

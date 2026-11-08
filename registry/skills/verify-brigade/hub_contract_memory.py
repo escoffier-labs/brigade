@@ -443,7 +443,7 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         token=node_token,
         shape={"events": [{"seq": int, "kind": str, "principal": str}], "next_seq": int, "log_epoch": hc.Eq(epoch)},
     )
-    seqs = [e.get("seq") for e in page.get("events", []) if isinstance(e, dict)]
+    seqs: list[Any] = [e.get("seq") for e in page.get("events", []) if isinstance(e, dict)]
     d.invariant(
         "memory-log",
         seqs == sorted(seqs) and bool(seqs) and page.get("next_seq") == seqs[-1],
@@ -453,7 +453,7 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
     # Follow next_seq to the end of the log, in case other writers on a shared
     # hub pushed this run's events past one page's scan window.
     scopes: set = set()
-    after = start_seq
+    after: Any = start_seq
     for _ in range(LOG_PAGES):
         agent_page = mem("memory-log-principal", {"action": "log", "after_seq": after}, token=agent_token)
         scopes |= {e.get("scope") for e in agent_page.get("events", []) if isinstance(e, dict)}
@@ -495,8 +495,8 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
     )
     _search_cases(d, mem, put, card, suffix, node_token=node_token, agent_token=agent_token, repo_one=repo_one)
     _proposal_cases(mem, put, card("proposal"), epoch, scan_available)
-    # Bounds and actions later slices build.
-    mem("memory-action-later", {"action": "preflight"}, status=501, shape=err("memory_action_unavailable"))
+    # Bounds and unknown actions.
+    mem("memory-preflight-missing-id", {"action": "preflight"}, status=400, shape=err("memory_request_invalid"))
     mem("memory-action-unknown", {"action": "nope"}, status=400, shape=err("memory_request_invalid"))
     put(
         "memory-card-too-large",
@@ -553,6 +553,19 @@ def _proposal_cases(mem: Any, put: Any, card_id: str, epoch: str, scan_available
         },
         status=201,
         shape={"proposal_id": hc.NonEmpty(), "state": hc.Eq("pending"), "diff": hc.NonEmpty()},
+    )
+    mem(
+        "memory-proposal-preflight",
+        {"action": "preflight", "proposal_id": opened.get("proposal_id", "")},
+        shape={
+            "schema": hc.Eq("brigade.memory-tier0-preflight.v1"),
+            "status": hc.Eq("held"),
+            "eligible": hc.Eq(False),
+            "diagnostic_only": hc.Eq(True),
+            "candidate_id": hc.Eq(opened.get("proposal_id", "")),
+            "proof_evidence_count": hc.Eq(None),
+            "proof_source_group_count": hc.Eq(None),
+        },
     )
     mem(
         "memory-propose-keeps-head",

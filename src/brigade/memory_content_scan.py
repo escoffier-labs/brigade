@@ -129,7 +129,11 @@ _check_nfkc_pin(_BUNDLE)
 
 
 def ruleset_version() -> str:
-    """The bundle's `<version>:<sha256 of the rules file>`, as the hub reports it in `status.scan.ruleset_version`."""
+    """Bundle version and digest, including the pinned Python and Rust sources.
+
+    After scanner edits regenerate with scripts/memory_scan_bundle.py. The
+    hub reports the same ID in status.scan.ruleset_version.
+    """
     return f"{_BUNDLE['version']}:{hashlib.sha256(_BUNDLE_BYTES).hexdigest()}"
 
 

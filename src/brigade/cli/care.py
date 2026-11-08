@@ -49,6 +49,8 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Override one selected entry's schedule. Repeatable.",
     )
 
+    p_install.add_argument("--scope", help="One configured hub read scope for memory-reflect only.")
+
     p_status = care_sub.add_parser(
         "status",
         help="List installed care entries and the latest receipt for each runbook recipe.",
@@ -107,6 +109,7 @@ def dispatch(args) -> int:
             json_output=args.json,
             entry_ids=args.entry_ids,
             schedule_specs=args.schedule_specs,
+            scope=args.scope,
         )
     if args.care_command == "status":
         return care_cmd.status(

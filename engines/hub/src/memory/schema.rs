@@ -2,7 +2,7 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 4;
+pub const USER_VERSION: i64 = 9;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
@@ -84,7 +84,7 @@ CREATE TABLE memory_events(
   client_event_id TEXT NOT NULL,
   kind TEXT NOT NULL CHECK(kind IN ('card.put','card.retire','card.trust','card.import',
     'evidence.attach','handoff.submit','proposal.open','proposal.decide','proposal.apply',
-    'proposal.rollback','grant.change','recall.capture')),
+    'proposal.rollback','grant.change','recall.capture','memory.auto_apply_switch','evidence.purge','retrieval_eval.record')),
   principal TEXT NOT NULL,
   scope TEXT,
   card_id TEXT,
@@ -143,10 +143,12 @@ CREATE TABLE memory_idempotency(
   PRIMARY KEY(principal, client_event_id)
 ) WITHOUT ROWID;
 CREATE INDEX memory_idempotency_age ON memory_idempotency(created_ms);
-{}{}
+{}{}{}{}
 ",
         super::embedding::DDL,
-        super::proposals::DDL
+        super::proposals::DDL,
+        super::attestation::DDL,
+        super::retrieval_eval::DDL
     )
 }
 
@@ -164,6 +166,8 @@ pub const TABLES: &[&str] = &[
     "memory_lineage",
     "memory_embed_jobs",
     "memory_proposals",
+    "memory_evidence",
+    "memory_retrieval_evals",
 ];
 
 /// Create a fresh file's schema, or check an existing one. Never downgrades,
@@ -186,6 +190,7 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
         c.execute_batch("BEGIN IMMEDIATE").map_err(err)?;
         let created = (|| {
             c.execute_batch(&ddl())?;
+            super::hardening::migrate(c)?;
             let meta = [
                 ("log_epoch", super::ids::mint(now_ms)),
                 ("normalizer_version", NORMALIZER_VERSION.into()),
@@ -226,6 +231,21 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     if version < 4 {
         step(c, super::proposals::DDL, 4).map_err(err)?;
     }
+    if version < 5 {
+        step(c, &super::attestation::legacy_ddl(), 5).map_err(err)?;
+    }
+    if version < 6 {
+        step(c, &review_schema(), 6).map_err(err)?;
+    }
+    if version < 7 {
+        step(c, &eval_schema(), 7).map_err(err)?;
+    }
+    if version < 8 {
+        step_with(c, 8, super::retrieval_eval::migrate).map_err(err)?;
+    }
+    if version < 9 {
+        step_with(c, 9, super::hardening::migrate).map_err(err)?;
+    }
     for table in TABLES {
         let present: Option<i64> = c
             .query_row(
@@ -243,10 +263,45 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// Extend the event CHECK without losing sequence high watermarks or triggers.
+fn review_schema() -> String {
+    format!(
+        "{} {}",
+        super::attestation::tombstone_migration(),
+        event_schema()
+    )
+}
+
+fn event_schema() -> String {
+    let ddl = ddl();
+    let block = &ddl[ddl.find("CREATE TABLE memory_events(").unwrap()
+        ..ddl.find("CREATE TABLE memory_blobs(").unwrap()];
+    let (table, rest) = block.split_once("CREATE INDEX memory_events_card").unwrap();
+    format!(
+        "CREATE TEMP TABLE memory_events_high_water AS SELECT seq FROM sqlite_sequence WHERE name='memory_events'; {} INSERT INTO memory_events_v6 SELECT * FROM memory_events; DROP TABLE memory_events; ALTER TABLE memory_events_v6 RENAME TO memory_events; CREATE INDEX memory_events_card{} UPDATE sqlite_sequence SET seq=MAX(seq,COALESCE((SELECT seq FROM memory_events_high_water),0)) WHERE name='memory_events'; DROP TABLE memory_events_high_water;",
+        table.replace(
+            "CREATE TABLE memory_events(",
+            "CREATE TABLE memory_events_v6("
+        ),
+        rest
+    )
+}
+
+fn eval_schema() -> String {
+    format!("{} {}", super::retrieval_eval::legacy_ddl(), event_schema())
+}
+
 /// Apply one migration step unless another process already recorded it.
 /// The version is read again under the write lock: two hubs opening the same
 /// older file at once rebuild it once.
 pub(super) fn step(c: &Connection, sql: &str, version: i64) -> rusqlite::Result<()> {
+    step_with(c, version, |c| c.execute_batch(sql))
+}
+fn step_with(
+    c: &Connection,
+    version: i64,
+    apply: impl FnOnce(&Connection) -> rusqlite::Result<()>,
+) -> rusqlite::Result<()> {
     c.execute_batch("BEGIN IMMEDIATE")?;
     let applied = c
         .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
@@ -254,8 +309,7 @@ pub(super) fn step(c: &Connection, sql: &str, version: i64) -> rusqlite::Result<
             if current >= version {
                 return Ok(());
             }
-            c.execute_batch(sql)
-                .and_then(|()| c.pragma_update(None, "user_version", version))
+            apply(c).and_then(|()| c.pragma_update(None, "user_version", version))
         })
         .and_then(|()| c.execute_batch("COMMIT"));
     if applied.is_err() {

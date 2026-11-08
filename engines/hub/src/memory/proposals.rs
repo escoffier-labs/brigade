@@ -32,11 +32,12 @@ impl Command {
         match self.request["action"].as_str() {
             Some("propose") => "propose",
             Some("decide") => "decide",
+            Some("auto_apply") => "auto_apply",
             _ => "rollback",
         }
     }
     pub fn right(&self) -> &'static str {
-        if self.name() == "propose" {
+        if matches!(self.name(), "propose" | "auto_apply") {
             "reflect"
         } else {
             "review"
@@ -65,7 +66,7 @@ fn invalid(reason: &str) -> Reply {
 fn missing() -> Reply {
     error(404, "memory_proposal_not_found", "proposal not found")
 }
-fn load<T: ReadTx + ?Sized>(tx: &T, id: &str) -> rusqlite::Result<Option<Json>> {
+pub(super) fn load<T: ReadTx + ?Sized>(tx: &T, id: &str) -> rusqlite::Result<Option<Json>> {
     let rows = tx.query(
         "SELECT state,body,principal FROM memory_proposals WHERE proposal_id=?1",
         &[t(id)],
@@ -77,7 +78,7 @@ fn load<T: ReadTx + ?Sized>(tx: &T, id: &str) -> rusqlite::Result<Option<Json>> 
         body
     }))
 }
-fn cards(body: &Json) -> &[Json] {
+pub(super) fn cards(body: &Json) -> &[Json] {
     body["cards"].as_array().map(Vec::as_slice).unwrap_or(&[])
 }
 pub(super) fn string<'a>(v: &'a Json, key: &str) -> &'a str {
@@ -90,7 +91,7 @@ fn denied(right: &str) -> Reply {
         &format!("this credential needs read and {right} grants on every target scope"),
     )
 }
-fn scoped_right<T: ReadTx + ?Sized>(
+pub(super) fn scoped_right<T: ReadTx + ?Sized>(
     tx: &T,
     who: &auth::Credential,
     scope: &str,
@@ -117,10 +118,11 @@ pub fn authorize<T: ReadTx + ?Sized>(
     who: &auth::Credential,
     request: &Json,
 ) -> rusqlite::Result<Option<Reply>> {
-    let right = if request["action"] == "propose" {
-        "reflect"
-    } else {
-        "review"
+    let right = match request["action"].as_str() {
+        Some("propose") => "reflect",
+        Some("preflight") => "read",
+        Some("auto_apply") => "reflect",
+        _ => "review",
     };
     if request["action"] == "propose" {
         if let Some(ops) = request["ops"].as_array() {
@@ -146,7 +148,7 @@ pub fn authorize<T: ReadTx + ?Sized>(
     }
     Ok(None)
 }
-fn op_schema(op: &Json) -> Result<(), &'static str> {
+pub(super) fn op_schema(op: &Json) -> Result<(), &'static str> {
     let map = op.as_object().ok_or("op must be an object")?;
     let extras: &[&str] = match string(op, "type") {
         "replace_block" | "add_previously" => &["text"],
@@ -234,8 +236,10 @@ fn snapshot<T: ReadTx + ?Sized>(tx: &T, op: &Json) -> rusqlite::Result<Result<Js
         return Ok(Err("card base revision is not the live head".into()));
     }
     let text = bytes(tx, &h.hash)?;
+    let rows = tx.query("SELECT scan_state FROM memory_card_revisions WHERE scope=?1 AND card_id=?2 AND revision=?3", &[t(scope),t(id),Value::Integer(h.revision)])?;
+    let scan = rows.first().map(|r| s(&r[0]));
     Ok(Ok(
-        json!({"scope":scope,"card_id":id,"base_revision":h.revision,"before_hash":h.hash,"before_text":text,"before_trust":h.trust,"before_state":h.state,"after_text":text,"after_state":"live","pins":[]}),
+        json!({"scope":scope,"card_id":id,"base_revision":h.revision,"before_hash":h.hash,"before_text":text,"before_trust":h.trust,"before_state":h.state,"before_scan":scan,"after_text":text,"after_state":"live","pins":[]}),
     ))
 }
 fn card_diff(card: &Json) -> String {
@@ -417,7 +421,7 @@ fn submit<T: ReadTx + ?Sized>(
         })
         .collect();
     Ok(Ok(
-        json!({"base_epoch":epoch,"cards":by_card.into_values().collect::<Vec<_>>(),"ops":ops,"diff":diff,"tier":2,"rollback_of":null}),
+        json!({"base_epoch":epoch,"workspace_id":request["workspace_id"],"cards":by_card.into_values().collect::<Vec<_>>(),"ops":ops,"diff":diff,"tier":2,"rollback_of":null}),
     ))
 }
 /// Prepare CPU work and diffs on a query-only reader. A refusal is carried to
@@ -440,7 +444,10 @@ pub fn prepare<T: ReadTx + ?Sized>(
     };
     Ok(Command { request, draft })
 }
-fn stale_reason<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<Option<&'static str>> {
+pub(super) fn stale_reason<T: ReadTx + ?Sized>(
+    tx: &T,
+    body: &Json,
+) -> rusqlite::Result<Option<&'static str>> {
     if string(body, "base_epoch") != ops::epoch(tx)? {
         return Ok(Some("memory_epoch_changed"));
     }
@@ -465,7 +472,7 @@ fn stale_reason<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<Opt
     Ok(None)
 }
 fn metadata(body: &Json) -> Json {
-    json!({"proposal_id":body["proposal_id"],"rollback_of":body["rollback_of"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"state":body["state"],"decision":body["decision"],"reason":body["reason"],"rules":body["rules"],
+    json!({"proposal_id":body["proposal_id"],"decision_mode":body["decision_mode"],"auto_apply_gates":body["auto_apply_gates"],"rollback_of":body["rollback_of"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"state":body["state"],"decision":body["decision"],"reason":body["reason"],"rules":body["rules"],
         "cards":cards(body).iter().map(|c|json!({"scope":c["scope"],"card_id":c["card_id"],"base_revision":c["base_revision"],"before_hash":c["before_hash"],"after_hash":c["after_hash"],"before_state":c["before_state"],"after_state":c["after_state"],"pins":c["pins"].as_array().unwrap().iter().map(|p|json!({"block_id":p["block_id"],"hash":p["hash"]})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
 }
 fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::Result<()> {
@@ -496,23 +503,53 @@ fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::R
     Ok(())
 }
 
-fn reply(body: &Json, status: u16) -> Reply {
+pub(super) fn reply(body: &Json, status: u16) -> Reply {
     Reply::new(
         status,
-        json!({"proposal_id":body["proposal_id"],"state":body["state"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"rules":body["rules"],"log_epoch":body["base_epoch"]}),
+        json!({"proposal_id":body["proposal_id"],"state":body["state"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"rules":body["rules"],"preflight":body["preflight"],"log_epoch":body["base_epoch"]}),
     )
 }
-fn update(tx: &dyn WriteTx, body: &Json, p: &Prepared) -> rusqlite::Result<()> {
+/// Automatic calls may be made by reflect-only callers, including replays.
+pub(super) fn redact_auto_reply<T: ReadTx + ?Sized>(
+    tx: &T,
+    who: &auth::Credential,
+    proposal: &Json,
+    response: &mut Json,
+) -> rusqlite::Result<()> {
+    if super::preflight::redact(tx, who, proposal, &mut response["preflight"])? {
+        response["diff"] = Json::Null;
+        if let Some(targets) = response["targets"].as_array_mut() {
+            for target in targets {
+                target["after_hash"] = Json::Null;
+            }
+        }
+    }
+    Ok(())
+}
+fn update(
+    tx: &dyn WriteTx,
+    body: &Json,
+    p: &Prepared,
+    authority: &Authority,
+) -> rusqlite::Result<Option<Reply>> {
+    if let Some(r) = super::hardening::quota(tx, body, &authority.proposal_limits, true)? {
+        return Ok(Some(r));
+    }
     tx.execute(
-        "UPDATE memory_proposals SET state=?2,body=?3,decided_by=?4 WHERE proposal_id=?1",
+        "UPDATE memory_proposals SET state=?2,body=?3,decided_by=?4,retained_bytes=length(CAST(?3 AS BLOB)),terminal_ms=CASE WHEN ?2 IN ('applied','rejected','stale') THEN ?5 ELSE NULL END WHERE proposal_id=?1",
         &[
             t(string(body, "proposal_id")),
             t(string(body, "state")),
             t(&body.to_string()),
-            t(p.credential.principal()),
+            if body["state"] == "pending" {
+                Value::Null
+            } else {
+                t(p.credential.principal())
+            },
+            Value::Integer(p.now_ms),
         ],
     )?;
-    Ok(())
+    Ok(None)
 }
 fn open(
     tx: &dyn WriteTx,
@@ -524,26 +561,34 @@ fn open(
 ) -> rusqlite::Result<Reply> {
     body["proposal_id"] = json!(ids::mint(p.now_ms));
     body["proposer"] = json!(p.credential.principal());
+    body["proposer_credential"] = json!(super::attestation::identity(&p.credential, authority));
     body["rules"] = json!([]);
     body["decision_policy_revision"] = Json::Null;
     body["decision_policy_digest"] = Json::Null;
     body["tier"] = json!(super::proposal_tiers::classify(tx, &body, scanner)?);
+    body["opened_tier"] = body["tier"].clone();
     if body["state"].is_null() {
         body["state"] = json!("pending");
     }
     body["policy_revision"] = json!(authority.policy.as_ref().map(|a| a.0));
     body["policy_digest"] = json!(authority.policy.as_ref().map(|a| &a.1));
-    // The blob table owns card bytes. Proposal rows retain pins and diff but
-    // never publish either through the event stream.
+    if !body["rollback_of"].is_null() {
+        for card in body["cards"].as_array_mut().unwrap() {
+            let rows = tx.query("SELECT scan_state FROM memory_card_revisions WHERE scope=?1 AND card_id=?2 AND revision=?3", &[t(string(card,"scope")),t(string(card,"card_id")),Value::Integer(card["base_revision"].as_i64().unwrap_or(0))])?;
+            card["before_scan"] = json!(rows.first().map(|r| s(&r[0])));
+        }
+    }
+    body["created_at"] = json!(ids::isoformat(p.now_ms));
+    if let Some(refusal) = super::hardening::admit(tx, &body, &authority.proposal_limits)? {
+        return Ok(refusal);
+    }
+    tx.execute("INSERT INTO memory_proposals(proposal_id,state,body,principal,created_at,digest,retained_bytes,terminal_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",&[t(string(&body,"proposal_id")),t(string(&body,"state")),t(&body.to_string()),t(p.credential.principal()),t(&ids::isoformat(p.now_ms)),t(&super::hardening::digest(&body)),Value::Integer(body.to_string().len() as i64),if body["state"]=="stale" {Value::Integer(p.now_ms)} else {Value::Null}])?;
     for card in cards(&body) {
-        ops::store_blob(
-            tx,
-            string(card, "after_hash"),
-            string(card, "after_text"),
-            &ids::isoformat(p.now_ms),
+        tx.execute(
+            "INSERT OR IGNORE INTO memory_proposal_scopes VALUES(?1,?2)",
+            &[t(string(&body, "proposal_id")), t(string(card, "scope"))],
         )?;
     }
-    tx.execute("INSERT INTO memory_proposals(proposal_id,state,body,principal,created_at) VALUES(?1,?2,?3,?4,?5)",&[t(string(&body,"proposal_id")),t(string(&body,"state")),t(&body.to_string()),t(p.credential.principal()),t(&ids::isoformat(p.now_ms))])?;
     event(tx, p, kind, &body)?;
     Ok(reply(&body, 201))
 }
@@ -553,19 +598,100 @@ fn apply_cards(
     tx: &dyn WriteTx,
     p: &Prepared,
     body: &mut Json,
+    authority: &Authority,
     scanner: &dyn Scanner,
 ) -> rusqlite::Result<Option<Reply>> {
+    let automatic = matches!(&p.action,ops::Action::Proposal(c) if c.name()=="auto_apply");
     for card in cards(body) {
-        if !scoped_right(tx, &p.credential, string(card, "scope"), "review")? {
+        if !scoped_right(
+            tx,
+            &p.credential,
+            string(card, "scope"),
+            if automatic { "reflect" } else { "review" },
+        )? {
             return Ok(Some(denied("review")));
         }
     }
-    if let Some(r) = self_review(p, body) {
-        return Ok(Some(r));
+    if !automatic {
+        if let Some(r) = self_review(p, body) {
+            return Ok(Some(r));
+        }
+        // Reviewed calls still require explicit acceptance. Only the automatic
+        // action can enter the separate all-gates boundary below.
+        if !matches!(&p.action, ops::Action::Proposal(cmd) if cmd.name() == "decide" && cmd.request["decision"] == "accept")
+        {
+            return Ok(Some(error(
+                403,
+                "memory_review_required",
+                "an explicit reviewer decision is required",
+            )));
+        }
+    }
+    if !automatic {
+        body["tier"] = json!(super::proposal_tiers::classify(tx, body, scanner)?);
+    }
+    // Keep diagnostics before blocker returns. Reusing the later apply-loop
+    // scans would move scan work before those checks or need a second report path.
+    if automatic {
+        let snapshot = match &p.action {
+            ops::Action::Proposal(c) => c.draft.as_ref().ok().map(|b| &b["_auto_snapshot"]),
+            _ => None,
+        };
+        let snapshot = snapshot.cloned().unwrap_or(Json::Null);
+        let proposal_digest = ids::sha256_hex(ids::canonical(body).as_bytes());
+        body["preflight"] = snapshot["report"].clone();
+        let current_token = super::hardening::token(tx)?;
+        if let Some(reason) = super::hardening::cheap(tx, body, authority)? {
+            body["preflight"] = super::hardening::held(body, reason);
+        } else if snapshot["proposal_sha256"] != proposal_digest
+            || snapshot["token"] != current_token
+            || snapshot["authority"] != super::hardening::authority_digest(authority)
+            || snapshot["now_ms"]
+                .as_i64()
+                .is_none_or(|ms| p.now_ms < ms || p.now_ms - ms > 1000)
+            || (super::preflight::all_satisfied(&body["preflight"])
+                && body["preflight"]["valid_until_ms"]
+                    .as_i64()
+                    .is_none_or(|ms| p.now_ms > ms))
+        {
+            body["preflight"] = if snapshot["token"]["memory_vector_log"]
+                != current_token["memory_vector_log"]
+            {
+                json!({"checks":[{"gate":"retrieval_eval","code":"retrieval_eval_vector_changed","state":"held"}]})
+            } else {
+                json!({"checks":[{"gate":"snapshot","code":"auto_apply_snapshot_changed","state":"held"}]})
+            };
+        }
+    } else {
+        body["preflight"] = super::preflight::evaluate(tx, body, authority, scanner, p.now_ms)?;
     }
     body["rules"] = json!([]);
+    if automatic {
+        body["auto_apply_gates"] = body["preflight"]["checks"].clone();
+    }
+    if automatic && !super::preflight::all_satisfied(&body["preflight"]) {
+        // A failed automatic attempt leaves human review available.
+        body["state"] = json!("pending");
+        body["reason"] = json!("auto_apply_held");
+        return Ok(None);
+    }
+    if automatic {
+        body["tier"] = json!(super::proposal_tiers::classify(tx, body, scanner)?);
+    }
+    if body["policy_revision"] != json!(authority.policy.as_ref().map(|a| a.0))
+        || body["policy_digest"] != json!(authority.policy.as_ref().map(|a| &a.1))
+    {
+        body["state"] = json!("stale");
+        body["reason"] = json!("policy_changed");
+        return Ok(None);
+    }
     if let Some(reason) = stale_reason(tx, body)? {
         body["state"] = json!("stale");
+        body["reason"] = json!(reason);
+        return Ok(None);
+    }
+    if let Some(reason) = super::preflight::input_blocker(tx, body)? {
+        body["state"] = json!("held");
         body["reason"] = json!(reason);
         return Ok(None);
     }
@@ -573,6 +699,11 @@ fn apply_cards(
     let mut scans = Vec::new();
     for card in cards(body) {
         let scan = scanner.scan(string(card, "after_text"));
+        if automatic && !matches!(&scan,Scan::Clean{ruleset} if !ruleset.is_empty()) {
+            body["state"] = json!("pending");
+            body["reason"] = json!("scan_not_clean");
+            return Ok(None);
+        }
         if matches!(scan, Scan::Blocked { .. } | Scan::Failed) {
             body["rules"] = json!(scan.rules());
             body["state"] = json!("held");
@@ -597,12 +728,15 @@ fn apply_cards(
     let id = string(body, "proposal_id").to_string();
     let rollback = !body["rollback_of"].is_null();
     let digest = body["policy_digest"].as_str().map(String::from);
+    let body_audit = json!({"checks":body["preflight"]["checks"],"retrieval_eval_record":body["preflight"]["retrieval_eval_record"],"policy_digest":body["policy_digest"],"attesting_credentials":body["preflight"]["attesting_credentials"]});
     for (card, scan) in body["cards"].as_array_mut().unwrap().iter_mut().zip(scans) {
         let scope = string(card, "scope");
         let card_id = string(card, "card_id");
         let hash = string(card, "after_hash");
         let trust = if rollback {
             string(card, "restore_trust")
+        } else if automatic {
+            string(card, "before_trust")
         } else {
             "reviewed"
         };
@@ -610,6 +744,12 @@ fn apply_cards(
         {
             continue;
         }
+        ops::store_blob(
+            tx,
+            hash,
+            string(card, "after_text"),
+            &ids::isoformat(p.now_ms),
+        )?;
         ops::store_scan(tx, hash, &scan, &ids::isoformat(p.now_ms))?;
         let seq = ops::append(
             tx,
@@ -627,7 +767,11 @@ fn apply_cards(
                 content_hash: Some(hash),
                 trust: Some(trust),
                 origin: None,
-                payload: json!({"proposal_id":id}),
+                payload: if automatic {
+                    json!({"proposal_id":id,"decision_mode":"automatic","gates":body_audit.clone()})
+                } else {
+                    json!({"proposal_id":id})
+                },
                 policy_digest: digest.as_deref(),
             },
         )?;
@@ -644,7 +788,9 @@ fn apply_cards(
             Some(string(card, "after_text")),
         )?;
         tx.execute("UPDATE memory_card_revisions SET proposal_id=?1 WHERE scope=?2 AND card_id=?3 AND revision=?4",&[t(&id),t(scope),t(card_id),Value::Integer(seq)])?;
+        let applied_trust = trust.to_string();
         card["applied_revision"] = json!(seq);
+        card["applied_trust"] = json!(applied_trust);
     }
     body["state"] = json!("applied");
     body["reason"] = Json::Null;
@@ -656,6 +802,9 @@ fn rollback(body: &Json) -> Json {
     inverse["state"] = Json::Null;
     inverse["reason"] = Json::Null;
     inverse["decision"] = Json::Null;
+    inverse["decision_mode"] = Json::Null;
+    inverse["auto_apply_gates"] = Json::Null;
+    inverse["preflight"] = Json::Null;
     inverse["rules"] = json!([]);
     inverse["cards"]
         .as_array_mut()
@@ -668,7 +817,9 @@ fn rollback(body: &Json) -> Json {
         card["before_hash"] = old["after_hash"].clone();
         card["before_text"] = old["after_text"].clone();
         card["before_state"] = old["after_state"].clone();
-        card["before_trust"] = json!(if body["rollback_of"].is_null() {
+        card["before_trust"] = json!(if let Some(trust) = old["applied_trust"].as_str() {
+            trust
+        } else if body["rollback_of"].is_null() {
             "reviewed"
         } else {
             string(&old, "restore_trust")
@@ -737,6 +888,13 @@ pub fn run(
         r.body["log_epoch"] = json!(ops::epoch(tx)?);
         return Ok(r);
     }
+    if body["compacted"] == true {
+        return Ok(error(
+            409,
+            "memory_proposal_compacted",
+            "proposal body retention expired, immutable audit retained",
+        ));
+    }
     if cmd.name() == "rollback" {
         if body["state"] != "applied" {
             return Ok(error(
@@ -756,6 +914,43 @@ pub fn run(
             }
         }
         return open(tx, p, inverse, authority, "proposal.rollback", scanner);
+    }
+    if cmd.name() == "auto_apply" {
+        if !body["rollback_of"].is_null() {
+            return Ok(error(
+                409,
+                "memory_rollback_review_required",
+                "compensating proposals require a reviewed decision",
+            ));
+        }
+        if body["state"] != "pending" {
+            return Ok(error(
+                409,
+                "memory_proposal_state",
+                "automatic apply requires a pending proposal",
+            ));
+        }
+        if let Some(r) = apply_cards(tx, p, &mut body, authority, scanner)? {
+            return Ok(r);
+        }
+        if body["state"] == "applied" {
+            body["decision"] = json!("auto_apply");
+            body["decision_mode"] = json!("automatic");
+            body["decision_policy_revision"] = json!(authority.policy.as_ref().map(|a| a.0));
+            body["decision_policy_digest"] = json!(authority.policy.as_ref().map(|a| &a.1));
+            if let Some(r) = update(tx, &body, p, authority)? {
+                return Ok(r);
+            }
+            event(tx, p, "proposal.decide", &body)?;
+        }
+        // An unsuccessful attempt never writes a proposal transition. Report
+        // the persisted pending state even if a late check changed the local body.
+        if body["state"] != "applied" {
+            body["state"] = json!("pending");
+        }
+        let mut response = reply(&body, 200);
+        redact_auto_reply(tx, &p.credential, &body, &mut response.body)?;
+        return Ok(response);
     }
     let redecide = body["state"] == "stale" && body["reason"] == "policy_changed";
     if !matches!(string(&body, "state"), "pending" | "held") && !redecide {
@@ -801,11 +996,13 @@ pub fn run(
     {
         body["state"] = json!("stale");
         body["reason"] = json!("policy_changed");
-    } else if let Some(r) = apply_cards(tx, p, &mut body, scanner)? {
+    } else if let Some(r) = apply_cards(tx, p, &mut body, authority, scanner)? {
         return Ok(r);
     }
     body["decision"] = cmd.request["decision"].clone();
-    update(tx, &body, p)?;
+    if let Some(r) = update(tx, &body, p, authority)? {
+        return Ok(r);
+    }
     event(tx, p, "proposal.decide", &body)?;
     Ok(reply(&body, 200))
 }
@@ -814,6 +1011,57 @@ pub fn run(
 mod tests {
     use super::super::{ops::Action, tests::*};
     use super::*;
+    #[tokio::test]
+    async fn tier1_mutation_guard_requires_explicit_decide_at_apply_boundary() {
+        let h = Hub::with(super::super::proposal_tests::clean(), None);
+        let a = h
+            .put(
+                ADMIN_TOKEN,
+                "fleet",
+                "a",
+                None,
+                super::super::proposal_tests::OLD,
+            )
+            .await;
+        let mut operation = super::super::proposal_tests::op("fleet", "a", rev(&a));
+        operation["text"] = json!("Use  the focused gate.");
+        let opened = super::super::proposal_tests::submit(&h, ADMIN_TOKEN, vec![operation]).await;
+        assert_eq!(opened.body["tier"], 1);
+        let db = rusqlite::Connection::open(h.memory()).unwrap();
+        let tx = crate::writer::worker::Tx(&db);
+        let mut body = load(&tx, opened.body["proposal_id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        // A mutant that omits the explicit-decision guard would apply this
+        // cosmetic Tier 1 edit with no calibration and no reviewed decision.
+        let p = Prepared {
+            credential: auth::Credential::Admin,
+            action: Action::Proposal(Command {
+                request: json!({"action":"propose"}),
+                draft: Ok(body.clone()),
+            }),
+            client_event_id: h.id(),
+            request_digest: String::new(),
+            now_ms: h.now(),
+        };
+        let r = apply_cards(
+            &tx,
+            &p,
+            &mut body,
+            &Authority::read(&crate::writer::worker::Tx(
+                &rusqlite::Connection::open(&h.hub).unwrap(),
+            ))
+            .unwrap(),
+            super::super::proposal_tests::clean().as_ref(),
+        )
+        .unwrap();
+        assert_eq!(r.as_ref().map(|r| r.status), Some(403));
+        assert_eq!(body["state"], "pending");
+        assert_eq!(
+            ops::head(&tx, "fleet", "a").unwrap().unwrap().revision,
+            rev(&a)
+        );
+    }
     #[tokio::test]
     async fn apply_boundary_requires_read_and_review_on_each_target_scope() {
         for scope in ["repo:restricted", "collection:notes"] {
@@ -865,6 +1113,7 @@ mod tests {
                     &tx,
                     &p,
                     &mut body,
+                    &Authority::default(),
                     &Fixed(Scan::Clean {
                         ruleset: "test-v7".into(),
                     }),

@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from . import memory_hub_client as hubc
 from . import memory_proposal_io as io
 from . import memory_reflect_candidates as derive
 from .memory_evidence_log import LOG_PATH, MAX_SCAN_BYTES, EvidenceLog
@@ -134,15 +135,21 @@ def _evidence_log(target: Path) -> EvidenceLog:
 def register(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("reflect", help="Derive cited memory candidates without editing cards.")
     commands = parser.add_subparsers(dest="memory_reflect_command", required=True)
-    for name in ("run", "status", "candidates", "show", "propose", "preflight"):
+    for name in ("run", "status", "candidates", "show", "propose", "preflight", "rollback"):
         command = commands.add_parser(name, help=f"{name.capitalize()} deterministic memory reflection candidates.")
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
         if name == "run":
+            command.add_argument(
+                "--hub", action="store_true", help="Require hub memory, never fall back to local cards."
+            )
+            command.add_argument("--scheduled", action="store_true", help="Skip a hub run paused after three failures.")
             command.add_argument("--scope", help="Exact card frontmatter scope (missing scope means repo).")
             command.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Candidate limit from 1 to 100.")
             command.add_argument("--dry-run", action="store_true", help="Print metadata diffs and duplicate summaries.")
-        elif name in ("show", "propose", "preflight"):
+        elif name == "rollback":
+            command.add_argument("proposal_id", help="Applied hub proposal to compensate. Requires separate review.")
+        elif name in ("show", "propose", "preflight", "rollback"):
             command.add_argument("candidate_id")
             if name == "preflight":
                 command.add_argument("--policy", help="Target-relative diagnostic policy JSON.")
@@ -270,7 +277,11 @@ def inspect_payload(*, target: Path, command: str, candidate_id: str | None = No
         raise ValueError("invalid candidate id")
     runs, invalid = _runs(target)
     if command == "status":
+        from .memory_reflect_hub import schedule_summary
+
+        schedule = schedule_summary(target)
         return {
+            "schedule": schedule,
             "status": "ok",
             "run_count": len(runs),
             "invalid_runs": invalid,
@@ -317,7 +328,18 @@ def dispatch(args: argparse.Namespace) -> int:
         with io.directory(target):
             pass
         if args.memory_reflect_command == "run":
-            payload = run_payload(target=target, scope=args.scope, limit=args.limit, dry_run=args.dry_run)
+            from . import memory_reflect_hub
+
+            if args.hub or args.scheduled or hubc.hub_mode(target) != "off":
+                payload = memory_reflect_hub.run_payload(
+                    target=target, scope=args.scope, limit=args.limit, dry_run=args.dry_run, scheduled=args.scheduled
+                )
+            else:
+                payload = run_payload(target=target, scope=args.scope, limit=args.limit, dry_run=args.dry_run)
+        elif args.memory_reflect_command == "rollback":
+            from .memory_reflect_hub import rollback_payload
+
+            payload = rollback_payload(target=target, proposal_id=args.proposal_id)
         elif args.memory_reflect_command == "propose":
             from .memory_proposal_v2_reflect import propose_payload
 
@@ -326,6 +348,8 @@ def dispatch(args: argparse.Namespace) -> int:
             payload = inspect_payload(
                 target=target, command=args.memory_reflect_command, candidate_id=getattr(args, "candidate_id", None)
             )
+    except (hubc.HubUnavailable, hubc.HubRefusal) as exc:
+        payload = {"status": "refused", "error": exc.code if isinstance(exc, hubc.HubRefusal) else "hub unavailable"}
     except (OSError, ValueError, UnicodeError, RecursionError) as exc:
         payload = {"status": "refused", "error": str(exc)}
     if args.json:
@@ -334,9 +358,31 @@ def dispatch(args: argparse.Namespace) -> int:
         print(f"memory reflect: {payload.get('status', payload.get('kind', 'ok'))}")
         if "error" in payload:
             print(_terminal_text(f"error: {payload['error']}"))
+            if "reason" in payload:
+                print(_terminal_text(f"reason: {payload['reason']}"))
         if args.memory_reflect_command == "propose" and "id" in payload:
             print(_terminal_text(f"{payload['id']} digest: {payload['digest']}"))
             print(_terminal_text(payload["diff"]))
+        if payload.get("backend") == "hub":
+            print(f"hub candidates: {payload['candidate_count']}, proposals: {len(payload['proposals'])}")
+            schedule = payload["schedule"]
+            print(
+                f"schedule: paused={str(schedule['paused']).lower()}, consecutive_failures={schedule['consecutive_failures']}"
+            )
+            for refused in payload.get("refused_ops", []):
+                print(_terminal_text(f"refused: {refused['op_digest']} {refused['code']}"))
+            for reason, count in sorted(payload.get("skipped_reasons", {}).items()):
+                print(_terminal_text(f"skipped: {reason}={count}"))
+            for proposal in payload["proposals"]:
+                print(_terminal_text(f"proposal: {proposal['proposal_id']} (separate decision required)"))
+        if payload.get("status") == "paused":
+            print("scheduled reflection is paused. Run memory reflect run --hub manually to resume after a success.")
+        if args.memory_reflect_command == "rollback" and "proposal" in payload:
+            print(
+                _terminal_text(
+                    f"compensating proposal: {payload['proposal'].get('proposal_id')} (separate decision required)"
+                )
+            )
         if "latest_run" in payload:
             print(json.dumps(payload, sort_keys=True, indent=2))
         candidates = payload.get("candidates", [payload] if "candidate_id" in payload else [])

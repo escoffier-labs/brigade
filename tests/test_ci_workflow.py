@@ -2796,6 +2796,8 @@ def test_windows_verifier_is_resolved_before_path_is_replaced():
         "tests/fixtures/memory-scan-private.json",
         "tests/fixtures/memory-scan-secrets.json",
         "tests/test_memory_scan_private.py",
+        "tests/test_memory_scan_nfkc.py",
+        "tests/fixtures/memory-scan-nfkc.json",
         "tests/memory_scan_adversarial.py",
     ],
 )

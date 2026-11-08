@@ -14,6 +14,8 @@ from brigade import memory_bm25
 from brigade.memory_cmd import search_cards_payload
 
 from .corpus import CardDoc
+from .hub import HubAdapter, HubOptions
+from brigade.memory_hub_client import MemoryHubClient
 
 _TOKEN_RE = re.compile(r"[a-z0-9_]+", re.IGNORECASE)
 
@@ -169,6 +171,8 @@ def build_adapters(
     cards: Sequence[CardDoc],
     *,
     wanted: Sequence[str],
+    hub: MemoryHubClient | None = None,
+    hub_options: HubOptions | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Return adapter metadata and callables keyed by adapter name."""
     adapters: dict[str, dict[str, Any]] = {}
@@ -195,4 +199,16 @@ def build_adapters(
             "reason": reason,
             "search": semantic_fn,
         }
+    for name, mode in (("hub-lexical", "lexical"), ("hub-hybrid", "hybrid")):
+        if name in wanted:
+            available = hub is not None
+            if hub and mode == "hybrid":
+                status = hub.call("status").get("retrieval", {})
+                available = status.get("effective") == "hybrid" and status.get("state") == "ok"
+            search = HubAdapter(hub, mode, hub_options or HubOptions(), cards) if hub and available else None
+            adapters[name] = {
+                "available": search is not None,
+                "reason": None if search else "hub binary or requested embedder unavailable",
+                "search": search,
+            }
     return adapters

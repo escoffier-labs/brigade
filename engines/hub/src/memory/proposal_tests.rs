@@ -202,12 +202,9 @@ async fn target_scope_grants_guard_propose_decide_apply_and_rollback_including_c
             403
         );
         grant(&h, scope, &["read", "reflect"]).await;
-        assert_eq!(
-            submit(&h, AGENT_TOKEN, vec![op(scope, "a", rev(&a))])
-                .await
-                .status,
-            201
-        );
+        let mut distinct = op(scope, "a", rev(&a));
+        distinct["text"] = json!("Use the targeted gate.");
+        assert_eq!(submit(&h, AGENT_TOKEN, vec![distinct]).await.status, 201);
         assert_eq!(
             decide(&h, AGENT_TOKEN, &opened.body["proposal_id"])
                 .await
@@ -245,7 +242,7 @@ async fn schema_v3_upgrades_without_changing_epoch_or_cards() {
     let old_max: i64 = db
         .query_row("SELECT max(seq) FROM memory_events", [], |r| r.get(0))
         .unwrap();
-    db.execute_batch("DROP TABLE IF EXISTS memory_proposals; PRAGMA user_version=3;")
+    db.execute_batch("DROP TABLE IF EXISTS memory_retrieval_evals; DROP TABLE IF EXISTS memory_proposals; DROP TABLE IF EXISTS memory_evidence; PRAGMA user_version=3;")
         .unwrap();
     drop(db);
     h.open(clean(), None);
@@ -256,7 +253,7 @@ async fn schema_v3_upgrades_without_changing_epoch_or_cards() {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        4
+        schema::USER_VERSION
     );
     let next = h
         .put(ADMIN_TOKEN, "fleet", "after-upgrade", None, "Next card.")
@@ -527,7 +524,7 @@ async fn policy_change_since_open_stales_the_decision() {
     let h = Hub::with(clean(), None);
     let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
     let opened = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
-    Connection::open(&h.hub).unwrap().execute_batch("INSERT INTO fleet_policy_revisions VALUES(2,'policy-digest-2'); UPDATE fleet_policy_meta SET current_revision=2;").unwrap();
+    Connection::open(&h.hub).unwrap().execute_batch("INSERT INTO fleet_policy_revisions(revision,digest) VALUES(2,'policy-digest-2'); UPDATE fleet_policy_meta SET current_revision=2;").unwrap();
     let before = card(&h, "fleet", "a").await;
     let r = decide(&h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
     assert_eq!(r.body["state"], "stale");
@@ -704,7 +701,7 @@ async fn changed_policy_requires_fresh_decision_bound_to_current_digest() {
         let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
         let opened = submit(&h, ADMIN_TOKEN, vec![evidence_op("fleet", "a", rev(&a))]).await;
         let request = json!({"action":"decide","proposal_id":opened.body["proposal_id"],"decision":decision,"base_epoch":h.epoch().await,"client_event_id":h.id()});
-        Connection::open(&h.hub).unwrap().execute_batch("INSERT INTO fleet_policy_revisions VALUES(2,'policy-digest-2'); UPDATE fleet_policy_meta SET current_revision=2;").unwrap();
+        Connection::open(&h.hub).unwrap().execute_batch("INSERT INTO fleet_policy_revisions(revision,digest) VALUES(2,'policy-digest-2'); UPDATE fleet_policy_meta SET current_revision=2;").unwrap();
         let before = card(&h, "fleet", "a").await;
         let first = h.call(ADMIN_TOKEN, request.clone()).await;
         assert_eq!(first.body["decision_policy_digest"], "policy-digest-2");
@@ -783,11 +780,21 @@ async fn policy_removal_binds_decision_to_absence_instead_of_old_digest() {
 async fn claimed_higher_tiers_are_ignored_and_mixed_ops_take_highest_tier() {
     let h = Hub::with(clean(), None);
     let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let mut existing = Json::Null;
     for claimed in [json!(2), json!("unknown"), json!({"tier":0})] {
         let mut evidence = evidence_op("fleet", "a", rev(&a));
         evidence["tier"] = claimed.clone();
         let r = h.call(ADMIN_TOKEN, json!({"action":"propose","tier":claimed,"ops":[evidence],"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
-        assert_eq!(r.status, 201, "{r:?}");
+        if existing.is_null() {
+            assert_eq!(r.status, 201);
+            existing = r.body["proposal_id"].clone();
+        } else {
+            assert_eq!(
+                (r.status, code(&r)),
+                (409, "memory_proposal_duplicate_pending")
+            );
+            assert_eq!(r.body["proposal_id"], existing);
+        }
         assert_eq!(r.body["tier"], 0);
     }
     for reverse in [false, true] {
@@ -816,7 +823,7 @@ fn stored_proposal(h: &Hub, id: &Json) -> String {
 fn edit_policy(h: &Hub, revision: i64, digest: &str) {
     let db = Connection::open(&h.hub).unwrap();
     db.execute(
-        "INSERT INTO fleet_policy_revisions VALUES(?1,?2)",
+        "INSERT INTO fleet_policy_revisions(revision,digest) VALUES(?1,?2)",
         rusqlite::params![revision, digest],
     )
     .unwrap();

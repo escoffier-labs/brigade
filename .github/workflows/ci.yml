@@ -173,6 +173,8 @@ jobs:
               - 'tests/fixtures/memory-scan-private.json'
               - 'tests/fixtures/memory-scan-secrets.json'
               - 'tests/test_memory_scan_private.py'
+              - 'tests/test_memory_scan_nfkc.py'
+              - 'tests/fixtures/memory-scan-nfkc.json'
               - 'tests/memory_scan_adversarial.py'
               - 'src/brigade/fleet_hub_server.py'
               - 'tests/test_fleet_hub_server.py'
