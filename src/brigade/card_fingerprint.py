@@ -128,7 +128,9 @@ def read_text_nofollow(
     """Read UTF-8 text without following a symlinked final path component."""
     has_nofollow = hasattr(os, "O_NOFOLLOW")
     if has_nofollow:
-        flags = os.O_RDONLY | os.O_NOFOLLOW
+        # O_NONBLOCK keeps a path swapped for a FIFO from blocking the open before the
+        # regular-file check below. It is cleared again once the type is confirmed.
+        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
         try:
             fd = os.open(path, flags)
         except OSError as exc:
@@ -153,6 +155,8 @@ def read_text_nofollow(
             raise OSError(f"refusing symlinked path: {path}")
         if not stat.S_ISREG(st.st_mode):
             raise OSError(f"card path is not a regular file: {path}")
+        if has_nofollow and hasattr(os, "O_NONBLOCK"):
+            os.set_blocking(fd, True)
         data = _read_fd_to_bytes(fd, read_fn=read_fn)
     finally:
         os.close(fd)

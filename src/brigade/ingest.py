@@ -493,7 +493,8 @@ def _read_card_child(parent: int, name: str) -> tuple[bytes, int] | None:
     """Exact bytes and mode of a card read relative to a held parent, or None when absent."""
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if dirfd.posix_available():
-        flags = dirfd.file_flags(flags)
+        # Non-blocking, so a card swapped for a FIFO fails the type check instead of hanging the open.
+        flags = dirfd.file_flags(flags | getattr(os, "O_NONBLOCK", 0))
     try:
         descriptor = dirfd.open_child_file(parent, name, flags, 0)
     except FileNotFoundError:
@@ -502,6 +503,8 @@ def _read_card_child(parent: int, name: str) -> tuple[bytes, int] | None:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise OSError("publication must be a single-link regular file")
+        if dirfd.posix_available():
+            os.set_blocking(descriptor, True)
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
             return handle.read(), metadata.st_mode
@@ -649,13 +652,17 @@ def _append_document_nofollow(target: Path, dest: Path, text: str) -> None:
     resolved = root / relative
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
     if dirfd.posix_available():
-        flags = dirfd.file_flags(flags)  # adds O_NOFOLLOW; the Windows backend refuses reparse points itself
+        # O_NOFOLLOW; the Windows backend refuses reparse points itself. O_NONBLOCK makes a FIFO
+        # fail the open (no reader) or the type check below instead of hanging.
+        flags = dirfd.file_flags(flags | getattr(os, "O_NONBLOCK", 0))
     parent = dirfd.open_directory_chain(resolved.parent, create=True)
     try:
         descriptor = dirfd.open_child_file(parent, resolved.name, flags, 0o644)
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 raise OSError("target document is not a regular file")
+            if dirfd.posix_available():
+                os.set_blocking(descriptor, True)
             with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
                 descriptor = -1
                 handle.write(text)

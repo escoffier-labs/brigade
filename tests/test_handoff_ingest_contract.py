@@ -7,8 +7,10 @@ without writing a file.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
+import signal
 import json
 from pathlib import Path
 
@@ -911,3 +913,97 @@ def test_a_stable_parent_identity_still_publishes(tmp_path: Path, monkeypatch):
     outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
     monkeypatch.setattr(ingest_mod, "_directory_identity", lambda descriptor: (1, 1))
     assert _execute(ws, handoff, outcome).kind == "promoted"
+
+
+# --- review round 5: a FIFO where a card or document should be ------------------
+
+posix_only = pytest.mark.skipif(
+    not (hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM")), reason="needs POSIX FIFOs and SIGALRM"
+)
+
+
+@contextlib.contextmanager
+def _no_hang(seconds: int = 10):
+    """Fail the test instead of hanging it if a blocking open never returns."""
+
+    def expired(signum, frame):
+        raise TimeoutError("open blocked on a FIFO")
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+@posix_only
+def test_a_card_swapped_for_a_fifo_is_routed_to_review_without_hanging(tmp_path: Path):
+    ws, handoff = _update_handoff(tmp_path)
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
+    card = ws / "memory" / "cards" / "contract-card.md"
+    card.unlink()
+    os.mkfifo(card)
+    with _no_hang():
+        action = _execute(ws, handoff, outcome)
+    assert action.kind == "inboxed"
+    assert card.is_fifo()
+    assert not list(card.parent.glob(".contract-card.md.*"))
+
+
+@posix_only
+def test_a_new_card_over_a_fifo_is_routed_to_review_without_hanging(tmp_path: Path):
+    ws = _workspace(tmp_path, card=None)
+    payload = _draft(tmp_path, action="create-card", target_card="fresh-card.md", content=CARD)
+    handoff = Path(payload["path"])
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
+    assert outcome.kind == "promoted"
+    os.mkfifo(ws / "memory" / "cards" / "fresh-card.md")
+    with _no_hang():
+        assert _execute(ws, handoff, outcome).kind == "inboxed"
+
+
+@posix_only
+def test_shared_card_reader_refuses_a_fifo_without_blocking(tmp_path: Path):
+    from brigade.card_fingerprint import read_text_nofollow
+
+    fifo = tmp_path / "card.md"
+    os.mkfifo(fifo)
+    with _no_hang(), pytest.raises(OSError, match="not a regular file"):
+        read_text_nofollow(fifo)
+
+
+@posix_only
+def test_a_document_append_over_a_fifo_fails_without_blocking(tmp_path: Path, monkeypatch):
+    ws, _ = _escape_setup(tmp_path)
+    (ws / "rules").mkdir()
+    payload = drafts.build_draft(
+        target=ws,
+        title="T",
+        summary="S.",
+        action="no-card",
+        target_document="rules/team.md",
+        content="Do it.",
+        inbox=str(ws / "in"),
+    )
+    handoff = Path(payload["path"])
+    os.mkfifo(ws / "rules" / "team.md")  # swapped in after the draft passed lint
+    # The path check catches the FIFO first. Disable it to prove the open itself cannot hang.
+    monkeypatch.setattr(ingest_mod, "document_destination_problem", lambda *args, **kwargs: None)
+    outcome = ingest_mod.Outcome("routed", dest=ws / "rules" / "team.md")
+    with _no_hang():
+        assert _execute(ws, handoff, outcome).kind == "inboxed"
+
+
+@posix_only
+def test_regular_cards_and_documents_still_read_and_write_after_the_nonblocking_open(tmp_path: Path):
+    ws, handoff = _update_handoff(tmp_path)
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
+    with _no_hang():
+        assert _execute(ws, handoff, outcome).kind == "promoted"
+    card = ws / "memory" / "cards" / "contract-card.md"
+    assert b"revised" in card.read_bytes()
+    from brigade.card_fingerprint import read_text_nofollow
+
+    assert "revised" in read_text_nofollow(card)
