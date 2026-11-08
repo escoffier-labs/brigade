@@ -119,3 +119,50 @@ def test_reflect_replacement_command_fits_cmd_limit(tmp_path):
 
     command = care_cmd._schtasks_create_command(care_cmd.MEMORY_REFLECT_ENTRY, workspace=tmp_path / "reflect folder")
     assert len(command) <= 8191
+
+
+@pytest.mark.parametrize("entry_id", ["daily-care", "scoped-memory-reflect"])
+def test_printed_windows_plan_matches_acceptance_grammar(tmp_path, monkeypatch, entry_id):
+    """Mirror Assert-EncodedCarePlan in scripts/windows-native-acceptance.ps1."""
+    import base64
+    import dataclasses
+    import re
+
+    from brigade import care_cmd
+    from brigade.isolated_exec import trusted_cwd
+    from tests._home import set_home
+
+    set_home(monkeypatch, tmp_path / "home")
+    if entry_id == "daily-care":
+        entry = next(item for item in care_cmd.CARE_ENTRIES if item.entry_id == "daily-care")
+    else:
+        entry = dataclasses.replace(care_cmd.MEMORY_REFLECT_ENTRY, reflect_scope="repo:example")
+    command = care_cmd._schtasks_create_command(entry, workspace=tmp_path / "care folder")
+    prefix = care_windows.POWERSHELL_EXE + " -NoProfile -NonInteractive -EncodedCommand "
+    assert command.startswith(prefix)
+    script = base64.b64decode(command.removeprefix(prefix)).decode("utf-16le")
+
+    def literal(value):
+        return "'" + value.replace("'", "''") + "'"
+
+    match = re.search(r"\$action\.Arguments=(?P<value>'(?:[^']|'')*');", script)
+    assert match, "care action arguments missing"
+    raw = match.group("value")
+    name = care_cmd._schtasks_task_name(entry)
+    schedule = care_cmd._schtasks_schedule_flags(entry.schedule)
+    expected = (
+        f"$ErrorActionPreference='Stop'; & 'C:\\Windows\\System32\\schtasks.exe' /Create /TN '{name}' "
+        f"/TR 'C:\\Windows\\System32\\cmd.exe /d /c exit 1' {schedule} /RU $env:USERNAME /IT /F; "
+        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
+        "$service=New-Object -ComObject Schedule.Service; $service.Connect(); "
+        "$folder=$service.GetFolder('\\'); "
+        f"$definition=$folder.GetTask('{name}').Definition; "
+        "$action=$definition.Actions.Item(1); "
+        f"$action.Path={literal(sys.executable)}; $action.Arguments={raw}; "
+        f"$action.WorkingDirectory={literal(str(trusted_cwd()))}; "
+        f"$folder.RegisterTaskDefinition('{name}',$definition,6,$null,$null,3,$null) | Out-Null"
+    )
+    assert script == expected
+    arguments = care_windows.split_windows_argv(raw[1:-1].replace("''", "'"))
+    if entry.reflect_scope is not None:
+        assert arguments[-2:] == ["--scope", "repo:example"]
