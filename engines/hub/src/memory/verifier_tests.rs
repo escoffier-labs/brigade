@@ -699,9 +699,93 @@ async fn a_list_that_over_reports_after_a_lost_commit_is_repaired_on_restart() {
     let read = || -> Json { serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap() };
     assert_eq!(read()["verifiers"], json!(["agent:dot"]));
     h.open(clean(), None);
-    // The committed set, at the generation the lost change announced.
+    // The committed set at the memory file's own generation, not relabeled
+    // to the one the lost change announced, so policy writes stay held.
     assert_eq!(read()["verifiers"], json!([]));
-    assert_eq!(read()["generation"], json!(1));
+    assert_eq!((read()["generation"].clone(), announced(&h)), (json!(0), 1));
+    assert_eq!(resync(&h).await.status, 200);
+    assert_eq!((read()["generation"].clone(), announced(&h)), (json!(2), 2));
+}
+
+async fn resync(h: &Hub) -> Reply {
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"verifier_resync","client_event_id":h.id()}),
+    )
+    .await
+}
+fn set_announced(h: &Hub, generation: i64) {
+    Connection::open(&h.hub)
+        .unwrap()
+        .execute(
+            "INSERT INTO hub_meta VALUES('memory_verifier_generation',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [generation.to_string()],
+        )
+        .unwrap();
+}
+async fn generation_state(h: &Hub) -> Json {
+    status(h, ADMIN_TOKEN).await.body["verifier_generation"].clone()
+}
+
+#[tokio::test]
+async fn a_memory_file_restored_below_the_hub_is_not_relabeled() {
+    let mut h = Hub::with(clean(), None);
+    assert_eq!(flag(&h, "agent:dot", true).await.status, 200);
+    assert_eq!(flag(&h, "node-1", true).await.status, 200);
+    assert_eq!(
+        generation_state(&h).await,
+        json!({"memory":2,"hub":2,"current":true})
+    );
+    h.store.take();
+    // Restore the memory file to its state at generation 1.
+    Connection::open(h.memory())
+        .unwrap()
+        .execute_batch(
+            "DELETE FROM memory_verifiers WHERE principal='node-1';
+             DELETE FROM memory_verifier_credentials WHERE principal='node-1';
+             UPDATE memory_meta SET value='1' WHERE key='verifier_generation';",
+        )
+        .unwrap();
+    h.open(clean(), None);
+    let list: Json =
+        serde_json::from_slice(&std::fs::read(verifier::sidecar(&h.memory())).unwrap()).unwrap();
+    assert_eq!(list["generation"], json!(1));
+    assert_eq!(list["verifiers"], json!(["agent:dot"]));
+    assert_eq!(announced(&h), 2);
+    assert_eq!(
+        generation_state(&h).await,
+        json!({"memory":1,"hub":2,"current":false})
+    );
+    // The repair: an admin action announces 3 and memory stores it.
+    let r = resync(&h).await;
+    assert_eq!(r.status, 200, "{r:?}");
+    assert_eq!(r.body["verifiers"], json!(["agent:dot"]));
+    assert_eq!((listed_generation(&h), announced(&h)), (json!(3), 3));
+    assert_eq!(
+        generation_state(&h).await,
+        json!({"memory":3,"hub":3,"current":true})
+    );
+}
+
+#[tokio::test]
+async fn a_hub_restored_below_memory_stays_mismatched_until_a_flag_change() {
+    let mut h = Hub::with(clean(), None);
+    assert_eq!(flag(&h, "agent:dot", true).await.status, 200);
+    assert_eq!(flag(&h, "node-1", true).await.status, 200);
+    h.store.take();
+    // Restore the hub file, and the list beside it, to generation 1.
+    set_announced(&h, 1);
+    verifier::publish(&h.memory(), 1, &["agent:dot".to_string()]).unwrap();
+    h.open(clean(), None);
+    // Start republishes at memory's own generation, so the pair disagrees.
+    assert_eq!((listed_generation(&h), announced(&h)), (json!(2), 1));
+    assert_eq!(
+        generation_state(&h).await,
+        json!({"memory":2,"hub":1,"current":false})
+    );
+    // Any admin flag change repairs it: it announces past both.
+    assert_eq!(flag(&h, "agent:dot", true).await.status, 200);
+    assert_eq!((listed_generation(&h), announced(&h)), (json!(3), 3));
 }
 
 fn announced(h: &Hub) -> i64 {
@@ -736,7 +820,7 @@ async fn a_valid_list_left_at_an_older_generation_is_republished_on_restart() {
 }
 
 #[tokio::test]
-async fn a_refused_flag_change_republishes_at_its_announced_generation() {
+async fn a_flag_change_refused_for_a_listed_principal_announces_nothing() {
     let h = Hub::with(clean(), None);
     policy(
         &h,
@@ -744,8 +828,8 @@ async fn a_refused_flag_change_republishes_at_its_announced_generation() {
     );
     let r = flag(&h, "agent:dot", true).await;
     assert_eq!(code(&r), "memory_policy_verifier_listed");
-    // The announcement stands, so the list must reach it or hold policy writes.
-    assert_eq!((listed_generation(&h), announced(&h)), (json!(1), 1));
+    // Refused before anything was announced, so the pair still matches.
+    assert_eq!((listed_generation(&h), announced(&h)), (json!(0), 0));
     assert_eq!(principal_flag(&h, "agent:dot"), None);
 }
 

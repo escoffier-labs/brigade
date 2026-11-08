@@ -190,35 +190,44 @@ impl HubLock {
 }
 
 /// Publish the flagged principal ids `db` sees, plus `retained`, beside the
-/// memory file, labeled with the newest of `db`'s generation and `announced`.
+/// memory file, labeled with `db`'s own generation. A list is never relabeled
+/// to match the hub: a generation that differs from the hub's is what tells
+/// the policy writer that one of the two files was restored or a change was
+/// lost.
 fn publish_set(
     db: &Connection,
     memory: &std::path::Path,
     retained: &std::collections::BTreeSet<String>,
-    announced: i64,
 ) -> Result<(), String> {
     let tx = worker::Tx(db);
     let mut list = super::verifier::principals(&tx).map_err(|e| e.to_string())?;
-    let generation = super::verifier::db_generation(&tx)
-        .map_err(|e| e.to_string())?
-        .max(announced);
+    let generation = super::verifier::db_generation(&tx).map_err(|e| e.to_string())?;
     list.extend(retained.iter().cloned());
     list.sort();
     list.dedup();
     super::verifier::publish(memory, generation, &list).map_err(|e| e.to_string())
 }
 
-/// Publish the committed set at the hub's current generation, read through
-/// `hub`. Startup and every batch that held a flag change call this. A flag
-/// change that never committed announced a generation its list can now carry,
-/// because the committed set is what is true.
+/// Publish the committed set at the memory file's generation. Startup and
+/// every batch that held a flag change call this. When the hub file announced
+/// a different generation, the list stays mismatched, policy writes that list
+/// a reflect principal stay refused, and the operator is told how to repair it.
 fn publish_verifiers(
     db: &Connection,
     hub: &Connection,
     memory: &std::path::Path,
 ) -> Result<(), String> {
+    publish_set(db, memory, &Default::default())?;
+    let committed = super::verifier::db_generation(&worker::Tx(db)).map_err(|e| e.to_string())?;
     let announced = super::verifier::hub_generation(&worker::Tx(hub)).map_err(|e| e.to_string())?;
-    publish_set(db, memory, &Default::default(), announced)
+    if committed != announced {
+        eprintln!(
+            "WARN memory verifier generation {committed} differs from the hub's {announced}, \
+             so fleet policy writes that list a reflect principal are refused. If either \
+             database was restored, run the admin memory action verifier_resync"
+        );
+    }
+    Ok(())
 }
 
 /// A flag change publishes inside its own savepoint, before the batch commits.
@@ -231,19 +240,19 @@ fn publish_pending(
     action: &ops::Action,
     retained: &mut std::collections::BTreeSet<String>,
 ) -> Result<(), Reply> {
-    let ops::Action::Verifier {
-        principal,
-        verifier,
-        ..
-    } = action
-    else {
-        return Ok(());
-    };
-    if !verifier {
-        retained.insert(principal.clone());
+    match action {
+        ops::Action::Verifier {
+            principal,
+            verifier: false,
+            ..
+        } => {
+            retained.insert(principal.clone());
+        }
+        ops::Action::Verifier { .. } | ops::Action::VerifierResync { .. } => {}
+        _ => return Ok(()),
     }
     // The change stored its announced generation in this transaction.
-    publish_set(db, memory, retained, 0).map_err(|e| {
+    publish_set(db, memory, retained).map_err(|e| {
         eprintln!("WARN memory verifier list not published, flag change refused: {e}");
         ops::error(
             503,
@@ -895,9 +904,12 @@ pub(crate) fn run(
         // failure leaves a list whose generation holds policy writes until the
         // next flag change or start replaces it.
         if committed
-            && results
-                .iter()
-                .any(|(p, _)| matches!(p.command.action, ops::Action::Verifier { .. }))
+            && results.iter().any(|(p, _)| {
+                matches!(
+                    p.command.action,
+                    ops::Action::Verifier { .. } | ops::Action::VerifierResync { .. }
+                )
+            })
         {
             if let Err(e) = publish_verifiers(&db, &hub.db, &config.memory) {
                 eprintln!("WARN memory verifier list not republished: {e}");

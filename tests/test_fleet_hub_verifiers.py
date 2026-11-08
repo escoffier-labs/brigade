@@ -126,6 +126,38 @@ def test_a_missing_list_after_memory_init_refuses_a_listing_policy(conn, tmp_pat
     assert _save(conn, ["agent:any"], expected=2)["revision"] == 3
 
 
+def test_a_list_from_a_newer_memory_than_a_restored_hub_is_refused(conn):
+    # Memory reached generation 8 and flagged agent:verify, then the hub file
+    # was restored to a copy at generation 6. The list republished at start
+    # carries 8.
+    _announce(conn, 6)
+    _publish(conn, ["agent:verify"], generation=8)
+    for reflect in (["agent:verify"], ["agent:other"]):
+        with pytest.raises(fleet_hub_verifiers.VerifierListed) as refused:
+            _save(conn, reflect, expected=1)
+        assert refused.value.code == "memory_policy_verifier_list_stale"
+    # The repair: an admin verifier action announces 9 and memory stores it.
+    _announce(conn, 9)
+    _publish(conn, ["agent:verify"], generation=9)
+    with pytest.raises(fleet_hub_verifiers.VerifierListed) as refused:
+        _save(conn, ["agent:verify"], expected=1)
+    assert refused.value.code == "memory_policy_verifier_listed"
+    assert _save(conn, ["agent:other"], expected=1)["revision"] == 2
+
+
+def test_a_hub_and_list_restored_together_below_memory_are_refused_after_restart(conn):
+    # The hub file and the list were both restored to generation 6 while memory
+    # is at 8. Accepting the matched pair would under-report, so memory's start
+    # republishes at its own generation 8 and the pair no longer matches.
+    _announce(conn, 6)
+    _publish(conn, [], generation=6)
+    assert _save(conn, ["agent:verify"], expected=1)["revision"] == 2
+    _publish(conn, ["agent:verify"], generation=8)
+    with pytest.raises(fleet_hub_verifiers.VerifierListed) as refused:
+        _save(conn, ["agent:other"], expected=2)
+    assert refused.value.code == "memory_policy_verifier_list_stale"
+
+
 def test_a_valid_list_at_an_older_generation_is_refused(conn):
     # A flag change announced generation 2 and committed, but its list never
     # landed: the file still holds generation 1, before the principal was flagged.
@@ -142,6 +174,3 @@ def test_a_valid_list_at_an_older_generation_is_refused(conn):
         _save(conn, ["agent:verify"], expected=2)
     assert refused.value.code == "memory_policy_verifier_listed"
     assert _save(conn, ["agent:other"], expected=2)["revision"] == 3
-    # A list newer than the hub's record (a hub file restored from an older copy) is current.
-    _publish(conn, [], generation=5)
-    assert _save(conn, ["agent:verify"], expected=3)["revision"] == 4

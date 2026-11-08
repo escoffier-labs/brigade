@@ -13,10 +13,13 @@ over-report flagged principals but never under-report them.
 The list is bound to the flag state by a generation. Before a flag change
 reaches the memory writer, the Rust hub writer durably records the change's
 generation in ``hub_meta`` under ``memory_verifier_generation``, and every list
-the memory writer publishes carries the generation it reflects. A list whose
-generation is below the hub's is one a crash or a failed startup republish left
-behind, and it refuses any policy that lists a reflect principal, whatever
-principals it names.
+the memory writer publishes carries the memory file's own generation, never a
+relabeled one. Only a list at exactly the hub's generation is current. A lower
+generation is a list a crash or a failed startup republish left behind, or a
+restored memory file. A higher one is a restored hub file. Either refuses any
+policy that lists a reflect principal, whatever principals it names, until an
+admin ``verifier`` or ``verifier_resync`` memory action announces a new
+generation and stores it in both files.
 
 Every policy revision is written inside ``BEGIN IMMEDIATE`` on the hub
 database, and this module reads the file inside that transaction. A flag change
@@ -110,10 +113,11 @@ def flagged(conn: sqlite3.Connection) -> frozenset[str]:
     except ValueError as exc:
         raise VerifierListed(f"{UNREADABLE}: the memory verifier list is malformed", code=UNREADABLE) from exc
     expected = hub_generation(conn)
-    if generation < expected:
+    if generation != expected:
         raise VerifierListed(
             f"{STALE}: the memory verifier list is at generation {generation} but the hub announced {expected}. "
-            "Restart hub memory so it republishes the list",
+            "Restart hub memory so it republishes the list, and if either database was restored, "
+            "run the admin memory action verifier_resync",
             code=STALE,
         )
     return frozenset(verifiers)

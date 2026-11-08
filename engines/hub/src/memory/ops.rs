@@ -66,6 +66,11 @@ pub enum Action {
         /// Announced in the hub file before the command reaches the writer.
         generation: i64,
     },
+    /// Admin only: store a newly announced generation and republish the list,
+    /// changing no flag. The repair after either database is restored.
+    VerifierResync {
+        generation: i64,
+    },
     /// Native registration binds a credential's flag copy before issuing it.
     VerifierBind {
         principal: String,
@@ -100,6 +105,7 @@ impl Action {
             Action::Grant { .. } => "grant",
             Action::Verifier { .. } => "verifier",
             Action::VerifierBind { .. } => "verifier.bind",
+            Action::VerifierResync { .. } => "verifier_resync",
             #[cfg(test)]
             Action::PolicyProbe => "probe",
         }
@@ -135,6 +141,7 @@ impl Action {
             Action::Grant { .. }
             | Action::Rescan { .. }
             | Action::Verifier { .. }
+            | Action::VerifierResync { .. }
             | Action::VerifierBind { .. } => (None, "admin"),
             #[cfg(test)]
             Action::PolicyProbe => (None, "read"),
@@ -987,6 +994,7 @@ fn run(
             digest,
             requested,
         } => super::verifier::bind(tx, p, principal, class, digest, *requested),
+        Action::VerifierResync { generation } => super::verifier::resync(tx, p, *generation),
         #[cfg(test)]
         Action::PolicyProbe => Ok(Reply::new(
             200,

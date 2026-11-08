@@ -787,14 +787,36 @@ impl Store {
             return unavailable("no hub writer");
         };
         let _turn = self.verifier_turn.lock().await;
-        let announced = match self
+        let (announced, policy) = match self
             .hub
-            .submit(|db| verifier::hub_generation(&Conn(db)))
+            .submit(|db| {
+                let tx = Conn(db);
+                Ok((
+                    verifier::hub_generation(&tx)?,
+                    ops::Authority::read(&tx)?.policy_document,
+                ))
+            })
             .await
         {
-            Ok(g) => g,
+            Ok(read) => read,
             _ => return unavailable("hub read"),
         };
+        // Refuse a listed principal before announcing anything. The writer
+        // checks again under the hub lock.
+        if let Action::Verifier {
+            principal,
+            verifier: true,
+            ..
+        } = &prepared.action
+        {
+            if verifier::listed(&policy, principal) {
+                return error(
+                    409,
+                    "memory_policy_verifier_listed",
+                    "the current fleet policy lists this principal in memory.reflect_principals. Remove it from the policy before flagging it",
+                );
+            }
+        }
         let committed = match self
             .readers
             .submit(|db| verifier::db_generation(&Conn(db)))
@@ -807,7 +829,9 @@ impl Store {
         if !log.record(next).await {
             return unavailable("hub write");
         }
-        if let Action::Verifier { generation, .. } = &mut prepared.action {
+        if let Action::Verifier { generation, .. } | Action::VerifierResync { generation } =
+            &mut prepared.action
+        {
             *generation = next;
         }
         self.write(prepared).await
@@ -951,7 +975,7 @@ impl Store {
                 Ok(prepared) => self.write(prepared).await,
                 Err(reply) => reply,
             },
-            "verifier" => match self.prepare(credential, action, map, &raw) {
+            "verifier" | "verifier_resync" => match self.prepare(credential, action, map, &raw) {
                 Ok(prepared) => self.verifier_change(prepared).await,
                 Err(reply) => reply,
             },
@@ -1088,6 +1112,7 @@ impl Store {
             "auto_apply" => &["action", "proposal_id", "base_epoch", "client_event_id"],
             "auto_apply_switch" => &["action", "enabled", "client_event_id"],
             "verifier" => &["action", "principal", "verifier", "client_event_id"],
+            "verifier_resync" => &["action", "client_event_id"],
             "evidence.purge" => &["action", "evidence_id", "client_event_id"],
             "retrieval_eval.record" => {
                 &["action", "report_json", "report_sha256", "client_event_id"]
@@ -1158,6 +1183,7 @@ impl Store {
             action,
             "grant"
                 | "verifier"
+                | "verifier_resync"
                 | "rescan"
                 | "auto_apply_switch"
                 | "evidence.purge"
@@ -1248,6 +1274,7 @@ impl Store {
         let action = match action {
             "retrieval_eval.record" => Action::RetrievalEval(retrieval_eval::prepare(raw)?),
             "evidence.purge" => Action::EvidencePurge(short("evidence_id", 1024, true)?.unwrap()),
+            "verifier_resync" => Action::VerifierResync { generation: 0 },
             "verifier" => Action::Verifier {
                 principal: str_field("principal")
                     .filter(|p| ids::valid_principal(p) && *p != ADMIN)
@@ -1708,10 +1735,19 @@ impl Store {
                     let principal = reader.principal().to_string();
                     reply.body["reflect_principal"] = match self
                         .hub
-                        .submit(move |db| ops::Authority::read(&Conn(db)))
+                        .submit(move |db| {
+                            let tx = Conn(db);
+                            Ok((ops::Authority::read(&tx)?, verifier::hub_generation(&tx)?))
+                        })
                         .await
                     {
-                        Ok(authority) => {
+                        Ok((authority, announced)) => {
+                            // Policy writes that list a reflect principal are
+                            // refused until these two match (D4).
+                            let state = &mut reply.body["verifier_generation"];
+                            let current = state["memory"] == announced;
+                            state["hub"] = json!(announced);
+                            state["current"] = json!(current);
                             json!(verifier::listed(&authority.policy_document, &principal))
                         }
                         Err(_) => {
@@ -1868,6 +1904,7 @@ fn reads<T: ReadTx + ?Sized>(
                     "principal": credential.principal(),
                     "credential": credential.class(),
                     "verifier": verifier::flagged(tx, credential.principal())?,
+                    "verifier_generation": {"memory": verifier::db_generation(tx)?},
                     "capabilities": [verifier::CAPABILITY],
                 }),
             );

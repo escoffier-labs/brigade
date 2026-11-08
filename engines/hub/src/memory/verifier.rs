@@ -24,10 +24,12 @@
 //! reaches the memory writer, the hub writer durably records the next
 //! generation in `hub_meta` (`memory_verifier_generation`), a table Python
 //! already reads. The change stores it in `memory_meta`, and every published
-//! list carries the generation it reflects. Python refuses a list whose
-//! generation is below the hub's, so a list that a crash left behind, or that
-//! a failed startup republish could not replace, holds policy writes instead
-//! of passing as current.
+//! list carries the memory file's own generation, never a relabeled one.
+//! Python accepts a list only at exactly the hub's generation, so a list a
+//! crash left behind, one a failed startup republish could not replace, or one
+//! from a restored copy of either database holds policy writes instead of
+//! passing as current. An admin `verifier` or `verifier_resync` action
+//! announces a new generation and stores it in both files, which repairs it.
 use super::{
     Reply,
     attestation::credential_id,
@@ -181,10 +183,7 @@ pub fn set(
         ));
     }
     let stamp = ids::isoformat(p.now_ms);
-    tx.execute(
-        "INSERT INTO memory_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        &[t(DB_GENERATION_KEY), t(&generation.to_string())],
-    )?;
+    store_generation(tx, generation)?;
     let flag = Value::Integer(i64::from(verifier));
     tx.execute(
         "INSERT INTO memory_verifiers(principal,verifier,updated_at,updated_by) VALUES(?1,?2,?3,?4) ON CONFLICT(principal) DO UPDATE SET verifier=excluded.verifier,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
@@ -224,6 +223,41 @@ pub fn set(
     Ok(Reply::new(
         200,
         json!({"verifier": change, "live_credentials": live}),
+    ))
+}
+
+fn store_generation(tx: &dyn WriteTx, generation: i64) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO memory_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        &[t(DB_GENERATION_KEY), t(&generation.to_string())],
+    )?;
+    Ok(())
+}
+
+/// The admin `verifier_resync` action. Stores the generation the hub just
+/// announced and changes no flag, so the list the writer publishes before
+/// commit matches the hub again. Use it after restoring either database.
+pub fn resync(tx: &dyn WriteTx, p: &Prepared, generation: i64) -> rusqlite::Result<Reply> {
+    store_generation(tx, generation)?;
+    append(
+        tx,
+        p,
+        NewEvent {
+            kind: "grant.change",
+            scope: None,
+            card_id: None,
+            changes_head: false,
+            base_revision: None,
+            content_hash: None,
+            trust: None,
+            origin: None,
+            payload: json!({"verifier_generation": generation}),
+            policy_digest: None,
+        },
+    )?;
+    Ok(Reply::new(
+        200,
+        json!({"verifier_generation": generation, "verifiers": principals(tx)?}),
     ))
 }
 

@@ -2022,13 +2022,37 @@ any policy that lists a reflect principal, with
 The list is bound to the flag state by a generation. Before a flag change
 reaches the memory writer, the hub writer durably records the next generation
 in `hub_meta` under `memory_verifier_generation`. The change stores it in the
-memory file, and every list carries the generation it reflects. The list is
-written to a synced temporary file, renamed, and the directory is synced
-before the change commits. If the generation cannot be recorded, the change is
-refused with `503 memory_verifier_generation_unavailable`. A policy write that
-finds the list below the hub's generation, because a crash lost the list or a
-start could not replace it, refuses any policy that lists a reflect principal,
-with `memory_policy_verifier_list_stale`. Hub memory does not start when its
-startup republish fails, so the stale list keeps holding those policy writes
-until a start succeeds. A list at a higher generation than `hub_meta`, after
-the hub file is restored from an older copy, is accepted.
+memory file, and every list carries the memory file's own generation. The
+writer never relabels a list to match the hub. The list is written to a
+synced temporary file, renamed, and the directory is synced before the change
+commits. If the generation cannot be recorded, the change is refused with
+`503 memory_verifier_generation_unavailable`. A flag request for a principal
+the policy lists is refused before anything is announced.
+
+The policy writer accepts the list only at exactly the hub's generation. Any
+other value refuses every policy that lists a reflect principal, with
+`memory_policy_verifier_list_stale`. A lower list generation means a crash lost
+the list, a start could not replace it, or the memory file was restored from
+an older copy. A higher one means the hub file was restored. Hub memory does
+not start when its startup republish fails, so a stale list keeps holding
+those policy writes. `status` reports `verifier_generation` with the memory
+file's generation (`memory`), the hub's (`hub`) and whether they match
+(`current`), and the hub logs a warning at start and after each flag change
+while they differ.
+
+### Recovery after restoring either database
+
+After restoring the hub database, the memory database or both, start the hub
+and check `status`. If `verifier_generation.current` is false, run the admin
+`verifier_resync` memory action:
+
+```json
+{"action":"verifier_resync","client_event_id":"<26-character time-ordered id>"}
+```
+
+It announces a generation past both files, stores it in the memory file
+without changing any flag, republishes the list and replies with the flagged
+principals. Any admin `verifier` action, setting or clearing a flag, repairs
+it the same way. Review the replied principals against the policy before
+listing reflect principals again: a restored memory file holds the flags it
+had when it was copied.
