@@ -668,6 +668,127 @@ def test_late_write_keeps_worktree(tmp_path: Path, monkeypatch):
     assert linked.exists()
 
 
+def _late_append_on_unlink(monkeypatch, source: Path, data: bytes, state: dict) -> int:
+    """Open a writer before rescue and append `data` right before the claim
+    is unlinked. Sets state["late"] once the append happened."""
+    writer = os.open(source, os.O_WRONLY | os.O_APPEND)
+    real_unlink = handoff_worktrees.dirfd.unlink_child
+
+    def unlink_child(parent, name, **kwargs):
+        if name.startswith(".brigade-claim-"):
+            os.write(writer, data)
+            state["late"] = True
+        return real_unlink(parent, name, **kwargs)
+
+    monkeypatch.setattr(handoff_worktrees.dirfd, "unlink_child", unlink_child)
+    return writer
+
+
+def _fail_late_temps_in(monkeypatch, state: dict, *directories: Path) -> None:
+    """After the late append, refuse new rescue temp files in `directories`."""
+    real_open = handoff_worktrees.dirfd.open_child_file
+    blocked = {(d.stat().st_dev, d.stat().st_ino) for d in directories}
+
+    def open_child_file(parent, name, flags, *args, **kwargs):
+        info = os.fstat(parent)
+        if state.get("late") and name.startswith(".brigade-rescue-") and (info.st_dev, info.st_ino) in blocked:
+            raise OSError(28, "No space left on device")
+        return real_open(parent, name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(handoff_worktrees.dirfd, "open_child_file", open_child_file)
+
+
+def test_late_append_past_the_cap_is_preserved(tmp_path: Path, monkeypatch, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    source = _handoff(inbox, "2026-11-08-0900-slow.md", "first part")
+    monkeypatch.setattr(handoff_worktrees, "MAX_HANDOFF_BYTES", 200)
+    tail = b"x" * 1000 + b"\n"
+    state: dict = {}
+    writer = _late_append_on_unlink(monkeypatch, source, tail, state)
+    try:
+        runguard.remove_worktree(main, linked, force=True)
+    finally:
+        os.close(writer)
+
+    assert linked.exists()
+    assert "late-write-oversize-recovered" in capsys.readouterr().err
+    (recovered,) = list((main / ".claude" / "memory-handoffs").glob(".late-oversize-*.md.recovered"))
+    assert recovered.read_bytes().endswith(tail)
+    assert recovered.stat().st_size > 1000
+
+
+def test_late_write_falls_back_to_source_inbox(tmp_path: Path, monkeypatch, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    source = _handoff(inbox, "2026-11-08-0900-slow.md", "first part")
+    dest = main / ".claude" / "memory-handoffs"
+    state: dict = {}
+    writer = _late_append_on_unlink(monkeypatch, source, b"late tail\n", state)
+    _fail_late_temps_in(monkeypatch, state, dest)
+    try:
+        runguard.remove_worktree(main, linked, force=True)
+    finally:
+        os.close(writer)
+
+    assert linked.exists()
+    assert "late-write-kept-in-source" in capsys.readouterr().err
+    (kept,) = list(inbox.glob("2026-11-08-0900-slow-late-*.md"))
+    assert kept.read_text() == _HANDOFF.format(summary="first part") + "late tail\n"
+    assert not list(dest.glob(".brigade-rescue-*"))
+
+
+def test_late_write_double_failure_keeps_worktree_without_stray_temps(tmp_path: Path, monkeypatch, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    source = _handoff(inbox, "2026-11-08-0900-slow.md", "first part")
+    dest = main / ".claude" / "memory-handoffs"
+    state: dict = {}
+    writer = _late_append_on_unlink(monkeypatch, source, b"late tail\n", state)
+    _fail_late_temps_in(monkeypatch, state, dest, inbox)
+    try:
+        runguard.remove_worktree(main, linked, force=True)
+    finally:
+        os.close(writer)
+
+    assert linked.exists()
+    assert "late-write-unrecoverable" in capsys.readouterr().err
+    assert not list(dest.glob(".brigade-rescue-*"))
+    assert not list(inbox.glob(".brigade-rescue-*"))
+
+
+def test_tracked_but_deleted_destination_name_is_not_reused(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    dest = main / ".claude" / "memory-handoffs"
+    tracked = _handoff(dest, "pending.md", "older committed handoff")
+    _git(main, "add", "-f", "--", str(tracked.relative_to(main)))
+    _git(main, "commit", "-q", "-m", "track")
+    tracked.unlink()  # still in the index, gone from the working tree
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "pending.md", "fresh worktree handoff")
+
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    assert [r.state for r in results] == ["delivered"]
+    assert not (dest / "pending.md").exists()
+    (published,) = list(dest.glob("pending-*.md"))
+    assert published.read_text() == _HANDOFF.format(summary="fresh worktree handoff")
+    assert ingest_mod.run(main) == 0
+    assert len(list((main / "memory" / "handoff-inbox").glob("*pending-*.md"))) == 1
+
+
+def test_unknown_destination_tracking_fails_the_rescue(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-pending.md", "pending")
+    real = handoff_worktrees._tracked
+    dest = (main / ".claude" / "memory-handoffs").resolve()
+    monkeypatch.setattr(handoff_worktrees, "_tracked", lambda inbox: None if inbox == dest else real(inbox))
+
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    assert [(r.state, r.reason) for r in results] == [("failed", "destination-unavailable")]
+    assert pending.is_file()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX link fallback")
 def test_link_fallback_never_overwrites_a_racing_file(tmp_path: Path, monkeypatch):
     (tmp_path / "a.md").write_text("claimed")

@@ -16,7 +16,9 @@ atomic no-replace rename, copies it, and keeps the claimed file open across
 its unlink so a late write through an older descriptor is still seen and
 republished. Residual risk: a writer that stalls longer than the quiescence
 window mid-write and then writes to the already-unlinked inode after the
-post-unlink check loses those bytes. Closing that needs an atomic
+post-unlink check loses those bytes, and so does a late write whose
+recovery fails in both the destination and the source inbox (for example a
+full disk on both filesystems). Closing that needs an atomic
 publication contract for handoff writers (write a private temp, fsync,
 publish with a no-replace rename), tracked in escoffier-labs/brigade#2397.
 """
@@ -420,14 +422,13 @@ def _digest_index(parent: int, skip: tuple[set[str], set[tuple[int, int]]] | Non
     return known
 
 
-def _known_digests(dest_fd: int, inbox: Path) -> set[str]:
+def _known_digests(dest_fd: int, tracked: tuple[set[str], set[tuple[int, int]]]) -> set[str]:
     """Content ingest will see or has already archived at the destination.
 
     A git-tracked file in the inbox is never ingested, so its bytes do not
-    count as delivered. If tracking is unknown, only `processed/` counts.
+    count as delivered.
     """
-    tracked = _tracked(inbox)
-    known = _digest_index(dest_fd, tracked) if tracked is not None else set()
+    known = _digest_index(dest_fd, tracked)
     try:
         processed = dirfd.open_child_directory(dest_fd, "processed", writable=False)
     except FileNotFoundError:
@@ -456,9 +457,14 @@ class _Dest:
     def __init__(self, root: Path | None) -> None:
         self.root = root
         self.root_fd: int | None = None
-        self.inboxes: dict[tuple[str, ...], tuple[int, set[str]]] = {}
+        self.inboxes: dict[tuple[str, ...], tuple[int, set[str], frozenset[str]]] = {}
 
-    def inbox(self, parts: tuple[str, ...]) -> tuple[int, set[str]]:
+    def inbox(self, parts: tuple[str, ...]) -> tuple[int, set[str], frozenset[str]]:
+        """Held inbox fd, digests ingest will see, and tracked names (casefolded).
+
+        Ingest skips git-tracked names, so a rescue must never publish under
+        one. Unknown tracking raises instead of guessing.
+        """
         if parts not in self.inboxes:
             if self.root is None:
                 raise OSError("no verified main checkout")
@@ -467,15 +473,18 @@ class _Dest:
             fd = _walk(self.root_fd, parts, create=True)
             assert fd is not None
             try:
-                known = _known_digests(fd, self.root.resolve(strict=True).joinpath(*parts))
+                tracked = _tracked(self.root.resolve(strict=True).joinpath(*parts))
+                if tracked is None:
+                    raise OSError("destination git tracking unknown")
+                known = _known_digests(fd, tracked)
             except BaseException:
                 os.close(fd)
                 raise
-            self.inboxes[parts] = (fd, known)
+            self.inboxes[parts] = (fd, known, frozenset(n.casefold() for n in tracked[0]))
         return self.inboxes[parts]
 
     def close(self) -> None:
-        for fd, _ in self.inboxes.values():
+        for fd, _, _ in self.inboxes.values():
             os.close(fd)
         if self.root_fd is not None:
             os.close(self.root_fd)
@@ -548,7 +557,7 @@ def _quiet(info: os.stat_result) -> bool:
     return time.time() - info.st_mtime >= QUIESCENCE_SECONDS
 
 
-def _publish_bytes(dest_fd: int, raw: bytes, names: tuple[str, ...]) -> str:
+def _publish_bytes(dest_fd: int, raw: bytes, names: tuple[str, ...], forbidden: frozenset[str]) -> str:
     """Publish `raw` under the first free name, never replacing anything.
 
     The bytes go to a temp name the ingesters ignore, are fsynced and read
@@ -570,7 +579,8 @@ def _publish_bytes(dest_fd: int, raw: bytes, names: tuple[str, ...]) -> str:
         if digest(copied) != sha:
             raise OSError("copy verification failed")
         for final in dict.fromkeys(names):
-            if _child_exists(dest_fd, final):
+            # A tracked name is skipped by ingest even when its file is gone.
+            if final.casefold() in forbidden or _child_exists(dest_fd, final):
                 continue
             try:
                 dirfd.replace_children(dest_fd, temp, final, replace=False)
@@ -584,6 +594,84 @@ def _publish_bytes(dest_fd: int, raw: bytes, names: tuple[str, ...]) -> str:
         if created:
             try:
                 dirfd.unlink_child(dest_fd, temp)
+            except OSError:
+                pass
+
+
+def _late_write(held: int, delivered: os.stat_result, sha: str) -> bool:
+    """True when the unlinked inode changed after delivery (or cannot be read).
+
+    Uses a streaming hash with no size cap, so an oversized late append is
+    detected rather than raised.
+    """
+    try:
+        after = os.fstat(held)
+        if (after.st_size, after.st_mtime_ns) != (delivered.st_size, delivered.st_mtime_ns):
+            return True
+        os.lseek(held, 0, os.SEEK_SET)
+        hasher = hashlib.sha256()
+        while chunk := os.read(held, 1 << 16):
+            hasher.update(chunk)
+        return hasher.hexdigest() != sha
+    except OSError:
+        return True
+
+
+def _recover_late(directory: int, held: int, stem: str, forbidden: frozenset[str]) -> tuple[str, bool]:
+    """Stream every byte of the held inode into a new file under `directory`.
+
+    No ingest size cap applies: recovery keeps whatever is there. Content
+    within the cap becomes `<stem>-late-<sha>.md`. Larger content gets a
+    name ingest skips. Returns (published name, oversize). The temp file is
+    removed on any failure.
+    """
+    temp = f"{_TEMP_PREFIX}{uuid.uuid4().hex}{_TEMP_SUFFIX}"
+    out = dirfd.open_child_file(directory, temp, _write_flags(), 0o644)
+    created = True
+    try:
+        hasher = hashlib.sha256()
+        size = 0
+        try:
+            os.lseek(held, 0, os.SEEK_SET)
+            while chunk := os.read(held, 1 << 16):
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(out, view) :]
+                hasher.update(chunk)
+                size += len(chunk)
+            os.fsync(out)
+        finally:
+            os.close(out)
+        sha = hasher.hexdigest()
+        check = dirfd.open_child_file(directory, temp, _read_flags())
+        try:
+            verify = hashlib.sha256()
+            while chunk := os.read(check, 1 << 16):
+                verify.update(chunk)
+        finally:
+            os.close(check)
+        if verify.hexdigest() != sha:
+            raise OSError("late copy verification failed")
+        oversize = size > MAX_HANDOFF_BYTES
+        if oversize:
+            names: tuple[str, ...] = (f".late-oversize-{uuid.uuid4().hex}.md.recovered",)
+        else:
+            names = (f"{stem}-late-{sha[:12]}.md", f"{stem}-late-{uuid.uuid4().hex[:8]}.md")
+        for final in names:
+            if final.casefold() in forbidden or _child_exists(directory, final):
+                continue
+            try:
+                dirfd.replace_children(directory, temp, final, replace=False)
+            except FileExistsError:
+                continue
+            created = False
+            dirfd.fsync_directory(directory)
+            return final, oversize
+        raise FileExistsError(errno.EEXIST, "no free recovery name", names[0])
+    finally:
+        if created:
+            try:
+                dirfd.unlink_child(directory, temp)
             except OSError:
                 pass
 
@@ -634,12 +722,17 @@ def _rescue_one(
             return Rescue(source, "failed", reason="source-too-recent")
         raw = _read_fd(held)
         sha = digest(raw)
-        dest_fd, known = dest.inbox(parts)
+        dest_fd, known, dest_tracked = dest.inbox(parts)
         published: str | None = None
         if sha in known:
             state = "duplicate"
         else:
-            published = _publish_bytes(dest_fd, raw, (name, f"{stem}-{sha[:12]}.md"))
+            published = _publish_bytes(
+                dest_fd,
+                raw,
+                (name, f"{stem}-{sha[:12]}.md", f"{stem}-{uuid.uuid4().hex[:8]}.md"),
+                dest_tracked,
+            )
             known.add(sha)
             state = "delivered"
         # The claimed bytes must still be the bytes that were delivered.
@@ -648,19 +741,30 @@ def _rescue_one(
         delivered = os.fstat(held)
         dirfd.unlink_child(src_fd, claim)
         claimed = False
-        dirfd.fsync_directory(src_fd)
-        # A writer holding a descriptor from before the claim can still write
-        # to the unlinked inode. Read it once more through the held handle.
-        after = os.fstat(held)
-        late = _read_fd(held)
-        if (after.st_size, after.st_mtime_ns) != (delivered.st_size, delivered.st_mtime_ns) or digest(late) != sha:
-            late_name = _publish_bytes(
-                dest_fd, late, (f"{stem}-late-{digest(late)[:12]}.md", f"{stem}-late-{uuid.uuid4().hex[:8]}.md")
-            )
-            late_path = str(dest.root.joinpath(*parts, late_name)) if dest.root else None
-            return Rescue(source, "failed", dest=late_path, reason="late-write-republished")
-        dest_path = str(dest.root.joinpath(*parts, published)) if dest.root and published else None
-        return Rescue(source, state, dest=dest_path)
+        # From here the held handle is the only reference to these bytes. No
+        # error may close it before a late write is durable somewhere.
+        late = _late_write(held, delivered, sha)
+        try:
+            dirfd.fsync_directory(src_fd)
+        except OSError:
+            pass  # the unlink not reaching disk only re-delivers a duplicate
+        if not late:
+            dest_path = str(dest.root.joinpath(*parts, published)) if dest.root and published else None
+            return Rescue(source, state, dest=dest_path)
+        dest_root = dest.root.joinpath(*parts) if dest.root else None
+        source_tracked = frozenset(n.casefold() for n in tracked_names)
+        targets = (("dest", dest_fd, dest_root, dest_tracked), ("source", src_fd, Path(label), source_tracked))
+        for where, directory, base, forbidden in targets:
+            try:
+                kept, oversize = _recover_late(directory, held, stem, forbidden)
+            except OSError:
+                continue
+            if where == "dest":
+                reason = "late-write-oversize-recovered" if oversize else "late-write-republished"
+            else:
+                reason = "late-write-kept-in-source"
+            return Rescue(source, "failed", dest=str(base / kept) if base else None, reason=reason)
+        return Rescue(source, "failed", reason="late-write-unrecoverable")
     except OSError:
         return Rescue(source, "failed", reason="rescue-io-error")
     finally:
