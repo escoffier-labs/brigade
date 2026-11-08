@@ -769,6 +769,7 @@ def test_tracked_but_deleted_destination_name_is_not_reused(tmp_path: Path):
     results = handoff_worktrees.rescue_pending_handoffs(linked, main)
 
     assert [r.state for r in results] == ["delivered"]
+    assert not pending.exists()
     assert not (dest / "pending.md").exists()
     (published,) = list(dest.glob("pending-*.md"))
     assert published.read_text() == _HANDOFF.format(summary="fresh worktree handoff")
@@ -939,6 +940,17 @@ def test_stop_hint_points_linked_worktree_at_main_checkout(tmp_path: Path):
     assert hook_runtime._is_handoff_path(linked, str(main_inbox / "note.md"))
     assert hook_runtime._is_handoff_path(linked, str(linked / ".claude" / "memory-handoffs" / "note.md"))
     assert not hook_runtime._is_handoff_path(linked, str(linked / "src" / "note.md"))
+
+
+def test_stop_note_keeps_salience_rule_and_names_main_inbox(tmp_path: Path):
+    from brigade.claude_hooks.handoff_close import HANDOFF_STOP_NOTE, handoff_stop_note
+
+    main, linked = _repo_with_worktree(tmp_path)
+    assert handoff_stop_note(main) == HANDOFF_STOP_NOTE
+    note = handoff_stop_note(linked)
+    assert str((main / ".claude" / "memory-handoffs").resolve()) in note
+    assert "Nothing durable: <reason>" in note
+    assert "brigade handoff draft" in note
 
 
 def test_handoff_since_sees_main_checkout_inbox(tmp_path: Path):

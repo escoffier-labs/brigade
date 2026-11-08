@@ -1817,8 +1817,8 @@ counted. Reads answered by a local replica never reach the hub.
 
 The tables hold scope, card id, day and counts. No principal, query text, time
 of day, client address or result rank is stored. The counts are not part of
-the event log, replication or any policy digest. In this release no read
-action returns them.
+the event log, replication or any policy digest. Only the `read_stats` action
+below returns them.
 
 Counting never fails or slows a read, and flushing never delays a write. Each
 hub process adds reads to an in-memory accumulator. The memory writer flushes
@@ -1873,3 +1873,75 @@ sweep that uses its whole row budget in either stage runs again while the
 writer is idle. `/metrics` reports each budget that bites as
 `brigade_hub_memory_read_count_budget_total{budget="..."}` and lost increments
 as `brigade_hub_memory_read_count_dropped_total`.
+
+### Reading the counts (`read_stats`)
+
+`read_stats` returns per-card aggregates for one scope. It needs one grant
+that names the exact scope and holds both `read` and `read_stats`. `read`
+from `*`, `repo:*` or a node default does not count, no wildcard carries
+`read_stats`, and `reflect` does not imply it. A caller without that grant
+gets `403 memory_grant_missing`. Grant it to a verifier principal like this:
+
+```json
+{"action":"grant","principal":"agent:verify","scope":"repo:example/one","rights":["read","reflect","read_stats"],"client_event_id":"<26-character time-ordered id>"}
+```
+
+| Request field | Meaning |
+|---|---|
+| `scope` | Required. One scope, never a wildcard |
+| `limit` | Optional, 1 to 1000, default 1000 |
+| `after` | Optional. The previous page's `next_after` |
+
+The reply holds `scope`, `rows`, `next_after` and `read_counts_since_day`. Each
+row holds `card_id`, `reads_7d` and `reads_30d` (search hits plus first-chunk
+card reads over the UTC days ending today), `last_read_day` (UTC days since
+1970-01-01) and `total_reads`. Only live cards that have been read are listed,
+in card id order. Counts not yet flushed are not included.
+
+`next_after` is an opaque handle. It is valid for 15 minutes, for the same
+principal, scope and log epoch, and until the hub restarts. Any other handle
+is refused with `400 memory_request_invalid`. Restart the listing without
+`after`.
+
+One principal may make one `read_stats` request per second and 600 per UTC
+day. Over that the hub answers `429 memory_read_stats_rate_limited`. A refused
+request does not use up the quota. The limits live in memory and reset when
+the hub restarts.
+
+Every request is recorded in the hub's `fleet_audit_log`, and `GET /audit`
+with the admin token lists the rows. The memory event log is not used, so the
+record does not replicate to card readers. The rows are bounded before
+anything reaches the hub writer:
+
+| Row | When | Detail |
+|---|---|---|
+| `memory.read_stats` | Once per admitted request, whatever its answer (200, 400, 403) | `scope` when valid, `count` rows returned, `status` |
+| `memory.read_stats_refused` | At most once per principal per hour | `count` requests refused with 429 since that principal's previous summary, at most 1,000,000 (the audit reader's bound), with any remainder carried into the next summary, `status` 429 |
+
+Actor and subject are the caller. The hub writes at most 20,000 rows of both
+kinds per UTC day. Once that is spent, every `read_stats` request is refused
+with 429 until the day ends, and refusals wait in memory for the next summary.
+The hub tracks at most 4,096 principals a day. Refusals from principals past
+that share one summary under the actor `read-stats-untracked`. A restart
+forgets refusals not yet summarized. Since `fleet_audit_log` is append-only,
+this cap, not a retention sweep, bounds the table: at most 20,000
+`read_stats` rows per day.
+
+Audit rows never take writer capacity other families need. At most 4 audit
+inserts are queued or running on the hub writer at once, admission is
+non-durable, and a row that finds no free slot is dropped at once. An admitted
+request whose row is not committed is answered
+`503 memory_action_unavailable` with no rows. A summary row that is not
+committed goes back into the next summary. The hub writer also starts when hub
+memory is the only native family.
+
+Counts carry no principal, but in a scope that one principal reads they
+describe that principal's activity per card per day. Grant `read_stats` on
+such a scope only to a principal that the reader would accept seeing it, and
+treat the audit log as the record of who looked.
+
+`brigade.memory_hub_client.read_stats(client, scope, after=..., limit=...)`
+reads one page. It asks `status` first and refuses the admin credential, as
+reflect does, and it rejects a reply with any field beyond the documented
+ones. Remote connector profiles (Dot, Duet and Grok Bot memory), fleet digests,
+proposal listings and search replies never carry counts.

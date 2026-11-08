@@ -34,6 +34,7 @@ from . import (
     write_attribution,
 )
 from .fingerprint import repo_worktree_fingerprint
+from .handoff_close import closes_nothing_durable as _closes_nothing_durable, handoff_stop_note as _handoff_stop_note
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
 from .session_state import (
@@ -2522,6 +2523,7 @@ def _handle_event(
         shared_tree_notes: list[str] = []
         handoff_target: Path | None = None
         context_target: Path | None = None
+        closed_without_handoff = _closes_nothing_durable(payload)
         for stop_target in _stop_targets(payload, session_id, task_epoch=task_epoch):
             if not stop_target.is_dir():
                 continue
@@ -2569,6 +2571,8 @@ def _handle_event(
                     + "\n- ".join(blocking_failures)
                 ),
             }
+        if closed_without_handoff:
+            handoff_target = None
         if shared_tree_notes:
             records = [
                 "Verification is recorded for this session. Closeout is not blocked because a concurrent "
@@ -2576,10 +2580,7 @@ def _handle_event(
                 *shared_tree_notes,
             ]
             if handoff_target is not None:
-                records.append(
-                    "If this work produced durable knowledge, write a Memory Handoff in "
-                    f"{handoff_worktrees.stop_hint(handoff_target)} before finishing."
-                )
+                records.append(_handoff_stop_note(handoff_target))
             return _additional_context(
                 "Stop",
                 "",
@@ -2593,10 +2594,7 @@ def _handle_event(
                 "",
                 target=handoff_target,
                 session_id=session_id,
-                records=[
-                    "Verification is recorded. If this work produced durable knowledge, write a Memory Handoff in "
-                    f"{handoff_worktrees.stop_hint(handoff_target)} before finishing.",
-                ],
+                records=[f"Verification is recorded. {_handoff_stop_note(handoff_target)}"],
             )
     return None
 

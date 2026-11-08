@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -98,6 +99,7 @@ ACTIONS = (
     "hub.identity",
     "hub.migration",
     "statement.upload",
+    "memory.read_stats",
 )
 
 
@@ -738,3 +740,90 @@ def test_known_public_identity_context_must_be_structural_and_used(conn, context
             conn, actor="admin", action="grants.change", subject="fixture", detail={}, known_public_identifiers=context
         )
     assert audit.page(conn) == []
+
+
+@pytest.mark.parametrize(
+    ("actor", "detail"),
+    [
+        ("agent:verify", {"scope": "repo:github.com/example/one", "count": 1000, "status": 200}),
+        ("node-1", {"scope": "collection:vault/notes", "count": 0, "status": 403}),
+        ("admin", {"scope": "principal:agent:verify", "count": 0, "status": 429}),
+        ("agent:verify", {"count": 0, "status": 400}),
+        ("agent:verify", {"scope": "fleet", "count": 0, "status": 503}),
+    ],
+)
+def test_hub_read_stats_rows_page_back_as_written(conn, actor, detail):
+    # The Rust hub writes these rows directly: actor and subject are the caller,
+    # detail is the scope, the rows returned and the HTTP status.
+    conn.execute(
+        "INSERT INTO fleet_audit_log(at,actor,action,subject,detail) VALUES(?,?,?,?,?)",
+        ("2026-11-08T00:00:00.000000+00:00", actor, "memory.read_stats", actor, json.dumps(detail)),
+    )
+    row = audit.page(conn)[0]
+    assert (row["actor"], row["action"], row["subject"], row["detail"]) == (actor, "memory.read_stats", actor, detail)
+
+
+@pytest.mark.parametrize("actor", ["agent:verify", "node-1", "admin", "read-stats-untracked"])
+def test_hub_read_stats_refusal_summaries_page_back(conn, actor):
+    # One summary row per principal per hour: count is the refusals merged into it.
+    detail = {"count": 5000, "status": 429}
+    conn.execute(
+        "INSERT INTO fleet_audit_log(at,actor,action,subject,detail) VALUES(?,?,?,?,?)",
+        ("2026-11-08T00:00:00.000000+00:00", actor, "memory.read_stats_refused", actor, json.dumps(detail)),
+    )
+    row = audit.page(conn)[0]
+    assert (row["actor"], row["action"], row["detail"]) == (actor, "memory.read_stats_refused", detail)
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        {"scope": "repo:"},
+        {"scope": "repo:a b"},
+        {"scope": "repo:a*b"},
+        {"scope": "collection:" + "a" * 201},
+        {"scope": "principal:Agent:Bad"},
+        {"scope": "somewhere"},
+        {"scope": ["fleet"]},
+        {"scope": "repo:example/ghp_abcdefghijklmnop"},
+        {"status": 99},
+        {"status": 600},
+        {"status": True},
+        {"status": "200"},
+    ],
+)
+def test_read_stats_scope_and_status_are_bounded(conn, detail):
+    with pytest.raises(ValueError, match="invalid audit (scope|status)"):
+        audit.append(conn, actor="agent:verify", action="memory.read_stats", subject="agent:verify", detail=detail)
+    assert conn.execute("SELECT COUNT(*) FROM fleet_audit_log").fetchone() == (0,)
+
+
+def test_refusal_summary_count_bound_matches_the_hub():
+    # The hub caps each summary at SUMMARY_COUNT_MAX and carries the rest, so
+    # every count it writes stays inside the reader's bound.
+    source = (Path(__file__).resolve().parents[1] / "engines/hub/src/memory/read_stats.rs").read_text()
+    match = re.search(r"pub const SUMMARY_COUNT_MAX: u32 = ([0-9_]+);", source)
+    assert match is not None
+    assert int(match.group(1).replace("_", "")) == audit.COUNT_MAX
+
+
+def test_refusal_summary_at_the_bound_pages_back_and_past_it_is_refused(conn):
+    conn.execute(
+        "INSERT INTO fleet_audit_log(at,actor,action,subject,detail) VALUES(?,?,?,?,?)",
+        (
+            "2026-11-08T00:00:00.000000+00:00",
+            "agent:verify",
+            "memory.read_stats_refused",
+            "agent:verify",
+            json.dumps({"count": audit.COUNT_MAX, "status": 429}),
+        ),
+    )
+    assert audit.page(conn)[0]["detail"] == {"count": audit.COUNT_MAX, "status": 429}
+    with pytest.raises(ValueError, match="invalid audit count"):
+        audit.append(
+            conn,
+            actor="agent:verify",
+            action="memory.read_stats_refused",
+            subject="agent:verify",
+            detail={"count": audit.COUNT_MAX + 1, "status": 429},
+        )

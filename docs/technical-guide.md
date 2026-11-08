@@ -68,6 +68,8 @@ One memory owner stays canonical.
 That is typically OpenClaw or Hermes when present, otherwise `this-repo`.
 Writer harnesses drop handoffs into their own inboxes, and the ingester scans all of them.
 
+A handoff is written on judgment, not after every edit. Write one only when the session produced knowledge a later session cannot get from the repo, git history or an existing card: a root cause, a decision with its reason, a new operational fact, or a stated preference. Run `brigade memory search` first and update the card you would otherwise restate. Write it with `brigade handoff draft`. If nothing qualifies, end the session with one line, `Nothing durable: <reason>`, and write no file. A code or config edit alone is not a reason.
+
 ![Brigade Stack keeps agents local and reviewable](assets/technical-guide-design.svg)
 
 The ingester is intentionally conservative.
