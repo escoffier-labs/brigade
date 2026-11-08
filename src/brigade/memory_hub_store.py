@@ -39,6 +39,8 @@ import stat
 from pathlib import Path
 from typing import Any, Iterator
 
+from . import memory_hub_replica_limits as limits
+
 PARENT_REL = ".brigade/memory"
 ROOT_REL = ".brigade/memory/hub"
 REPLICA = "replica"
@@ -149,21 +151,26 @@ def write_private(path: Path, data: str) -> None:
         raise
 
 
-def read_private(path: Path) -> str | None:
+def read_private(path: Path, *, max_bytes: int | None = None) -> str | None:
     if path.is_symlink():
         raise StoreError(f"{path} is a symlink")
     try:
-        fd = os.open(path, os.O_RDONLY | _NOFOLLOW | _CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | _NOFOLLOW | _CLOEXEC | getattr(os, "O_NONBLOCK", 0))
     except FileNotFoundError:
         return None
     with os.fdopen(fd, "r", encoding="utf-8") as handle:
         if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
             raise StoreError(f"{path} is not a regular file")
-        return handle.read()
+        if max_bytes is not None and os.fstat(handle.fileno()).st_size > max_bytes:
+            raise limits.ReplicaLimitError("metadata")
+        raw = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
+        if max_bytes is not None and len(raw.encode("utf-8")) > max_bytes:
+            raise limits.ReplicaLimitError("metadata")
+        return raw
 
 
-def read_json(path: Path) -> Any:
-    raw = read_private(path)
+def read_json(path: Path, *, max_bytes: int | None = None) -> Any:
+    raw = read_private(path, max_bytes=max_bytes)
     if raw is None:
         return None
     try:
@@ -193,9 +200,15 @@ class Replica:
 
     def __init__(self, directory: Path) -> None:
         self.directory = directory
-        meta = read_json(directory / "meta.json") if directory.is_dir() else None
+        meta = read_json(directory / "meta.json", max_bytes=limits.MAX_META_BYTES) if directory.is_dir() else None
         self.meta: dict[str, Any] = meta if isinstance(meta, dict) else {}
-        heads = read_json(directory / "heads.json") if self.meta else None
+        heads = (
+            limits.read_heads(directory / "heads.json", self.meta)
+            if self.meta and limits.active()
+            else read_json(directory / "heads.json")
+            if self.meta
+            else None
+        )
         self.heads: dict[str, dict[str, Any]] = heads if isinstance(heads, dict) else {}
 
     @staticmethod
@@ -246,11 +259,17 @@ class Replica:
         return sum(head_size(key, head) for key, head in self.heads.items())
 
     def save(self) -> None:
-        private_dir(self.directory)
-        write_json(self.directory / "heads.json", self.heads)
+        limits.check_count(len(self.heads))
+        snapshot = _dumps(self.heads) + "\n"
         self.meta["cards"] = len(self.heads)
+        self.meta["heads_sha256"] = hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
         self.meta["bytes"] = self.bytes()
         self.meta["full"] = bool(self.missing)
+        metadata = _dumps(self.meta) + "\n"
+        if len(metadata.encode("utf-8")) > limits.MAX_META_BYTES:
+            raise limits.ReplicaLimitError("metadata")
+        private_dir(self.directory)
+        write_json(self.directory / "heads.json", self.heads)
         write_json(self.directory / "meta.json", self.meta)
 
 

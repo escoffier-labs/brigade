@@ -224,7 +224,7 @@ def _check_replica_files(target: Path, *, scope: str | None, dry_run: bool) -> N
                 "hub reflect on-disk replica exceeds the 64 MiB ceiling plus 1 MiB serialization slack. Snapshot was not parsed",
             )
         if scope is not None and not dry_run:
-            meta = store.read_json(root / "meta.json")
+            meta = store.read_json(root / "meta.json", max_bytes=store.limits.MAX_META_BYTES)
             scopes = meta.get("read_scopes", []) if isinstance(meta, dict) else []
             if not isinstance(scopes, list) or not all(isinstance(name, str) for name in scopes):
                 raise ReflectError("hub_reflect_replica_invalid", "hub reflect replica has invalid read scope metadata")
@@ -407,10 +407,14 @@ def run_payload(*, target: Path, scope: str | None, limit: int, dry_run: bool, s
             return {"status": "paused", "schedule": {k: state[k] for k in ("consecutive_failures", "paused")}}
         try:
             settings, client = _client(target)
-            payload = _reflect(target, settings, client, state, scope=scope, limit=limit, dry_run=dry_run)
+            with store.limits.bounded(max_cards=MAX_SCOPE_CARDS, max_bytes=MAX_REPLICA_BYTES + REPLICA_FILE_SLACK):
+                payload = _reflect(target, settings, client, state, scope=scope, limit=limit, dry_run=dry_run)
         except (hubc.HubConfigError, hubc.HubUnavailable, hubc.HubRefusal, OSError, ValueError) as exc:
             # Never retain hub-supplied text, card bytes or credential-bearing errors.
-            if isinstance(exc, ReflectError):
+            if isinstance(exc, store.limits.ReplicaLimitError):
+                code = "hub_reflect_scope_limit" if exc.kind == "cards" else "hub_reflect_replica_limit"
+                reason = f"hub reflect per-replica {exc.kind} bound exceeded before snapshot decoding or saving"
+            elif isinstance(exc, ReflectError):
                 code, reason = exc.code, str(exc)
             elif isinstance(exc, ReflectConfigError):
                 code, reason = "hub_reflect_config", str(exc)

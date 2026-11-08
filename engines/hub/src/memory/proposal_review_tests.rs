@@ -468,7 +468,9 @@ async fn operator_hidden_pages_use_opaque_cursors_and_refuse_tampering() {
         .await;
         hidden.push(opened.body["proposal_id"].as_str().unwrap().to_string());
     }
-    // This principal has no grants, so every proposal is hidden.
+    // Explicit operators may scan global proposal population, but still need
+    // target read grants to see summaries.
+    grant(&h, "*", &["list_proposals"]).await;
     let mut after = Json::Null;
     for page in 0..3 {
         let mut request = json!({"action":"proposal_list","limit":1});
@@ -520,4 +522,55 @@ async fn operator_held_proposals_appear_only_with_all() {
         .await;
     assert_eq!(all.body["proposals"][0]["proposal_id"], *id);
     assert_eq!(all.body["proposals"][0]["state"], "held");
+}
+
+#[tokio::test]
+async fn grantless_listing_has_no_hidden_population_oracle() {
+    let h = Hub::with(clean(), None);
+    for count in 0..3 {
+        if count > 0 {
+            let a = h
+                .put(
+                    ADMIN_TOKEN,
+                    "collection:hidden",
+                    &format!("card-{count}"),
+                    None,
+                    OLD,
+                )
+                .await;
+            submit(
+                &h,
+                ADMIN_TOKEN,
+                vec![op("collection:hidden", &format!("card-{count}"), rev(&a))],
+            )
+            .await;
+        }
+        for all in [false, true] {
+            let reply = h
+                .call(
+                    AGENT_TOKEN,
+                    json!({"action":"proposal_list","limit":1,"all":all}),
+                )
+                .await;
+            assert_eq!(reply.status, 200);
+            assert_eq!(reply.body, json!({"proposals":[],"next_after":null}));
+        }
+    }
+    // A scoped review grant is not the global operator capability.
+    grant(
+        &h,
+        "collection:hidden",
+        &["read", "review", "list_proposals"],
+    )
+    .await;
+    let scoped = h
+        .call(AGENT_TOKEN, json!({"action":"proposal_list","limit":1}))
+        .await;
+    assert_eq!(scoped.body, json!({"proposals":[],"next_after":null}));
+    grant(&h, "*", &["list_proposals"]).await;
+    let operator = h
+        .call(AGENT_TOKEN, json!({"action":"proposal_list","limit":1}))
+        .await;
+    assert_eq!(operator.body["proposals"].as_array().unwrap().len(), 1);
+    assert!(operator.body["next_after"].is_string());
 }

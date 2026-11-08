@@ -11,6 +11,11 @@ pub(super) fn read<T: ReadTx + ?Sized>(
     map: &Map<String, Json>,
     cursors: &Cursors,
 ) -> rusqlite::Result<Reply> {
+    // Global listing is an explicit operator capability. Without it, even the
+    // continuation shape must be independent of hidden proposal population.
+    if action == "proposal_list" && !auth::has_right(tx, who, Some("*"), "list_proposals")? {
+        return Ok(Reply::new(200, json!({"proposals":[],"next_after":null})));
+    }
     let epoch = tx
         .query("SELECT value FROM memory_meta WHERE key='log_epoch'", &[])?
         .first()

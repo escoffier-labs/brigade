@@ -419,6 +419,7 @@ def _apply(
         used -= store.head_size(key, previous)
     if event["kind"] == "card.retire":
         return used
+    store.limits.check_count(len(replica.heads) + 1)
     try:
         card = _card_text(client, event["scope"], event["card_id"], event["revision"], epoch)
     except _ScopeRefused as exc:

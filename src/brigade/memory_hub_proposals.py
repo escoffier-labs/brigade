@@ -27,7 +27,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         command.add_argument("--hub-url", help="Explicit memory hub URL. Requires --token-file.")
         command.add_argument("--token-file", type=Path, help="Absolute path to a private memory credential file.")
         if name == "list":
-            command.add_argument("--all", action="store_true", help="Include states other than pending.")
+            command.add_argument(
+                "--all",
+                action="store_true",
+                help="Include states other than pending. Listing requires list_proposals on *.",
+            )
             command.add_argument("--after", help="Opaque next_after cursor returned by the hub.")
             command.add_argument("--limit", type=int, default=100, help="Page size from 1 to 100.")
         else:

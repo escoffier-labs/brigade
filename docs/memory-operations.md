@@ -591,14 +591,33 @@ brigade memory proposals decide <proposal-id> --reject --target <reflect-folder>
 brigade memory proposals decide <proposal-id> --accept --expected-policy-digest <sha256> --target <reflect-folder>
 ```
 
-`list` defaults to pending proposals. It returns at most 100 summaries without
+`list` defaults to pending proposals. Global listing requires the explicit
+operator capability `list_proposals` granted on `*`. A principal without that
+capability always receives an empty list and null cursor, independently of
+hidden proposal counts. This gate keeps each request's scan bounded without
+turning empty pages into a visibility oracle. Scoped `read` and `review`
+grants alone do not permit global listing. Listing operators may observe global
+pagination shape, but still need `read` on every target to see a summary.
+
+An administrator grants the listing capability separately from scoped card access:
+
+```json
+{"action":"grant","principal":"agent:reviewer","scope":"*","rights":["list_proposals"],"client_event_id":"<26-character time-ordered id>"}
+```
+
+The command returns at most 100 summaries without
 diffs. Use `--limit` and the returned opaque `next_after` as `--after` to continue.
 The cursor is an HMAC-authenticated handle. Scan positions stay in a bounded
 hub-local cache of 4,096 handles and are never encoded in the response.
+Each principal can hold at most 64 handles. Repeated requests for the same
+position, epoch and filter reuse the handle. A principal can evict only its
+own oldest handle. If the global cache is full, a new principal's request is
+refused instead of evicting another principal's handles.
 Handles bind the principal, hub log epoch and `--all` selection. Altered,
 expired or mismatched handles are refused. Restart a list without `--after`
-after a hub restart or cache eviction. Hidden rows still advance the scan
-without exposing their proposal ids or creation timestamps.
+after a hub restart or eviction of a principal's own old handle. Listing
+operators' scans advance over hidden rows without exposing their ids or
+creation timestamps.
 A page can be empty when its proposals are outside the caller's grants.
 Continue while `next_after` is present. `--all` includes held, stale and decided
 proposals. Held proposals appear only with `--all`. `show` asks the hub for the stored diff. The hub returns a null diff
@@ -634,7 +653,7 @@ Authorization is checked again before a stored diff is returned.
 
 | Action | Request fields in addition to `action` and `client_event_id` | Target-scope grant |
 |---|---|---|
-| `proposal_list` | `all`, `limit`, `after` (all optional, no event id) | `read` on every target to see a summary |
+| `proposal_list` | `all`, `limit`, `after` (all optional, no event id) | `list_proposals` on `*` to list, plus `read` on every target to see a summary |
 | `proposal_show` | `proposal_id` (no event id) | `read` on every target, with `review` required for diff text |
 | `propose` | `base_epoch`, `ops` | `read` and `reflect` on every addressed card, including `other_card` |
 | `decide` | `proposal_id`, `base_epoch`, `decision` (`accept` or `reject`), `expected_policy_digest` (required when re-deciding after a policy change) | `read` and `review` on every addressed card |
@@ -1219,8 +1238,15 @@ submitting proposals. Narrow the configured read scopes for a dedicated run.
 Before loading an existing replica or an interrupted rebuild, reflection
 checks the on-disk `heads.json` size. A file above the 64 MiB ceiling plus
 1 MiB of serialization slack is refused with `hub_reflect_replica_limit`
-before JSON parsing. The CLI reports local failure codes and fixed reasons
-without card text.
+before JSON parsing. Reflect also limits the whole selected replica to 50,000
+cards, including unscoped runs. Sync checks the count before fetching a new
+head, and saves check it before serialization. Each save records a card count
+and snapshot digest. Reads validate the stored count against a streaming count
+and digest before decoding the full heads dictionary, including legacy
+snapshots without count metadata. A false low count cannot bypass the bound.
+`meta.json` is limited to 8 MiB before parsing. Ordinary sync replicas retain
+their configured byte limits and can hold more cards outside a reflect run.
+The CLI reports local failure codes and fixed reasons without card text.
 
 `run --scope <scope>` selects one configured read scope before fetching card
 heads or refreshing legacy scan metadata. Status and log reads still use the
@@ -1333,7 +1359,9 @@ brigade memory care install --target ~/memory-reflect --entry memory-reflect --s
 
 The single `--scope` matches `memory reflect run --scope`. One job uses one
 scope, which keeps its grant requirement explicit. Reinstalling a scoped
-entry retains its scope when `--scope` is omitted. To return to an unscoped
+entry retains its scope when `--scope` is omitted. The Windows replacement
+command inspects the saved Task Scheduler action before replacing it and
+preserves one valid scope. Ambiguous or invalid saved scopes refuse replacement. To return to an unscoped
 entry, uninstall it with `brigade memory care uninstall --entry memory-reflect
 --target <reflect-folder>`, then install again without `--scope`. A workspace file still
 chooses only mode, scopes and replica size. It cannot supply a hub URL or token

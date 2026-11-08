@@ -37,7 +37,7 @@ def test_scope_bound_fails_closed_with_code_and_reason(setup, capsys, monkeypatc
     assert cli.main(["memory", "reflect", "run", "--target", str(target)]) == 1
     output = capsys.readouterr().out
     assert "hub_reflect_scope_limit" in output
-    assert "per-scope" in output
+    assert ("per-replica" if bound == "MAX_SCOPE_CARDS" else "per-scope") in output
     assert "Same claim" not in output
     assert writes(hub) == []
 
@@ -269,13 +269,11 @@ def test_oversized_disk_heads_are_refused_before_parsing(setup, capsys, monkeypa
     path.parent.mkdir(parents=True)
     with path.open("wb") as file:
         file.truncate(66 * 1024 * 1024)
-    original = store.read_json
 
-    def forbid_heads(file):
-        assert file.name != "heads.json", "oversized heads must never be parsed"
-        return original(file)
+    def forbid_heads(raw):
+        raise AssertionError("oversized heads must never be parsed")
 
-    monkeypatch.setattr(store, "read_json", forbid_heads)
+    monkeypatch.setattr(store.limits, "decode_heads", forbid_heads)
     code, report = run(target, capsys, "run")
     assert code == 1 and report["error"] == "hub_reflect_replica_limit"
     assert writes(hub) == []

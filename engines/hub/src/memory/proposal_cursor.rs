@@ -5,6 +5,7 @@ use std::{collections::VecDeque, sync::Mutex};
 use subtle::ConstantTimeEq;
 
 const CAPACITY: usize = 4096;
+const PER_PRINCIPAL: usize = 64;
 
 struct Position {
     handle: String,
@@ -78,6 +79,26 @@ impl Cursors {
         epoch: &str,
         all: bool,
     ) -> Option<String> {
+        let mut positions = self.positions.lock().ok()?;
+        if let Some(existing) = positions.iter().find(|p| {
+            p.principal == who.principal() && p.epoch == epoch && p.all == all && p.after == after
+        }) {
+            return Some(existing.handle.clone());
+        }
+        if positions
+            .iter()
+            .filter(|p| p.principal == who.principal())
+            .count()
+            >= PER_PRINCIPAL
+        {
+            let own_oldest = positions
+                .iter()
+                .position(|p| p.principal == who.principal())?;
+            positions.remove(own_oldest);
+        } else if positions.len() == CAPACITY {
+            // Refuse new handles rather than evict another principal's cursor.
+            return None;
+        }
         // Only this MAC leaves the hub. No encoded plaintext or timestamp is in the handle.
         let nonce = ids::mint(0);
         let payload = serde_json::json!([nonce, who.principal(), epoch, all, after]);
@@ -85,10 +106,6 @@ impl Cursors {
             "p1.{}",
             ids::hex(&mac(&self.key, payload.to_string().as_bytes()))
         );
-        let mut positions = self.positions.lock().ok()?;
-        if positions.len() == CAPACITY {
-            positions.pop_front();
-        }
         positions.push_back(Position {
             handle: handle.clone(),
             principal: who.principal().into(),
@@ -139,12 +156,41 @@ mod tests {
                 .resolve(&first, &who, "epoch", false)
                 .is_none()
         );
-        for _ in 0..CAPACITY {
+        for index in 0..PER_PRINCIPAL {
             cursors
-                .issue("position".into(), &who, "epoch", false)
+                .issue(format!("position-{index}"), &who, "epoch", false)
                 .unwrap();
         }
         assert!(cursors.resolve(&first, &who, "epoch", false).is_none());
-        assert_eq!(cursors.positions.lock().unwrap().len(), CAPACITY);
+        assert_eq!(cursors.positions.lock().unwrap().len(), PER_PRINCIPAL);
+    }
+    #[test]
+    fn one_principal_cannot_evict_another_and_positions_reuse_handles() {
+        let cursors = Cursors::new("fixture-secret");
+        let owner = Credential::Admin;
+        let protected = cursors
+            .issue("protected".into(), &owner, "epoch", false)
+            .unwrap();
+        let other = Credential::Principal {
+            id: "agent:other".into(),
+            digest: "fixture".into(),
+        };
+        for index in 0..CAPACITY + 1 {
+            let position = format!("position-{index}");
+            let first = cursors
+                .issue(position.clone(), &other, "epoch", false)
+                .unwrap();
+            assert_eq!(
+                cursors.issue(position, &other, "epoch", false).unwrap(),
+                first
+            );
+        }
+        assert_eq!(
+            cursors
+                .resolve(&protected, &owner, "epoch", false)
+                .as_deref(),
+            Some("protected")
+        );
+        assert_eq!(cursors.positions.lock().unwrap().len(), PER_PRINCIPAL + 1);
     }
 }
