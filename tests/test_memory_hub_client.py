@@ -60,6 +60,7 @@ class FakeHub:
         self.status_reply: tuple[int, dict] | None = None
         self.search_reply: tuple[int, dict] | None = None
         self.on_status = None
+        self.read_stats_reply: tuple[int, dict] | None = None
 
     # -- transport -----------------------------------------------------------
     def __call__(self, url: str, token: str, body: dict, timeout: float):
@@ -103,6 +104,19 @@ class FakeHub:
         return grants is None or bool(grants)
 
     # -- actions -------------------------------------------------------------
+    def do_read_stats(self, body):
+        # The hub's own contract is tested in the hub crate. This keeps the reply shape and the codes.
+        if self.read_stats_reply is not None:
+            return self.read_stats_reply
+        rows = [
+            {"card_id": "alpha", "reads_7d": 3, "reads_30d": 9, "last_read_day": 20400, "total_reads": 12},
+            {"card_id": "beta", "reads_7d": 0, "reads_30d": 1, "last_read_day": 20380, "total_reads": 1},
+        ]
+        start = 1 if body.get("after") == "s1.next" else 0
+        page = rows[start : start + body["limit"]]
+        following = "s1.next" if start + len(page) < len(rows) else None
+        return 200, {"scope": body["scope"], "rows": page, "next_after": following, "read_counts_since_day": 20300}
+
     def do_status(self, body):
         if self.on_status is not None:
             self.on_status()
@@ -2728,3 +2742,121 @@ def test_local_rank_winner_keeps_hub_id_after_publication_fusion():
     assert fused["card_id"] == "derived-id"
     assert fused["card_aliases"] == ["My Card"]
     assert fused["ranks"] == {"hub": 2, "local": 1}
+
+
+# -- read_stats (memory verification slice 2) ---------------------------------
+
+
+def test_read_stats_pages_through_the_hub_and_returns_only_the_documented_fields():
+    fake = FakeHub()
+    client = hubc.MemoryHubClient(HUB_URL, NODE_CREDENTIAL, transport=fake)
+    first = hubc.read_stats(client, "repo:example/one", limit=1)
+    assert first == {
+        "scope": "repo:example/one",
+        "rows": [{"card_id": "alpha", "reads_7d": 3, "reads_30d": 9, "last_read_day": 20400, "total_reads": 12}],
+        "next_after": "s1.next",
+        "read_counts_since_day": 20300,
+    }
+    second = hubc.read_stats(client, "repo:example/one", after=first["next_after"])
+    assert [row["card_id"] for row in second["rows"]] == ["beta"] and second["next_after"] is None
+    # Status first on every call, then read_stats with only scope, limit and after.
+    assert [c["action"] for c in fake.calls] == ["status", "read_stats", "status", "read_stats"]
+    assert fake.calls[1] == {"action": "read_stats", "scope": "repo:example/one", "limit": 1}
+    assert fake.calls[3] == {"action": "read_stats", "scope": "repo:example/one", "limit": 1000, "after": "s1.next"}
+
+
+def test_read_stats_refuses_the_admin_credential_before_asking_for_counts():
+    fake = FakeHub()
+    client = hubc.MemoryHubClient(HUB_URL, ADMIN_CREDENTIAL, transport=fake)
+    with pytest.raises(hubc.HubConfigError, match="admin token"):
+        hubc.read_stats(client, "fleet")
+    assert [c["action"] for c in fake.calls] == ["status"]
+
+
+@pytest.mark.parametrize(
+    ("scope", "limit", "after"),
+    [
+        ("fleet*", 10, None),
+        ("", 10, None),
+        ("fleet", 0, None),
+        ("fleet", 1001, None),
+        ("fleet", True, None),
+        ("fleet", 10, 7),
+    ],
+)
+def test_read_stats_refuses_bad_arguments_without_calling_the_hub(scope, limit, after):
+    fake = FakeHub()
+    client = hubc.MemoryHubClient(HUB_URL, NODE_CREDENTIAL, transport=fake)
+    with pytest.raises(ValueError):
+        hubc.read_stats(client, scope, limit=limit, after=after)
+    assert fake.calls == []
+
+
+def test_read_stats_grant_and_rate_limit_answers_are_refusals():
+    fake = FakeHub()
+    client = hubc.MemoryHubClient(HUB_URL, NODE_CREDENTIAL, transport=fake)
+    fake.read_stats_reply = (403, {"error": "no grant", "code": "memory_grant_missing"})
+    with pytest.raises(hubc.HubRefusal) as denied:
+        hubc.read_stats(client, "fleet")
+    assert denied.value.denies_access and denied.value.code == "memory_grant_missing"
+    fake.read_stats_reply = (429, {"error": "slow down", "code": hubc.READ_STATS_RATE_LIMITED})
+    with pytest.raises(hubc.HubRefusal) as limited:
+        hubc.read_stats(client, "fleet")
+    assert limited.value.status == 429 and limited.value.code == "memory_read_stats_rate_limited"
+    # An uncoded 429 (a proxy) is still "try later".
+    fake.read_stats_reply = (429, {})
+    with pytest.raises(hubc.HubUnavailable):
+        hubc.read_stats(client, "fleet")
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # Every key is required, so a missing next_after cannot read as the last page.
+        {"scope": "fleet", "rows": [], "read_counts_since_day": 1},
+        {"scope": "fleet", "rows": [], "next_after": None},
+        {"rows": [], "next_after": None, "read_counts_since_day": 1},
+        {"scope": "fleet", "rows": [], "next_after": None, "read_counts_since_day": 1, "query": "x"},
+        {
+            "scope": "fleet",
+            "rows": [
+                {"card_id": "alpha", "reads_7d": 1, "reads_30d": 1, "last_read_day": 1, "total_reads": 1, "query": "x"}
+            ],
+            "next_after": None,
+            "read_counts_since_day": 1,
+        },
+        {
+            "scope": "fleet",
+            "rows": [{"card_id": "alpha", "reads_7d": 1, "reads_30d": 1, "last_read_day": 1}],
+            "next_after": None,
+            "read_counts_since_day": 1,
+        },
+        {
+            "scope": "fleet",
+            "rows": [{"card_id": "Alpha!", "reads_7d": 1, "reads_30d": 1, "last_read_day": 1, "total_reads": 1}],
+            "next_after": None,
+            "read_counts_since_day": 1,
+        },
+        {
+            "scope": "fleet",
+            "rows": [{"card_id": "alpha", "reads_7d": -1, "reads_30d": 1, "last_read_day": 1, "total_reads": 1}],
+            "next_after": None,
+            "read_counts_since_day": 1,
+        },
+        {
+            "scope": "fleet",
+            "rows": [{"card_id": "alpha", "reads_7d": True, "reads_30d": 1, "last_read_day": 1, "total_reads": 1}],
+            "next_after": None,
+            "read_counts_since_day": 1,
+        },
+        {"scope": "repo:other", "rows": [], "next_after": None, "read_counts_since_day": 1},
+        {"scope": "fleet", "rows": {}, "next_after": None, "read_counts_since_day": 1},
+        {"scope": "fleet", "rows": [], "next_after": 3, "read_counts_since_day": 1},
+    ],
+)
+def test_read_stats_refuses_a_reply_of_any_other_shape(reply):
+    fake = FakeHub()
+    fake.read_stats_reply = (200, reply)
+    client = hubc.MemoryHubClient(HUB_URL, NODE_CREDENTIAL, transport=fake)
+    with pytest.raises(hubc.HubUnavailable, match="malformed-read-stats"):
+        hubc.read_stats(client, "fleet")
