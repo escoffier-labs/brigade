@@ -570,6 +570,15 @@ def test_an_alias_with_an_unpaired_surrogate_is_malformed_not_a_crash():
     assert links.Index([card]).info[(SCOPE, "bad")][2] is False
 
 
+def test_an_escaped_backtick_cannot_expose_a_code_span_to_repair():
+    claim = "An escaped \\` and code `[[old]]`."
+    submissions, skipped, _ = unit(successor_pair(claim))
+    assert submissions == [] and skipped == {}
+    assert links._code_spans(claim) == [(claim.index("`[[old]]`"), claim.index("`[[old]]`") + len("`[[old]]`"))]
+    doubled = "Two slashes \\\\`[[old]]` keep the span."
+    assert links._code_spans(doubled) == [(doubled.index("`[[old]]`"), doubled.index("`[[old]]`") + len("`[[old]]`"))]
+
+
 def test_two_retired_cards_sharing_a_name_are_ambiguous_even_with_one_successor():
     heads = [
         head("src", card_text("See [[Old Guide]].")),

@@ -217,11 +217,22 @@ class Index:
 
 
 def _code_spans(text: str) -> list[tuple[int, int]]:
-    """Inline code spans, opened and closed by backtick runs of equal length."""
+    """Inline code spans, opened and closed by backtick runs of equal length.
+
+    A backtick escaped by an odd run of backslashes is literal and cannot open a
+    span, as in CommonMark. Escapes do not apply inside a span, so a closer is
+    matched by length alone.
+    """
     spans: list[tuple[int, int]] = []
     size, at = len(text), 0
     while at < size:
         if text[at] != "`":
+            at += 1
+            continue
+        slashes = 0
+        while at - slashes - 1 >= 0 and text[at - slashes - 1] == "\\":
+            slashes += 1
+        if slashes % 2:
             at += 1
             continue
         end = at
