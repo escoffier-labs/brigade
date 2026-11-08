@@ -151,6 +151,12 @@ async fn retrieval_is_last_hold_and_recorded_path_is_exactly_once_audited_and_re
     assert_eq!(before, card(&h, "fleet", "a").await);
     let request = auto_request(&h, &id).await;
     super::retrieval_eval_tests::record_current(&h).await;
+    let limited = h.call(ADMIN_TOKEN, request.clone()).await;
+    assert_eq!(
+        (limited.status, code(&limited)),
+        (429, "memory_auto_apply_rate_limited")
+    );
+    h.set_clock(h.now() + 60_001);
     let applied = h.call(ADMIN_TOKEN, request.clone()).await;
     assert_eq!(applied.body["state"], "applied");
     let after = card(&h, "fleet", "a").await;

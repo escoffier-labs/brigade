@@ -19,6 +19,7 @@ pub mod embedder;
 pub mod embedding;
 #[cfg(test)]
 mod embedding_tests;
+mod hardening;
 pub mod ids;
 pub mod index;
 pub mod ops;
@@ -48,6 +49,8 @@ pub mod writer;
 mod collection_tests;
 #[cfg(test)]
 mod embedder_tests;
+#[cfg(test)]
+mod hardening_tests;
 #[cfg(test)]
 mod lexical_tests;
 #[cfg(test)]
@@ -141,6 +144,7 @@ pub struct Store {
     retrieval: Option<Arc<embedder::Runtime>>,
     rrf: ranking::Weights,
     eval_weights: Arc<std::sync::RwLock<Json>>,
+    proposal_limits: Arc<std::sync::RwLock<hardening::Limits>>,
     dense: Arc<dense::Index>,
     coverage: std::sync::RwLock<embedding::Coverage>,
     /// Woken by a committed `put`, so an idle scheduler starts at once.
@@ -226,6 +230,7 @@ impl Store {
         config.index = Some(index.clone());
         config.dense = Some(dense.clone());
         let eval_weights = config.eval_weights.clone();
+        let proposal_limits = config.proposal_limits.clone();
         let writer = writer::Writer::start(config, db, options.arbiter.clone())
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -241,6 +246,7 @@ impl Store {
             retrieval: None,
             rrf: ranking::Weights::default(),
             eval_weights,
+            proposal_limits,
             dense,
             coverage: std::sync::RwLock::new(embedding::Coverage::default()),
             embed_wake: Arc::new(tokio::sync::Notify::new()),
@@ -252,6 +258,7 @@ impl Store {
     }
     /// Lexical mode ignores an unused embedder table, including credentials.
     pub fn configure_retrieval(&mut self, config: &Json) -> Result<(), String> {
+        *self.proposal_limits.write().unwrap() = hardening::Limits::parse(config)?;
         self.rrf = ranking::Weights::parse(config.get("rrf"))?;
         self.pull_embeddings = config["embedder"]["pull"].as_bool().unwrap_or(false);
         // Absent means lexical. Present but not a string is a typo, never lexical.
@@ -1608,6 +1615,29 @@ fn reads<T: ReadTx + ?Sized>(
                 };
                 next = seq;
                 if visible {
+                    let mut payload =
+                        serde_json::from_str::<Json>(&text(&r[12])).unwrap_or(Json::Null);
+                    if text(&r[3]).starts_with("proposal.") {
+                        let mut review = match &r[5] {
+                            Value::Text(scope) => {
+                                proposals::scoped_right(tx, credential, scope, "review")?
+                            }
+                            _ => *credential == Credential::Admin,
+                        };
+                        if let Some(cards) = payload["cards"].as_array() {
+                            for card in cards {
+                                review &= proposals::scoped_right(
+                                    tx,
+                                    credential,
+                                    proposals::string(card, "scope"),
+                                    "review",
+                                )?;
+                            }
+                        }
+                        if !review {
+                            payload = json!({"proposal_id":payload["proposal_id"],"state":payload["state"],"decision":payload["decision"],"decision_mode":payload["decision_mode"]});
+                        }
+                    }
                     events.push(json!({
                         "seq": seq,
                         "event_id": text(&r[1]),
@@ -1621,7 +1651,7 @@ fn reads<T: ReadTx + ?Sized>(
                         "content_hash": nullable(&r[9]),
                         "trust": nullable(&r[10]),
                         "origin": nullable(&r[11]),
-                        "payload": serde_json::from_str::<Json>(&text(&r[12])).unwrap_or(Json::Null),
+                        "payload": payload,
                         "policy_digest": nullable(&r[13]),
                         "created_at": text(&r[14]),
                     }));

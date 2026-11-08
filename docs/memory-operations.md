@@ -1266,3 +1266,84 @@ plus `review` on every original target scope. It sends the observed log epoch
 and never restores card text directly. The compensation waits for another
 explicit decision, with the same hub scope, self-review, revision and pin
 checks as S19a.
+
+
+## Hub proposal resource limits
+
+Automatic apply remains off by default. Grant `reflect` only after upgrading
+all hub instances to memory schema 9. The migration retains the log epoch,
+proposal ids and event sequence. Existing hybrid evaluation records have no
+dense binding and hold until a new evaluation is recorded. Lexical reports
+retain their existing contract.
+
+The hub configuration accepts `memory.proposal_limits`:
+
+| Key | Default | Purpose |
+|---|---:|---|
+| `pending_per_principal` | 32 | Pending and held proposals owned by one principal |
+| `pending_per_scope` | 128 | Pending and held proposals touching one scope |
+| `bytes_per_principal` | 67108864 | Retained proposal body bytes, including terminal audits |
+| `bytes_per_scope` | 268435456 | Retained body bytes charged in full to every target scope |
+| `retention_days` | 7 | Days after a terminal decision before body compaction |
+| `diagnostic_rows` | 100000 | Total rows returned by automatic diagnostics |
+| `diagnostic_ms` | 100 | Read snapshot execution deadline in milliseconds |
+| `lock_ms` | 50 | SQLite execution deadline for proposal admission and automatic apply |
+| `auto_principal_ms` | 1000 | Minimum interval between attempts by one principal |
+| `auto_proposal_ms` | 60000 | Minimum interval between attempts on one proposal |
+
+Limits must be positive integers. Unknown keys fail configuration. Retention
+is capped at 365 days. The pending defaults allow a review batch of 32 proposals
+per principal and four such batches per scope. The byte defaults bound retained
+storage separately from counts, with four principal byte budgets per scope.
+Seven days keeps a weekly rollback window for applied bodies. A scope is
+charged the full body for a proposal
+that touches it. Audits continue to count toward the byte quota, so accumulating
+terminal records cannot evade admission.
+
+Each quota dimension (pending count and retained bytes, per principal and per
+scope) is checked separately inside the writer transaction. A write passes a
+dimension when the usage it leaves is within the limit or no higher than the
+usage before it. A new proposal always adds a pending row and bytes, so
+admission needs room under every limit. A decision that moves a proposal out of
+pending lowers the pending count, so reviewers can reject or accept a backlog
+left above a lowered limit, or above the defaults after an upgrade, one
+proposal at a time. The same decision still records audit bytes, so it is
+refused when those bytes would cross a byte limit the store was within. A store
+already above a byte limit must raise that limit before it can record further
+decisions that grow its bytes.
+
+An identical pending proposal is detected by its epoch, target cards with base
+revisions, operations and policy digest. The hub returns HTTP 409 with
+`memory_proposal_duplicate_pending` and the existing `proposal_id`. Principal
+and scope quota refusals return HTTP 429 with `memory_proposal_principal_quota`
+or `memory_proposal_scope_quota`. These refusals leave no event, blob, proposal
+or idempotency row. New proposed text enters the blob table only when applied.
+
+Idle retention sweeps compact rejected, stale and applied bodies in bounded
+transactions. The immutable audit retains proposal and card ids, revisions,
+content and body digests, policy digests, state, decision, actor and timestamps.
+It drops text, operations, pins, diffs and diagnostic reports. Event rows remain
+append-only. A compacted proposal cannot be changed or rolled back. Rollback
+needs the retained body and therefore has the same retention window.
+
+Automatic apply checks policy enablement, the kill switch and the stored Tier 0
+classification before evidence resolution or corpus diagnostics. Eligible
+candidates receive diagnostics in a read snapshot with row and time limits.
+Under the writer lock, compact event and vector high water marks, authority
+digests, expiry times and target facts must still match. Any intervening memory
+event or vector change conservatively holds with `auto_apply_snapshot_changed`,
+even outside the target scope. SQLite progress handlers bound remaining scans.
+`memory_auto_apply_budget_exceeded` refuses exhausted work without a write.
+`memory_auto_apply_rate_limited` refuses attempts inside either interval. The
+bounded rate cache is in memory and resets on hub restart. Committed retries
+retain their existing idempotency behavior.
+
+Hybrid records retain the active embedder id, vector log sequence, coverage
+count and a digest of scoped live content hashes and exact vector identities.
+A changed vector snapshot holds with `retrieval_eval_vector_changed`. The
+vector log high water mark survives log retention. Lexical evaluation does not
+use this binding.
+
+Scope readers without review authority receive only proposal id, state,
+decision and decision mode in proposal event payloads. This reader redaction
+also covers historical payloads without rewriting the append-only log.

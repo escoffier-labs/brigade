@@ -252,6 +252,7 @@ async fn retrieval_eval_expiry_cannot_be_refreshed_by_recording_old_bytes_and_re
     );
     record_current(&h).await;
     assert_eq!(h.call(ADMIN_TOKEN, request).await, held);
+    h.set_clock(h.now() + 60_001);
     // Evidence expired too, so refresh it using new ids rather than changing immutable rows.
     assert_eq!(
         h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await.body["state"],
@@ -273,6 +274,7 @@ async fn retrieval_eval_changed_corpus_and_active_hybrid_cannot_use_lexical_reco
             .iter()
             .any(|c| c["code"] == "retrieval_eval_drift_exceeded")
     );
+    h.set_clock(h.now() + 60_001);
     // Configure hybrid through the production runtime, with no endpoint access.
     h.store.as_mut().unwrap().configure_retrieval(&json!({"retrieval":"hybrid","embedder":{"backend":"remote","pull":true,"name":"fixture","shape":"api/embed","input_chars":1000,"query_prefix_version":1,"model_digest":ids::sha256_hex(b"model"),"dimensions":4}})).unwrap();
     let r = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
@@ -405,7 +407,7 @@ async fn retrieval_eval_late_stale_reply_never_claims_an_unpersisted_transition(
         fn query(&self, sql: &str, params: &[Value]) -> rusqlite::Result<Vec<Vec<Value>>> {
             if sql == "SELECT value FROM memory_meta WHERE key='log_epoch'" {
                 self.reads.set(self.reads.get() + 1);
-                if self.reads.get() == 4 {
+                if self.reads.get() == 3 {
                     return Ok(vec![vec![Value::Text("restored".into())]]);
                 }
             }
@@ -438,6 +440,12 @@ async fn retrieval_eval_late_stale_reply_never_claims_an_unpersisted_transition(
         embedder_id: None,
         weights: store.rrf.json(),
     });
+    if let ops::Action::Proposal(cmd) = &mut p.action {
+        let body = cmd.draft.as_mut().unwrap();
+        let report = preflight::evaluate(&Tx(&db), body, &a, clean().as_ref(), h.now()).unwrap();
+        assert!(preflight::all_satisfied(&report));
+        body["_auto_snapshot"] = json!({"report":report,"token":hardening::token(&Tx(&db)).unwrap(),"authority":hardening::authority_digest(&a),"proposal_sha256":ids::sha256_hex(ids::canonical(body).as_bytes()),"now_ms":h.now()});
+    }
     let tx = LateEpoch {
         inner: Tx(&db),
         reads: Cell::new(0),
@@ -446,7 +454,7 @@ async fn retrieval_eval_late_stale_reply_never_claims_an_unpersisted_transition(
         unreachable!()
     };
     let r = proposals::run(&tx, &p, cmd, &a, clean().as_ref()).unwrap();
-    assert_eq!(tx.reads.get(), 4);
+    assert_eq!(tx.reads.get(), 3);
     assert!(preflight::all_satisfied(&r.body["preflight"]), "{r:?}");
     assert_eq!(r.body["reason"], "memory_epoch_changed");
     assert_eq!(r.body["state"], "pending");
@@ -1007,7 +1015,7 @@ async fn retrieval_eval_schema_seven_upgrade_preserves_rows_epoch_sequence_and_o
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        8
+        schema::USER_VERSION
     );
     assert_eq!(
         db.query_row(
@@ -1080,6 +1088,7 @@ async fn retrieval_eval_one_record_allows_two_independent_applies_within_budget(
     pad(&h, 98).await;
     record_current(&h).await;
     for id in [first, second.body["proposal_id"].clone()] {
+        h.set_clock(h.now() + 1_001);
         assert_check(&report(&h, &id).await, "retrieval_eval_satisfied");
         let r = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
         assert_eq!(r.body["state"], "applied");
@@ -1270,4 +1279,125 @@ async fn retrieval_eval_adding_card_at_249_does_not_raise_budget_to_five() {
         201
     );
     assert_check(&report(&h, &id).await, "retrieval_eval_drift_exceeded");
+}
+
+#[tokio::test]
+async fn hybrid_vector_added_after_evaluation_holds_without_head_change() {
+    let (mut h, id) = ready().await;
+    let report_body = hybrid_gate_report(&mut h).await;
+    assert_eq!(record(&h, &report_body).await.status, 201);
+    assert_check(&report(&h, &id).await, "retrieval_eval_satisfied");
+    let db = Connection::open(h.memory()).unwrap();
+    let hash: String = db
+        .query_row(
+            "SELECT content_hash FROM memory_cards WHERE scope='fleet' AND card_id='a'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let embedder = h.store.as_ref().unwrap().dense.active_id().unwrap();
+    let before = h.events();
+    db.execute(
+        "INSERT INTO memory_vectors VALUES(?1,?2,1,?3)",
+        rusqlite::params![hash, embedder, vec![0u8; 16]],
+    )
+    .unwrap();
+    assert_eq!(h.events(), before);
+    assert_check(&report(&h, &id).await, "retrieval_eval_vector_changed");
+    let r = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
+    assert_eq!(r.body["state"], "pending");
+    assert_eq!(h.events(), before);
+}
+
+#[tokio::test]
+async fn epoch_change_between_automatic_snapshot_and_lock_acquisition_is_rejected() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (mut h, id) = ready().await;
+    record_current(&h).await;
+    let before = bytes_snapshot(&h);
+    let events = h.events();
+    let request = auto_request(&h, &id).await;
+    let path = h.memory();
+    let observed = Arc::new(AtomicBool::new(false));
+    let flag = observed.clone();
+    h.store.take();
+    h.open(
+        clean(),
+        Some(Arc::new(move |step| {
+            if step == writer::Step::AutoPrepared {
+                Connection::open(&path)
+                    .unwrap()
+                    .execute(
+                        "UPDATE memory_meta SET value='restored-epoch' WHERE key='log_epoch'",
+                        [],
+                    )
+                    .unwrap();
+                flag.store(true, Ordering::SeqCst);
+            }
+        })),
+    );
+    let r = h.call(ADMIN_TOKEN, request).await;
+    assert!(observed.load(Ordering::SeqCst));
+    assert_eq!((r.status, code(&r)), (409, "memory_epoch_changed"));
+    assert_eq!(r.body["log_epoch"], h.epoch().await);
+    assert_eq!(bytes_snapshot(&h), before);
+    assert_eq!(h.events(), events);
+    let db = Connection::open(h.memory()).unwrap();
+    assert_eq!(
+        proposals::load(&crate::writer::worker::Tx(&db), id.as_str().unwrap())
+            .unwrap()
+            .unwrap()["state"],
+        "pending"
+    );
+}
+
+#[tokio::test]
+async fn hybrid_vector_change_after_snapshot_is_rechecked_under_apply_lock() {
+    let (mut h, id) = ready().await;
+    let report_body = hybrid_gate_report(&mut h).await;
+    assert_eq!(record(&h, &report_body).await.status, 201);
+    let db = Connection::open(h.memory()).unwrap();
+    let hash: String = db
+        .query_row(
+            "SELECT content_hash FROM memory_cards WHERE scope='fleet' AND card_id='a'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let embedder = h.store.as_ref().unwrap().dense.active_id().unwrap();
+    let path = h.memory();
+    let before = bytes_snapshot(&h);
+    let events = h.events();
+    // Reopen with the same runtime and a seam outside both writer locks.
+    let config = json!({"retrieval":"hybrid","embedder":{"backend":"remote","pull":true,"shape":"api/embed","name":"fixture","model_digest":ids::sha256_hex(b"model"),"dimensions":4,"input_chars":1000,"query_prefix_version":1}});
+    h.store.take();
+    h.open(
+        clean(),
+        Some(Arc::new(move |step| {
+            if step == writer::Step::AutoPrepared {
+                Connection::open(&path)
+                    .unwrap()
+                    .execute(
+                        "INSERT INTO memory_vectors VALUES(?1,?2,1,?3)",
+                        rusqlite::params![hash, embedder, vec![0u8; 16]],
+                    )
+                    .unwrap();
+            }
+        })),
+    );
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&config)
+        .unwrap();
+    let r = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
+    assert_eq!(r.body["state"], "pending");
+    assert_check(
+        &Reply::new(200, r.body["preflight"].clone()),
+        "retrieval_eval_vector_changed",
+    );
+    let after = bytes_snapshot(&h);
+    // Only the externally inserted vector changed. No card or revision changed.
+    assert_eq!(&before[..2], &after[..2]);
+    assert_eq!(h.events(), events);
 }

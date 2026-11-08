@@ -119,6 +119,7 @@ async fn contrary_and_negative_records_in_other_workspaces_hold_the_card() {
         assert_eq!(bytes_snapshot(&h), before);
         super::retrieval_eval_tests::record_current(&h).await;
         assert_eq!(h.call(ADMIN_TOKEN,json!({"action":"evidence.purge","evidence_id":"agent:dot/workspace-b/late","client_event_id":h.id()})).await.status,200);
+        h.set_clock(h.now() + 60_001);
         assert_eq!(
             h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await.body["state"],
             "applied"
@@ -502,6 +503,7 @@ async fn automatic_reply_requires_review_on_every_target_scope() {
         &["read", "reflect", "review"],
     )
     .await;
+    h.set_clock(h.now() + 60_001);
     let reviewed = h
         .call(AGENT_TOKEN, auto_request(&h, &p.body["proposal_id"]).await)
         .await;

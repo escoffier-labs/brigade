@@ -3807,6 +3807,22 @@ The questions this gate depended on, Q1, Q2 and Q6, are decided (2026-11-04):
 - After the release: S11 (contract v2), S12a to S12i (cold families), S19d,
   S19e, S21, S27 as soon as S23 to S26 are live, and S28 after S12g.
 
+## Proposal security hardening (#2379)
+
+Before granting `reflect`, memory schema 9 adds per principal and per scope
+pending quotas, retained byte quotas and digest-based pending deduplication.
+Seven-day terminal retention replaces proposal text and diffs with immutable
+audit records. Append-only event history is preserved.
+
+Automatic apply stays off by default. Cheap immutable gates precede budgeted
+read snapshot diagnostics. The writer rechecks compact freshness bindings and
+target facts, with a SQLite progress budget for remaining scans. Per principal
+and per proposal attempt limits bound repeated requests. Hybrid evaluation
+records bind the dense snapshot and hold on vector changes. Proposal log
+payloads require review authority for hashes and diagnostic details, including
+historical events. Configuration, refusal codes and retention limits are in
+[memory operations](memory-operations.md#hub-proposal-resource-limits).
+
 ## Risks
 
 | Risk | Effect | Mitigation |
