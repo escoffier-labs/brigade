@@ -23,6 +23,7 @@ removing `--engine rust`: both engines serve the same database file.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import re
 import signal
@@ -186,6 +187,24 @@ def health_url(host: str, port: int) -> str:
 _LISTENING = re.compile(rb"^listening on (\S+?)\r?\n?$")
 
 
+def probe_url(configured: str, reported: tuple[str, int]) -> str | None:
+    """The `/health` URL for the port brigade-hub reported, or None to refuse it.
+
+    Only the port comes from the child. The host is derived from the
+    configured `--host` (a wildcard probes loopback), never from the child's
+    output, and a reported host that is not loopback, a wildcard or the
+    configured host refuses the start.
+    """
+    host, port = reported
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if not (address.is_loopback or address.is_unspecified or host == configured):
+        return None
+    return health_url(configured, port)
+
+
 def bound_address(line: bytes) -> tuple[str, int] | None:
     """The host and port from brigade-hub's `listening on <address>` line."""
     match = _LISTENING.match(line)
@@ -303,6 +322,7 @@ def run(
         )
         return _supervise(
             argv,
+            host=host,
             image=image,
             detail=(
                 f"brigade-hub front, managed Python upstream; db {db_path}; "
@@ -324,6 +344,7 @@ def run(
 def _supervise(
     argv: list[str],
     *,
+    host: str = "127.0.0.1",
     image: int | None = None,
     detail: str,
     interval: float,
@@ -390,6 +411,7 @@ def _supervise(
         relay.start()
         reason = _watch(
             child,
+            host=host,
             bound=bound,
             detail=detail,
             interval=interval,
@@ -448,6 +470,7 @@ def _relay_stderr(child: subprocess.Popen[bytes], bound: list[tuple[str, int]]) 
 def _watch(
     child: subprocess.Popen[bytes],
     *,
+    host: str,
     bound: list[tuple[str, int]],
     detail: str,
     interval: float,
@@ -473,10 +496,13 @@ def _watch(
                 return f"/health did not answer within {startup:g} s of startup"
             next_check = now + POLL_SECONDS
         elif now >= next_check:
-            host, port = bound[0]
-            if healthy(health_url(host, port)):
+            url = probe_url(host, bound[0])
+            if url is None:
+                return f"brigade-hub reported a non-loopback address {bound[0][0]!r}; refusing to probe it"
+            if healthy(url):
                 if not served:
-                    print(f"{STARTED} {'[' + host + ']' if ':' in host else host}:{port} ({detail})", flush=True)
+                    address = url.removeprefix("http://").removesuffix("/health")
+                    print(f"{STARTED} {address} ({detail})", flush=True)
                     served = True
                 sick = 0
             elif served:

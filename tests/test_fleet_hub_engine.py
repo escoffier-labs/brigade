@@ -293,6 +293,50 @@ def test_port_zero_never_probes_port_zero(tmp_path, capsys):
     assert "starting" in captured.err
 
 
+@linux_only
+def test_a_child_reporting_a_foreign_host_is_never_probed_and_the_start_is_refused(tmp_path, capsys):
+    hub, digest = _fake_hub(
+        tmp_path,
+        # Replaces the prelude's line: this child claims a host on the network.
+        "sys.stderr.write('listening on 10.0.0.5:8080\\n'); sys.stderr.flush()\n" + SERVE,
+    )
+    hub.write_text(hub.read_text().replace("listening on 127.0.0.1:3774", "starting"))
+    digest = hashlib.sha256(hub.read_bytes()).hexdigest()
+    probed: list[str] = []
+    code = _run(
+        tmp_path,
+        hub,
+        digest,
+        env=_watchdog_env(),
+        healthy=lambda url: probed.append(url) or True,
+        only_loopback=lambda: False,
+    )
+    assert code == 1
+    assert probed == []
+    captured = capsys.readouterr()
+    assert "reported a non-loopback address '10.0.0.5'" in captured.err
+    assert "listening on 10.0.0.5" not in captured.out
+
+
+@pytest.mark.parametrize(
+    ("configured", "reported", "url"),
+    [
+        ("127.0.0.1", ("127.0.0.1", 4000), "http://127.0.0.1:4000/health"),
+        ("0.0.0.0", ("0.0.0.0", 4000), "http://127.0.0.1:4000/health"),
+        ("::", ("::", 4000), "http://[::1]:4000/health"),
+        ("::1", ("::1", 4000), "http://[::1]:4000/health"),
+        # The probe host comes from the configuration, never from the child.
+        ("127.0.0.1", ("127.0.0.2", 4000), "http://127.0.0.1:4000/health"),
+        ("100.64.0.7", ("100.64.0.7", 4000), "http://100.64.0.7:4000/health"),
+        ("127.0.0.1", ("10.0.0.5", 8080), None),
+        ("127.0.0.1", ("evil.example", 8080), None),
+        ("100.64.0.7", ("100.64.0.8", 4000), None),
+    ],
+)
+def test_probe_url_takes_only_the_port_from_the_child(configured, reported, url):
+    assert fleet_hub_engine.probe_url(configured, reported) == url
+
+
 def test_bound_address_reads_brigade_hub_listening_lines():
     assert fleet_hub_engine.bound_address(b"listening on 127.0.0.1:3774\n") == ("127.0.0.1", 3774)
     assert fleet_hub_engine.bound_address(b"listening on [::1]:40000\n") == ("::1", 40000)
