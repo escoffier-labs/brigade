@@ -1385,6 +1385,85 @@ open beside the exact ops, with the skip counts and the `near_duplicate`
 counters `threshold`, `max_proposals`, `candidate_pairs`, `pair_checks`,
 `index_entries`, `clusters` and `common_shingles`.
 
+#### Broken-link repair pass
+
+After the exact and near-duplicate passes, each configured read scope runs a
+deterministic link-repair pass over the same bounded heads. It reads the
+`[[target]]`, `[[target|alias]]`, `[[target#heading]]` and
+`[[target#heading|alias]]` links in anchored claim blocks. The target ends at
+the first `#` or `|`, and the alias and heading stay as written. A folder
+prefix (`cards/` or `memory/cards/`), a `.md` extension and spaces inside the
+brackets also stay. Links in code spans, code blocks, tables, quotes, raw HTML
+and every other opaque block are never read or changed. An embed
+(`![[x]]`), an escaped link (`\[[x]]`) and a heading-only link (`[[#x]]`) are not
+card links and are ignored.
+
+A link is broken when its target matches no live card in the same scope. A
+card is live when its hub state is `live` and its front matter has neither
+`status: superseded` nor `superseded_by`. A target matches a live card by card
+id, alias, `topic` or `title`, compared after case folding and trimming. The
+hub card id is the file stem for migrated cards, and older ids stay as
+aliases. A link to a retired or superseded card is therefore broken too.
+
+The pass repoints a broken link only when exactly one live card in the same
+scope is the clear target. It tries two rules in order:
+
+1. The target is a card that an accepted supersede retired, and its
+   `superseded_by` names a live card in the same scope. That successor is the
+   target. Only one hop is followed, so a successor that was itself retired
+   leaves the link for rule 2.
+2. Exactly one live card has a card id, alias, `topic` or `title` that equals
+   the target after case folding and after runs of whitespace and hyphens
+   collapse to one space. `Gizmo  Notes`, `gizmo-notes` and `Gizmo Notes`
+   all reach a card titled `Gizmo Notes`.
+
+Anything else is counted and left alone, per link:
+
+| Skip reason | Meaning |
+|---|---|
+| `link_no_target` | No live card matches |
+| `link_ambiguous_target` | Several live cards, or several different successors, match |
+| `link_cross_scope_target` | The only match is a live card in another scope, or the successor names another scope |
+| `link_non_clean`, `link_unknown_trust`, `link_inactive_card` | The card holding the link fails the exact pass's scan and trust filters, or is not live |
+| `link_missing_pin` | The block holding the link has no claim anchor |
+| `link_unreplaceable_block` | The block spans several lines or contains `^`, so the hub would refuse a one-line replacement |
+| `link_invalid_blocks` | The card's claim anchors are duplicated or invalid |
+| `link_deferred` | The per-run cap held the submission for a later run |
+
+Each repair is a `replace_block` op that carries only the block's wording with
+the link targets changed. It pins the card's base revision and the block hash,
+and the hub appends `previously X, now Y` to the card when it applies. A block
+with several repairable links gets one op. Cards go in card id order, and a
+submission holds whole cards, at most seven ops, so it stays within the hub
+limits of 64 ops over eight cards. A single card with more than seven
+repairable blocks splits across submissions, and the later ones go stale when
+a reviewer accepts the first.
+
+`[reflect] link_repair_max_proposals` (default 8, from 0 to 32) caps how many
+new link-repair submissions one run opens. A value outside the range or of
+the wrong type fails the run with `hub_reflect_config` before any hub call.
+The order is exact merges, then near-duplicate submissions, then link repairs,
+and `--limit` truncates in that order. Link-repair submissions take turns by
+the same rule as near-duplicate clusters. The key is a digest of the scope and
+the sorted card ids in the submission, and `schedule.json` keeps a second table,
+`link_clusters`, with the same two times per key under the same binding. A
+scope can yield at most one key per card, so its entry cap is the 50,000-card
+bound. A full table is about 3.1 MB, and with a full near-duplicate table it
+stays within the 8 MiB state file limit.
+
+The hub classifies `replace_block` as Tier 1 only when the old and new wording
+are plain ASCII letters, spaces and `.,!?` with identical words. Every link
+repair contains `[` in both, so it never qualifies for Tier 1 or Tier 0, and
+the hub takes it as Tier 2. Each one waits for an explicit reviewer decision
+and never takes the automatic apply route.
+
+Counts never include card text. The replacement wording is card text, so the
+report's `ops` list leaves out each op's `text`. `--dry-run` sends nothing and
+lists the ops it would open without wording, with the skip counts and the
+`link_repair` counters `max_proposals`, `links` (links read), `broken` and
+`repairs`. A real run still sends the wording to the hub, which needs it to
+review the change.
+
 Hub reflection selects scopes before deriving or bounding candidates. Each scope
 allows at most 50,000 live cards and 64 MiB of UTF-8 card text, replacing the
 local reflection limit of 1,024 files. Duplicate grouping runs one scope at a

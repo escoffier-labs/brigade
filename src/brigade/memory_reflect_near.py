@@ -46,14 +46,14 @@ WORD = re.compile(r"\w+")
 
 
 class ThresholdError(ValueError):
-    """A [reflect] near-duplicate setting is missing a valid value."""
+    """A [reflect] setting is missing a valid value. The link-repair pass reuses it."""
 
 
-def settings(target: Path) -> tuple[float, int]:
-    """Read the `[reflect]` threshold and per-run proposal cap from memory-care.toml."""
+def reflect_table(target: Path) -> dict[str, Any]:
+    """Read the `[reflect]` table from memory-care.toml. Every pass validates its own keys."""
     raw = io.read_bytes(target / CONFIG, absent=True)
     if raw is None:
-        return DEFAULT_THRESHOLD, DEFAULT_MAX_PROPOSALS
+        return {}
     try:
         data = tomllib.loads(raw.decode("utf-8-sig"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError):
@@ -61,6 +61,12 @@ def settings(target: Path) -> tuple[float, int]:
     table = data.get("reflect", {})
     if not isinstance(table, dict):
         raise ThresholdError("[reflect] must be a table")
+    return table
+
+
+def settings(target: Path) -> tuple[float, int]:
+    """Read the `[reflect]` threshold and per-run proposal cap from memory-care.toml."""
+    table = reflect_table(target)
     value = table.get("near_duplicate_threshold", DEFAULT_THRESHOLD)
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not MIN_THRESHOLD <= value <= MAX_THRESHOLD:
         raise ThresholdError(
