@@ -69,19 +69,22 @@ def _plain_repo(path: Path) -> Path:
     return path
 
 
-def _swap_source_on_first_fsync(monkeypatch, source: Path, text: str) -> None:
-    """Replace `source` with a new file the first time a copy is fsynced."""
+def _on_first_fsync(monkeypatch, action) -> None:
+    """Run `action` the first time rescue fsyncs its copy (after the claim)."""
     real = os.fsync
     state = {"done": False}
 
     def fsync(fd):
         if not state["done"]:
             state["done"] = True
-            source.unlink()
-            source.write_text(text)
+            action()
         return real(fd)
 
     monkeypatch.setattr(handoff_worktrees.os, "fsync", fsync)
+
+
+def _claims(inbox: Path) -> list[Path]:
+    return list(inbox.glob(".brigade-claim-*"))
 
 
 # A. One bad item is recorded and skipped; the rest of the batch still runs.
@@ -219,6 +222,48 @@ def test_untrusted_fields_stay_out_of_logs_and_receipts(tmp_target: Path, capsys
     assert "SENTINEL-TARGET" not in header
     assert "\x1b" not in header
     assert "\x1b" not in reviews[0].name
+
+
+# Codex 4507466523: review drafts never overwrite each other.
+
+
+def _freeze_ingest_clock(monkeypatch) -> None:
+    from datetime import datetime as real_datetime, timezone
+
+    class Frozen(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2026, 11, 8, 12, 0, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(ingest_mod, "datetime", Frozen)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="'?' is not a valid Windows filename character")
+def test_sanitized_name_collision_keeps_both_drafts(tmp_target: Path, monkeypatch):
+    inbox = _seed(tmp_target)
+    _handoff(inbox, "a!.md", "first")
+    _handoff(inbox, "a?.md", "second")
+    _freeze_ingest_clock(monkeypatch)
+
+    assert ingest_mod.run(tmp_target) == 0
+    drafts = sorted((tmp_target / "memory" / "handoff-inbox").glob("*.md"))
+    assert len(drafts) == 2
+    bodies = [d.read_text() for d in drafts]
+    assert any("first" in b for b in bodies) and any("second" in b for b in bodies)
+
+
+def test_truncated_long_name_collision_keeps_both_drafts(tmp_target: Path, monkeypatch):
+    inbox = _seed(tmp_target)
+    prefix = "2026-11-08-0900-" + "x" * 150
+    _handoff(inbox, prefix + "-one.md", "first")
+    _handoff(inbox, prefix + "-two.md", "second")
+    _freeze_ingest_clock(monkeypatch)
+
+    assert ingest_mod.run(tmp_target) == 0
+    drafts = sorted((tmp_target / "memory" / "handoff-inbox").glob("*.md"))
+    assert len(drafts) == 2
+    bodies = [d.read_text() for d in drafts]
+    assert any("first" in b for b in bodies) and any("second" in b for b in bodies)
 
 
 # B. Linked worktree inboxes are found through git and deduped by content.
@@ -407,28 +452,140 @@ def test_rescue_without_verified_destination_keeps_the_handoff(tmp_path: Path):
     assert pending.is_file()
 
 
-# Daybreak 2: the source must still be the copied file at unlink time.
+# Daybreak 2: the source is claimed atomically before it is copied.
 
 
-def test_source_swapped_during_rescue_is_kept(tmp_path: Path, monkeypatch):
+def test_clean_rescue_leaves_no_claim_file(tmp_path: Path):
     main, linked = _repo_with_worktree(tmp_path)
-    source = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-raced.md", "original")
-    _swap_source_on_first_fsync(monkeypatch, source, "replacement written mid-rescue")
+    inbox = linked / ".claude" / "memory-handoffs"
+    source = _handoff(inbox, "2026-11-08-0900-clean.md", "clean")
+    text = source.read_text()
+
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    assert [r.state for r in results] == ["delivered"]
+    assert not source.exists()
+    assert _claims(inbox) == []
+    assert (main / ".claude" / "memory-handoffs" / source.name).read_text() == text
+
+
+def test_writer_returning_to_claimed_path_keeps_worktree(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    source = _handoff(inbox, "2026-11-08-0900-raced.md", "original")
+    original = source.read_text()
+    _on_first_fsync(monkeypatch, lambda: source.write_text("written after the claim"))
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert linked.exists()
+    assert source.read_text() == "written after the claim"
+    assert (main / ".claude" / "memory-handoffs" / source.name).read_text() == original
+    assert _claims(inbox) == []
+
+
+def test_file_swapped_in_just_before_unlink_survives(tmp_path: Path, monkeypatch):
+    """The race Daybreak named: a new file lands at the original path right
+    before the source unlink. It must survive as pending."""
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    source = _handoff(inbox, "2026-11-08-0900-raced.md", "original")
+    original = source.read_text()
+    real_unlink = handoff_worktrees.dirfd.unlink_child
+    state = {"done": False}
+
+    def unlink_child(parent, name, **kwargs):
+        if not state["done"]:
+            state["done"] = True
+            if source.exists():
+                source.unlink()
+            source.write_text("swapped in before the unlink")
+        return real_unlink(parent, name, **kwargs)
+
+    monkeypatch.setattr(handoff_worktrees.dirfd, "unlink_child", unlink_child)
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert linked.exists()
+    assert source.read_text() == "swapped in before the unlink"
+    assert (main / ".claude" / "memory-handoffs" / source.name).read_text() == original
+    assert _claims(inbox) == []
+
+
+def test_claimed_file_changed_after_copy_is_restored(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    source = _handoff(inbox, "2026-11-08-0900-raced.md", "original")
+
+    def rewrite_claim():
+        (claim,) = _claims(inbox)
+        claim.write_text("changed after the copy")
+
+    _on_first_fsync(monkeypatch, rewrite_claim)
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    assert [(r.state, r.reason) for r in results] == [("failed", "source-changed")]
+    assert source.read_text() == "changed after the copy"
+    assert _claims(inbox) == []
+
+
+def test_claimed_file_changed_during_removal_keeps_worktree(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    source = _handoff(inbox, "2026-11-08-0900-raced.md", "original")
+
+    def rewrite_claim():
+        (claim,) = _claims(inbox)
+        claim.write_text("changed after the copy")
+
+    _on_first_fsync(monkeypatch, rewrite_claim)
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert linked.exists()
+    assert source.read_text() == "changed after the copy"
+
+
+def test_stale_claim_keeps_worktree(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    (inbox / ".brigade-claim-0123.md.claimed").write_text("interrupted rescue")
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert linked.exists()
+    assert (inbox / ".brigade-claim-0123.md.claimed").is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX rename path")
+def test_rename_noreplace_never_replaces(tmp_path: Path):
+    (tmp_path / "a.md").write_text("a")
+    (tmp_path / "b.md").write_text("b")
+    fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(FileExistsError):
+            handoff_worktrees._rename_noreplace(fd, "a.md", "b.md")
+        handoff_worktrees._rename_noreplace(fd, "a.md", "c.md")
+        if os.uname().sysname == "Linux":
+            assert handoff_worktrees._renameat2_noreplace(fd, "c.md", "d.md")
+    finally:
+        os.close(fd)
+    assert (tmp_path / "b.md").read_text() == "b"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["b.md", "d.md"] if os.uname().sysname == "Linux" else True
+
+
+def test_preplanted_temp_name_is_never_deleted(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    source = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-pending.md", "pending")
+    fixed = handoff_worktrees.uuid.UUID(int=7)
+    monkeypatch.setattr(handoff_worktrees.uuid, "uuid4", lambda: fixed)
+    planted = main / ".claude" / "memory-handoffs" / f".brigade-rescue-{fixed.hex}.tmp"
+    planted.write_text("someone else's file")
 
     results = handoff_worktrees.rescue_pending_handoffs(linked, main)
 
     assert [r.state for r in results] == ["failed"]
-    assert source.read_text() == "replacement written mid-rescue"
-
-
-def test_source_swapped_during_removal_keeps_worktree(tmp_path: Path, monkeypatch):
-    main, linked = _repo_with_worktree(tmp_path)
-    source = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-raced.md", "original")
-    _swap_source_on_first_fsync(monkeypatch, source, "replacement written mid-rescue")
-
-    runguard.remove_worktree(main, linked, force=True)
-
-    assert source.read_text() == "replacement written mid-rescue"
+    assert planted.read_text() == "someone else's file"
+    assert source.read_text() == _HANDOFF.format(summary="pending")
 
 
 # Codex 6: broken git metadata is not "nothing tracked".

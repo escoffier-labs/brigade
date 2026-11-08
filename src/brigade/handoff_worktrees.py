@@ -14,6 +14,8 @@ discovery or rescue outside that repository.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import os
 import stat
@@ -51,6 +53,12 @@ CLAUDE_INBOX = WRITER_INBOXES["claude"]
 # Ingesters list only `*.md`, so a partial rescue copy is never read.
 _TEMP_PREFIX = ".brigade-rescue-"
 _TEMP_SUFFIX = ".tmp"
+# A source being rescued is renamed to a private claim name first. No
+# ingester or writer lists it, and a writer that returns to the original
+# path creates a new file instead of changing the claimed one.
+_CLAIM_PREFIX = ".brigade-claim-"
+_CLAIM_SUFFIX = ".md.claimed"
+_RENAME_NOREPLACE = 1
 
 
 def _git_env() -> dict[str, str]:
@@ -441,8 +449,61 @@ class _Dest:
             os.close(self.root_fd)
 
 
-def _identity(info: os.stat_result) -> tuple[int, int, int, int]:
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+def _renameat2_noreplace(parent: int, source: str, destination: str) -> bool:
+    """Linux renameat2(RENAME_NOREPLACE). False when the call is unavailable."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        function = ctypes.CDLL(None, use_errno=True).renameat2
+    except (OSError, AttributeError):
+        return False
+    function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    if function(parent, os.fsencode(source), parent, os.fsencode(destination), _RENAME_NOREPLACE) == 0:
+        return True
+    code = ctypes.get_errno()
+    if code in (errno.ENOSYS, errno.EINVAL):
+        return False
+    raise OSError(code, os.strerror(code), destination)
+
+
+def _rename_noreplace(parent: int, source: str, destination: str) -> None:
+    """Atomically rename one child of a held directory without replacing.
+
+    Linux uses renameat2(RENAME_NOREPLACE) and Windows a no-replace handle
+    rename. Elsewhere `destination` is a fresh random name, so a checked
+    plain rename moves exactly the object at `source` without clobbering.
+    """
+    if os.name == "posix":
+        if _renameat2_noreplace(parent, source, destination):
+            return
+        if _child_exists(parent, destination):
+            raise FileExistsError(errno.EEXIST, "destination exists", destination)
+        os.rename(source, destination, src_dir_fd=parent, dst_dir_fd=parent)
+        return
+    dirfd.replace_children(parent, source, destination, replace=False)
+
+
+def _restore_claim(src_fd: int, claim: str, name: str) -> bool:
+    """Put a claimed handoff back as a pending `.md` without replacing anything."""
+    stem = name[: -len(".md")]
+    for target in (name, f"{stem}-restored-{uuid.uuid4().hex[:8]}.md"):
+        try:
+            _rename_noreplace(src_fd, claim, target)
+        except FileExistsError:
+            continue
+        except OSError:
+            return False
+        try:
+            dirfd.fsync_directory(src_fd)
+        except OSError:
+            pass
+        return True
+    return False
+
+
+def _is_candidate(name: str) -> bool:
+    return name.endswith(".md") and not name.startswith(".") and name != "TEMPLATE.md"
 
 
 def _rescue_one(
@@ -457,16 +518,31 @@ def _rescue_one(
     tracked_names, tracked_ids = tracked
     if name.casefold() in {n.casefold() for n in tracked_names}:
         return None
-    dest_fd: int | None = None
-    temp: str | None = None
     try:
         before = dirfd.stat_child(src_fd, name)
-        if not stat.S_ISREG(before.st_mode):
-            return Rescue(source, "failed", reason="not-regular-file")
-        if (before.st_dev, before.st_ino) in tracked_ids:
-            return None
-        raw, opened = _read_child(src_fd, name)
-        if os.name == "posix" and (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+    except OSError:
+        return Rescue(source, "failed", reason="rescue-io-error")
+    if not stat.S_ISREG(before.st_mode):
+        return Rescue(source, "failed", reason="not-regular-file")
+    if (before.st_dev, before.st_ino) in tracked_ids:
+        return None
+    # Claim the source atomically. From here on only the claimed object is
+    # read, compared and removed, whatever happens at the original path.
+    claim = f"{_CLAIM_PREFIX}{uuid.uuid4().hex}{_CLAIM_SUFFIX}"
+    try:
+        _rename_noreplace(src_fd, name, claim)
+    except OSError:
+        return Rescue(source, "failed", reason="claim-failed")
+    claimed = True
+    dest_fd: int | None = None
+    temp: str | None = None
+    temp_created = False
+    try:
+        held = dirfd.stat_child(src_fd, claim)
+        if not stat.S_ISREG(held.st_mode) or (held.st_dev, held.st_ino) in tracked_ids:
+            return Rescue(source, "failed", reason="source-changed")
+        raw, opened = _read_child(src_fd, claim)
+        if (opened.st_dev, opened.st_ino) != (held.st_dev, held.st_ino):
             return Rescue(source, "failed", reason="source-changed")
         sha = digest(raw)
         dest_fd, known = dest.inbox(parts)
@@ -476,6 +552,7 @@ def _rescue_one(
         else:
             temp = f"{_TEMP_PREFIX}{uuid.uuid4().hex}{_TEMP_SUFFIX}"
             out = dirfd.open_child_file(dest_fd, temp, _write_flags(), 0o644)
+            temp_created = True
             try:
                 view = memoryview(raw)
                 while view:
@@ -494,28 +571,35 @@ def _rescue_one(
                     dirfd.replace_children(dest_fd, temp, final, replace=False)
                 except FileExistsError:
                     continue
-                published, temp = final, None
+                published, temp_created = final, False
                 break
             if published is None:
                 return Rescue(source, "failed", reason="destination-collision")
             dirfd.fsync_directory(dest_fd)
             known.add(sha)
             state = "delivered"
-        # The source must be the file we copied, right up to the unlink.
-        if _identity(dirfd.stat_child(src_fd, name)) != _identity(before):
+        # The claimed bytes must still be the bytes that were delivered.
+        current, _ = _read_child(src_fd, claim)
+        if digest(current) != sha:
             return Rescue(source, "failed", reason="source-changed")
-        dirfd.unlink_child(src_fd, name)
+        dirfd.unlink_child(src_fd, claim)
+        claimed = False
         dirfd.fsync_directory(src_fd)
         dest_path = str(dest.root.joinpath(*parts, published)) if dest.root and published else None
         return Rescue(source, state, dest=dest_path)
     except OSError:
         return Rescue(source, "failed", reason="rescue-io-error")
     finally:
-        if temp is not None and dest_fd is not None:
+        if temp_created and temp is not None and dest_fd is not None:
             try:
                 dirfd.unlink_child(dest_fd, temp)
             except OSError:
                 pass
+        if claimed and not _restore_claim(src_fd, claim, name):
+            print(
+                f"brigade: claimed handoff left as {safe_text(claim)} in {safe_text(label)}",
+                file=sys.stderr,
+            )
 
 
 def _rescue_inbox(worktree: Path, root_fd: int, rel: str, dest: _Dest) -> list[Rescue]:
@@ -531,7 +615,10 @@ def _rescue_inbox(worktree: Path, root_fd: int, rel: str, dest: _Dest) -> list[R
         names = dirfd.child_names(src_fd, MAX_INBOX_ENTRIES + 1)
         if len(names) > MAX_INBOX_ENTRIES:
             return [Rescue(label, "failed", reason="inbox-too-large")]
-        candidates = sorted(n for n in names if n.endswith(".md") and not n.startswith(".") and n != "TEMPLATE.md")
+        # A claim left by an interrupted rescue still holds a handoff.
+        if any(n.startswith(_CLAIM_PREFIX) for n in names):
+            return [Rescue(label, "failed", reason="stale-claim")]
+        candidates = sorted(n for n in names if _is_candidate(n))
         if not candidates:
             return []
         tracked = _tracked(worktree.joinpath(*parts))
@@ -541,8 +628,18 @@ def _rescue_inbox(worktree: Path, root_fd: int, rel: str, dest: _Dest) -> list[R
             dest.inbox(parts)
         except OSError:
             return [Rescue(label, "failed", reason="destination-unavailable")]
-        results = [_rescue_one(src_fd, name, label, dest, parts, tracked) for name in candidates]
-        return [result for result in results if result is not None]
+        results = [r for r in (_rescue_one(src_fd, n, label, dest, parts, tracked) for n in candidates) if r]
+        # A writer may have created a handoff (or returned to a claimed path)
+        # during the pass. Anything still pending keeps the worktree.
+        tracked_names = {n.casefold() for n in tracked[0]}
+        left = [
+            n
+            for n in dirfd.child_names(src_fd, MAX_INBOX_ENTRIES + 1)
+            if n.startswith(_CLAIM_PREFIX) or (_is_candidate(n) and n.casefold() not in tracked_names)
+        ]
+        if left and not any(r.state == "failed" for r in results):
+            results.append(Rescue(label, "failed", reason="pending-after-rescue"))
+        return results
     except OSError:
         return [Rescue(label, "failed", reason="inbox-unreadable")]
     finally:

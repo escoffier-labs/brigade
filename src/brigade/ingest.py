@@ -74,6 +74,7 @@ SKIP_INVALID_SOURCE_CONFIG = "invalid handoff source config"
 # stop discovery short of the one that owns the inbox.
 _GIT_LOCATION_ENV = handoff_worktrees.GIT_LOCATION_ENV
 _TRACKED_SKIP_CODE = "tracked-or-unverifiable"
+_MAX_DRAFT_SUFFIX = 1000
 
 
 class TrackedHandoffError(RuntimeError):
@@ -709,7 +710,6 @@ def _execute(
         slug = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         # Ordinary names pass through unchanged; anything else is replaced.
         stem = re.sub(r"[^A-Za-z0-9._-]", "_", handoff_path.stem)[:120]
-        dest = inbox_dir / f"{slug}-{stem}.md"
         verb = "inbox" if outcome.kind == "inboxed" else "skip-inbox"
         summary = _summary(verb, name, outcome.code, _match_meta(outcome, target))
         if not dry_run:
@@ -721,7 +721,7 @@ def _execute(
                 f"<!-- routed from {handoff_worktrees.safe_text(handoff_path.name)}\n"
                 f"     reason: {outcome.code}{_match_meta(outcome, target)}\n     routed-at: {slug} -->\n\n"
             )
-            dest.write_text(header + original, encoding="utf-8")
+            dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
             log_match(target, outcome.match, dest)
             _archive(handoff_path, processed_dir)
         # Both inboxed and skipped are now archived; classify them uniformly.
@@ -929,6 +929,23 @@ def _archive(src: Path, processed_dir: Path) -> Path:
         dest = processed_dir / f"{src.stem}-{stamp}{src.suffix}"
     shutil.move(str(src), dest)
     return dest
+
+
+def _write_review_draft(inbox_dir: Path, base: str, text: str) -> Path:
+    """Create a new review draft, never replacing an existing one.
+
+    Sanitizing and truncating handoff names can map two handoffs to one
+    stem within the same second, so a taken name gets a numbered suffix.
+    """
+    for index in range(_MAX_DRAFT_SUFFIX):
+        dest = inbox_dir / (f"{base}.md" if index == 0 else f"{base}-{index}.md")
+        try:
+            with dest.open("x", encoding="utf-8") as handle:
+                handle.write(text)
+        except FileExistsError:
+            continue
+        return dest
+    raise OSError(f"no free review draft name for {base}")
 
 
 def _summary(verb: str, name: str, code: str, meta: str = "") -> str:
