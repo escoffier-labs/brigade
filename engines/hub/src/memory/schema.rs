@@ -2,7 +2,7 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 9;
+pub const USER_VERSION: i64 = 10;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
@@ -143,12 +143,13 @@ CREATE TABLE memory_idempotency(
   PRIMARY KEY(principal, client_event_id)
 ) WITHOUT ROWID;
 CREATE INDEX memory_idempotency_age ON memory_idempotency(created_ms);
-{}{}{}{}
+{}{}{}{}{}
 ",
         super::embedding::DDL,
         super::proposals::DDL,
         super::attestation::DDL,
-        super::retrieval_eval::DDL
+        super::retrieval_eval::DDL,
+        super::read_counts::DDL
     )
 }
 
@@ -168,6 +169,8 @@ pub const TABLES: &[&str] = &[
     "memory_proposals",
     "memory_evidence",
     "memory_retrieval_evals",
+    "memory_read_days",
+    "memory_read_totals",
 ];
 
 /// Create a fresh file's schema, or check an existing one. Never downgrades,
@@ -200,6 +203,7 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
             for (k, v) in meta {
                 c.execute("INSERT INTO memory_meta(key,value) VALUES(?1,?2)", [k, &v])?;
             }
+            super::read_counts::migrate(c, now_ms)?;
             c.execute_batch(&format!(
                 "PRAGMA application_id={APPLICATION_ID}; PRAGMA user_version={USER_VERSION};"
             ))
@@ -245,6 +249,11 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     }
     if version < 9 {
         step_with(c, 9, super::hardening::migrate).map_err(err)?;
+    }
+    // Version 10: per-card read counts. Not part of the event log, the log
+    // epoch, replication or any policy digest.
+    if version < 10 {
+        step_with(c, 10, |c| super::read_counts::migrate(c, now_ms)).map_err(err)?;
     }
     for table in TABLES {
         let present: Option<i64> = c

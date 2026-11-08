@@ -1800,3 +1800,76 @@ use this binding.
 Scope readers without review authority receive only proposal id, state,
 decision and decision mode in proposal event payloads. This reader redaction
 also covers historical payloads without rewriting the append-only log.
+
+## Hub read counts
+
+Memory schema 10 adds per-card daily read counts for the verification cadence
+in [phase-memory-verify.md](phase-memory-verify.md) (#2387). The migration
+keeps the log epoch, proposal ids and event sequence, and records
+`read_counts_since_day` in `memory_meta`. An older hub refuses a version 10
+file, so take the usual backup before upgrading.
+
+The hub counts two things per card per UTC day. `search_hits` is one per card
+a `search` reply with status 200 returns. `card_reads` is one per `card` read
+with status 200 at offset 0. Continuation chunks, `eval: true` searches, the
+hub's own searches, `log`, `status`, proposal reads and refused reads are not
+counted. Reads answered by a local replica never reach the hub.
+
+The tables hold scope, card id, day and counts. No principal, query text, time
+of day, client address or result rank is stored. The counts are not part of
+the event log, replication or any policy digest. In this release no read
+action returns them.
+
+Counting never fails or slows a read, and flushing never delays a write. Each
+hub process adds reads to an in-memory accumulator. The memory writer flushes
+it about once a minute in small transactions, and only while nothing is
+queued. A flush or retention sweep that sees a job arrive rolls back at the
+next row boundary and yields. A full accumulator does not force a flush: new
+keys are dropped and counted. A restart or crash loses counts not yet flushed.
+
+The hub configuration accepts `memory.read_counts`:
+
+| Key | Default | Range | Effect when reached |
+|---|---:|---|---|
+| `accumulator_keys` | 65536 | 1 to 1048576 | New card-day keys are dropped and counted |
+| `principal_card_daily` | 64 | 1 to 1000000 | Reads by one principal of one card are served, not counted |
+| `principal_daily` | 20000 | 1 to 1000000 | Reads by one principal are served, not counted |
+| `flush_rows` | 2048 | 1 to 100000 | The rest wait for the next flush |
+| `flush_ms` | 20 | 1 to 1000 | The flush commits at a row boundary and resumes later |
+| `day_rows` | 1000000 | 1 to 100000000 | New day rows are not inserted. Existing rows still update |
+| `total_rows` | 250000 | 1 to 100000000 | New totals rows are not inserted. Existing rows still update |
+| `sweep_rows` | 2000 | 1 to 100000 | The retention sweep resumes on the next idle tick |
+| `sweep_ms` | 20 | 1 to 1000 | Same |
+| `retention_days` | 35 | 7 to 365 | Day rows older than this are deleted |
+| `principals` | 64 | 1 to 4096 | Principals the daily limiter tracks at once |
+| `principal_pairs` | 2048 | 1 to 1000000 | Further distinct cards from one principal are served, not counted |
+| `limiter_pairs` | 131072 | 1 to 16777216 | Limiter entries across all principals |
+
+Unknown keys and values outside a range fail configuration, and so does a
+`limiter_pairs` below `principals` times `principal_pairs`. Every tracked
+principal can therefore use its whole share, and one principal cannot fill the
+limiter for the others. A principal with fewer than `principal_pairs / 16`
+distinct cards (128 by default) is light. When the principal table is full and
+any tracked principal is not light, a new principal evicts the one with the
+most distinct cards. That principal's reads are served but not counted until
+the day resets, so eviction never refills its budget. When every tracked
+principal is light, the least recently active one leaves without being denied
+and is tracked again on its next read with its daily total intact. Its
+per-card limits start over, so it can have at most `principal_pairs / 16 - 1`
+cards counted up to `principal_card_daily` more times each that day (127 x 64
+by default). Each light principal leaves this way at most once a day, and at
+most `16 x principals` do (1,024 by default). Past that, a new principal's
+reads are served but not counted, and the loss is counted. This bounded
+inflation is accepted over leaving the rest of the fleet uncounted. The
+per-principal limits live only in memory, key each principal by a per-process
+keyed hash, and reset at the UTC day boundary. Per-day counters saturate at
+2^32 - 1.
+
+The idle retention sweep deletes expired day rows oldest first, then removes
+the totals rows of retired cards, within `sweep_rows` and `sweep_ms` per
+transaction. It checks for queued work and the time budget at every totals row,
+commits partial progress at the budget, and resumes from where it stopped. A
+sweep that uses its whole row budget in either stage runs again while the
+writer is idle. `/metrics` reports each budget that bites as
+`brigade_hub_memory_read_count_budget_total{budget="..."}` and lost increments
+as `brigade_hub_memory_read_count_dropped_total`.
