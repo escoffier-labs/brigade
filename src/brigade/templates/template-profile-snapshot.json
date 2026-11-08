@@ -573,10 +573,10 @@
         "sha256": "ce4f1abf5735263eb6a33fa46dbece8e4e885c457120df70fff3cebe6ca3a9c3"
       },
       {
-        "byte_size": 1424,
+        "byte_size": 1660,
         "dst": ".claude/memory-handoffs/TEMPLATE.md",
         "rendered": true,
-        "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
+        "sha256": "5d1cfcb92ba69300e8194bbb7636f64aec1a2a445ac0e2b6e9551aca41323c88"
       },
       {
         "byte_size": 4850,
@@ -617,10 +617,10 @@
         "sha256": "ce4f1abf5735263eb6a33fa46dbece8e4e885c457120df70fff3cebe6ca3a9c3"
       },
       {
-        "byte_size": 1424,
+        "byte_size": 1660,
         "dst": ".claude/memory-handoffs/TEMPLATE.md",
         "rendered": true,
-        "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
+        "sha256": "5d1cfcb92ba69300e8194bbb7636f64aec1a2a445ac0e2b6e9551aca41323c88"
       },
       {
         "byte_size": 4850,
@@ -697,16 +697,16 @@
         "sha256": "ce4f1abf5735263eb6a33fa46dbece8e4e885c457120df70fff3cebe6ca3a9c3"
       },
       {
-        "byte_size": 1424,
+        "byte_size": 1660,
         "dst": ".claude/memory-handoffs/TEMPLATE.md",
         "rendered": true,
-        "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
+        "sha256": "5d1cfcb92ba69300e8194bbb7636f64aec1a2a445ac0e2b6e9551aca41323c88"
       },
       {
-        "byte_size": 1424,
+        "byte_size": 1660,
         "dst": ".codex/memory-handoffs/TEMPLATE.md",
         "rendered": true,
-        "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
+        "sha256": "5d1cfcb92ba69300e8194bbb7636f64aec1a2a445ac0e2b6e9551aca41323c88"
       },
       {
         "byte_size": 10904,
@@ -793,10 +793,10 @@
         "sha256": "094d37f8e9f9e3abf8883fbc412e18bfa4de6fdff5528a2afb5d9bfbddcecafa"
       },
       {
-        "byte_size": 3258,
+        "byte_size": 4870,
         "dst": "memory/cards/handoff-flow.md",
         "rendered": true,
-        "sha256": "996140feb4a54265732c01c0b8f37e14479d4df14ecf938122b0a9901fae5ca1"
+        "sha256": "084828d7855a2481c7b7775212921e6e6eaae83edaaa299ac74e7218ed7c8d1e"
       },
       {
         "byte_size": 2080,
