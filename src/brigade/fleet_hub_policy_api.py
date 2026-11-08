@@ -16,6 +16,7 @@ from typing import Any, Mapping, Sequence
 from . import (
     fleet_hub_policy,
     fleet_hub_routing,
+    fleet_hub_verifiers,
     fleet_model_inventory,
     fleet_model_roster,
     fleet_policy,
@@ -830,6 +831,8 @@ def handle_policy(
             conn.commit()
             opened = False
         return status_payload
+    except fleet_hub_verifiers.VerifierListed as exc:
+        raise _error(exc.code, str(exc), status=409) from exc
     except FleetHubConflict as exc:
         raise _error("revision-conflict", str(exc), status=409) from exc
     except FleetHubForbidden as exc:

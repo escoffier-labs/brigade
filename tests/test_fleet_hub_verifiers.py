@@ -1,0 +1,176 @@
+"""A fleet policy write never lists a memory verifier as a reflect principal (phase-memory-verify D4)."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from brigade import fleet_hub, fleet_hub_policy, fleet_hub_policy_api, fleet_hub_verifiers, fleet_policy
+
+
+@pytest.fixture()
+def conn(tmp_path):
+    connection = fleet_hub.init_db(tmp_path / "fleet-hub.db")
+    try:
+        yield connection
+    finally:
+        connection.close()
+
+
+def _publish(conn, verifiers: list[str], generation: int = 0) -> None:
+    path = fleet_hub_verifiers.sidecar_path(conn)
+    assert path is not None
+    path.write_text(
+        json.dumps({"schema": fleet_hub_verifiers.SCHEMA, "generation": generation, "verifiers": verifiers})
+    )
+
+
+def _announce(conn, generation: int) -> None:
+    conn.execute(
+        "INSERT INTO hub_meta(key,value) VALUES('memory_verifier_generation',?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(generation),),
+    )
+    conn.commit()
+
+
+def _document(reflect: list[str]) -> dict:
+    document = fleet_policy.empty_document()
+    document["memory"] = {"tier0_op_classes": ["append_evidence"], "reflect_principals": reflect}
+    return document
+
+
+def _save(conn, reflect: list[str], *, expected: int) -> dict:
+    return fleet_hub_policy.save_policy(
+        conn, _document(reflect), expected_version=expected, actor="admin", reason="memory reflect principals"
+    )
+
+
+def _revision(conn) -> int:
+    return fleet_hub_policy.current_policy(conn)["revision"]
+
+
+def test_the_sidecar_sits_beside_the_hub_database(conn, tmp_path):
+    assert fleet_hub_verifiers.sidecar_path(conn) == tmp_path / "fleet-hub-memory-verifiers.json"
+
+
+def test_a_policy_listing_a_verifier_is_refused_including_a_replay(conn):
+    _publish(conn, ["agent:verify"])
+    for _ in range(2):
+        with pytest.raises(fleet_hub_verifiers.VerifierListed) as refused:
+            _save(conn, ["agent:other", "agent:verify"], expected=1)
+        assert refused.value.code == "memory_policy_verifier_listed"
+        assert "agent:verify" in str(refused.value)
+        assert "agent:other" not in str(refused.value)
+        assert _revision(conn) == 1
+    assert _save(conn, ["agent:other"], expected=1)["revision"] == 2
+
+
+def test_rollback_to_a_revision_that_lists_a_later_verifier_is_refused(conn):
+    assert _save(conn, ["agent:verify"], expected=1)["revision"] == 2
+    assert _save(conn, [], expected=2)["revision"] == 3
+    _publish(conn, ["agent:verify"])
+    with pytest.raises(fleet_hub_verifiers.VerifierListed):
+        fleet_hub_policy.rollback_policy(conn, to_revision=2, expected_version=3, actor="admin", reason="restore")
+    assert _revision(conn) == 3
+    _publish(conn, [])
+    rolled = fleet_hub_policy.rollback_policy(conn, to_revision=2, expected_version=3, actor="admin", reason="restore")
+    assert rolled["revision"] == 4
+
+
+def test_no_published_list_means_no_verifier(conn):
+    assert _save(conn, ["agent:verify"], expected=1)["revision"] == 2
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"{",
+        b"[]",
+        b'{"schema":"other","generation":0,"verifiers":[]}',
+        b'{"schema":"x"}',
+        b'{"schema":"x","verifiers":[]}',
+        b'{"schema":"x","generation":"1","verifiers":[]}',
+        b'{"schema":"x","generation":true,"verifiers":[]}',
+    ],
+)
+def test_an_unreadable_list_refuses_only_policies_that_list_reflect_principals(conn, body):
+    path = fleet_hub_verifiers.sidecar_path(conn)
+    assert path is not None
+    path.write_bytes(body.replace(b'"x"', json.dumps(fleet_hub_verifiers.SCHEMA).encode()))
+    with pytest.raises(fleet_hub_verifiers.VerifierListed) as refused:
+        _save(conn, ["agent:other"], expected=1)
+    assert refused.value.code == "memory_policy_verifier_list_unreadable"
+    assert _save(conn, [], expected=1)["revision"] == 2
+
+
+def test_the_policy_api_reports_the_refusal_code(conn):
+    _publish(conn, ["agent:verify"])
+    body = {"action": "save", "document": _document(["agent:verify"]), "expected_version": 1, "reason": "listing"}
+    with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError) as refused:
+        fleet_hub_policy_api.handle_policy(conn, body, caller_node=None, is_admin=True)
+    assert (refused.value.status, refused.value.code) == (409, "memory_policy_verifier_listed")
+    assert _revision(conn) == 1
+
+
+def test_a_missing_list_after_memory_init_refuses_a_listing_policy(conn, tmp_path):
+    (tmp_path / "fleet-hub-memory.db").write_bytes(b"")
+    with pytest.raises(fleet_hub_verifiers.VerifierListed) as refused:
+        _save(conn, ["agent:any"], expected=1)
+    assert refused.value.code == "memory_policy_verifier_list_unreadable"
+    assert "missing" in str(refused.value)
+    assert _revision(conn) == 1
+    assert _save(conn, [], expected=1)["revision"] == 2
+    _publish(conn, [])
+    assert _save(conn, ["agent:any"], expected=2)["revision"] == 3
+
+
+def test_a_list_from_a_newer_memory_than_a_restored_hub_is_refused(conn):
+    # Memory reached generation 8 and flagged agent:verify, then the hub file
+    # was restored to a copy at generation 6. The list republished at start
+    # carries 8.
+    _announce(conn, 6)
+    _publish(conn, ["agent:verify"], generation=8)
+    for reflect in (["agent:verify"], ["agent:other"]):
+        with pytest.raises(fleet_hub_verifiers.VerifierListed) as refused:
+            _save(conn, reflect, expected=1)
+        assert refused.value.code == "memory_policy_verifier_list_stale"
+    # The repair: an admin verifier action announces 9 and memory stores it.
+    _announce(conn, 9)
+    _publish(conn, ["agent:verify"], generation=9)
+    with pytest.raises(fleet_hub_verifiers.VerifierListed) as refused:
+        _save(conn, ["agent:verify"], expected=1)
+    assert refused.value.code == "memory_policy_verifier_listed"
+    assert _save(conn, ["agent:other"], expected=1)["revision"] == 2
+
+
+def test_a_hub_and_list_restored_together_below_memory_are_refused_after_restart(conn):
+    # The hub file and the list were both restored to generation 6 while memory
+    # is at 8. Accepting the matched pair would under-report, so memory's start
+    # republishes at its own generation 8 and the pair no longer matches.
+    _announce(conn, 6)
+    _publish(conn, [], generation=6)
+    assert _save(conn, ["agent:verify"], expected=1)["revision"] == 2
+    _publish(conn, ["agent:verify"], generation=8)
+    with pytest.raises(fleet_hub_verifiers.VerifierListed) as refused:
+        _save(conn, ["agent:other"], expected=2)
+    assert refused.value.code == "memory_policy_verifier_list_stale"
+
+
+def test_a_valid_list_at_an_older_generation_is_refused(conn):
+    # A flag change announced generation 2 and committed, but its list never
+    # landed: the file still holds generation 1, before the principal was flagged.
+    _announce(conn, 2)
+    _publish(conn, [], generation=1)
+    for reflect in (["agent:verify"], ["agent:other"]):
+        with pytest.raises(fleet_hub_verifiers.VerifierListed) as refused:
+            _save(conn, reflect, expected=1)
+        assert refused.value.code == "memory_policy_verifier_list_stale"
+    assert _revision(conn) == 1
+    assert _save(conn, [], expected=1)["revision"] == 2
+    _publish(conn, ["agent:verify"], generation=2)
+    with pytest.raises(fleet_hub_verifiers.VerifierListed) as refused:
+        _save(conn, ["agent:verify"], expected=2)
+    assert refused.value.code == "memory_policy_verifier_listed"
+    assert _save(conn, ["agent:other"], expected=2)["revision"] == 3

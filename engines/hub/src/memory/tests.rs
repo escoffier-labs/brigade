@@ -41,6 +41,7 @@ pub(super) fn hub_fixture(dir: &Path) -> PathBuf {
          CREATE TABLE fleet_policy_revisions(revision INTEGER PRIMARY KEY, digest TEXT NOT NULL, document TEXT NOT NULL DEFAULT '{}');
          CREATE TABLE fleet_policy_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1), current_revision INTEGER NOT NULL);
          CREATE TABLE claims_probe(id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT);
+         CREATE TABLE hub_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
          INSERT INTO fleet_policy_revisions(revision,digest) VALUES(1,'policy-digest-1');
          INSERT INTO fleet_policy_meta VALUES(1,1);",
     )
@@ -74,6 +75,8 @@ pub(super) struct Hub {
     pub(super) clock: PathBuf,
     pub(super) arbiter: Arc<Arbiter>,
     pub(super) store: Option<Store>,
+    /// One hub writer for verifier generations, kept across reopens.
+    generation: Option<Arc<crate::memory_verifier_generation::HubGeneration>>,
 }
 impl Hub {
     pub(super) fn new() -> Self {
@@ -88,6 +91,7 @@ impl Hub {
             hub,
             arbiter: Arc::default(),
             store: None,
+            generation: None,
         };
         h.set_clock(1_800_000_000_000);
         h.open(scanner, hook);
@@ -115,6 +119,18 @@ impl Hub {
             )
             .unwrap(),
         );
+        // Verifier flag changes announce their generation through a hub writer.
+        let (hub, arbiter) = (self.hub.clone(), self.arbiter.clone());
+        let generation = self
+            .generation
+            .get_or_insert_with(|| {
+                Arc::new(crate::memory_verifier_generation::HubGeneration::new(
+                    hub_writer::Writer::start_unchecked(hub_writer::Config::new(hub), arbiter)
+                        .unwrap(),
+                ))
+            })
+            .clone();
+        self.store.as_ref().unwrap().attach_generation(generation);
     }
     pub(super) fn set_clock(&self, ms: i64) {
         std::fs::write(&self.clock, format!("{}", ms as f64 / 1000.0)).unwrap();
@@ -169,6 +185,7 @@ impl Hub {
 impl Drop for Hub {
     fn drop(&mut self) {
         self.store.take();
+        self.generation.take();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }

@@ -18,6 +18,8 @@ use subtle::ConstantTimeEq;
 
 #[path = "registration_principals.rs"]
 mod principals;
+#[path = "registration_verifier.rs"]
+mod verifier;
 
 pub use brigade_hub::wire::{array, now, object, py_trim, quote, string, text, valid_node, value};
 
@@ -239,6 +241,9 @@ pub struct Registration {
     pub writer: writer::Writer,
     pub admin: String,
     pub clock: Option<String>,
+    /// The native memory store, when one is served. Enrollment binds each new
+    /// credential's verifier flag copy through it before issuing.
+    pub memory: Option<Arc<brigade_hub::memory::Store>>,
 }
 struct Mutation {
     key: String,
@@ -308,7 +313,7 @@ impl Registration {
         if !parts.headers.contains_key("content-length") {
             return Reply::error(400, "bad Content-Length or Transfer-Encoding").response();
         }
-        let raw = match parse_body(body) {
+        let mut raw = match parse_body(body) {
             Ok(raw) => raw,
             Err(message) => return Reply::error(400, &message).response(),
         };
@@ -316,6 +321,11 @@ impl Registration {
             Ok(t) => t,
             Err(_) => return crate::busy("registration-unavailable"),
         };
+        if let Err(refusal) =
+            verifier::bind(self.memory.as_deref(), parts.uri.path(), &mut raw, &token).await
+        {
+            return *refusal;
+        }
         let command = Mutation {
             key: digest(
                 parts.headers["authorization"]

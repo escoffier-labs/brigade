@@ -63,11 +63,11 @@ fn card(id: &str, offset: Option<i64>) -> Json {
     body
 }
 
-/// Every table and index except the two new tables, with their rows.
+/// Every table and index except the version 10 and 11 tables, with their rows.
 fn snapshot(db: &Connection) -> Vec<String> {
     let mut out = Vec::new();
     let objects: Vec<(String, String, Option<String>)> = db
-        .prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'memory_read_%' ORDER BY name")
+        .prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'memory_read_%' AND name NOT LIKE 'memory_verifier%' ORDER BY name")
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .unwrap()
@@ -111,6 +111,7 @@ async fn version_nine_migrates_to_ten_without_touching_other_tables() {
     let db = Connection::open(h.memory()).unwrap();
     db.execute_batch(
         "DROP TABLE memory_read_days; DROP TABLE memory_read_totals;
+         DROP TABLE memory_verifiers; DROP TABLE memory_verifier_credentials;
          DELETE FROM memory_meta WHERE key IN ('read_counts_since_day','read_days_rows','read_totals_rows');
          PRAGMA user_version=9;",
     )
@@ -122,7 +123,7 @@ async fn version_nine_migrates_to_ten_without_touching_other_tables() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        10
+        schema::USER_VERSION
     );
     assert_eq!(snapshot(&db), before);
     assert_eq!(schema::log_epoch(&db).unwrap(), epoch);

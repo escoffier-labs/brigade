@@ -182,7 +182,7 @@ async fn retrieval_is_last_hold_and_recorded_path_is_exactly_once_audited_and_re
         audit["gates"]["policy_digest"],
         format!("sha256:{}", ids::sha256_hex(b"test policy"))
     );
-    assert_eq!(audit["gates"]["checks"].as_array().unwrap().len(), 16);
+    assert_eq!(audit["gates"]["checks"].as_array().unwrap().len(), 17);
     assert!(!payload.contains(OLD));
     let inverse=h.call(ADMIN_TOKEN,json!({"action":"rollback","proposal_id":id,"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
     assert_eq!(inverse.body["state"], "pending");

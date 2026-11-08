@@ -51,6 +51,9 @@ pub mod scan;
 pub mod schema;
 pub mod search;
 pub mod text;
+pub mod verifier;
+#[cfg(test)]
+mod verifier_tests;
 pub mod writer;
 
 #[cfg(test)]
@@ -151,6 +154,10 @@ pub struct Store {
     /// Where `read_stats` audit rows go. Without one `read_stats` is
     /// refused, never served unaudited.
     audit: std::sync::OnceLock<Arc<dyn read_stats::AuditLog>>,
+    /// Announces each verifier flag change's generation in the hub file.
+    generation: std::sync::OnceLock<Arc<dyn verifier::GenerationLog>>,
+    /// One verifier flag change at a time, from announcement to commit.
+    verifier_turn: tokio::sync::Mutex<()>,
     clock: ids::Clock,
     scanner: Arc<dyn Scanner>,
     last_sweep: std::sync::atomic::AtomicI64,
@@ -262,6 +269,8 @@ impl Store {
             read_stats_cursors,
             read_stats_gate: read_stats::Gate::default(),
             audit: std::sync::OnceLock::new(),
+            generation: std::sync::OnceLock::new(),
+            verifier_turn: tokio::sync::Mutex::new(()),
             clock: options.clock,
             scanner: options.scanner,
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
@@ -757,6 +766,111 @@ impl Store {
     pub fn attach_audit(&self, log: Arc<dyn read_stats::AuditLog>) {
         let _ = self.audit.set(log);
     }
+    pub fn attach_generation(&self, log: Arc<dyn verifier::GenerationLog>) {
+        let _ = self.generation.set(log);
+    }
+    /// D4: announce the next generation in the hub file, durably, before the
+    /// flag change reaches the memory writer. The list the change publishes
+    /// carries that generation, so a list a crash left behind is visibly older
+    /// than the hub's and the policy writer refuses it.
+    async fn verifier_change(&self, mut prepared: Prepared) -> Reply {
+        let unavailable = |reason: &str| {
+            error(
+                503,
+                "memory_verifier_generation_unavailable",
+                &format!(
+                    "the verifier generation could not be announced ({reason}), so the flag was not changed"
+                ),
+            )
+        };
+        let Some(log) = self.generation.get() else {
+            return unavailable("no hub writer");
+        };
+        let _turn = self.verifier_turn.lock().await;
+        // A retry is answered from the idempotency record before anything is
+        // announced, so it never moves the hub's generation past the memory
+        // file's. Flag changes are serialized by the turn, and the writer
+        // commits before it answers, so a committed answer is visible here.
+        let (who, event, digest) = (
+            prepared.credential.principal().to_string(),
+            prepared.client_event_id.clone(),
+            prepared.request_digest.clone(),
+        );
+        let stored = match self
+            .readers
+            .submit(move |db| {
+                Conn(db).query(
+                    "SELECT request_digest,status,response FROM memory_idempotency WHERE principal=?1 AND client_event_id=?2",
+                    &[Value::Text(who), Value::Text(event)],
+                )
+            })
+            .await
+        {
+            Ok(rows) => rows,
+            Err(_) => return unavailable("memory read"),
+        };
+        if let Some(row) = stored.first() {
+            if text(&row[0]) != digest {
+                return error(
+                    409,
+                    "memory_client_event_conflict",
+                    "client_event_id was already used for a different request",
+                );
+            }
+            return Reply::new(
+                num(&row[1]).unwrap_or(200) as u16,
+                serde_json::from_str(&text(&row[2])).unwrap_or(Json::Null),
+            );
+        }
+        let (announced, policy) = match self
+            .hub
+            .submit(|db| {
+                let tx = Conn(db);
+                Ok((
+                    verifier::hub_generation(&tx)?,
+                    ops::Authority::read(&tx)?.policy_document,
+                ))
+            })
+            .await
+        {
+            Ok(read) => read,
+            _ => return unavailable("hub read"),
+        };
+        // Refuse a listed principal before announcing anything. The writer
+        // checks again under the hub lock.
+        if let Action::Verifier {
+            principal,
+            verifier: true,
+            ..
+        } = &prepared.action
+        {
+            if verifier::listed(&policy, principal) {
+                return error(
+                    409,
+                    "memory_policy_verifier_listed",
+                    "the current fleet policy lists this principal in memory.reflect_principals. Remove it from the policy before flagging it",
+                );
+            }
+        }
+        let committed = match self
+            .readers
+            .submit(|db| verifier::db_generation(&Conn(db)))
+            .await
+        {
+            Ok(g) => g,
+            _ => return unavailable("memory read"),
+        };
+        let next = announced.max(committed) + 1;
+        if !log.record(next).await {
+            return unavailable("hub write");
+        }
+        if let Action::Verifier { generation, .. } | Action::VerifierResync { generation } =
+            &mut prepared.action
+        {
+            *generation = next;
+        }
+        self.write(prepared).await
+    }
     /// The lexical index, for `/metrics` and `status`.
     pub fn index(&self) -> &Arc<index::Index> {
         &self.index
@@ -814,7 +928,54 @@ impl Store {
             )),
         }
     }
+    /// D4: a credential whose verifier copy differs from its principal's flag
+    /// is refused before any memory action. Writes check again under the lock.
+    async fn verifier_refusal(&self, credential: &Credential) -> Option<Reply> {
+        if *credential == Credential::Admin {
+            return None;
+        }
+        let who = credential.clone();
+        match self
+            .readers
+            .submit(move |db| verifier::check(&Conn(db), &who))
+            .await
+        {
+            Ok(refusal) => refusal,
+            Err(_) => Some(Reply::new(
+                503,
+                json!({"error": "hub busy", "reason": "memory-reader-timeout"}),
+            )),
+        }
+    }
+    /// Bind the verifier copy for a credential native registration is about
+    /// to issue, through the memory writer. A refusal means nothing may be
+    /// issued. `class` is `node` or `principal`.
+    pub async fn bind_credential(
+        &self,
+        principal: &str,
+        class: &'static str,
+        digest: &str,
+        requested: Option<bool>,
+    ) -> Reply {
+        let now_ms = self.clock.now_ms();
+        self.write(Prepared {
+            credential: Credential::Admin,
+            action: Action::VerifierBind {
+                principal: principal.into(),
+                class,
+                digest: digest.into(),
+                requested,
+            },
+            client_event_id: ids::mint(now_ms),
+            request_digest: String::new(),
+            now_ms,
+        })
+        .await
+    }
     pub async fn handle(&self, credential: &Credential, body: &[u8]) -> Reply {
+        if let Some(refusal) = self.verifier_refusal(credential).await {
+            return refusal;
+        }
         let raw: Json = match serde_json::from_slice(body) {
             Ok(v) => v,
             Err(_) => return invalid("body must be a JSON object"),
@@ -847,6 +1008,10 @@ impl Store {
             | "auto_apply_switch"
             | "retrieval_eval.record" => match self.prepare(credential, action, map, &raw) {
                 Ok(prepared) => self.write(prepared).await,
+                Err(reply) => reply,
+            },
+            "verifier" | "verifier_resync" => match self.prepare(credential, action, map, &raw) {
+                Ok(prepared) => self.verifier_change(prepared).await,
                 Err(reply) => reply,
             },
             _ => invalid("unknown memory action"),
@@ -981,6 +1146,8 @@ impl Store {
             ],
             "auto_apply" => &["action", "proposal_id", "base_epoch", "client_event_id"],
             "auto_apply_switch" => &["action", "enabled", "client_event_id"],
+            "verifier" => &["action", "principal", "verifier", "client_event_id"],
+            "verifier_resync" => &["action", "client_event_id"],
             "evidence.purge" => &["action", "evidence_id", "client_event_id"],
             "retrieval_eval.record" => {
                 &["action", "report_json", "report_sha256", "client_event_id"]
@@ -1049,7 +1216,13 @@ impl Store {
         }
         if matches!(
             action,
-            "grant" | "rescan" | "auto_apply_switch" | "evidence.purge" | "retrieval_eval.record"
+            "grant"
+                | "verifier"
+                | "verifier_resync"
+                | "rescan"
+                | "auto_apply_switch"
+                | "evidence.purge"
+                | "retrieval_eval.record"
         ) && *credential != Credential::Admin
         {
             return Err(error(
@@ -1136,6 +1309,18 @@ impl Store {
         let action = match action {
             "retrieval_eval.record" => Action::RetrievalEval(retrieval_eval::prepare(raw)?),
             "evidence.purge" => Action::EvidencePurge(short("evidence_id", 1024, true)?.unwrap()),
+            "verifier_resync" => Action::VerifierResync { generation: 0 },
+            "verifier" => Action::Verifier {
+                principal: str_field("principal")
+                    .filter(|p| ids::valid_principal(p) && *p != ADMIN)
+                    .ok_or_else(|| invalid("principal must be a node id or agent:<name>"))?
+                    .into(),
+                verifier: map
+                    .get("verifier")
+                    .and_then(Json::as_bool)
+                    .ok_or_else(|| invalid("verifier must be a boolean"))?,
+                generation: 0,
+            },
             "auto_apply_switch" => Action::AutoApplySwitch(
                 map.get("enabled")
                     .and_then(Json::as_bool)
@@ -1343,6 +1528,9 @@ impl Store {
 
     /// S23's internal push boundary. The public search contract stays unchanged.
     pub async fn push(&self, credential: &Credential, map: &Map<String, Json>) -> Reply {
+        if let Some(refusal) = self.verifier_refusal(credential).await {
+            return refusal;
+        }
         self.search_for(credential, map, true).await
     }
 
@@ -1577,6 +1765,34 @@ impl Store {
         {
             Ok(mut reply) => {
                 if is_status && reply.status == 200 {
+                    // D4: the caller's own `reflect_principals` membership,
+                    // read from the hub's current policy. Never inferred.
+                    let principal = reader.principal().to_string();
+                    reply.body["reflect_principal"] = match self
+                        .hub
+                        .submit(move |db| {
+                            let tx = Conn(db);
+                            Ok((ops::Authority::read(&tx)?, verifier::hub_generation(&tx)?))
+                        })
+                        .await
+                    {
+                        Ok((authority, announced)) => {
+                            // Policy writes that list a reflect principal are
+                            // refused until these two match (D4).
+                            let state = &mut reply.body["verifier_generation"];
+                            let current = state["memory"] == announced;
+                            state["hub"] = json!(announced);
+                            state["current"] = json!(current);
+                            json!(verifier::listed(&authority.policy_document, &principal))
+                        }
+                        Err(_) => {
+                            return error(
+                                503,
+                                "memory_action_unavailable",
+                                "policy read unavailable",
+                            );
+                        }
+                    };
                     reply.body["default_mode"] = retrieval["mode"].clone();
                     if let Some(id) = retrieval.get("embedder_id") {
                         reply.body["embedders"] =
@@ -1722,6 +1938,9 @@ fn reads<T: ReadTx + ?Sized>(
                     "default_mode": "lexical",
                     "principal": credential.principal(),
                     "credential": credential.class(),
+                    "verifier": verifier::flagged(tx, credential.principal())?,
+                    "verifier_generation": {"memory": verifier::db_generation(tx)?},
+                    "capabilities": [verifier::CAPABILITY],
                 }),
             );
             if let Some(names) = readable_scopes {
