@@ -381,3 +381,141 @@ async fn reviewed_apply_retains_its_existing_budget_contract() {
     assert_eq!(applied.status, 200);
     assert_eq!(applied.body["state"], "applied");
 }
+
+fn pending(db: &Connection) -> i64 {
+    db.query_row(
+        "SELECT count(*) FROM memory_proposals WHERE state IN ('pending','held')",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+fn limits(h: &mut Hub, limits: Json) {
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&json!({ "proposal_limits": limits }))
+        .unwrap();
+}
+async fn reject(h: &Hub, id: &Json) -> Reply {
+    h.call(ADMIN_TOKEN, json!({"action":"decide","proposal_id":id,"decision":"reject","base_epoch":h.epoch().await,"client_event_id":h.id()})).await
+}
+/// Opens `n` pending proposals for one principal on distinct cards in `fleet`.
+async fn backlog(h: &mut Hub, n: usize) -> Vec<Json> {
+    limits(
+        h,
+        json!({"pending_per_principal": 1000, "pending_per_scope": 1000}),
+    );
+    let mut ids = Vec::new();
+    for i in 0..n {
+        let card = format!("c{i}");
+        let put = h.put(ADMIN_TOKEN, "fleet", &card, None, OLD).await;
+        let r = submit(h, ADMIN_TOKEN, vec![op("fleet", &card, rev(&put))]).await;
+        assert_eq!(r.status, 201, "{r:?}");
+        ids.push(r.body["proposal_id"].clone());
+    }
+    ids
+}
+/// Decides proposals one at a time, alternating reject and accept, until the
+/// pending count reaches `floor`. Every decision must succeed.
+async fn drain(h: &Hub, db: &Connection, ids: &mut Vec<Json>, floor: i64) {
+    let mut accept = false;
+    while pending(db) > floor {
+        let id = ids.pop().unwrap();
+        let before = pending(db);
+        let r = if accept {
+            decide(h, ADMIN_TOKEN, &id).await
+        } else {
+            reject(h, &id).await
+        };
+        assert_eq!(r.status, 200, "{r:?}");
+        let expected = if accept { "applied" } else { "rejected" };
+        assert_eq!(r.body["state"], expected);
+        assert_eq!(pending(db), before - 1);
+        accept = !accept;
+    }
+}
+#[tokio::test]
+async fn upgraded_backlog_above_default_quota_drains_by_reject_and_accept() {
+    let mut h = Hub::with(clean(), None);
+    let mut ids = backlog(&mut h, 34).await;
+    // An upgrade from an unbounded store returns to the default 32 pending.
+    limits(&mut h, json!({}));
+    let db = Connection::open(h.memory()).unwrap();
+    assert_eq!(pending(&db), 34);
+    let extra = h.put(ADMIN_TOKEN, "fleet", "extra", None, OLD).await;
+    let extra_op = op("fleet", "extra", rev(&extra));
+    let refused = submit(&h, ADMIN_TOKEN, vec![extra_op.clone()]).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (429, "memory_proposal_principal_quota")
+    );
+    drain(&h, &db, &mut ids, 32).await;
+    // Still at the limit, so admission remains closed.
+    let refused = submit(&h, ADMIN_TOKEN, vec![extra_op.clone()]).await;
+    assert_eq!(code(&refused), "memory_proposal_principal_quota");
+    drain(&h, &db, &mut ids, 31).await;
+    let admitted = submit(&h, ADMIN_TOKEN, vec![extra_op]).await;
+    assert_eq!(admitted.status, 201, "{admitted:?}");
+    assert_eq!(pending(&db), 32);
+}
+#[tokio::test]
+async fn lowered_pending_limits_below_backlog_drain_and_still_refuse_admission() {
+    for (key, expected) in [
+        ("pending_per_principal", "memory_proposal_principal_quota"),
+        ("pending_per_scope", "memory_proposal_scope_quota"),
+    ] {
+        let mut h = Hub::with(clean(), None);
+        let mut ids = backlog(&mut h, 5).await;
+        let mut lowered = json!({"pending_per_principal": 1000, "pending_per_scope": 1000});
+        lowered[key] = json!(2);
+        limits(&mut h, lowered);
+        let db = Connection::open(h.memory()).unwrap();
+        let extra = h.put(ADMIN_TOKEN, "fleet", "extra", None, OLD).await;
+        let extra_op = op("fleet", "extra", rev(&extra));
+        let refused = submit(&h, ADMIN_TOKEN, vec![extra_op.clone()]).await;
+        assert_eq!((refused.status, code(&refused)), (429, expected), "{key}");
+        drain(&h, &db, &mut ids, 2).await;
+        let refused = submit(&h, ADMIN_TOKEN, vec![extra_op.clone()]).await;
+        assert_eq!(code(&refused), expected, "{key}");
+        drain(&h, &db, &mut ids, 1).await;
+        let admitted = submit(&h, ADMIN_TOKEN, vec![extra_op]).await;
+        assert_eq!(admitted.status, 201, "{key}: {admitted:?}");
+    }
+}
+#[tokio::test]
+async fn draining_pending_backlog_cannot_push_bytes_past_a_limit_they_were_within() {
+    for (key, expected) in [
+        ("bytes_per_principal", "memory_proposal_principal_quota"),
+        ("bytes_per_scope", "memory_proposal_scope_quota"),
+    ] {
+        let mut h = Hub::with(clean(), None);
+        let mut ids = backlog(&mut h, 3).await;
+        let db = Connection::open(h.memory()).unwrap();
+        let bytes: i64 = db
+            .query_row(
+                "SELECT SUM(retained_bytes) FROM memory_proposals",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // Pending is over its limit while bytes sit exactly at theirs. A
+        // decision records more audit bytes, so it would cross the byte limit.
+        let mut lowered = json!({"pending_per_principal": 1, "pending_per_scope": 1});
+        lowered[key] = json!(bytes);
+        limits(&mut h, lowered);
+        let id = ids.pop().unwrap();
+        let before = (h.events(), count(&db, "memory_card_revisions"));
+        for r in [reject(&h, &id).await, decide(&h, ADMIN_TOKEN, &id).await] {
+            assert_eq!((r.status, code(&r)), (429, expected), "{key}: {r:?}");
+        }
+        assert_eq!(pending(&db), 3);
+        assert_eq!(before, (h.events(), count(&db, "memory_card_revisions")));
+        // With byte headroom, the pending overage alone does not block a decision.
+        let mut relaxed = json!({"pending_per_principal": 1, "pending_per_scope": 1});
+        relaxed[key] = json!(bytes.saturating_mul(4));
+        limits(&mut h, relaxed);
+        ids.push(id);
+        drain(&h, &db, &mut ids, 1).await;
+    }
+}

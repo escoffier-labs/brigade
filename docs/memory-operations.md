@@ -1300,6 +1300,18 @@ charged the full body for a proposal
 that touches it. Audits continue to count toward the byte quota, so accumulating
 terminal records cannot evade admission.
 
+Each quota dimension (pending count and retained bytes, per principal and per
+scope) is checked separately inside the writer transaction. A write passes a
+dimension when the usage it leaves is within the limit or no higher than the
+usage before it. A new proposal always adds a pending row and bytes, so
+admission needs room under every limit. A decision that moves a proposal out of
+pending lowers the pending count, so reviewers can reject or accept a backlog
+left above a lowered limit, or above the defaults after an upgrade, one
+proposal at a time. The same decision still records audit bytes, so it is
+refused when those bytes would cross a byte limit the store was within. A store
+already above a byte limit must raise that limit before it can record further
+decisions that grow its bytes.
+
 An identical pending proposal is detected by its epoch, target cards with base
 revisions, operations and policy digest. The hub returns HTTP 409 with
 `memory_proposal_duplicate_pending` and the existing `proposal_id`. Principal

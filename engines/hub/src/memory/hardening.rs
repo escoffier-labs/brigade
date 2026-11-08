@@ -161,28 +161,44 @@ pub fn admit(tx: &dyn WriteTx, body: &Json, limits: &Limits) -> rusqlite::Result
     }
     quota(tx, body, limits, false)
 }
+/// A dimension passes when its usage stays within the limit or does not grow.
+/// Admission always grows pending count and bytes, so it stays strict, while a
+/// decision that drains an existing backlog above a lowered limit is allowed.
+fn within(before: i64, after: i64, limit: i64) -> bool {
+    after <= limit || after <= before
+}
+/// Checks the usage a write leaves behind. `replacing` names the stored row
+/// whose current pending count and bytes the new body replaces.
 pub fn quota(
     tx: &dyn WriteTx,
     body: &Json,
     limits: &Limits,
     replacing: bool,
 ) -> rusqlite::Result<Option<Reply>> {
-    let excluded = if replacing {
+    let own = if replacing {
         proposals::string(body, "proposal_id")
     } else {
         ""
     };
-    let pending = if matches!(proposals::string(body, "state"), "pending" | "held") {
-        1
-    } else {
-        0
+    let pending = i64::from(matches!(
+        proposals::string(body, "state"),
+        "pending" | "held"
+    ));
+    let bytes = i64::try_from(body.to_string().len()).unwrap_or(i64::MAX);
+    // Columns: total pending, total bytes, then the replaced row's share of each.
+    let allowed = |r: &[Value], pending_limit, bytes_limit| {
+        let (total_pending, total_bytes) = (number(&r[0]), number(&r[1]));
+        let pending_after = total_pending
+            .saturating_sub(number(&r[2]))
+            .saturating_add(pending);
+        let bytes_after = total_bytes
+            .saturating_sub(number(&r[3]))
+            .saturating_add(bytes);
+        within(total_pending, pending_after, pending_limit)
+            && within(total_bytes, bytes_after, bytes_limit)
     };
-    let bytes = body.to_string().len() as i64;
-    let usage=tx.query("SELECT COALESCE(SUM(state IN ('pending','held')),0),COALESCE(SUM(retained_bytes),0) FROM memory_proposals WHERE principal=?1 AND proposal_id!=?2", &[ops::t(proposals::string(body,"proposer")),ops::t(excluded)])?;
-    let exceeds = |r: &[Value], pending_limit, retained| {
-        number(&r[0]) + pending > pending_limit || number(&r[1]).saturating_add(bytes) > retained
-    };
-    if exceeds(
+    let usage=tx.query("SELECT COALESCE(SUM(state IN ('pending','held')),0),COALESCE(SUM(retained_bytes),0),COALESCE(SUM(proposal_id=?2 AND state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN proposal_id=?2 THEN retained_bytes ELSE 0 END),0) FROM memory_proposals WHERE principal=?1", &[ops::t(proposals::string(body,"proposer")),ops::t(own)])?;
+    if !allowed(
         &usage[0],
         limits.pending_per_principal,
         limits.bytes_per_principal,
@@ -198,8 +214,8 @@ pub fn quota(
         .map(|c| proposals::string(c, "scope"))
         .collect();
     for scope in scopes {
-        let usage=tx.query("SELECT COALESCE(SUM(p.state IN ('pending','held')),0),COALESCE(SUM(p.retained_bytes),0) FROM memory_proposals p JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1 AND p.proposal_id!=?2", &[ops::t(scope),ops::t(excluded)])?;
-        if exceeds(&usage[0], limits.pending_per_scope, limits.bytes_per_scope) {
+        let usage=tx.query("SELECT COALESCE(SUM(p.state IN ('pending','held')),0),COALESCE(SUM(p.retained_bytes),0),COALESCE(SUM(p.proposal_id=?2 AND p.state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN p.proposal_id=?2 THEN p.retained_bytes ELSE 0 END),0) FROM memory_proposals p JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1", &[ops::t(scope),ops::t(own)])?;
+        if !allowed(&usage[0], limits.pending_per_scope, limits.bytes_per_scope) {
             return Ok(Some(ops::error(
                 429,
                 "memory_proposal_scope_quota",
