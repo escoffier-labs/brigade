@@ -83,6 +83,8 @@ _OVERRIDE_KEYS = ("hub_url", "node_token_file")
 READ_SCOPES_MAX = 64
 # Answers that say "not now" rather than "no": they spool and use the replica.
 _UNAVAILABLE_STATUSES = {408, 429}
+# Coded proposal quota answers are hub decisions, so callers can stop proposing.
+QUOTA_REFUSALS = {"memory_proposal_principal_quota", "memory_proposal_scope_quota"}
 CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _CARD_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 _EVENT_ID = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}")
@@ -563,6 +565,9 @@ class MemoryHubClient:
             if action == "rescan" and status != 200:
                 raise HubRefusal(status, {"code": "memory_rescan_status", "error": "rescan requires HTTP 200"})
             return payload
+        code = payload.get("code")
+        if status == 429 and isinstance(code, str) and code in QUOTA_REFUSALS:
+            raise HubRefusal(status, payload)
         if 300 <= status < 400 or status in _UNAVAILABLE_STATUSES:
             # A redirect is never followed with the credential, and 408 or 429
             # come from the hub or a proxy in front of it: try again later.

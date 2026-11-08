@@ -211,7 +211,8 @@ def test_duplicate_comparison_preserves_opaque_whitespace(setup, capsys):
             hubc.event_id(),
         )
     assert run(target, capsys, "run")[0] == 0
-    assert writes(hub) == []
+    # Never an exact merge. The near-duplicate pass may still ask a reviewer to supersede.
+    assert {op["type"] for call in writes(hub) for op in call["ops"]} <= {"supersede_card"}
 
 
 def test_revoked_read_does_not_fall_back_to_cached_cards(setup, capsys):
