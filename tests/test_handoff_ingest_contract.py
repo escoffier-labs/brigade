@@ -17,7 +17,6 @@ import pytest
 from brigade import budgets, handoff_cmd, ingest as ingest_mod
 from brigade.handoff_cmd import drafts, linting
 from brigade.handoff_ingest_rules import (
-    _parse_frontmatter_block,
     card_frontmatter_problems,
     safe_card_name,
     safe_document_target,
@@ -271,20 +270,23 @@ def test_draft_refuses_a_card_without_frontmatter(tmp_path: Path):
     assert _no_files(tmp_path)
 
 
-def test_card_frontmatter_rules_cover_tags_title_closing_delimiter_and_dates():
+def test_card_frontmatter_policy_covers_tags_title_closing_delimiter_and_dates():
     assert card_frontmatter_problems(NO_TAGS) == [
-        "card frontmatter needs `tags` as a list (for example `tags: [memory, handoff]`)"
+        "card frontmatter needs `tags` (for example `tags: [memory, handoff]`)"
     ]
     assert card_frontmatter_problems(CARD.replace("topic: contract-card\n", "")) == [
         "card frontmatter needs a nonempty `title` or `topic`"
     ]
     assert card_frontmatter_problems("---\ntopic: x\ncategory: y\ntags: [a]\n") == [
-        "card frontmatter has no closing `---`"
+        "card content missing YAML frontmatter (it must open and close with `---`)"
     ]
     assert card_frontmatter_problems(CARD.replace("tags:", "updated: yesterday\ntags:")) == [
         "card frontmatter `updated` must be an ISO date like 2026-11-08"
     ]
     assert card_frontmatter_problems(CARD.replace("tags: [memory, handoff]", "tags:\n  - memory\n  - handoff")) == []
+    assert card_frontmatter_problems(CARD.replace("\n\n# Contract card\n\nBody of the card.\n", "\n")) == [
+        "card body is empty after the frontmatter"
+    ]
 
 
 # --- unsafe card name ---------------------------------------------------------
@@ -479,23 +481,6 @@ def test_unindented_block_list_is_accepted_by_lint_draft_and_ingest(tmp_path: Pa
     assert payload["valid"] is True
     sections = ingest_mod.parse(Path(payload["path"]))
     assert ingest_mod.decide(sections, tmp_path, promote_cards=True, route_documents=True).kind == "promoted"
-
-
-def test_unindented_list_entries_do_not_leak_into_the_next_key():
-    # A dash line after a flow list or scalar belongs to no list, so it stays invalid.
-    scalar_then_dash = CARD.replace("tags: [memory, handoff]", "tags: [memory]\n- stray")
-    assert card_frontmatter_problems(scalar_then_dash) == ["card frontmatter has a line that is not `key: value`"]
-    empty_tags = CARD.replace("tags: [memory, handoff]", "tags:\nlabel: x")
-    assert card_frontmatter_problems(empty_tags) == []  # an empty list is still a list
-
-
-def test_repeated_frontmatter_key_message_never_echoes_content():
-    leaky = CARD.replace(
-        "category: foundation\n", "category: foundation\nsecret-token-key: one\nsecret-token-key: two\n"
-    )
-    assert card_frontmatter_problems(leaky) == ["card frontmatter repeats a key"]
-    result = linting.lint_text(_handoff_text("create-card", content=leaky))
-    assert "secret-token-key" not in "\n".join(result.errors + result.warnings)
 
 
 def _escape_setup(tmp_path: Path) -> tuple[Path, Path]:
@@ -707,57 +692,81 @@ def test_lint_unsafe_document_message_does_not_echo_the_target():
     assert not any("SECRET-TOKEN" in e for e in result.errors)
 
 
-def _value(raw: str):
-    fields, problem = _parse_frontmatter_block([f"key: {raw}"])
-    return problem if problem else fields["key"]
+def _agree(tmp_path: Path, content: str, *, accepted: bool) -> None:
+    """Lint, draft and ingest decide give the same verdict on one card."""
+    lint_ok = linting.lint_text(_handoff_text("create-card", content=content)).valid
+    sections = {
+        "type": "workflow",
+        "title": "T",
+        "summary": "S.",
+        "recommended memory action": "create-card",
+        "target card": "agree.md",
+        "suggested card content": content,
+    }
+    decide_ok = ingest_mod.decide(sections, tmp_path, promote_cards=True, route_documents=True).kind == "promoted"
+    try:
+        _draft(tmp_path, action="create-card", target_card="agree.md", content=content, draft_id="agree")
+        draft_ok = True
+    except drafts.HandoffDraftRefused:
+        draft_ok = False
+    assert (lint_ok, draft_ok, decide_ok) == (accepted, accepted, accepted)
 
 
-MALFORMED = "card frontmatter has a malformed value (unterminated quote or list)"
+MULTILINE_DESCRIPTION = CARD.replace(
+    "category: foundation\n",
+    'category: foundation\ndescription: "first line of the description\n  second line of the description"\n',
+)
+MULTILINE_FLOW_LIST = CARD.replace("tags: [memory, handoff]", "tags: [\n  memory,\n  handoff,\n]")
+ISO_TIMESTAMPS = CARD.replace(
+    "tags:", "last_reviewed: 2026-11-08T12:00:00Z\nfresh_until: 2026-12-01T00:00:00+00:00\ntags:"
+)
 
 
-def test_yaml_comments_are_stripped_outside_quotes_only():
-    assert _value("[memory] # indexing tags") == ["memory"]
-    assert _value("[memory]  #tight") == ["memory"]
-    assert _value('"foundation # kept"') == "foundation # kept"
-    assert _value("'a # b' # dropped") == "a # b"
-    assert _value('"a \\" # still quoted" # dropped') == 'a " # still quoted'
-    assert _value("[a#b, c]") == ["a#b", "c"]
-    assert _value("a#b") == "a#b"
-    assert _value("[\"a # b\", 'c, d']") == ["a # b", "c, d"]
+def test_multiline_quoted_values_are_accepted_by_lint_draft_and_ingest(tmp_path: Path):
+    _agree(tmp_path, MULTILINE_DESCRIPTION, accepted=True)
 
 
-def test_unterminated_quotes_and_lists_are_rejected_without_echoing_text():
-    for raw in ['[a, "b]', "['x # y]", '"unterminated # not a comment', "'open", "[a, b", '["a" b]', '"a" b']:
-        assert _value(raw) == MALFORMED, raw
-    assert "SECRET" not in MALFORMED
-    # The same rejection reaches lint and draft.
-    broken = CARD.replace("tags: [memory, handoff]", 'tags: [memory, "SECRET-TOKEN-9d41]')
-    assert card_frontmatter_problems(broken) == [MALFORMED]
-    assert not linting.lint_text(_handoff_text("create-card", content=broken)).valid
+def test_multiline_flow_lists_are_accepted_by_lint_draft_and_ingest(tmp_path: Path):
+    _agree(tmp_path, MULTILINE_FLOW_LIST, accepted=True)
 
 
-def test_a_quote_inside_a_plain_scalar_is_ordinary_text():
-    assert _value("it's fine # dropped") == "it's fine"
-    assert _value('say "hi" there') == 'say "hi" there'
-    assert _value("[it's, ok]") == ["it's", "ok"]
-    plain = CARD.replace("topic: contract-card", 'topic: the card\'s "plain" topic')
-    assert card_frontmatter_problems(plain) == []
+def test_iso_timestamps_and_date_only_values_are_accepted(tmp_path: Path):
+    assert card_frontmatter_problems(ISO_TIMESTAMPS) == []
+    dated = CARD.replace("tags:", "last_reviewed: 2026-11-08\nfresh_until: 2026-12-01\ntags:")
+    assert card_frontmatter_problems(dated) == []
+    _agree(tmp_path, ISO_TIMESTAMPS, accepted=True)
 
 
-def test_frontmatter_with_trailing_comments_is_accepted_and_empty_values_are_not():
+def test_trailing_comments_and_hash_in_values_are_accepted(tmp_path: Path):
     commented = CARD.replace("tags: [memory, handoff]", "tags: [memory, handoff] # indexing tags").replace(
         "category: foundation", "category: foundation # grouping"
     )
     assert card_frontmatter_problems(commented) == []
-    assert linting.lint_text(_handoff_text("create-card", content=commented)).valid
-    block = CARD.replace("tags: [memory, handoff]", "tags: # keep these\n- memory # one\n- handoff")
-    assert card_frontmatter_problems(block) == []
-    only_comment = CARD.replace("category: foundation", "category: # nothing here")
-    assert card_frontmatter_problems(only_comment) == [
-        "card frontmatter needs a nonempty `category` (for example `category: foundation`)"
-    ]
-    hash_in_value = CARD.replace("category: foundation", 'category: "a # b"')
-    assert card_frontmatter_problems(hash_in_value) == []
+    assert card_frontmatter_problems(CARD.replace("category: foundation", 'category: "a # b"')) == []
+    _agree(tmp_path, commented, accepted=True)
+
+
+def test_a_card_the_shared_parser_rejects_is_rejected_by_all_three(tmp_path: Path):
+    secret = "SECRET-TOKEN-9d41"
+    for content in (
+        f"# {secret}\n\nNo frontmatter at all.\n",
+        CARD.replace("tags: [memory, handoff]\n---", f"tags: [memory, handoff]\n{secret}: never closed"),
+    ):
+        _agree(tmp_path, content, accepted=False)
+    reasons = card_frontmatter_problems(f"# {secret}\n\nbody\n")
+    assert reasons and not any(secret in r for r in reasons)
+    sections = {
+        "type": "workflow",
+        "title": "T",
+        "summary": "S.",
+        "recommended memory action": "create-card",
+        "target card": "agree.md",
+        "suggested card content": f"# {secret}\n\nbody\n",
+    }
+    outcome = ingest_mod.decide(sections, tmp_path, promote_cards=True, route_documents=True)
+    assert outcome.kind == "inboxed" and secret not in outcome.reason
+    result = linting.lint_text(_handoff_text("create-card", content=f"# {secret}\n\nbody\n"))
+    assert not any(secret in e for e in result.errors + result.warnings)
 
 
 # --- review round 3: held parent, content-free categories ----------------------
@@ -871,3 +880,34 @@ def test_refusal_reasons_leave_out_fence_languages_card_names_and_targets(tmp_pa
     with pytest.raises(drafts.HandoffDraftRefused) as refused:
         _draft(tmp_path, action="update-card", target_card=f"{secret}-missing.md", content=UPDATED)
     assert secret not in " ".join(refused.value.problems)
+
+
+# --- review round 4: parent identity on every platform --------------------------
+
+
+def test_a_parent_whose_identity_changed_is_routed_to_review_without_posix_gating(tmp_path: Path, monkeypatch):
+    # A Windows swap cannot run on Linux CI, so mock the directory identity: the first
+    # call is the held descriptor, the second is the reopened path, and they differ.
+    ws, handoff = _update_handoff(tmp_path)
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
+    card = ws / "memory" / "cards" / "contract-card.md"
+    before = card.read_bytes()
+    calls = []
+
+    def identity(descriptor):
+        calls.append(descriptor)
+        return (1, len(calls))
+
+    monkeypatch.setattr(ingest_mod, "_directory_identity", identity)
+    action = _execute(ws, handoff, outcome)
+    assert len(calls) == 2
+    assert action.kind == "inboxed"
+    assert card.read_bytes() == before
+    assert not list(card.parent.glob(".contract-card.md.*"))
+
+
+def test_a_stable_parent_identity_still_publishes(tmp_path: Path, monkeypatch):
+    ws, handoff = _update_handoff(tmp_path)
+    outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
+    monkeypatch.setattr(ingest_mod, "_directory_identity", lambda descriptor: (1, 1))
+    assert _execute(ws, handoff, outcome).kind == "promoted"

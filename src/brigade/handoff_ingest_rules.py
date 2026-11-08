@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import date
 from pathlib import Path
 
 from . import budgets
@@ -39,7 +38,6 @@ SAFE_SPECIAL_TARGETS = frozenset(
 
 EXPECTED_SHA_SECTION = "Expected card SHA256"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DATE_KEYS = ("created", "updated", "last_verified", "last_reviewed", "review_after", "expires", "fresh_until")
 CARDS_RELATIVE = Path("memory") / "cards"
 
@@ -78,163 +76,53 @@ def read_card_bytes(workspace: Path | None, name: str) -> bytes | None:
         return None
 
 
-_MALFORMED_VALUE = "card frontmatter has a malformed value (unterminated quote or list)"
+def card_frontmatter_structure_problems(content: str) -> list[str]:
+    """Structural problems, read with the parser ingest uses for cards.
 
-
-class _FrontmatterSyntaxError(ValueError):
-    """A frontmatter value is not valid YAML. The message never carries card text."""
-
-
-def _read_scalar(text: str, start: int, stops: str) -> tuple[str, int]:
-    """Read one scalar from `start`. Returns its value and the index after it.
-
-    A quote opens a quoted string only at the start of a scalar, and a quoted string
-    must close. Inside a plain scalar a quote is an ordinary character. A `#` starts
-    a comment only after whitespace, so `a#b` keeps its `#`. A plain scalar ends at a
-    character in `stops` or at a comment.
+    There is one frontmatter grammar: `card_fingerprint._parse_frontmatter_lines`.
+    Whatever it cannot read, ingest cannot read, so lint and draft refuse it too.
     """
-    length = len(text)
-    index = start
-    while index < length and text[index] in " \t":
-        index += 1
-    if index < length and text[index] in "'\"":
-        quote = text[index]
-        index += 1
-        chars: list[str] = []
-        while index < length:
-            char = text[index]
-            if quote == '"' and char == "\\" and index + 1 < length:
-                chars.append(text[index + 1])
-                index += 2
-                continue
-            if char == quote:
-                if quote == "'" and text[index + 1 : index + 2] == "'":
-                    chars.append("'")
-                    index += 2
-                    continue
-                return "".join(chars), index + 1
-            chars.append(char)
-            index += 1
-        raise _FrontmatterSyntaxError("unterminated quote")
-    begin = index
-    while index < length:
-        if text[index] in stops or (text[index] == "#" and index > begin and text[index - 1] in " \t"):
-            break
-        index += 1
-    return text[begin:index].strip(), index
+    from .card_fingerprint import _parse_frontmatter_lines, strip_frontmatter
+
+    text = content.lstrip()
+    _, has_frontmatter = _parse_frontmatter_lines(text)
+    if not has_frontmatter:
+        return ["card content missing YAML frontmatter (it must open and close with `---`)"]
+    if not strip_frontmatter(text).strip():
+        return ["card body is empty after the frontmatter"]
+    return []
 
 
-def _only_comment_left(text: str, index: int) -> None:
-    """After a value, only spaces and a comment set off by whitespace may remain."""
-    rest = text[index:]
-    stripped = rest.lstrip()
-    if not stripped:
-        return
-    spaced = rest != stripped or (index > 0 and text[index - 1] in " \t")
-    if not (stripped.startswith("#") and spaced):
-        raise _FrontmatterSyntaxError("trailing characters after a value")
-
-
-def _parse_value(raw: str) -> str | list[str]:
-    """Parse the value of `key: value`: a scalar, a flow list, or "" for a block list."""
-    text = raw.strip()
-    if not text or text.startswith("#"):
-        return ""
-    if not text.startswith("["):
-        value, end = _read_scalar(text, 0, "")
-        _only_comment_left(text, end)
-        return value
-    items: list[str] = []
-    index = 1
-    while True:
-        while index < len(text) and text[index] in " \t":
-            index += 1
-        if index >= len(text):
-            raise _FrontmatterSyntaxError("unterminated list")
-        if text[index] == "]":
-            index += 1
-            break
-        value, index = _read_scalar(text, index, ",]")
-        if value:
-            items.append(value)
-        while index < len(text) and text[index] in " \t":
-            index += 1
-        if index < len(text) and text[index] == ",":
-            index += 1
-        elif index >= len(text) or text[index] != "]":
-            raise _FrontmatterSyntaxError("unterminated list")
-    _only_comment_left(text, index)
-    return items
-
-
-def _parse_frontmatter_block(lines: list[str]) -> tuple[dict[str, object], str | None]:
-    fields: dict[str, object] = {}
-    current_list: str | None = None
-    for line in lines:
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        stripped = line.strip()
-        try:
-            # YAML allows the entries of a block list at the same indent as its key.
-            if current_list is not None and (stripped.startswith("- ") or stripped == "-"):
-                items = fields[current_list]
-                assert isinstance(items, list)
-                entry = _parse_value(stripped[1:])
-                if isinstance(entry, list):
-                    return fields, _MALFORMED_VALUE
-                items.append(entry)
-                continue
-            if line[0] in " \t":
-                continue
-            current_list = None
-            if ":" not in line:
-                return fields, "card frontmatter has a line that is not `key: value`"
-            key, value = line.split(":", 1)
-            key = _read_scalar(key, 0, "")[0] if key.strip().startswith(("'", '"')) else key.strip()
-            if key in fields:
-                return fields, "card frontmatter repeats a key"
-            parsed = _parse_value(value)
-        except _FrontmatterSyntaxError:
-            return fields, _MALFORMED_VALUE
-        fields[key] = parsed
-        if parsed == "":
-            fields[key] = []
-            current_list = key
-    return fields, None
+def _present(value: object) -> bool:
+    return bool(value.strip()) if isinstance(value, str) else bool(value)
 
 
 def card_frontmatter_problems(content: str) -> list[str]:
-    """Problems that make the ingester refuse a card: frontmatter, body, title, category, tags."""
-    lines = content.replace("\r\n", "\n").lstrip().split("\n")
-    if not lines or lines[0].strip() != "---":
-        return ["card content missing YAML frontmatter (it must start with `---`)"]
-    try:
-        end = next(index for index in range(1, len(lines)) if lines[index].strip() == "---")
-    except StopIteration:
-        return ["card frontmatter has no closing `---`"]
-    fields, parse_problem = _parse_frontmatter_block(lines[1:end])
-    if parse_problem:
-        return [parse_problem]
-    problems: list[str] = []
-    if not "\n".join(lines[end + 1 :]).strip():
-        problems.append("card body is empty after the frontmatter")
-    if not any(isinstance(fields.get(key), str) and str(fields[key]).strip() for key in ("title", "topic")):
+    """Structure plus the card policy the live ingester enforces on the parsed frontmatter.
+
+    Policy: a `title` or `topic`, a `category`, a `tags` key, and ISO dates (date-only or
+    a timestamp, as `memory_cmd._parse_date` reads them). The shared parser keeps a
+    flow list as text, so `tags` is checked for presence, not for list shape.
+    """
+    from .card_fingerprint import _parse_frontmatter_lines
+    from .memory_cmd import _parse_date
+
+    problems = card_frontmatter_structure_problems(content)
+    if problems and problems[0].startswith("card content missing"):
+        return problems
+    fields, _ = _parse_frontmatter_lines(content.lstrip())
+    if not any(isinstance(fields.get(key), str) and _present(fields[key]) for key in ("title", "topic")):
         problems.append("card frontmatter needs a nonempty `title` or `topic`")
     category = fields.get("category")
     if not isinstance(category, str) or not category.strip():
         problems.append("card frontmatter needs a nonempty `category` (for example `category: foundation`)")
-    tags = fields.get("tags")
-    if not isinstance(tags, list) or not all(isinstance(tag, str) and tag.strip() for tag in tags):
-        problems.append("card frontmatter needs `tags` as a list (for example `tags: [memory, handoff]`)")
+    if "tags" not in fields:
+        problems.append("card frontmatter needs `tags` (for example `tags: [memory, handoff]`)")
     for key in _DATE_KEYS:
         value = fields.get(key)
-        if value is None:
+        if value is None or (isinstance(value, str) and not value.strip()):
             continue
-        try:
-            if not isinstance(value, str) or not _ISO_DATE_RE.fullmatch(value):
-                raise ValueError(key)
-            date.fromisoformat(value)
-        except ValueError:
+        if _parse_date(value) is None:
             problems.append(f"card frontmatter `{key}` must be an ISO date like 2026-11-08")
     return problems
 

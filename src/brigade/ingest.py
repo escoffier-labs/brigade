@@ -36,6 +36,7 @@ from .handoff_ingest_rules import (
     EXPECTED_SHA_SECTION,
     SHA256_RE,
     bootstrap_budget_problem,
+    card_frontmatter_structure_problems,
     document_destination_problem,
     safe_card_name,
     read_card_bytes,
@@ -357,8 +358,10 @@ def decide(
             return Outcome("inboxed", reason="target card name unsafe")
         if fence_error:
             return Outcome("inboxed", reason=fence_error)
-        if not content.lstrip().startswith("---"):
-            return Outcome("inboxed", reason="card content missing YAML frontmatter")
+        # The same parser and structure rules lint and draft use, so the three agree.
+        structure = card_frontmatter_structure_problems(content)
+        if structure:
+            return Outcome("inboxed", reason="; ".join(structure))
         reserved = _identity_migration_fields(content.lstrip())
         if reserved:
             return Outcome(
@@ -507,16 +510,26 @@ def _read_card_child(parent: int, name: str) -> tuple[bytes, int] | None:
             os.close(descriptor)
 
 
+def _directory_identity(descriptor: int) -> tuple[int, int]:
+    """Volume and file index of an open directory: `st_dev` and `st_ino` on POSIX and Windows."""
+    metadata = os.fstat(descriptor)
+    return metadata.st_dev, metadata.st_ino
+
+
 def _assert_parent_unchanged(parent: int, parent_path: Path) -> None:
-    """The held directory is still what `parent_path` names (checked where inodes are stable)."""
-    if not dirfd.posix_available():
-        return  # the held handle already keeps every operation inside the opened directory
+    """The held directory is still the one `parent_path` names.
+
+    Windows directory handles allow delete sharing, so another process can rename the
+    directory and put a different one at the path. Reopen the path and compare stable
+    identities on every platform, so a publish into a moved directory is never reported
+    as an update of the named card.
+    """
     current = dirfd.open_directory_chain(parent_path)
     try:
-        held, now = os.fstat(parent), os.fstat(current)
+        same = _directory_identity(parent) == _directory_identity(current)
     finally:
         os.close(current)
-    if (held.st_dev, held.st_ino) != (now.st_dev, now.st_ino):
+    if not same:
         raise OSError("publication parent changed")
 
 
