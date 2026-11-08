@@ -109,12 +109,18 @@ def _scoped(scope: str, name: str) -> str | None:
     qualified for another scope never resolves a link here.
 
     A name is scope qualified only when some `/` splits it into a scope the hub
-    accepts and a card path that `_target` reduces to a valid card id. Each
-    split is tried from the left, because a repo scope contains a `/` itself
-    and the card path can carry a `cards/` prefix or `.md`. So
+    accepts and a card path that `_target` reduces to a valid card id. The
+    card's own scope is tried first as an exact prefix, so a scope such as
+    `repo:a/cards` keeps `repo:a/cards/c`. Other splits are then tried from the
+    left, because a repo scope contains a `/` itself and the card path can
+    carry a `cards/` prefix or `.md`. So
     `repo:links/cards/old-guide.md` is `old-guide` in `repo:links`. Any other
     alias, such as `docs:v1/guide`, is kept as written.
     """
+    if name.startswith(scope + "/"):
+        own = _target(name[len(scope) + 1 :])
+        if hub_client.valid_card_id(own):
+            return own
     at = name.find("/")
     while at > 0:
         owner, card_id = name[:at], _target(name[at + 1 :])
