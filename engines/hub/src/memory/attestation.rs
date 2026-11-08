@@ -230,6 +230,13 @@ pub fn attach(
             "principal evidence capacity reached",
         ));
     }
+    if manifest.is_some() {
+        let size = checked.bytes.len() as i64;
+        let principal = p.credential.principal();
+        if let Some(r) = binding::retained_refusal(tx, principal, scope, size, &binding::BUDGET)? {
+            return Ok(r);
+        }
+    }
     let text = std::str::from_utf8(&checked.bytes).unwrap();
     let scan = scanner.scan(text);
     if !matches!(&scan,Scan::Clean{ruleset} if !ruleset.is_empty()) {
@@ -265,7 +272,10 @@ pub fn attach(
         ],
     )?;
     if let Some(revision) = manifest {
-        binding::record(tx, string(r, "evidence_id"), revision, p.now_ms)?;
+        let size = checked.bytes.len() as i64;
+        let id = string(r, "evidence_id");
+        let principal = p.credential.principal();
+        binding::record(tx, id, principal, scope, revision, size, p.now_ms)?;
     }
     let mut payload = json!({"evidence_id":r["evidence_id"],"workspace_id":r["workspace_id"],"artifact_kind":r["artifact_kind"],"artifact_sha256":r["artifact_sha256"],"observed_at":r["observed_at"],"credential_id":key,"stance":stance,"scan_state":scan.state()});
     if manifest.is_some() {

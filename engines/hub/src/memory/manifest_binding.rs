@@ -13,35 +13,55 @@
 //!
 //! A `pending_review` record never holds automatic apply and never counts as
 //! proof. An `inert` record also frees its quota slot, as a purged one does.
+//!
+//! Freed slots alone would let a verifier churn storage, so the bytes and
+//! records a verifier still retains outside `active` are budgeted per
+//! principal and per scope, and the idle sweep purges a record 35 days after
+//! it went inert. The purge is the same tombstone the admin `evidence.purge`
+//! action writes: the artifact bytes are cleared, the hash and identity stay,
+//! an `evidence.purge` event records it, and the binding row keeps its
+//! metadata with `purged_ms` set.
 //! `memory_evidence` stays immutable, so the state lives in this side table,
 //! and a trigger lets a row move forward only. Records attached by anyone
 //! else have no row here and behave exactly as before.
 use super::{
-    Reply, auth,
-    ops::{error, s, t},
+    Reply, auth, ids,
+    ops::{Action, NewEvent, Prepared, append, error, s, t},
     proposals::{self, string},
 };
-use crate::writer::{ReadTx, WriteTx};
+use crate::writer::{ReadTx, WriteTx, worker};
 use rusqlite::{Connection, types::Value};
 use serde_json::{Value as Json, json};
 use std::collections::BTreeSet;
 
 pub const DDL: &str = "CREATE TABLE IF NOT EXISTS memory_evidence_bindings(
   evidence_id TEXT PRIMARY KEY REFERENCES memory_evidence(evidence_id),
+  principal TEXT NOT NULL,
+  scope TEXT NOT NULL,
   base_revision INTEGER NOT NULL CHECK(base_revision > 0),
+  retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
   state TEXT NOT NULL CHECK(state IN ('pending_review','active','inert')),
   proposal_id TEXT,
   created_ms INTEGER NOT NULL,
   updated_ms INTEGER NOT NULL,
-  CHECK(state != 'active' OR proposal_id IS NOT NULL)
+  purged_ms INTEGER,
+  CHECK(state != 'active' OR proposal_id IS NOT NULL),
+  CHECK(purged_ms IS NULL OR state = 'inert')
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS memory_evidence_bindings_proposal ON memory_evidence_bindings(proposal_id);
 CREATE INDEX IF NOT EXISTS memory_evidence_bindings_unbound ON memory_evidence_bindings(state,created_ms) WHERE proposal_id IS NULL;
+CREATE INDEX IF NOT EXISTS memory_evidence_bindings_retained_principal ON memory_evidence_bindings(principal) WHERE purged_ms IS NULL AND state!='active';
+CREATE INDEX IF NOT EXISTS memory_evidence_bindings_retained_scope ON memory_evidence_bindings(scope) WHERE purged_ms IS NULL AND state!='active';
+CREATE INDEX IF NOT EXISTS memory_evidence_bindings_expiring ON memory_evidence_bindings(updated_ms) WHERE state='inert' AND purged_ms IS NULL;
 CREATE TRIGGER IF NOT EXISTS memory_evidence_bindings_forward BEFORE UPDATE ON memory_evidence_bindings
- WHEN OLD.state!='pending_review'
- OR OLD.evidence_id IS NOT NEW.evidence_id OR OLD.base_revision IS NOT NEW.base_revision
- OR OLD.created_ms IS NOT NEW.created_ms
+ WHEN OLD.evidence_id IS NOT NEW.evidence_id OR OLD.principal IS NOT NEW.principal
+ OR OLD.scope IS NOT NEW.scope OR OLD.base_revision IS NOT NEW.base_revision
+ OR OLD.retained_bytes IS NOT NEW.retained_bytes OR OLD.created_ms IS NOT NEW.created_ms
  OR (OLD.proposal_id IS NOT NULL AND OLD.proposal_id IS NOT NEW.proposal_id)
+ OR OLD.state='active'
+ OR (OLD.state='pending_review' AND NEW.purged_ms IS NOT NULL)
+ OR (OLD.state='inert' AND (NEW.state!='inert' OR OLD.purged_ms IS NOT NULL
+   OR NEW.purged_ms IS NULL OR OLD.updated_ms IS NOT NEW.updated_ms))
  BEGIN SELECT RAISE(ABORT,'evidence binding moves forward only'); END;
 CREATE TRIGGER IF NOT EXISTS memory_evidence_bindings_no_delete BEFORE DELETE ON memory_evidence_bindings
  BEGIN SELECT RAISE(ABORT,'evidence binding is retained'); END;
@@ -53,6 +73,31 @@ pub const MANIFEST_KIND: &str = "memory-verify-manifest";
 pub const MANIFEST_SCHEMA: &str = "brigade.memory-verify-manifest.v1";
 /// A record no proposal cites within this window becomes inert.
 pub const UNBOUND_MS: i64 = 24 * 3600 * 1000;
+/// An inert record's bytes are kept this long after it went inert.
+pub const RETENTION_MS: i64 = 35 * 24 * 3600 * 1000;
+/// Records one sweep transaction purges at most. Clearing a 64 KiB blob
+/// frees its pages, and the sweep transaction has a 20 ms budget.
+pub const PURGE_BATCH: usize = 8;
+
+/// What a principal, and a scope across principals, may retain in verifier
+/// records that are pending or inert and not yet purged. The verify pass
+/// opens at most 4 proposals per run with one manifest each, so 35 days of
+/// daily runs retain about 140 records, at most 8.75 MiB at the 64 KiB
+/// artifact limit. The principal budget leaves room for manual runs, and the
+/// scope budget for four verifier principals.
+#[derive(Clone, Copy, Debug)]
+pub struct Budget {
+    pub principal_bytes: i64,
+    pub principal_records: i64,
+    pub scope_bytes: i64,
+    pub scope_records: i64,
+}
+pub const BUDGET: Budget = Budget {
+    principal_bytes: 16 * 1024 * 1024,
+    principal_records: 1024,
+    scope_bytes: 64 * 1024 * 1024,
+    scope_records: 4096,
+};
 
 /// Appended to a `memory_evidence` query: the record holds and counts only if
 /// it has no binding row or its row is `active`.
@@ -99,11 +144,68 @@ pub fn manifest_card(request: &Json, bytes: &[u8]) -> Result<i64, Reply> {
     Ok(revision)
 }
 
+/// The retained-storage check for a new verifier record of `bytes` bytes.
+/// Counts pending and inert records that are neither purged by retention nor
+/// tombstoned by an admin.
+pub fn retained_refusal<T: ReadTx + ?Sized>(
+    tx: &T,
+    principal: &str,
+    scope: &str,
+    bytes: i64,
+    budget: &Budget,
+) -> rusqlite::Result<Option<Reply>> {
+    for (column, key, max_bytes, max_records, code) in [
+        (
+            "principal",
+            principal,
+            budget.principal_bytes,
+            budget.principal_records,
+            "memory_evidence_retained_principal_quota",
+        ),
+        (
+            "scope",
+            scope,
+            budget.scope_bytes,
+            budget.scope_records,
+            "memory_evidence_retained_scope_quota",
+        ),
+    ] {
+        let usage = tx.query(
+            &format!("SELECT count(*),COALESCE(SUM(b.retained_bytes),0) FROM memory_evidence_bindings b JOIN memory_evidence e USING(evidence_id) WHERE b.{column}=?1 AND b.purged_ms IS NULL AND b.state!='active' AND e.tombstoned=0"),
+            &[t(key)],
+        )?;
+        let number = |v: &Value| {
+            if let Value::Integer(n) = v {
+                *n
+            } else {
+                i64::MAX
+            }
+        };
+        let (records, used) = (number(&usage[0][0]), number(&usage[0][1]));
+        if records >= max_records || used.saturating_add(bytes) > max_bytes {
+            return Ok(Some(error(
+                429,
+                code,
+                "retained verifier evidence budget reached. Records free their bytes 35 days after they go inert",
+            )));
+        }
+    }
+    Ok(None)
+}
+
 /// Record a verifier attachment in `pending_review`, unbound.
-pub fn record(tx: &dyn WriteTx, id: &str, revision: i64, now: i64) -> rusqlite::Result<()> {
+pub fn record(
+    tx: &dyn WriteTx,
+    id: &str,
+    principal: &str,
+    scope: &str,
+    revision: i64,
+    bytes: i64,
+    now: i64,
+) -> rusqlite::Result<()> {
     tx.execute(
-        "INSERT INTO memory_evidence_bindings(evidence_id,base_revision,state,proposal_id,created_ms,updated_ms) VALUES(?1,?2,'pending_review',NULL,?3,?3)",
-        &[t(id), Value::Integer(revision), Value::Integer(now)],
+        "INSERT INTO memory_evidence_bindings(evidence_id,principal,scope,base_revision,retained_bytes,state,proposal_id,created_ms,updated_ms,purged_ms) VALUES(?1,?2,?3,?4,?5,'pending_review',NULL,?6,?6,NULL)",
+        &[t(id), t(principal), t(scope), Value::Integer(revision), Value::Integer(bytes), Value::Integer(now)],
     )?;
     Ok(())
 }
@@ -228,6 +330,59 @@ pub fn sweep(db: &Connection, now: i64, max: usize) -> rusqlite::Result<usize> {
         "UPDATE memory_evidence_bindings SET state='inert',updated_ms=?1 WHERE evidence_id IN (SELECT evidence_id FROM memory_evidence_bindings WHERE state='pending_review' AND proposal_id IS NULL AND created_ms<=?2 ORDER BY created_ms LIMIT ?3)",
         rusqlite::params![now, now.saturating_sub(UNBOUND_MS), max as i64],
     )
+}
+
+/// The retention purge: records inert for 35 days lose their artifact bytes
+/// through the admin purge's tombstone and an `evidence.purge` event marked
+/// `verifier_retention`. The hash, identity and binding metadata stay.
+pub fn expire(db: &Connection, now: i64, max: usize) -> rusqlite::Result<usize> {
+    let tx = worker::Tx(db);
+    let rows = tx.query(
+        "SELECT b.evidence_id,e.scope,e.card_id FROM memory_evidence_bindings b JOIN memory_evidence e USING(evidence_id) WHERE b.state='inert' AND b.purged_ms IS NULL AND b.updated_ms<=?1 ORDER BY b.updated_ms LIMIT ?2",
+        &[
+            Value::Integer(now.saturating_sub(RETENTION_MS)),
+            Value::Integer(max.min(PURGE_BATCH) as i64),
+        ],
+    )?;
+    for row in &rows {
+        let id = s(&row[0]);
+        tx.execute(
+            "UPDATE memory_evidence_bindings SET purged_ms=?2 WHERE evidence_id=?1",
+            &[t(&id), Value::Integer(now)],
+        )?;
+        // An admin may have purged it already. That purge was logged then.
+        if tx.execute(
+            "UPDATE memory_evidence SET tombstoned=1,artifact_bytes=x'' WHERE evidence_id=?1 AND tombstoned=0",
+            &[t(&id)],
+        )? == 0
+        {
+            continue;
+        }
+        let hub = Prepared {
+            credential: auth::Credential::Admin,
+            action: Action::Capture { payload: json!({}) },
+            client_event_id: ids::mint(now),
+            request_digest: String::new(),
+            now_ms: now,
+        };
+        append(
+            &tx,
+            &hub,
+            NewEvent {
+                kind: "evidence.purge",
+                scope: Some(&s(&row[1])),
+                card_id: Some(&s(&row[2])),
+                changes_head: false,
+                base_revision: None,
+                content_hash: None,
+                trust: None,
+                origin: None,
+                payload: json!({"evidence_id":id,"tombstoned":true,"reason":"verifier_retention"}),
+                policy_digest: None,
+            },
+        )?;
+    }
+    Ok(rows.len())
 }
 
 /// The reviewer hash read on `proposal_show`. The list is added only for a

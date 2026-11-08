@@ -2088,6 +2088,26 @@ settles them. The idle sweep moves records left unbound for 24 hours to
 it. No state moves backward. The `memory_evidence_bindings` table enforces
 that with a trigger.
 
+Freed slots alone would let a verifier attach, let records go inert and
+attach again forever, so retained storage has its own budget. A principal may
+retain 16 MiB and 1,024 verifier records that are pending or inert and not
+yet purged, and a scope may retain 64 MiB and 4,096 across principals. An
+attach over either budget is refused with
+`429 memory_evidence_retained_principal_quota` or
+`429 memory_evidence_retained_scope_quota`. The verify pass opens at most 4
+proposals per run with one manifest each, so 35 days of daily runs retain
+about 140 records, at most 8.75 MiB at the 64 KiB artifact limit. Active
+records are not counted, since a reviewer accepted them and the per-card slot
+caps bound them.
+
+The idle sweep purges a record 35 days after it went inert, at most 8 records
+per sweep transaction. The purge is the tombstone the admin `evidence.purge`
+action writes: the artifact bytes are cleared, the id, hash and other fields
+stay, and an `evidence.purge` event with `"reason": "verifier_retention"`
+records it. The binding row keeps its metadata and gains `purged_ms`. A purged
+record frees its budget, never holds automatic apply and never counts as
+proof. An admin purge also stops a record counting at once.
+
 `propose` checks every verifier record an `append_evidence` op cites. The
 record binds only when the proposal comes from the principal that attached
 it, every op addresses the record's scope and card id at the manifest's base

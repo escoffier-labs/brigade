@@ -633,7 +633,7 @@ async fn the_list_needs_review_on_each_bound_attestations_scope() {
     )
     .unwrap();
     db.execute(
-        "INSERT INTO memory_evidence_bindings VALUES('agent:dot/workspace-a/elsewhere',?1,'pending_review',?2,?3,?3)",
+        "INSERT INTO memory_evidence_bindings VALUES('agent:dot/workspace-a/elsewhere','agent:dot','repo:other',?1,1,'pending_review',?2,?3,?3,NULL)",
         rusqlite::params![a, one.as_str().unwrap(), h.now()],
     )
     .unwrap();
@@ -734,4 +734,191 @@ fn version_eleven_migrates_to_twelve_with_no_binding_rows() {
     assert_eq!(version(&db), 12);
     drop(db);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A manifest padded to just under the 64 KiB artifact limit.
+fn large_manifest(a: i64) -> Vec<u8> {
+    let mut m: Json = serde_json::from_slice(&manifest("fleet", "a", a)).unwrap();
+    let base = m.to_string().len() + r#","pad":"""#.len();
+    m["pad"] = json!("x".repeat(65_000 - base));
+    let bytes = m.to_string().into_bytes();
+    assert_eq!(bytes.len(), 65_000);
+    bytes
+}
+async fn attach_large(h: &Hub, name: &str, a: i64) -> Reply {
+    let bytes = large_manifest(a);
+    h.call(
+        AGENT_TOKEN,
+        attach_request(h, name, "fleet", "a", &bytes, "memory-verify-manifest"),
+    )
+    .await
+}
+fn purged(h: &Hub) -> (i64, i64, i64) {
+    let db = Connection::open(h.memory()).unwrap();
+    let count = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
+    (
+        count("SELECT count(*) FROM memory_evidence_bindings WHERE purged_ms IS NOT NULL"),
+        count(
+            "SELECT count(*) FROM memory_evidence e JOIN memory_evidence_bindings b USING(evidence_id) WHERE b.purged_ms IS NOT NULL AND e.tombstoned=1 AND length(e.artifact_bytes)=0 AND length(e.artifact_sha256)=64",
+        ),
+        count(
+            "SELECT count(*) FROM memory_events WHERE kind='evidence.purge' AND json_extract(payload,'$.reason')='verifier_retention'",
+        ),
+    )
+}
+
+#[tokio::test]
+async fn churn_hits_the_retained_budget_and_the_35_day_purge_frees_it() {
+    let (h, a) = ready().await;
+    let size = large_manifest(a).len() as i64;
+    let expected = manifest_binding::BUDGET.principal_bytes / size;
+    assert!(expected < manifest_binding::BUDGET.principal_records);
+    let (mut accepted, mut refused, mut inert) = (0, None, 0);
+    // Attach eight, then reject their proposal so all eight go inert and free
+    // their slots. Without a retained budget this would never stop.
+    'rounds: for round in 0..40 {
+        let mut names = Vec::new();
+        for i in 0..8 {
+            let name = format!("r{round}-{i}");
+            let r = attach_large(&h, &name, a).await;
+            if r.status != 201 {
+                refused = Some(r);
+                break 'rounds;
+            }
+            accepted += 1;
+            names.push(eid(&name));
+        }
+        let opened = propose(&h, AGENT_TOKEN, vec![cite("fleet", "a", a, &names)]).await;
+        assert_eq!(opened.status, 201, "{opened:?}");
+        let r = decision(&h, &opened.body["proposal_id"], "reject").await;
+        assert_eq!(r.body["state"], "rejected", "{r:?}");
+        inert += names.len() as i64;
+    }
+    let refused = refused.expect("the retained budget refuses churn");
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (429, "memory_evidence_retained_principal_quota"),
+        "{refused:?}"
+    );
+    assert_eq!(accepted, expected);
+    assert!(!held(&h).await);
+    // Not yet: records keep their bytes for 35 days after going inert.
+    h.set_clock(h.now() + manifest_binding::RETENTION_MS - 60_000);
+    let db = Connection::open(h.memory()).unwrap();
+    writer::sweep(&db, h.now()).unwrap();
+    assert_eq!(purged(&h), (0, 0, 0));
+    assert_eq!(
+        code(&attach_large(&h, "early", a).await),
+        "memory_evidence_retained_principal_quota"
+    );
+    h.set_clock(h.now() + 60_000);
+    // Each idle sweep purges a bounded batch. Keep sweeping until done.
+    for _ in 0..200 {
+        if purged(&h).0 == inert {
+            break;
+        }
+        let _ = writer::sweep(&db, h.now());
+    }
+    assert_eq!(purged(&h), (inert, inert, inert));
+    let again = attach_large(&h, "after-purge", a).await;
+    assert_eq!(again.status, 201, "{again:?}");
+    // Purged records never hold and never count. `purged` checked above that
+    // each keeps its sha256.
+    assert!(!held(&h).await);
+}
+
+#[tokio::test]
+async fn the_scope_and_record_budgets_count_retained_records_only() {
+    let (h, a) = ready().await;
+    for name in ["m1", "m2"] {
+        assert_eq!(attest(&h, name, "fleet", "a", a).await.status, 201);
+    }
+    let size = manifest("fleet", "a", a).len() as i64;
+    let check = |budget: manifest_binding::Budget, scope: &str| {
+        let db = Connection::open(h.memory()).unwrap();
+        let tx = crate::writer::worker::Tx(&db);
+        manifest_binding::retained_refusal(&tx, "agent:dot", scope, size, &budget)
+            .unwrap()
+            .map(|r| code(&r).to_string())
+    };
+    let roomy = manifest_binding::BUDGET;
+    assert_eq!(check(roomy, "fleet"), None);
+    let scope_bytes = manifest_binding::Budget {
+        scope_bytes: 3 * size - 1,
+        ..roomy
+    };
+    assert_eq!(
+        check(scope_bytes, "fleet").as_deref(),
+        Some("memory_evidence_retained_scope_quota")
+    );
+    // Another scope has nothing retained.
+    assert_eq!(check(scope_bytes, "repo:other"), None);
+    let records = manifest_binding::Budget {
+        principal_records: 2,
+        ..roomy
+    };
+    assert_eq!(
+        check(records, "fleet").as_deref(),
+        Some("memory_evidence_retained_principal_quota")
+    );
+    // An admin purge stops a record counting at once.
+    let purge = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"evidence.purge","evidence_id":eid("m1"),"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(purge.status, 200, "{purge:?}");
+    assert_eq!(check(records, "fleet"), None);
+    assert_eq!(check(scope_bytes, "fleet"), None);
+}
+
+#[tokio::test]
+async fn retention_purges_only_records_inert_for_35_days() {
+    let (h, a) = ready().await;
+    for name in ["kept", "dropped"] {
+        assert_eq!(attest(&h, name, "fleet", "a", a).await.status, 201);
+    }
+    let accepted = propose(&h, AGENT_TOKEN, vec![cite("fleet", "a", a, &[eid("kept")])]).await;
+    let rejected = propose(
+        &h,
+        AGENT_TOKEN,
+        vec![cite("fleet", "a", a, &[eid("dropped")])],
+    )
+    .await;
+    assert_eq!(
+        decision(&h, &rejected.body["proposal_id"], "reject")
+            .await
+            .status,
+        200
+    );
+    assert_eq!(
+        decision(&h, &accepted.body["proposal_id"], "accept")
+            .await
+            .body["state"],
+        "applied"
+    );
+    let db = Connection::open(h.memory()).unwrap();
+    h.set_clock(h.now() + manifest_binding::RETENTION_MS + 1);
+    writer::sweep(&db, h.now()).unwrap();
+    assert_eq!(state(&h, "kept").0, "active");
+    assert_eq!(purged(&h), (1, 1, 1));
+    let bytes = |name: &str| -> i64 {
+        db.query_row(
+            "SELECT length(artifact_bytes) FROM memory_evidence WHERE evidence_id=?1",
+            [eid(name)],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(bytes("dropped"), 0);
+    assert!(bytes("kept") > 0);
+    // A purged row is final.
+    assert!(
+        db.execute(
+            "UPDATE memory_evidence_bindings SET purged_ms=1 WHERE evidence_id=?1",
+            [eid("dropped")],
+        )
+        .is_err()
+    );
 }

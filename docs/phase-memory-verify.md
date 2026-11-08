@@ -658,6 +658,10 @@ move forward only. A proposal that goes stale because the policy changed can
 still be decided again, so its records stay `pending_review` until that
 decision or until compaction makes them inert. A record older than 24 hours
 cannot bind even before the sweep reaches it.
+Because inert records free their slots, the bytes and records a verifier
+retains outside `active` are also budgeted per principal and per scope, and
+the idle sweep purges a record 35 days after it went inert through the same
+tombstone and `evidence.purge` event as an admin purge.
 
 ### Hash read for reviewers
 
