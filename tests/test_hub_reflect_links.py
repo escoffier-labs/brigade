@@ -505,6 +505,30 @@ def test_a_live_card_with_the_normalized_name_is_a_collision_not_a_redirect():
     assert submissions == [] and skipped == {"link_ambiguous_target": 1}
 
 
+def test_a_live_card_claiming_a_retired_cards_exact_title_is_a_collision():
+    for title in ("Old Guide", "old guide"):
+        live = head("other", card_text("Unrelated.", "c-dddddd", f"title: {title}"))
+        heads = [
+            head("src", card_text("See [[Old Guide]].")),
+            retired_guide(),
+            head("new", card_text("N.", "c-cccccc")),
+            live,
+        ]
+        submissions, skipped, stats = unit(heads)
+        assert submissions == [] and skipped == {"link_ambiguous_target": 1}
+
+
+def test_an_exact_live_card_id_stays_valid_even_when_a_retired_title_matches():
+    heads = [
+        head("src", card_text("See [[old-guide]].")),
+        retired_guide(),
+        head("new", card_text("N.", "c-cccccc")),
+        head("old-guide", card_text("Live card.", "c-dddddd")),
+    ]
+    submissions, skipped, _ = unit(heads)
+    assert submissions == [] and skipped == {}
+
+
 def test_two_retired_cards_sharing_a_name_are_ambiguous_even_with_one_successor():
     heads = [
         head("src", card_text("See [[Old Guide]].")),

@@ -135,6 +135,19 @@ class Index:
             return "link_untrusted_target"
         return None
 
+    def valid(self, scope: str, name: str) -> bool:
+        """True when a link already reaches a live card without needing repair.
+
+        An exact live card id always counts. A live title, topic or alias counts
+        only while no retired card shares the name. Otherwise a live card could
+        claim a retired card's name and skip the collision check in `_pick`.
+        """
+        if name.strip().lower() in self.ids.get(scope, set()):
+            return True
+        if not self.live.get((scope, _fold(name))):
+            return False
+        return not self.retired.get((scope, _loose(name)))
+
     def resolve(self, scope: str, raw: str, trust: Any) -> tuple[str | None, str | None]:
         """Return the live card a broken link should name, or the reason to skip it."""
         target, reason = self._pick(scope, raw)
@@ -273,7 +286,7 @@ def ops(
             for start, end, raw in _links(block.text):
                 stats["links"] += 1
                 name = _target(raw)
-                if index.live.get((head["scope"], _fold(name))):
+                if index.valid(head["scope"], name):
                     continue
                 stats["broken"] += 1
                 if reason or not block.block_id:
