@@ -59,6 +59,18 @@ pub enum Action {
         scope: String,
         rights: Vec<String>,
     },
+    /// Admin only: set or clear a principal's verifier flag (D4).
+    Verifier {
+        principal: String,
+        verifier: bool,
+    },
+    /// Native registration binds a credential's flag copy before issuing it.
+    VerifierBind {
+        principal: String,
+        class: &'static str,
+        digest: String,
+        requested: Option<bool>,
+    },
     /// Test-only command that records the policy revision it saw under the lock.
     #[cfg(test)]
     PolicyProbe,
@@ -84,6 +96,8 @@ impl Action {
             Action::Handoff { .. } => "handoff",
             Action::Capture { .. } => "capture",
             Action::Grant { .. } => "grant",
+            Action::Verifier { .. } => "verifier",
+            Action::VerifierBind { .. } => "verifier.bind",
             #[cfg(test)]
             Action::PolicyProbe => "probe",
         }
@@ -116,7 +130,10 @@ impl Action {
             } => (Some(scope), "import"),
             Action::Handoff { .. } => (None, "handoff"),
             Action::Capture { .. } => (None, "read"),
-            Action::Grant { .. } | Action::Rescan { .. } => (None, "admin"),
+            Action::Grant { .. }
+            | Action::Rescan { .. }
+            | Action::Verifier { .. }
+            | Action::VerifierBind { .. } => (None, "admin"),
             #[cfg(test)]
             Action::PolicyProbe => (None, "read"),
         }
@@ -127,9 +144,13 @@ impl Action {
         if matches!(self, Action::PolicyProbe) {
             return true;
         }
+        // The verifier action reads the policy and the live credentials.
         matches!(
             self,
-            Action::Proposal(_) | Action::Evidence(_) | Action::RetrievalEval(_)
+            Action::Proposal(_)
+                | Action::Evidence(_)
+                | Action::RetrievalEval(_)
+                | Action::Verifier { .. }
         )
     }
     /// New blob bytes this command may add, for the per-batch bound.
@@ -159,6 +180,9 @@ pub struct Authority {
     pub policy_document: serde_json::Value,
     pub valid_credentials: std::collections::BTreeSet<String>,
     pub admin_credential: String,
+    /// Live hub credentials as (class, principal, token digest), read with
+    /// `valid_credentials`. Only the verifier action uses them.
+    pub live: Vec<(String, String, String)>,
     pub retrieval: Option<super::retrieval_eval::Live>,
     pub proposal_limits: super::hardening::Limits,
 }
@@ -200,6 +224,11 @@ impl Authority {
                 // Authentication precedence, including shadowed or admin hashes,
                 // is defined in auth rather than duplicated in a validity query.
                 if auth::still_valid(tx, &credential, admin)?.is_ok() {
+                    authority.live.push((
+                        class.to_string(),
+                        credential.principal().to_string(),
+                        digest.clone(),
+                    ));
                     authority
                         .valid_credentials
                         .insert(super::attestation::credential_id(
@@ -494,6 +523,11 @@ pub fn apply(
     scanner: &dyn super::scan::Scanner,
     embedder: Option<(&str, bool)>,
 ) -> rusqlite::Result<Reply> {
+    // A credential whose verifier copy differs from its principal is refused
+    // on every action, inside the transaction that would act on it.
+    if let Some(r) = super::verifier::check(tx, &p.credential)? {
+        return Ok(r);
+    }
     let (scope, right) = p.action.requirement();
     if !auth::has_right(tx, &p.credential, scope, right)? {
         return Ok(error(
@@ -526,7 +560,10 @@ pub fn apply(
     // text, and a stored copy would outlive the card's retirement and answer
     // a replay without the grant, state and scan checks. Each command is
     // safe to repeat: a second submit or failure finds no leased job.
-    let replayable = !matches!(p.action, Action::Embedding { .. });
+    let replayable = !matches!(
+        p.action,
+        Action::Embedding { .. } | Action::VerifierBind { .. }
+    );
     let stored = if replayable {
         tx.query(
         "SELECT request_digest,status,response FROM memory_idempotency WHERE principal=?1 AND client_event_id=?2",
@@ -937,6 +974,16 @@ fn run(
             )?;
             Ok(Reply::new(200, json!({"grant": grant})))
         }
+        Action::Verifier {
+            principal,
+            verifier,
+        } => super::verifier::set(tx, p, _authority, principal, *verifier),
+        Action::VerifierBind {
+            principal,
+            class,
+            digest,
+            requested,
+        } => super::verifier::bind(tx, p, principal, class, digest, *requested),
         #[cfg(test)]
         Action::PolicyProbe => Ok(Reply::new(
             200,

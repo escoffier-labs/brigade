@@ -1945,3 +1945,71 @@ reads one page. It asks `status` first and refuses the admin credential, as
 reflect does, and it rejects a reply with any field beyond the documented
 ones. Remote connector profiles (Dot, Duet and Grok Bot memory), fleet digests,
 proposal listings and search replies never carry counts.
+
+## Verifier principals and the Tier 2 floor
+
+Memory schema 11 adds verifier principals for the verification pass in
+[phase-memory-verify.md](phase-memory-verify.md) (D4, #2385). The migration
+adds two empty tables, so every existing principal and credential stays
+unflagged. An older hub refuses a version 11 file, so take the usual backup
+before upgrading.
+
+Only the admin sets or clears the flag, with the `verifier` memory action:
+
+```json
+{"action":"verifier","principal":"agent:verify","verifier":true,"client_event_id":"<26-character time-ordered id>"}
+```
+
+No other memory action carries the flag, and a principal cannot set or clear
+its own. The change is one memory transaction that updates the principal
+record, rewrites the copy every credential of that principal holds, binds a
+copy for each live credential that had none, and logs a `grant.change` event
+with `{"principal", "verifier"}`. The reply reports `live_credentials`, the
+number of live credentials it bound. Flagging a principal that the current
+fleet policy lists in `memory.reflect_principals` is refused with
+`409 memory_policy_verifier_listed` until the policy drops it.
+
+The flag belongs to the principal, so it covers every credential:
+
+- Every memory request refuses a credential whose copy differs from its
+  principal's flag with `403 memory_verifier_flag_mismatch`, at admission and
+  again under the writer's lock.
+- Native registration (`POST /nodes` with `action: "add"`, and
+  `POST /message-principals` enrollment) binds the new credential's copy
+  through the memory writer before the hub issues it. The request may carry
+  `"verifier": true` or `false`. A request for an unflagged credential of a
+  verifier principal is refused with `409 memory_verifier_credential_unflagged`
+  and nothing is issued. Asking for the flag on an unflagged principal is
+  refused with `409 memory_verifier_flag_mismatch`. Rotation is revoke, then
+  add, so the rotated credential carries the flag.
+- The principal record is never deleted. Revoking every credential, removing
+  the principal's grants, or deleting its hub row leaves the flag in place,
+  and the same principal id comes back as a verifier until the admin clears it.
+- A credential issued on a path that binds no copy, such as the Python
+  upstream when registration is not native, holds no copy and is refused for
+  a verifier principal. Setting the flag again binds every live credential.
+
+The hub enforces three rules for a flagged principal:
+
+1. Every proposal it submits records `verifier: true` and is Tier 2 at submit,
+   at preflight and at every decision, whatever its ops and whatever
+   `tier0_op_classes` lists. Clearing the flag later does not lower an open
+   proposal. Preflight reports a `verifier_floor` gate held with code
+   `verifier_floor`, and `auto_apply` refuses the proposal with
+   `409 memory_verifier_floor` and changes nothing.
+2. It is never a reflect principal. A fleet policy revision that lists it in
+   `memory.reflect_principals`, saved or restored by rollback through any
+   path, is refused with `409 memory_policy_verifier_listed`.
+3. `status` reports the caller's own `verifier` flag and its
+   `reflect_principal` membership as booleans, and `capabilities` lists
+   `verifier_floor`.
+
+Python never opens the memory file. After a committed flag change, while it
+still holds the hub lock, the memory writer replaces
+`fleet-hub-memory-verifiers.json` beside the hub database with the flagged
+principal ids (owner-only, no credential material). It rewrites the file at
+every start. The Python policy writer reads it inside its own hub write
+transaction, so a flag change and a policy revision are ordered by the hub
+lock. A missing file means no principal is flagged. A file that cannot be read
+or parsed refuses any policy that lists a reflect principal, with
+`memory_policy_verifier_list_unreadable`.

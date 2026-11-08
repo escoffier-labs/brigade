@@ -2,7 +2,7 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 10;
+pub const USER_VERSION: i64 = 11;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
@@ -143,13 +143,14 @@ CREATE TABLE memory_idempotency(
   PRIMARY KEY(principal, client_event_id)
 ) WITHOUT ROWID;
 CREATE INDEX memory_idempotency_age ON memory_idempotency(created_ms);
-{}{}{}{}{}
+{}{}{}{}{}{}
 ",
         super::embedding::DDL,
         super::proposals::DDL,
         super::attestation::DDL,
         super::retrieval_eval::DDL,
-        super::read_counts::DDL
+        super::read_counts::DDL,
+        super::verifier::DDL
     )
 }
 
@@ -171,6 +172,8 @@ pub const TABLES: &[&str] = &[
     "memory_retrieval_evals",
     "memory_read_days",
     "memory_read_totals",
+    "memory_verifiers",
+    "memory_verifier_credentials",
 ];
 
 /// Create a fresh file's schema, or check an existing one. Never downgrades,
@@ -254,6 +257,12 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     // epoch, replication or any policy digest.
     if version < 10 {
         step_with(c, 10, |c| super::read_counts::migrate(c, now_ms)).map_err(err)?;
+    }
+    // Version 11: verifier principals and their credential copies (D4 of
+    // phase-memory-verify). Existing principals and credentials stay
+    // unflagged: a missing row is an unflagged one.
+    if version < 11 {
+        step(c, super::verifier::DDL, 11).map_err(err)?;
     }
     for table in TABLES {
         let present: Option<i64> = c

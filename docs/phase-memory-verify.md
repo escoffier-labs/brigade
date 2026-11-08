@@ -555,6 +555,15 @@ No slice may submit a live proposal until the hub implements all three rules,
 and the job refuses to submit against a hub that does not advertise them
 (`verify_hub_floor_missing`).
 
+Slice 3 stores the principal flag and the credential copies in the memory
+file (schema 11), because D7 keeps Python out of it and the hub file's schema
+belongs to Python. Native registration binds a credential's copy through the
+memory writer before the hub issues it. Fleet policy revisions are written by
+Python, so the memory writer publishes the flagged principal ids to
+`fleet-hub-memory-verifiers.json` while it still holds the hub lock, and the
+policy writer checks that file inside its own hub write transaction. The
+operator details are in [memory-operations.md](memory-operations.md).
+
 ### Prompt injection
 
 Card text and evidence are written by agents, and session excerpts can carry

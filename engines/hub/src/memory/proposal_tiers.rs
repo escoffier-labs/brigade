@@ -83,6 +83,11 @@ pub fn classify<T: ReadTx + ?Sized>(
     body: &Json,
     scanner: &dyn Scanner,
 ) -> rusqlite::Result<u8> {
+    // D4: a proposal recorded from a verifier principal is Tier 2 at submit,
+    // preflight and every decision, whatever its ops or the policy lists.
+    if body["verifier"] == true {
+        return Ok(2);
+    }
     let Some(cards) = body["cards"].as_array().filter(|c| !c.is_empty()) else {
         return Ok(2);
     };

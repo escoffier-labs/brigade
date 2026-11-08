@@ -189,6 +189,17 @@ impl HubLock {
     }
 }
 
+/// Write the flagged principal ids beside the memory file. A failure is
+/// reported and repaired by the next flag change or start.
+fn publish_verifiers(db: &Connection, memory: &std::path::Path) {
+    let published = super::verifier::principals(&worker::Tx(db))
+        .map_err(|e| e.to_string())
+        .and_then(|list| super::verifier::publish(memory, &list).map_err(|e| e.to_string()));
+    if let Err(e) = published {
+        eprintln!("WARN memory verifier list not published: {e}");
+    }
+}
+
 fn storage(reason: &'static str) -> Failure {
     Failure {
         status: 503,
@@ -222,6 +233,9 @@ impl Writer {
         arbiter: Arc<Arbiter>,
     ) -> rusqlite::Result<Self> {
         let hub = HubLock::open(&config.hub)?;
+        // Replace a sidecar a crash may have left stale (phase-memory-verify
+        // D4), before the store accepts its first request.
+        publish_verifiers(&memory, &config.memory);
         let (sender, receiver) = mpsc::channel(config.capacity);
         if let Some(index) = &config.index {
             index.attach(sender.downgrade());
@@ -803,6 +817,16 @@ pub(crate) fn run(
         let committed = !broken && db.execute_batch("COMMIT").is_ok();
         if committed {
             hook(&config, Step::Committed);
+        }
+        // A committed verifier flag change reaches the Python policy writer
+        // before any hub write can follow it: the hub lock is still held.
+        if committed
+            && results.iter().any(|(p, r)| {
+                matches!(p.command.action, ops::Action::Verifier { .. })
+                    && matches!(r, Ok(reply) if reply.status < 300)
+            })
+        {
+            publish_verifiers(&db, &config.memory);
         }
         // Step 5: end the hub transaction and return the turn at once, even
         // when the memory commit failed.

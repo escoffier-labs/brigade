@@ -562,6 +562,11 @@ fn open(
     body["proposal_id"] = json!(ids::mint(p.now_ms));
     body["proposer"] = json!(p.credential.principal());
     body["proposer_credential"] = json!(super::attestation::identity(&p.credential, authority));
+    // D4: the floor follows this record, so clearing the flag later never
+    // lowers an open proposal's tier. A copied rollback body keeps it.
+    if super::verifier::flagged(tx, p.credential.principal())? {
+        body["verifier"] = json!(true);
+    }
     body["rules"] = json!([]);
     body["decision_policy_revision"] = Json::Null;
     body["decision_policy_digest"] = Json::Null;
@@ -916,6 +921,13 @@ pub fn run(
         return open(tx, p, inverse, authority, "proposal.rollback", scanner);
     }
     if cmd.name() == "auto_apply" {
+        if body["verifier"] == true {
+            return Ok(error(
+                409,
+                "memory_verifier_floor",
+                "a verifier proposal is Tier 2 and requires a reviewed decision",
+            ));
+        }
         if !body["rollback_of"].is_null() {
             return Ok(error(
                 409,

@@ -117,6 +117,12 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         .then_some("proposer_credential_invalid"),
         "held",
     );
+    check(
+        &mut checks,
+        "verifier_floor",
+        (body["verifier"] == true).then_some("verifier_floor"),
+        "held",
+    );
     let tier = super::proposal_tiers::classify(tx, body, scanner)?;
     check(
         &mut checks,
@@ -293,6 +299,7 @@ pub fn all_satisfied(report: &Json) -> bool {
         "auto_apply_enabled",
         "kill_switch",
         "proposer_credential",
+        "verifier_floor",
         "candidate",
         "snapshot",
         "delta",

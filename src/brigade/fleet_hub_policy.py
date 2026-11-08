@@ -32,7 +32,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from . import fleet_hub, fleet_policy
+from . import fleet_hub, fleet_hub_verifiers, fleet_policy
 from .fleet_hub import FleetHubConflict, FleetHubError, FleetHubForbidden
 from .fleet_policy import FleetPolicyError, resolve_policy  # noqa: F401  (re-exported API)
 
@@ -555,6 +555,8 @@ def _write_revision(
             )
         document, extra = build(current)
         document = fleet_policy.canonical_role_document(document)
+        # Read under this write lock, after any committed verifier flag change.
+        fleet_hub_verifiers.refuse_listed(conn, document)
         revision = current["revision"] + 1
         digest = fleet_policy.document_digest(document)
         now = fleet_hub._utc_now()

@@ -51,6 +51,9 @@ pub mod scan;
 pub mod schema;
 pub mod search;
 pub mod text;
+pub mod verifier;
+#[cfg(test)]
+mod verifier_tests;
 pub mod writer;
 
 #[cfg(test)]
@@ -814,7 +817,54 @@ impl Store {
             )),
         }
     }
+    /// D4: a credential whose verifier copy differs from its principal's flag
+    /// is refused before any memory action. Writes check again under the lock.
+    async fn verifier_refusal(&self, credential: &Credential) -> Option<Reply> {
+        if *credential == Credential::Admin {
+            return None;
+        }
+        let who = credential.clone();
+        match self
+            .readers
+            .submit(move |db| verifier::check(&Conn(db), &who))
+            .await
+        {
+            Ok(refusal) => refusal,
+            Err(_) => Some(Reply::new(
+                503,
+                json!({"error": "hub busy", "reason": "memory-reader-timeout"}),
+            )),
+        }
+    }
+    /// Bind the verifier copy for a credential native registration is about
+    /// to issue, through the memory writer. A refusal means nothing may be
+    /// issued. `class` is `node` or `principal`.
+    pub async fn bind_credential(
+        &self,
+        principal: &str,
+        class: &'static str,
+        digest: &str,
+        requested: Option<bool>,
+    ) -> Reply {
+        let now_ms = self.clock.now_ms();
+        self.write(Prepared {
+            credential: Credential::Admin,
+            action: Action::VerifierBind {
+                principal: principal.into(),
+                class,
+                digest: digest.into(),
+                requested,
+            },
+            client_event_id: ids::mint(now_ms),
+            request_digest: String::new(),
+            now_ms,
+        })
+        .await
+    }
     pub async fn handle(&self, credential: &Credential, body: &[u8]) -> Reply {
+        if let Some(refusal) = self.verifier_refusal(credential).await {
+            return refusal;
+        }
         let raw: Json = match serde_json::from_slice(body) {
             Ok(v) => v,
             Err(_) => return invalid("body must be a JSON object"),
@@ -841,6 +891,7 @@ impl Store {
             | "handoff"
             | "capture"
             | "grant"
+            | "verifier"
             | "rescan"
             | "evidence.attach"
             | "evidence.purge"
@@ -981,6 +1032,7 @@ impl Store {
             ],
             "auto_apply" => &["action", "proposal_id", "base_epoch", "client_event_id"],
             "auto_apply_switch" => &["action", "enabled", "client_event_id"],
+            "verifier" => &["action", "principal", "verifier", "client_event_id"],
             "evidence.purge" => &["action", "evidence_id", "client_event_id"],
             "retrieval_eval.record" => {
                 &["action", "report_json", "report_sha256", "client_event_id"]
@@ -1049,7 +1101,12 @@ impl Store {
         }
         if matches!(
             action,
-            "grant" | "rescan" | "auto_apply_switch" | "evidence.purge" | "retrieval_eval.record"
+            "grant"
+                | "verifier"
+                | "rescan"
+                | "auto_apply_switch"
+                | "evidence.purge"
+                | "retrieval_eval.record"
         ) && *credential != Credential::Admin
         {
             return Err(error(
@@ -1136,6 +1193,16 @@ impl Store {
         let action = match action {
             "retrieval_eval.record" => Action::RetrievalEval(retrieval_eval::prepare(raw)?),
             "evidence.purge" => Action::EvidencePurge(short("evidence_id", 1024, true)?.unwrap()),
+            "verifier" => Action::Verifier {
+                principal: str_field("principal")
+                    .filter(|p| ids::valid_principal(p) && *p != ADMIN)
+                    .ok_or_else(|| invalid("principal must be a node id or agent:<name>"))?
+                    .into(),
+                verifier: map
+                    .get("verifier")
+                    .and_then(Json::as_bool)
+                    .ok_or_else(|| invalid("verifier must be a boolean"))?,
+            },
             "auto_apply_switch" => Action::AutoApplySwitch(
                 map.get("enabled")
                     .and_then(Json::as_bool)
@@ -1343,6 +1410,9 @@ impl Store {
 
     /// S23's internal push boundary. The public search contract stays unchanged.
     pub async fn push(&self, credential: &Credential, map: &Map<String, Json>) -> Reply {
+        if let Some(refusal) = self.verifier_refusal(credential).await {
+            return refusal;
+        }
         self.search_for(credential, map, true).await
     }
 
@@ -1577,6 +1647,25 @@ impl Store {
         {
             Ok(mut reply) => {
                 if is_status && reply.status == 200 {
+                    // D4: the caller's own `reflect_principals` membership,
+                    // read from the hub's current policy. Never inferred.
+                    let principal = reader.principal().to_string();
+                    reply.body["reflect_principal"] = match self
+                        .hub
+                        .submit(move |db| ops::Authority::read(&Conn(db)))
+                        .await
+                    {
+                        Ok(authority) => {
+                            json!(verifier::listed(&authority.policy_document, &principal))
+                        }
+                        Err(_) => {
+                            return error(
+                                503,
+                                "memory_action_unavailable",
+                                "policy read unavailable",
+                            );
+                        }
+                    };
                     reply.body["default_mode"] = retrieval["mode"].clone();
                     if let Some(id) = retrieval.get("embedder_id") {
                         reply.body["embedders"] =
@@ -1722,6 +1811,8 @@ fn reads<T: ReadTx + ?Sized>(
                     "default_mode": "lexical",
                     "principal": credential.principal(),
                     "credential": credential.class(),
+                    "verifier": verifier::flagged(tx, credential.principal())?,
+                    "capabilities": [verifier::CAPABILITY],
                 }),
             );
             if let Some(names) = readable_scopes {

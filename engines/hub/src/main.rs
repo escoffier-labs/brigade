@@ -1559,6 +1559,7 @@ async fn start_and_serve(
             writer: writer.clone().unwrap(),
             admin: registration::digest(&admin),
             clock: native_clock.clone(),
+            memory: memory_store.clone(),
         });
     }
     if native("messages") {
@@ -2074,3 +2075,6 @@ mod tests_s3c;
 
 #[cfg(test)]
 mod tests_s9;
+
+#[cfg(test)]
+mod tests_verifier;
