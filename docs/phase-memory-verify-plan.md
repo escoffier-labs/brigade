@@ -31,7 +31,9 @@ they do not exist yet.
 Revision 2 (2026-11-08) moves the hub work ahead of every client slice. The
 verifier floor (old slice 10, now slice 3) is mandatory, and a new slice 4
 adds proposal-bound attestations and the reviewer hash read. Old slices 3 to
-9 become slices 5 to 11 with the same order.
+9 become slices 5 to 11 with the same order. Revision 3 makes the verifier
+flag principal-level in slice 3, and adds exact card binding and a hidden
+manifest list to slice 4.
 
 ## Integration baseline
 
@@ -135,16 +137,23 @@ Tests:
 Security review focus: the grant split from `reflect`, the cursor, the audit
 record, and the single-reader-scope note in the docs.
 
-## Slice 3. Verifier credentials and the Tier 2 floor
+## Slice 3. Verifier principals and the Tier 2 floor
 
-No dependency on slices 1 and 2. Design: D4 (verifier credentials and the
+No dependency on slices 1 and 2. Design: D4 (verifier principals and the
 Tier 2 floor). Mandatory before any slice submits a proposal.
 
 Changes:
 
-- The hub principal enrollment path: a `verifier` attribute set only by an
-  admin at enrollment or by an admin update, stored with the credential
-  record. The principal cannot change it.
+- The hub principal record: a `verifier` attribute set or cleared only by an
+  admin. The principal cannot change it. Each credential record carries a copy
+  bound at issue, and every request refuses a copy that differs from the
+  principal record with `403 memory_verifier_flag_mismatch`.
+- The enrollment, rotation and re-add paths issue every new credential with
+  the principal's flag and refuse a request that would create an unflagged
+  credential for a verifier principal with
+  `memory_verifier_credential_unflagged`. Revocation keeps the flag, and
+  removing the principal leaves a flagged tombstone. Setting or clearing the
+  flag updates the principal and all live credentials in one transaction.
 - `engines/hub/src/memory/proposal_tiers.rs` and `proposals.rs`: proposals
   from a flagged principal record `verifier: true` at submit and are Tier 2 at
   submit, preflight and every decision, whatever their ops.
@@ -167,9 +176,20 @@ Tests:
 - `status` reports both booleans correctly for flagged, unflagged and listed
   principals.
 - A principal cannot set its own flag through any memory action.
+- Rotation: the rotated credential carries the flag, and a rotation request
+  asking for an unflagged credential is refused and issues nothing.
+- Multiple credentials: a second and third credential enrolled for a verifier
+  are all flagged, and a proposal from any of them is Tier 2.
+- Revoke and re-add: revoking every credential and re-adding one, and removing
+  and re-adding the principal id, both yield a flagged credential.
+- A credential whose stored copy differs from the principal record is refused
+  on every memory action.
+- Clearing the flag updates every live credential at once, and no request in
+  between sees a mismatch.
 
 Security review focus: the floor cannot be bypassed through policy staleness,
-replay, flag changes or a direct `auto_apply` call.
+replay, flag changes, credential rotation or re-enrollment, or a direct
+`auto_apply` call.
 
 ## Slice 4. Proposal-bound attestations and the reviewer hash read
 
@@ -179,16 +199,24 @@ for reviewers).
 Changes:
 
 - `engines/hub/src/memory/attestation.rs`: attachments from a verifier enter
-  `pending_review` and never hold automatic apply or count as proof. The first
-  proposal from the same principal that cites the record binds it.
+  `pending_review` and never hold automatic apply or count as proof. Attach
+  parses the manifest and refuses a `card` scope or card id that differs from
+  the attestation's with `memory_manifest_card_mismatch`.
+- `propose` binds a cited manifest only when the proposal is from the
+  attaching principal, its citing `append_evidence` op and every other op
+  address the attestation's scope and card id at the manifest's base
+  revision, any `other_card` is in the same scope, and the record is unbound.
+  Otherwise the whole proposal is refused with
+  `422 memory_manifest_binding_invalid` and nothing is stored.
 - Proposal decisions in `proposals.rs`: accept moves bound records to
   `active`. Reject, stale and compaction move them to `inert`. A sweep moves
   records unbound after 24 hours to `inert`. Inert records free their quota
   slot and never count as proof or as a contrary hold.
-- `engines/hub/src/memory/proposal_reads.rs`: `proposal_show` returns each
-  cited verifier manifest's evidence id, `artifact_kind`, `artifact_sha256`,
-  stance and state to callers with `review` on every target, and null fields
-  to everyone else.
+- `engines/hub/src/memory/proposal_reads.rs`: `proposal_show` returns a
+  `verifier_manifests` list (evidence id, `artifact_kind`, `artifact_sha256`,
+  stance and state) only to callers with `review` on the proposal's targets
+  and on the scope and card of every bound attestation. For anyone else the
+  key is absent.
 
 Tests:
 
@@ -198,8 +226,20 @@ Tests:
   sweep each make the record inert, free its slot, and leave no hold.
 - A record cannot be bound by another principal's proposal or by a second
   proposal.
-- `proposal_show` returns the hash to a reviewer with `review` on all targets,
-  and null to a caller with `read` only or with `review` on some targets.
+- Cross-card: a manifest attested for card A cited by a proposal whose ops
+  change card B is refused, including when the proposal also touches card A.
+- Cross-scope: the same card id in another scope, and an `other_card` in
+  another scope, are refused.
+- Stale revision: a proposal whose ops use a base revision other than the
+  manifest's is refused, and so is a manifest whose `card` fields differ from
+  its attestation at attach time.
+- An accepted proposal for card B cannot activate a contrary record for card
+  A by any sequence of attach and propose calls.
+- `proposal_show` returns the list to a reviewer with `review` on all
+  targets and attested cards.
+- To a caller with `read` only, or with `review` on some targets, replies for
+  proposals binding zero, one and many manifests have the same keys and the
+  same shape, and differ only in fields a non-reviewer already sees.
 - Existing non-verifier attestations behave exactly as before.
 
 Security review focus: state transitions under concurrent decisions, and that
@@ -351,7 +391,7 @@ inputs. This slice gets the deepest review of the client set.
 
 ## Slice 9. Submission, manifests, failure and the care entry
 
-Depends on slices 3, 4 and 8. Design: D4 (verifier credentials), D5 (the
+Depends on slices 3, 4 and 8. Design: D4 (verifier principals), D5 (the
 manifest) and D6.
 
 Changes:
@@ -407,7 +447,7 @@ Changes:
 Tests (`tests/test_memory_verify_show.py`):
 
 - A tampered manifest or packet fails the chain and prints no evidence.
-- A caller without `review` gets null hashes and the command refuses.
+- A caller without `review` gets no manifest list and the command refuses.
 - Headers show trust, authentication and findings ahead of quotes.
 - A rejected correction is not proposed again until the revision or evidence
   changes.

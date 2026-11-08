@@ -18,6 +18,11 @@ isolation and two-item corroboration (D3), manifests that hold nothing before
 acceptance and a reviewer hash read (D5), and writer budgets for the read
 counters (D2). The open questions became decisions at the end.
 
+Revision 3 (2026-11-08) answers the second security review: the verifier flag
+belongs to the principal and every credential it holds (D4), a manifest binds
+only to a proposal for the exact card, scope and revision it checked (D5), and
+non-reviewers cannot see how many manifests a proposal binds (D5).
+
 ## Why
 
 Scheduled hub reflection proposes only structural edits today: exact duplicate
@@ -479,12 +484,29 @@ never enter the shared run journal. Packets are owner-only files under
 `.brigade/memory/verify/packets/`, capped at 64 MiB in total, and deleted 14
 days after their proposal reaches a terminal state.
 
-### Verifier credentials and the Tier 2 floor
+### Verifier principals and the Tier 2 floor
 
-Verifier identity is an attribute of the credential, held by the hub. An
-admin sets a `verifier` flag on the principal at enrollment. The principal
-cannot set or clear it, and no policy list or naming convention stands in for
-it. The hub enforces three rules for flagged principals:
+Verifier identity is an attribute of the principal, held by the hub. An admin
+sets a `verifier` flag on the principal record. The principal cannot set or
+clear it, and no policy list or naming convention stands in for it.
+
+The flag covers every credential of the principal. Each credential record
+carries a copy of it, bound when the credential is issued, and every request
+requires the copy to match the principal record. A mismatch is refused with
+`403 memory_verifier_flag_mismatch`. The hub keeps the two in step:
+
+- Enrolling an additional credential, rotating a credential, and re-adding a
+  credential after revocation all issue the new credential with the
+  principal's flag. An enrollment or rotation request that would create an
+  unflagged credential for a verifier principal is refused with
+  `memory_verifier_credential_unflagged`, and nothing is issued.
+- Revoking credentials does not clear the flag. If the principal record itself
+  is removed, the hub keeps a tombstone with the flag, so the same principal
+  id comes back as a verifier until an admin clears it.
+- Setting or clearing the flag updates the principal record and every live
+  credential in one transaction.
+
+The hub enforces three rules for flagged principals:
 
 1. **Tier 2 floor.** Every proposal a verifier submits is classified Tier 2
    at submit, at preflight and at every decision, whatever its ops and
@@ -565,23 +587,47 @@ proposal-bound life cycle:
 
 | State | Entered when | Holds automatic apply |
 |---|---|---|
-| `pending_review` | Attached by a verifier credential. Bound to the first proposal from the same principal whose ops cite it | No |
+| `pending_review` | Attached by a verifier credential. Bound to the first proposal that passes the binding check below | No |
 | `active` | That proposal is accepted. A manifest with `contrary` stance then behaves as a normal contrary record | Yes, for `contrary` |
 | `inert` | The proposal is rejected, goes stale or is compacted, or no proposal cites the record within 24 hours | No, and it never counts as proof |
 
 An inert record frees its quota slot, as a purged one does, so rejected
 corrections do not use up the 8 records one principal may hold per card.
 
+Binding requires exact correspondence between three things: the attestation's
+scope and card id, the manifest's `card` fields (scope, card id and base
+revision), and the proposal's ops. The hub parses the manifest at attach time
+and refuses one whose `card` scope or card id differs from the attestation's,
+with `memory_manifest_card_mismatch`. At `propose`, a proposal that cites a
+verifier manifest binds it only when all of these hold:
+
+- The proposal comes from the principal that attached the record.
+- The `append_evidence` op citing the record addresses the attestation's scope
+  and card id, with a `base_revision` equal to the manifest's base revision.
+- Every other op in the proposal addresses that same scope, card id and base
+  revision. A `supersede_card` op's `other_card` must be in the same scope.
+- The record is still `pending_review` and unbound.
+
+Otherwise the whole proposal is refused with
+`422 memory_manifest_binding_invalid` and nothing is stored. A verifier
+therefore cannot bind a manifest for card A to a proposal that changes card B,
+to a card in another scope, or to a revision the manifest did not check.
+
 ### Hash read for reviewers
 
 `attestation::resolve` returns hashes only for supporting records from
 members of `reflect_principals`. A verifier manifest is neither, so a reviewer
-could not authenticate it. The hub adds a read: `proposal_show` returns, for
-each proposal-bound verifier manifest the proposal cites, its evidence id,
-`artifact_kind`, `artifact_sha256`, stance and state. Only a caller with
-`review` on every target scope receives these fields. Everyone else sees them
-as null, as they see a null diff today. The hash covers the manifest bytes.
-The manifest carries `packet_sha256`, which binds the local packet in turn.
+could not authenticate it. The hub adds a read: `proposal_show` gains a
+`verifier_manifests` list with each bound manifest's evidence id,
+`artifact_kind`, `artifact_sha256`, stance and state.
+
+The authorization targets for this list are the proposal's targets plus the
+scope and card of every bound attestation. Only a caller with `review` on all
+of them receives the list, which is present and possibly empty. For any other
+caller the key is absent, so a reply to a non-reviewer looks the same whether
+the proposal binds zero, one or several manifests. The hash covers the
+manifest bytes. The manifest carries `packet_sha256`, which binds the local
+packet in turn.
 
 ### Commands
 
