@@ -174,9 +174,15 @@ impl Limits {
         Ok(limits)
     }
     /// A tracked principal with fewer distinct cards than this is a light
-    /// user and is never evicted to make room.
+    /// user. It is never denied, and leaves the table only when every tracked
+    /// principal is light.
     pub fn light_pairs(&self) -> usize {
         (self.principal_pairs / 16).max(1)
+    }
+    /// Light principals that may be evicted per day before newcomers go
+    /// uncounted: sixteen per table slot.
+    pub fn carried_principals(&self) -> usize {
+        self.principals.saturating_mul(16)
     }
 }
 
@@ -191,7 +197,8 @@ pub enum Kind {
 /// `write_waiting` counts flushes and sweeps that rolled back to let a
 /// queued write go first. `principal_evicted` counts evictions of the
 /// heaviest principal and `evicted_reads` the reads it made afterwards.
-pub const BUDGETS: [&str; 16] = [
+/// `light_evicted` counts light principals moved out to make room.
+pub const BUDGETS: [&str; 17] = [
     "accumulator_keys",
     "principal_card_daily",
     "principal_daily",
@@ -199,6 +206,7 @@ pub const BUDGETS: [&str; 16] = [
     "limiter_pairs",
     "principals_full",
     "principal_evicted",
+    "light_evicted",
     "evicted_reads",
     "contended",
     "flush_rows",
@@ -275,6 +283,8 @@ struct Slot {
 struct Usage {
     total: u32,
     pairs: HashMap<u64, u32>,
+    /// The `State::tick` of its last counted or limited read.
+    last: u64,
 }
 
 struct State {
@@ -285,8 +295,14 @@ struct State {
     /// Principals evicted today. Their reads are served, not counted, until
     /// the day resets, so eviction never refills a heavy principal's budget.
     evicted: HashSet<u64>,
+    /// Light principals evicted today to make room, with the daily total they
+    /// had used. Each may be evicted this way once a day, and its total comes
+    /// back when it is tracked again.
+    carried: HashMap<u64, u32>,
     /// Pair entries across every tracked principal.
     pair_entries: usize,
+    /// Activity clock for least-recently-active eviction.
+    tick: u64,
     keys: HashMap<Key, Slot>,
     /// Oldest first. Holds exactly one entry per key in `keys`.
     order: BTreeMap<i64, Key>,
@@ -307,36 +323,65 @@ impl State {
         self.order.insert(seq, key.clone());
         self.keys.insert(key, Slot { seq, tally });
     }
-    /// Starts tracking `who`, evicting the heaviest principal if the table is
-    /// full and that principal is not a light user. False when there is no
-    /// room: the read is served, not counted.
+    /// Starts tracking `who`, making room when the table is full. False when
+    /// there is no room: the read is served, not counted.
+    ///
+    /// If any tracked principal holds at least `light_pairs` distinct cards,
+    /// the heaviest is evicted and denied for the rest of the day. If all are
+    /// light, the least recently active one not already evicted today leaves
+    /// without being denied. Its daily total is carried, so it is tracked
+    /// again on its next read with its daily limit intact.
     fn track(&mut self, who: u64, stats: &Stats) -> bool {
         if self.principals.contains_key(&who) {
             return true;
         }
-        if self.principals.len() >= self.limits.principals {
-            let heaviest = self
-                .principals
-                .iter()
-                .map(|(id, usage)| (usage.pairs.len(), usage.total, *id))
-                .max();
-            match heaviest {
-                Some((pairs, _, id))
-                    if pairs >= self.limits.light_pairs()
-                        && self.evicted.len() < self.limits.principals =>
-                {
-                    self.principals.remove(&id);
-                    self.pair_entries -= pairs;
-                    self.evicted.insert(id);
-                    stats.bump("principal_evicted");
-                }
-                _ => {
-                    stats.bump("principals_full");
-                    return false;
-                }
-            }
+        if self.principals.len() >= self.limits.principals && !self.make_room(stats) {
+            stats.bump("principals_full");
+            return false;
         }
-        self.principals.insert(who, Usage::default());
+        let total = self.carried.get(&who).copied().unwrap_or(0);
+        self.principals.insert(
+            who,
+            Usage {
+                total,
+                ..Usage::default()
+            },
+        );
+        true
+    }
+    fn make_room(&mut self, stats: &Stats) -> bool {
+        let light = self.limits.light_pairs();
+        let heaviest = self
+            .principals
+            .iter()
+            .map(|(id, usage)| (usage.pairs.len(), usage.total, *id))
+            .max();
+        if let Some((pairs, _, id)) = heaviest.filter(|h| h.0 >= light) {
+            if self.evicted.len() >= self.limits.principals {
+                return false;
+            }
+            self.principals.remove(&id);
+            self.pair_entries -= pairs;
+            self.evicted.insert(id);
+            stats.bump("principal_evicted");
+            return true;
+        }
+        if self.carried.len() >= self.limits.carried_principals() {
+            return false;
+        }
+        let idle = self
+            .principals
+            .iter()
+            .filter(|(id, _)| !self.carried.contains_key(id))
+            .min_by_key(|(id, usage)| (usage.last, **id))
+            .map(|(id, _)| *id);
+        let Some(id) = idle else {
+            return false;
+        };
+        let usage = self.principals.remove(&id).unwrap();
+        self.pair_entries -= usage.pairs.len();
+        self.carried.insert(id, usage.total);
+        stats.bump("light_evicted");
         true
     }
 }
@@ -359,7 +404,9 @@ impl ReadCounts {
                 limiter_day: i64::MIN,
                 principals: HashMap::new(),
                 evicted: HashSet::new(),
+                carried: HashMap::new(),
                 pair_entries: 0,
+                tick: 0,
                 keys: HashMap::new(),
                 order: BTreeMap::new(),
                 next: 0,
@@ -431,9 +478,12 @@ impl ReadCounts {
             state.limiter_day = today;
             state.principals.clear();
             state.evicted.clear();
+            state.carried.clear();
             state.pair_entries = 0;
         }
         let who = self.hasher.hash_one(principal);
+        state.tick += 1;
+        let tick = state.tick;
         let tally = match kind {
             Kind::SearchHit => Tally {
                 search_hits: 1,
@@ -465,6 +515,7 @@ impl ReadCounts {
             }
             let limits = &state.limits;
             let usage = state.principals.get_mut(&who).unwrap();
+            usage.last = tick;
             if usage.total >= limits.principal_daily {
                 self.stats.bump("principal_daily");
                 continue;
@@ -710,7 +761,8 @@ pub struct Swept {
     pub days: usize,
     pub totals: usize,
     pub examined: usize,
-    /// A row or time budget stopped this sweep with expired rows left.
+    /// The time budget stopped this sweep, or either stage used the whole
+    /// row budget, so rows may remain and the writer should sweep again.
     pub more: bool,
 }
 
@@ -827,7 +879,11 @@ pub fn sweep(
         return Err(e);
     }
     *cursor = next_cursor;
-    let full = swept.days == limits.sweep_rows;
+    // Either stage used the whole row budget, so rows may remain. The writer
+    // queues the next sweep at once. A sweep that finds nothing left wraps the
+    // cursor and reports false.
+    let full = swept.days == limits.sweep_rows
+        || (swept.days + swept.examined == limits.sweep_rows && cursor.0.is_some());
     if timed_out {
         counts.stats.bump("sweep_ms");
     } else if full {

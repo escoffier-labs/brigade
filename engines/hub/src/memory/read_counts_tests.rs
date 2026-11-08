@@ -942,8 +942,19 @@ fn one_principal_filling_its_share_never_stops_another_being_counted() {
     );
 }
 
+fn counted_cards(db: &Connection, filter: &str) -> Vec<String> {
+    db.prepare(&format!(
+        "SELECT card_id FROM memory_read_days WHERE {filter} ORDER BY card_id"
+    ))
+    .unwrap()
+    .query_map([], |r| r.get(0))
+    .unwrap()
+    .collect::<rusqlite::Result<_>>()
+    .unwrap()
+}
+
 #[test]
-fn a_full_principal_table_evicts_the_heaviest_and_never_a_light_user() {
+fn a_full_table_evicts_and_denies_the_heaviest_before_any_light_user() {
     // Two principals, 64 pairs each. A principal under 4 pairs is light.
     let counts = ReadCounts::new(limits(|l| {
         l.principals = 2;
@@ -952,37 +963,100 @@ fn a_full_principal_table_evicts_the_heaviest_and_never_a_light_user() {
     }));
     assert_eq!(counts.limits().light_pairs(), 4);
     let now = 1_800_000_000_000;
+    // The light principal is the least recently active, and still stays.
+    counts.record("light", &[("fleet", "a")], Kind::SearchHit, now);
     let heavy = distinct("h", 10);
     counts.record("heavy", &in_fleet(&heavy), Kind::SearchHit, now);
-    counts.record("light", &[("fleet", "a")], Kind::SearchHit, now);
-    // A newcomer evicts the heavy principal, not the light one.
     counts.record("new", &[("fleet", "b")], Kind::SearchHit, now);
     assert_eq!(counts.stats.budget("principal_evicted"), 1);
+    assert_eq!(counts.stats.budget("light_evicted"), 0);
     counts.record("light", &[("fleet", "c")], Kind::SearchHit, now);
-    // The evicted principal is served but not counted for the rest of the day,
-    // so eviction never refills its budget.
+    // The evicted heavy principal is served but not counted for the rest of
+    // the day, so eviction never refills its budget.
     counts.record("heavy", &[("fleet", "d")], Kind::SearchHit, now);
     assert_eq!(counts.stats.budget("evicted_reads"), 1);
-    // Only light users left: a further newcomer is not counted, and the loss is.
+    // Only light users left: the least recently active one ("new") makes room
+    // without being denied, and comes back on its next read.
     counts.record("late", &[("fleet", "e")], Kind::SearchHit, now);
-    assert_eq!(counts.stats.budget("principals_full"), 1);
-    assert_eq!(counts.stats.dropped(), 1);
     counts.record("light", &[("fleet", "f")], Kind::SearchHit, now);
+    counts.record("new", &[("fleet", "g")], Kind::SearchHit, now);
+    assert_eq!(counts.stats.budget("light_evicted"), 2);
+    assert_eq!(counts.stats.budget("principals_full"), 0);
+    assert_eq!(counts.stats.dropped(), 0);
     let db = memory_db();
     flush_once(&db, &counts, &idle).unwrap();
-    let counted: Vec<String> = db
-        .prepare(
-            "SELECT card_id FROM memory_read_days WHERE card_id NOT LIKE 'h%' ORDER BY card_id",
-        )
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap();
-    assert_eq!(counted, ["a", "b", "c", "f"]);
+    assert_eq!(
+        counted_cards(&db, "card_id NOT LIKE 'h%'"),
+        ["a", "b", "c", "e", "f", "g"]
+    );
     // The next UTC day starts everyone over.
     counts.record("heavy", &[("fleet", "d")], Kind::SearchHit, now + DAY_MS);
     assert_eq!(counts.len(), 1);
+}
+
+#[test]
+fn sixty_four_light_principals_never_leave_a_newcomer_uncounted() {
+    let counts = ReadCounts::default();
+    let now = 1_800_000_000_000;
+    for n in 0..64 {
+        counts.record(
+            &format!("p{n}"),
+            &[("fleet", "shared")],
+            Kind::SearchHit,
+            now,
+        );
+    }
+    counts.record("newcomer", &[("fleet", "fresh")], Kind::SearchHit, now);
+    assert_eq!(counts.stats.budget("light_evicted"), 1);
+    assert_eq!(counts.stats.budget("principals_full"), 0);
+    // The evicted principal (the least recently active, p0) is counted again.
+    counts.record("p0", &[("fleet", "again")], Kind::SearchHit, now);
+    assert_eq!(counts.stats.budget("light_evicted"), 2);
+    let db = memory_db();
+    flush_once(&db, &counts, &idle).unwrap();
+    assert_eq!(day_row(&db, "fleet", "shared"), Some((64, 0)));
+    assert_eq!(day_row(&db, "fleet", "fresh"), Some((1, 0)));
+    assert_eq!(day_row(&db, "fleet", "again"), Some((1, 0)));
+    assert_eq!(counts.stats.dropped(), 0);
+}
+
+#[test]
+fn a_re_tracked_light_principal_stays_within_its_bound() {
+    // One slot, light under 2 cards, at most 3 counts per card and 5 a day.
+    let counts = ReadCounts::new(limits(|l| {
+        l.principals = 1;
+        l.principal_pairs = 32;
+        l.limiter_pairs = 32;
+        l.principal_card_daily = 3;
+        l.principal_daily = 5;
+    }));
+    let now = 1_800_000_000_000;
+    let reread = |who: &str, n: usize| {
+        for _ in 0..n {
+            counts.record(who, &[("fleet", "a")], Kind::CardRead, now);
+        }
+    };
+    reread("p", 10);
+    // "q" moves "p" out. "p" then moves "q" out and is tracked again.
+    reread("q", 1);
+    reread("p", 10);
+    // Its per-card memory restarted, but its daily total came back with it:
+    // 3 before, then only 2 more of the 5 a day.
+    let db = memory_db();
+    flush_once(&db, &counts, &idle).unwrap();
+    assert_eq!(day_row(&db, "fleet", "a"), Some((0, 3 + 1 + 2)));
+    // Extra counts over the per-card cap: at most (light_pairs - 1) x
+    // principal_card_daily, here 1 x 3. "p" got 5 on one card against a cap of 3.
+    let limits = counts.limits();
+    let bound = (limits.light_pairs() as u32 - 1) * limits.principal_card_daily;
+    assert_eq!(bound, 3);
+    assert!(5 - limits.principal_card_daily <= bound);
+    // Each light principal leaves this way once a day. With both evicted once,
+    // a further newcomer is not counted, and the loss is.
+    reread("q", 1);
+    assert_eq!(counts.stats.budget("light_evicted"), 2);
+    assert_eq!(counts.stats.budget("principals_full"), 1);
+    assert_eq!(counts.stats.dropped(), 1);
 }
 
 #[test]
@@ -1121,6 +1195,45 @@ fn a_totals_sweep_at_its_time_budget_commits_partial_progress_and_resumes() {
         ticks += 1;
     }
     assert!(ticks > 1);
+    assert_eq!(count(&db, "SELECT count(*) FROM memory_read_totals"), 0);
+    assert_eq!(meta(&db, "read_totals_rows"), Some("0".into()));
+}
+
+#[test]
+fn a_totals_stage_that_fills_the_row_budget_asks_for_another_sweep() {
+    let counts = ReadCounts::new(limits(|l| l.sweep_rows = 5));
+    let now = 1_800_000_000_000;
+    let db = memory_db();
+    seed_retired_totals(&db, 6);
+    let mut cursor = SweepCursor::default();
+    let first = sweep(&db, &counts, now, &mut cursor, &idle).unwrap();
+    assert_eq!((first.examined, first.totals, first.more), (5, 5, true));
+    let second = sweep(&db, &counts, now, &mut cursor, &idle).unwrap();
+    assert_eq!((second.examined, second.totals, second.more), (1, 1, false));
+    assert_eq!(cursor, SweepCursor(None));
+    assert_eq!(count(&db, "SELECT count(*) FROM memory_read_totals"), 0);
+}
+
+#[tokio::test]
+async fn the_writer_queues_the_next_sweep_until_the_totals_are_done() {
+    let mut h = Hub::with(clean(), None);
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&json!({"read_counts": {"sweep_rows": 5}}))
+        .unwrap();
+    seed_retired_totals(&Connection::open(h.memory()).unwrap(), 6);
+    let store = h.store.as_ref().unwrap();
+    assert!(store.sweep());
+    let started = std::time::Instant::now();
+    while store.read_counts.stats.swept() < 6 {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "second sweep never ran"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let db = Connection::open(h.memory()).unwrap();
     assert_eq!(count(&db, "SELECT count(*) FROM memory_read_totals"), 0);
     assert_eq!(meta(&db, "read_totals_rows"), Some("0".into()));
 }

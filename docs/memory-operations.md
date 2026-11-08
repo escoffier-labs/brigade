@@ -1748,12 +1748,19 @@ The hub configuration accepts `memory.read_counts`:
 Unknown keys and values outside a range fail configuration, and so does a
 `limiter_pairs` below `principals` times `principal_pairs`. Every tracked
 principal can therefore use its whole share, and one principal cannot fill the
-limiter for the others. When the principal table is full, a new principal
-evicts the one with the most distinct cards, as long as that principal holds at
-least `principal_pairs / 16` cards (128 by default). An evicted principal's
-reads are served but not counted until the day resets, so eviction never
-refills its budget. When every tracked principal is lighter than that, the new
-principal's reads are served but not counted, and the loss is counted. The
+limiter for the others. A principal with fewer than `principal_pairs / 16`
+distinct cards (128 by default) is light. When the principal table is full and
+any tracked principal is not light, a new principal evicts the one with the
+most distinct cards. That principal's reads are served but not counted until
+the day resets, so eviction never refills its budget. When every tracked
+principal is light, the least recently active one leaves without being denied
+and is tracked again on its next read with its daily total intact. Its
+per-card limits start over, so it can have at most `principal_pairs / 16 - 1`
+cards counted up to `principal_card_daily` more times each that day (127 x 64
+by default). Each light principal leaves this way at most once a day, and at
+most `16 x principals` do (1,024 by default). Past that, a new principal's
+reads are served but not counted, and the loss is counted. This bounded
+inflation is accepted over leaving the rest of the fleet uncounted. The
 per-principal limits live only in memory, key each principal by a per-process
 keyed hash, and reset at the UTC day boundary. Per-day counters saturate at
 2^32 - 1.
@@ -1761,6 +1768,8 @@ keyed hash, and reset at the UTC day boundary. Per-day counters saturate at
 The idle retention sweep deletes expired day rows oldest first, then removes
 the totals rows of retired cards, within `sweep_rows` and `sweep_ms` per
 transaction. It checks for queued work and the time budget at every totals row,
-commits partial progress at the budget, and resumes from where it stopped. `/metrics` reports each budget that bites as
+commits partial progress at the budget, and resumes from where it stopped. A
+sweep that uses its whole row budget in either stage runs again while the
+writer is idle. `/metrics` reports each budget that bites as
 `brigade_hub_memory_read_count_budget_total{budget="..."}` and lost increments
 as `brigade_hub_memory_read_count_dropped_total`.
