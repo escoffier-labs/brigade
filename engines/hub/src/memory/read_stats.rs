@@ -14,7 +14,7 @@
 //! and each admitted request, whatever its answer, gets its own audit row.
 //! Requests the gate refuses get no row of their own: each principal's
 //! refusals are merged into at most one `memory.read_stats_refused` summary row
-//! per [`SUMMARY_WINDOW_MS`]. Every row of either kind counts against
+//! per [`SUMMARY_WINDOW_MS`], holding at most [`SUMMARY_COUNT_MAX`] of them. Every row of either kind counts against
 //! [`AUDIT_DAILY_ROWS`] for the whole hub, and once that is spent every request
 //! is refused until the UTC day ends. The memory event log is never used, so
 //! the record does not replicate to card readers. This module never writes the
@@ -47,6 +47,9 @@ pub const AUDIT_DAILY_ROWS: u32 = 20_000;
 pub const AUDIT_ACTION: &str = "memory.read_stats";
 /// The audit action for a summary of refused requests.
 pub const REFUSED_ACTION: &str = "memory.read_stats_refused";
+/// The most refusals one summary row stores. It is `brigade.fleet_hub_audit.COUNT_MAX`,
+/// the reader's bound on `count`. Any remainder carries into the next summary.
+pub const SUMMARY_COUNT_MAX: u32 = 1_000_000;
 /// The actor of the summary for principals the full gate could not track.
 pub const UNTRACKED_ACTOR: &str = "read-stats-untracked";
 
@@ -182,7 +185,10 @@ impl Gate {
                 .summary_ms
                 .is_none_or(|last| now_ms.saturating_sub(last) >= SUMMARY_WINDOW_MS)
         {
-            let refused = std::mem::take(&mut entry.pending);
+            // The audit reader refuses a count past its bound, so one summary
+            // stores at most that many. The rest waits for the next summary.
+            let refused = entry.pending.min(SUMMARY_COUNT_MAX);
+            entry.pending -= refused;
             entry.summary_ms = Some(now_ms);
             state.rows += 1;
             return Decision::Refuse(Some((actor.to_string(), refused)));
@@ -191,19 +197,27 @@ impl Gate {
     }
 
     /// Refusals whose summary row was not written go back to be summarized
-    /// with the next one.
+    /// with the next one. They never depend on the entry that produced them:
+    /// if that entry was evicted while the row was in flight (a UTC day
+    /// rolled over and the table was full), the principal gets a new entry
+    /// when there is room, and otherwise the count joins the untracked summary.
     pub(super) fn unsent(&self, actor: &str, refused: u32) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        let state = &mut *state;
         let entry = if actor == UNTRACKED_ACTOR {
-            Some(&mut state.untracked)
+            &mut state.untracked
+        } else if state.entries.contains_key(actor) || state.entries.len() < PRINCIPALS {
+            let day = state.day;
+            state
+                .entries
+                .entry(actor.to_string())
+                .or_insert_with(|| Entry::fresh(day))
         } else {
-            state.entries.get_mut(actor)
+            &mut state.untracked
         };
-        if let Some(entry) = entry {
-            entry.pending = entry.pending.saturating_add(refused);
-        }
+        entry.pending = entry.pending.saturating_add(refused);
     }
 }
 

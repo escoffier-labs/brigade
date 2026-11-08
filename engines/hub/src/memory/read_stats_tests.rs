@@ -465,6 +465,121 @@ fn principals_past_the_table_share_one_untracked_summary() {
     assert!(admitted(&gate, "agent:late", START + read_counts::DAY_MS));
 }
 
+/// The gate holds `PRINCIPALS` principals of `prefix` admitted at `now`.
+fn fill(gate: &Gate, prefix: &str, now: i64) {
+    for p in 0..PRINCIPALS {
+        assert!(admitted(gate, &format!("agent:{prefix}{p}"), now));
+    }
+}
+
+#[test]
+fn a_summary_that_fails_across_the_day_boundary_is_never_lost() {
+    // With room after the eviction: the principal gets a new entry.
+    let gate = Gate::default();
+    fill(&gate, "p", START);
+    // agent:p0's summary for one refusal is in flight when the day rolls over.
+    assert_eq!(
+        gate.decide("agent:p0", START),
+        Decision::Refuse(Some(("agent:p0".into(), 1)))
+    );
+    let tomorrow = START + read_counts::DAY_MS;
+    // A new principal finds the table full and evicts every earlier entry.
+    assert!(admitted(&gate, "agent:new", tomorrow));
+    // The insert fails. The count must survive into agent:p0's next summary.
+    gate.unsent("agent:p0", 1);
+    assert!(admitted(&gate, "agent:p0", tomorrow));
+    assert_eq!(
+        gate.decide("agent:p0", tomorrow),
+        Decision::Refuse(Some(("agent:p0".into(), 2)))
+    );
+
+    // Without room: the table filled again on the new day, so the count joins
+    // the untracked summary.
+    let gate = Gate::default();
+    fill(&gate, "p", START);
+    assert_eq!(
+        gate.decide("agent:p0", START),
+        Decision::Refuse(Some(("agent:p0".into(), 1)))
+    );
+    fill(&gate, "q", tomorrow);
+    gate.unsent("agent:p0", 1);
+    assert_eq!(
+        gate.decide("agent:late", tomorrow),
+        Decision::Refuse(Some((UNTRACKED_ACTOR.into(), 2)))
+    );
+}
+
+#[test]
+fn a_summary_never_stores_more_than_the_reader_accepts() {
+    let gate = Gate::default();
+    // The day's quota is spent, so every later request is refused.
+    for n in 0..DAILY_MAX as i64 {
+        assert!(admitted(&gate, "agent:dot", START + n * MIN_GAP_MS));
+    }
+    gate.unsent("agent:dot", 2_500_000);
+    let mut counts = Vec::new();
+    for hour in 0..4 {
+        let now = START + DAILY_MAX as i64 * MIN_GAP_MS + hour * SUMMARY_WINDOW_MS;
+        match gate.decide("agent:dot", now) {
+            Decision::Refuse(Some((_, n))) => counts.push(n),
+            other => panic!("{other:?}"),
+        }
+    }
+    // Capped at the reader's bound, and nothing lost: 2,500,000 plus 4 refusals.
+    assert_eq!(counts, [SUMMARY_COUNT_MAX, SUMMARY_COUNT_MAX, 500_003, 1]);
+}
+
+/// Pages the hub file's audit log through `brigade.fleet_hub_audit.page`,
+/// the reader behind `GET /audit`, and returns its rows as JSON.
+fn python_audit_page(hub: &std::path::Path) -> Json {
+    let python = std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into());
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src");
+    let out = std::process::Command::new(python)
+        .env("PYTHONPATH", src)
+        .args([
+            "-c",
+            "import json, sqlite3, sys\n\
+             from brigade import fleet_hub_audit\n\
+             rows = fleet_hub_audit.page(sqlite3.connect(sys.argv[1]), limit=500)\n\
+             print(json.dumps(rows))",
+        ])
+        .arg(hub)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[tokio::test]
+async fn a_summary_past_a_million_refusals_still_pages_through_the_audit_reader() {
+    let h = hub().await;
+    grant(&h, "agent:dot", "fleet", &["read", "read_stats"]).await;
+    assert_eq!(stats(&h, AGENT_TOKEN, ask("fleet")).await.status, 200);
+    // A flood of 1,500,000 refusals already merged, then one more.
+    h.store
+        .as_ref()
+        .unwrap()
+        .read_stats_gate
+        .unsent("agent:dot", 1_500_000);
+    assert_eq!(h.call(AGENT_TOKEN, ask("fleet")).await.status, 429);
+    h.set_clock(h.now() + SUMMARY_WINDOW_MS);
+    assert_eq!(h.call(AGENT_TOKEN, ask("fleet")).await.status, 200);
+    assert_eq!(h.call(AGENT_TOKEN, ask("fleet")).await.status, 429);
+    let rows = python_audit_page(&h.hub);
+    let summaries: Vec<i64> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["action"] == REFUSED_ACTION)
+        .map(|r| r["detail"]["count"].as_i64().unwrap())
+        .collect();
+    assert_eq!(summaries, [1_000_000, 500_002]);
+}
+
 #[tokio::test]
 async fn every_admitted_request_writes_one_audit_row_and_no_memory_event() {
     let h = hub().await;

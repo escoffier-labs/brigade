@@ -1916,7 +1916,7 @@ anything reaches the hub writer:
 | Row | When | Detail |
 |---|---|---|
 | `memory.read_stats` | Once per admitted request, whatever its answer (200, 400, 403) | `scope` when valid, `count` rows returned, `status` |
-| `memory.read_stats_refused` | At most once per principal per hour | `count` requests refused with 429 since that principal's previous summary, `status` 429 |
+| `memory.read_stats_refused` | At most once per principal per hour | `count` requests refused with 429 since that principal's previous summary, at most 1,000,000 (the audit reader's bound), with any remainder carried into the next summary, `status` 429 |
 
 Actor and subject are the caller. The hub writes at most 20,000 rows of both
 kinds per UTC day. Once that is spent, every `read_stats` request is refused

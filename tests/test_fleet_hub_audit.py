@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -795,3 +796,34 @@ def test_read_stats_scope_and_status_are_bounded(conn, detail):
     with pytest.raises(ValueError, match="invalid audit (scope|status)"):
         audit.append(conn, actor="agent:verify", action="memory.read_stats", subject="agent:verify", detail=detail)
     assert conn.execute("SELECT COUNT(*) FROM fleet_audit_log").fetchone() == (0,)
+
+
+def test_refusal_summary_count_bound_matches_the_hub():
+    # The hub caps each summary at SUMMARY_COUNT_MAX and carries the rest, so
+    # every count it writes stays inside the reader's bound.
+    source = (Path(__file__).resolve().parents[1] / "engines/hub/src/memory/read_stats.rs").read_text()
+    match = re.search(r"pub const SUMMARY_COUNT_MAX: u32 = ([0-9_]+);", source)
+    assert match is not None
+    assert int(match.group(1).replace("_", "")) == audit.COUNT_MAX
+
+
+def test_refusal_summary_at_the_bound_pages_back_and_past_it_is_refused(conn):
+    conn.execute(
+        "INSERT INTO fleet_audit_log(at,actor,action,subject,detail) VALUES(?,?,?,?,?)",
+        (
+            "2026-11-08T00:00:00.000000+00:00",
+            "agent:verify",
+            "memory.read_stats_refused",
+            "agent:verify",
+            json.dumps({"count": audit.COUNT_MAX, "status": 429}),
+        ),
+    )
+    assert audit.page(conn)[0]["detail"] == {"count": audit.COUNT_MAX, "status": 429}
+    with pytest.raises(ValueError, match="invalid audit count"):
+        audit.append(
+            conn,
+            actor="agent:verify",
+            action="memory.read_stats_refused",
+            subject="agent:verify",
+            detail={"count": audit.COUNT_MAX + 1, "status": 429},
+        )

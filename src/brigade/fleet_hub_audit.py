@@ -38,7 +38,8 @@ Scope is one hub memory scope (fleet, repo:<identity>, collection:<name> or
 principal:<id>) and status is an HTTP status in 100..599 (not bool). The hub
 writes ``memory.read_stats`` once per admitted request, with the rows returned
 as count, and ``memory.read_stats_refused`` at most once per principal per
-hour, with the refusals merged since the previous one as count.
+hour, with the refusals merged since the previous one as count. A summary holds
+at most COUNT_MAX refusals and the hub carries the rest into the next one.
 Nested/free-text fields, arbitrary keys and recognizable credentials are refused
 with value-free errors. Page cursors are SQLite nonnegative integers and limits
 are 1..500, with defaults 0 and 100. Rows contain decoded detail dictionaries.
@@ -128,6 +129,10 @@ _CREDENTIAL = re.compile(
     re.IGNORECASE,
 )
 _OPAQUE = re.compile(r"[A-Za-z0-9_-]{32,}")
+# The bound on detail count. The Rust hub stores at most this many refusals in
+# one memory.read_stats_refused row (SUMMARY_COUNT_MAX in
+# engines/hub/src/memory/read_stats.rs) and carries the rest into the next one.
+COUNT_MAX = 1_000_000
 # The hub's memory scope grammar. Repository and collection names are printable
 # ASCII without spaces, quotes, backslashes or wildcards.
 _NAMED_SCOPE = re.compile(r"(?:repo|collection):[!#-)+-\[\]-~]{1,200}")
@@ -205,7 +210,7 @@ def _detail(
             if not isinstance(value, str) or value not in ("agent", "teammate"):
                 raise ValueError("invalid audit role")
         elif field == "count":
-            if type(value) is not int or not 0 <= value <= 1_000_000:
+            if type(value) is not int or not 0 <= value <= COUNT_MAX:
                 raise ValueError("invalid audit count")
         elif field == "scope":
             _scope(value, admission=admission)
