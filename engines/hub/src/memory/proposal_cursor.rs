@@ -13,10 +13,15 @@ struct Position {
     epoch: String,
     all: bool,
     after: String,
+    issued_ms: i64,
 }
 
 pub(super) struct Cursors {
     key: [u8; 32],
+    /// Three characters, ending in a dot, that start every handle of this kind.
+    prefix: &'static str,
+    /// How long a handle resolves after it was issued. None: until eviction or restart.
+    ttl_ms: Option<i64>,
     positions: Mutex<VecDeque<Position>>,
 }
 
@@ -41,11 +46,26 @@ fn mac(key: &[u8], message: &[u8]) -> [u8; 32] {
 
 impl Cursors {
     pub(super) fn new(hub_secret: &str) -> Self {
+        Self::keyed(hub_secret, "brigade.proposal-cursor.v1", "p1.", None)
+    }
+
+    /// A separate cursor family. Its key is derived under its own domain, so a
+    /// handle from one family never resolves in another.
+    pub(super) fn keyed(
+        hub_secret: &str,
+        domain: &str,
+        prefix: &'static str,
+        ttl_ms: Option<i64>,
+    ) -> Self {
+        assert!(prefix.len() == 3 && prefix.ends_with('.'));
         let mut hash = Sha256::new();
-        hash.update(b"brigade.proposal-cursor.v1\0");
+        hash.update(domain.as_bytes());
+        hash.update(b"\0");
         hash.update(hub_secret.as_bytes());
         Self {
             key: hash.finalize().into(),
+            prefix,
+            ttl_ms,
             positions: Mutex::default(),
         }
     }
@@ -57,7 +77,19 @@ impl Cursors {
         epoch: &str,
         all: bool,
     ) -> Option<String> {
-        if handle.len() != 67 || !handle.starts_with("p1.") {
+        self.resolve_at(handle, who, epoch, all, 0)
+    }
+
+    /// `epoch` is everything the handle is bound to besides the principal.
+    pub(super) fn resolve_at(
+        &self,
+        handle: &str,
+        who: &Credential,
+        epoch: &str,
+        all: bool,
+        now_ms: i64,
+    ) -> Option<String> {
+        if handle.len() != 67 || !handle.starts_with(self.prefix) {
             return None;
         }
         let positions = self.positions.lock().ok()?;
@@ -68,6 +100,9 @@ impl Cursors {
                     && p.principal == who.principal()
                     && p.epoch == epoch
                     && p.all == all
+                    && self
+                        .ttl_ms
+                        .is_none_or(|ttl| now_ms >= p.issued_ms && now_ms - p.issued_ms <= ttl)
             })
             .map(|p| p.after.clone())
     }
@@ -79,9 +114,29 @@ impl Cursors {
         epoch: &str,
         all: bool,
     ) -> Option<String> {
+        self.issue_at(after, who, epoch, all, 0)
+    }
+
+    pub(super) fn issue_at(
+        &self,
+        after: String,
+        who: &Credential,
+        epoch: &str,
+        all: bool,
+        now_ms: i64,
+    ) -> Option<String> {
         let mut positions = self.positions.lock().ok()?;
+        if let Some(ttl) = self.ttl_ms {
+            // Expired handles never resolve again, so they give their slots back.
+            positions.retain(|p| now_ms >= p.issued_ms && now_ms - p.issued_ms <= ttl);
+        }
+        // A handle with a lifetime is never reused, so each page gets a full one.
         if let Some(existing) = positions.iter().find(|p| {
-            p.principal == who.principal() && p.epoch == epoch && p.all == all && p.after == after
+            self.ttl_ms.is_none()
+                && p.principal == who.principal()
+                && p.epoch == epoch
+                && p.all == all
+                && p.after == after
         }) {
             return Some(existing.handle.clone());
         }
@@ -103,7 +158,8 @@ impl Cursors {
         let nonce = ids::mint(0);
         let payload = serde_json::json!([nonce, who.principal(), epoch, all, after]);
         let handle = format!(
-            "p1.{}",
+            "{}{}",
+            self.prefix,
             ids::hex(&mac(&self.key, payload.to_string().as_bytes()))
         );
         positions.push_back(Position {
@@ -112,6 +168,7 @@ impl Cursors {
             epoch: epoch.into(),
             all,
             after,
+            issued_ms: now_ms,
         });
         Some(handle)
     }

@@ -15,6 +15,7 @@ pub const RIGHTS: &[&str] = &[
     "review",
     "import",
     "list_proposals",
+    "read_stats",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,6 +201,29 @@ fn granted(grants: &Grants, scope: &str, right: &str) -> bool {
     grants
         .iter()
         .any(|(pattern, rights)| covers(pattern, scope) && rights.contains(right))
+}
+
+/// A right that only a grant naming exactly this scope can open. Wildcard
+/// grants and node defaults never carry it, so `*` with every right still
+/// does not open per-card read counts. The admin token needs no grant.
+pub fn has_exact_right<T: ReadTx + ?Sized>(
+    tx: &T,
+    credential: &Credential,
+    scope: &str,
+    right: &str,
+) -> rusqlite::Result<bool> {
+    if *credential == Credential::Admin {
+        return Ok(true);
+    }
+    if scope
+        .strip_prefix("principal:")
+        .is_some_and(|owner| owner != credential.principal())
+    {
+        return Ok(false);
+    }
+    Ok(grant_rows(tx, credential.principal())?
+        .iter()
+        .any(|(pattern, rights)| pattern == scope && rights.contains(right)))
 }
 
 /// Per-request cache of readable scopes, for filtering a page of the log or

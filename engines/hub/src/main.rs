@@ -1523,18 +1523,36 @@ async fn start_and_serve(
     }
     state.lookup = Some(admission::Lookup::new(readers.clone(), &admin));
     let native = |family| state.modes.get(family) == brigade_hub::modes::Mode::Native;
-    // One S4a writer per file, shared by every native family. It owns the writer metrics.
-    let writer = if native("registration") || native("claims") || native("messages") {
-        let writer = brigade_hub::writer::Writer::start(
+    let families = native("registration") || native("claims") || native("messages");
+    let memory_store = match &state.memory {
+        Some(memory_route::MemoryRoute::Store(store)) => Some(store.clone()),
+        _ => None,
+    };
+    // One S4a writer per file, shared by every native family and by memory's
+    // `read_stats` audit rows. It owns the writer metrics when a family is native.
+    let start = || {
+        brigade_hub::writer::Writer::start(
             brigade_hub::writer::Config::new(path.clone()),
             arbiter.clone(),
         )
-        .map_err(|_| "native writer unavailable")?;
+    };
+    let writer = if families {
+        let writer = start().map_err(|_| "native writer unavailable")?;
         state.telemetry.attach_writer(writer.stats());
         Some(writer)
+    } else if memory_store.is_some() {
+        // Memory alone never fails startup over it: `read_stats` refuses instead.
+        start()
+            .inspect_err(|_| eprintln!("WARN memory read_stats unavailable: no hub writer"))
+            .ok()
     } else {
         None
     };
+    if let (Some(store), Some(writer)) = (&memory_store, &writer) {
+        store.attach_audit(std::sync::Arc::new(brigade_hub::memory_audit::HubAudit(
+            writer.clone(),
+        )));
+    }
     if native("registration") {
         state.registration = Some(registration::Registration {
             readers: readers.clone(),

@@ -5,8 +5,8 @@ transaction as the audited mutation. No helper opens a connection, explicitly
 starts or finishes a transaction, or performs authentication. Refusal aggregation and rate
 limits belong to the future invite caller, not this primitive.
 
-Detail has exactly nine optional fields: principal_id, node_id, invite_id,
-hub_id, key_id, statement_id, role, grants, count. Identifier values use ASCII
+Detail has exactly eleven optional fields: principal_id, node_id, invite_id,
+hub_id, key_id, statement_id, role, grants, count, scope, status. Identifier values use ASCII
 letters/digits and ._- (plus an optional agent: prefix for principals). They are
 1..128 characters, with agent names restricted to 1..63 lowercase characters.
 Actor, subject, principal_id, node_id and bare node grants accept canonical
@@ -34,6 +34,10 @@ detail; callers establish it from database targets and validated grant patterns.
 
 Roles are agent or teammate. Grants are at most 64 identifiers or the exact
 wildcards *, node:*, agent:*. Count is an integer in 0..1,000,000 (not bool).
+Scope is one hub memory scope (fleet, repo:<identity>, collection:<name> or
+principal:<id>) and status is an HTTP status in 100..599 (not bool). The hub
+writes both for ``memory.read_stats``, one row per request, refused ones
+included, with the rows returned as count.
 Nested/free-text fields, arbitrary keys and recognizable credentials are refused
 with value-free errors. Page cursors are SQLite nonnegative integers and limits
 are 1..500, with defaults 0 and 100. Rows contain decoded detail dictionaries.
@@ -63,6 +67,7 @@ Action = Literal[
     "hub.identity",
     "hub.migration",
     "statement.upload",
+    "memory.read_stats",
 ]
 
 
@@ -78,6 +83,8 @@ class AuditDetail(TypedDict, total=False):
     role: Literal["agent", "teammate"]
     grants: list[str]
     count: int
+    scope: str
+    status: int
 
 
 class AuditRow(TypedDict):
@@ -105,6 +112,7 @@ _ACTIONS = frozenset(
         "hub.identity",
         "hub.migration",
         "statement.upload",
+        "memory.read_stats",
     }
 )
 _ID_FIELDS = frozenset({"principal_id", "node_id", "invite_id", "hub_id", "key_id", "statement_id"})
@@ -117,6 +125,28 @@ _CREDENTIAL = re.compile(
     re.IGNORECASE,
 )
 _OPAQUE = re.compile(r"[A-Za-z0-9_-]{32,}")
+# The hub's memory scope grammar. Repository and collection names are printable
+# ASCII without spaces, quotes, backslashes or wildcards.
+_NAMED_SCOPE = re.compile(r"(?:repo|collection):[!#-)+-\[\]-~]{1,200}")
+
+
+def _scope(value: object, *, admission: bool = True) -> str:
+    if not isinstance(value, str):
+        raise ValueError("invalid audit scope")
+    owner = value.removeprefix("principal:") if value.startswith("principal:") else None
+    valid = (
+        value == "fleet"
+        or _NAMED_SCOPE.fullmatch(value) is not None
+        or (
+            owner is not None
+            and (
+                owner == "hub:admin" or _AGENT.fullmatch(owner) is not None or _IDENTIFIER.fullmatch(owner) is not None
+            )
+        )
+    )
+    if not valid or (admission and _CREDENTIAL.search(value)):
+        raise ValueError("invalid audit scope")
+    return value
 
 
 def _identifier(
@@ -154,7 +184,7 @@ def _action(value: object) -> Action:
 def _detail(
     raw: object, *, admission: bool = True, known_public_identifiers: frozenset[str] = frozenset()
 ) -> AuditDetail:
-    if not isinstance(raw, dict) or not raw.keys() <= _ID_FIELDS | {"role", "grants", "count"}:
+    if not isinstance(raw, dict) or not raw.keys() <= _ID_FIELDS | {"role", "grants", "count", "scope", "status"}:
         raise ValueError("invalid audit detail fields")
     result = dict(raw)
     for field, value in raw.items():
@@ -174,6 +204,11 @@ def _detail(
         elif field == "count":
             if type(value) is not int or not 0 <= value <= 1_000_000:
                 raise ValueError("invalid audit count")
+        elif field == "scope":
+            _scope(value, admission=admission)
+        elif field == "status":
+            if type(value) is not int or not 100 <= value <= 599:
+                raise ValueError("invalid audit status")
         elif field == "grants":
             if not isinstance(value, list) or len(value) > 64:
                 raise ValueError("invalid audit grants")

@@ -37,6 +37,9 @@ mod ranking_tests;
 pub mod read_counts;
 #[cfg(test)]
 mod read_counts_tests;
+pub mod read_stats;
+#[cfg(test)]
+mod read_stats_tests;
 mod rescan;
 #[cfg(test)]
 mod rescan_tests;
@@ -143,6 +146,11 @@ pub struct Store {
     hub: Arc<ReaderPool>,
     admin: String,
     proposal_cursors: Arc<proposal_cursor::Cursors>,
+    read_stats_cursors: Arc<proposal_cursor::Cursors>,
+    read_stats_limiter: read_stats::Limiter,
+    /// Where `read_stats` audit rows go. Without one `read_stats` is
+    /// refused, never served unaudited.
+    audit: std::sync::OnceLock<Arc<dyn read_stats::AuditLog>>,
     clock: ids::Clock,
     scanner: Arc<dyn Scanner>,
     last_sweep: std::sync::atomic::AtomicI64,
@@ -243,6 +251,7 @@ impl Store {
         let writer = writer::Writer::start(config, db, options.arbiter.clone())
             .map_err(|e| e.to_string())?;
         let proposal_cursors = Arc::new(proposal_cursor::Cursors::new(&options.admin_digest));
+        let read_stats_cursors = Arc::new(read_stats::cursors(&options.admin_digest));
         Ok(Self {
             writer,
             arbiter: options.arbiter,
@@ -250,6 +259,9 @@ impl Store {
             hub,
             admin: options.admin_digest,
             proposal_cursors,
+            read_stats_cursors,
+            read_stats_limiter: read_stats::Limiter::default(),
+            audit: std::sync::OnceLock::new(),
             clock: options.clock,
             scanner: options.scanner,
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
@@ -741,6 +753,10 @@ impl Store {
         }
         status
     }
+    /// Gives `read_stats` its audit log. Only the first call takes effect.
+    pub fn attach_audit(&self, log: Arc<dyn read_stats::AuditLog>) {
+        let _ = self.audit.set(log);
+    }
     /// The lexical index, for `/metrics` and `status`.
     pub fn index(&self) -> &Arc<index::Index> {
         &self.index
@@ -808,7 +824,7 @@ impl Store {
         };
         let action = map.get("action").and_then(Json::as_str).unwrap_or("");
         match action {
-            "card" | "log" | "status" | "proposal_list" | "proposal_show" => {
+            "card" | "log" | "status" | "proposal_list" | "proposal_show" | "read_stats" => {
                 self.read(credential, action, map).await
             }
             "search" => self.search(credential, map).await,
@@ -1463,7 +1479,54 @@ impl Store {
         reply
     }
 
+    /// `read_stats`: the rate limit, the read, then one audit row on the hub
+    /// file. A request whose audit row cannot be written gets a 503 and no rows.
+    async fn read_stats(&self, credential: &Credential, map: &Map<String, Json>) -> Reply {
+        let now_ms = self.clock.now_ms();
+        let Some(audit) = self.audit.get() else {
+            return error(
+                503,
+                "memory_action_unavailable",
+                "read_stats needs the hub audit log",
+            );
+        };
+        let reply = if !self
+            .read_stats_limiter
+            .admit(credential.principal(), now_ms)
+        {
+            read_stats::rate_limited()
+        } else {
+            let who = credential.clone();
+            let request = map.clone();
+            let cursors = self.read_stats_cursors.clone();
+            self.readers
+                .submit(move |c| read_stats::read(&Conn(c), &who, &request, &cursors, now_ms))
+                .await
+                .unwrap_or_else(|_| {
+                    Reply::new(
+                        503,
+                        json!({"error": "hub busy", "reason": "memory-reader-timeout"}),
+                    )
+                })
+        };
+        let row =
+            read_stats::Audit::new(credential, read_stats::requested_scope(map), &reply, now_ms);
+        let written = audit.append(row).await;
+        if written {
+            reply
+        } else {
+            error(
+                503,
+                "memory_action_unavailable",
+                "read_stats audit unavailable",
+            )
+        }
+    }
+
     async fn read(&self, credential: &Credential, action: &str, map: &Map<String, Json>) -> Reply {
+        if action == "read_stats" {
+            return self.read_stats(credential, map).await;
+        }
         let reader = credential;
         let credential = credential.clone();
         let map = map.clone();

@@ -98,6 +98,7 @@ ACTIONS = (
     "hub.identity",
     "hub.migration",
     "statement.upload",
+    "memory.read_stats",
 )
 
 
@@ -738,3 +739,47 @@ def test_known_public_identity_context_must_be_structural_and_used(conn, context
             conn, actor="admin", action="grants.change", subject="fixture", detail={}, known_public_identifiers=context
         )
     assert audit.page(conn) == []
+
+
+@pytest.mark.parametrize(
+    ("actor", "detail"),
+    [
+        ("agent:verify", {"scope": "repo:github.com/example/one", "count": 1000, "status": 200}),
+        ("node-1", {"scope": "collection:vault/notes", "count": 0, "status": 403}),
+        ("admin", {"scope": "principal:agent:verify", "count": 0, "status": 429}),
+        ("agent:verify", {"count": 0, "status": 400}),
+        ("agent:verify", {"scope": "fleet", "count": 0, "status": 503}),
+    ],
+)
+def test_hub_read_stats_rows_page_back_as_written(conn, actor, detail):
+    # The Rust hub writes these rows directly: actor and subject are the caller,
+    # detail is the scope, the rows returned and the HTTP status.
+    conn.execute(
+        "INSERT INTO fleet_audit_log(at,actor,action,subject,detail) VALUES(?,?,?,?,?)",
+        ("2026-11-08T00:00:00.000000+00:00", actor, "memory.read_stats", actor, json.dumps(detail)),
+    )
+    row = audit.page(conn)[0]
+    assert (row["actor"], row["action"], row["subject"], row["detail"]) == (actor, "memory.read_stats", actor, detail)
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        {"scope": "repo:"},
+        {"scope": "repo:a b"},
+        {"scope": "repo:a*b"},
+        {"scope": "collection:" + "a" * 201},
+        {"scope": "principal:Agent:Bad"},
+        {"scope": "somewhere"},
+        {"scope": ["fleet"]},
+        {"scope": "repo:example/ghp_abcdefghijklmnop"},
+        {"status": 99},
+        {"status": 600},
+        {"status": True},
+        {"status": "200"},
+    ],
+)
+def test_read_stats_scope_and_status_are_bounded(conn, detail):
+    with pytest.raises(ValueError, match="invalid audit (scope|status)"):
+        audit.append(conn, actor="agent:verify", action="memory.read_stats", subject="agent:verify", detail=detail)
+    assert conn.execute("SELECT COUNT(*) FROM fleet_audit_log").fetchone() == (0,)

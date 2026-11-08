@@ -85,6 +85,11 @@ READ_SCOPES_MAX = 64
 _UNAVAILABLE_STATUSES = {408, 429}
 # Coded proposal quota answers are hub decisions, so callers can stop proposing.
 QUOTA_REFUSALS = {"memory_proposal_principal_quota", "memory_proposal_scope_quota"}
+# `read_stats` allows one request per second and 600 a day per principal. The hub
+# says so with this code, so a caller can stop instead of retrying at once.
+READ_STATS_RATE_LIMITED = "memory_read_stats_rate_limited"
+READ_STATS_PAGE_MAX = 1000
+READ_STATS_FIELDS = frozenset({"card_id", "reads_7d", "reads_30d", "last_read_day", "total_reads"})
 CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _CARD_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 _EVENT_ID = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}")
@@ -566,7 +571,7 @@ class MemoryHubClient:
                 raise HubRefusal(status, {"code": "memory_rescan_status", "error": "rescan requires HTTP 200"})
             return payload
         code = payload.get("code")
-        if status == 429 and isinstance(code, str) and code in QUOTA_REFUSALS:
+        if status == 429 and isinstance(code, str) and (code in QUOTA_REFUSALS or code == READ_STATS_RATE_LIMITED):
             raise HubRefusal(status, payload)
         if 300 <= status < 400 or status in _UNAVAILABLE_STATUSES:
             # A redirect is never followed with the credential, and 408 or 429
@@ -587,3 +592,57 @@ class MemoryHubClient:
 
 def client_for(settings: HubSettings, *, transport: Transport | None = None) -> MemoryHubClient:
     return MemoryHubClient(settings.hub_url, settings.token, transport=transport)
+
+
+def read_stats(
+    client: MemoryHubClient, scope: str, *, after: str | None = None, limit: int = READ_STATS_PAGE_MAX
+) -> dict[str, Any]:
+    """One page of per-card read counts for `scope`: `scope`, `rows`, `next_after`, `read_counts_since_day`.
+
+    The hub needs `read` and `read_stats` granted on this exact scope, and it
+    audits every request. Like reflect, this refuses the admin credential: it
+    asks `status` first and raises HubConfigError when the hub reports
+    `credential: "admin"`. Each row holds only `card_id`, `reads_7d`,
+    `reads_30d`, `last_read_day` and `total_reads`. A reply of any other shape
+    raises HubUnavailable("malformed-read-stats"). Over the rate limit the hub
+    answers 429 `memory_read_stats_rate_limited`, raised as a HubRefusal.
+    """
+    if not valid_scope(scope):
+        raise HubConfigError("read_stats needs one scope: fleet, repo:<identity>, collection:<name> or principal:<id>")
+    if type(limit) is not int or not 1 <= limit <= READ_STATS_PAGE_MAX:
+        raise ValueError(f"read_stats limit must be from 1 to {READ_STATS_PAGE_MAX}")
+    if after is not None and not isinstance(after, str):
+        raise ValueError("read_stats after must be the previous page's next_after")
+    refuse_admin(client.call("status"))
+    fields: dict[str, Any] = {"scope": scope, "limit": limit}
+    if after is not None:
+        fields["after"] = after
+    body = client.call("read_stats", **fields)
+    rows = body.get("rows")
+    following = body.get("next_after")
+    since = body.get("read_counts_since_day")
+
+    def count(value: object) -> bool:
+        return type(value) is int and value >= 0
+
+    if (
+        body.get("scope") != scope
+        or not isinstance(rows, list)
+        or len(rows) > limit
+        or not (following is None or isinstance(following, str))
+        or not (since is None or type(since) is int)
+        or not all(
+            isinstance(row, dict)
+            and row.keys() == READ_STATS_FIELDS
+            and valid_card_id(row["card_id"])
+            and all(count(row[key]) for key in READ_STATS_FIELDS - {"card_id"})
+            for row in rows
+        )
+    ):
+        raise HubUnavailable("malformed-read-stats")
+    return {
+        "scope": scope,
+        "rows": [dict(row) for row in rows],
+        "next_after": following,
+        "read_counts_since_day": since,
+    }
