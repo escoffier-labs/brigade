@@ -68,6 +68,35 @@ def test_matcher_follows_picomatch_dot_semantics(pattern, path, expected):
 
 
 @pytest.mark.parametrize(
+    ("pattern", "path", "expected"),
+    [
+        ("engines/hub/**", "engines/hub", True),
+        ("**/b.py", "b.py", True),
+        ("**/b.py", "x/y/b.py", True),
+        ("a/**/b/**/c", "a/x/b/y/b/c", True),
+        ("a/**/b/**/c", "a/x/b/y/c/d", False),
+        ("a/**/b.py", "a/b.py/c", False),
+        ("a/*/b", "a/b", False),
+    ],
+)
+def test_matcher_backtracks_over_double_star(pattern, path, expected):
+    assert ci_hub_select.matches(path, (pattern,)) is expected
+
+
+def test_matcher_has_no_recursion_depth_limit():
+    # A proposal controls its paths: any depth must match without error.
+    deep = "/".join(["a"] * 5000)
+    assert ci_hub_select.matches(f"engines/hub/{deep}/lib.rs", HUB_PATTERNS)
+    assert not ci_hub_select.matches(f"docs/{deep}/guide.md", HUB_PATTERNS)
+    assert ci_hub_select.matches(f"x/{deep}/y.py", ("x/**/y.py",))
+    assert not ci_hub_select.matches(f"x/{deep}/z.py", ("x/**/y.py",))
+    # A recursive matcher recursed once per pattern segment, so only a deep
+    # pattern (from main, never the proposal) reached the recursion limit.
+    assert ci_hub_select.matches(f"{deep}/b.py", (f"{deep}/*.py",))
+    assert not ci_hub_select.matches(f"{deep}/b.rs", (f"{deep}/*.py",))
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "",

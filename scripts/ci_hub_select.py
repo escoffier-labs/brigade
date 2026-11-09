@@ -123,13 +123,31 @@ def _segment_matches(pattern: str, name: str) -> bool:
 
 
 def _segments_match(pattern: list[str], path: list[str]) -> bool:
-    if not pattern:
-        return not path
-    if pattern[0] == "**":
-        # Zero or more whole segments. Matching the directory itself as well
-        # is broader than picomatch, which only ever selects more.
-        return any(_segments_match(pattern[1:], path[index:]) for index in range(len(path) + 1))
-    return bool(path) and _segment_matches(pattern[0], path[0]) and _segments_match(pattern[1:], path[1:])
+    # Iterative, so no input depth meets the recursion limit. (A recursive
+    # matcher's depth follows the pattern, which comes from main, not the
+    # proposal's path.) `**` matches zero or more whole segments; on a
+    # mismatch the latest `**` absorbs one more segment and matching resumes
+    # after it. Matching the directory itself as well is broader than
+    # picomatch, which only ever selects more.
+    position = index = 0
+    star = -1
+    resume = 0
+    while index < len(path):
+        if position < len(pattern) and pattern[position] == "**":
+            star, resume = position, index
+            position += 1
+        elif position < len(pattern) and _segment_matches(pattern[position], path[index]):
+            position += 1
+            index += 1
+        elif star >= 0:
+            position = star + 1
+            resume += 1
+            index = resume
+        else:
+            return False
+    while position < len(pattern) and pattern[position] == "**":
+        position += 1
+    return position == len(pattern)
 
 
 def matches(path: str, patterns: tuple[str, ...]) -> bool:
