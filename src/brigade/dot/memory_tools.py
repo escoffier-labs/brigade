@@ -273,9 +273,93 @@ class MemoryTools:
         return client.call("search", timeout=SEARCH_BUDGET_SECONDS, query=query, limit=limit, query_source="push")
 
     def _hub_card(self, name: str, offset: int, scope: str | None = None) -> dict[str, Any] | None:
+        """A card only hub memory holds, or None. Dot and Duet read it push-safe as their own principal."""
+        if self.profile.principal_memory:
+            return self._cli_hub_card(name, offset, scope)
+        return self._push_card(name, offset, scope)
+
+    def _push_card(self, name: str, offset: int, scope: str | None) -> dict[str, Any] | None:
+        """Hub `card` with `push: true`, as this connector's pinned principal (S23).
+
+        The hub serves only a live head with a current clean scan receipt and push trust (reviewed,
+        policy-promoted or imported, or unreviewed written by this principal), so `memory_card` opens no
+        more than `memory_hits` could send. The host node credential and the replica play no part: a card
+        the hub withholds, an unavailable hub or a head that moves between chunks answer None.
+        """
+        from ..memory_hub_client import (
+            HubConfigError,
+            HubRefusal,
+            HubUnavailable,
+            MemoryHubClient,
+            content_hash,
+            hub_mode,
+            obj,
+            valid_scope,
+        )
+
+        try:
+            if hub_mode(self.workspace) == "off":
+                return None
+        except (HubConfigError, ValueError, OSError):
+            return None
+        authority = self._principal_authority()
+        try:
+            client = MemoryHubClient(authority.hub, authority.token)
+        except (HubUnavailable, HubConfigError):
+            return None
+        parts: list[str] = []
+        pinned: tuple[Any, ...] | None = None
+        chars = 0
+        following: int | None = 0
+        while following is not None:
+            fields: dict[str, Any] = {"card_id": name, "push": True, "offset": following}
+            if scope is not None:
+                fields["scope"] = scope
+            try:
+                body = client.call("card", **fields)
+            except (HubUnavailable, HubRefusal, HubConfigError):
+                return None
+            card = obj(body.get("card"))
+            text = card.get("text")
+            identity = (card.get("scope"), card.get("revision"), card.get("content_hash"), body.get("log_epoch"))
+            if not isinstance(text, str) or (pinned is not None and identity != pinned):
+                return None
+            pinned = identity
+            chars += len(text)
+            if chars > MAX_CARD_FILE_BYTES:
+                return None
+            parts.append(text)
+            step = card.get("next_offset")
+            following = step if type(step) is int and step > following else None
+        text = "".join(parts)
+        found_scope, revision, sha256, _ = pinned or (None, None, None, None)
+        if not isinstance(sha256, str) or content_hash(text) != sha256 or not valid_scope(found_scope):
+            return None
+        if self.profile.prompt_load_scan:
+            # The whole card and its scope are scanned, as for a local card.
+            refusal = egress_refusal([text, found_scope])
+            if refusal:
+                return {"card_id": name, **refusal}
+        chunk = text[offset : offset + CARD_CHUNK_CHARS]
+        end = offset + len(chunk)
+        return dict(
+            name=name,
+            source="hub",
+            scope=found_scope,
+            revision=revision if _is_count(revision) else None,
+            sha256=sha256 if _SHA256.fullmatch(sha256) else None,
+            chars=len(text),
+            offset=offset,
+            next_offset=end if end < len(text) else None,
+            content=chunk,
+            content_trust="untrusted",
+        )
+
+    def _cli_hub_card(self, name: str, offset: int, scope: str | None = None) -> dict[str, Any] | None:
         """A card only hub memory holds, read through `brigade memory hub card` (S14).
 
-        The CLI reads only the workspace's `[hub]` read scopes; `scope`, as a
+        Only a principal memory profile (Grok Bot memory) reads this way, with its own pinned
+        credential in the child's environment. Dot and Duet use `_push_card`. The CLI reads only the workspace's `[hub]` read scopes; `scope`, as a
         search match reports it, picks one when the id is in more than one.
         While the hub is unavailable the CLI answers from this host's replica,
         so a replica search match opens too; `source` says which answered. A

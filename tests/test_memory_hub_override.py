@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,7 @@ from brigade import memory_hub_sync as sync
 from brigade.dot import process as dot_process
 from tests._home import set_home
 from tests.test_memory_hub_client import (
+    CONNECTOR_CREDENTIAL,
     HUB_URL,
     NODE_CREDENTIAL,
     OTHER_CREDENTIAL,
@@ -148,8 +150,15 @@ def test_dot_and_duet_memory_tools_use_the_user_level_override(hubs, tmp_path):
     tools = _dot_cli(overridden(hubs, tmp_path))
     found = tools.memory_search("otter")
     assert [(m["card_id"], m["source"]) for m in found["matches"]] == [("otter", "hub")]
-    assert tools.memory_card("otter", scope="repo:test/app")["content"] == "otter notes\n"
     assert hubs.hubs_used() == {MEMORY_HUB}
+    # Card reads are push-safe and go out as the connector principal, so they use the hub that
+    # enrolled it, never the override: its credential never reaches another hub (S23).
+    put(hubs.fleet, "repo:test/app", "otter", "otter notes")
+    hubs.fleet.cards[("repo:test/app", "otter")]["trust"] = "reviewed"
+    tools._authority = lambda: SimpleNamespace(hub=FLEET_HUB, token=CONNECTOR_CREDENTIAL)
+    hubs.seen.clear()
+    assert tools.memory_card("otter", scope="repo:test/app")["content"] == "otter notes\n"
+    assert set(hubs.seen) == {(FLEET_HUB, CONNECTOR_CREDENTIAL)}
 
 
 def test_the_dot_child_environment_carries_brigade_home_and_no_hub_variables(hubs, monkeypatch, tmp_path):

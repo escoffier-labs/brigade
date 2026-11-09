@@ -186,6 +186,10 @@ With hub memory on (`mode = "read"` or `"sync"`), hits come from the hub only:
   head and current clean scan receipt before answering, so a retired, lowered
   or superseded card in a stale index snapshot is dropped. Flagged, pending and
   private-class text never leaves on this path.
+- `memory_card` opens a hub card under the same rules: it reads as the
+  connector principal with `push: true`, so it serves only what `memory_hits`
+  could send, never another writer's unreviewed card, a pending or flagged
+  version or a retired head, and never from the replica.
 - A local card is never pushed in these modes. An unavailable hub, a refusal
   (for example `memory_grant_missing` before the grant) or an unreadable `[hub]`
   table leaves the field out, with no local or replica fallback.

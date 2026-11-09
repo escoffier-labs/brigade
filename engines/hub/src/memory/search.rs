@@ -43,6 +43,18 @@ pub struct Request {
     pub dense: Option<(std::sync::Arc<super::dense::Matrix>, Vec<f32>)>,
 }
 
+/// The trust a connector may receive, over `memory_cards c`: reviewed,
+/// policy-promoted and imported heads, and an `agent-unreviewed` head only for
+/// the credential that wrote it. `writer` numbers the parameter holding the
+/// principal, and the next one holds its credential class. Push search and
+/// push card reads share it (S23).
+pub fn push_trust_sql(writer: usize) -> String {
+    format!(
+        "(c.trust IN ('imported','reviewed','policy-promoted') OR (c.trust='agent-unreviewed' AND c.writer=?{writer} AND c.writer_class=?{}))",
+        writer + 1
+    )
+}
+
 fn invalid(message: &str) -> Reply {
     error(400, "memory_query_invalid", message)
 }
@@ -304,7 +316,7 @@ pub fn run<T: ReadTx + ?Sized>(
                 for (n, score) in hits {
                     let d = snap.doc(n);
                     let rows = tx.query(
-                        "SELECT 1 FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_scans s ON s.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.revision=?3 AND c.content_hash=?4 AND c.state='live' AND (c.trust IN ('imported','reviewed','policy-promoted') OR (c.trust='agent-unreviewed' AND c.writer=?6 AND c.writer_class=?7)) AND r.scan_state='clean' AND s.ruleset_version=?5 AND s.state='clean'",
+                        &format!("SELECT 1 FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_scans s ON s.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.revision=?3 AND c.content_hash=?4 AND c.state='live' AND {} AND r.scan_state='clean' AND s.ruleset_version=?5 AND s.state='clean'", push_trust_sql(6)),
                         &[Value::Text(scopes[d.scope as usize].to_string()), Value::Text(d.card_id.to_string()), Value::Integer(d.revision), Value::Text(d.content_hash.to_string()), Value::Text(ruleset.clone()), Value::Text(credential.principal().into()), Value::Text(credential.class().into())],
                     )?;
                     if !rows.is_empty() {

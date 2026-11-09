@@ -13,3 +13,7 @@
   after re-reading each head and its current clean scan receipt, so a retired, lowered or
   superseded card in a stale index snapshot is dropped. Private-class and flagged text never
   leaves on this path. `eval` and `ranking: "raw"` are refused with it.
+- Dot and Duet `memory_card` read hub cards as the connector's own principal with the hub's new
+  `card` `push: true` mode, never with the host node's credential or the replica. The hub serves
+  only a live head with a current clean scan receipt and push trust, so a card id an agent is
+  given or guesses opens no more than `memory_hits` could send.

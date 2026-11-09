@@ -1,6 +1,6 @@
 //! S23: connector push over `search` with `query_source: "push"`. The trust
 //! filter, per-principal grants, head revalidation, the egress scan and the
-//! response bound with a 2,000-card corpus.
+//! response bound with a 2,000-card corpus, and push-safe `card` reads.
 use super::scan;
 use super::tests::{ADMIN_TOKEN, AGENT_TOKEN, Hub, NODE_TOKEN, code};
 use rusqlite::Connection;
@@ -205,4 +205,166 @@ async fn push_takes_the_default_ranking_and_bounds_a_2000_card_corpus() {
         assert!(r.body.to_string().len() < 4096 * limit, "{}", r.body);
         assert!(!r.body.to_string().contains("release checklist body"));
     }
+}
+
+/// `card` with `push: true` serves only what push could send this credential.
+/// `token` reads the cards. Running it as the node, the writer of the
+/// unreviewed card, is the negative check: that card then opens.
+#[cfg(feature = "memory-scan")]
+async fn push_card_reads_as(token: &str) -> Vec<(String, u16, String)> {
+    let h = Hub::with(scan::bundled(), None);
+    let grant = json!({"action":"grant","principal":"agent:dot","scope":"fleet","rights":["read","write"],"client_event_id":h.id()});
+    assert_eq!(h.call(ADMIN_TOKEN, grant).await.status, 200);
+    write(
+        &h,
+        ADMIN_TOKEN,
+        "import",
+        "reviewed",
+        &card("Release checklist", "steps"),
+    )
+    .await;
+    write(
+        &h,
+        NODE_TOKEN,
+        "put",
+        "node-draft",
+        &card("Release draft", "node"),
+    )
+    .await;
+    write(
+        &h,
+        AGENT_TOKEN,
+        "put",
+        "dot-draft",
+        &card("Release notes", "dot"),
+    )
+    .await;
+    write(&h, ADMIN_TOKEN, "import", "private", &private_text()).await;
+    write(
+        &h,
+        ADMIN_TOKEN,
+        "import",
+        "pending",
+        &card("Release pending", "p"),
+    )
+    .await;
+    write(
+        &h,
+        ADMIN_TOKEN,
+        "import",
+        "retired",
+        &card("Release retired", "r"),
+    )
+    .await;
+    let epoch = h.epoch().await;
+    let head = |id: &str| -> i64 {
+        Connection::open(h.memory())
+            .unwrap()
+            .query_row(
+                "SELECT revision FROM memory_cards WHERE card_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let retire = json!({"action":"retire","scope":"fleet","card_id":"retired","base_revision":head("retired"),
+                        "base_epoch":epoch,"reason":"obsolete","client_event_id":h.id()});
+    assert_eq!(h.call(ADMIN_TOKEN, retire).await.status, 200);
+    Connection::open(h.memory())
+        .unwrap()
+        .execute(
+            "UPDATE memory_card_revisions SET scan_state='pending' WHERE card_id='pending'",
+            [],
+        )
+        .unwrap();
+    let mut out = Vec::new();
+    for id in [
+        "reviewed",
+        "node-draft",
+        "dot-draft",
+        "private",
+        "pending",
+        "retired",
+    ] {
+        let plain = h
+            .call(token, json!({"action":"card","scope":"fleet","card_id":id}))
+            .await;
+        // A plain read opens every head the grant reaches, push or not.
+        assert_eq!(plain.status, 200, "{id}: {:?}", plain.body);
+        let r = h
+            .call(
+                token,
+                json!({"action":"card","scope":"fleet","card_id":id,"push":true}),
+            )
+            .await;
+        if r.status == 200 {
+            assert_eq!(r.body["card"]["state"], "live");
+            assert_eq!(r.body["card"]["scan_state"], "clean");
+        } else {
+            assert!(r.body.get("card").is_none(), "{:?}", r.body);
+            assert!(!r.body.to_string().contains("release checklist body"));
+        }
+        out.push((id.to_string(), r.status, code(&r).to_string()));
+    }
+    let bad = h
+        .call(
+            token,
+            json!({"action":"card","scope":"fleet","card_id":"reviewed","push":true,"revision":1}),
+        )
+        .await;
+    assert_eq!((bad.status, code(&bad)), (400, "memory_request_invalid"));
+    let bad = h
+        .call(
+            token,
+            json!({"action":"card","scope":"fleet","card_id":"reviewed","push":"yes"}),
+        )
+        .await;
+    assert_eq!(bad.status, 400);
+    out
+}
+
+#[cfg(feature = "memory-scan")]
+#[tokio::test]
+async fn push_card_reads_refuse_what_push_would_never_send() {
+    let refused = |id: &str| (id.to_string(), 404, "memory_card_not_found".to_string());
+    let opened = |id: &str| (id.to_string(), 200, String::new());
+    assert_eq!(
+        push_card_reads_as(AGENT_TOKEN).await,
+        [
+            opened("reviewed"),
+            refused("node-draft"),
+            opened("dot-draft"),
+            refused("private"),
+            refused("pending"),
+            refused("retired"),
+        ]
+    );
+    // Negative check: the node wrote `node-draft`, so its credential opens it.
+    // A connector that read with the node credential would leak it.
+    let node = push_card_reads_as(NODE_TOKEN).await;
+    assert_eq!(node[1], opened("node-draft"));
+    assert_eq!(node[2], refused("dot-draft"));
+}
+
+#[cfg(feature = "memory-scan")]
+#[tokio::test]
+async fn push_card_reads_need_the_scanner() {
+    let mut h = Hub::with(scan::bundled(), None);
+    write(
+        &h,
+        ADMIN_TOKEN,
+        "import",
+        "reviewed",
+        &card("Release checklist", "steps"),
+    )
+    .await;
+    h.store.take();
+    h.open(std::sync::Arc::new(scan::Unavailable), None);
+    let r = h
+        .call(
+            NODE_TOKEN,
+            json!({"action":"card","scope":"fleet","card_id":"reviewed","push":true}),
+        )
+        .await;
+    assert_eq!((r.status, code(&r)), (503, "memory_scan_unavailable"));
 }

@@ -27,6 +27,10 @@ from brigade import memory_hub_sync as sync
 NODE_CREDENTIAL = "-".join(("fixture", "node", "credential", "0123456789"))
 OTHER_CREDENTIAL = "-".join(("fixture", "other", "credential", "0123456789"))
 ADMIN_CREDENTIAL = "-".join(("fixture", "admin", "credential", "0123456789"))
+# Dot's and Duet's own message principal: memory_card reads with it, never the node credential (S23).
+CONNECTOR_CREDENTIAL = "-".join(("fixture", "connector", "credential", "0123456789"))
+# What the hub pushes to every reader. agent-unreviewed goes only to its writer.
+PUSH_TRUST = {"reviewed", "policy-promoted", "imported"}
 HUB_URL = "http://127.0.0.1:3774"
 CHUNK = 16  # the fake hub's card chunk, small so the client follows next_offset
 POSIX_DOT = pytest.mark.skipif(
@@ -54,8 +58,19 @@ class FakeHub:
         # Credentials: token to principal, and what each principal may read.
         # None means a node's defaults: fleet, every repo: scope and its own principal: scope.
         # As on the hub, neither the defaults nor a "*" grant open a collection: scope.
-        self.principals = {NODE_CREDENTIAL: "node-1", OTHER_CREDENTIAL: "node-2", ADMIN_CREDENTIAL: "hub:admin"}
-        self.grants: dict[str, set[str] | None] = {"node-1": None, "node-2": None, "hub:admin": {"*"}}
+        self.principals = {
+            NODE_CREDENTIAL: "node-1",
+            OTHER_CREDENTIAL: "node-2",
+            ADMIN_CREDENTIAL: "hub:admin",
+            CONNECTOR_CREDENTIAL: "agent:dot",
+        }
+        # The connector principal starts with the runbook's read on fleet and the test repositories.
+        self.grants: dict[str, set[str] | None] = {
+            "node-1": None,
+            "node-2": None,
+            "hub:admin": {"*"},
+            "agent:dot": {"fleet", "repo:test/app", "repo:me/app", "repo:a", "repo:b"},
+        }
         self.who = ""
         self.status_reply: tuple[int, dict] | None = None
         self.search_reply: tuple[int, dict] | None = None
@@ -146,7 +161,14 @@ class FakeHub:
         self.seq += 1
         normalized = hubc.normalize_text(text)
         digest = hashlib.sha256(normalized.encode()).hexdigest()
-        head = {"revision": self.seq, "text": normalized, "hash": digest, "state": state, "trust": "agent-unreviewed"}
+        head = {
+            "revision": self.seq,
+            "text": normalized,
+            "hash": digest,
+            "state": state,
+            "trust": "agent-unreviewed",
+            "writer": self.who,
+        }
         self.cards[(scope, card_id)] = head
         self.revisions[(scope, card_id, self.seq)] = dict(head)
         self.events.append(
@@ -225,10 +247,17 @@ class FakeHub:
             scope = scopes[0]
         if not self.readable(scope):
             return 403, {"error": "no read grant", "code": "memory_grant_missing"}
+        if body.get("push") and body.get("revision") is not None:
+            return 400, {"error": "push reads the head", "code": "memory_request_invalid"}
         if body.get("revision") is not None:
             head = self.revisions.get((scope, body["card_id"], body["revision"]))
         else:
             head = self.cards.get((scope, body["card_id"]))
+        if head is not None and body.get("push"):
+            # Only what push could send: a live head with push trust (scan receipts are not modeled).
+            own = head["trust"] == "agent-unreviewed" and head.get("writer") == self.who
+            if head["state"] != "live" or not (head["trust"] in PUSH_TRUST or own):
+                head = None
         if head is None:
             return 404, {"error": "card not found", "code": "memory_card_not_found"}
         offset = body.get("offset", 0)
@@ -801,6 +830,8 @@ def _dot_memory(target: Path, reply: dict):
 
     tools = MemoryTools.__new__(MemoryTools)
     tools.workspace, tools.cards, tools.profile = target, target / "memory" / "cards", DUET
+    # The listener-pinned connector principal. Dot and Duet card reads use it, never the node credential.
+    tools._authority = lambda: SimpleNamespace(hub=HUB_URL, token=CONNECTOR_CREDENTIAL)
     tools.commands = _Runner(reply)
     tools.runtime = SimpleNamespace(paths=SimpleNamespace(bin=SimpleNamespace(brigade="brigade")))
     tools.environment = {}
@@ -808,19 +839,55 @@ def _dot_memory(target: Path, reply: dict):
 
 
 @POSIX_DOT
-def test_dot_memory_card_reads_a_hub_only_card(tmp_path):
+def test_dot_memory_card_reads_a_hub_only_card(hub, tmp_path):
     target = workspace(tmp_path, mode="read")
     for directory in (target, target / "memory", target / "memory" / "cards"):
         directory.chmod(0o755)
-    card = {"scope": "fleet", "card_id": "theirs", "revision": 3, "content_hash": "ab" * 32, "text": "hub text\n"}
-    tools = _dot_memory(target, {"ok": True, "card": card})
+    _put(hub, "fleet", "theirs", "hub text, long enough for several chunks")
+    hub.cards[("fleet", "theirs")]["trust"] = "reviewed"
+    tools = _dot_memory(target, {})
+    hub.calls.clear()
+    hub.tokens.clear()
     got = tools.memory_card("theirs")
-    assert (got["source"], got["content"], got["revision"], got["next_offset"]) == ("hub", "hub text\n", 3, None)
-    assert tools.commands.argv[0][:4] == ["brigade", "memory", "hub", "card"]
+    text = "hub text, long enough for several chunks\n"
+    revision = hub.cards[("fleet", "theirs")]["revision"]
+    assert (got["source"], got["content"], got["revision"], got["next_offset"]) == ("hub", text, revision, None)
+    # Every chunk is a push-safe read with the connector's own credential, never the node's or the CLI.
+    assert [c["action"] for c in hub.calls] == ["card"] * 3 and all(c["push"] is True for c in hub.calls)
+    assert hub.tokens == {CONNECTOR_CREDENTIAL} and tools.commands.argv == []
     (target / ".brigade" / "memory-care.toml").write_text('[hub]\nmode = "off"\n', encoding="utf-8")
-    tools.commands.argv.clear()
+    hub.calls.clear()
     assert tools.memory_card("theirs") == {"error": "card_not_found", "name": "theirs"}
-    assert tools.commands.argv == []
+    assert hub.calls == []
+
+
+@pytest.mark.parametrize("credential", [CONNECTOR_CREDENTIAL, NODE_CREDENTIAL], ids=["connector", "node"])
+def test_dot_memory_card_opens_only_what_push_could_send(hub, tmp_path, credential):
+    """Another writer's unreviewed card, a retired head and a reviewed one, as the connector reads them.
+
+    The NODE_CREDENTIAL case is the negative check: a connector reading as the node, which wrote the
+    unreviewed card, would open it.
+    """
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "fleet", "node-draft", "node draft text")
+    _put(hub, "fleet", "reviewed", "reviewed text")
+    hub.cards[("fleet", "reviewed")]["trust"] = "reviewed"
+    _put(hub, "fleet", "gone", "retired text")
+    hub.cards[("fleet", "gone")]["trust"] = "reviewed"
+    retire = {"scope": "fleet", "card_id": "gone", "base_epoch": hub.epoch, "reason": "obsolete"}
+    retire["base_revision"] = hub.cards[("fleet", "gone")]["revision"]
+    hubc.MemoryHubClient(HUB_URL, NODE_CREDENTIAL, transport=hub).call(
+        "retire", client_event_id=hubc.event_id(), **retire
+    )
+    tools = _dot_memory(target, {})
+    tools._authority = lambda: SimpleNamespace(hub=HUB_URL, token=credential)
+    assert tools.memory_card("reviewed", scope="fleet")["content"] == "reviewed text\n"
+    assert tools.memory_card("gone", scope="fleet") == {"error": "card_not_found", "name": "gone"}
+    draft = tools.memory_card("node-draft", scope="fleet")
+    if credential == CONNECTOR_CREDENTIAL:
+        assert draft == {"error": "card_not_found", "name": "node-draft"}
+    else:
+        assert draft["content"] == "node draft text\n"
 
 
 def test_dot_memory_search_keeps_hub_labels_only_when_hub_memory_answered(tmp_path):
@@ -885,6 +952,11 @@ def test_dot_reads_only_the_configured_scope(hub, tmp_path):
     found = tools.memory_search("salary")
     assert [(m["card_id"], m["scope"], m["source"]) for m in found["matches"]] == [("app-pay", "repo:me/app", "hub")]
     assert [c["scopes"] for c in hub.calls if c["action"] == "search"] == [["repo:me/app"]]
+    # Card reads go out as the connector principal, so its grants decide, not the node's.
+    hub.grants["agent:dot"] = {"repo:me/app"}
+    for key in hub.cards:
+        hub.cards[key]["trust"] = "reviewed"
+    hub.calls.clear()
     for name, scope in (("alice-notes", "principal:alice"), ("fleet-pay", "fleet")):
         assert tools.memory_card(name, scope=scope) == {"error": "card_not_found", "name": name}
     assert tools.memory_card("app-pay", scope="repo:me/app")["content"] == "salary app-pay\n"
@@ -893,7 +965,7 @@ def test_dot_reads_only_the_configured_scope(hub, tmp_path):
         for name in ("alice-notes", "fleet-pay"):
             assert tools.memory_card(name) == {"error": "card_not_found", "name": name}
         assert tools.memory_card("app-pay")["content"] == "salary app-pay\n"
-    assert {c.get("scope") for c in hub.calls if c["action"] == "card"} == {"repo:me/app"}
+    assert all(c["push"] is True for c in hub.calls if c["action"] == "card")
 
 
 def test_memory_never_sends_the_admin_token(hub, tmp_path, monkeypatch, capsys):
@@ -1214,12 +1286,14 @@ def test_dot_memory_card_opens_a_card_held_in_two_read_scopes(hub, tmp_path, cap
     code, out, _ = run(["memory", "hub", "card", "--target", str(target), "--json", "twin"], capsys)
     assert code == 1 and json.loads(out)["code"] == "memory_card_ambiguous"
     tools = _dot_cli(target)
+    for key in hub.cards:
+        hub.cards[key]["trust"] = "reviewed"
     if os.name == "posix":
         # A read without a scope opens the local cards directory first, which needs POSIX.
         assert tools.memory_card("twin") == {"error": "card_not_found", "name": "twin"}
     got = tools.memory_card("twin", scope="fleet")
     assert (got["scope"], got["content"]) == ("fleet", "fleet twin\n")
-    assert tools.commands.argv[-1][-4:] == ["--scope", "fleet", "--", "twin"]
+    assert hub.calls[-1] == {"action": "card", "card_id": "twin", "push": True, "offset": 0, "scope": "fleet"}
     # The tool contract takes an optional scope and still accepts calls without one.
     assert validate_arguments("memory_card", {"name": "twin", "scope": "fleet"}) == {
         "name": "twin",
@@ -1462,9 +1536,12 @@ def test_dot_memory_card_opens_a_replica_match_while_the_hub_is_down(hub, tmp_pa
     tools = _dot_cli(target)
     [match] = tools.memory_search("otter")["matches"]
     assert (match["card_id"], match["source"]) == ("theirs", "replica")
-    got = tools.memory_card("theirs", scope=match["scope"])
-    assert (got["source"], got["content"], got["scope"]) == ("replica", "otter replicated\n", "fleet")
+    # A replica cannot revalidate a head, so Dot and Duet card reads never fall back to it.
+    assert tools.memory_card("theirs", scope=match["scope"]) == {"error": "card_not_found", "name": "theirs"}
     hub.mode = "up"
+    hub.cards[("fleet", "theirs")]["trust"] = "reviewed"
+    got = tools.memory_card("theirs", scope="fleet")
+    assert (got["source"], got["content"], got["scope"]) == ("hub", "otter replicated\n", "fleet")
     hub.do_card = lambda body: (401, {"error": "unauthorized"})
     assert tools.memory_card("theirs", scope="fleet") == {"error": "card_not_found", "name": "theirs"}
 
@@ -1554,8 +1631,8 @@ def test_a_scope_the_hub_refused_is_never_served_from_the_replica(hub, tmp_path,
     hub.do_card = original
     sync.pull(target, client(hub), settings(target))
     hub.do_card = refuse_a_then_rate_limit_b
-    got = tools.memory_card("y", scope="repo:b")
-    assert (got["source"], got["content"]) == ("replica", "rate limited scope text\n")
+    # The CLI's replica fallback is not Dot's: a push-safe card read never answers from a replica.
+    assert tools.memory_card("y", scope="repo:b") == {"error": "card_not_found", "name": "y"}
 
 
 @pytest.mark.parametrize("keep", ["--keep-hub", "--keep-local"])
@@ -2570,6 +2647,9 @@ def test_search_fuses_derived_publication_id_and_retains_old_name(hub, tmp_path)
         directory.chmod(0o755)
     if os.name == "posix":
         assert _dot_memory(target, {}).memory_card("My Card")["content"] == "# My Card\nkoala fixture\n"
+        # The node wrote it unreviewed, so the connector opens it only once it is reviewed.
+        assert _dot_cli(target).memory_card(match["card_id"])["error"] == "card_not_found"
+        hub.cards[("repo:test/app", match["card_id"])]["trust"] = "reviewed"
         opened = _dot_cli(target).memory_card(match["card_id"])
         assert opened["content"] == "# My Card\nkoala fixture\n"
         assert opened["source"] == "hub"
