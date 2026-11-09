@@ -37,11 +37,103 @@ jobs:
         with:
           fetch-depth: 2
           persist-credentials: false
+      - name: Select hub suite for the merge group from trusted main
+        id: hub_merge_group
+        if: ${{ github.event_name == 'merge_group' }}
+        run: |
+          # Load the selector and its path list from the tip of main, never
+          # from the proposal. A main without the selector runs the hub suite.
+          # It also reports the cumulative range start (merge base of main and
+          # the head) that the docs step below classifies, and the main commit
+          # it used, so both decisions rest on the same trusted inputs.
+          python3 -I -S - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import secrets
+          import subprocess
+          import sys
+          import tempfile
+
+          def git(*args):
+              return subprocess.run(
+                  ["git", "--no-replace-objects", *args], check=True,
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
+              ).stdout
+
+          def echo_inert(text):
+              # Show the selector's own output with workflow commands disabled.
+              token = secrets.token_hex(16)
+              print(f"::stop-commands::{token}")
+              print(text)
+              print(f"::{token}::")
+
+          def parse_output(text, keys):
+              # Exactly one line per expected key: a missing, repeated or
+              # unknown key fails, never collapses into a dict.
+              pairs = [line.split("=", 1) for line in text.splitlines()]
+              names = [pair[0] for pair in pairs]
+              if len(pairs) != len(keys) or any(len(pair) != 2 for pair in pairs) or sorted(names) != sorted(keys):
+                  raise ValueError("invalid helper output")
+              return dict(pairs)
+
+          result = {"hub": "true", "reason": "trusted-hub-selector-unavailable", "start": "", "target": ""}
+          try:
+              # A fixed refspec: the target never comes from the event or the proposal.
+              git("fetch", "--no-tags", "--no-recurse-submodules", "--depth=1", "origin", "+refs/heads/main:refs/ci-trusted/main")
+              target = git("rev-parse", "--verify", "refs/ci-trusted/main^{commit}").decode().strip()
+              if not re.fullmatch(r"[0-9a-f]{40}", target):
+                  raise ValueError("invalid target")
+              entry = git("ls-tree", "-z", target, "--", "scripts/ci_hub_select.py")
+              match = re.fullmatch(rb"100644 blob ([0-9a-f]{40})\tscripts/ci_hub_select.py\x00", entry)
+              if not match:
+                  raise ValueError("missing or unsafe selector")
+              blob = match[1].decode("ascii")
+              if not 0 < int(git("cat-file", "-s", blob)) <= 131072:
+                  raise ValueError("invalid selector size")
+              source = git("cat-file", "blob", blob)
+              with tempfile.TemporaryDirectory(prefix="ci-hub-select-", dir=os.environ["RUNNER_TEMP"]) as directory:
+                  trusted = Path(directory) / "selector.py"
+                  trusted.write_bytes(source)
+                  output = Path(directory) / "output"
+                  try:
+                      completed = subprocess.run(
+                          [sys.executable, "-I", "-S", str(trusted)], check=True, timeout=300,
+                          env=dict(os.environ, GITHUB_OUTPUT=str(output), CI_HUB_TARGET=target),
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                      )
+                  except subprocess.CalledProcessError as error:
+                      echo_inert(error.stderr.decode("utf-8", "replace")[-2000:])
+                      raise
+                  echo_inert(completed.stdout.decode("utf-8", "replace")[-2000:])
+                  candidate = parse_output(output.read_text(encoding="utf-8"), ("hub", "reason", "start"))
+                  if (
+                      candidate["hub"] not in {"true", "false"}
+                      or not re.fullmatch(r"[a-z-]{1,80}", candidate["reason"])
+                      or not re.fullmatch(r"(?:[0-9a-f]{40})?", candidate["start"])
+                  ):
+                      raise ValueError("invalid selector output")
+                  result = dict(candidate, target=target)
+          except (KeyError, TypeError, ValueError, UnicodeError, OSError, subprocess.SubprocessError):
+              pass
+          output = "".join(f"{key}={value}\n" for key, value in result.items())
+          print(output, end="")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+              stream.write(output)
+          PY
       - name: Classify authoritative event diff
         id: docs
+        env:
+          # Merge groups only: set by hub_merge_group above, empty otherwise.
+          CI_TRUSTED_MAIN: ${{ steps.hub_merge_group.outputs.target }}
+          CI_MERGE_GROUP_START: ${{ steps.hub_merge_group.outputs.start }}
         run: |
-          # Bootstrap from the event's trusted base, never proposal-owned Python.
-          # A base without this helper deliberately takes full CI on first install.
+          # Never proposal-owned Python. Pull requests and pushes load the
+          # classifier from the event's base. Merge groups load it from main's
+          # tip (fetched by fixed refspec above) and classify the cumulative
+          # range from the merge base with main, because merge_group.base_sha
+          # is the previous queue entry's head. A source without this helper
+          # deliberately takes full CI on first install.
           python3 -I -S - <<'PY'
           import json
           import os
@@ -71,53 +163,77 @@ jobs:
               if kind != b"commit\n":
                   raise ValueError("not a commit")
 
+          def parse_output(text, keys):
+              # Exactly one line per expected key: a missing, repeated or
+              # unknown key fails, never collapses into a dict.
+              pairs = [line.split("=", 1) for line in text.splitlines()]
+              names = [pair[0] for pair in pairs]
+              if len(pairs) != len(keys) or any(len(pair) != 2 for pair in pairs) or sorted(names) != sorted(keys):
+                  raise ValueError("invalid helper output")
+              return dict(pairs)
+
           result = {"docs_only": "false", "uncertain": "true", "reason": "trusted-classifier-unavailable"}
           try:
-              event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+              event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
               head = oid(os.environ["GITHUB_SHA"])
               if git("rev-parse", "HEAD").decode().strip() != head:
                   raise ValueError("checkout mismatch")
               ensure_commit(head)
               name = os.environ["GITHUB_EVENT_NAME"]
+              extra = {}
               if name == "pull_request":
                   # Raw commit headers retain parents even at a shallow boundary.
                   headers = git("cat-file", "-p", head).split(b"\n\n", 1)[0].splitlines()
                   parents = [line[7:].decode("ascii") for line in headers if line.startswith(b"parent ")]
                   if len(parents) != 2 or parents[1] != oid(event["pull_request"]["head"]["sha"]):
                       raise ValueError("not the PR test merge")
-                  base = oid(parents[0])
+                  source = oid(parents[0])
               elif name == "merge_group":
-                  base = oid(event["merge_group"]["base_sha"])
                   if oid(event["merge_group"]["head_sha"]) != head:
                       raise ValueError("merge group mismatch")
+                  # The fixed-refspec main commit, which must be the one the
+                  # trusted selector validated the range start against. Nothing
+                  # refetches the ref between the steps, so this is a
+                  # consistency check between the selector's output and the ref.
+                  source = oid(git("rev-parse", "--verify", "refs/ci-trusted/main^{commit}").decode().strip())
+                  if oid(os.environ["CI_TRUSTED_MAIN"]) != source:
+                      raise ValueError("selector target disagrees with the trusted ref")
+                  # The classifier re-checks that the start is in main's history.
+                  extra = {
+                      "CI_TRUSTED_MAIN": source,
+                      "CI_MERGE_GROUP_START": oid(os.environ["CI_MERGE_GROUP_START"]),
+                  }
               elif name == "push":
-                  base = oid(event["before"])
+                  source = oid(event["before"])
                   if oid(event["after"]) != head:
                       raise ValueError("push mismatch")
               else:
                   raise ValueError("unsupported event")
-              ensure_commit(base)
-              entry = git("ls-tree", "-z", base, "--", "scripts/ci_docs_only.py")
+              ensure_commit(source)
+              entry = git("ls-tree", "-z", source, "--", "scripts/ci_docs_only.py")
               match = re.fullmatch(rb"100644 blob ([0-9a-f]{40})\tscripts/ci_docs_only.py\x00", entry)
               if not match:
                   raise ValueError("missing or unsafe classifier")
               blob = match[1].decode("ascii")
               if not 0 < int(git("cat-file", "-s", blob)) <= 131072:
                   raise ValueError("invalid classifier size")
-              source = git("cat-file", "blob", blob)
+              classifier = git("cat-file", "blob", blob)
               with tempfile.TemporaryDirectory(prefix="ci-classifier-", dir=os.environ["RUNNER_TEMP"]) as directory:
                   trusted = Path(directory) / "classifier.py"
-                  trusted.write_bytes(source)
+                  trusted.write_bytes(classifier)
                   output = Path(directory) / "output"
+                  environment = {
+                      key: value for key, value in os.environ.items()
+                      if key not in {"CI_TRUSTED_MAIN", "CI_MERGE_GROUP_START"}
+                  }
                   subprocess.run(
                       [sys.executable, "-I", "-S", str(trusted)], check=True, timeout=300,
-                      env=dict(os.environ, GITHUB_OUTPUT=str(output)),
+                      env=dict(environment, GITHUB_OUTPUT=str(output), **extra),
                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                   )
-                  candidate = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                  candidate = parse_output(output.read_text(encoding="utf-8"), ("docs_only", "uncertain", "reason"))
                   if (
-                      set(candidate) != {"docs_only", "uncertain", "reason"}
-                      or candidate["docs_only"] not in {"true", "false"}
+                      candidate["docs_only"] not in {"true", "false"}
                       or candidate["uncertain"] not in {"true", "false"}
                       or (candidate["docs_only"] == "true" and candidate["uncertain"] != "false")
                       or not re.fullmatch(r"[a-z-]{1,80}", candidate["reason"])
@@ -128,7 +244,7 @@ jobs:
               pass
           output = "".join(f"{key}={value}\n" for key, value in result.items())
           print(output, end="")
-          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as stream:
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
               stream.write(output)
           PY
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -169,66 +285,6 @@ jobs:
         id: hub_filter
         with:
           filters: scripts/ci_hub_paths.yml
-      - name: Select hub suite for the merge group from trusted main
-        id: hub_merge_group
-        if: ${{ github.event_name == 'merge_group' }}
-        run: |
-          # Load the selector and its path list from the tip of main, never
-          # from the proposal. A main without the selector runs the hub suite.
-          python3 -I -S - <<'PY'
-          import os
-          from pathlib import Path
-          import re
-          import subprocess
-          import sys
-          import tempfile
-
-          def git(*args):
-              return subprocess.run(
-                  ["git", "--no-replace-objects", *args], check=True,
-                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
-              ).stdout
-
-          result = {"hub": "true", "reason": "trusted-hub-selector-unavailable"}
-          try:
-              # A fixed refspec: the target never comes from the event or the proposal.
-              git("fetch", "--no-tags", "--no-recurse-submodules", "--depth=1", "origin", "+refs/heads/main:refs/ci-hub-select/main")
-              target = git("rev-parse", "--verify", "refs/ci-hub-select/main^{commit}").decode().strip()
-              if not re.fullmatch(r"[0-9a-f]{40}", target):
-                  raise ValueError("invalid target")
-              entry = git("ls-tree", "-z", target, "--", "scripts/ci_hub_select.py")
-              match = re.fullmatch(rb"100644 blob ([0-9a-f]{40})\tscripts/ci_hub_select.py\x00", entry)
-              if not match:
-                  raise ValueError("missing or unsafe selector")
-              blob = match[1].decode("ascii")
-              if not 0 < int(git("cat-file", "-s", blob)) <= 131072:
-                  raise ValueError("invalid selector size")
-              source = git("cat-file", "blob", blob)
-              with tempfile.TemporaryDirectory(prefix="ci-hub-select-", dir=os.environ["RUNNER_TEMP"]) as directory:
-                  trusted = Path(directory) / "selector.py"
-                  trusted.write_bytes(source)
-                  output = Path(directory) / "output"
-                  completed = subprocess.run(
-                      [sys.executable, "-I", "-S", str(trusted)], check=True, timeout=300,
-                      env=dict(os.environ, GITHUB_OUTPUT=str(output), CI_HUB_TARGET=target),
-                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                  )
-                  print(completed.stdout.decode("utf-8", "replace"), end="")
-                  candidate = dict(line.split("=", 1) for line in output.read_text().splitlines())
-                  if (
-                      set(candidate) != {"hub", "reason"}
-                      or candidate["hub"] not in {"true", "false"}
-                      or not re.fullmatch(r"[a-z-]{1,80}", candidate["reason"])
-                  ):
-                      raise ValueError("invalid selector output")
-                  result = candidate
-          except (KeyError, TypeError, ValueError, UnicodeError, OSError, subprocess.SubprocessError):
-              pass
-          output = "".join(f"{key}={value}\n" for key, value in result.items())
-          print(output, end="")
-          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as stream:
-              stream.write(output)
-          PY
 
   code-graph-msrv:
     name: MSRV (Rust 1.85)
