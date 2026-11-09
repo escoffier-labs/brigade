@@ -769,7 +769,15 @@ fn purged(h: &Hub) -> (i64, i64, i64) {
 
 #[tokio::test]
 async fn churn_hits_the_retained_budget_and_the_35_day_purge_frees_it() {
-    let (h, a) = ready().await;
+    let (mut h, a) = ready().await;
+    // The churn loop measures the retained budget. A large writer deadline keeps
+    // a slow shared runner from answering 503 on `propose` (#2411). The
+    // deadline itself is covered in hardening_tests.rs.
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&json!({"proposal_limits":{"lock_ms":30_000}}))
+        .unwrap();
     let size = large_manifest(a).len() as i64;
     let expected = manifest_binding::BUDGET.principal_bytes / size;
     assert!(expected < manifest_binding::BUDGET.principal_records);
