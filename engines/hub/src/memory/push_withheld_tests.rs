@@ -172,10 +172,10 @@ fn steps(h: &Hub, credential: &super::Credential, ruleset: &str, body: Json) -> 
     (reply.status, count.load(Ordering::Relaxed))
 }
 
-/// Rounds of the latency check: the fewest before it may stop early, and the
-/// most before it gives up and fails on the ratio it has.
-const MIN_ROUNDS: usize = 8;
-const MAX_ROUNDS: usize = 80;
+/// Rounds of the latency check. Every round always runs: stopping as soon as
+/// the minima enter the bound would let an absent minimum that is still
+/// inflated hide a real withheld-side slowdown.
+const ROUNDS: usize = 80;
 
 /// A hub holding one eligible card and one the node may not push: `hidden`
 /// has a flagged scan. `first` sorts before it, so the decoy head an absent
@@ -242,22 +242,19 @@ async fn push_card_404_latency_does_not_separate_absent_and_withheld_ids() {
     // ever adds time, so the fastest batch per id converges on its true cost
     // and more rounds only tighten it. The rounds alternate which id runs
     // first, so neither owns the cold side of a pair, and one batch per id
-    // warms the store's caches and is discarded. Sampling stops once the
-    // fastest batches fall inside the bound. A real asymmetry keeps them
-    // apart however many rounds run, so it still fails once the rounds run out.
+    // warms the store's caches and is discarded. All rounds run before the
+    // minima are compared, so a real asymmetry cannot pass on an early lucky
+    // sample.
     batch("absent").await;
     batch("hidden").await;
     let (mut absent, mut withheld) = (Duration::MAX, Duration::MAX);
-    for round in 0..MAX_ROUNDS {
+    for round in 0..ROUNDS {
         if round % 2 == 0 {
             absent = absent.min(batch("absent").await);
             withheld = withheld.min(batch("hidden").await);
         } else {
             withheld = withheld.min(batch("hidden").await);
             absent = absent.min(batch("absent").await);
-        }
-        if round + 1 >= MIN_ROUNDS && within(absent, withheld) {
-            break;
         }
     }
     let ratio = withheld.as_secs_f64() / absent.as_secs_f64();
