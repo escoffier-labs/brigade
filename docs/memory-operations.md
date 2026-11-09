@@ -2179,6 +2179,41 @@ after the configuration was read is refused with `verify_root_changed`.
 
 A scope with no `[[verify.workspace]]` entry is never verified.
 
+### Evidence assembly
+
+The model-backed pass reads a card's cited evidence only from the roots bound
+to the card's scope. Each root is opened once per run as a directory handle
+(no-follow on POSIX), checked against the identity pinned at parse time, and
+held while evidence under it is read. A cited path resolves under that handle
+one component at a time and must stay under `.brigade/work/verify-runs`,
+`.brigade/receipts`, `.brigade/evidence`, `memory/evidence`, the handoff inbox
+or a writer inbox. Links, hard links, mount crossings and files over 1 MiB are
+refused. On Windows the root opens through the handle-relative helper, which
+refuses reparse points, and its file index is checked the same way. Without
+either backend every root is refused.
+
+An archive project listed by two scopes belongs to neither: its bundles,
+excerpts and receipt records are not used for any scope. List each project
+under one scope only.
+
+A cited item is `evidence_unreachable` when it sits under no bound root or
+under two roots of the scope, under another scope's root, outside the evidence
+directories, in a bundle whose recorded project is missing or not owned by the
+scope, or is an attested evidence id. Each reachable item is cut on a UTF-8
+boundary (8 KiB per item, 32 KiB per card, 8 items, 3 excerpts of 4 KiB) and
+scanned with the memory rule bundle. A blocked or flagged item is dropped,
+counted as `evidence_flagged`, and recorded with its rule ids only.
+
+Only a verify receipt whose bytes match the digest the local evidence archive
+recorded for it, under one of the scope's projects and at the same path,
+ranks as authenticated, and only for the fields Brigade writes: argv, exit
+codes, run status, times, tree fingerprint, commit and manifest id. Its stdout
+and stderr summaries form a separate medium item. A card gets no model call
+(`no_evidence`, `evidence_unreachable`, `evidence_flagged` or
+`uncorroborated`) unless an authenticated receipt and a second independently
+produced item remain, from a different file and run id, sharing no run of 200
+or more bytes, and drawn from neither command output nor related excerpts.
+
 ### Commands
 
 ```bash
