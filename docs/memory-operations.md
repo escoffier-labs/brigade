@@ -2142,6 +2142,7 @@ confirm_seat = "verify-confirm"
 cards_per_run = 12        # 1 to 64
 min_interval_days = 7     # 1 to 365
 never_read_days = 90      # 1 to 3650
+cached_counts_max_age_hours = 24  # 1 to 168
 
 [[verify.workspace]]
 scope = "repo:example"
@@ -2151,8 +2152,8 @@ archive_projects = ["example"]
 
 Configuration fails, naming the rule but never the configured value, when:
 
-- a workspace root is bound to two scopes, or listed twice, including through
-  a symbolic link that resolves to the same directory
+- a workspace root does not exist or is not a directory
+- a workspace root is bound to two scopes, or listed twice
 - a workspace root sits inside another bound root, in any scope
 - an entry leaves out `archive_projects`. An empty list is allowed and means
   the scope gets no excerpts and no evidence bundles
@@ -2162,6 +2163,13 @@ Configuration fails, naming the rule but never the configured value, when:
   `~/.brigade/fleet.toml` or the `BRIGADE_MEMORY_HUB_URL` and
   `BRIGADE_MEMORY_HUB_TOKEN_FILE` pair, which the folder must use
 - `propose_seat` and `confirm_seat` name the same seat
+
+Roots are compared by directory identity (device and inode), never by
+spelling. A case-only variant on a case-insensitive filesystem, a symbolic
+link and a parent reached through a link all count as the same directory.
+Each parsed root keeps its identity, and the pass checks it again before it
+reads evidence under that root. A root that became a different directory
+after the configuration was read is refused with `verify_root_changed`.
 
 A scope with no `[[verify.workspace]]` entry is never verified.
 
@@ -2199,7 +2207,8 @@ any other page.
 | `recently_verified` | Inside the minimum interval, or the 30-day interval below |
 | `pending_ceiling` | The job already has 8 pending proposals, so nothing is selected |
 | `verify_deferred_slots` | Eligible, but the run's slots were full |
-| `read_stats_limited` | `read_stats` answered 429, so the counts in the state file were used |
+| `read_stats_limited` | `read_stats` answered 429 for the scope |
+| `read_stats_unavailable` | After a 429, the state file had no usable counts for the scope, so nothing in it was selected |
 | `scope_unbound`, `scope_unreadable` | A hub read scope with no workspace entry, or a bound scope the hub settings do not read |
 
 ### Score and lanes
@@ -2229,7 +2238,18 @@ id.
 `never_read.count` counts live cards this job first saw at least
 `never_read_days` ago with no read recorded. It stays null until the hub's
 `read_counts_since_day` is also at least that old, and while counts are
-unavailable. With several scopes the total is null when any scope's count is.
+unavailable. A scope scored from cached counts after a 429 always reports
+null, because a read after the cached snapshot is unknown. With several scopes
+the total is null when any scope's count is.
+
+### Cached counts after a 429
+
+When `read_stats` answers `429 memory_read_stats_rate_limited`, the run may
+score that scope from counts cached in the state file, but only when the
+cache records when it was observed (`counts_ms`), that time is not in the
+future, and it is at most `cached_counts_max_age_hours` old (default 24).
+Otherwise the scope is skipped with `read_stats_unavailable` and none of its
+cards are selected.
 
 ### State file
 

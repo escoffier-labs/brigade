@@ -41,7 +41,7 @@ KEY = re.compile(r"[0-9a-f]{32}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
 CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 TOP_KEYS = frozenset({"schema", "consecutive_failures", "paused", "last_status", "binding", "scopes"})
-SCOPE_KEYS = frozenset({"since_day", "never_read", "cards"})
+SCOPE_KEYS = frozenset({"since_day", "never_read", "counts_ms", "cards"})
 CARD_KEYS = frozenset({"seen", "proposed", "verified", "revision", "evidence", "verdict", "pending", "reads"})
 
 assert io.MAX_STATE_BYTES == MAX_BYTES  # The bounded reader and writer enforce this limit.
@@ -103,6 +103,9 @@ def validate(state: object) -> dict[str, Any]:
         for field in ("since_day", "never_read"):
             if table.get(field) is not None and not _count(table[field]):
                 raise VerifyStateError()
+        # When the cached read counts were observed, in ms since the epoch. Never null.
+        if "counts_ms" in table and not _count(table["counts_ms"]):
+            raise VerifyStateError()
         cards = table.get("cards", {})
         if not isinstance(cards, dict) or len(cards) > MAX_SCOPE_CARDS:
             raise VerifyStateError()

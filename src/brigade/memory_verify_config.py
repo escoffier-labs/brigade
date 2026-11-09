@@ -3,8 +3,12 @@
 Each workspace entry binds one hub scope to an absolute workspace root and an
 explicit list of evidence archive projects. Ownership has to be unambiguous:
 a root belongs to exactly one scope, no bound root sits inside another, and
-every entry names its archive projects, even when the list is empty. The
-workspace file never carries a hub URL or a credential path. Those stay in
+every entry names its archive projects, even when the list is empty. Every
+root must exist, and roots are compared by directory identity (device and
+inode), so a case-only spelling, a symlink alias or a differently spelled
+parent cannot make one directory look like two. Each parsed workspace keeps
+that identity, and `revalidate()` checks it again before evidence is read.
+The workspace file never carries a hub URL or a credential path. Those stay in
 the user-level fleet settings, as for `[hub]`.
 """
 
@@ -12,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import tomllib
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -31,8 +36,19 @@ MAX_WORKSPACES = 64
 MAX_ARCHIVE_PROJECTS = 32
 SEAT = re.compile(r"[a-z][a-z0-9._-]{0,127}")
 PROJECT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+DEFAULT_CACHED_COUNTS_MAX_AGE_HOURS = 24
+MAX_CACHED_COUNTS_MAX_AGE_HOURS = 168
 VERIFY_KEYS = frozenset(
-    {"enabled", "propose_seat", "confirm_seat", "cards_per_run", "min_interval_days", "never_read_days", "workspace"}
+    {
+        "enabled",
+        "propose_seat",
+        "confirm_seat",
+        "cards_per_run",
+        "min_interval_days",
+        "never_read_days",
+        "cached_counts_max_age_hours",
+        "workspace",
+    }
 )
 WORKSPACE_KEYS = frozenset({"scope", "path", "archive_projects"})
 # Named so the refusal says where these settings belong instead of "unknown key".
@@ -43,8 +59,15 @@ HUB_KEY_REFUSAL = (
 )
 
 
+MISSING_ROOT = "[[verify.workspace]] path must name an existing directory"
+ROOT_CHANGED = "verify_root_changed: a bound workspace root is no longer the directory configured"
+
+
 class VerifyConfigError(ValueError):
     """A fixed diagnostic. It names keys and rules, never configured values."""
+
+
+Identity = tuple[int, int]
 
 
 @dataclass(frozen=True)
@@ -52,6 +75,10 @@ class Workspace:
     scope: str
     path: str
     archive_projects: tuple[str, ...]
+    # Resolved at parse time: normcase(realpath) for messages and ordering, and the
+    # directory's (st_dev, st_ino), which revalidate() checks before any evidence read.
+    resolved: str = ""
+    identity: Identity = (0, 0)
 
 
 @dataclass(frozen=True)
@@ -62,6 +89,7 @@ class VerifyConfig:
     cards_per_run: int = DEFAULT_CARDS_PER_RUN
     min_interval_days: int = DEFAULT_MIN_INTERVAL_DAYS
     never_read_days: int = DEFAULT_NEVER_READ_DAYS
+    cached_counts_max_age_hours: int = DEFAULT_CACHED_COUNTS_MAX_AGE_HOURS
     workspaces: tuple[Workspace, ...] = ()
 
     def scopes(self) -> tuple[str, ...]:
@@ -99,8 +127,45 @@ def _root(value: object) -> str:
     return value
 
 
-def _inside(child: str, parent: str) -> bool:
-    return PurePosixPath(child).is_relative_to(PurePosixPath(parent))
+# Injectable for tests that emulate a case-insensitive filesystem. Both follow symbolic links.
+_stat = os.stat
+_realpath = os.path.realpath
+
+
+def _directory(path: str) -> Identity:
+    """The (st_dev, st_ino) of an existing directory, following links. Fixed error otherwise."""
+    try:
+        metadata = _stat(path)
+    except (OSError, ValueError):
+        raise VerifyConfigError(MISSING_ROOT) from None
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise VerifyConfigError(MISSING_ROOT)
+    return metadata.st_dev, metadata.st_ino
+
+
+def _ancestors(resolved: str) -> set[Identity]:
+    """Directory identities of every parent of a resolved root, up to and including /."""
+    found: set[Identity] = set()
+    for parent in PurePosixPath(resolved).parents:
+        try:
+            metadata = _stat(str(parent))
+        except (OSError, ValueError):
+            raise VerifyConfigError(MISSING_ROOT) from None
+        found.add((metadata.st_dev, metadata.st_ino))
+    return found
+
+
+def revalidate(workspace: Workspace) -> str | None:
+    """None while the root is still the directory resolved at parse time, else a fixed reason.
+
+    Evidence assembly calls this before reading anything under a root, so a
+    symlink retargeted or a directory replaced after parsing reads nothing.
+    """
+    try:
+        current = _directory(workspace.path)
+    except VerifyConfigError:
+        return ROOT_CHANGED
+    return None if current == workspace.identity else ROOT_CHANGED
 
 
 def _workspaces(raw: object) -> tuple[Workspace, ...]:
@@ -137,20 +202,24 @@ def _workspaces(raw: object) -> tuple[Workspace, ...]:
                 "distinct archive project names"
             )
         assert isinstance(scope, str)
-        entries.append(Workspace(scope=scope, path=path, archive_projects=tuple(projects)))
-    # Compare both the written path and where it resolves now, so a symlink cannot alias a root.
-    forms = [(entry, (entry.path, os.path.realpath(entry.path))) for entry in entries]
-    for index, (entry, paths) in enumerate(forms):
-        for other, other_paths in forms[index + 1 :]:
-            for mine in paths:
-                for theirs in other_paths:
-                    if mine == theirs:
-                        if entry.scope != other.scope:
-                            raise VerifyConfigError("[[verify.workspace]] a workspace root is bound to two scopes")
-                        raise VerifyConfigError("[[verify.workspace]] a workspace root is listed twice")
-                    if _inside(mine, theirs) or _inside(theirs, mine):
-                        raise VerifyConfigError("[[verify.workspace]] a workspace root is nested inside another root")
-    return tuple(entries)
+        identity = _directory(path)
+        resolved = os.path.normcase(_realpath(path))
+        entries.append(
+            Workspace(scope=scope, path=path, archive_projects=tuple(projects), resolved=resolved, identity=identity)
+        )
+    # Ownership compares directory identity, never spelling: a case-only variant on a
+    # case-insensitive filesystem, a symlink alias and a differently spelled parent
+    # all name the same directory and are caught here.
+    parents = {entry.identity: _ancestors(entry.resolved) for entry in entries}
+    for index, entry in enumerate(entries):
+        for other in entries[index + 1 :]:
+            if entry.identity == other.identity:
+                if entry.scope != other.scope:
+                    raise VerifyConfigError("[[verify.workspace]] a workspace root is bound to two scopes")
+                raise VerifyConfigError("[[verify.workspace]] a workspace root is listed twice")
+            if entry.identity in parents[other.identity] or other.identity in parents[entry.identity]:
+                raise VerifyConfigError("[[verify.workspace]] a workspace root is nested inside another root")
+    return tuple(sorted(entries, key=lambda entry: (entry.resolved, entry.scope)))
 
 
 def parse(data: dict[str, Any]) -> VerifyConfig:
@@ -178,6 +247,13 @@ def parse(data: dict[str, Any]) -> VerifyConfig:
         cards_per_run=_integer(table, "cards_per_run", DEFAULT_CARDS_PER_RUN, 1, MAX_CARDS_PER_RUN),
         min_interval_days=_integer(table, "min_interval_days", DEFAULT_MIN_INTERVAL_DAYS, 1, MAX_MIN_INTERVAL_DAYS),
         never_read_days=_integer(table, "never_read_days", DEFAULT_NEVER_READ_DAYS, 1, MAX_NEVER_READ_DAYS),
+        cached_counts_max_age_hours=_integer(
+            table,
+            "cached_counts_max_age_hours",
+            DEFAULT_CACHED_COUNTS_MAX_AGE_HOURS,
+            1,
+            MAX_CACHED_COUNTS_MAX_AGE_HOURS,
+        ),
         workspaces=_workspaces(table.get("workspace")),
     )
 

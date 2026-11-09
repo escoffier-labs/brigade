@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -252,7 +253,10 @@ def test_never_read_stays_null_until_counting_covers_the_window():
 # -- [verify] ownership configuration ----------------------------------------
 
 
-def workspace(scope, path, projects=("example",), **extra):
+def workspace(scope, path, projects=("example",), create=True, **extra):
+    """A workspace entry. Roots must exist, so the directory is created unless `create` is false."""
+    if create and not os.path.lexists(path):
+        os.makedirs(path)
     item = {"scope": scope, "path": str(path), **extra}
     if projects is not None:
         item["archive_projects"] = list(projects)
@@ -340,6 +344,7 @@ def test_the_workspace_file_never_names_a_hub_url_or_credential_path(tmp_path, n
 
 
 def configure(target, workspace_root, extra=""):
+    os.makedirs(workspace_root, exist_ok=True)
     (target / ".brigade/memory-care.toml").write_text(
         '[hub]\nmode="read"\nread_scopes=["fleet"]\n'
         f'[verify]\n{extra}[[verify.workspace]]\nscope="fleet"\npath="{workspace_root}"\narchive_projects=[]\n'
@@ -414,13 +419,78 @@ def test_live_runs_are_refused_before_any_hub_call(verify_setup, capsys, flags):
     assert hub.calls == []
 
 
-def test_rate_limited_counts_fall_back_to_the_state_file(verify_setup, capsys):
-    target, hub = verify_setup
+def cache(target, observed_ms, extra=None):
+    """Write a state file whose fleet scope caches counts for card `a`, observed at `observed_ms`."""
+    table = {"cards": {key("a", "fleet"): {"seen": NOW, "proposed": 0, "reads": [5, 10, 20]}}}
+    if observed_ms is not None:
+        table["counts_ms"] = observed_ms
+    state = vstate.fresh()
+    state["scopes"] = {"fleet": {**table, **(extra or {})}}
+    vstate.save(target, state)
+
+
+def rate_limited(hub):
     hub.read_stats_reply = (429, {"error": SECRET, "code": hubc.READ_STATS_RATE_LIMITED})
+
+
+def wall_ms():
+    return int(time.time() * 1000)
+
+
+def test_a_fresh_cache_scores_but_never_reports_never_read(verify_setup, capsys):
+    target, hub = verify_setup
+    rate_limited(hub)
+    cache(target, wall_ms() - 3_600_000, extra={"since_day": 1})
     code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
     assert code == 0 and report["read_stats"] == {"fleet": "cached"}
-    assert report["skipped"]["read_stats_limited"] == 1
-    assert report["never_read"]["count"] is None
+    assert report["skipped"]["read_stats_limited"] == 1 and "read_stats_unavailable" not in report["skipped"]
+    scores = {item["card_id"]: item["score"] for item in report["selected"]}
+    # Cached reads score card a. Card b has none. Both are never verified (staleness 6).
+    assert scores == {"a": round(math.log2(1 + 20 + 10) + 6, 4), "b": 6.0}
+    # The cache even holds a since_day that covers the window, and never-read is still unknown.
+    assert report["never_read"] == {"count": None, "by_scope": {"fleet": None}}
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [
+        pytest.param(lambda: wall_ms() - 25 * 3_600_000, id="stale"),
+        pytest.param(lambda: None, id="no-timestamp"),
+        pytest.param(lambda: wall_ms() + 3_600_000, id="future"),
+    ],
+)
+def test_an_unusable_cache_skips_the_scope(verify_setup, capsys, observed):
+    target, hub = verify_setup
+    rate_limited(hub)
+    cache(target, observed())
+    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
+    assert code == 0 and report["read_stats"] == {"fleet": "unavailable"}
+    assert report["selected"] == [] and report["eligible"] == 0
+    assert report["skipped"]["read_stats_unavailable"] == 1
+    assert report["never_read"] == {"count": None, "by_scope": {"fleet": None}}
+
+
+def test_a_rate_limited_scope_with_no_cache_is_skipped(verify_setup, capsys):
+    target, hub = verify_setup
+    rate_limited(hub)
+    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
+    assert code == 0 and report["read_stats"] == {"fleet": "unavailable"}
+    assert report["selected"] == [] and report["skipped"]["read_stats_unavailable"] == 1
+
+
+def test_the_cache_age_limit_is_configurable(verify_setup, capsys, tmp_path):
+    target, hub = verify_setup
+    configure(target, tmp_path / "bound", extra="cached_counts_max_age_hours = 48\n")
+    rate_limited(hub)
+    cache(target, wall_ms() - 25 * 3_600_000)
+    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
+    assert code == 0 and report["read_stats"] == {"fleet": "cached"}
+
+
+@pytest.mark.parametrize("hours", [0, 169, True, "24"])
+def test_the_cache_age_limit_is_bounded(hours):
+    with pytest.raises(config.VerifyConfigError, match="cached_counts_max_age_hours"):
+        config.parse({"verify": {"cached_counts_max_age_hours": hours}})
 
 
 def test_a_refused_grant_fails_with_a_fixed_reason_and_no_state(verify_setup, capsys):
@@ -474,6 +544,8 @@ def test_read_stats_pacing_spans_scopes(setup, clock, tmp_path, capsys):
         f'[[verify.workspace]]\nscope="{scope}"\npath="{tmp_path / str(index)}"\narchive_projects=[]\n'
         for index, scope in enumerate(scopes)
     )
+    for index in range(len(scopes)):
+        (tmp_path / str(index)).mkdir()
     (target / ".brigade/memory-care.toml").write_text(
         f'[hub]\nmode="read"\nread_scopes={json.dumps(scopes)}\n[verify]\n{workspaces}'
     )
@@ -500,18 +572,87 @@ def test_read_stats_pacing_spans_scopes(setup, clock, tmp_path, capsys):
 
 def test_cached_counts_never_raise_on_malformed_entries():
     good = {"seen": 1, "proposed": 0, "reads": [1, 2, 3]}
-    assert verify_cmd._cached({"scopes": {SCOPE: {"since_day": 5, "cards": {KEY: good}}}}, SCOPE) == (
-        {KEY: pick.Reads(1, 2, 3)},
-        5,
-    )
+    now, age = 10_000_000, 3_600_000
+
+    def cached(state):
+        return verify_cmd._cached(state, SCOPE, now_ms=now, max_age_ms=age)
+
+    assert cached({"scopes": {SCOPE: {"counts_ms": now - 5, "cards": {KEY: good}}}}) == {KEY: pick.Reads(1, 2, 3)}
     for broken in (
-        {"scopes": {SCOPE: {"cards": {KEY: {**good, "reads": None}}}}},
-        {"scopes": {SCOPE: {"cards": {KEY: {**good, "reads": [1, 2]}}}}},
-        {"scopes": {SCOPE: {"cards": {KEY: {**good, "reads": [1, -2, 3]}}}}},
-        {"scopes": {SCOPE: {"cards": {KEY: {**good, "reads": ["1", 2, 3]}}}}},
-        {"scopes": {SCOPE: {"cards": None}}},
-        {"scopes": {SCOPE: {"since_day": "x", "cards": {}}}},
+        {"scopes": {SCOPE: {"counts_ms": now, "cards": {KEY: {**good, "reads": None}}}}},
+        {"scopes": {SCOPE: {"counts_ms": now, "cards": {KEY: {**good, "reads": [1, 2]}}}}},
+        {"scopes": {SCOPE: {"counts_ms": now, "cards": {KEY: {**good, "reads": [1, -2, 3]}}}}},
+        {"scopes": {SCOPE: {"counts_ms": now, "cards": {KEY: {**good, "reads": ["1", 2, 3]}}}}},
+        {"scopes": {SCOPE: {"counts_ms": now, "cards": None}}},
+        {"scopes": {SCOPE: {"counts_ms": "x", "cards": {}}}},
+        {"scopes": {SCOPE: {"counts_ms": None, "cards": {}}}},
+        {"scopes": {SCOPE: {"counts_ms": now + 1, "cards": {}}}},
+        {"scopes": {SCOPE: {"counts_ms": now - age - 1, "cards": {}}}},
+        {"scopes": {SCOPE: {"cards": {KEY: good}}}},
         {"scopes": {SCOPE: None}},
         {"scopes": None},
+        None,
     ):
-        assert verify_cmd._cached(broken, SCOPE) == ({}, None)
+        assert cached(broken) is None
+
+
+# -- root identity -------------------------------------------------------------
+
+
+def case_insensitive(monkeypatch):
+    """Emulate a case-insensitive filesystem: `Repo` and `repo` name one directory."""
+    real = os.stat
+    monkeypatch.setattr(config, "_stat", lambda path, *a, **k: real(str(path).replace("/Repo", "/repo"), *a, **k))
+
+
+def test_a_case_only_alias_is_one_root(tmp_path, monkeypatch):
+    (tmp_path / "repo").mkdir()
+    case_insensitive(monkeypatch)
+    upper = workspace("repo:one", tmp_path / "Repo", create=False)
+    lower = workspace("repo:two", tmp_path / "repo", create=False)
+    assert "two scopes" in refused(upper, lower)
+    assert "listed twice" in refused(upper, {**lower, "scope": "repo:one"})
+
+
+def test_a_nested_root_under_a_differently_spelled_parent_fails(tmp_path, monkeypatch):
+    (tmp_path / "repo" / "inner").mkdir(parents=True)
+    case_insensitive(monkeypatch)
+    outer = workspace("repo:one", tmp_path / "Repo", create=False)
+    inner = workspace("repo:two", tmp_path / "repo" / "inner", create=False)
+    assert "nested" in refused(outer, inner)
+    assert "nested" in refused(inner, outer)
+
+
+def test_a_nested_root_under_a_symlinked_parent_fails(tmp_path):
+    (tmp_path / "w" / "inner").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(tmp_path / "w")
+    outer = workspace("repo:one", tmp_path / "w")
+    inner = workspace("repo:two", tmp_path / "link" / "inner")
+    assert "nested" in refused(outer, inner)
+
+
+@pytest.mark.parametrize("kind", ["missing", "file"])
+def test_a_root_must_be_an_existing_directory(tmp_path, kind):
+    path = tmp_path / "root"
+    if kind == "file":
+        path.write_text(SECRET)
+    assert refused(workspace("repo:one", path, create=False)) == config.MISSING_ROOT
+
+
+def test_parsed_roots_keep_their_identity_and_revalidate(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "a")
+    [bound] = parse(workspace("repo:one", link, create=False)).workspaces
+    real = os.stat(tmp_path / "a")
+    assert bound.identity == (real.st_dev, real.st_ino)
+    assert bound.resolved == os.path.normcase(os.path.realpath(tmp_path / "a"))
+    assert config.revalidate(bound) is None
+    # Retargeting the link after parsing makes the bound root a different directory.
+    link.unlink()
+    link.symlink_to(tmp_path / "b")
+    assert config.revalidate(bound) == config.ROOT_CHANGED
+    link.unlink()
+    assert config.revalidate(bound) == config.ROOT_CHANGED
+    assert str(tmp_path) not in config.ROOT_CHANGED

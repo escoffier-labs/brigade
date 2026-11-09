@@ -36,6 +36,7 @@ def valid_state():
         "repo:example": {
             "since_day": 20300,
             "never_read": 2,
+            "counts_ms": 1_762_560_000_000,
             "cards": {
                 KEY: {
                     "seen": 1,
@@ -246,3 +247,13 @@ def test_null_reads_with_a_rate_limited_hub_gives_the_fixed_reason(tmp_path, cap
     assert code == 1
     assert json.loads(captured.out) == {"status": "failed", "code": "verify_state", "reason": vstate.STATE_ERROR}
     assert "Traceback" not in captured.err and SECRET not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("value", [None, -1, "1762560000000", 1.5, True])
+def test_a_malformed_counts_timestamp_fails_closed(tmp_path, value):
+    state = valid_state()
+    state["scopes"]["repo:example"]["counts_ms"] = value
+    write_raw(tmp_path, json.dumps(state).encode())
+    with pytest.raises(vstate.VerifyStateError) as exc_info:
+        vstate.load(tmp_path)
+    assert_fixed(exc_info)
