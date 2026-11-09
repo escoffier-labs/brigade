@@ -34,10 +34,13 @@ from .card_fingerprint import (
 )
 from .handoff_content import normalize_suggested_card_content
 from .handoff_ingest_rules import (
+    CARDS_RELATIVE,
     EXPECTED_SHA_SECTION,
     SHA256_RE,
+    CardIdIndex,
     bootstrap_budget_problem,
     card_frontmatter_structure_problems,
+    card_id_collision_problem,
     document_destination_problem,
     safe_card_name,
     read_card_bytes,
@@ -280,6 +283,9 @@ def ingest_into(
         print(f"brigade ingest: no handoff inbox at {legacy}", file=sys.stderr)
         return NO_HANDOFF_INBOX
 
+    # Read the cards' ids once for the whole run. Each promoted card is added to it,
+    # so two handoffs in one run cannot both claim an id.
+    card_ids = CardIdIndex(owner)
     for handoffs_dir in handoff_dirs:
         processed_dir = handoffs_dir / "processed"
         try:
@@ -319,6 +325,7 @@ def ingest_into(
                     target=owner,
                     promote_cards=promote_cards,
                     route_documents=route_documents,
+                    card_ids=card_ids,
                 )
                 action = _execute(
                     outcome,
@@ -345,6 +352,8 @@ def ingest_into(
             # identical copy must not be archived as its duplicate.
             if action.kind in _HANDLED_KINDS:
                 stats.seen_digests.add(sha)
+            if outcome.code == "card-promoted" and action.kind == "promoted":
+                _register_promoted_card(card_ids, outcome, sections, dry_run=dry_run)
             stats.processed += 1
             stats.actions.append(action.summary)
             if action.kind == "promoted":
@@ -409,6 +418,7 @@ def decide(
     target: Path,
     promote_cards: bool,
     route_documents: bool,
+    card_ids: CardIdIndex | None = None,
 ) -> Outcome:
     if "memory proposal notification" in sections:
         return Outcome(
@@ -501,6 +511,16 @@ def decide(
             match_outcome = _decide_create_card_match(content, target=target)
             if match_outcome is not None:
                 return match_outcome
+            if not dest.exists():
+                # The card is written with the id it holds, or a freshly minted one, so judge
+                # it by that. An existing destination keeps its own id and is not a new card.
+                collision = card_id_collision_problem(
+                    card_ids if card_ids is not None else CardIdIndex(target),
+                    ensure_card_id_frontmatter(content.strip() + "\n"),
+                    card,
+                )
+                if collision:
+                    return Outcome("inboxed", code="card-id-collision", reason=collision)
         return Outcome("promoted", code="card-promoted", dest=dest)
 
     if action == "no-card" and route_documents:
@@ -595,6 +615,24 @@ def _decide_create_card_match(content: str, *, target: Path) -> Outcome | None:
 class Action:
     kind: str
     summary: str
+
+
+def _register_promoted_card(
+    card_ids: CardIdIndex, outcome: Outcome, sections: Dict[str, str], *, dry_run: bool
+) -> None:
+    """Add the card a handoff just promoted to the run's id index, as written or as it would be."""
+    dest = outcome.dest
+    if dest is None:
+        return
+    try:
+        text = (
+            ensure_card_id_frontmatter(sections.get("suggested card content", "").strip() + "\n")
+            if dry_run
+            else dest.read_text(encoding="utf-8", errors="replace")
+        )
+    except OSError:
+        return
+    card_ids.register((CARDS_RELATIVE / dest.name).as_posix(), text)
 
 
 def _read_card_child(parent: int, name: str) -> tuple[bytes, int] | None:

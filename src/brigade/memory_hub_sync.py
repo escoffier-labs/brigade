@@ -680,8 +680,25 @@ def publication_card_id(text: str, rel: str, legacy_id: str) -> str:
     return legacy_id if hubc.valid_card_id(legacy_id) else memory_hub_import.note_card_id(text, rel)
 
 
-def _local_cards(target: Path) -> list[dict[str, Any]]:
+def publication_identity(text: str, rel: str) -> tuple[str, bool]:
+    """The card id push gives a card with this text at root-relative `rel`, and whether it was derived.
+
+    The one derivation: handoff lint and ingest call it too, so the id they
+    compare with the existing cards is the id push will count.
+    """
     from . import card_identity, memory_cmd, memory_hub_import
+
+    meta, _ = memory_cmd._parse_frontmatter(text)
+    identity = card_identity.card_identity(meta, rel)
+    # Keep accepted legacy keys, including those already published. Only
+    # invalid keys need S20's shared frontmatter/path derivation.
+    card_id = publication_card_id(text, rel, identity.card_id)
+    derived = card_id != identity.card_id and memory_hub_import.frontmatter_card_id(text) is None
+    return card_id, derived
+
+
+def _local_cards(target: Path) -> list[dict[str, Any]]:
+    from . import memory_cmd
 
     cards = []
     for fields in memory_cmd.search_card_fields(target):
@@ -690,12 +707,7 @@ def _local_cards(target: Path) -> list[dict[str, Any]]:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        meta, _ = memory_cmd._parse_frontmatter(text)
-        identity = card_identity.card_identity(meta, fields["rel"])
-        # Keep accepted legacy keys, including those already published. Only
-        # invalid keys need S20's shared frontmatter/path derivation.
-        card_id = publication_card_id(text, fields["rel"], identity.card_id)
-        derived = card_id != identity.card_id and memory_hub_import.frontmatter_card_id(text) is None
+        card_id, derived = publication_identity(text, fields["rel"])
         reason = withheld(text)
         cards.append(
             {

@@ -20,6 +20,7 @@ from ..handoff_content import normalize_suggested_card_content
 from ..handoff_ingest_rules import (
     EXPECTED_SHA_SECTION,
     SAFE_SPECIAL_TARGETS,
+    CardIdIndex,
     bootstrap_budget_problem,
     card_frontmatter_problems,
     card_state_problems,
@@ -530,6 +531,7 @@ def _lint_card_action(
     *,
     action: str = "create-card",
     workspace: Path | None = None,
+    card_ids: CardIdIndex | None = None,
 ) -> None:
     target_card = _section_value(sections, "Target card")
     if not target_card:
@@ -552,6 +554,8 @@ def _lint_card_action(
         target_card=target_card.splitlines()[0].strip() if target_card else "",
         expected_sha=(_section_value(sections, EXPECTED_SHA_SECTION).splitlines() or [""])[0],
         workspace=workspace,
+        suggested_content=suggested_card if not fence_error and suggested_card.startswith("---") else None,
+        card_ids=card_ids,
     )
     errors.extend(state_errors)
     warnings.extend(state_warnings)

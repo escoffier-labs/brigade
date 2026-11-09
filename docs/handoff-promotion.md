@@ -65,10 +65,13 @@ Write handoffs with `brigade handoff draft`, not by hand. Before it writes anyth
 | `update-card` without the expected SHA | Reads the target card in the workspace and writes `## Expected card SHA256` for you |
 | Stale expected SHA | Refuses when `--expected-sha` no longer matches the live card |
 | Missing frontmatter, `category`, `title` or `topic`, or `tags` | Refuses and names the missing field |
+| `create-card` whose card id another card already holds | Refuses with `card-id-collision` and names the existing file. A card takes its `id`, else its `topic`, else its file name, the same id `memory hub push` counts, so an id-less card can collide on a broad topic. Give it an explicit `id: card-<uuid4>` or another topic. `update-card` on the card that holds the id stays allowed |
 | Unsafe card name | Refuses names with a path, a leading dot or a non-`.md` ending |
 | Unsafe target document | Refuses anything outside `USER.md`, `TOOLS.md`, `rules/<name>.md` and the three `.learnings` files |
 | Bootstrap size guard | Refuses an append that would push `USER.md` or `TOOLS.md` over its budget |
 | No recognizable sections | Cannot happen, `draft` always writes the canonical sections |
+
+`brigade ingest` applies the same check to a `create-card` handoff. A card that would share an id is routed to the review inbox as `card-id-collision` and never written. A card with no valid `id` is written with a freshly minted `card-<uuid4>` id, so only an explicit id can collide there. Lint is stricter: it flags the id-less topic case too, because other ingesters may write the card as is.
 
 A refused draft prints one `error: draft refused, nothing written:` line per problem and exits 2. `--workspace` points at the memory workspace when it is not `--target`. `--expected-sha` supplies the SHA when the workspace is not reachable, and `draft` says so by name if it needs one of the two. `brigade handoff lint` applies the same rules to files written another way, and `--workspace` works there too.
 
