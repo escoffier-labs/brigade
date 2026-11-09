@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 
 
 from . import worklore_client
-from .fleet_home_guard import fleet_config_path, fleet_home
+from .fleet_home_guard import RelativeBrigadeHomeError, fleet_config_path, fleet_home
 from .worklore_brigade import BrigadeObservationError, IDENTITY_RE, normalize_task
 
 COMMAND_TIMEOUT_SECONDS = 30
@@ -349,7 +349,7 @@ def _write_receipt_best_effort(
             refused=refused,
             skipped=skipped,
         )
-    except OSError:
+    except (OSError, RelativeBrigadeHomeError):
         return
 
 

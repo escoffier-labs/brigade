@@ -148,9 +148,14 @@ def nofollow_supported() -> bool:
     """Windows and other hosts without no-follow descriptors fail closed.
 
     This is intentional: without a nofollow/dirfd primitive the high-water
-    file cannot be trusted, so cache reads and writes must not proceed.
+    file cannot be trusted, so cache reads and writes must not proceed. A
+    relative ``BRIGADE_HOME`` has no trusted cache location either (#2423).
     """
-    return bool(getattr(os, "O_NOFOLLOW", 0)) and _client._dir_fd_supported()
+    return (
+        bool(getattr(os, "O_NOFOLLOW", 0))
+        and _client._dir_fd_supported()
+        and fleet_home_guard.absolute_brigade_home() is not None
+    )
 
 
 def lkg_path() -> Path:

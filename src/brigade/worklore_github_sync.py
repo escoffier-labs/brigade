@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 
 from . import worklore_client, worklore_store
-from .fleet_home_guard import fleet_config_path, fleet_home
+from .fleet_home_guard import RelativeBrigadeHomeError, fleet_config_path, fleet_home
 from .worklore_github import (
     GitHubObservationError,
     bounded_acceptance,
@@ -638,7 +638,7 @@ def _write_receipt_best_effort(
             refused=refused,
             skipped=skipped,
         )
-    except OSError:
+    except (OSError, RelativeBrigadeHomeError):
         return
 
 

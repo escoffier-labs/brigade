@@ -265,3 +265,115 @@ def test_the_absolute_home_check_on_windows_and_posix_paths(home, accepted, monk
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: home)
     assert (fleet_home_guard.absolute_brigade_home() == home) is accepted
     assert (fleet_home_guard.absolute_brigade_home() is None) is not accepted
+
+
+@pytest.fixture
+def relative_home_workspace(tmp_path, monkeypatch, no_fleet_env):
+    """A repository with its own `.brigade/node.toml` and fleet.toml, run with BRIGADE_HOME=.brigade."""
+    from brigade import node as node_mod
+
+    workspace = tmp_path / "ws"
+    _fleet_toml(workspace / ".brigade", WORKSPACE_HUB, label="workspace")
+    node_mod.ensure_identity(workspace)
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("BRIGADE_HOME", ".brigade")
+    return workspace
+
+
+@pytest.fixture
+def no_workspace_reads(monkeypatch):
+    """Fail if the node identity or a fleet.toml is read."""
+    from brigade import node as node_mod
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a workspace-selected fleet file was read")
+
+    monkeypatch.setattr(node_mod, "load_identity", refuse)
+    monkeypatch.setattr(fleet_client, "_read_fleet_section", refuse)
+
+
+def test_the_claim_target_under_a_relative_home_reads_no_workspace_file(
+    relative_home_workspace, no_workspace_reads, no_requests, caplog
+):
+    with caplog.at_level(logging.WARNING, logger="brigade.fleet"):
+        assert fleet_client.resolve_claim_target(relative_home_workspace) == "ws"
+    assert any("BRIGADE_HOME must be an absolute path" in record.message for record in caplog.records)
+    assert not no_requests
+
+
+def test_a_local_only_run_with_no_fleet_claim_works_under_a_relative_home(
+    relative_home_workspace, monkeypatch, no_requests, capsys
+):
+    from brigade import aboyeur, cli
+
+    roster = relative_home_workspace / "roster.toml"
+    roster.write_text('orchestrator = "chef"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n', encoding="utf-8")
+    dispatched: list[int] = []
+    monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: dispatched.append(1) or 0)
+    argv = ["run", "do something", "--roster", str(roster), "--cwd", str(relative_home_workspace)]
+
+    assert cli.main([*argv, "--no-fleet-claim"]) == 0
+    assert dispatched == [1]
+    assert "Traceback" not in capsys.readouterr().err
+    assert not no_requests
+
+
+def test_model_admission_under_a_relative_home_fails_closed_without_the_cache(
+    relative_home_workspace, monkeypatch, no_requests
+):
+    import urllib.error
+
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", USER_HUB)
+    monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", "fixture-node-credential")
+
+    def unauthorized(*args, **kwargs):
+        raise urllib.error.HTTPError(USER_HUB + "/models", 401, "unauthorized", None, None)
+
+    monkeypatch.setattr(fleet_client, "_get_models_blocking", unauthorized)
+    assert fleet_model_admission.nofollow_supported() is False
+    decision = fleet_model_admission.fetch_versioned_roster()
+    assert decision.ok is False
+    assert decision.reason == "auth-failed"
+    assert not (relative_home_workspace / ".brigade" / fleet_client.SPOOL_DIRNAME).exists()
+
+
+@pytest.mark.parametrize(
+    ("argv", "code"),
+    [(["node", "--machine"], 2), (["fleet", "claims", "--release", ".", "--path"], 1)],
+    ids=["node-machine", "claims-release-path"],
+)
+def test_fleet_commands_that_need_the_home_print_a_clear_error(relative_home_workspace, argv, code, capsys):
+    from brigade import cli
+
+    assert cli.main(argv) == code
+    err = capsys.readouterr().err
+    assert "BRIGADE_HOME must be an absolute path" in err and "Traceback" not in err
+
+
+def test_worklore_best_effort_receipts_skip_a_relative_home(relative_home_workspace):
+    from brigade import worklore_brigade_sync, worklore_github_sync
+
+    worklore_github_sync._write_receipt_best_effort(
+        "github:example", idempotency_key="", observation_count=0, last_error_code=None
+    )
+    worklore_brigade_sync._write_receipt_best_effort(
+        "brigade:example", adapter_id="brigade", idempotency_key="", observation_count=0, last_error_code=None
+    )
+    assert not (relative_home_workspace / ".brigade" / "worklore").exists()
+
+
+def test_no_fleet_claim_never_resolves_a_claim_target(relative_home_workspace, monkeypatch, no_requests):
+    from brigade import aboyeur, cli
+
+    def refused(base_path=None):
+        raise fleet_home_guard.RelativeBrigadeHomeError(fleet_home_guard.RELATIVE_HOME_REFUSAL)
+
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", refused)
+    roster = relative_home_workspace / "roster.toml"
+    roster.write_text('orchestrator = "chef"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n', encoding="utf-8")
+    dispatched: list[int] = []
+    monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: dispatched.append(1) or 0)
+    argv = ["run", "do something", "--roster", str(roster), "--cwd", str(relative_home_workspace)]
+
+    assert cli.main([*argv, "--no-fleet-claim"]) == 0
+    assert dispatched == [1]

@@ -837,13 +837,9 @@ def dispatch(args) -> int:
             # (same node, same target, a token that died with it) is
             # superseded instead of locking this node out for the residual
             # TTL — a claim under any other lease is never touched.
-            try:
-                claim_target = fleet_client.resolve_claim_target(run_cwd)
-            except ClaimTargetError:
-                # The escape hatch must work when git is the thing failing.
-                if not args.no_fleet_claim:
-                    raise
-                claim_target = run_cwd.name
+            # The escape hatch skips the claim key entirely, so neither a failing git nor a
+            # refused fleet home (#2423) can stop a local-only run.
+            claim_target = run_cwd.name if args.no_fleet_claim else fleet_client.resolve_claim_target(run_cwd)
             if args.no_fleet_claim:
                 _FLEET_LOG.warning(
                     "fleet claim skipped for %s (--no-fleet-claim); relying on the local run lock alone",

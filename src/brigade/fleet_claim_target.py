@@ -207,7 +207,7 @@ def resolve(base_path: Path | None) -> str:
 
     Raises ``ClaimTargetError`` when git fails transiently.
     """
-    from . import fleet_client
+    from . import fleet_client, fleet_home_guard
 
     start = Path(base_path) if base_path is not None else Path.cwd()
     workspace = fleet_client.find_workspace_for_path(start)
@@ -215,6 +215,11 @@ def resolve(base_path: Path | None) -> str:
         try:
             is_home = workspace.resolve() == fleet_client.home_identity_target().resolve()
         except OSError:
+            is_home = False
+        except fleet_home_guard.RelativeBrigadeHomeError:
+            # No trusted home to compare against (#2423). The key is only a label, as with an
+            # unconfigured fleet: no fleet file is read, so no claim reaches a workspace-chosen hub.
+            fleet_home_guard.fleet_config_path()
             is_home = False
         if not is_home:
             return workspace.name
