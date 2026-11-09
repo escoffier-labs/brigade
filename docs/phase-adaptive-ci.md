@@ -365,8 +365,11 @@ campaign:
 1,024 rows) and
 `push_withheld_tests::push_card_404_latency_does_not_separate_absent_and_withheld_ids`
 (run 42679377812, latency ratio 1.562 against a 1.5 bound). A failed queue entry
-is re-queued and pays the run again, so these flakes show up in the after
-window's `reruns` and `runner_minutes_all_attempts`.
+that is re-queued starts a new workflow run with its own run id, not another
+attempt of the failed run. Its cost therefore shows up as extra `merge_group`
+runs in the window (the failed one in the `all` view, the retry in either
+view), not in `reruns` or `runner_minutes_all_attempts`, which count Actions
+re-runs of the same run id only.
 
 ### Review gates and account identity
 
@@ -374,10 +377,19 @@ Agents in this repository open pull requests and push from the maintainer's
 own GitHub account, and that stays so. GitHub does not let an author approve
 their own pull request, and an admin bypass would apply to the agents too, so
 a required CODEOWNERS review cannot gate changes to the workflows or the
-selectors. The guards for CI selection therefore live inside CI:
+selectors. The guards for CI selection therefore live inside CI, with one
+limit that no CI check can close:
 
 - selectors and classifiers for merge groups are loaded from trusted `main`
-  and diff the cumulative range, so a queue entry cannot choose its own tests;
+  and diff the cumulative range, so a queue entry cannot choose its own tests
+  by editing a selector, a classifier or a path list;
+- this does not cover an entry that edits `.github/workflows/ci.yml` itself. A
+  merge group runs the head's `ci.yml`, so such an entry can bypass the
+  trusted bootstrap or set gate outputs directly, for its own group and every
+  group queued behind it (see "Trust and its limit" in
+  [`hub-merge-queue.md`](adaptive-ci/hub-merge-queue.md#trust-and-its-limit)
+  and [`docs-classifier-trust.md`](adaptive-ci/docs-classifier-trust.md#trust-and-its-limit)).
+  Workflow edits are covered only by review before they are queued;
 - a repository invariant test requires every `ci.yml` job to run under
   `!cancelled()` so `ci-gate` sees it;
 - the nightly `hub-nightly.yml` runs the full hub suite on `main` and opens
