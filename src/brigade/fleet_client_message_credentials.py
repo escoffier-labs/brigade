@@ -73,8 +73,10 @@ def _open_token_fd(path: str) -> int:
     if sys.platform == "win32":
         # O_NOFOLLOW is 0 on Windows, so open with FILE_FLAG_OPEN_REPARSE_POINT and refuse a
         # handle that is a reparse point or a directory, then read from that same handle (#2422).
-        from .work_cmd import nt_dirfd
-
+        try:
+            from .work_cmd import nt_dirfd
+        except ImportError:  # no ctypes on this build: fail closed as a credential error
+            raise ValueError from None
         return nt_dirfd.open_path_file(os.path.abspath(path), os.O_RDONLY)
     raise ValueError  # No way to open without following a link: fail closed.
 

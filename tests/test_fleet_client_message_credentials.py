@@ -890,3 +890,24 @@ def test_windows_token_reads_through_the_no_follow_handle(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
     assert credentials.read_message_token_file(path.name) == path.read_text()
     assert opened == [str(path), str(path)]
+
+
+def test_token_open_fails_closed_when_the_windows_helper_cannot_import(tmp_path, monkeypatch):
+    # A Windows build without ctypes cannot load nt_dirfd. The reader must refuse with the
+    # credential error, never let ImportError escape past token_file_invalid handling.
+    import builtins
+
+    path = token_file(tmp_path)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    real_import = builtins.__import__
+
+    def no_helper(name, globals=None, locals=None, fromlist=(), level=0):
+        if "nt_dirfd" in name or "nt_dirfd" in (fromlist or ()):
+            raise ImportError("no ctypes")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", no_helper)
+    with pytest.raises(credentials.FleetMessageHubError) as caught:
+        credentials.read_message_token_file(str(path))
+    assert caught.value.code == "token_file_invalid"
