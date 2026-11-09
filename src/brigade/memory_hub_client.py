@@ -243,12 +243,13 @@ def display_url(url: str) -> str:
     return urllib.parse.urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
 
 
-def _user_config(path: Path | None = None) -> dict[str, Any]:
-    """`~/.brigade/fleet.toml` (under `BRIGADE_HOME` when set), or `path`, or {} when absent."""
-    from . import fleet_client
+def _user_config(path: Path | None) -> dict[str, Any]:
+    """The user-level fleet.toml at `path` (from `fleet_home_guard`), or {} when absent or refused.
 
+    A relative BRIGADE_HOME gives no path, so the working directory never chooses `[memory_hub]` (#2423).
+    """
     if path is None:
-        path = fleet_client.brigade_home() / fleet_client.FLEET_CONFIG_REL_PATH.name
+        return {}
     try:
         if not path.is_file():
             return {}
@@ -293,13 +294,17 @@ def _table_override(config: dict[str, Any]) -> tuple[str, str] | None:
     return values["hub_url"], values["node_token_file"]
 
 
-def _same_file(first: Path, raw_second: str) -> bool:
-    """Whether `raw_second` (a `[fleet]` token path, as `brigade fleet` reads it) names the file `first`."""
+def _same_file(first: Path, raw_second: str, base: Path | None) -> bool:
+    """Whether `raw_second` (a `[fleet]` token path in the fleet.toml at `base`) names the file `first`."""
+    from . import fleet_home_guard
+
     candidates = [raw_second.strip()]
     if "\\" in raw_second:
         candidates.append(raw_second.strip().replace("\\", "/"))
     for candidate in candidates:
-        second = Path(candidate).expanduser()
+        second = fleet_home_guard.token_path(candidate, base) if base is not None else None
+        if second is None:
+            continue
         try:
             if os.path.samefile(first, second):
                 return True
@@ -314,7 +319,12 @@ def _same_file(first: Path, raw_second: str) -> bool:
 
 
 def _refuse_fleet_credential(
-    token: str, path: Path, file_name: str, config: dict[str, Any], fleet: dict[str, str] | None
+    token: str,
+    path: Path,
+    file_name: str,
+    config: dict[str, Any],
+    fleet: dict[str, str] | None,
+    config_path: Path | None,
 ) -> None:
     """Refuse an override that would send a fleet credential to the memory hub. Never prints either token."""
     from . import fleet_client
@@ -332,7 +342,7 @@ def _refuse_fleet_credential(
     if isinstance(section, dict):
         for key in ("node_token_file", "token_file"):
             raw = section.get(key)
-            if isinstance(raw, str) and raw.strip() and _same_file(path, raw):
+            if isinstance(raw, str) and raw.strip() and _same_file(path, raw, config_path):
                 raise HubConfigError(refusal)
 
 
@@ -344,7 +354,11 @@ def _memory_hub_override(
     The environment pair outranks `[memory_hub]`. Each pair is all or nothing,
     and an empty environment value counts as unset, as for the fleet variables.
     """
-    config = _user_config()
+    from . import fleet_home_guard
+
+    # One resolution of the guarded fleet.toml serves `[memory_hub]` and the fleet path comparison.
+    config_path = fleet_home_guard.fleet_config_path()
+    config = _user_config(config_path)
     env_url = os.environ.get(ENV_HUB_URL, "").strip()
     env_file = os.environ.get(ENV_HUB_TOKEN_FILE, "").strip()
     if credential_pair is not None:
@@ -365,12 +379,18 @@ def _memory_hub_override(
         url, path = pair[0], Path(pair[1]).expanduser()
         source = SOURCE_TABLE
         url_name, file_name = f"[{MEMORY_HUB_TABLE}] hub_url", f"[{MEMORY_HUB_TABLE}] node_token_file"
-    url, token = _checked_override(url, path, url_name, file_name, config, fleet)
+    url, token = _checked_override(url, path, url_name, file_name, config, fleet, config_path)
     return url, token, source
 
 
 def _checked_override(
-    url: str, path: Path, url_name: str, file_name: str, config: dict[str, Any], fleet: dict[str, str] | None
+    url: str,
+    path: Path,
+    url_name: str,
+    file_name: str,
+    config: dict[str, Any],
+    fleet: dict[str, str] | None,
+    config_path: Path | None,
 ) -> tuple[str, str]:
     """`(hub_url, token)` for one memory hub override, after the URL, token file and fleet credential checks."""
     from . import fleet_client
@@ -391,7 +411,7 @@ def _checked_override(
         token = read_message_token_file(str(path), label="memory hub node")
     except FleetMessageHubError as exc:
         raise HubConfigError(f"{file_name} {path}: {exc}") from exc
-    _refuse_fleet_credential(token, path, file_name, config, fleet)
+    _refuse_fleet_credential(token, path, file_name, config, fleet, config_path)
     return url.rstrip("/"), token
 
 
@@ -402,11 +422,10 @@ def _absolute_user_config_path() -> Path | None:
     holds its own `.brigade/fleet.toml` (#2423), so a caller that must not take its hub from there
     reads nothing instead.
     """
-    from . import fleet_client
+    from . import fleet_client, fleet_home_guard
 
-    override = os.environ.get("BRIGADE_HOME")
-    home = Path(override).expanduser() if override else Path.home() / ".brigade"
-    return home / fleet_client.FLEET_CONFIG_REL_PATH.name if home.is_absolute() else None
+    home = fleet_home_guard.absolute_brigade_home()
+    return None if home is None else home / fleet_client.FLEET_CONFIG_REL_PATH.name
 
 
 def connector_settings(target: Path) -> HubSettings | None:
@@ -436,6 +455,7 @@ def connector_settings(target: Path) -> HubSettings | None:
         f"[{MEMORY_HUB_TABLE}] node_token_file",
         config,
         None,
+        path,
     )
     return replace(base, hub_url=hub_url, token=token, source=SOURCE_TABLE)
 

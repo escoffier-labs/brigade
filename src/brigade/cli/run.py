@@ -418,7 +418,7 @@ def dispatch(args) -> int:
         )
 
     from .. import aboyeur as aboyeur_mod
-    from .. import fleet_client
+    from .. import fleet_client, fleet_home_guard
     from .. import run_budget
     from .. import runguard
     from .. import roster as roster_mod
@@ -837,17 +837,24 @@ def dispatch(args) -> int:
             # (same node, same target, a token that died with it) is
             # superseded instead of locking this node out for the residual
             # TTL — a claim under any other lease is never touched.
-            try:
-                claim_target = fleet_client.resolve_claim_target(run_cwd)
-            except ClaimTargetError:
-                # The escape hatch must work when git is the thing failing.
-                if not args.no_fleet_claim:
-                    raise
-                claim_target = run_cwd.name
-            if args.no_fleet_claim:
+            # The escape hatch skips the claim key entirely, so a failing git cannot stop a
+            # local-only run. A relative BRIGADE_HOME has no claim key at all (#2423): the
+            # run takes no hub claim, unless --require-fleet-claim asks for one.
+            claim_skip = "--no-fleet-claim" if args.no_fleet_claim else None
+            claim_target = run_cwd.name
+            if claim_skip is None:
+                try:
+                    claim_target = fleet_client.resolve_claim_target(run_cwd)
+                except fleet_home_guard.RelativeBrigadeHomeError:
+                    if getattr(args, "require_fleet_claim", False):
+                        raise
+                    fleet_home_guard.fleet_config_path()
+                    claim_skip = "BRIGADE_HOME is relative"
+            if claim_skip is not None:
                 _FLEET_LOG.warning(
-                    "fleet claim skipped for %s (--no-fleet-claim); relying on the local run lock alone",
-                    claim_target,
+                    "fleet claim skipped for run directory %s (%s); relying on the local run lock alone",
+                    run_cwd.name,
+                    claim_skip,
                 )
             else:
                 dead_owner = next(
@@ -1146,7 +1153,7 @@ def dispatch(args) -> int:
         if worktree_cwd is not None and keep_worktree:
             print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
         return 2
-    except (fleet_client.FleetClaimHeldError, ClaimTargetError) as exc:
+    except (fleet_client.FleetClaimHeldError, ClaimTargetError, fleet_home_guard.RelativeBrigadeHomeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except TimeoutError as exc:

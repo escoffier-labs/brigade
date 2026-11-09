@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import fleet_client
+from . import fleet_home_guard
 
 if TYPE_CHECKING:
     from .fleet_hub_sealed import StoragePolicy
@@ -59,7 +59,9 @@ _VERSION = re.compile(r"[0-9]{1,6}(?:\.[0-9]{1,6}){1,3}(?:(?:a|b|rc|\.post)[0-9]
 
 def config() -> dict[str, Any]:
     """Deployment settings live only in the operator's fleet.toml."""
-    path = fleet_client.brigade_home() / "fleet.toml"
+    path = fleet_home_guard.fleet_config_path()
+    if path is None:
+        return {}
     try:
         payload = tomllib.loads(path.read_text(encoding="utf-8"))
         section = payload.get("fleet", {}).get("stats", {})

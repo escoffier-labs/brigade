@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from . import fleet_client as _client
-from . import fleet_model_roster
+from . import fleet_home_guard, fleet_model_roster
 from .fleet_client import FleetClientError
 
 MODEL_ROSTER_MAX_BYTES = 1024 * 1024
@@ -148,21 +148,26 @@ def nofollow_supported() -> bool:
     """Windows and other hosts without no-follow descriptors fail closed.
 
     This is intentional: without a nofollow/dirfd primitive the high-water
-    file cannot be trusted, so cache reads and writes must not proceed.
+    file cannot be trusted, so cache reads and writes must not proceed. A
+    relative ``BRIGADE_HOME`` has no trusted cache location either (#2423).
     """
-    return bool(getattr(os, "O_NOFOLLOW", 0)) and _client._dir_fd_supported()
+    return (
+        bool(getattr(os, "O_NOFOLLOW", 0))
+        and _client._dir_fd_supported()
+        and fleet_home_guard.absolute_brigade_home() is not None
+    )
 
 
 def lkg_path() -> Path:
-    return _client.brigade_home() / _client.SPOOL_DIRNAME / LKG_NAME
+    return fleet_home_guard.fleet_home() / _client.SPOOL_DIRNAME / LKG_NAME
 
 
 def high_water_path() -> Path:
-    return _client.brigade_home() / _client.SPOOL_DIRNAME / HIGH_WATER_NAME
+    return fleet_home_guard.fleet_home() / _client.SPOOL_DIRNAME / HIGH_WATER_NAME
 
 
 def audit_spool_path() -> Path:
-    return _client.brigade_home() / _client.SPOOL_DIRNAME / AUDIT_SPOOL_NAME
+    return fleet_home_guard.fleet_home() / _client.SPOOL_DIRNAME / AUDIT_SPOOL_NAME
 
 
 def _iso_z(value: datetime | str) -> str:

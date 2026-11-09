@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 
@@ -30,5 +31,9 @@ def dispatch(args) -> int:
     from .. import fleet_client
     from .. import node as node_mod
 
-    target = fleet_client.home_identity_target() if args.machine else args.target
+    try:
+        target = fleet_client.home_identity_target() if args.machine else args.target
+    except fleet_client.FleetClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     return node_mod.run(target=target, json_output=args.json)

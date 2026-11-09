@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from . import cloud_tracker, fleet_client, grokbot_job_validation, grokbot_jobs
+from . import cloud_tracker, fleet_client, fleet_home_guard, grokbot_job_validation, grokbot_jobs
 
 
 DEFAULT_BIND = "127.0.0.1:8766"
@@ -816,6 +816,8 @@ class GrokbotAdapter:
         acquired under. A row from before the column existed resolves once
         and is written back. A failed resolution raises and stores nothing.
         """
+        # A relative BRIGADE_HOME refuses here, so renew, release and events never send a stored key (#2423).
+        fleet_home_guard.fleet_home()
         stored = grokbot_jobs.lease_claim_target(self.config.target, job_id, self.config.bot_id, lease_id)
         if stored is not None:
             return stored
@@ -836,6 +838,8 @@ class GrokbotAdapter:
         came from the lease's own row (a retry) rather than a fresh resolution.
         """
         try:
+            # Checked before the lease row, so a stored key never reaches the hub under a relative home.
+            fleet_home_guard.fleet_home()
             stored = grokbot_jobs.lease_claim_target(self.config.target, job_id, self.config.bot_id, lease_id)
             target = stored if stored is not None else fleet_client.resolve_claim_target(self.config.target)
             decision = fleet_client.acquire_claim(
@@ -862,6 +866,7 @@ class GrokbotAdapter:
 
     def _fleet_release(self, job_id: str, lease_id: str, holder: str, target: str | None = None) -> None:
         try:
+            fleet_home_guard.fleet_home()
             resolved = target if target is not None else self._lease_target(job_id, lease_id)
             fleet_client.release_claim(resolved, holder=holder)
         except Exception:

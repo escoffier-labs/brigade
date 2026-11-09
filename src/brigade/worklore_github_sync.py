@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 
 from . import worklore_client, worklore_store
-from .fleet_client import FLEET_CONFIG_REL_PATH, brigade_home
+from .fleet_home_guard import RelativeBrigadeHomeError, fleet_config_path, fleet_home
 from .worklore_github import (
     GitHubObservationError,
     bounded_acceptance,
@@ -135,8 +135,8 @@ def load_github_config() -> dict[str, Any]:
 
 
 def _read_github_section() -> dict[str, Any] | None:
-    config_path = brigade_home() / FLEET_CONFIG_REL_PATH.name
-    if not config_path.is_file():
+    config_path = fleet_config_path()
+    if config_path is None or not config_path.is_file():
         return None
     try:
         payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -573,7 +573,7 @@ def _chunks(observations: list[dict[str, Any]], size: int) -> list[list[dict[str
 
 
 def _ensure_private_receipt_dir() -> Path:
-    directory = brigade_home() / "worklore" / "github"
+    directory = fleet_home() / "worklore" / "github"
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
     try:
         directory.chmod(0o700)
@@ -638,7 +638,7 @@ def _write_receipt_best_effort(
             refused=refused,
             skipped=skipped,
         )
-    except OSError:
+    except (OSError, RelativeBrigadeHomeError):
         return
 
 

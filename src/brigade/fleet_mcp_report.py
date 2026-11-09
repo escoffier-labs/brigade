@@ -182,9 +182,9 @@ def build_servers(target: Path) -> tuple[bool, list[dict[str, Any]], list[dict[s
 
 def account_connectors_enabled() -> bool:
     """The opt-in node setting: ``[fleet.mcp] include_account_connectors = true`` in ``~/.brigade/fleet.toml``."""
-    from .fleet_client import FLEET_CONFIG_REL_PATH, _read_fleet_section, brigade_home
+    from .fleet_home_guard import user_fleet_section
 
-    section = _read_fleet_section(brigade_home() / FLEET_CONFIG_REL_PATH.name).get("mcp")
+    section = user_fleet_section().get("mcp")
     return isinstance(section, dict) and section.get("include_account_connectors") is True
 
 

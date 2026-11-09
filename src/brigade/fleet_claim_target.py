@@ -205,10 +205,13 @@ def git_claim_key(start: Path) -> str | None:
 def resolve(base_path: Path | None) -> str:
     """Stable cross-machine claim key for the repo at ``base_path``.
 
-    Raises ``ClaimTargetError`` when git fails transiently.
+    Raises ``ClaimTargetError`` when git fails transiently, and
+    ``RelativeBrigadeHomeError`` under a relative ``BRIGADE_HOME`` (#2423): without a
+    trusted home identity there is no key at all, so callers take no hub claim.
     """
-    from . import fleet_client
+    from . import fleet_client, fleet_home_guard
 
+    fleet_home_guard.fleet_home()
     start = Path(base_path) if base_path is not None else Path.cwd()
     workspace = fleet_client.find_workspace_for_path(start)
     if workspace is not None:

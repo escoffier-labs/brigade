@@ -29,6 +29,7 @@ _CODES = frozenset(
         "mesh_keys_failed",
         "mesh_keys_interrupted",
         "mesh_keys_output_failed",
+        "relative_brigade_home",
     }
 )
 _FIELDS = (
@@ -118,9 +119,12 @@ def _dispatch(args: argparse.Namespace) -> int:
         except ValueError:
             return _failure(args, "mesh_keys_identity_invalid")
 
-        from .. import fleet_client, fleet_mesh_keys
+        from .. import fleet_home_guard, fleet_mesh_keys
 
-        home = fleet_client.brigade_home()
+        try:
+            home = fleet_home_guard.fleet_home()
+        except fleet_home_guard.RelativeBrigadeHomeError as error:
+            return _failure(args, error.code)
         if args.keys_command == "rotate":
             state = fleet_mesh_keys.rotate_local_keys(brigade_home=home, principal=args.principal, hub_id=args.hub_id)
         else:

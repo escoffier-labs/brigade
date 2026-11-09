@@ -10,7 +10,7 @@ import re
 import stat
 import sys
 
-from . import fleet_client
+from . import fleet_client, fleet_home_guard
 from .mcp_events import EVENT_ERROR_CODES
 
 ENV_TOKEN_FILE = "BRIGADE_FLEET_MESSAGE_TOKEN_FILE"
@@ -49,6 +49,7 @@ MESSAGE_CODES = (
             "principal_enrollment_changed",
             "principal_enrollment_revoked",
             "principal_enrollment_grants_changed",
+            "relative_brigade_home",
         }
     )
     | EVENT_ERROR_CODES
@@ -106,6 +107,9 @@ def read_message_token_file(path: str, *, label: str = "message") -> str:
 
 
 def message_settings(token_file: str | None, *, node_credential: bool = False) -> tuple[str, str, str]:
+    # A relative BRIGADE_HOME would let the working directory choose the hub and the node
+    # credential, so message operations refuse it before reading anything (#2423).
+    fleet_home_guard.fleet_config_path(strict=True)
     settings = fleet_client.load_fleet_settings()
     hub = settings.get("hub_url", "")
     if not hub:

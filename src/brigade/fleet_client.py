@@ -226,7 +226,7 @@ class _PoisonResponse(Exception):
 
 
 def brigade_home() -> Path:
-    """Brigade per-user home directory (override with BRIGADE_HOME for tests)."""
+    """Brigade per-user home directory; fleet readers use ``fleet_home_guard`` instead (#2423)."""
     override = os.environ.get("BRIGADE_HOME")
     if override:
         return Path(override).expanduser()
@@ -244,22 +244,26 @@ def load_fleet_settings(*, strict: bool = False) -> dict[str, str]:
     consulted for whichever value the environment did not set. No fallback
     between the two token kinds happens here (see ``load_fleet_config``).
     Strict callers refuse read or parsing failures when consulting that file.
+    A relative ``BRIGADE_HOME`` never selects that file (#2423): strict callers get
+    ``RelativeBrigadeHomeError``, and others get the environment values only.
     """
     hub_url = os.environ.get("BRIGADE_FLEET_HUB_URL", "").strip()
     admin_token = os.environ.get("BRIGADE_FLEET_TOKEN", "").strip()
     node_token = os.environ.get("BRIGADE_FLEET_NODE_TOKEN", "").strip()
     if not (hub_url and admin_token and node_token):
-        section = _read_fleet_section(brigade_home() / FLEET_CONFIG_REL_PATH.name, strict=strict)
+        from .fleet_home_guard import read_token_file, user_fleet_config
+
+        config_path, section = user_fleet_config(strict=strict)
         if not hub_url and isinstance(section.get("hub_url"), str):
             hub_url = section["hub_url"].strip()
         if not admin_token:
             token_file = section.get("token_file")
             if isinstance(token_file, str) and token_file.strip():
-                admin_token = _read_token_file(token_file)
+                admin_token = read_token_file(token_file, config_path)
         if not node_token:
             node_token_file = section.get("node_token_file")
             if isinstance(node_token_file, str) and node_token_file.strip():
-                node_token = _read_token_file(node_token_file)
+                node_token = read_token_file(node_token_file, config_path)
     return {"hub_url": hub_url, "admin_token": admin_token, "node_token": node_token}
 
 
@@ -281,20 +285,6 @@ def load_fleet_config(*, strict: bool = False) -> dict[str, str]:
             _SHARED_TOKEN_WARNED = True
             _LOG.warning(_SHARED_TOKEN_WARNING)
     return _claim_lifecycle._FleetConfig(settings, token)
-
-
-def _read_token_file(raw_path: str) -> str:
-    """Read a token file; tolerate a Windows path written with backslashes
-    (tried as-is first, then with backslashes normalized to ``/``)."""
-    candidates = [raw_path.strip()]
-    if "\\" in raw_path:
-        candidates.append(raw_path.strip().replace("\\", "/"))
-    for candidate in candidates:
-        try:
-            return Path(candidate).expanduser().read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-    return ""
 
 
 def _read_fleet_section(config_path: Path, *, strict: bool = False) -> dict[str, Any]:
@@ -342,8 +332,11 @@ def home_identity_target() -> Path:
     A ``BRIGADE_HOME`` override that does not end in ``.brigade`` is used as
     the target directly (→ ``$BRIGADE_HOME/.brigade/node.toml``). This is the
     same resolution ``resolve_node_id`` and ``brigade node --machine`` use.
+    A relative ``BRIGADE_HOME`` raises ``RelativeBrigadeHomeError``.
     """
-    home = brigade_home()
+    from .fleet_home_guard import fleet_home
+
+    home = fleet_home()
     return home.parent if home.name == ".brigade" else home
 
 
@@ -496,8 +489,10 @@ def _post_events(hub_url: str, token: str, body: Any, *, timeout: float) -> None
 
 
 def spool_path(node_id: str) -> Path:
+    from .fleet_home_guard import fleet_home
+
     safe_node_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in node_id) or "unknown"
-    return brigade_home() / SPOOL_DIRNAME / f"{safe_node_id}.jsonl"
+    return fleet_home() / SPOOL_DIRNAME / f"{safe_node_id}.jsonl"
 
 
 # Spool files are private (#1154): refuse a symlinked path where the OS can
@@ -984,8 +979,8 @@ class ClaimDecision:
     refused this node's credentials (HTTP 401/403), a stable outcome that
     is never retried or fallen back from; see ``FleetClaimAuthError``), or
     ``"hub-unavailable"`` (network/hub failure; callers fall back to the
-    local run lock), or ``"lease-expired"`` (a granted response arrived
-    too late for admission).
+    local run lock), ``"lease-expired"`` (a granted response arrived
+    too late for admission), or ``"relative-brigade-home"`` (nothing sent).
     ``holder`` is the fencing token this operation used; renew and release
     must present the same token. ``superseded`` is the unexpired same-node
     claim a ``supersede_dead_owner`` acquire replaced (issue #1141); a
@@ -1122,6 +1117,11 @@ def _claim_op(
     recorded on the row at acquire; ``supersede`` is the dead lease a
     node-scoped acquire presents (see ``lease_from_lock_owner``).
     """
+    from .fleet_home_guard import RELATIVE_HOME_REFUSAL, absolute_brigade_home
+
+    if absolute_brigade_home() is None:
+        # No trusted home identity, so no claim request leaves, whatever key or node id is reused (#2423).
+        return ClaimDecision(granted=False, reason="relative-brigade-home", detail=RELATIVE_HOME_REFUSAL, holder=holder)
     try:
         config = load_fleet_config() if hub_url is None or token is None else {}
         hub = config["hub_url"] if hub_url is None else hub_url

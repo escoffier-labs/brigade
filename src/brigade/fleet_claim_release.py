@@ -111,11 +111,12 @@ def _release_claim(
         # Never an ancestor walk: the directory must be the workspace itself.
         # The per-user home identity is not a repo workspace (#1639).
         enclosing = fleet_client.find_workspace_for_path(workspace)
-        if (
-            enclosing is not None
-            and enclosing != workspace
-            and enclosing != fleet_client.home_identity_target().resolve()
-        ):
+        try:
+            home_target = fleet_client.home_identity_target().resolve()
+        except fleet_client.FleetClientError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if enclosing is not None and enclosing != workspace and enclosing != home_target:
             print(
                 f"error: {workspace} is inside the workspace {enclosing}; pass that workspace path instead",
                 file=sys.stderr,

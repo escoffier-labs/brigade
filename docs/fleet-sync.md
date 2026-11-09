@@ -27,6 +27,15 @@ status of each phase.
   `BRIGADE_FLEET_HUB_URL`, `BRIGADE_FLEET_NODE_TOKEN`, and
   `BRIGADE_FLEET_TOKEN` override. Tokens are dedicated fleet secrets and are
   never written into a Brigade config value.
+- `BRIGADE_HOME` moves that file, the spool and the node identity, and it must
+  be an absolute path. A relative one would resolve against the working
+  directory, so a repository's own `.brigade/fleet.toml` could pick the hub and
+  the token files. Fleet commands and message principals refuse it with
+  `BRIGADE_HOME must be an absolute path`. Best-effort reporting reads no file,
+  keeps only the environment values and logs one warning.
+- A relative `token_file` or `node_token_file` is read from the directory
+  that holds `fleet.toml`, never from the working directory. `~` expands.
+  Memory sync reads `[memory_hub]` from the same guarded file.
 
 ## Cloud concurrency controls
 

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import fleet_client
+from . import fleet_client, fleet_home_guard
 from .fleet_client_message_credentials import (
     FleetMessageHubError,
     MessageAuthority,
@@ -996,14 +996,16 @@ def finalize_principal_add(name: str, *, request_id: str, pending_path: Path | N
 def _principal_pending_path(name: str, admin_token: str, *, hub_url: str) -> Path:
     token_scope = "v1-" + message_scope(hub_url, admin_token)
     name_scope = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
-    return fleet_client.brigade_home() / fleet_client.SPOOL_DIRNAME / f"principal-{name_scope}-{token_scope}.jsonl"
+    return fleet_home_guard.fleet_home() / fleet_client.SPOOL_DIRNAME / f"principal-{name_scope}-{token_scope}.jsonl"
 
 
 def _principal_revocation_path(name: str, admin_token: str, *, hub_url: str) -> Path:
     token_scope = "v1-" + message_scope(hub_url, admin_token)
     name_scope = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
     return (
-        fleet_client.brigade_home() / fleet_client.SPOOL_DIRNAME / f"principal-{name_scope}-{token_scope}.revoke.jsonl"
+        fleet_home_guard.fleet_home()
+        / fleet_client.SPOOL_DIRNAME
+        / f"principal-{name_scope}-{token_scope}.revoke.jsonl"
     )
 
 
