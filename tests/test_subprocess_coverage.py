@@ -30,7 +30,8 @@ def test_ci_coverage_reports_after_fixture_sources_are_removed(tmp_path):
         for line in workflow.splitlines()
         if "run: python scripts/ci_pytest_shard.py" in line and "--cov=" in line
     )
-    command = command.replace("${{ matrix.shard }}", "0")
+    # Shadow selection's pull-request-only junit argument is not part of this coverage contract.
+    command = command.replace("${{ matrix.shard }}", "0").replace(" $SHADOW_JUNIT", "")
     argv = [argument.replace("$PWD", str(ROOT)) for argument in shlex.split(command)]
     argv[0] = sys.executable
     # One bounded shard exercises every selected fixture; keep CI's source argument.

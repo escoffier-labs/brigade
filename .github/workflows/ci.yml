@@ -781,7 +781,10 @@ jobs:
         env:
           COVERAGE_CORE: sysmon
           COVERAGE_FILE: .coverage.${{ matrix.python }}.${{ matrix.shard }}
-        run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q -n 4 --dist=worksteal --cov="$PWD/src/brigade" --cov-report=
+          # Shadow test selection records per-test results on pull requests only.
+          # An argument, not PYTEST_ADDOPTS, so tests that spawn pytest cannot overwrite it.
+          SHADOW_JUNIT: ${{ github.event_name == 'pull_request' && format('--junitxml=shadow-junit-{0}.xml -o junit_family=xunit1', matrix.shard) || '' }}
+        run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q -n 4 --dist=worksteal $SHADOW_JUNIT --cov="$PWD/src/brigade" --cov-report=
       - name: Assert grokbot MCP tests run without skips
         if: matrix.python == '3.12' && matrix.shard == 0
         run: |
@@ -804,6 +807,95 @@ jobs:
           path: .coverage.${{ matrix.python }}.${{ matrix.shard }}
           include-hidden-files: true
           if-no-files-found: error
+      - name: Upload shadow junit
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && matrix.python == '3.12' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: shadow-junit-${{ matrix.shard }}
+          path: shadow-junit-${{ matrix.shard }}.xml
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 7
+
+  # Shadow test selection (docs/adaptive-ci/shadow-selection.md). These two jobs observe
+  # what a selective run would skip and record any failing test it would have missed.
+  # Every test still runs. Neither job is in ci-gate's needs, both are non-blocking, and
+  # pushes and merge groups never run them.
+  shadow-plan:
+    name: shadow test selection plan
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && github.event_name == 'pull_request' }}
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Compute shadow plan
+        # HEAD^1 is the base tip GitHub merged into, so the diff is the pull request's own change.
+        run: python3 scripts/ci_test_selection.py --base HEAD^1 --head HEAD --output shadow-plan/shadow-plan.json
+      - name: Upload shadow plan
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: shadow-plan
+          path: shadow-plan/shadow-plan.json
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 7
+
+  shadow-selection:
+    name: shadow test selection report
+    needs: [changes, shadow-plan, test-shards]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && github.event_name == 'pull_request' }}
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Download shadow plan
+        continue-on-error: true
+        uses: actions/download-artifact@v8.0.2
+        with:
+          name: shadow-plan
+          path: shadow-in/plan
+      - name: Download shard junit
+        continue-on-error: true
+        uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: shadow-junit-*
+          path: shadow-in/junit
+          merge-multiple: true
+      - name: Join plan and shard results
+        env:
+          SHARDS_RESULT: ${{ needs.test-shards.result }}
+        run: |
+          # The report records its own errors in the artifact. If the script itself
+          # cannot run, write an error report instead of failing quietly.
+          python3 scripts/ci_shadow_report.py --plan shadow-in/plan/shadow-plan.json --junit-dir shadow-in/junit --output shadow-out/shadow-selection.json || {
+            echo "::warning::shadow report script exited nonzero"
+            mkdir -p shadow-out
+            echo '{"schema_version":1,"status":"error","errors":["report script exited nonzero"],"mode":"unknown","policies":{},"failing_files":[],"test_files_total":0}' > shadow-out/shadow-selection.json
+          }
+      - name: Upload shadow selection
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: shadow-selection
+          path: shadow-out/shadow-selection.json
+          if-no-files-found: warn
+          overwrite: true
 
   fleet-hub-container:
     needs: changes
