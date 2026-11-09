@@ -2500,11 +2500,21 @@ A run without `--dry-run` takes these steps in order:
 5. It selects cards, stores the read count snapshots, assembles evidence and
    calls the seats one card at a time.
 6. For a card whose checks produce an op, it builds a local review packet and
-   a manifest, attaches the manifest with `evidence.attach` and opens one
-   proposal for that one card. The proposal holds the correction ops and an
-   `append_evidence` op that cites the manifest, all pinned to the card's
-   revision and block hashes. Submission reuses reflect's request id ledger,
-   so a lost reply replays the same request.
+   a manifest, and stages the exact submission (ops, manifest and packet) in
+   the packet directory before anything is sent. It then attaches the manifest
+   with `evidence.attach` and opens one proposal for that one card. The
+   proposal holds the correction ops and an `append_evidence` op that cites
+   the manifest, all pinned to the card's revision and block hashes.
+   Submission reuses reflect's request id ledger, so a lost reply replays the
+   same request.
+
+Before checking cards, every non-dry run reconciles the stages. A stage whose
+ledger entry holds a proposal id is published as that proposal's packet, so a
+crash between submit and publication loses nothing (`packets_recovered`). A
+stage whose request has no result yet, after a transient refusal, a quota
+reply or a crash, is sent again unchanged under the same request id. Its card
+is not checked again and does not enter its cooldown until the request has a
+result (`submission_unresolved`).
 
 Commit-id expansions need a git resolver, which a later slice adds. Until
 then every expansion abstains with `verify_commit_unresolved`, so no
@@ -2535,14 +2545,26 @@ card, evidence or model text, and it is scanned before attachment
 | `seat_timeout`, `seat_failed` | One call failed. The card is skipped and not marked verified |
 | `verify_deferred_time` | The 20-minute wall clock ran out before this card |
 | `packets_settled`, `packets_expired` | Packets marked terminal or deleted this run |
+| `packets_recovered` | A staged packet of an already opened proposal was published |
+| `packets_temporary_removed`, `packets_stage_invalid` | A crashed write's temporary file, or a stage that failed its checks, was removed |
+| `verify_packet_mismatch` | A different packet already holds the proposal's name. It is kept for review, never overwritten |
+| `submission_unresolved`, `submission_unresolved_card` | A request without a result waits for the next run's replay, and its card is not checked again |
 
 A run fails, and counts toward the pause, on a transport, configuration or
 authorization error, on a failed pre-run check, on a refused seat, on a seat
 authentication or isolation failure, when every model call fails
 (`verify_seats_failed`) and when the hub refuses every proposal the run
-attempted (`all_proposals_refused`). Three consecutive failed non-dry runs
-pause the scheduled job. `--scheduled` then returns `paused` without a hub
-call, and only a successful non-dry manual run clears the pause.
+attempted (`all_proposals_refused`).
+
+The pause counter follows one rule. A failed non-dry run adds one. A
+completed non-dry run resets it to zero only when it did work: at least one
+seat call answered, or at least one submission reached a result (opened,
+matched a pending duplicate, or was finally refused). A completed run that
+did neither, for example because every card was inside its interval, reports
+`idle: true` and leaves the counter as it was. A dry run never changes it.
+Three consecutive failures pause the scheduled job. `--scheduled` then returns
+`paused` without a hub call, and only a manual non-dry run that did work
+clears the pause.
 
 ### Review packets
 
@@ -2550,8 +2572,18 @@ Each opened proposal has a packet at
 `.brigade/memory/verify/packets/<proposal-id>.json`: the evidence texts with
 their trust ranks and whether they counted, the scan findings of dropped
 items, the seats, both prompts and raw replies, the outcomes and the ops. The
-directory is owner-only (0700) and every packet is owner-only (0600). The
+directory is owner-only (0700) and every file in it is owner-only (0600). The
 manifest's `packet_sha256` binds the packet bytes.
+
+Every file in the directory is published the same way: an owner-only
+temporary file created exclusively without following links, written and
+fsynced, renamed over its final name, then the directory fsynced. A crash
+never leaves a partial file under a final name, and the next run removes
+leftover temporary files it owns. A submission's stage,
+`staged-<ledger digest>.json`, is published before the manifest is attached
+and removed once the packet is published. A packet already under a
+proposal's name is never replaced: identical bytes are left alone, and
+different bytes are reported as `verify_packet_mismatch` and kept for review.
 
 When a run finds a packet's proposal no longer open, it renames the packet to
 `<proposal-id>.t<ms>.json` with the time it noticed, and a later run deletes it

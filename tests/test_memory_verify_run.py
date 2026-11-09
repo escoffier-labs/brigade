@@ -28,6 +28,7 @@ from brigade import memory_proposal_io as io
 from brigade import memory_verify_cmd as verify_cmd
 from brigade import memory_verify_contract as vc
 from brigade import memory_verify_evidence as ev
+from brigade import memory_verify_packets as pk
 from brigade import memory_verify_run as run_mod
 from brigade import memory_verify_seat as seats
 from brigade import memory_verify_select as pick
@@ -208,7 +209,7 @@ def state_of(target):
 
 
 def packets(target):
-    root = target / run_mod.PACKETS
+    root = target / pk.PACKETS
     return sorted(path.name for path in root.iterdir()) if root.exists() else []
 
 
@@ -274,7 +275,7 @@ def test_a_dry_run_calls_seats_but_makes_no_hub_write_no_packet_and_leaves_the_p
     assert report["skipped"]["dry_run_proposal"] == 1
     assert [role for role, _ in fake.calls] == ["propose", "confirm"]
     assert writes(hub) == [] and report["proposals"] == []
-    assert not (target / run_mod.PACKETS).exists()
+    assert not (target / pk.PACKETS).exists()
     assert (target / vstate.STATE).read_bytes() == before
     assert report["schedule"] == {"consecutive_failures": 2, "paused": False}
 
@@ -320,7 +321,8 @@ def test_a_real_run_submits_a_pinned_one_card_proposal_with_a_manifest_append_ev
     for text in ("Zanzibar", FIXED, "fix verified"):
         assert text not in manifest_bytes.decode()
     # The packet is the one the manifest binds, owner-only, and named by its proposal id.
-    packet_path = target / run_mod.PACKETS / f"{proposal['proposal_id']}.json"
+    packet_path = target / pk.PACKETS / f"{proposal['proposal_id']}.json"
+    assert packets(target) == [packet_path.name]  # The stage is gone once the packet is published.
     assert io.sha256(packet_path.read_bytes()) == manifest["packet_sha256"]
     assert stat.S_IMODE(os.stat(packet_path).st_mode) == 0o600
     assert stat.S_IMODE(os.stat(packet_path.parent).st_mode) == 0o700
@@ -367,7 +369,11 @@ def test_a_duplicate_pending_reply_records_the_existing_id(verify_hub, capsys, r
     assert report["skipped"]["duplicate_pending"] == 1 and report["proposals"] == []
     assert entry_for(target, CARD_ID)["pending"] == existing
     assert [pending["proposal_id"] for pending in state_of(target)["submissions"].values()] == [existing]
-    assert packets(target) == []
+    # The packet for the existing proposal is published, and it is the one the attached manifest binds.
+    assert packets(target) == [f"{existing}.json"]
+    (attach,) = [call for call in writes(hub) if call["action"] == "evidence.attach"]
+    manifest = json.loads(base64.b64decode(attach["artifact_base64"]))
+    assert io.sha256((target / pk.PACKETS / f"{existing}.json").read_bytes()) == manifest["packet_sha256"]
 
 
 @pytest.mark.parametrize("code", sorted(hubc.QUOTA_REFUSALS))
@@ -383,7 +389,11 @@ def test_principal_and_scope_quota_replies_stop_proposing_without_a_failure(veri
     assert {card["card_id"] for card in report["cards"]} >= {CARD_ID, SECOND_ID}
     assert entry_for(target, SECOND_ID)["verdict"] == "correction"
     assert report["schedule"] == {"consecutive_failures": 0, "paused": False}
-    assert packets(target) == [] and "pending" not in entry_for(target, CARD_ID)
+    assert "pending" not in entry_for(target, CARD_ID)
+    # The request is in the ledger without a result, so its stage stays for the next run to replay.
+    (staged,) = packets(target)
+    assert pk.STAGED.fullmatch(staged)
+    assert "verified" not in entry_for(target, CARD_ID)
 
 
 @pytest.mark.parametrize("code", sorted(hubc.EVIDENCE_QUOTA_REFUSALS))
@@ -433,7 +443,8 @@ def test_the_pending_ceiling_stops_new_proposals(verify_hub, capsys, resolver):
     hub.calls.clear()
     fake.calls.clear()
     status, report = verify(target, capsys)
-    assert status == 0 and report["skipped"]["pending_ceiling"] == 1 and report["selected"] == []
+    # Selection stops at the ceiling, and so does the replay of the earlier quota-stopped request.
+    assert status == 0 and report["skipped"]["pending_ceiling"] == 2 and report["selected"] == []
     assert fake.calls == [] and writes(hub) == []
     assert sorted(call["proposal_id"] for call in hub.calls if call["action"] == "proposal_show") == sorted(ids)
     # Once the hub says they are settled, the ceiling frees and the card is proposed.
@@ -511,9 +522,10 @@ def test_every_model_call_failing_fails_the_run(verify_hub, capsys):
 
 
 def write_packet(target, name, data=b"{}\n"):
-    root = target / run_mod.PACKETS
+    root = target / pk.PACKETS
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     (root / name).write_bytes(data)
+    os.chmod(root / name, 0o600)
 
 
 def test_packets_of_settled_proposals_expire_14_days_after_settling(tmp_path):
@@ -525,23 +537,23 @@ def test_packets_of_settled_proposals_expire_14_days_after_settling(tmp_path):
     write_packet(target, f"{settled}.json")
     write_packet(target, f"{old}.t{now - 14 * DAY}.json")
     write_packet(target, f"{young}.t{now - 14 * DAY + 1}.json")
-    counts = run_mod.maintain_packets(target, {still_open}, now)
-    assert counts == {"packets_settled": 1, "packets_expired": 1}
+    counts = pk.maintain(target, {still_open}, now)
+    assert counts == {"packets_temporary_removed": 0, "packets_settled": 1, "packets_expired": 1}
     assert packets(target) == sorted(
         [f"{still_open}.json", f"{settled}.t{now}.json", f"{young}.t{now - 14 * DAY + 1}.json"]
     )
-    assert stat.S_IMODE(os.stat(target / run_mod.PACKETS).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(target / pk.PACKETS).st_mode) == 0o700
 
 
 def test_the_packet_cap_drops_the_oldest_settled_packets_first_and_never_open_ones(tmp_path, monkeypatch):
-    monkeypatch.setattr(run_mod, "PACKET_CAP", 100)
+    monkeypatch.setattr(pk, "PACKET_CAP", 100)
     first, second, live = hubc.event_id(), hubc.event_id(), hubc.event_id()
     write_packet(tmp_path, f"{first}.t1.json", b"x" * 30)
     write_packet(tmp_path, f"{second}.t2.json", b"x" * 30)
     write_packet(tmp_path, f"{live}.json", b"x" * 30)
-    assert run_mod._room(tmp_path, 30)
+    assert pk.room(tmp_path, 30)
     assert packets(tmp_path) == sorted([f"{second}.t2.json", f"{live}.json"])
-    assert not run_mod._room(tmp_path, 80)
+    assert not pk.room(tmp_path, 80)
     assert packets(tmp_path) == [f"{live}.json"]
 
 
@@ -556,7 +568,7 @@ def test_a_run_settles_and_later_expires_the_packet_of_an_applied_proposal(verif
     assert report["skipped"]["packets_settled"] == 1 and "pending" not in entry_for(target, CARD_ID)
     assert packets(target) == [f"{proposal['proposal_id']}.t{later}.json"]
     report = run_mod.run_payload(
-        target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=later + run_mod.PACKET_DAYS * DAY
+        target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=later + pk.PACKET_DAYS * DAY
     )
     assert report["skipped"]["packets_expired"] == 1
     assert f"{proposal['proposal_id']}.t{later}.json" not in packets(target)
@@ -564,9 +576,215 @@ def test_a_run_settles_and_later_expires_the_packet_of_an_applied_proposal(verif
 
 def test_a_full_packet_directory_defers_the_card_before_any_hub_write(verify_hub, capsys, resolver, monkeypatch):
     target, hub, _, _ = verify_hub
-    monkeypatch.setattr(run_mod, "PACKET_CAP", 64)
+    monkeypatch.setattr(pk, "PACKET_CAP", 64)
     status, report = verify(target, capsys)
     assert status == 0 and report["skipped"]["verify_packet_cap"] == 1 and writes(hub) == []
+
+
+# --- Atomic publication, staging and replay -------------------------------------------------
+
+
+class FixedSecrets:
+    """Deterministic nonces and evidence order for the contract module, so a rerun builds identical packets.
+
+    Each check draws two nonces, propose then confirm, so the two alternate.
+    """
+
+    drawn = 0
+
+    @classmethod
+    def token_hex(cls, count):
+        cls.drawn += 1
+        return ("ab" if cls.drawn % 2 else "cd") * count
+
+    @staticmethod
+    def SystemRandom():  # noqa: N802 - mirrors the secrets API
+        import random
+
+        return random.Random(7)
+
+
+def manifest_of(hub):
+    attach = [call for call in writes(hub) if call["action"] == "evidence.attach"][-1]
+    return json.loads(base64.b64decode(attach["artifact_base64"]))
+
+
+def park(target, proposal_id):
+    """Make the card checkable again while `proposal_id` stays open under another remembered card."""
+    state = state_of(target)
+    cards = state["scopes"][SCOPE]["cards"]
+    for entry in cards.values():
+        entry.pop("verified", None)
+        entry.pop("pending", None)
+    if proposal_id is not None:
+        cards["f" * 32] = {"seen": 1, "proposed": 1, "pending": proposal_id}
+    state["submissions"] = {}
+    vstate.save(target, state)
+
+
+def test_a_duplicate_pending_packet_is_written_once_kept_when_matching_and_never_overwritten(
+    verify_hub, capsys, resolver, monkeypatch
+):
+    target, hub, _, _ = verify_hub
+    monkeypatch.setattr(vc, "secrets", FixedSecrets)
+    existing = hubc.event_id()
+    hub.propose_reply = (409, {"code": "memory_proposal_duplicate_pending", "proposal_id": existing})
+    assert verify(target, capsys)[0] == 0
+    path = target / pk.PACKETS / f"{existing}.json"
+    first = os.stat(path)
+    assert io.sha256(path.read_bytes()) == manifest_of(hub)["packet_sha256"]
+    # The same check again: the matching packet stays exactly as it is.
+    park(target, existing)
+    status, report = verify(target, capsys)
+    assert status == 0 and report["skipped"]["duplicate_pending"] == 1
+    assert pk.MISMATCH not in report["skipped"]
+    again = os.stat(path)
+    assert (again.st_ino, again.st_mtime_ns) == (first.st_ino, first.st_mtime_ns)
+    assert packets(target) == [path.name]
+
+
+def test_a_mismatched_packet_for_a_duplicate_is_never_overwritten(verify_hub, capsys, resolver):
+    target, hub, _, _ = verify_hub
+    hub.propose_reply = (429, {"code": "memory_proposal_scope_quota", "error": "quota"})
+    assert verify(target, capsys)[0] == 0  # Binds the state to this hub without opening anything.
+    existing = hubc.event_id()
+    park(target, existing)
+    for name in packets(target):
+        (target / pk.PACKETS / name).unlink()
+    write_packet(target, f"{existing}.json", b'{"other": "packet"}\n')
+    hub.propose_reply = (409, {"code": "memory_proposal_duplicate_pending", "proposal_id": existing})
+    status, report = verify(target, capsys)
+    assert status == 0 and report["skipped"][pk.MISMATCH] == 1
+    assert (target / pk.PACKETS / f"{existing}.json").read_bytes() == b'{"other": "packet"}\n'
+    assert packets(target) == [f"{existing}.json"]  # The stage is gone, the proposal is left for review.
+    assert entry_for(target, CARD_ID)["pending"] == existing
+
+
+def test_a_crash_between_create_and_write_leaves_no_final_name_and_the_next_run_recovers(
+    verify_hub, capsys, resolver, monkeypatch
+):
+    target, hub, _, _ = verify_hub
+    original = pk.write_all
+
+    in_flight = []
+
+    def crash(handle, data):
+        # What the directory holds while the bytes are being written: only the temporary file.
+        in_flight.append(sorted(path.name for path in (target / pk.PACKETS).iterdir()))
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(pk, "write_all", crash)
+    status, report = verify(target, capsys)
+    assert status == 1 and report["code"] == "verify_io"
+    (names,) = in_flight
+    assert len(names) == 1 and pk.TEMPORARY.fullmatch(names[0])
+    assert packets(target) == [] and writes(hub) == []
+    monkeypatch.setattr(pk, "write_all", original)
+    status, report = verify(target, capsys)
+    assert status == 0
+    (proposal,) = report["proposals"]
+    path = target / pk.PACKETS / f"{proposal['proposal_id']}.json"
+    assert io.sha256(path.read_bytes()) == manifest_of(hub)["packet_sha256"]
+
+
+def test_a_leftover_temporary_file_is_removed_by_the_next_run(verify_hub, capsys):
+    target, _, _, _ = verify_hub
+    leftover = f".packet-{'0' * 32}.tmp"
+    write_packet(target, leftover, b"partial")
+    status, report = verify(target, capsys)
+    assert status == 0 and report["skipped"]["packets_temporary_removed"] == 1
+    assert leftover not in packets(target)
+
+
+def test_the_temporary_file_is_owner_only_inside_the_packet_directory(verify_hub, capsys, resolver, monkeypatch):
+    target, _, _, _ = verify_hub
+    seen = []
+    original = pk.write_all
+
+    def observe(handle, data):
+        for path in target.rglob(".packet-*.tmp"):
+            seen.append((path.parent, stat.S_IMODE(os.stat(path).st_mode)))
+        original(handle, data)
+
+    monkeypatch.setattr(pk, "write_all", observe)
+    assert verify(target, capsys)[0] == 0
+    # The stage, then the packet: each through its own temporary file in the packet directory.
+    assert len(seen) == 2 and set(seen) == {(target / pk.PACKETS, 0o600)}
+    assert not list(target.rglob(".packet-*.tmp"))
+
+
+def test_a_failure_after_submit_before_finalize_is_recovered_from_the_stage(verify_hub, capsys, resolver, monkeypatch):
+    target, hub, _, _ = verify_hub
+
+    def lost(*args):
+        raise OSError("lost before finalize")
+
+    monkeypatch.setattr(run_mod, "FINALIZE", lost)
+    status, report = verify(target, capsys)
+    assert status == 1 and report["code"] == "verify_io"
+    (proposal_id,) = [pending["proposal_id"] for pending in state_of(target)["submissions"].values()]
+    assert [name for name in packets(target) if pk.STAGED.fullmatch(name)]
+    assert f"{proposal_id}.json" not in packets(target)
+    monkeypatch.setattr(run_mod, "FINALIZE", pk.finalize)
+    status, report = verify(target, capsys)
+    assert status == 0 and report["skipped"]["packets_recovered"] == 1
+    assert packets(target) == [f"{proposal_id}.json"]
+    path = target / pk.PACKETS / f"{proposal_id}.json"
+    assert io.sha256(path.read_bytes()) == manifest_of(hub)["packet_sha256"]
+    assert sum(1 for call in hub.calls if call["action"] == "propose") == 1
+
+
+def test_a_failed_submit_is_replayed_by_the_next_healthy_run_with_the_same_request(verify_hub, capsys, resolver):
+    target, hub, fake, _ = verify_hub
+    hub.propose_reply = (503, {"code": "memory_writer_busy", "error": "busy", "retryable": True})
+    status, report = verify(target, capsys)
+    assert status == 1 and report["schedule"]["consecutive_failures"] == 1
+    assert "verified" not in entry_for(target, CARD_ID)
+    hub.propose_reply = None
+    calls = len(fake.calls)
+    status, report = verify(target, capsys)
+    assert status == 0 and len(report["proposals"]) == 1
+    first, second = [call for call in hub.calls if call["action"] == "propose"]
+    assert (first["client_event_id"], first["ops"]) == (second["client_event_id"], second["ops"])
+    # The replayed card is not checked again, and the real success clears the counter.
+    assert len(fake.calls) == calls
+    assert report["schedule"] == {"consecutive_failures": 0, "paused": False}
+
+
+def test_a_tampered_stage_is_removed_and_never_sent(verify_hub, capsys, resolver):
+    target, hub, _, _ = verify_hub
+    hub.propose_reply = (429, {"code": "memory_proposal_scope_quota", "error": "quota"})
+    assert verify(target, capsys)[0] == 0
+    (name,) = packets(target)
+    path = target / pk.PACKETS / name
+    record = json.loads(path.read_bytes())
+    record["packet"] = base64.b64encode(b'{"changed": true}\n').decode()
+    path.write_bytes(json.dumps(record).encode())
+    tampered = record["evidence_id"]
+    hub.propose_reply = None
+    hub.calls.clear()
+    status, report = verify(target, capsys)
+    assert status == 0 and report["skipped"]["packets_stage_invalid"] == 1
+    assert all(call["evidence_id"] != tampered for call in writes(hub) if call["action"] == "evidence.attach")
+    for call in writes(hub):
+        if call["action"] == "propose":
+            assert call["ops"][-1]["evidence_ids"] != [tampered]
+
+
+def test_an_idle_run_leaves_the_pause_counter_and_a_run_with_work_resets_it(verify_hub, capsys):
+    target, hub, fake, _ = verify_hub
+    assert verify(target, capsys)[0] == 0  # Every card is now inside its interval.
+    state = state_of(target)
+    state.update(consecutive_failures=2)
+    vstate.save(target, state)
+    calls = len(fake.calls)
+    status, report = verify(target, capsys)
+    assert status == 0 and report["idle"] is True and len(fake.calls) == calls
+    assert report["schedule"] == {"consecutive_failures": 2, "paused": False}
+    park(target, None)
+    status, report = verify(target, capsys)
+    assert status == 0 and report["idle"] is False
+    assert report["schedule"] == {"consecutive_failures": 0, "paused": False}
 
 
 # --- Read count snapshots ------------------------------------------------------------------

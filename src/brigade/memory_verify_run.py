@@ -16,29 +16,31 @@ One run, in order (phase-memory-verify D3 to D6):
 5. Assemble evidence, call the seats and check the replies
    (`memory_verify_contract.verify_card`). Commit expansions abstain until
    slice 9a supplies the resolver (`commit_resolver`).
-6. For each card with an op: write nothing yet, build the review packet and the
-   manifest, scan the manifest, attach it with `evidence.attach`, then open one
-   proposal for that one card with the correction ops and an `append_evidence`
-   op citing the manifest. Submission goes through the S19d request id ledger
-   in `memory_reflect_hub.submit`. Only after the proposal opens is the packet
-   written, owner-only, named by its proposal id.
+6. For each card with an op: build the review packet and the manifest, scan
+   the manifest, then publish a stage record with the exact ops, manifest and
+   packet (`memory_verify_packets`). Only then attach the manifest with
+   `evidence.attach` and open one proposal for that one card with the
+   correction ops and an `append_evidence` op citing the manifest, through the
+   S19d request id ledger in `memory_reflect_hub.submit`. Once the proposal is
+   open, the packet is published as `<proposal-id>.json` from the stage.
+
+At the start of every non-dry run, `Sender.reconcile` reads each stage. A
+stage whose ledger entry holds a proposal id is finalized, so a crash between
+submit and publication loses no packet. A stage whose request has no result
+yet is sent again, identical, under the same request id. A card with such an
+unresolved submission is not checked again and does not enter its cooldown.
 
 What reaches the hub: the `status`, `read_stats` and `proposal_show` reads,
 the manifest (codes, references, digests, byte ranges and seat ids, no free
 text) and the proposal ops. The only free text in an op is the replacement
 the contract already checked. Card text, evidence text and model output stay
-in the packet on this host.
+on this host, in the packet directory described in `memory_verify_packets`.
 
-Packets live under `.brigade/memory/verify/packets/` in an owner-only (0700)
-directory as owner-only (0600) files. An open proposal's packet is
-`<proposal-id>.json`. When a run sees the proposal is no longer open, it
-renames the packet to `<proposal-id>.t<ms>.json`, and a packet is deleted 14
-days after that time. New packets never push the directory past 64 MiB: the
-oldest terminal packets go first, and if there is still no room the card is
-deferred with `verify_packet_cap` and nothing is attached or proposed.
-
-Failure and quota follow D6. Three consecutive failed non-dry runs pause the
-scheduled job, and only a successful non-dry manual run clears the pause. A
+Failure and quota follow D6. A failed non-dry run adds one to the pause
+counter. A completed non-dry run resets it only when it did work: a seat call
+answered, or a submission reached a result. A completed run that only skipped
+leaves the counter as it was. Three consecutive failures pause the scheduled
+job, and only a manual non-dry run that did work clears the pause. A
 dry run calls the seats (unless `--no-model`, handled in `memory_verify_cmd`)
 but attaches, submits and writes nothing, and leaves the pause counter alone.
 """
@@ -49,7 +51,6 @@ import base64
 import contextlib
 import os
 import re
-import stat
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -66,6 +67,7 @@ from . import memory_verify_cmd as cmd
 from . import memory_verify_config as config
 from . import memory_verify_contract as contract
 from . import memory_verify_evidence as ev
+from . import memory_verify_packets as packets
 from . import memory_verify_seat as seats
 from . import memory_verify_select as pick
 from . import memory_verify_state as vstate
@@ -77,14 +79,11 @@ MAX_NEW_PROPOSALS = 4
 PENDING_CEILING = pick.PENDING_CEILING
 # proposal_show reads per run. The ceiling keeps remembered proposals far below this.
 MAX_SHOWS = 64
-PACKETS = f"{vstate.ROOT}/packets"
-PACKET_CAP = 64 * 1024 * 1024
-PACKET_DAYS = 14
 DAY_MS = pick.DAY_MS
 PACKET_SCHEMA = "brigade.memory-verify-packet.v1"
 MANIFEST_SCHEMA = "brigade.memory-verify-manifest.v1"
 MANIFEST_KIND = "memory-verify-manifest"
-WORKSPACE_ID = "memory-verify"
+WORKSPACE_ID = packets.WORKSPACE_ID
 FLOOR = "verifier_floor"
 MANIFESTS = "verifier_manifests"
 REFLECT_FOLDER = ".brigade/memory/reflect"
@@ -92,8 +91,6 @@ OPEN_STATES = frozenset({"pending", "held"})
 EVIDENCE_CONFLICT = "memory_evidence_conflict"
 EVIDENCE_CAPS = frozenset({"memory_evidence_principal_cap", "memory_evidence_workspace_cap"})
 COMPONENT = re.compile(r"[A-Za-z0-9._:-]{1,128}")
-OPEN_PACKET = re.compile(r"([0-9A-HJKMNP-TV-Z]{26})\.json")
-DONE_PACKET = re.compile(r"([0-9A-HJKMNP-TV-Z]{26})\.t([0-9]{1,16})\.json")
 REFLECT_REFUSAL = "the verify folder must not be the reflect job's folder. Give memory-verify its own folder"
 
 # Injectable for tests: the seat layer, evidence assembly, the archive and the clock.
@@ -102,13 +99,14 @@ CALL: Callable[..., seats.Reply] = seats.call
 WORK_AREA: Callable[[Path], contextlib.AbstractContextManager[Any]] = seats.work_area
 ASSEMBLE: Callable[..., Iterator[ev.Assembly]] = ev.assemble_all
 MONOTONIC: Callable[[], float] = time.monotonic
+FINALIZE: Callable[[Path, packets.Stage, str], str | None] = packets.finalize
 
 
 def _engine(verb: str, arguments: list[str]) -> Any:
     """One evidence engine verb, decoded, or None on any failure."""
-    from . import evidence_runtime, proc
+    from . import component_bins, proc
 
-    binary = evidence_runtime.resolve_miseledger()
+    binary = component_bins.resolve("brigade-evidence")
     if binary is None:
         return None
     result = proc.run([binary, verb, *arguments], timeout=30.0)
@@ -314,68 +312,6 @@ def _verdict(result: contract.CardResult) -> str:
     return "abstained"
 
 
-# --- Packets -------------------------------------------------------------------------------
-
-
-@contextlib.contextmanager
-def _packets(target: Path) -> Iterator[int]:
-    with io.directory(target / PACKETS, create=True, private=True) as fd:
-        yield fd
-
-
-def _listing(fd: int) -> list[tuple[str, int]]:
-    """(name, size) of every regular file in the packet directory."""
-    found = []
-    for name in os.listdir(fd):
-        metadata = os.stat(name, dir_fd=fd, follow_symlinks=False)
-        if stat.S_ISREG(metadata.st_mode):
-            found.append((name, metadata.st_size))
-    return found
-
-
-def maintain_packets(target: Path, open_ids: set[str], now: int) -> dict[str, int]:
-    """Mark packets of settled proposals terminal at `now`, then delete those terminal for 14 days."""
-    counts = {"packets_settled": 0, "packets_expired": 0}
-    with _packets(target) as fd:
-        for name, _size in _listing(fd):
-            opened = OPEN_PACKET.fullmatch(name)
-            if opened and opened[1] not in open_ids:
-                os.rename(name, f"{opened[1]}.t{now}.json", src_dir_fd=fd, dst_dir_fd=fd)
-                counts["packets_settled"] += 1
-                continue
-            done = DONE_PACKET.fullmatch(name)
-            if done and now - int(done[2]) >= PACKET_DAYS * DAY_MS:
-                os.unlink(name, dir_fd=fd)
-                counts["packets_expired"] += 1
-        os.fsync(fd)
-    return counts
-
-
-def _room(target: Path, size: int) -> bool:
-    """Whether a packet of `size` bytes fits under the cap, deleting the oldest terminal packets first."""
-    with _packets(target) as fd:
-        listing = _listing(fd)
-        total = sum(entry[1] for entry in listing)
-        terminal = sorted(
-            (int(done[2]), name, entry_size)
-            for name, entry_size in listing
-            if (done := DONE_PACKET.fullmatch(name)) is not None
-        )
-        for _, name, entry_size in terminal:
-            if total + size <= PACKET_CAP:
-                break
-            os.unlink(name, dir_fd=fd)
-            total -= entry_size
-        return total + size <= PACKET_CAP
-
-
-def _write_packet(target: Path, proposal_id: str, data: bytes) -> None:
-    io.write_exclusive(target / PACKETS / f"{proposal_id}.json", data)
-
-
-# --- Seat calls ----------------------------------------------------------------------------
-
-
 class SeatStop(Exception):
     """A seat reply that ends the run: quota stops it cleanly, a fatal status fails it."""
 
@@ -567,28 +503,28 @@ class Tally:
     made: int = 0
     ok: int = 0
     stop: str | None = None
+    # Set when a seat call answered or a submission reached a result. A run without it is idle.
+    worked: bool = False
 
     def skip(self, reason: str, amount: int = 1) -> None:
         if amount:
             self.skipped[reason] = self.skipped.get(reason, 0) + amount
 
 
-def _attach(
-    client: hubc.MemoryHubClient, card: contract.CardInput, shown: Review, evidence_id: str, observed: int
-) -> str | None:
-    """Attach the manifest. None when it is on the hub, else a skip code. Raises when the run must fail."""
+def _attach(client: hubc.MemoryHubClient, staged: packets.Stage, observed: int) -> str | None:
+    """Attach the staged manifest. None when it is on the hub, else a skip code. Raises when the run must fail."""
     try:
         client.call(
             "evidence.attach",
-            scope=card.scope,
-            card_id=card.card_id,
+            scope=staged.scope,
+            card_id=staged.card_id,
             workspace_id=WORKSPACE_ID,
-            evidence_id=evidence_id,
+            evidence_id=staged.evidence_id,
             artifact_kind=MANIFEST_KIND,
-            artifact_sha256=io.sha256(shown.manifest),
-            artifact_base64=base64.b64encode(shown.manifest).decode("ascii"),
+            artifact_sha256=io.sha256(staged.manifest),
+            artifact_base64=base64.b64encode(staged.manifest).decode("ascii"),
             observed_at=observed,
-            stance=shown.stance,
+            stance=staged.stance,
             client_event_id=hubc.event_id(),
         )
     except hubc.HubRefusal as exc:
@@ -602,6 +538,145 @@ def _attach(
             return "evidence_cap"
         return "manifest_refused"
     return None
+
+
+# Results of sending one staged submission. Only UNRESOLVED keeps the card out of its cooldown.
+OPENED, DUPLICATE, REFUSED, UNRESOLVED, DROPPED = "opened", "duplicate", "refused", "unresolved", "dropped"
+MANIFEST_REFUSED = "verify_manifest_refused"
+
+
+@dataclass
+class Sender:
+    """What sending needs from the run: the hub, the state, its ledger and the run's counters."""
+
+    target: Path
+    state: dict[str, Any]
+    client: hubc.MemoryHubClient
+    tally: Tally
+    tables: dict[str, dict[str, dict[str, Any]]]
+    epoch: str
+    observed: int
+    now: int
+    pending: int
+    state_principal: str = ""
+
+    @property
+    def ledger(self) -> dict[str, dict[str, Any]]:
+        return self.state.setdefault("submissions", {})
+
+    def save(self) -> None:
+        vstate.save(self.target, self.state)
+
+    def entry(self, staged: packets.Stage) -> dict[str, Any] | None:
+        key = fairness.key_digest(staged.scope, [staged.card_id])
+        return self.tables.get(staged.scope, {}).get(key)
+
+    def open(self, staged: packets.Stage, proposal_id: str) -> None:
+        """Remember the open proposal on its card, then publish its packet from the stage."""
+        entry = self.entry(staged)
+        if entry is not None and entry.get("pending") != proposal_id:
+            entry.update(pending=proposal_id, proposed=self.now)
+            self.pending += 1
+        self.save()
+        if FINALIZE(self.target, staged, proposal_id) is not None:
+            self.tally.skip(packets.MISMATCH)
+
+    def send(self, staged: packets.Stage, *, replay: bool) -> str:
+        """Attach the staged manifest and submit the staged ops through the request id ledger.
+
+        A replay sends the identical request again, so the hub answers it
+        idempotently under the same request id.
+        """
+        tally, remembered = self.tally, self.ledger.get(staged.digest)
+        if remembered is not None and remembered.get("proposal_id"):
+            self.open(staged, remembered["proposal_id"])
+            tally.skip("packets_recovered")
+            tally.worked = True
+            return OPENED
+        if remembered is not None and remembered.get("refused"):
+            packets.drop(self.target, staged)
+            return REFUSED
+        if replay and remembered is None:
+            # No request was published for it under this binding, so nothing can be replayed.
+            packets.drop(self.target, staged)
+            return DROPPED
+        hold = (
+            tally.stop
+            if tally.stop is not None
+            else "verify_deferred_proposals"
+            if len(tally.proposals) >= MAX_NEW_PROPOSALS
+            else "pending_ceiling"
+            if self.pending >= PENDING_CEILING
+            else None
+        )
+        if hold is not None:
+            tally.skip(hold)
+            return self._unsent(staged)
+        blocked = _attach(self.client, staged, self.observed)
+        if blocked is not None:
+            tally.skip(blocked)
+            if blocked == "evidence_quota":
+                tally.stop = blocked  # Back pressure: stop proposing without a failure.
+            if blocked != "manifest_refused":
+                return self._unsent(staged)
+            tally.attempted += 1
+            tally.failed += 1
+            if remembered is not None:
+                remembered["refused"] = MANIFEST_REFUSED
+                self.save()
+            packets.drop(self.target, staged)
+            return REFUSED
+        sent = ledger.submit(
+            self.client, self.ledger, staged.digest, list(staged.ops), base_epoch=self.epoch, save=self.save
+        )
+        tally.refused.extend({"card_id": staged.card_id, "code": code} for code in sent.refusals)
+        if sent.outcome == ledger.QUOTA:
+            tally.stop = "proposal_quota"
+            tally.skip("proposal_quota")
+            return UNRESOLVED
+        if sent.outcome in (ledger.DENIED, ledger.UNAVAILABLE):
+            raise VerifyRunError(sent.code or "hub_unavailable", "hub refused the verify request")
+        tally.attempted += 1
+        if sent.outcome == ledger.FAILED:
+            tally.failed += 1
+            current = self.ledger.get(staged.digest)
+            if current is not None and not current.get("refused"):
+                tally.skip("submission_unresolved")
+                return UNRESOLVED  # Retryable: the stage stays and the next run replays it.
+            packets.drop(self.target, staged)
+            return REFUSED if current is not None else UNRESOLVED
+        tally.worked = True
+        if sent.proposal_id is None:
+            packets.drop(self.target, staged)
+            tally.skip("duplicate_pending")
+            return REFUSED
+        self.open(staged, sent.proposal_id)
+        if sent.outcome == ledger.DUPLICATE:
+            tally.skip("duplicate_pending")
+            return DUPLICATE
+        tally.proposals.append({"scope": staged.scope, "card_id": staged.card_id, "proposal_id": sent.proposal_id})
+        return OPENED
+
+    def _unsent(self, staged: packets.Stage) -> str:
+        """Keep a stage whose request is already in the ledger, so the next run replays it. Drop any other."""
+        if staged.digest in self.ledger:
+            return UNRESOLVED
+        packets.drop(self.target, staged)
+        return DROPPED
+
+    def reconcile(self) -> set[tuple[str, str]]:
+        """At run start: finalize stages of opened proposals and replay unresolved ones.
+
+        Returns the cards whose submission is still unresolved, which this run
+        neither checks again nor puts into their cooldown.
+        """
+        found, invalid = packets.staged(self.target, ledger._submission_digest)
+        self.tally.skip("packets_stage_invalid", invalid)
+        unresolved = set()
+        for staged in found:
+            if self.send(staged, replay=True) == UNRESOLVED:
+                unresolved.add((staged.scope, staged.card_id))
+        return unresolved
 
 
 def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, now: int) -> dict[str, Any]:
@@ -618,18 +693,30 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
         updates = {}
     tally = Tally(skipped=picked.skipped)
     tables: dict[str, dict[str, dict[str, Any]]] = {}
+    unresolved: set[tuple[str, str]] = set()
     if not dry_run:
         tables = _remember(state, picked, updates, now)
         vstate.save(target, state)  # The one write that carries every complete read count snapshot.
-        for name, count in maintain_packets(target, _open_proposals(state), now).items():
-            tally.skip(name, count)
     known = {key: entry for cards in tables.values() for key, entry in cards.items()} if not dry_run else picked.entries
-    pending = _pending_count(known)
+    sender = Sender(
+        target,
+        state,
+        client,
+        tally,
+        tables,
+        picked.log_epoch,
+        _hub_ms(status, now),
+        now,
+        _pending_count(known),
+        status["principal"],
+    )
+    if not dry_run:
+        unresolved = sender.reconcile()
+        for name, count in packets.maintain(target, _open_proposals(state), now).items():
+            tally.skip(name, count)
     by_card = {(head["scope"], head["card_id"]): head for head in picked.heads}
     chosen = [by_card[(card.scope, card.card_id)] for card, _lane in picked.selection.selected]
-    observed = _hub_ms(status, now)
     deadline = MONOTONIC() + RUN_SECONDS
-    submissions = state.setdefault("submissions", {}) if not dry_run else {}
     today = now // DAY_MS
     with WORK_AREA(target) as area:
         for position, assembly in enumerate(ASSEMBLE(chosen, settings, ARCHIVE(), now_ms=now)):
@@ -641,8 +728,14 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
                 tally.skip("verify_deferred_time")
                 continue
             head = chosen[position]
+            if (head["scope"], head["card_id"]) in unresolved:
+                tally.skip("submission_unresolved_card")
+                continue
             key = fairness.key_digest(head["scope"], [head["card_id"]])
             entry = tables.get(head["scope"], {}).get(key)
+            if entry is not None and entry.get("pending"):
+                tally.skip("pending_proposal")  # Reconcile opened its proposal this run.
+                continue
             calls = Calls(area)
             try:
                 card = contract.CardInput.from_text(
@@ -677,39 +770,25 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
                 continue
             tally.made += calls.made
             tally.ok += calls.ok
+            tally.worked = tally.worked or calls.ok > 0
             report = {"scope": card.scope, **result.report(), "evidence": assembly.report()["counts"]}
             tally.cards.append(report)
             failed = calls.failed()
             if failed is not None:
                 tally.skip(failed)
-            elif entry is not None:
+            sent = None
+            if result.proposal is not None:
+                sent = _propose(
+                    sender, card=card, result=result, assembly=assembly, calls=calls, pair=pair, dry_run=dry_run
+                )
+            # A card whose submission has no result stays out of its cooldown, so its request is replayed.
+            if failed is None and entry is not None and sent != UNRESOLVED:
                 entry.update(verified=today, revision=card.revision, verdict=_verdict(result))
                 found = assembly.evidence()
                 if found is not None:
                     entry["evidence"] = found.digest
                 else:
                     entry.pop("evidence", None)
-            if result.proposal is None:
-                continue
-            pending = _propose(
-                target,
-                state,
-                client,
-                tally,
-                card=card,
-                result=result,
-                assembly=assembly,
-                calls=calls,
-                pair=pair,
-                entry=entry,
-                submissions=submissions,
-                principal=status["principal"],
-                epoch=picked.log_epoch,
-                observed=observed,
-                pending=pending,
-                dry_run=dry_run,
-                now=now,
-            )
     if tally.made and not tally.ok and tally.stop != "seat_quota":
         raise VerifyRunError("verify_seats_failed", "every model call in the run failed")
     payload: dict[str, Any] = {
@@ -721,6 +800,7 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
         "proposals": tally.proposals,
         "refused": tally.refused,
         "calls": {"made": tally.made, "ok": tally.ok},
+        "idle": not tally.worked,
     }
     if tally.attempted and tally.failed == tally.attempted:
         payload.update(status="failed", code="all_proposals_refused", reason="the hub refused every verify proposal")
@@ -738,91 +818,65 @@ def _updated_ms(head: Mapping[str, Any]) -> int | None:
 
 
 def _propose(
-    target: Path,
-    state: dict[str, Any],
-    client: hubc.MemoryHubClient,
-    tally: Tally,
+    sender: Sender,
     *,
     card: contract.CardInput,
     result: contract.CardResult,
     assembly: ev.Assembly,
     calls: Calls,
     pair: Sequence[seats.Seat],
-    entry: dict[str, Any] | None,
-    submissions: dict[str, dict[str, Any]],
-    principal: str,
-    epoch: str,
-    observed: int,
-    pending: int,
     dry_run: bool,
-    now: int,
-) -> int:
-    """Attach and submit one card's proposal. Returns the updated pending count."""
+) -> str | None:
+    """Stage, attach and submit one card's proposal. None when nothing was sent, else the send result."""
+    tally = sender.tally
     proposal = result.proposal
     assert proposal is not None
     corrections = proposal.payload_ops()
     digest = ledger._submission_digest(corrections)
-    remembered = submissions.get(digest, {})
+    remembered = sender.ledger.get(digest, {}) if not dry_run else {}
     if remembered.get("proposal_id"):
         tally.skip("already_proposed")
+        entry = sender.tables.get(card.scope, {}).get(fairness.key_digest(card.scope, [card.card_id]))
         if entry is not None:
             entry.update(pending=remembered["proposal_id"])
-        return pending
+        return None
     if remembered.get("refused"):
         tally.skip("refused")
-        return pending
+        return None
     if tally.stop is not None:
         tally.skip(tally.stop)
-        return pending
+        return None
     if len(tally.proposals) >= MAX_NEW_PROPOSALS:
         tally.skip("verify_deferred_proposals")
-        return pending
-    if pending >= PENDING_CEILING:
+        return None
+    if sender.pending >= PENDING_CEILING:
         tally.skip("pending_ceiling")
-        return pending
+        return None
     shown = review(card, result, assembly, calls, pair)
     if contract.scan_problem(shown.manifest.decode()):
         tally.skip("verify_manifest_unclean")
-        return pending
+        return None
     if dry_run:
         tally.skip("dry_run_proposal")
-        return pending
-    if not _room(target, len(shown.packet)):
+        return None
+    evidence_id = _evidence_id(sender.state_principal, shown.manifest)
+    staged = packets.Stage(
+        digest=digest,
+        scope=card.scope,
+        card_id=card.card_id,
+        evidence_id=evidence_id,
+        stance=shown.stance,
+        manifest=shown.manifest,
+        packet=shown.packet,
+        ops=(*corrections, _manifest_op(card, proposal, evidence_id)),
+    )
+    record = staged.record()
+    # The stage and, later, the packet it publishes both take room until the stage is removed.
+    if not packets.room(sender.target, len(record) + len(shown.packet)):
         tally.skip("verify_packet_cap")
-        return pending
-    evidence_id = _evidence_id(principal, shown.manifest)
-    blocked = _attach(client, card, shown, evidence_id, observed)
-    if blocked is not None:
-        tally.skip(blocked)
-        if blocked == "evidence_quota":
-            tally.stop = blocked  # Back pressure: stop proposing without a failure.
-        elif blocked == "manifest_refused":
-            tally.attempted += 1
-            tally.failed += 1
-        return pending
-    ops = [*corrections, _manifest_op(card, proposal, evidence_id)]
-    sent = ledger.submit(client, submissions, digest, ops, base_epoch=epoch, save=lambda: vstate.save(target, state))
-    tally.refused.extend({"card_id": card.card_id, "code": code} for code in sent.refusals)
-    if sent.outcome == ledger.QUOTA:
-        tally.stop = "proposal_quota"
-        tally.skip("proposal_quota")
-        return pending
-    if sent.outcome in (ledger.DENIED, ledger.UNAVAILABLE):
-        raise VerifyRunError(sent.code or "hub_unavailable", "hub refused the verify request")
-    tally.attempted += 1
-    if sent.outcome == ledger.FAILED:
-        tally.failed += 1
-        return pending
-    if sent.proposal_id is not None and entry is not None:
-        entry.update(pending=sent.proposal_id, proposed=now)
-    if sent.outcome == ledger.DUPLICATE:
-        tally.skip("duplicate_pending")
-        return pending + (sent.proposal_id is not None)
-    assert sent.proposal_id is not None
-    _write_packet(target, sent.proposal_id, shown.packet)
-    vstate.save(target, state)
-    tally.proposals.append({"scope": card.scope, "card_id": card.card_id, "proposal_id": sent.proposal_id})
-    return pending + 1
+        return None
+    packets.stage(sender.target, staged)
+    return sender.send(staged, replay=False)
 
 
 def _failure(exc: BaseException) -> dict[str, Any]:
@@ -874,7 +928,12 @@ def run_payload(
         ) as exc:
             payload = _failure(exc)
         if not dry_run:
-            vstate.record_run(state, "failed" if payload["status"] == "failed" else "completed")
+            # The pause counter rule: a failed run adds one. A completed run resets it only when it
+            # did work (a seat call answered, or a submission reached a result). An idle run leaves it.
+            if payload["status"] == "failed":
+                vstate.record_run(state, "failed")
+            elif not payload.get("idle"):
+                vstate.record_run(state, "completed")
             vstate.save(target, state)
         payload["schedule"] = {key: state[key] for key in ("consecutive_failures", "paused")}
         return payload

@@ -7,3 +7,8 @@
   11:00 and refuses the reflect job's folder and fleet credentials.
 - A rate-limited verify scope is now scored from the last complete read count
   snapshot when it is at most two days old.
+- Verify submissions are staged on disk before they are sent. A crash after a
+  proposal opens no longer loses its review packet, and a submission that met
+  a transient error is replayed with the same request id by the next run
+  instead of waiting out the card's cooldown. A run that only skipped no
+  longer clears the pause counter.
