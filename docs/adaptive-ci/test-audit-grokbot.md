@@ -15,16 +15,16 @@ The evidence supports removing 444 of 33,044 test lines (1.3 percent), not the 2
 | Test LOC, non-blank non-comment | 27,729 | 27,378 | -351 |
 | Support LOC dedicated to grokbot tests | 0 | 0 | 0 |
 | Grokbot source LOC (65 files, counted separately) | 29,316 | 29,316 | 0 |
-| Grokbot test runtime, run 1 (pytest-reported seconds) | 73.940 | 74.433 | |
-| Grokbot test runtime, run 2 | 77.784 | 66.917 | |
-| Sum of per-test times, run 1 / run 2 | 68.3 / 72.5 | 69.4 / 62.4 | |
+| Grokbot test runtime, run 1 (seconds, pytest summary line) | 73.98 | 74.57 | +0.59 |
+| Grokbot test runtime, run 2 | 81.41 | 66.96 | -14.45 |
+| Sum of per-test call times from junit, run 1 / run 2 (seconds) | 68.3 / 72.5 | 69.4 / 62.4 | |
 | Grokbot line coverage (statements covered) | 78.618% (13,689 of 17,412) | 78.618% (13,689 of 17,412) | +0.000 points |
 
 Definitions and conditions:
 
 - Test LOC counts every line of the 53 `tests/test_grokbot*.py` files. Support LOC is 0 because the suite has no grokbot-specific support module. Shared support (`tests/dot_support.py`, `tests/conftest.py`) is not counted.
 - Source LOC counts every `src/brigade/**/*.py` path containing `grokbot`, including the `grokbot_fleet`, `grokbot_obsidian`, `grokbot_t3` and `grokbot_wazuh` packages and `fleet_client_grokbot.py` and `fleet_hub_grokbot.py`. No source file changed.
-- Runtime: the same command before and after, `python -m pytest <53 files> -q --durations=0 --junitxml=...`, serial, no coverage, through `brigade work verify run`. Two runs each side. The machine was shared with other agents' pytest runs, so the second baseline run (77.8 s) includes a brief concurrent analysis script on my side. Treat differences under about 5 seconds as noise. Runtime is not a lever here: the whole set runs in about 75 seconds.
+- Runtime: the same command before and after, `python -m pytest <53 files> -q --durations=0 --junitxml=...`, serial, no coverage, through `brigade work verify run`. Two runs each side. The machine was shared with other agents' pytest runs, and the second baseline run (81.4 s) overlapped a CPU-heavy analysis script of mine that I stopped partway. The four runs span 67 to 81 seconds with no change that survives that spread, so this PR makes no runtime claim. Runtime is not a lever here: the whole set runs in about 75 seconds.
 - Coverage: one run each side with `--cov=brigade`, filtered to the 65 grokbot source files. The venv had the `grokbot` extra installed (`pip install -e ".[dev,grokbot]"`), the way CI's `tests/test_grokbot_mcp.py` step does. Without the extra, 22 tests skip silently and coverage reads 77.94 percent.
 
 ## Why not 20 percent
@@ -202,8 +202,18 @@ Practical points for adopting a gate in Brigade:
 
 ## Verification
 
-Run through `brigade work verify run --target . --argv-json ... --capture brigade-work`:
+Every run went through `brigade work verify run --target . --argv-json ... --capture brigade-work`. The receipt ids below are local to the authoring worktree (`.brigade/work` is not committed).
 
-- Baseline and after timing, coverage and per-test context runs: `.venv/bin/python -m pytest <53 files> ...` (see Result for the exact conditions).
-- Per-change gate: `./scripts/verify-focused` with the 15 changed test files (ruff, ruff format, mypy, version sync, managed and template snapshots, pytest).
-- Mutations: a copy-and-mutate driver script (copy the tree, apply one text replacement, run the named tests, restore), run as a single script receipt.
+| Run | Receipt | Result |
+|---|---|---|
+| Baseline timing, run 1 and run 2 (`[dev,grokbot]`) | `20261109-151509-work-verify-98458b`, `20261109-151652-work-verify-a0df5b` | 1,999 passed, 73.98 s and 81.41 s |
+| Baseline coverage | `20261109-151840-work-verify-aba307` | 1,999 passed, 78.618 percent of grokbot statements |
+| Baseline without the `grokbot` extra (discarded) | `20261109-151212-work-verify-64e83d` | 1,977 passed, 22 skipped, 77.935 percent |
+| Per-test coverage contexts | `20261109-152135-work-verify-50b1be` | 1,999 passed |
+| Controls for the three fleet_tools false positives | `20261109-152546-work-verify-94d155` | 2 passed (same assertions pass with no saturation, no replay, no reservation) |
+| After timing, run 1 and run 2 | `20261109-153724-work-verify-b95041`, `20261109-153912-work-verify-31d042` | 1,992 passed, 74.57 s and 66.96 s |
+| After coverage | `20261109-154053-work-verify-d2c7e1` | 1,992 passed, 78.618 percent, covered lines unchanged in all 65 modules |
+| Final focused gate over the 15 changed test files | `20261109-154343-work-verify-98c9a6` | `./scripts/verify-focused`: ruff, ruff format, mypy, version sync, managed and template snapshots, 943 passed |
+| Mutations, three batches (40 rows) | `20261109-153407-work-verify-ba789c`, `20261109-153613-work-verify-f26664`, `20261109-154416-work-verify-760c0c` | worktree `src/` diff exit code 0 after each batch |
+
+An earlier mutation attempt (`20261109-153323-work-verify-b7b81a`) was interrupted on purpose after it showed a same-size `.pyc` cache hit, and rerun with `PYTHONDONTWRITEBYTECODE=1`.
