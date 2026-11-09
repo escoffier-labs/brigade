@@ -102,6 +102,43 @@ def root_directory_flags() -> int:
     return getattr(os, "O_PATH", os.O_RDONLY) | o_directory | o_nofollow | getattr(os, "O_CLOEXEC", 0)
 
 
+def mount_ids_required() -> bool:
+    """Whether descriptors carry a readable mount id here, so containment must check it.
+
+    Linux reports the mount of every open descriptor in ``/proc/self/fdinfo``,
+    which tells a bind mount apart from its source even on one device. Other
+    POSIX systems have no such facility, and callers fall back to ``st_dev``.
+    """
+    return sys.platform.startswith("linux")
+
+
+def parse_mount_id(data: bytes) -> int:
+    """The ``mnt_id:`` value of one fdinfo record. Raises the typed OSError when absent or malformed."""
+    for line in data.splitlines():
+        if line.startswith(b"mnt_id:"):
+            value = line[len(b"mnt_id:") :].strip()
+            if value.isdigit():
+                return int(value)
+            break
+    raise unavailable("mount identities")
+
+
+def mount_id(fd: int) -> int:
+    """The mount id of an open descriptor on Linux, from ``/proc/self/fdinfo``.
+
+    Raises the typed OSError when the record cannot be read or has no mount id,
+    so a caller that requires mount containment fails closed.
+    """
+    if not mount_ids_required() or type(fd) is not int or fd < 0:
+        raise unavailable("mount identities")
+    try:
+        with open(f"/proc/self/fdinfo/{fd}", "rb") as handle:
+            data = handle.read(65536)
+    except OSError:
+        raise unavailable("mount identities") from None
+    return parse_mount_id(data)
+
+
 def validate_component(name: str) -> str:
     """Reject empty, dotted, separator-bearing, or NUL names so walks stay contained."""
     if not isinstance(name, str) or not name:

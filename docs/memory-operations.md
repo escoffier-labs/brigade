@@ -2179,6 +2179,78 @@ after the configuration was read is refused with `verify_root_changed`.
 
 A scope with no `[[verify.workspace]]` entry is never verified.
 
+### Evidence assembly
+
+The model-backed pass reads a card's cited evidence only from the roots bound
+to the card's scope. Each root is opened once per run as a directory handle
+(no-follow on POSIX), checked against the identity pinned at parse time, and
+held while evidence under it is read. A cited path resolves under that handle
+one component at a time and must stay under `.brigade/work/verify-runs`,
+`.brigade/receipts`, `.brigade/evidence`, `memory/evidence`, the handoff inbox
+or a writer inbox. Links, hard links, mount crossings and files over 1 MiB are
+refused. On Linux every opened directory and file must also report the root's
+mount id in `/proc/self/fdinfo`, which refuses a bind mount on the same
+device, and a root whose mount id cannot be read is refused. Other POSIX
+systems check the device only. On Windows the root opens through the handle-relative helper, which
+refuses reparse points, and its file index is checked the same way. Without
+either backend every root is refused.
+
+An archive project listed by two scopes belongs to neither: its bundles,
+excerpts and receipt records are not used for any scope. List each project
+under one scope only.
+
+A cited item is `evidence_unreachable` when it sits under no bound root or
+under two roots of the scope, under another scope's root, outside the evidence
+directories, or an attested evidence id. A cited bundle is read only through
+the evidence engine's regenerated, eligibility-filtered reply, never from its
+cache files. Every source the engine marks ineligible, every source with an
+integrity mismatch, and every source whose project the scope does not own
+exactly is dropped and counted by reason. So is a source whose trust label is
+missing, outside the engine's set, unknown, quarantined, or changed by the
+time it is read again, and one whose injection status is no longer clean. The
+text used comes from that same read. A bundle counts toward corroboration only
+when every source it keeps has the engine's item and collection identifiers,
+and, for material Brigade wrote, a run id that agrees with its external id.
+Otherwise it still reaches the prompt as context and counts
+`lineage_incomplete`. Paths are compared after NFC normalization, with POSIX
+separators, relative to the evidence directory. A bundle's observation time is
+the newest creation time among the sources it keeps. The engine's regeneration
+time is never used, and a bundle whose sources carry no valid time has none.
+Every observation time (bundle sources, receipt completion, file modification
+and excerpts) is checked against one run time. A time more than five minutes
+after it, before 1970, or out of range counts as no time and is counted as
+`observed_in_future` for bundle sources.
+
+An item left empty or holding only whitespace, including one the byte bounds
+cut to nothing, is dropped and counted as `evidence_empty`. A receipt or
+engine text holding a string that is not valid UTF-8, such as an escaped lone
+surrogate, makes that reference unreachable without stopping the run. So does
+an archive reply with a value of the wrong type, such as a digest source that
+is a list: the reference fails closed and later cards still assemble. A bundle with no
+source left is `evidence_unreachable`. Each reachable item is cut on a UTF-8
+boundary (8 KiB per item, 32 KiB per card, 8 items, 3 excerpts of 4 KiB) and
+scanned with the memory rule bundle, both as rendered and, for receipts, as
+each decoded field value. Related excerpts count only when the engine's record
+for each hit names one of the scope's projects exactly, because the engine's
+project filter also matches longer names that contain it. Each hit needs an
+explicit eligible trust label that the engine's record repeats. The text sent
+to the model is that record's body, which is also the text the checks ran on. A blocked or flagged item is dropped,
+counted as `evidence_flagged`, and recorded with its rule ids only.
+
+Only a verify receipt whose bytes match the digest the local evidence archive
+recorded for it, under one of the scope's projects and at the same path,
+ranks as authenticated, and only for the fields Brigade writes: argv, exit
+codes, run status, times, tree fingerprint, commit and manifest id. Its stdout
+and stderr summaries form a separate medium item. A card gets no model call
+(`no_evidence`, `evidence_unreachable`, `evidence_flagged` or
+`uncorroborated`) unless an authenticated receipt and a second independently
+produced item remain, from a different file, run id and archive record (a
+bundle carries those of every source in it), sharing no run of 200
+or more bytes anywhere in either source (a source too repetitive to fingerprint
+fully counts as copied), and drawn from neither command output
+nor related excerpts. The archive record must repeat the receipt's source,
+collection, kind, project, path and run exactly, with no integrity mismatch.
+
 ### Commands
 
 ```bash
