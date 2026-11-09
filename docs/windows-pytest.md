@@ -77,6 +77,15 @@ For local use, omit `--job-started-at`. Then `--job-timeout` alone caps driver
 execution from entry, including driver setup. The default per-file timeout
 is 900 seconds and the default parallel worker count is six.
 
+## Pull request sharding
+
+The pull request lane (`windows-affected-tests` in `ci.yml`) selects files with
+`scripts/windows_affected_tests.py` and spreads a large selection across up to
+three runners (`windows-affected-shard`). Each runner calls this driver with
+`--files-from` and `--keep-order`, which starts files in the listed order
+(heaviest first) instead of sorting them by name. Measurements and the balance
+weights are in [adaptive-ci/windows-tail.md](adaptive-ci/windows-tail.md).
+
 ## Isolation phase
 
 CI explicitly selects `test_runs_serve.py` and `test_aboyeur.py` with `--serial`.

@@ -8,6 +8,9 @@ jobs:
   hub:
     name: hub (Rust ${{ matrix.toolchain }})
     runs-on: ubuntu-latest
+    # A caller job that uses a reusable workflow cannot set timeout-minutes,
+    # so the limits live here. Measured 2026-11-05 to 11-09: max 15.2 min.
+    timeout-minutes: 45
     strategy:
       matrix:
         toolchain: [stable, '1.85.0']
@@ -108,6 +111,8 @@ jobs:
     # pre-publication acceptance there, as the release job does.
     name: hub (linux-arm64)
     runs-on: ubuntu-24.04-arm
+    # Measured max 2.1 min with a warm cache; a cold release build is longer.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: engines/hub

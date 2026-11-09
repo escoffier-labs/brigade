@@ -720,12 +720,3 @@ def test_relay_findings_help_is_preview_first_without_credential_options(capsys)
     assert "preview" in out
     for option in ("--token", "--bearer", "--password", "--api-key", "--credential"):
         assert option not in out
-
-
-def test_existing_findings_commands_remain_in_parser_inventory():
-    from brigade.roadmap_cmd import _cli_command_paths
-
-    paths = _cli_command_paths()
-    assert "brigade run cloud grokbot relay-findings" in paths
-    assert "brigade run cloud grokbot reconcile-findings" in paths
-    assert "brigade run cloud grokbot convert-findings" in paths

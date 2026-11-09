@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import os
@@ -18,6 +17,7 @@ from typing import Any
 
 from . import engine_paths, memory_bm25
 from .budgets import MEMORY_CARD_BUDGET_BYTES
+from .frontmatter_literal import bounded_literal_list
 from .install import apply_gitignore
 from .selection import Selection
 from .localio import (
@@ -365,11 +365,7 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, Any], bool]:
         if not key:
             continue
         if value.startswith("[") and value.endswith("]"):
-            try:
-                parsed = ast.literal_eval(value)
-            except (SyntaxError, ValueError):
-                parsed = value
-            data[key] = parsed
+            data[key] = bounded_literal_list(value)
         elif value.lower() in {"true", "false"}:
             data[key] = value.lower() == "true"
         else:

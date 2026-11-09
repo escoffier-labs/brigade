@@ -1,5 +1,7 @@
 """Selection contracts for the PR Windows lane."""
 
+import json
+import re
 import subprocess
 
 import pytest
@@ -125,3 +127,127 @@ def test_merge_first_parent_excludes_changes_already_on_the_base_branch(tmp_path
     selector.main(["--repo", str(tmp_path), "--base", "HEAD^1", "--head", "HEAD", "--output", str(current)])
     assert stale.read_text() == "test_engine.py\n"
     assert current.read_text() == ""
+
+
+def test_driver_change_adds_the_flush_tests_that_exist(tmp_path):
+    for name in (*selector.FLUSH_TESTS[:2], "test_unrelated.py"):
+        write(tmp_path, f"tests/{name}")
+    assert selector.select_tests(tmp_path, ["scripts/windows_pytest.py"]) == sorted(
+        [*selector.FLUSH_TESTS[:2], "test_unrelated.py"]
+    )
+    assert selector.select_tests(tmp_path, ["tests/test_unrelated.py"]) == ["test_unrelated.py"]
+
+
+def test_flush_tests_exist_in_the_real_suite():
+    missing = [name for name in selector.FLUSH_TESTS if not (selector.Path("tests") / name).exists()]
+    assert not missing
+
+
+def test_serial_files_match_the_ci_driver_arguments():
+    workflow = (selector.Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
+    section = workflow.split("  windows-affected-shard:", 1)[1].split("  windows-affected-tests:", 1)[0]
+    assert set(re.findall(r"--serial (\S+)", section)) == selector.SERIAL_FILES
+
+
+def test_plan_runs_every_selected_file_exactly_once_heaviest_first():
+    names = [f"test_{i:03}.py" for i in range(120)]
+    weights = {name: float(300 - i) for i, name in enumerate(names)}
+    shards = selector.plan_shards(names, weights, 4.0)
+    assert 1 < len(shards) <= selector.MAX_SHARDS
+    assert sorted(name for shard in shards for name in shard) == names
+    for shard in shards:
+        assert shard == sorted(shard, key=lambda name: (-weights[name], name))
+    loads = [sum(weights[name] for name in shard) for shard in shards]
+    assert max(loads) < 1.1 * min(loads)
+
+
+def test_plan_keeps_a_small_selection_on_one_runner_and_caps_a_large_one():
+    small = [f"test_{i}.py" for i in range(20)]
+    assert len(selector.plan_shards(small, {}, 4.0)) == 1
+    assert selector.plan_shards([], {}, 4.0) == []
+    huge = [f"test_{i}.py" for i in range(2000)]
+    assert len(selector.plan_shards(huge, {}, 4.0)) == selector.MAX_SHARDS
+
+
+def test_plan_never_creates_an_empty_shard_for_few_heavy_files():
+    serial = sorted(selector.SERIAL_FILES)[0]
+    for names, weights in (
+        (["test_heavy.py"], {"test_heavy.py": 30000.0}),
+        ([serial], {serial: 3000.0}),
+        ([serial, "test_heavy.py"], {serial: 3000.0, "test_heavy.py": 30000.0}),
+    ):
+        shards = selector.plan_shards(names, weights, 4.0)
+        assert all(shards), shards
+        assert sorted(name for shard in shards for name in shard) == sorted(names)
+
+
+def test_plan_counts_serial_files_as_wall_time():
+    serial = sorted(selector.SERIAL_FILES)[0]
+    names = [serial, *(f"test_{i:02}.py" for i in range(30))]
+    shards = selector.plan_shards(names, {serial: 500.0}, 4.0)
+    assert len(shards) == 2
+    # The 500 second serial file outweighs all 30 light files combined.
+    assert [serial] in shards
+
+
+def test_load_weights_degrades_to_defaults(tmp_path):
+    assert selector.load_weights(tmp_path / "missing.json") == ({}, 5.0)
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json")
+    assert selector.load_weights(broken) == ({}, 5.0)
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps({"default_seconds": 3, "seconds": {"test_a.py": 40}}))
+    assert selector.load_weights(good) == ({"test_a.py": 40.0}, 3.0)
+
+
+def test_committed_weights_name_existing_tests():
+    weights, default = selector.load_weights(selector.DEFAULT_WEIGHTS)
+    assert weights and default > 0
+    assert not [name for name in weights if not (selector.Path("tests") / name).exists()]
+
+
+def test_plan_cli_writes_matrix_and_inert_entry_for_empty_selection(tmp_path):
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(tmp_path), *args], text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.email", "contributor@example.com")
+    git("config", "user.name", "Contributor")
+    write(tmp_path, "tests/test_old.py")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    write(tmp_path, "tests/test_new.py")
+    git("add", "-A")
+    git("commit", "-qm", "head")
+    plan = tmp_path / "plan.json"
+    argv = ["--repo", str(tmp_path), "--base", base, "--output", str(tmp_path / "files.txt"), "--plan", str(plan)]
+    assert selector.main(argv) == 0
+    assert json.loads(plan.read_text()) == {
+        "count": 1,
+        "matrix": {"include": [{"shard": 1, "total": 1, "files": "test_new.py\n"}]},
+    }
+    assert selector.main([*argv[:2], "--base", "HEAD", *argv[4:]]) == 0
+    assert json.loads(plan.read_text()) == {
+        "count": 0,
+        "matrix": {"include": [{"shard": 1, "total": 1, "files": ""}]},
+    }
+
+
+def test_weights_command_keeps_heavy_files_and_averages_the_rest(tmp_path):
+    def record(name, rows):
+        path = tmp_path / name
+        path.write_text(json.dumps({"results": [{"name": n, "status": s, "seconds": t} for n, s, t in rows]}))
+        return path
+
+    one = record(
+        "a.json", [("test_heavy.py", "passed", 100), ("test_light.py", "passed", 2), ("test_gone.py", "unstarted", 9)]
+    )
+    two = record("b.json", [("test_heavy.py", "failed", 200), ("test_light.py", "passed", 4)])
+    output = tmp_path / "weights.json"
+    assert selector.main(["weights", str(one), str(two), "--output", str(output)]) == 0
+    assert json.loads(output.read_text()) == {
+        "schema": "brigade.windows_test_weights.v1",
+        "default_seconds": 3.0,
+        "seconds": {"test_heavy.py": 150},
+    }
