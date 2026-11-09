@@ -11,6 +11,7 @@ import pytest
 
 from brigade import dirfd
 from brigade import localio
+from brigade import memory_cmd
 from brigade import memory_proposal_io as io
 from brigade import memory_verify_config as config
 from brigade import memory_verify_evidence as ev
@@ -23,6 +24,7 @@ RUN = "20261101-120000-work-verify-abc123"
 RECEIPT = f".brigade/work/verify-runs/{RUN}/receipt.json"
 HANDOFF = "memory/handoff-inbox/2026-11-01-port.md"
 SECRET = "Zanzibarquill"
+BUNDLE = memory_cmd.EVIDENCE_LOCATOR_PREFIX
 
 
 def card(*refs, title="Port listener", claim=f"{SECRET} listens on port 7."):
@@ -469,10 +471,10 @@ def test_a_bundle_under_an_unlisted_or_second_project_is_unreachable(tmp_path):
             "b-none": ev.Bundle((), ("x",)),
         }
     )
-    [result] = run(card("miseledger:b-listed"), parsed, archive)
+    [result] = run(card(f"{BUNDLE}b-listed"), parsed, archive)
     assert [(i.kind, i.text) for i in result.items] == [(ev.EVIDENCE_BUNDLE, "listed bundle text")]
     for bundle in ("b-unlisted", "b-shared", "b-two", "b-none", "b-missing"):
-        [result] = run(card(f"miseledger://evidence/{bundle}"), parsed, archive)
+        [result] = run(card(f"{BUNDLE}{bundle}"), parsed, archive)
         assert result.abstain == ev.UNREACHABLE, bundle
 
 

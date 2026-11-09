@@ -45,7 +45,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -355,21 +355,20 @@ class EngineArchive:
     Related excerpts use `search --project`. A bundle's project is the single
     project filter its engine recorded. A receipt record is the archive item
     for that run, read with `show`, and must name the same project and path.
+
+    `runner(verb, arguments)` runs one engine verb and returns its decoded JSON
+    reply, or None on any failure. The code that wires the pass supplies it, so
+    this module never resolves or names an engine executable.
     """
 
-    def __init__(self, runner: Any = None) -> None:
+    def __init__(self, runner: Callable[[str, list[str]], Any]) -> None:
         self._runner = runner
 
     def _run(self, verb: str, arguments: list[str]) -> Any:
-        if self._runner is not None:
-            return self._runner(verb, arguments)
-        from . import evidence_cmd
-
         try:
-            result = evidence_cmd._run_miseledger_result(verb, arguments)
+            return self._runner(verb, arguments)
         except (OSError, ValueError):
             return None
-        return _json(result.stdout) if result.code == 0 else None
 
     def search(self, project: str, query: str, limit: int) -> list[Excerpt] | None:
         payload = self._run("search", [query, "--project", project, "--limit", str(limit), "--json"])
@@ -386,8 +385,8 @@ class EngineArchive:
         return found
 
     def bundle(self, bundle_id: str) -> Bundle | None:
-        is_bundle, path = candidates.evidence_bundle_path(f"miseledger:{bundle_id}")
-        if not is_bundle or path is None:
+        path = memory_cmd._evidence_bundle_path(bundle_id)
+        if path is None:
             return None
         try:
             payload = _json(io.text(path, limit=READ_LIMIT, absent=True))
@@ -732,8 +731,10 @@ def _cited(
     """Items for one cited ref, or None when unreachable. The flag says whether it was an attested id."""
     if _attested(ref):
         return None, True
-    bundle_id = memory_cmd._miseledger_evidence_id(ref)
-    if bundle_id is not None:
+    is_bundle, cache_path = candidates.evidence_bundle_path(ref)
+    if is_bundle:
+        # The cache file is named `<bundle id>.json`, and only valid ids get a path.
+        bundle_id = cache_path.stem if cache_path is not None else ""
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", bundle_id):
             return None, False
         bundle = archive.bundle(bundle_id)
