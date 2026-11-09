@@ -483,10 +483,6 @@ def test_platforms_without_held_descriptor_exec_refuse_every_seat(target, monkey
     assert caught.value.code == "verify_seat_not_isolated"
 
 
-def _native_echo() -> str | None:
-    return _native_program("echo")
-
-
 def _native_program(name: str) -> str | None:
     found = shutil.which(name)
     if found is None:
@@ -552,11 +548,12 @@ def test_run_held_refuses_a_descriptor_that_could_be_a_standard_stream():
 
 @SAFE
 def test_a_held_executable_opened_while_stdin_is_closed_still_runs_the_held_image(tmp_path):
-    echo = _native_echo()
-    if echo is None:
-        pytest.skip("needs a native echo binary")
-    held = tmp_path / "held-echo"
-    shutil.copyfile(echo, held)
+    shell = _native_program("sh")
+    if shell is None:
+        pytest.skip("needs a native sh binary")
+    # A shell, not echo: a single-utility echo refuses a held exec (see the swap test above).
+    held = tmp_path / "held-shell"
+    shutil.copyfile(shell, held)
     held.chmod(0o700)
     # A child with fd 0 closed: the open lands in slot 0 unless it is moved up.
     script = textwrap.dedent(
@@ -565,7 +562,7 @@ def test_a_held_executable_opened_while_stdin_is_closed_still_runs_the_held_imag
         from brigade import memory_verify_seat as seats, proc
         os.close(0)
         fd, canonical, identity = seats.open_executable({str(held)!r})
-        result = proc.run_held([canonical, "held-image-ran"], fd, timeout=30, stdin=b"")
+        result = proc.run_held([canonical, "-c", "echo held-image-ran"], fd, timeout=30, stdin=b"")
         os.close(fd)
         print(json.dumps({{"fd": fd, "code": result.code, "stdout": result.stdout}}))
         """
