@@ -112,7 +112,7 @@ is rejected by the duet pack, and the reverse.
 | `digest_pr_repo` | string | Repository for digest PR queries, formatted `owner/repo`. |
 | `notify_command` | string array | Optional notification argv for watch alerts. |
 | `skills_deny` | string array | Optional. Up to 256 skill ids hidden from `skill_search` and `skill_get`. |
-| `memory_push` | boolean | Optional, default `true`. `false` stops `inbox_list` and `fleet_digest` from carrying `memory_hits` (see the Dot guide). |
+| `memory_push` | boolean | Optional, default `true`. `false` stops `inbox_list` and `fleet_digest` from carrying `memory_hits` (see the Dot guide). With hub memory on, the hits come from the hub under Duet's own principal, which needs `read` on `fleet` (see "Grants for memory hits" in the Dot guide). |
 
 `events_enabled` and `callback_hosts` remain rejected. To enable dispatch,
 add these fields to the runtime JSON, adding the path members to the existing

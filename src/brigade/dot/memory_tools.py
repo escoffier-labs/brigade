@@ -259,6 +259,19 @@ class MemoryTools:
                     payload["warning"] = value["warning"]
         return payload
 
+    def push_search(self, query: str, limit: int) -> dict[str, Any]:
+        """Hub `search` with `query_source: "push"`, as this connector's own principal (S23).
+
+        The connector principal's grants decide what it reads, never the host node's, so the runbook
+        grants Dot and Duet read on `fleet`. One call inside the search budget: the push is fail-open,
+        and the caller omits `memory_hits` on any error.
+        """
+        from ..memory_hub_client import SEARCH_BUDGET_SECONDS, MemoryHubClient
+
+        authority = self._principal_authority()
+        client = MemoryHubClient(authority.hub, authority.token)
+        return client.call("search", timeout=SEARCH_BUDGET_SECONDS, query=query, limit=limit, query_source="push")
+
     def _hub_card(self, name: str, offset: int, scope: str | None = None) -> dict[str, Any] | None:
         """A card only hub memory holds, read through `brigade memory hub card` (S14).
 

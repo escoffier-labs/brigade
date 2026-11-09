@@ -75,6 +75,8 @@ mod proposal_review_tests;
 #[cfg(test)]
 mod proposal_tests;
 #[cfg(test)]
+mod push_tests;
+#[cfg(test)]
 mod tests;
 
 use crate::{
@@ -988,6 +990,11 @@ impl Store {
             "card" | "log" | "status" | "proposal_list" | "proposal_show" | "read_stats" => {
                 self.read(credential, action, map).await
             }
+            // S23: connectors ask for push hits through `search`, so they
+            // get the trust filter, head revalidation and egress scan.
+            "search" if map.get("query_source").and_then(Json::as_str) == Some("push") => {
+                self.search_for(credential, map, true).await
+            }
             "search" => self.search(credential, map).await,
             "preflight" => self.preflight(credential, map).await,
             "reindex" | "embed_lease" | "embed_submit" | "embed_failed" => {
@@ -1526,7 +1533,8 @@ impl Store {
         })
     }
 
-    /// S23's internal push boundary. The public search contract stays unchanged.
+    /// The push boundary. Over the route it is `search` with
+    /// `query_source: "push"` (S23).
     pub async fn push(&self, credential: &Credential, map: &Map<String, Json>) -> Reply {
         if let Some(refusal) = self.verifier_refusal(credential).await {
             return refusal;
@@ -1573,7 +1581,7 @@ impl Store {
             Err(reply) => return reply,
         };
         request.weights = self.rrf;
-        request.push = push;
+        request.push |= push;
         request.prompt |= push;
         let snapshot = match request.min_seq {
             Some(min) => self.index.wait(min, MIN_SEQ_WAIT).await,

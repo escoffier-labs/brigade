@@ -163,8 +163,34 @@ title, summary or tags, so the card can be opened locally. See `docs/memory-oper
 
 ### Memory hits in `inbox_list` and `fleet_digest`
 
-`inbox_list` and `fleet_digest` responses may carry an optional `memory_hits`
-object, so an agent sees relevant cards without being told to search:
+`inbox_list` and `fleet_digest` responses may carry one optional `memory_hits`
+object, so an agent sees relevant cards without being told to search. No
+response carries a second memory field. Where the hits come from depends on the
+workspace's `[hub]` mode.
+
+With hub memory on (`mode = "read"` or `"sync"`), hits come from the hub only:
+
+```json
+{"content_trust": "untrusted",
+ "hits": [{"source": "hub", "scope": "fleet", "card_id": "<id>", "hash": "<12 hex>",
+           "trust": "reviewed", "score": 0.0312, "card": "<wrapped title, summary and tags>"}],
+ "next": "Read a card with memory_card(name=<card_id>, scope=<scope>)."}
+```
+
+- The connector calls hub `search` with `query_source: "push"` as its own
+  message principal, never the host node. The hub answers only what that
+  principal's grants open, so the setup step grants Dot and Duet `read` on
+  `fleet` (see [Grants for memory hits](#grants-for-memory-hits)).
+- The hub pushes reviewed, policy-promoted and imported cards, and an
+  unreviewed card only to the credential that wrote it. It re-reads each hit's
+  head and current clean scan receipt before answering, so a retired, lowered
+  or superseded card in a stale index snapshot is dropped. Flagged, pending and
+  private-class text never leaves on this path.
+- A local card is never pushed in these modes. An unavailable hub, a refusal
+  (for example `memory_grant_missing` before the grant) or an unreadable `[hub]`
+  table leaves the field out, with no local or replica fallback.
+
+With hub memory off, hits come from local cards, as before:
 
 ```json
 {"content_trust": "untrusted",
@@ -172,17 +198,43 @@ object, so an agent sees relevant cards without being told to search:
  "next": "Read a card with memory_card(name=<path basename without .md>)."}
 ```
 
+- Local recall runs in a killable child with the text on stdin. The search log
+  records only an HMAC of the query with `query_source: push`, never the text.
+  Paths that are not a flat `memory/cards/<name>.md` are dropped.
+
+Both sources share these rules:
+
 - The query comes from the item shown: the first listed message's subject and
   body for `inbox_list`, and the pending inbox subjects plus the next work item
   title for `fleet_digest`. It is normalized and bounded to 256 characters.
-- At most 3 hits. Each carries the card path and its title and tags, wrapped
-  with `wrap_untrusted` as `memory` content. Card bodies are never included.
-  Paths that are not a flat `memory/cards/<name>.md` are dropped.
-- Recall runs in a killable child with the text on stdin. The search log records
-  only an HMAC of the query with `query_source: push`, never the text.
-- The field is omitted when push is off, there is no `memory/cards` directory,
-  nothing matches, or recall fails. Responses stay inside the existing 64 KiB bound.
+- At most 3 hits on `inbox_list` and 5 on `fleet_digest`. The card text is
+  wrapped with `wrap_untrusted` as `memory` content and capped at 300
+  characters, so a summary never passes 300. Card bodies are never included.
+  The whole `memory_hits` object stays within 4 KiB of encoded JSON: trailing
+  hits are dropped to fit.
+- Every hit goes through the prompt-load scan before it is wrapped, over the
+  full untruncated text and the location labels. A hit that fails, a hub
+  placeholder whose text the hub withheld, or a malformed hub match is dropped,
+  never redacted into the response. The call log records the drop count and
+  rule ids as `memory_push_scan`, never the text.
+- The field is omitted when push is off, nothing matches, or the source fails.
+  Responses stay inside the existing 64 KiB bound.
 - Set `"memory_push": false` in the runtime JSON to turn it off for this connector.
+
+### Grants for memory hits
+
+A message principal holds no memory grant until the hub admin adds one. Before
+turning on hub memory for a Dot or Duet workspace, grant each connector
+principal `read` on `fleet` with the hub's admin-only `grant` action on
+`POST /memory`, and nothing else:
+
+```json
+{"action": "grant", "principal": "<dot principal>", "scope": "fleet", "rights": ["read"], "client_event_id": "<26-character time-ordered id>"}
+{"action": "grant", "principal": "<duet principal>", "scope": "fleet", "rights": ["read"], "client_event_id": "<26-character time-ordered id>"}
+```
+
+Use the `hub.principal` values from each runtime JSON. Without the grant the hub
+answers `memory_grant_missing` and the responses carry no `memory_hits`.
 
 ## Security model
 

@@ -103,7 +103,16 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
     // With no embedder configured every mode is answered by BM25 (D30).
     one_of("ranking", &["default", "raw"])?;
     one_of("mode", &["auto", "lexical", "hybrid"])?;
-    one_of("query_source", &["prompt", "cwd", "explicit"])?;
+    one_of("query_source", &["prompt", "cwd", "explicit", "push"])?;
+    // S23: `push` asks for hits a connector shows unasked, so it keeps the
+    // one default ranking and has no evaluation form.
+    let push = map.get("query_source").and_then(Json::as_str) == Some("push");
+    if push && map.get("eval").and_then(Json::as_bool) == Some(true) {
+        return Err(invalid("query_source push takes no eval"));
+    }
+    if push && map.get("ranking").and_then(Json::as_str) == Some("raw") {
+        return Err(invalid("query_source push takes the default ranking"));
+    }
     match map.get("sources") {
         None | Some(Json::Null) => {}
         Some(Json::Array(items)) if items.iter().all(|i| i.as_str() == Some("automation")) => {}
@@ -155,7 +164,7 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
             map.get("query_source").and_then(Json::as_str),
             Some("prompt")
         ),
-        push: false,
+        push,
         eval: map.get("eval").and_then(Json::as_bool).unwrap_or(false),
         raw: map.get("ranking").and_then(Json::as_str) == Some("raw"),
         automation: map
@@ -282,7 +291,8 @@ pub fn run<T: ReadTx + ?Sized>(
     };
     // Push revalidates the exact snapshot head and its current scan receipt.
     // Unavailable, pending, private, flagged, retired and stale versions never
-    // leave here: only a clean receipt may reach a connector.
+    // leave here: only a clean receipt may reach a connector. An
+    // `agent-unreviewed` head goes only to the credential that wrote it.
     let eligible = |hits: Vec<(u32, f64)>| -> rusqlite::Result<Vec<(u32, f64)>> {
         if !request.push {
             return Ok(hits);
@@ -294,8 +304,8 @@ pub fn run<T: ReadTx + ?Sized>(
                 for (n, score) in hits {
                     let d = snap.doc(n);
                     let rows = tx.query(
-                        "SELECT 1 FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_scans s ON s.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.revision=?3 AND c.content_hash=?4 AND c.state='live' AND c.trust IN ('imported','reviewed','policy-promoted') AND r.scan_state='clean' AND s.ruleset_version=?5 AND s.state='clean'",
-                        &[Value::Text(scopes[d.scope as usize].to_string()), Value::Text(d.card_id.to_string()), Value::Integer(d.revision), Value::Text(d.content_hash.to_string()), Value::Text(ruleset.clone())],
+                        "SELECT 1 FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_scans s ON s.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.revision=?3 AND c.content_hash=?4 AND c.state='live' AND (c.trust IN ('imported','reviewed','policy-promoted') OR (c.trust='agent-unreviewed' AND c.writer=?6 AND c.writer_class=?7)) AND r.scan_state='clean' AND s.ruleset_version=?5 AND s.state='clean'",
+                        &[Value::Text(scopes[d.scope as usize].to_string()), Value::Text(d.card_id.to_string()), Value::Integer(d.revision), Value::Text(d.content_hash.to_string()), Value::Text(ruleset.clone()), Value::Text(credential.principal().into()), Value::Text(credential.class().into())],
                     )?;
                     if !rows.is_empty() {
                         eligible.push((n, score));

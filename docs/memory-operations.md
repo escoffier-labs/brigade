@@ -160,11 +160,11 @@ it:
 
 | Path | Audience | Private text |
 |---|---|---|
-| `Store::push` (connector push, S23) | Connector | Excluded. Only a clean scan receipt is eligible |
+| `search` with `query_source: "push"` (connector push, S23) | Connector | Excluded. Only a clean scan receipt is eligible |
 | Push prompt-load scan | Connector | `{card_id, blocked: "<rule id>", code: "memory_content_private"}` |
 | Search with `query_source: "prompt"` (local recall in Claude Code and Codex hooks) | Operator's harness provider | Returned, with U+034F and U+200C removed from the rendered fields |
 | Grok Bot, Dot and Duet `memory_search` and `memory_card` | Connector | Placeholder with `code: "memory_content_private"` |
-| `memory_hits` on `inbox_list` and `fleet_digest` | Connector | Dropped and counted, as for any finding |
+| `memory_hits` on `inbox_list` and `fleet_digest` | Connector | Dropped and counted, as for any finding, including a hub placeholder |
 | Embedder (S15a query, document and probe sends) | Loopback only | Sent only when the pinned address is loopback. Any other endpoint, a private-network one included, refuses with reason `content-private` before any lookup or connection. A stored `private` version embeds only for a loopback endpoint |
 | Embedder, push mode (S15b, the hub embeds in process) | Loopback only | Same rule as the row above. A stored `private` version is queued and leased only for a loopback endpoint |
 | Embedder, pull mode (S15b, workers lease documents) | Workers holding the embed grant | Off by default: never queued or leased, counted as unembeddable. With `[memory.embedder] pull_private = true` the hub leases private text to every credential with the embed grant, so the operator is trusted to keep that grant on their own machines. The hub's query endpoint plays no part, and the worker still sends private text only to a numeric loopback endpoint |
