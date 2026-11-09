@@ -25,6 +25,7 @@ DEFAULT_RECALL_LIMIT = 5
 RECALL_MAX_LINES = 10
 RECALL_TIMEOUT_SECONDS = 5
 RECALL_QUERY_MAX_CHARS = 256
+EXCLUDE_MAX = 200  # card ids a hook may ask recall to skip (S24 brief dedupe)
 _GIT_TIMEOUT_SECONDS = 0.5
 GENERIC_WORKSPACE_QUERY = "workspace"
 # Sources whose query text came from a person (a prompt or a --query flag).
@@ -201,6 +202,12 @@ def _format_tags(tags: list[str]) -> str:
 
 
 def format_recall_match_line(match: dict[str, Any]) -> str:
+    blocked = match.get("blocked")
+    if isinstance(blocked, str) and blocked:
+        # The prompt-load scan withheld this card (S18, S24): ids only.
+        code = match.get("code")
+        suffix = f" | code: {_single_line(str(code))}" if isinstance(code, str) and code else ""
+        return f"- {_single_line(str(match.get('card_id') or 'card'))} | blocked: {_single_line(blocked)}{suffix}"
     title = _single_line(str(match.get("title") or ""))
     path = _single_line(str(match.get("path") or ""))
     raw_tags = match.get("tags")
@@ -258,9 +265,17 @@ def _recall_cards_payload_impl(
     limit: int = DEFAULT_RECALL_LIMIT,
     query: str | None = None,
     query_source: str = "explicit",
+    hub: bool = False,
+    exclude: list[str] | None = None,
+    audience: str | None = None,
 ) -> dict[str, Any]:
-    """In-process recall body (runs in a killable child when timed)."""
-    from . import memory_recall_log
+    """In-process recall body (runs in a killable child when timed).
+
+    Hooks pass ``hub`` (route through hub memory when the workspace reads it),
+    ``exclude`` (card ids their brief already named) and ``audience`` (scan
+    every rendered line for that audience before it is returned, S24).
+    """
+    from . import memory_hook_hub, memory_recall_log
     from .memory_cmd import search_cards_payload
 
     capped = _clamp_limit(limit)
@@ -280,12 +295,15 @@ def _recall_cards_payload_impl(
         limit=capped,
         status="ok",
     )
+    excluded = [value for value in exclude or () if isinstance(value, str)][:EXCLUDE_MAX]
+    wide = min(capped + len(excluded), memory_hook_hub.SEARCH_WIDE_MAX)
+    fused = memory_hook_hub.hub_matches(memory_root, query, query_source, wide) if hub else None
     try:
-        raw = search_cards_payload(memory_root, query, limit=capped)
+        raw = {"matches": []} if fused is not None else search_cards_payload(memory_root, query, limit=wide)
     except (OSError, ValueError):
         empty["status"] = "error"
         return empty
-    matches: list[dict[str, Any]] = []
+    matches: list[dict[str, Any]] = list(fused or [])
     for item in raw.get("matches") or []:
         if not isinstance(item, dict):
             continue
@@ -303,8 +321,15 @@ def _recall_cards_payload_impl(
                 "score": item.get("score"),
             }
         )
+    matches = memory_hook_hub.without_ids(matches, excluded)[:capped]
     if query_source in QUERY_TEXT_SOURCES:
         memory_recall_log.record_recall(memory_root, query=query, query_source=query_source, matches=matches)
+    if audience is not None:
+        try:
+            matches = memory_hook_hub.scan_matches(matches, audience)
+        except Exception:  # noqa: BLE001 - a scan that cannot run injects nothing
+            empty["status"] = "scan-unavailable"
+            return empty
     return {
         "target": str(raw.get("target") or memory_root),
         "cwd": str(cwd),
@@ -328,6 +353,9 @@ def _recall_worker_main() -> None:
         limit=int(req["limit"]),
         query=req.get("query"),
         query_source=str(req.get("query_source") or "explicit"),
+        hub=req.get("hub") is True,
+        exclude=req.get("exclude") if isinstance(req.get("exclude"), list) else None,
+        audience=req.get("audience") if req.get("audience") in {"local", "connector"} else None,
     )
     sys.stdout.write(json.dumps(payload, sort_keys=True))
 
@@ -339,6 +367,9 @@ def recall_cards_payload(
     limit: int = DEFAULT_RECALL_LIMIT,
     query: str | None = None,
     query_source: str = "explicit",
+    hub: bool = False,
+    exclude: list[str] | None = None,
+    audience: str | None = None,
 ) -> dict[str, Any]:
     """Run bounded recall against ``target`` using the prompt, explicit, or checkout terms.
 
@@ -372,6 +403,9 @@ def recall_cards_payload(
             "limit": capped,
             "query": explicit_query,
             "query_source": query_source,
+            "hub": hub,
+            "exclude": list(exclude or ())[:EXCLUDE_MAX],
+            "audience": audience,
         },
         sort_keys=True,
     )
@@ -413,32 +447,58 @@ def recall_text_for_hook(
     query: str | None = None,
     prompt: str | None = None,
 ) -> str:
-    """Hook-facing recall: empty string on any failure (fail open, no leak).
+    """Hook-facing local recall text: empty string on any failure (fail open, no leak).
 
     ``prompt`` is the user's prompt (UserPromptSubmit); it wins over ``query``.
+    """
+    return recall_for_hook(wired_target=wired_target, cwd=cwd, limit=limit, query=query, prompt=prompt)[0]
+
+
+def recall_for_hook(
+    *,
+    wired_target: Path,
+    cwd: Path | None = None,
+    limit: int = DEFAULT_RECALL_LIMIT,
+    query: str | None = None,
+    prompt: str | None = None,
+    hub: bool = False,
+    exclude: list[str] | None = None,
+    audience: str | None = None,
+) -> tuple[str, list[str]]:
+    """Recall text plus the keys of the cards it shows; ``("", [])`` on any failure.
+
+    Withheld cards (``blocked``) are shown as placeholders and are not keys.
     """
     try:
         recall_target, status = resolve_memory_recall_target(wired_target)
         if status != "active" or recall_target is None:
-            return ""
+            return "", []
         session_cwd = cwd if cwd is not None else wired_target
         if not recall_target.exists():
-            return ""
+            return "", []
         if prompt is not None and not _normalize_query(prompt):
             # A prompt that normalizes to nothing (whitespace or control
             # characters) recalls nothing, like a blank prompt; no cwd fallback.
-            return ""
+            return "", []
+        options: dict[str, Any] = {"hub": hub, "exclude": exclude, "audience": audience}
         if prompt is not None:
             payload = recall_cards_payload(
-                target=recall_target, cwd=session_cwd, limit=limit, query=prompt, query_source="prompt"
+                target=recall_target, cwd=session_cwd, limit=limit, query=prompt, query_source="prompt", **options
             )
         else:
-            payload = recall_cards_payload(target=recall_target, cwd=session_cwd, limit=limit, query=query)
+            payload = recall_cards_payload(target=recall_target, cwd=session_cwd, limit=limit, query=query, **options)
         if payload.get("status") != "ok":
-            return ""
-        return format_recall_text(payload)
+            return "", []
+        from .memory_hook_hub import card_key
+
+        shown = [
+            card_key(match)
+            for match in (payload.get("matches") or [])[:DEFAULT_RECALL_LIMIT]
+            if isinstance(match, dict) and not match.get("blocked")
+        ]
+        return format_recall_text(payload), [key for key in shown if key]
     except Exception:  # noqa: BLE001 - session-start recall must never block the harness
-        return ""
+        return "", []
 
 
 def recall(

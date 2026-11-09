@@ -29,6 +29,7 @@ from . import (
     envelope,
     fleet_inbox,
     heartbeat,
+    hub_recall,
     presence,
     verification_mode,
     write_attribution,
@@ -748,23 +749,9 @@ def _run_brief(target: Path) -> str:
     return text
 
 
-def _run_recall(target: Path, payload: dict[str, Any], *, prompt: str | None = None) -> str:
-    """Bounded memory recall (prompt-driven on UserPromptSubmit); empty string on any failure."""
-    from .. import memory_hooks
-
-    raw_cwd = payload.get("cwd")
-    cwd: Path | None
-    if isinstance(raw_cwd, str) and raw_cwd.strip():
-        try:
-            cwd = Path(raw_cwd).expanduser().resolve(strict=False)
-        except OSError:
-            cwd = None
-    else:
-        cwd = None
-    try:
-        return memory_hooks.recall_text_for_hook(wired_target=target, cwd=cwd, prompt=prompt)
-    except Exception:  # noqa: BLE001 - recall must never block session start
-        return ""
+def _run_recall(target: Path, payload: dict[str, Any], *, prompt: str | None = None, brief: str | None = None) -> str:
+    """Bounded hub-aware recall, deduplicated against the brief (S24); empty string on any failure."""
+    return hub_recall.recall_text(target, payload, prompt=prompt, brief=brief)
 
 
 def _brief_records(text: str) -> list[str]:
@@ -2267,13 +2254,17 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
     # Live Fleet Hub inbox delivery rides on prompt and tool events of wired sessions.
     # It only gets what the event left of the hook budget, so a slow brief still
     # returns its claim path to the parent before the outer timeout kills the worker.
-    return fleet_inbox.attach(
+    result = fleet_inbox.attach(
         event,
         payload,
         result,
         wired=lambda: effective_hook_target(payload, pin=pin) is not None,
         budget=_hook_timeout_seconds() - (_monotonic() - started),
     )
+    # S24: card reads and the Stop capture, within what is left of the budget.
+    remaining = _hook_timeout_seconds() - (_monotonic() - started)
+    hub_recall.after_event(event, payload, lambda: effective_hook_target(payload, pin=pin), budget=remaining)
+    return result
 
 
 def _handle_event(
@@ -2322,7 +2313,7 @@ def _handle_event(
             # Compaction restart: restore the work brief (#736) and keep #834
             # bounded recall on the same SessionStart injection.
             brief_text = _run_brief(target)
-            recall_text = _run_recall(target, payload)
+            recall_text = _run_recall(target, payload, brief=brief_text)
             state["briefed"] = True
             _write_session_state_preserving_latch(
                 target, session_id, state, log_target=target, patch_fields=("briefed",)
@@ -2342,7 +2333,7 @@ def _handle_event(
         if state.get("briefed"):
             return None
         brief_text = _run_brief(target)
-        recall_text = _run_recall(target, payload)
+        recall_text = _run_recall(target, payload, brief=brief_text)
         state["briefed"] = True
         _write_session_state_preserving_latch(target, session_id, state, log_target=target, patch_fields=("briefed",))
         records = _brief_records(brief_text)

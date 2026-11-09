@@ -130,7 +130,7 @@ def test_claude_presence_uses_cwd_even_when_tool_targets_other_checkout(tmp_path
     for target in (root, other):
         write_config(target, Config(version=1, selection=Selection(depth="repo", harnesses=("claude",))))
     monkeypatch.setattr(runtime, "_run_brief", lambda *a: "brief")
-    monkeypatch.setattr(runtime, "_run_recall", lambda *a: "")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *a, **k: "")
     calls = []
     monkeypatch.setattr(runtime.presence, "emit_presence", lambda e, t, s: calls.append(t))
     payload = {

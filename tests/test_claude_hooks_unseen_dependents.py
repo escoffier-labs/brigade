@@ -37,7 +37,7 @@ def target(tmp_path: Path, monkeypatch, inherited_cache) -> Path:
     (target / "tests/test_api.py").write_text("from api import serve\ndef test_api(): assert serve()\n")
     monkeypatch.setattr(runtime.heartbeat, "on_event", lambda *args: None)
     monkeypatch.setattr(runtime.presence, "emit_presence", lambda *args: None)
-    monkeypatch.setattr(runtime, "_run_recall", lambda *args: "")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *args, **kwargs: "")
     monkeypatch.setattr(runtime, "_run_brief", lambda *args: "work brief")
     # The content check hashes the indexed files on a bounded thread (0.5 s in
     # production). On a loaded CI shard that thread can miss the budget, the

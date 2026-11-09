@@ -42,7 +42,7 @@ def target(tmp_path: Path, monkeypatch) -> Path:
     assert install_selection(target, Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])) == 0
     monkeypatch.setattr(runtime.heartbeat, "on_event", lambda *args: None)
     monkeypatch.setattr(runtime.presence, "emit_presence", lambda *args: None)
-    monkeypatch.setattr(runtime, "_run_recall", lambda *args: "")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *args, **kwargs: "")
     monkeypatch.setattr(runtime, "_run_brief", lambda *args: "work brief")
     event(target, "SessionStart", source="startup")
     state = runtime.read_session_state(target, SESSION)

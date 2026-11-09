@@ -2699,6 +2699,18 @@ Invariant tests, in S19a to S19e:
 - A T3 child in a Brigade-wired worktree also runs the recall hooks. The
   prompt hook skips cards whose ids already appear in the brief's
   `memory_context` block.
+- S24 as built (Claude hooks): the hub search, the fallback and the
+  prompt-load scan all run in the existing recall child, so its 5 s deadline
+  covers a stopped or hung hub. Session start records the card ids its work
+  brief named, and each prompt adds ids from a `memory_context` block. Card
+  ids are read from `cards/<id>.md` paths and `card_id` fields. "Opened" means
+  a card file read through the Read tool. The Stop hook sends one `capture`
+  per batch of keys not yet captured, at most 50 of each list, so a long
+  session can produce several events under one `session_ref`. A batch the hub
+  did not take is retried at the next Stop with the same `client_event_id`.
+  The hook audience is local unless `CLAUDE_CODE_REMOTE` or
+  `BRIGADE_RECALL_AUDIENCE=connector` marks a session outside the operator's
+  machines.
 - New fields in tool responses are additive. Connector tool snapshots are
   updated in the same PR.
 

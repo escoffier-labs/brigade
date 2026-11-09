@@ -203,7 +203,7 @@ def test_session_start_compact_source_restores_brief_and_recall_once(tmp_path: P
     recall_text = "memory recall: astro portfolio\n- Astro Notes | tags: astro | memory/cards/astro.md"
     recall_calls: list[str | None] = []
 
-    def fake_recall(_target: Path, payload: dict) -> str:
+    def fake_recall(_target: Path, payload: dict, **_kwargs: object) -> str:
         recall_calls.append(payload.get("source") if isinstance(payload.get("source"), str) else None)
         return recall_text
 
