@@ -136,7 +136,8 @@ The resolver MUST:
     When it is absent, the default is the single ref that
     `git symbolic-ref refs/remotes/origin/HEAD` names. If that is unset,
     there is no default and the resolver returns None. Local branches and
-    tags are never allowed refs.
+    tags are never allowed refs, and an allowed ref that is itself symbolic
+    (`git symbolic-ref -q` exits 0) returns None before any fetch.
 11. Prove each allowed ref fresh in the current run with
     `git fetch --porcelain --verbose --refmap= --no-tags --prune <remote>
     +refs/heads/<branch>:refs/remotes/<remote>/<branch>`. The explicit refspec

@@ -41,7 +41,9 @@
 8. An abbreviation shorter than `MIN_ABBREVIATION` never reaches git.
 9. A shallow repository or a partial clone is refused.
 10. Allowed refs come from `commit_refs`, else from the single ref that
-    `refs/remotes/origin/HEAD` names. Local branches and tags never count.
+    `refs/remotes/origin/HEAD` names. Local branches and tags never count,
+    and an allowed ref that is itself a symbolic ref refuses the repository
+    before any fetch, because a forced fetch would update its referent.
 11. Each allowed ref is fetched in this run with an explicit refspec, and the
     porcelain output (or `ls-remote` before git 2.41) proves it current. The
     run keeps the object id each fetch proved. A later card re-reads every
@@ -702,7 +704,8 @@ def _remote(ref: str) -> tuple[str, str]:
 def _allowed_refs(tool: GitTool, cwd: str, workspace: config.Workspace) -> tuple[str, ...] | None:
     if workspace.commit_refs:
         return workspace.commit_refs
-    target = _output(tool, cwd, "symbolic-ref", "--quiet", DEFAULT_HEAD)
+    # --no-recurse reads origin/HEAD's direct target, so a symbolic target is seen and refused by _plain_ref.
+    target = _output(tool, cwd, "symbolic-ref", "--quiet", "--no-recurse", DEFAULT_HEAD)
     if target is None or not config.valid_commit_ref(target) or _remote(target)[0] != "origin":
         return None
     return (target,)
@@ -828,9 +831,19 @@ def _repository_ready(tool: GitTool, cwd: str, workspace: config.Workspace) -> t
         return None
     for ref in refs:
         urls = [value for key, value in entries if key == f"remote.{_remote(ref)[0]}.url"]
-        if len(urls) != 1 or not https_url(urls[0]):
+        if len(urls) != 1 or not https_url(urls[0]) or not _plain_ref(tool, cwd, ref):
             return None
     return refs
+
+
+def _plain_ref(tool: GitTool, cwd: str, ref: str) -> bool:
+    """True when `ref` is not a symbolic ref. A forced fetch into a symbolic ref would update its referent.
+
+    `git symbolic-ref -q` exits 0 for a symbolic ref and 1 for a plain or missing one. A missing ref is fine:
+    the fetch creates it as a plain ref. Any other exit refuses.
+    """
+    result = _git(tool, cwd, "symbolic-ref", "-q", ref)
+    return result is not None and result.code == 1
 
 
 def _resolve(workspace: config.Workspace, run: Run, abbreviation: str) -> str | None:

@@ -643,7 +643,18 @@ Slice 9's resolver implementation requires its own security review. This contrac
     branches and tags are never allowed refs, because a local process can
     create or move them without a fetch. A remote-tracking ref can be moved
     locally too, so after its proof (rule 11) the resolver never trusts the
-    ref name again, only the object id the fetch proved.
+    ref name again, only the object id the fetch proved. An allowed ref,
+    explicit or defaulted, must also be a plain ref. A forced fetch into a
+    symbolic ref updates its referent, so `refs/remotes/origin/main`
+    pointing at `refs/heads/local-only` would let the fetch overwrite a
+    local branch, even with an empty refmap. Before any fetch, and again on
+    every later card, the resolver runs `git symbolic-ref -q <ref>` on each
+    allowed ref and returns None when it exits 0. Exit 1, for a plain ref or
+    one that does not exist yet (the fetch creates it as a plain ref),
+    passes, and any other exit refuses. `refs/remotes/origin/HEAD` is
+    symbolic by design, so the default reads its direct target with
+    `git symbolic-ref --quiet --no-recurse` and applies the same check to
+    that target. Following the chain to its end would hide a symbolic hop.
 11. Prove every allowed ref fresh in the current run without relying on the
     remote's configured fetch refspec. For each allowed ref
     `refs/remotes/<remote>/<branch>`, fetch with
@@ -652,7 +663,8 @@ Slice 9's resolver implementation requires its own security review. This contrac
     fetched, but git still applies configured `remote.<name>.fetch`
     mappings to update other local refs. The fetch therefore also passes an
     empty `--refmap=`, which makes git ignore every configured mapping, so
-    only the explicit destination can move. `remote.*.fetch` itself is not
+    only the explicit destination can move. It also passes
+    `--no-write-fetch-head`, because the proof never reads `FETCH_HEAD`. `remote.*.fetch` itself is not
     refused, because every normal clone has one. With the empty refmap it has
     no effect. The porcelain output must list that
     destination ref with an updated or up-to-date flag. git prints

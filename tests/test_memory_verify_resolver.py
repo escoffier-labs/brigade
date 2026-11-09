@@ -2011,3 +2011,49 @@ def test_a_plain_absolute_link_target_in_a_trusted_chain_passes(world, monkeypat
     os.symlink(f"{exec_dir}/git-remote-http", exec_dir / "git-remote-https")
     assert world.resolve(short(target)) == target
     assert "fetch" in world.calls
+
+
+# --- Fix round 6: an allowed ref must not be symbolic -----------------------------------
+
+
+def symbolic_main_to_local_branch(world: World) -> None:
+    """Point refs/remotes/origin/main at a local branch, so a forced fetch into it would move that branch."""
+    git(world.workspace, "branch", "local-only", world.base)
+    git(world.workspace, "symbolic-ref", "refs/remotes/origin/main", "refs/heads/local-only")
+
+
+def test_a_symbolic_allowed_ref_is_refused_and_its_referent_untouched(world, monkeypatch):
+    """Codex P2 reproduction: a forced fetch into a symbolic origin/main would overwrite refs/heads/local-only."""
+    symbolic_main_to_local_branch(world)
+    target = world.commit("target")
+    fetches = []
+    real = resolver._git
+
+    def spy(tool, cwd, *args):
+        if args[0] == "fetch":
+            fetches.append(args)
+        return real(tool, cwd, *args)
+
+    monkeypatch.setattr(resolver, "_git", spy)
+    assert world.resolve(short(target), commit_refs=["refs/remotes/origin/main"]) is None
+    assert fetches == []
+    assert git(world.workspace, "rev-parse", "refs/heads/local-only") == world.base
+
+
+def test_a_default_ref_whose_target_is_symbolic_is_refused(world):
+    """origin/HEAD is symbolic by design. Its direct target, origin/main, must not be symbolic too."""
+    symbolic_main_to_local_branch(world)
+    target = world.commit("target")
+    assert world.resolve(short(target)) is None
+    assert git(world.workspace, "rev-parse", "refs/heads/local-only") == world.base
+
+
+def test_a_default_ref_chained_to_another_remote_ref_is_refused(world):
+    """origin/HEAD -> origin/main -> origin/other. Following the chain to its end would hide the symbolic hop."""
+    target = world.commit("target", branch="other")
+    git(world.workspace, "fetch", "--quiet", "origin", ca=world.ca)
+    git(world.workspace, "symbolic-ref", "refs/remotes/origin/main", "refs/remotes/origin/other")
+    assert (
+        git(world.workspace, "symbolic-ref", "--no-recurse", "refs/remotes/origin/HEAD") == "refs/remotes/origin/main"
+    )
+    assert world.resolve(short(target)) is None
