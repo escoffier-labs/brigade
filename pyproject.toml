@@ -28,7 +28,7 @@ mesh = ["cryptography>=50.0.2,<52"]
 # Keep pytest below 9.2 until forwarded-module monkeypatch cleanup is compatible (#2091).
 dev = ["cryptography>=50.0.2,<52", "pytest>=9.2.0,<9.3", "pytest-cov>=7.1.0", "pytest-xdist>=3.8.0", "ruff>=0.17.3", "mypy>=2.4.1"]
 grokbot = ["mcp>=2.3.0,<3", "pyjwt[crypto]>=2.15.1"]
-research = ["playwright>=1.64.0"]
+research = ["playwright>=1.64.1"]
 
 [project.urls]
 Homepage = "https://brigadestack.com"
