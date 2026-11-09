@@ -2196,9 +2196,16 @@ counter does not move. Output never holds card text, titles or evidence.
 `--list-ids` adds the never-read card ids, still without titles or text.
 Failures print a fixed code and reason only.
 
-The run pulls only the bound scopes into the folder's replica, so cards
-already replicated in an unbound read scope are dropped from it, and an
-unbound scope never counts against verification. Each bound scope may hold
+Verify keeps its own hub replica under `.brigade/memory/verify/hub/`, with its
+own building directory and locks. It never reads, locks or writes the shared
+replica under `.brigade/memory/hub/` that `memory search`, the hooks and the
+other hub commands use, so running verify in an ordinary workspace leaves
+that replica byte for byte as it was. A dry run writes only verify's replica
+and no state.
+
+The run pulls only the bound scopes into its replica, so cards of a scope
+that is no longer bound are dropped from it, and an unbound scope never
+counts against verification. Each bound scope may hold
 50,000 cards, checked per scope (`verify_scope_limit`), and the replica as a
 whole is bounded by its 64 MiB byte ceiling.
 

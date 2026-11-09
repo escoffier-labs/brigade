@@ -29,6 +29,8 @@ from .inbox_lock import InboxLockTimeout, held_file_lock
 ROOT = ".brigade/memory/verify"
 STATE = f"{ROOT}/state.json"
 LOCK = f"{ROOT}/state.lock"
+# The verify pass keeps its own hub replica here, never in the shared `.brigade/memory/hub/`.
+REPLICA_ROOT = f"{ROOT}/hub"
 SCHEMA = "brigade.memory-verify-state.v1"
 MAX_BYTES = 8 * 1024 * 1024
 FAILURES = 3

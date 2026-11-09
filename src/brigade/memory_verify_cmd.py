@@ -114,11 +114,23 @@ def _binding(identity: str, principal: object, log_epoch: object) -> str:
 def _heads(
     target: Path, settings: hubc.HubSettings, client: hubc.MemoryHubClient, scopes: list[str]
 ) -> tuple[list[dict], str]:
-    """Pull only the bound scopes, as reflect does with --scope, and return their live heads and the binding.
+    """Pull the bound scopes into verify's own replica and return their live heads and the binding.
 
-    Unbound read scopes are left out of the pull, so a large unbound scope
-    never counts against verification. Cards already replicated in them are
-    dropped from this dedicated folder's replica by the narrowed pull.
+    Every store access, the pull included, runs relocated to
+    `.brigade/memory/verify/hub/`, so the shared replica under
+    `.brigade/memory/hub/` that search, hooks and other hub commands use is
+    never read, locked or written. A dry run writes only that replica.
+    """
+    with store.relocated(vstate.REPLICA_ROOT):
+        return _pull_heads(target, settings, client, scopes)
+
+
+def _pull_heads(
+    target: Path, settings: hubc.HubSettings, client: hubc.MemoryHubClient, scopes: list[str]
+) -> tuple[list[dict], str]:
+    """Pull only the bound scopes, as reflect does with --scope, so an unbound scope never counts here.
+
+    Cards of scopes no longer bound are dropped from verify's replica by the narrowed pull.
     """
     try:
         with store.locked(target):

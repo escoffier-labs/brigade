@@ -658,7 +658,7 @@ def test_revalidate_refuses_a_root_that_lost_its_identity(tmp_path, monkeypatch)
 
 
 def replica_binding(target):
-    meta = store.replica(target).meta
+    meta = verify_replica(target).meta
     return verify_cmd._binding(meta["hub"], meta["principal"], meta["log_epoch"])
 
 
@@ -687,7 +687,7 @@ def test_a_matching_binding_keeps_card_history(verify_setup, capsys):
 def test_history_from_another_hub_principal_or_epoch_is_ignored(verify_setup, capsys, other):
     target, _ = verify_setup
     assert verify(target, capsys, "run", "--dry-run", "--no-model")[0] == 0
-    meta = store.replica(target).meta
+    meta = verify_replica(target).meta
     parts = {"hub": meta["hub"], "principal": meta["principal"], "epoch": meta["log_epoch"]}
     if other == "hub":
         parts["hub"] = "http://192.0.2.20:3774"
@@ -747,10 +747,12 @@ def test_a_huge_unbound_scope_never_fails_a_small_bound_one(small_scopes, tmp_pa
     target, hub, _ = small_scopes
     put_cards(hub, "repo:big", 12)
     put_cards(hub, "repo:small", 1)
-    # Replicate the big scope first, as an ordinary pull in this folder would.
+    # Put the big scope into verify's own replica first, as a run that still bound it would have.
     (target / ".brigade/memory-care.toml").write_text('[hub]\nmode="read"\nread_scopes=["repo:big","repo:small"]\n')
-    assert cli.main(["memory", "hub", "pull", "--target", str(target), "--json"]) == 0
+    with store.relocated(vstate.REPLICA_ROOT):
+        assert cli.main(["memory", "hub", "pull", "--target", str(target), "--json"]) == 0
     capsys.readouterr()
+    assert {head["scope"] for head in verify_replica(target).heads.values()} == {"repo:big", "repo:small"}
     bind(target, tmp_path, ["repo:big", "repo:small"], ["repo:small"])
     code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
     assert code == 0, report
@@ -764,3 +766,76 @@ def test_one_bound_scope_over_the_per_scope_bound_fails(small_scopes, tmp_path, 
     bind(target, tmp_path, ["repo:one"], ["repo:one"])
     code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
     assert code == 1 and report == {"status": "failed", "code": "verify_scope_limit", "reason": verify_cmd.SCOPE_LIMIT}
+
+
+# -- verify keeps its own replica -------------------------------------------------
+
+
+def verify_replica(target):
+    with store.relocated(vstate.REPLICA_ROOT):
+        return store.replica(target)
+
+
+def snapshot(directory):
+    """Every file below `directory` with its bytes and modification time."""
+    found = {}
+    for path in sorted(directory.rglob("*")):
+        if path.is_file() and not path.is_symlink():
+            found[str(path.relative_to(directory))] = (path.read_bytes(), path.stat().st_mtime_ns)
+    return found
+
+
+def populated_workspace(setup, tmp_path, capsys):
+    """A workspace whose shared replica already holds two scopes, then a verify binding for one of them."""
+    target, hub, _ = setup
+    put_cards(hub, "repo:other", 2, prefix="o")
+    (target / ".brigade/memory-care.toml").write_text('[hub]\nmode="read"\nread_scopes=["fleet","repo:other"]\n')
+    assert cli.main(["memory", "hub", "pull", "--target", str(target), "--json"]) == 0
+    capsys.readouterr()
+    shared = target / store.ROOT_REL
+    assert {head["scope"] for head in store.replica(target).heads.values()} == {"fleet", "repo:other"}
+    (tmp_path / "bound").mkdir()
+    (target / ".brigade/memory-care.toml").write_text(
+        '[hub]\nmode="read"\nread_scopes=["fleet","repo:other"]\n[verify]\n'
+        f'[[verify.workspace]]\nscope="fleet"\npath="{tmp_path / "bound"}"\narchive_projects=[]\n'
+    )
+    return target, hub, shared
+
+
+def test_a_dry_run_never_touches_the_shared_replica(setup, clock, tmp_path, capsys):
+    target, _, shared = populated_workspace(setup, tmp_path, capsys)
+    before = snapshot(shared)
+    assert any(name.startswith("replica/") for name in before)
+    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
+    assert code == 0 and report["status"] == "completed"
+    assert snapshot(shared) == before
+    # The shared replica still serves both scopes. Verify's own holds only the bound one.
+    assert {head["scope"] for head in store.replica(target).heads.values()} == {"fleet", "repo:other"}
+    assert {head["scope"] for head in verify_replica(target).heads.values()} == {"fleet"}
+    assert not (target / vstate.STATE).exists()
+
+
+def test_a_second_run_reuses_its_own_replica(setup, clock, tmp_path, capsys):
+    target, hub, shared = populated_workspace(setup, tmp_path, capsys)
+    before = snapshot(shared)
+    assert verify(target, capsys, "run", "--dry-run", "--no-model")[0] == 0
+    first = verify_replica(target).meta
+    calls = len(hub.calls)
+    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
+    assert code == 0 and {item["card_id"] for item in report["selected"]} == {"a", "b"}
+    second = hub.calls[calls:]
+    # The second pull follows the log from the first run's watermark and fetches no card again.
+    assert [call for call in second if call["action"] == "card"] == []
+    assert all(call.get("after_seq", 0) == first["seq"] for call in second if call["action"] == "log")
+    assert verify_replica(target).meta["heads_sha256"] == first["heads_sha256"]
+    assert snapshot(shared) == before
+
+
+def test_the_store_root_moves_only_below_brigade_memory(tmp_path):
+    for bad in ("/abs/path", ".brigade/memory", ".brigade/x/hub", ".brigade/memory/../hub", "elsewhere/hub"):
+        with pytest.raises(ValueError):
+            with store.relocated(bad):
+                pass
+    with store.relocated(vstate.REPLICA_ROOT):
+        assert store.root(tmp_path) == tmp_path / ".brigade/memory/verify/hub"
+    assert store.root(tmp_path) == tmp_path / ".brigade/memory/hub"

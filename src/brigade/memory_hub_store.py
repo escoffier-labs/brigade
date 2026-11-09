@@ -43,7 +43,8 @@ import os
 import secrets
 import shutil
 import stat
-from pathlib import Path
+from contextvars import ContextVar
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
 from . import memory_hub_replica_limits as limits
@@ -73,8 +74,34 @@ class StoreError(OSError):
     """Hub memory state is unsafe or unreadable."""
 
 
+# Hub state root for this context, relative to the target. Only a caller that must never
+# touch the shared replica (the verify pass) relocates it, the way limits.bounded scopes
+# replica limits. Every path below derives from root(), so the replica, the building
+# directory, the locks, the spool and proposals all move together.
+_ROOT: ContextVar[str] = ContextVar("hub_store_root", default=ROOT_REL)
+
+
 def root(target: Path) -> Path:
-    return target / ROOT_REL
+    return target / _ROOT.get()
+
+
+@contextlib.contextmanager
+def relocated(relative: str) -> Iterator[None]:
+    """Keep this context's hub state under `target/relative`, a directory below `.brigade/memory/`."""
+    parts = PurePosixPath(relative).parts
+    if (
+        PurePosixPath(relative).is_absolute()
+        or ".." in parts
+        or "." in parts
+        or len(parts) < 3
+        or PurePosixPath(*parts[:2]) != PurePosixPath(PARENT_REL)
+    ):
+        raise ValueError("hub store root must be a directory below .brigade/memory")
+    token = _ROOT.set(relative)
+    try:
+        yield
+    finally:
+        _ROOT.reset(token)
 
 
 def private_dir(path: Path) -> Path:
