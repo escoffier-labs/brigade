@@ -91,7 +91,7 @@ def test_invalid_settings_fail_safe_in_hook_readers(tmp_path: Path) -> None:
     path = target / ".brigade" / "config.json"
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({"version": 1, "work": {"mode": "chaos", "rails": "maybe"}}))
-    assert work_mode.resolve_mode(target) == "enforced"
+    assert work_mode.resolve_mode(target) == "engineer"
     assert work_mode.rails_enabled(target) is True
     with pytest.raises(ValueError):
         config.load_config(target)
@@ -142,7 +142,7 @@ def test_switching_back_to_enforced_restores_block_and_hooks(tmp_path: Path, mon
     status = install_cmd.status_payload(target)
     assert status["current"] is True and status["work_mode"] == "yolo"
 
-    _set_mode(target, "enforced", capsys)
+    _set_mode(target, "engineer", capsys)
     assert (target / ".claude" / "settings.json").read_text() == enforced_settings
     assert "work_mode" not in install_cmd.status_payload(target)
     denied = runtime.handle_payload("PreToolUse", _bash(target, "PreToolUse", "python -m pytest -q"))
@@ -162,7 +162,7 @@ def test_mode_switch_preserves_foreign_stop_handlers(tmp_path: Path, capsys) -> 
     _set_mode(target, "yolo", capsys)
     stop = _settings_events(target)["Stop"]
     assert foreign in stop and len(stop) == 2
-    _set_mode(target, "enforced", capsys)
+    _set_mode(target, "engineer", capsys)
     stop = _settings_events(target)["Stop"]
     assert foreign in stop and len(stop) == 2
 
@@ -230,6 +230,37 @@ def test_init_yolo_installs_every_managed_event(tmp_path: Path, capsys) -> None:
     # Re-running init without --yolo keeps the recorded mode.
     assert cli.main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "claude"]) == 0
     assert work_mode.resolve_mode(target) == "yolo"
+
+
+def test_init_engineer_switches_a_yolo_install_back(tmp_path: Path, capsys) -> None:
+    target = tmp_path / "fresh"
+    base = ["init", "--target", str(target), "--depth", "repo", "--harnesses", "claude"]
+    assert cli.main([*base, "--yolo"]) == 0
+    assert cli.main([*base, "--engineer"]) == 0
+    capsys.readouterr()
+    assert work_mode.resolve_mode(target) == "engineer"
+    # The default is never written, so the config carries no work.mode at all.
+    assert "work" not in json.loads((target / config.CONFIG_REL_PATH).read_text(encoding="utf-8"))
+    with pytest.raises(SystemExit):
+        cli.main([*base, "--yolo", "--engineer"])
+
+
+def test_legacy_enforced_name_reads_and_sets_as_engineer(tmp_path: Path, capsys) -> None:
+    target = _wired(tmp_path)
+    path = target / config.CONFIG_REL_PATH
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["work"] = {"mode": "enforced"}
+    path.write_text(json.dumps(data), encoding="utf-8")
+    loaded = config.load_config(target)
+    assert loaded is not None and loaded.work_mode == "engineer"
+    assert work_mode.resolve_mode(target) == "engineer"
+    assert not any(row[1] == "work.mode" for row in work_mode.doctor_checks(target))
+    _set_mode(target, "yolo", capsys)
+    _set_mode(target, "enforced", capsys)
+    assert work_mode.resolve_mode(target) == "engineer"
+    assert "work" not in json.loads(path.read_text(encoding="utf-8"))
+    denied = runtime.handle_payload("PreToolUse", _bash(target, "PreToolUse", "python -m pytest -q"))
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_yolo_brief_drops_verification_wording(tmp_path: Path, capsys) -> None:
@@ -313,7 +344,7 @@ def test_rails_are_independent_of_mode_and_warn_once(tmp_path: Path, capsys) -> 
     assert "secrets, credentials, private hosts, or private paths" in first
     assert cli.main(["work", "rails", "off", "--target", str(target)]) == 0
     assert "secrets" not in capsys.readouterr().err
-    assert work_mode.resolve_mode(target) == "enforced"
+    assert work_mode.resolve_mode(target) == "engineer"
     assert cli.main(["work", "rails", "check", "--target", str(target)]) == work_mode.RAILS_OFF_EXIT
     _set_mode(target, "yolo", capsys)
     assert work_mode.summary(target) == {"mode": "yolo", "rails": "off"}
@@ -382,8 +413,8 @@ def test_invalid_work_mode_keeps_enforcement_in_hooks(tmp_path: Path) -> None:
     data.setdefault("work", {})["mode"] = "typo"
     path.write_text(json.dumps(data), encoding="utf-8")
     loaded = config.load_config(target)
-    assert loaded is not None and loaded.work_mode == "enforced"
-    assert work_mode.resolve_mode(target) == "enforced"
+    assert loaded is not None and loaded.work_mode == "engineer"
+    assert work_mode.resolve_mode(target) == "engineer"
     assert any(row[0] == "WARN" and row[1] == "work.mode" for row in work_mode.doctor_checks(target))
 
 
@@ -525,7 +556,7 @@ def test_unsupported_config_version_cannot_turn_rails_off(tmp_path: Path) -> Non
     data.update({"version": 99, "work": {"mode": "yolo", "rails": "off"}})
     path.write_text(json.dumps(data), encoding="utf-8")
     assert work_mode.rails_enabled(target) is True
-    assert work_mode.resolve_mode(target) == "enforced"
+    assert work_mode.resolve_mode(target) == "engineer"
 
 
 def test_config_write_failure_is_reported_and_keeps_old_config(tmp_path: Path, monkeypatch) -> None:

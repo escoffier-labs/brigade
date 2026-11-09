@@ -119,17 +119,17 @@ brigade work hooks install --scope user
 
 Session start then injects the work brief. An unwired repo prints the exact `brigade init` command for the agent to run. The home directory is never a work target. Pin with `--target <wired-workspace>` when the session cwd is not the workspace you want. Uninstall with `brigade work hooks uninstall --scope user`. Only Brigade-owned hook entries are touched.
 
-## Yolo mode and safety rails
+## Engineer mode, yolo mode and safety rails
 
-Brigade's default is `enforced` mode. Hooks route tests, linters, and builds through `brigade work verify run`, and the Stop gate asks for a verification receipt before a session that wrote code can finish. Yolo mode keeps the shared context and drops that enforcement:
+Brigade's default is `engineer` mode, with verification on. Hooks route tests, linters, and builds through `brigade work verify run`, and the Stop gate asks for a verification receipt before a session that wrote code can finish. Yolo mode keeps the shared context and drops that enforcement:
 
 ```bash
 brigade init --target . --depth repo --harnesses claude --yolo
 brigade work mode set yolo --target .       # switch an existing repo or workspace
-brigade work mode set enforced --target .   # switch back
+brigade work mode set engineer --target .   # switch back (or: brigade init ... --engineer)
 ```
 
-Yolo keeps the work brief, memory recall at session start and on prompts, memory search, Fleet Hub messages, and handoffs when you ask for one. Agents run checks raw and finish without a receipt or a handoff. `brigade work verify run` still works by hand. Both modes install the same Claude hook events. The hooks skip verification checks only for targets set to yolo, so a session started in a yolo workspace is still held to the receipt gate for an enforced child repository it writes into. `brigade status`, `brigade doctor`, and `brigade repos adoption` report the mode, and adoption shows a yolo repo as `yolo`, never `bypassed`.
+Yolo keeps the work brief, memory recall at session start and on prompts, memory search, Fleet Hub messages, and handoffs when you ask for one. Agents run checks raw and finish without a receipt or a handoff. `brigade work verify run` still works by hand. Both modes install the same Claude hook events. The hooks skip verification checks only for targets set to yolo, so a session started in a yolo workspace is still held to the receipt gate for an engineer-mode child repository it writes into. `brigade status`, `brigade doctor`, and `brigade repos adoption` report the mode, and adoption shows a yolo repo as `yolo`, never `bypassed`.
 
 Without receipts you give up evidence. Nothing records which checks ran, on which tree, or with what exit code. Outcomes are not captured, so skill and card scores stop moving. Adoption and doctor no longer flag a session that edited code and never ran a test, which leaves a skipped check invisible.
 

@@ -91,7 +91,7 @@ def profiles_for_depth(profile: str) -> tuple[str, ...]:
     return FULL_SECTIONS
 
 
-def session_close_items(*, mode: str = "enforced") -> tuple[str, ...]:
+def session_close_items(*, mode: str = "engineer") -> tuple[str, ...]:
     """Checklist items that lead the live brief and the full static profile."""
     return _YOLO_SESSION_CLOSE_ITEMS if mode == "yolo" else _SESSION_CLOSE_ITEMS
 
@@ -189,7 +189,7 @@ def render_static_instruction(profile: str = DEFAULT_PROFILE) -> str:
     return render_sections(profiles_for_depth(profile))
 
 
-def render_brief_session_close_lines(*, mode: str = "enforced") -> list[str]:
+def render_brief_session_close_lines(*, mode: str = "engineer") -> list[str]:
     """Lines printed at the top of live ``brigade work brief`` text output."""
     lines = ["session_close:"]
     lines.extend(f"  - [ ] {item}" for item in session_close_items(mode=mode))

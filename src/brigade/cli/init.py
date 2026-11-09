@@ -74,13 +74,29 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Repo depth: also install the full kit (rules/, hooks/pre-push, INSTALL_FOR_AGENTS.md). "
         "Workspace depth always installs it.",
     )
-    p_init.add_argument(
+    mode_group = p_init.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--yolo",
         action="store_true",
         help="Keep shared context (brief, recall, Fleet Hub, handoffs on request) without verification "
-        "enforcement. Switch back with `brigade work mode set enforced`.",
+        "enforcement. Switch back with `brigade work mode set engineer`.",
+    )
+    mode_group.add_argument(
+        "--engineer",
+        action="store_true",
+        help="Engineer mode (the default for new installs): route checks through `brigade work verify run` "
+        "and keep the Stop receipt gate. Switches an existing yolo install back.",
     )
     p_init.set_defaults(func=dispatch)
+
+
+def _requested_work_mode(args: argparse.Namespace) -> str | None:
+    """``yolo`` or ``engineer`` when a mode flag was passed; None keeps the recorded mode."""
+    if getattr(args, "yolo", False):
+        return "yolo"
+    if getattr(args, "engineer", False):
+        return "engineer"
+    return None
 
 
 def _recorded_selection(target: Path):
@@ -146,7 +162,7 @@ def dispatch(args) -> int:
             use_git_exclude=getattr(args, "git_exclude", False),
             update_gitignore=getattr(args, "update_gitignore", True),
             wire_skills=getattr(args, "wire_skills", True),
-            work_mode="yolo" if getattr(args, "yolo", False) else None,
+            work_mode=_requested_work_mode(args),
         )
 
     # New v0.3.0 path: --depth/--harnesses build a Selection directly.
@@ -191,7 +207,7 @@ def dispatch(args) -> int:
             use_git_exclude=getattr(args, "git_exclude", False),
             update_gitignore=getattr(args, "update_gitignore", True),
             wire_skills=getattr(args, "wire_skills", True),
-            work_mode="yolo" if getattr(args, "yolo", False) else None,
+            work_mode=_requested_work_mode(args),
         )
 
     # No selection flags: interactive prompt.
@@ -213,5 +229,5 @@ def dispatch(args) -> int:
         use_git_exclude=getattr(args, "git_exclude", False),
         update_gitignore=getattr(args, "update_gitignore", True),
         wire_skills=getattr(args, "wire_skills", True),
-        work_mode="yolo" if getattr(args, "yolo", False) else None,
+        work_mode=_requested_work_mode(args),
     )

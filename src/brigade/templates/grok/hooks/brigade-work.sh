@@ -132,11 +132,11 @@ import sys
 try:
     with open(sys.argv[1], encoding="utf-8") as config_file:
         config = json.load(config_file)
-    # An unsupported config version is invalid, so it resolves to enforced.
+    # An unsupported config version is invalid, so it resolves to engineer.
     work = config.get("work") if config.get("version") == 1 else None
 except (AttributeError, OSError, TypeError, ValueError):
     work = None
-print(work.get("mode") if isinstance(work, dict) and work.get("mode") == "yolo" else "enforced")
+print(work.get("mode") if isinstance(work, dict) and work.get("mode") == "yolo" else "engineer")
 PY
 )"
 

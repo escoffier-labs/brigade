@@ -27,10 +27,13 @@ DEFAULT_VERIFY_RUNS_KEEP = 50
 DEFAULT_VERIFY_ARCHIVE_ENABLED = True
 DEFAULT_VERIFY_ARCHIVE_DIR = ".brigade/work/verify-archive"
 DEFAULT_RUN_LOCK_WAIT_SECONDS = 0.0
-# Work-loop enforcement mode (#2233). Safety rails are not a repository setting:
+# Work-loop mode (#2233). Safety rails are not a repository setting:
 # their opt-out lives in a per-user record outside the repo (see work_mode).
-WORK_MODES = ("enforced", "yolo")
-DEFAULT_WORK_MODE = "enforced"
+WORK_MODES = ("engineer", "yolo")
+DEFAULT_WORK_MODE = "engineer"
+# Earlier name for engineer mode. Still read from configs and accepted by
+# `brigade work mode set`; the writer never emits it.
+LEGACY_WORK_MODE_ALIASES = {"enforced": "engineer"}
 
 
 @dataclass
@@ -51,6 +54,9 @@ class Config:
 
 
 def validate_work_mode(value: Any) -> str:
+    """Return the canonical mode for ``value``; legacy names map to their current mode."""
+    if isinstance(value, str):
+        value = LEGACY_WORK_MODE_ALIASES.get(value, value)
     if not isinstance(value, str) or value not in WORK_MODES:
         raise ValueError(f"work.mode must be one of: {', '.join(WORK_MODES)}")
     return value
@@ -217,8 +223,9 @@ def write_config(target: Path, cfg: Config) -> None:
     if memory_recall_target is not None:
         payload["memory_recall_target"] = memory_recall_target
     work: dict[str, str] = {}
-    if validate_work_mode(cfg.work_mode) != DEFAULT_WORK_MODE:
-        work["mode"] = cfg.work_mode
+    work_mode = validate_work_mode(cfg.work_mode)
+    if work_mode != DEFAULT_WORK_MODE:
+        work["mode"] = work_mode
     if work:
         payload["work"] = work
     # Write a sibling temp file and rename it over the config so a failed write
@@ -285,7 +292,7 @@ def load_config(target: Path) -> Optional[Config]:
     if not isinstance(run, dict):
         raise ValueError("run must be an object")
     run_record = validate_run_record(run.get("record", "metadata-only"))
-    # An invalid optional work mode falls back to enforced instead of failing the
+    # An invalid optional work mode falls back to engineer instead of failing the
     # whole config: a failed load reads as "not wired" to hook target discovery,
     # which would drop enforcement. Doctor reports it. An in-repo work.rails is
     # never read here; work_mode reports it as ignored.
