@@ -984,3 +984,16 @@ def test_an_opt_out_with_no_marker_writes_and_removes_through_the_same_directori
     assert install_cmd.hooks_update(target=target, quiet=True, recall_audience_choice="connector") == 0
     assert not recall_audience.marker_path().exists()
     assert recall_audience.audience() == "connector"
+
+
+def test_the_windows_opt_in_creates_a_fresh_home_before_binding_it(wired, monkeypatch, tmp_path):
+    """Runs the Windows code path everywhere (and natively on Windows)."""
+    monkeypatch.setattr(recall_audience, "_POSIX", False)
+    home = tmp_path / "fresh-user" / ".brigade"
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
+    assert not home.exists()
+    assert recall_audience.write_marker() is None
+    stored = json.loads(recall_audience.marker_path().read_text(encoding="utf-8"))
+    assert stored["audience"] == "local" and stored["home"] is not None
+    assert recall_audience.marker_problem() is None
+    assert recall_audience.audience() == "local"

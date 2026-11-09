@@ -328,9 +328,11 @@ def _write_posix(make_body: Callable[[list[int] | None], str]) -> None:
 
 
 def _write_windows(make_body: Callable[[list[int] | None], str]) -> None:
-    body = make_body(_windows_home_identity())
     path = marker_path()
+    # Create the home and claude-hooks first: a fresh home has no identity to bind
+    # until it exists. (POSIX creates them inside _Dirs before reading the identity.)
     path.parent.mkdir(parents=True, exist_ok=True)
+    body = make_body(_windows_home_identity())
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(body, encoding="utf-8")
