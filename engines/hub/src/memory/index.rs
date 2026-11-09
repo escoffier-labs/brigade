@@ -270,18 +270,31 @@ impl Snapshot {
     }
     /// Live documents whose scope is allowed, in document order.
     pub fn live(&self, allowed: &[bool]) -> Vec<u32> {
+        self.live_within(allowed, None)
+    }
+    /// [`Snapshot::live`], narrowed to the documents `keep` marks when given.
+    /// `keep` is indexed by document number; a number past its end is out.
+    pub fn live_within(&self, allowed: &[bool], keep: Option<&[bool]>) -> Vec<u32> {
         (0..self.docs.len as u32)
             .filter(|n| {
                 let d = self.docs.get(*n);
-                d.live && allowed.get(d.scope as usize).copied().unwrap_or(false)
+                d.live
+                    && allowed.get(d.scope as usize).copied().unwrap_or(false)
+                    && keep.is_none_or(|k| k.get(*n as usize).copied().unwrap_or(false))
             })
             .collect()
     }
     /// The first `first` visible documents in answer order (path, then
     /// scope), and how many are visible in all. Only those first are sorted:
     /// the rest are cut by a linear selection, from the document table alone.
-    pub fn in_answer_order(&self, allowed: &[bool], first: usize) -> (Vec<u32>, usize) {
-        let mut docs = self.live(allowed);
+    /// `keep` narrows the visible documents as in [`Snapshot::live_within`].
+    pub fn in_answer_order(
+        &self,
+        allowed: &[bool],
+        keep: Option<&[bool]>,
+        first: usize,
+    ) -> (Vec<u32>, usize) {
+        let mut docs = self.live_within(allowed, keep);
         let visible = docs.len();
         if visible > first {
             docs.select_nth_unstable_by(first, |a, b| self.order(*a, *b));
@@ -332,6 +345,45 @@ impl Snapshot {
                 total += s.tokens;
             }
         }
+        self.bm25(query, n, total, visible)
+    }
+    /// [`Snapshot::score`] over only the visible documents `keep` marks, with
+    /// every statistic (corpus size, average length and document frequency)
+    /// counted over those documents alone. Push search scores this way, so a
+    /// card it withholds never moves the scores or order of the cards it
+    /// sends (S23). The per-scope statistics cannot serve here, so the
+    /// marked documents are summed once per call.
+    pub fn score_within(
+        &self,
+        allowed: &[bool],
+        keep: &[bool],
+        query: &[String],
+    ) -> Vec<(u32, f64)> {
+        let visible = |n: u32| {
+            let d = self.docs.get(n);
+            d.live
+                && allowed.get(d.scope as usize).copied().unwrap_or(false)
+                && keep.get(n as usize).copied().unwrap_or(false)
+        };
+        let mut n: u64 = 0;
+        let mut total: u64 = 0;
+        for doc in 0..keep.len().min(self.docs.len) as u32 {
+            if visible(doc) {
+                n += 1;
+                total += u64::from(self.docs.get(doc).length);
+            }
+        }
+        self.bm25(query, n, total, visible)
+    }
+    /// BM25 over the documents `visible` admits, given their count `n` and
+    /// token total.
+    fn bm25(
+        &self,
+        query: &[String],
+        n: u64,
+        total: u64,
+        visible: impl Fn(u32) -> bool,
+    ) -> Vec<(u32, f64)> {
         let avg = if n == 0 { 0.0 } else { total as f64 / n as f64 };
         let avg = if avg == 0.0 { 1.0 } else { avg };
         let mut seen = HashSet::new();

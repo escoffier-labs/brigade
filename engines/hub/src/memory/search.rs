@@ -213,6 +213,18 @@ pub fn literal(
     allowed: &[bool],
     query: &str,
     limit: usize,
+    body: impl FnMut(&str) -> rusqlite::Result<Option<String>>,
+) -> rusqlite::Result<Literal> {
+    literal_within(snap, allowed, None, query, limit, body)
+}
+/// [`literal`] over only the visible documents `keep` marks, so a document
+/// outside them never takes a hit, a card or a byte of the budget.
+pub fn literal_within(
+    snap: &Snapshot,
+    allowed: &[bool],
+    keep: Option<&[bool]>,
+    query: &str,
+    limit: usize,
     mut body: impl FnMut(&str) -> rusqlite::Result<Option<String>>,
 ) -> rusqlite::Result<Literal> {
     let lowered = text::py_lower(query);
@@ -224,7 +236,7 @@ pub fn literal(
     if needles.is_empty() {
         return Ok(out);
     }
-    let (order, visible) = snap.in_answer_order(allowed, LITERAL_DOCS);
+    let (order, visible) = snap.in_answer_order(allowed, keep, LITERAL_DOCS);
     // The card and byte budgets bound the cost. Stopping at `limit` hits only pays off when the
     // budget would cut the scan anyway; below it, read every visible card so `match_count` stays
     // exact (as Python's) and `truncated` means only that the budget stopped the scan.
@@ -258,6 +270,74 @@ fn blob<T: ReadTx + ?Sized>(tx: &T, hash: &str) -> rusqlite::Result<Option<Strin
         Some(Value::Text(t)) => Some(t.clone()),
         _ => None,
     })
+}
+
+/// S23: the snapshot documents push may send `credential`, as a mask by
+/// document number. A document is in when it is visible (live, in an allowed
+/// scope) and is exactly the store's live head, with push trust and a clean
+/// receipt under the scanner's current rule set. With no rule set nothing is.
+///
+/// One query reads every push-eligible head, so a push search costs one pass
+/// over the cards rather than one query per hit, and the mask is built per
+/// request: it reads the store, so a change behind the published snapshot
+/// still withholds the card at once.
+fn push_mask<T: ReadTx + ?Sized>(
+    tx: &T,
+    credential: &Credential,
+    snap: &Snapshot,
+    allowed: &[bool],
+    scanner: &dyn super::scan::Scanner,
+) -> rusqlite::Result<Vec<bool>> {
+    let mut keep = vec![false; snap.documents()];
+    let (true, Some(ruleset)) = scanner.describe() else {
+        return Ok(keep);
+    };
+    let heads: std::collections::HashMap<(u32, &str), u32> = snap
+        .live(allowed)
+        .into_iter()
+        .map(|n| {
+            let d = snap.doc(n);
+            ((d.scope, &*d.card_id), n)
+        })
+        .collect();
+    if heads.is_empty() {
+        return Ok(keep);
+    }
+    let scopes: std::collections::HashMap<&str, u32> = snap
+        .scopes()
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i as u32))
+        .collect();
+    let rows = tx.query(
+        &format!(
+            "SELECT c.scope,c.card_id,c.revision,c.content_hash FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_scans s ON s.content_hash=c.content_hash WHERE c.state='live' AND {} AND r.scan_state='clean' AND s.ruleset_version=?1 AND s.state='clean'",
+            push_trust_sql(2)
+        ),
+        &[
+            Value::Text(ruleset),
+            Value::Text(credential.principal().into()),
+            Value::Text(credential.class().into()),
+        ],
+    )?;
+    for row in rows {
+        let (Value::Text(scope), Value::Text(card_id), Value::Integer(revision), Value::Text(hash)) =
+            (&row[0], &row[1], &row[2], &row[3])
+        else {
+            continue;
+        };
+        let Some(scope) = scopes.get(scope.as_str()) else {
+            continue;
+        };
+        let Some(&n) = heads.get(&(*scope, card_id.as_str())) else {
+            continue;
+        };
+        let d = snap.doc(n);
+        if d.revision == *revision && *d.content_hash == **hash {
+            keep[n as usize] = true;
+        }
+    }
+    Ok(keep)
 }
 
 pub fn run<T: ReadTx + ?Sized>(
@@ -298,47 +378,45 @@ pub fn run<T: ReadTx + ?Sized>(
             }
         }
     }
-    let (hits, complete) = if request.tokens.is_empty() {
-        let found = literal(snap, &allowed, &request.query, request.limit, |hash| {
-            blob(tx, hash)
-        })?;
-        (found.hits, found.complete)
-    } else {
-        (snap.score(&allowed, &request.tokens), true)
-    };
     // Push revalidates the exact snapshot head and its current scan receipt.
     // Unavailable, pending, private, flagged, retired and stale versions never
     // leave here: only a clean receipt may reach a connector. An
     // `agent-unreviewed` head goes only to the credential that wrote it.
-    let eligible = |hits: Vec<(u32, f64)>| -> rusqlite::Result<Vec<(u32, f64)>> {
-        if !request.push {
-            return Ok(hits);
-        }
-        let mut eligible = Vec::new();
-        let (available, ruleset) = scanner.describe();
-        if available {
-            if let Some(ruleset) = ruleset {
-                for (n, score) in hits {
-                    let d = snap.doc(n);
-                    let rows = tx.query(
-                        &format!("SELECT 1 FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_scans s ON s.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.revision=?3 AND c.content_hash=?4 AND c.state='live' AND {} AND r.scan_state='clean' AND s.ruleset_version=?5 AND s.state='clean'", push_trust_sql(6)),
-                        &[Value::Text(scopes[d.scope as usize].to_string()), Value::Text(d.card_id.to_string()), Value::Integer(d.revision), Value::Text(d.content_hash.to_string()), Value::Text(ruleset.clone()), Value::Text(credential.principal().into()), Value::Text(credential.class().into())],
-                    )?;
-                    if !rows.is_empty() {
-                        eligible.push((n, score));
-                    }
-                }
-            }
-        }
-        Ok(eligible)
+    // The filter applies before scoring, so ranking statistics, lineage and
+    // `match_count` never count a withheld card (#2410).
+    let keep = if request.push {
+        Some(push_mask(tx, credential, snap, &allowed, scanner)?)
+    } else {
+        None
     };
-    let hits = eligible(hits)?;
+    let (hits, complete) = if request.tokens.is_empty() {
+        let found = literal_within(
+            snap,
+            &allowed,
+            keep.as_deref(),
+            &request.query,
+            request.limit,
+            |hash| blob(tx, hash),
+        )?;
+        (found.hits, found.complete)
+    } else if let Some(keep) = &keep {
+        (snap.score_within(&allowed, keep, &request.tokens), true)
+    } else {
+        (snap.score(&allowed, &request.tokens), true)
+    };
+    let pushable = |n: u32| {
+        keep.as_ref()
+            .is_none_or(|k| k.get(n as usize).copied().unwrap_or(false))
+    };
+    let eligible = |hits: Vec<(u32, f64)>| -> Vec<(u32, f64)> {
+        hits.into_iter().filter(|(n, _)| pushable(*n)).collect()
+    };
     // `match_count` and `truncated` keep their lexical meaning in hybrid mode.
     let total = hits.len();
     let mut ranks = std::collections::HashMap::new();
     let hits = if let Some((matrix, query)) = &request.dense {
         let lexical = snap.top(hits, TOP);
-        let dense = snap.top(eligible(matrix.score(snap, &allowed, query))?, TOP);
+        let dense = snap.top(eligible(matrix.score(snap, &allowed, query)), TOP);
         let mut scores = std::collections::HashMap::new();
         for (source, list, weight) in [
             ("lexical", lexical, request.weights.lexical),
@@ -369,11 +447,9 @@ pub fn run<T: ReadTx + ?Sized>(
             uncollapsed: 0,
         }
     } else {
-        super::ranking::collapse_eligible(snap, &allowed, ordered, |n| {
-            Ok(!eligible(vec![(n, 0.0)])?.is_empty())
-        })?
+        super::ranking::collapse_eligible(snap, &allowed, ordered, |n| Ok(pushable(n)))?
     };
-    let mut ordered = eligible(collapsed.hits)?;
+    let mut ordered = eligible(collapsed.hits);
     if !request.raw && !request.automation {
         // Stable partition preserves scorer order within each source class.
         ordered.sort_by_key(|(n, _)| {
