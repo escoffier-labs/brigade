@@ -527,25 +527,39 @@ Slice 9's resolver implementation requires its own security review. This contrac
    ACLs are validated first.
 2. Run only a root-owned git, and build its environment from scratch. git is
    the first of `/usr/bin/git`, `/bin/git` and `/usr/local/bin/git` that
-   exists, resolved with `realpath`. The real file and every directory from
-   it up to `/` must be owned by root and writable by neither group nor
-   others. A git owned by the current user is refused, and so is one reached
+   exists, resolved with `realpath`. The real file must be a native (ELF)
+   regular file, and it and every directory from it up to `/` must be owned
+   by root, writable by neither group nor others, and neither setuid nor
+   setgid. A git owned by the current user is refused, and so is one reached
    through a link whose target fails the rule. git's exec directory must
-   meet the same rule. No setting or environment variable can name another
+   meet the same rule. git launches `git-remote-https` (and
+   `git-remote-http`, often its link target) by pathname from that exec
+   directory, which a held descriptor cannot cover. So before any fetch, each
+   of them that exists, its real target and the whole directory chain must
+   pass the same rule, and `git-remote-https` must exist. Otherwise the
+   resolver returns None without fetching. The residual trust is a
+   root-owned, root-chained native helper, the same level as git itself. No setting or environment variable can name another
    git. The verified file is opened once per run, the descriptor is checked
    against the path (device and inode), and every call executes that
    descriptor with `fexecve`. Replacing the path after the check changes
    nothing, and a script is never run this way. Nothing is copied from the
    caller's environment, which holds exactly:
-   - `PATH`: git's exec directory plus `/usr/bin`, `/bin` and
-     `/usr/local/bin`
+   - `PATH`: git's exec directory plus those of `/usr/bin`, `/bin` and
+     `/usr/local/bin` whose real directory passes the same chain rule, as
+     real paths without duplicates. A directory that fails is dropped.
    - `HOME`: an empty 0700 directory made with `mkdtemp` inside a 0700
      parent the resolver made with `mkdtemp` under the fixed `/tmp`. When
      the run ends, both are removed only while they are still the
-     directories the resolver made: the parent is reached without following
-     any link, both device and inode pairs and the owner must match, and the
-     HOME is removed relative to the held parent by a removal that never
-     follows a link. Any mismatch leaves them in place and logs it.
+     directories the resolver made. The parent is reached without following
+     any link and must keep its device, inode, owner and type. The HOME is
+     opened relative to the held parent with `O_DIRECTORY|O_NOFOLLOW`, and
+     the held descriptor must keep the HOME's identity. Its contents are
+     removed through that descriptor: every subdirectory is opened the same
+     way and checked against the entry just read, and nothing is reopened by
+     path. The empty HOME is then removed by name only after the name is
+     checked again against the same identity. `rmdir` removes only an empty
+     directory, so a swap after that last check cannot delete content. Any
+     mismatch leaves everything in place and logs it.
    - `LC_ALL=C`
    - `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
      `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`
@@ -606,8 +620,9 @@ Slice 9's resolver implementation requires its own security review. This contrac
     names, which is the remote-tracking default branch. If that symbolic ref
     is unset there is no default, and the resolver returns None. Local
     branches and tags are never allowed refs, because a local process can
-    create or move them without a fetch. Same-user tampering with
-    remote-tracking refs stays out of scope, as in the S24 marker ruling.
+    create or move them without a fetch. A remote-tracking ref can be moved
+    locally too, so after its proof (rule 11) the resolver never trusts the
+    ref name again, only the object id the fetch proved.
 11. Prove every allowed ref fresh in the current run without relying on the
     remote's configured fetch refspec. For each allowed ref
     `refs/remotes/<remote>/<branch>`, fetch with
@@ -623,6 +638,16 @@ Slice 9's resolver implementation requires its own security review. This contrac
     refs/heads/<branch>` from the same run, and they must match. A failed,
     timed out or rejected fetch, a missing destination ref, a mismatch, or a
     ref proven only in an earlier run returns None.
+
+    The proof is the object id, not the ref. Per run and per repository, the
+    resolver keeps the exact id each allowed ref's fetch proved: the
+    destination ref's value that the porcelain line names, or the value
+    `ls-remote` matched. Before a later card in the same run uses those ids,
+    it re-reads every allowed ref with `git show-ref --verify` and compares.
+    If any ref no longer names its proven id, something other than this
+    run's fetch moved it. The resolver does not refetch to re-prove. It drops
+    the proof and returns None for that card and for every later card for
+    that repository in the run. The next run fetches and proves again.
 12. Evaluate ambiguity across the complete available object database, not
     only the allowed refs. `git rev-parse --disambiguate=<abbreviation>`
     lists every object of any type (loose, packed and alternates) whose id
@@ -636,9 +661,10 @@ Slice 9's resolver implementation requires its own security review. This contrac
     return it in that spelling. The contract then requires it to equal the
     unique authenticated candidate.
 15. Check reachability separately with
-    `git merge-base --is-ancestor <id> <ref>` against each allowed ref. Exit
-    0 for at least one ref passes. Exit 1 for every ref, or any other exit,
-    returns None.
+    `git merge-base --is-ancestor <id> <proven-id>` against the proven object
+    id of each allowed ref (rule 11), never against a ref name, which could
+    have moved since the fetch. Exit 0 for at least one proven id passes.
+    Exit 1 for every one, or any other exit, returns None.
 16. Return None on any missing object, ambiguity, command error, nonzero
     exit, timeout or unparsable output.
 
@@ -658,8 +684,8 @@ with the same prefix instead of reporting the ambiguity. It also peels an
 annotated tag whose id matches to the commit the tag points at, which is a
 different id. And it says nothing about freshness or reachability.
 
-Reachability from an allowed ref after a proven fetch is the identity
-binding. A receipt proves only that some worktree used a commit. Grinding a
+Reachability from the object id a fetch in this run proved for an allowed
+ref is the identity binding. A receipt proves only that some worktree used a commit. Grinding a
 commit with a matching prefix and getting a receipt for it is not enough
 unless the attacker can also land that commit on an allowed ref.
 

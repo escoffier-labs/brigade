@@ -909,7 +909,7 @@ def test_the_environment_is_built_from_scratch(monkeypatch):
         monkeypatch.setenv(name, value)
     env = resolver.git_environment("/private/home", "/usr/lib/git-core")
     assert env == {
-        "PATH": os.pathsep.join(("/usr/lib/git-core", *resolver.SYSTEM_DIRS)),
+        "PATH": os.pathsep.join(("/usr/lib/git-core", *resolver.trusted_dirs(resolver.SYSTEM_DIRS))),
         "HOME": "/private/home",
         "LC_ALL": "C",
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -918,6 +918,17 @@ def test_the_environment_is_built_from_scratch(monkeypatch):
         "GIT_TERMINAL_PROMPT": "0",
     }
     assert set(env) == resolver.ENV_ALLOWLIST
+
+
+@posix
+def test_untrusted_system_dirs_are_dropped_from_path(tmp_path, monkeypatch):
+    user_bin = tmp_path / "user-bin"
+    user_bin.mkdir()
+    monkeypatch.setattr(resolver, "SYSTEM_DIRS", (str(user_bin), "/usr/bin", "/bin", str(tmp_path / "absent")))
+    env = resolver.git_environment("/private/home", "/usr/lib/git-core")
+    path = env["PATH"].split(os.pathsep)
+    assert str(user_bin) not in path and str(tmp_path / "absent") not in path
+    assert path[0] == "/usr/lib/git-core" and len(path) == len(set(path))  # /bin collapses into /usr/bin
 
 
 def test_every_call_carries_the_overrides():
@@ -1099,9 +1110,13 @@ def test_git_receives_exactly_the_allowlisted_environment(world, monkeypatch):
 
 
 def test_an_untrusted_exec_directory_is_refused(world, monkeypatch):
+    """The helpers link to the real root-owned ones, so only the exec directory's own chain can refuse it."""
     target = world.commit("target")
     loose = world.root / "loose-exec"
     loose.mkdir()
+    helper = os.path.realpath(os.path.join(git(world.root, "--exec-path"), "git-remote-https"))
+    os.symlink(helper, loose / "git-remote-https")
+    os.symlink(helper, loose / "git-remote-http")
     loose.chmod(0o777)
     real = resolver._git
 
@@ -1301,6 +1316,83 @@ def test_a_parent_reached_through_a_link_is_left_in_place(made_home, caplog):
     assert left_in_place(caplog)
 
 
+def after_home_check(monkeypatch, home: Path, action) -> list:
+    """Run `action` once, right after the cleanup's identity check on the HOME passes."""
+    metadata = os.lstat(home)
+    home_id = (metadata.st_dev, metadata.st_ino)
+    real_matches = resolver._matches
+    done: list = []
+
+    def matches(found, identity):
+        result = real_matches(found, identity)
+        if result and identity == home_id and not done:
+            action()
+            done.append(True)
+        return result
+
+    monkeypatch.setattr(resolver, "_matches", matches)
+    return done
+
+
+def test_a_home_swapped_right_after_its_identity_check_is_never_emptied(made_home, monkeypatch, caplog):
+    """Codex P2 and Daybreak P1: an unrelated directory swapped in after the check keeps its contents."""
+    holder, home, _, _ = made_home
+    (home / "own.txt").write_text("resolver scratch\n")
+    original = home.with_name(home.name + "-original")
+
+    def swap_home():
+        os.rename(home, original)
+        home.mkdir()
+        (home / "keep.txt").write_text("keep\n")
+
+    swapped = after_home_check(monkeypatch, home, swap_home)
+    collect(holder)
+    assert swapped
+    assert (home / "keep.txt").read_text() == "keep\n"
+    assert not (original / "own.txt").exists()  # the held original was emptied
+    assert left_in_place(caplog)
+
+
+def test_an_empty_directory_swapped_in_after_the_contents_are_removed_survives(made_home, monkeypatch, caplog):
+    """The final rmdir is by name, so the name is checked again first. An unrelated empty directory survives."""
+    holder, home, _, _ = made_home
+    original = home.with_name(home.name + "-original")
+    real_clear = resolver._clear_held
+
+    def clear_then_swap(fd):
+        real_clear(fd)
+        os.rename(home, original)
+        home.mkdir()
+
+    monkeypatch.setattr(resolver, "_clear_held", clear_then_swap)
+    collect(holder)
+    assert home.is_dir() and list(home.iterdir()) == []
+    assert left_in_place(caplog)
+
+
+def test_a_subdirectory_swapped_during_removal_is_never_emptied(made_home, monkeypatch, caplog):
+    """Inside the HOME, a directory replaced between its lstat and its open is refused, not emptied."""
+    holder, home, _, _ = made_home
+    (home / "sub").mkdir()
+    (home / "sub" / "own.txt").write_text("resolver scratch\n")
+    real_open = resolver._open_child_dir
+    swapped = []
+
+    def swap_then_open(parent_fd, name):
+        if name == "sub" and not swapped:
+            os.rename(home / "sub", home / "sub-original")
+            (home / "sub").mkdir()
+            (home / "sub" / "keep.txt").write_text("keep\n")
+            swapped.append(True)
+        return real_open(parent_fd, name)
+
+    monkeypatch.setattr(resolver, "_open_child_dir", swap_then_open)
+    collect(holder)
+    assert swapped
+    assert (home / "sub" / "keep.txt").read_text() == "keep\n"
+    assert left_in_place(caplog)
+
+
 def test_removal_after_the_checks_never_follows_a_swapped_parent(made_home, monkeypatch):
     """The parent is swapped for a link right after the identity checks pass. Removal stays on the held parent."""
     holder, home, _, sentinel = made_home
@@ -1308,18 +1400,12 @@ def test_removal_after_the_checks_never_follows_a_swapped_parent(made_home, monk
     lookalike = sentinel / home.name
     lookalike.mkdir()
     (lookalike / "keep.txt").write_text("keep\n")
-    real_stat_child = resolver.dirfd.stat_child
-    swapped = []
 
-    def stat_then_swap(parent_fd, name, **kwargs):
-        result = real_stat_child(parent_fd, name, **kwargs)
-        if name == home.name and not swapped:
-            os.rename(parent, parent.with_name(parent.name + "-moved"))
-            os.symlink(sentinel, parent)
-            swapped.append(True)
-        return result
+    def swap_parent():
+        os.rename(parent, parent.with_name(parent.name + "-moved"))
+        os.symlink(sentinel, parent)
 
-    monkeypatch.setattr(resolver.dirfd, "stat_child", stat_then_swap)
+    swapped = after_home_check(monkeypatch, home, swap_parent)
     collect(holder)
     assert swapped
     assert (lookalike / "keep.txt").read_text() == "keep\n"
@@ -1330,19 +1416,46 @@ def test_removal_after_the_checks_never_follows_a_swapped_parent(made_home, monk
 
 
 def fake_root(monkeypatch, *trusted: Path) -> None:
-    """Treat everything under `trusted`, and the directories above it, as root-owned and not writable by others."""
+    """Fake root ownership for everything under `trusted`. The mode rules (write, setuid, setgid) still apply there.
+
+    The real directories above a fake root (the test's tmp_path, /tmp and so on) are accepted as they are, since
+    a test cannot make them root-owned.
+    """
     real_node = resolver._trusted_node
     roots = [str(path) for path in trusted]
 
     def node(path, metadata):
-        if any(
-            path == root or path.startswith(root + os.sep) or root.startswith(path.rstrip(os.sep) + os.sep)
-            for root in roots
-        ):
+        if any(path == root or path.startswith(root + os.sep) for root in roots):
+            # Only the owner is faked. The module's own mode rules decide the rest.
+            as_root = os.stat_result(
+                (metadata.st_mode, metadata.st_ino, metadata.st_dev, metadata.st_nlink, 0, 0, 0, 0, 0, 0)
+            )
+            return real_node(path, as_root)
+        if any(root.startswith(path.rstrip(os.sep) + os.sep) for root in roots):
             return True
         return real_node(path, metadata)
 
     monkeypatch.setattr(resolver, "_trusted_node", node)
+
+
+# The mode bits a trusted node must not carry. The test below pins the module's value.
+UNSAFE_MODE = 0o022 | stat.S_ISUID | stat.S_ISGID
+
+
+def test_the_unsafe_mode_mask_is_write_setuid_and_setgid():
+    assert resolver.UNSAFE_MODE == UNSAFE_MODE
+
+
+def tree(root: Path, *parts: str) -> Path:
+    """Make root/parts with every created directory at 0755, so a fake root passes the mode rules."""
+    current = root
+    current.mkdir(mode=0o755, exist_ok=True)
+    current.chmod(0o755)
+    for part in parts:
+        current = current / part
+        current.mkdir(mode=0o755, exist_ok=True)
+        current.chmod(0o755)
+    return current
 
 
 @posix
@@ -1361,8 +1474,8 @@ def test_a_user_owned_git_is_refused(tmp_path, monkeypatch):
 @posix
 def test_a_symlinked_git_whose_target_is_not_root_owned_is_refused(tmp_path, monkeypatch):
     root = tmp_path / "root"
-    (root / "usr" / "local" / "bin").mkdir(parents=True)
-    (root / "usr" / "lib").mkdir(parents=True)
+    tree(root, "usr", "local", "bin")
+    tree(root, "usr", "lib")
     user = tmp_path / "home" / "user"
     user.mkdir(parents=True)
     shutil.copy2(real_git(), user / "git")
@@ -1385,6 +1498,9 @@ def test_a_symlinked_git_whose_target_is_not_root_owned_is_refused(tmp_path, mon
         (0, 0o100775, False),
         (0, 0o100757, False),
         (0, 0o040777, False),
+        (0, 0o104755, False),
+        (0, 0o102755, False),
+        (0, 0o042755, False),
         (1000, 0o100755, False),
     ],
 )
@@ -1408,7 +1524,7 @@ def test_a_root_owned_git_in_an_untrusted_directory_is_refused(tmp_path, monkeyp
 def test_a_git_swapped_after_the_check_never_runs(world, monkeypatch):
     target = world.commit("target")
     root = world.root / "root"
-    (root / "usr" / "bin").mkdir(parents=True)
+    tree(root, "usr", "bin")
     git_path = root / "usr" / "bin" / "git"
     shutil.copy2(real_git(), git_path)
     fake_root(monkeypatch, root)
@@ -1428,7 +1544,7 @@ def test_a_git_swapped_after_the_check_never_runs(world, monkeypatch):
     monkeypatch.setattr(resolver.proc, "run_held", swap_then_run)
     assert world.resolve(short(target)) == target
     assert world.ran() == []
-    # A new run verifies and holds the swapped script, which held execution refuses to run at all.
+    # A new run finds the swapped script, which is not a native file, so it is refused before it is held.
     assert world.resolve(short(target), run=resolver.Run()) is None
     assert world.ran() == []
 
@@ -1450,10 +1566,21 @@ def spawn_spies(monkeypatch) -> list:
 
 
 def bound_workspace(tmp_path: Path) -> config.Workspace:
+    """A workspace bound to a directory under tmp_path, built directly.
+
+    The `[[verify.workspace]]` parser accepts only POSIX roots, so it would refuse a Windows tmp_path before the
+    resolver is reached. The fail-closed path never reads the workspace, so a directly built entry is enough here.
+    """
     path = tmp_path / "workspace"
     path.mkdir()
-    entry = {"scope": SCOPE, "path": str(path), "archive_projects": []}
-    return config.parse({"verify": {"workspace": [entry]}}).workspaces[0]
+    metadata = os.stat(path)
+    return config.Workspace(
+        scope=SCOPE,
+        path=str(path),
+        archive_projects=(),
+        resolved=os.path.normcase(os.path.realpath(path)),
+        identity=(metadata.st_dev, metadata.st_ino),
+    )
 
 
 def test_an_unsupported_platform_fails_closed_without_spawning(tmp_path, monkeypatch):
@@ -1478,7 +1605,7 @@ def test_windows_fails_closed_without_spawning(tmp_path, monkeypatch):
 @posix
 def test_a_git_replaced_between_open_and_check_is_not_held(tmp_path, monkeypatch):
     root = tmp_path / "root"
-    (root / "usr" / "bin").mkdir(parents=True)
+    tree(root, "usr", "bin")
     git_path = root / "usr" / "bin" / "git"
     shutil.copy2(real_git(), git_path)
     replacement = root / "usr" / "bin" / "replacement"
@@ -1496,3 +1623,150 @@ def test_a_git_replaced_between_open_and_check_is_not_held(tmp_path, monkeypatch
     monkeypatch.setattr(resolver.os, "lstat", lstat)
     assert resolver._hold(str(git_path)) is None
     assert replaced
+
+
+# --- Fix round 3: reachability binds to the object ids a fetch proved -------------------
+
+
+def attacker_commit(world: World, message: str) -> str:
+    """An unpushed commit on top of the workspace's origin/main, made only in the workspace."""
+    tree = git(world.workspace, "rev-parse", "refs/remotes/origin/main^{tree}")
+    parent = git(world.workspace, "rev-parse", "refs/remotes/origin/main")
+    return git(world.workspace, "commit-tree", tree, "-p", parent, "-m", message)
+
+
+def test_a_ref_moved_after_the_proof_never_vouches_for_a_later_card(world):
+    """Codex P1: card 2 in the same run must not resolve against a remote-tracking ref moved locally."""
+    target = world.commit("target")
+    run = resolver.Run()
+    assert world.resolve(short(target), run=run) == target
+    attacker = attacker_commit(world, "attacker")
+    git(world.workspace, "update-ref", "refs/remotes/origin/main", attacker)
+    assert world.resolve(short(attacker), run=run) is None
+    # The run stopped trusting the repository, so even a genuine commit abstains for the rest of it.
+    assert world.resolve(short(target), run=run) is None
+    # A new run fetches and proves again: the remote resets the ref, and only the genuine commit resolves.
+    fresh = resolver.Run()
+    assert world.resolve(short(attacker), run=fresh) is None
+    assert world.resolve(short(target), run=fresh) == target
+
+
+def test_a_ref_moved_between_the_fetch_and_the_ancestry_check_is_ignored(world, monkeypatch):
+    """Within one card, reachability uses the proven id even if the ref moves right after the fetch."""
+    world.commit("target")
+    attacker = attacker_commit(world, "attacker")
+    real = resolver._git
+    moved = []
+
+    def move_after_fetch(tool, cwd, *args):
+        result = real(tool, cwd, *args)
+        if args[0] == "rev-parse" and any(arg.startswith("--disambiguate=") for arg in args) and not moved:
+            git(world.workspace, "update-ref", "refs/remotes/origin/main", attacker)
+            moved.append(True)
+        return result
+
+    monkeypatch.setattr(resolver, "_git", move_after_fetch)
+    assert world.resolve(short(attacker)) is None
+    assert moved
+
+
+def test_the_run_caches_the_ids_each_fetch_proved(world):
+    target = world.commit("target")
+    run = resolver.Run()
+    assert world.resolve(short(target), run=run) == target
+    ((key, proven),) = run.proofs.items()
+    assert key[1] == ("refs/remotes/origin/main",)
+    assert proven == {"refs/remotes/origin/main": target}
+
+
+# --- Fix round 3: setuid and setgid, and git's helpers ----------------------------------
+
+
+@posix
+@pytest.mark.parametrize("mode", [0o4755, 0o2755])
+def test_a_setuid_or_setgid_git_is_refused(tmp_path, monkeypatch, mode):
+    root = tmp_path / "root"
+    git_path = tree(root, "usr", "bin") / "git"
+    shutil.copy2(real_git(), git_path)
+    git_path.chmod(0o755)
+    fake_root(monkeypatch, root)
+    monkeypatch.setattr(resolver, "GIT_CANDIDATES", (str(git_path),))
+    assert resolver.find_git() == os.path.realpath(git_path)  # the control
+    git_path.chmod(mode)
+    if not os.stat(git_path).st_mode & mode & 0o6000:
+        pytest.skip("this filesystem does not keep setuid or setgid bits for the test user")
+    assert resolver.find_git() is None
+
+
+def real_helper() -> str:
+    found = os.path.realpath(os.path.join(git(Path.cwd(), "--exec-path"), "git-remote-https"))
+    assert os.path.isfile(found)
+    return found
+
+
+def fake_exec_dir(world: World, monkeypatch) -> Path:
+    """A fake root exec directory with trusted copies of git's https helpers, reported by `git --exec-path`."""
+    root = world.root / "root"
+    exec_dir = tree(root, "usr", "lib", "git-core")
+    shutil.copy2(real_helper(), exec_dir / "git-remote-http")
+    (exec_dir / "git-remote-http").chmod(0o755)
+    os.symlink("git-remote-http", exec_dir / "git-remote-https")
+    fake_root(monkeypatch, root)
+    real = resolver._git
+
+    def reported(tool, cwd, *args):
+        if args == ("--exec-path",):
+            return resolver._Result(0, f"{exec_dir}\n")
+        world.calls.append(args[0])
+        return real(tool, cwd, *args)
+
+    world.calls = []
+    monkeypatch.setattr(resolver, "_git", reported)
+    return exec_dir
+
+
+def test_trusted_helpers_in_the_exec_dir_pass(world, monkeypatch):
+    target = world.commit("target")
+    fake_exec_dir(world, monkeypatch)
+    assert world.resolve(short(target)) == target
+    assert "fetch" in world.calls
+
+
+@pytest.mark.parametrize("mode", [0o775, 0o757, 0o4755])
+def test_a_writable_or_setuid_helper_is_refused_before_any_fetch(world, monkeypatch, mode):
+    target = world.commit("target")
+    helper = fake_exec_dir(world, monkeypatch) / "git-remote-http"
+    helper.chmod(mode)
+    assert world.resolve(short(target)) is None
+    assert "fetch" not in world.calls
+
+
+def test_a_helper_linked_to_a_file_root_does_not_own_is_refused_before_any_fetch(world, monkeypatch):
+    target = world.commit("target")
+    exec_dir = fake_exec_dir(world, monkeypatch)
+    user = world.root / "home" / "user"
+    user.mkdir(parents=True)
+    shutil.copy2(real_helper(), user / "git-remote-https")
+    (exec_dir / "git-remote-https").unlink()
+    os.symlink(user / "git-remote-https", exec_dir / "git-remote-https")
+    assert world.resolve(short(target)) is None
+    assert "fetch" not in world.calls
+
+
+def test_a_missing_https_helper_is_refused_before_any_fetch(world, monkeypatch):
+    target = world.commit("target")
+    exec_dir = fake_exec_dir(world, monkeypatch)
+    (exec_dir / "git-remote-https").unlink()
+    assert world.resolve(short(target)) is None
+    assert "fetch" not in world.calls
+
+
+def test_a_helper_that_is_not_a_native_file_is_refused_before_any_fetch(world, monkeypatch):
+    target = world.commit("target")
+    exec_dir = fake_exec_dir(world, monkeypatch)
+    script = exec_dir / "git-remote-http"
+    script.unlink()
+    script.write_text("#!/bin/sh\nexit 0\n")
+    script.chmod(0o755)
+    assert world.resolve(short(target)) is None
+    assert "fetch" not in world.calls

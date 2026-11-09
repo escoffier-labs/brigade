@@ -9,14 +9,20 @@
    the whole process group killed on a timeout. Supervised runs also reap
    helpers left after git exits.
 2. git is the first of `GIT_CANDIDATES` that exists, resolved with
-   `realpath`. The real file and every directory from it up to `/` must be
-   owned by root and writable by neither group nor others, and so must git's
-   exec directory. The verified file is opened once per run and executed
-   through that held descriptor (`fexecve`), so swapping the path after the
-   check changes nothing. The environment is built from scratch and holds
-   only `ENV_ALLOWLIST`: `PATH` (git's exec directory and the fixed system
-   directories), `HOME` (an empty directory inside a resolver-owned 0700
-   parent), `LC_ALL=C` and the four `GIT_*` settings D3 names. Platforms
+   `realpath`. It must be a native (ELF) regular file, and it and every
+   directory from it up to `/` must be owned by root, writable by neither
+   group nor others, and neither setuid nor setgid. git's exec directory
+   must meet the same rule, and so must `git-remote-https` and
+   `git-remote-http` there (and their real targets) before any fetch. The
+   verified git is opened once per run and executed through that held
+   descriptor (`fexecve`), so swapping the path after the check changes
+   nothing. git launches its helpers by pathname, so for them the residual
+   trust is a root-owned, root-chained native file, the same level as git.
+   The environment is built from scratch and holds only `ENV_ALLOWLIST`:
+   `PATH` (git's exec directory and those fixed system directories that pass
+   the same chain rule, as real paths), `HOME` (an empty directory inside a
+   resolver-owned 0700 parent), `LC_ALL=C` and the four `GIT_*` settings D3
+   names. Platforms
    without held execution (Windows, and POSIX systems without `fexecve`)
    fail closed: the resolver returns None and never runs git.
 3. `--no-replace-objects` and the `OVERRIDES` list ride on every call.
@@ -33,11 +39,13 @@
 10. Allowed refs come from `commit_refs`, else from the single ref that
     `refs/remotes/origin/HEAD` names. Local branches and tags never count.
 11. Each allowed ref is fetched in this run with an explicit refspec, and the
-    porcelain output (or `ls-remote` before git 2.41) proves it current.
+    porcelain output (or `ls-remote` before git 2.41) proves it current. The
+    run keeps the object id each fetch proved. A later card re-reads every
+    ref with `show-ref` and abstains for the rest of the run when one moved.
 12. `rev-parse --disambiguate` must list exactly one object.
 13. That object must be a commit.
 14. Its id must be 40 or 64 lowercase hex characters.
-15. It must be an ancestor of at least one allowed ref.
+15. It must be an ancestor of at least one proven object id, never a ref name.
 16. Anything else returns None.
 
 Fetch proofs are cached in a `Run`, per repository and ref list, so the cards
@@ -155,7 +163,9 @@ class Run:
     Call `close()` when the run ends. Collecting the object does the same.
     """
 
-    proofs: dict[tuple[config.Identity, tuple[str, ...]], bool] = field(default_factory=dict)
+    # Per repository and ref list: each allowed ref mapped to the object id its fetch proved in this run, or None
+    # when the proof failed or a proven ref later moved.
+    proofs: dict[tuple[config.Identity, tuple[str, ...]], dict[str, str] | None] = field(default_factory=dict)
     version: tuple[int, int] | None = None
     tool: GitTool | None = None
     tool_failed: bool = False
@@ -196,9 +206,22 @@ def unavailable_reason() -> str | None:
     return None if platform_supported() else UNSUPPORTED_PLATFORM
 
 
+# Mode bits a trusted node must not carry: group or world write, setuid and setgid.
+UNSAFE_MODE = 0o022 | stat.S_ISUID | stat.S_ISGID
+# git launches these by pathname from its exec directory for an https fetch. held execution cannot cover them.
+HELPERS = ("git-remote-https", "git-remote-http")
+REQUIRED_HELPER = "git-remote-https"
+ELF_MAGIC = b"\x7fELF"
+
+
+def _root_owned(path: str, metadata: os.stat_result) -> bool:
+    """Owned by root. `path` lets tests fake a root without changing the mode rules."""
+    return metadata.st_uid == 0
+
+
 def _trusted_node(path: str, metadata: os.stat_result) -> bool:
-    """Owned by root and writable by neither group nor others. `path` is for tests that fake a root."""
-    return metadata.st_uid == 0 and not metadata.st_mode & 0o022
+    """Owned by root, writable by neither group nor others, and neither setuid nor setgid."""
+    return _root_owned(path, metadata) and not metadata.st_mode & UNSAFE_MODE
 
 
 def root_chain(path: str) -> bool:
@@ -217,18 +240,59 @@ def root_chain(path: str) -> bool:
         current = parent
 
 
+def native_file(real: str) -> bool:
+    """A regular file that starts with the ELF magic, read without following a link."""
+    try:
+        fd = os.open(real, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except (OSError, ValueError):
+        return False
+    try:
+        return stat.S_ISREG(os.fstat(fd).st_mode) and os.read(fd, len(ELF_MAGIC)) == ELF_MAGIC
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def trusted_executable(path: str) -> str | None:
+    """The real path behind `path` when it is a native, root-owned file in a root-owned chain, else None."""
+    real = os.path.realpath(path)
+    return real if native_file(real) and root_chain(real) else None
+
+
 def find_git() -> str | None:
-    """The real path of the first existing candidate, when it is a root-owned regular file in a root-owned chain."""
+    """The real path of the first existing candidate, when it passes `trusted_executable`."""
     for candidate in GIT_CANDIDATES:
-        if not os.path.lexists(candidate):
-            continue
-        real = os.path.realpath(candidate)
-        try:
-            regular = stat.S_ISREG(os.lstat(real).st_mode)
-        except (OSError, ValueError):
-            return None
-        return real if regular and root_chain(real) else None
+        if os.path.lexists(candidate):
+            return trusted_executable(candidate)
     return None
+
+
+def helpers_trusted(exec_dir: str) -> bool:
+    """Every helper an https fetch can launch from `exec_dir` is a trusted executable. git-remote-https must exist.
+
+    git runs these by pathname, so the held descriptor does not cover them. The residual trust is a root-owned,
+    root-chained native helper, the same level as git itself.
+    """
+    for name in HELPERS:
+        path = os.path.join(exec_dir, name)
+        if not os.path.lexists(path):
+            if name == REQUIRED_HELPER:
+                return False
+            continue
+        if trusted_executable(path) is None:
+            return False
+    return True
+
+
+def trusted_dirs(directories: Sequence[str]) -> tuple[str, ...]:
+    """The real paths of `directories` that exist and sit in a root-owned chain, deduplicated, in order."""
+    kept: list[str] = []
+    for directory in directories:
+        real = os.path.realpath(directory)
+        if real not in kept and os.path.isdir(real) and root_chain(real):
+            kept.append(real)
+    return tuple(kept)
 
 
 def _hold(real: str) -> int | None:
@@ -256,7 +320,7 @@ def _hold(real: str) -> int | None:
 def git_environment(home: str, exec_dir: str | None = None) -> dict[str, str]:
     """The from-scratch environment every git call runs with (D3 rule 2). Only `ENV_ALLOWLIST` keys appear."""
     return {
-        "PATH": os.pathsep.join(((exec_dir,) if exec_dir else ()) + SYSTEM_DIRS),
+        "PATH": os.pathsep.join(((exec_dir,) if exec_dir else ()) + trusted_dirs(SYSTEM_DIRS)),
         "HOME": home,
         "LC_ALL": "C",
         **GIT_SETTINGS,
@@ -285,28 +349,66 @@ def _matches(metadata: os.stat_result, identity: config.Identity) -> bool:
     )
 
 
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_child_dir(parent_fd: int, name: str) -> int:
+    """Open a child directory relative to a held parent, refusing a link."""
+    return os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+
+
+def _clear_held(fd: int) -> None:
+    """Remove everything inside the held directory `fd`, never following a link and never reopening by path.
+
+    Each subdirectory is opened relative to its held parent with O_NOFOLLOW, and its descriptor must name the
+    entry just read before anything inside it is touched.
+    """
+    with os.scandir(fd) as entries:
+        names = [entry.name for entry in entries]
+    for name in names:
+        entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if not stat.S_ISDIR(entry.st_mode):
+            os.unlink(name, dir_fd=fd)
+            continue
+        child = _open_child_dir(fd, name)
+        try:
+            opened = os.fstat(child)
+            if (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
+                raise OSError("a directory inside the private HOME changed while it was removed")
+            _clear_held(child)
+        finally:
+            os.close(child)
+        os.rmdir(name, dir_fd=fd)
+
+
 def remove_home(home: _Home) -> bool:
     """Remove the HOME and its parent only while both are still the directories the resolver made.
 
-    The parent is opened by walking from `/` without following any link, both
-    identities are compared (device, inode, owner, directory type), and the
-    HOME is removed relative to the held parent by the descriptor-based
-    rmtree, which never follows a link. Any mismatch leaves everything in
-    place and logs it. Nothing raises.
+    The parent is opened by walking from `/` without following any link and must keep its identity (device,
+    inode, owner, directory type). The HOME is opened relative to that held parent with O_NOFOLLOW and its
+    descriptor must keep the HOME's identity. Its contents are removed through the held descriptor, so a HOME
+    swapped after the check is never touched. The empty HOME is then removed by name only after that name is
+    re-checked against the same identity. `rmdir` removes only an empty directory, so a swap after the re-check
+    cannot delete content. Any mismatch leaves everything in place and logs it. Nothing raises.
     """
     try:
-        if not dirfd.tree_removal_available():
-            LOG.warning("verify resolver left its private HOME in place: no link-safe tree removal here")
-            return False
         parent_fd = dirfd.open_directory_chain(Path(home.parent), writable=False)
         try:
             if not _matches(os.fstat(parent_fd), home.parent_id):
                 LOG.warning("verify resolver left its private HOME in place: its parent was replaced")
                 return False
-            if not _matches(dirfd.stat_child(parent_fd, home.name), home.home_id):
-                LOG.warning("verify resolver left its private HOME in place: it was replaced")
+            home_fd = _open_child_dir(parent_fd, home.name)
+            try:
+                if not _matches(os.fstat(home_fd), home.home_id):
+                    LOG.warning("verify resolver left its private HOME in place: it was replaced")
+                    return False
+                _clear_held(home_fd)
+            finally:
+                os.close(home_fd)
+            if not _matches(os.stat(home.name, dir_fd=parent_fd, follow_symlinks=False), home.home_id):
+                LOG.warning("verify resolver left its private HOME in place: it was replaced during removal")
                 return False
-            dirfd.remove_tree_child(parent_fd, home.name)
+            os.rmdir(home.name, dir_fd=parent_fd)
         finally:
             os.close(parent_fd)
         top_fd = dirfd.open_directory_chain(Path(os.path.dirname(home.parent)), writable=False)
@@ -352,7 +454,7 @@ def _tool(run: Run) -> GitTool | None:
     if exec_dir is None or not os.path.isabs(exec_dir):
         return None
     exec_real = os.path.realpath(exec_dir)
-    if not os.path.isdir(exec_real) or not root_chain(exec_real):
+    if not os.path.isdir(exec_real) or not root_chain(exec_real) or not helpers_trusted(exec_real):
         return None
     run.tool, run.tool_failed = GitTool(real, fd, git_environment(home, exec_real)), False
     return run.tool
@@ -490,11 +592,11 @@ def _version(tool: GitTool, cwd: str, run: Run) -> tuple[int, int] | None:
     return run.version
 
 
-def _fetch_proves(tool: GitTool, cwd: str, ref: str, run: Run) -> bool:
-    """D3 rule 11: fetch `ref` now with an explicit refspec and prove the destination is current."""
+def _fetch_proves(tool: GitTool, cwd: str, ref: str, run: Run) -> str | None:
+    """D3 rule 11: fetch `ref` now with an explicit refspec and return the object id the fetch proved, or None."""
     version = _version(tool, cwd, run)
     if version is None:
-        return False
+        return None
     remote, branch = _remote(ref)
     refspec = f"+refs/heads/{branch}:{ref}"
     common = ("--no-tags", "--no-prune-tags", "--prune", "--no-recurse-submodules", "--no-write-fetch-head")
@@ -502,14 +604,42 @@ def _fetch_proves(tool: GitTool, cwd: str, ref: str, run: Run) -> bool:
         # Without --verbose, porcelain output leaves out refs that were already up to date.
         result = _git(tool, cwd, "fetch", "--porcelain", "--verbose", *common, remote, refspec)
         if result is None or result.code != 0:
-            return False
+            return None
         value = _ref_value(tool, cwd, ref)
-        return value is not None and _porcelain_proves(result.out, ref, value)
+        return value if value is not None and _porcelain_proves(result.out, ref, value) else None
     result = _git(tool, cwd, "fetch", *common, remote, refspec)
     if result is None or result.code != 0:
-        return False
+        return None
     remote_value = _ls_remote_value(tool, cwd, remote, branch)
-    return remote_value is not None and _ref_value(tool, cwd, ref) == remote_value
+    return remote_value if remote_value is not None and _ref_value(tool, cwd, ref) == remote_value else None
+
+
+def _proven_ids(
+    tool: GitTool, cwd: str, key: tuple[config.Identity, tuple[str, ...]], run: Run
+) -> dict[str, str] | None:
+    """The object id each allowed ref's fetch proved in this run, fetching on the run's first card.
+
+    A later card first re-reads every ref with `show-ref`. A ref that no longer names its proven id moved after
+    the proof (a local write the fetch did not make), so the run stops trusting that repository: the cache is
+    dropped to None and every later card for it abstains. The run never refetches to re-prove.
+    """
+    if key not in run.proofs:
+        proven: dict[str, str] = {}
+        for ref in key[1]:
+            value = _fetch_proves(tool, cwd, ref, run)
+            if value is None:
+                run.proofs[key] = None
+                return None
+            proven[ref] = value
+        run.proofs[key] = proven
+        return proven
+    cached = run.proofs[key]
+    if cached is None:
+        return None
+    if any(_ref_value(tool, cwd, ref) != value for ref, value in cached.items()):
+        run.proofs[key] = None
+        return None
+    return cached
 
 
 def _repository_ready(tool: GitTool, cwd: str, workspace: config.Workspace) -> tuple[str, ...] | None:
@@ -552,10 +682,8 @@ def _resolve(workspace: config.Workspace, run: Run, abbreviation: str) -> str | 
     refs = _repository_ready(tool, cwd, workspace)
     if refs is None:
         return None
-    key = (workspace.identity, refs)
-    if key not in run.proofs:
-        run.proofs[key] = all(_fetch_proves(tool, cwd, ref, run) for ref in refs)
-    if not run.proofs[key]:
+    proven = _proven_ids(tool, cwd, (workspace.identity, refs), run)
+    if proven is None:
         return None
     listed = _output(tool, cwd, "rev-parse", f"--disambiguate={abbreviation}")
     if listed is None or len(listed.splitlines()) != 1:
@@ -565,8 +693,9 @@ def _resolve(workspace: config.Workspace, run: Run, abbreviation: str) -> str | 
         return None
     if _output(tool, cwd, "cat-file", "-t", full) != "commit":
         return None
+    # Reachability is checked against the object ids the fetch proved, never against a ref name that can move.
     for ref in refs:
-        result = _git(tool, cwd, "merge-base", "--is-ancestor", full, ref)
+        result = _git(tool, cwd, "merge-base", "--is-ancestor", full, proven[ref])
         if result is None or result.code not in (0, 1):
             return None
         if result.code == 0:

@@ -93,8 +93,11 @@ The resolver MUST:
    timeout. POSIX-only in v1: without held-descriptor execution (Windows
    included) every expansion abstains and no process starts.
 2. Run only a root-owned git (`/usr/bin/git`, `/bin/git` or
-   `/usr/local/bin/git`, its real file and every directory above it owned by
-   root and not group- or world-writable), executed from a held descriptor,
+   `/usr/local/bin/git`, its real file a native executable and it and every
+   directory above it owned by root, not group- or world-writable, and
+   neither setuid nor setgid), executed from a held descriptor. Its
+   `git-remote-https` and `git-remote-http` helpers must pass the same rule
+   before any fetch,
    with an environment built from scratch: only `PATH` (git's exec directory
    and the system directories), a private empty `HOME` that is removed only
    while it is still the directory the resolver made, `LC_ALL=C`,
@@ -138,7 +141,10 @@ The resolver MUST:
     replaces the configured ones. The porcelain output must list the
     destination ref as updated or up to date, or, before git 2.41, the ref
     must equal `git ls-remote <remote> refs/heads/<branch>` from the same run.
-    Anything else, or a proof from an earlier run, returns None.
+    Anything else, or a proof from an earlier run, returns None. The run keeps
+    the object id each fetch proved. A later card re-reads each ref with
+    `show-ref` and, if one moved, returns None for the rest of the run
+    without refetching.
 12. Run `git rev-parse --disambiguate=<abbreviation>`. It lists every object
     of any type in the complete object database (loose, packed and
     alternates) whose id starts with the prefix, reachable or not, and never
@@ -147,8 +153,9 @@ The resolver MUST:
 13. Check `git cat-file -t <id>` prints exactly `commit`, otherwise return
     None.
 14. Check that the id is exactly 40 or 64 lowercase hex characters.
-15. Check `git merge-base --is-ancestor <id> <ref>` exits 0 for at least one
-    allowed ref. Exit 1 for every ref, or any other exit, returns None.
+15. Check `git merge-base --is-ancestor <id> <proven-id>` exits 0 for at
+    least one allowed ref's proven object id, never a ref name. Exit 1 for
+    every one, or any other exit, returns None.
 16. Return None on any command error, nonzero exit, timeout or unparsable
     output, and never raise to signal success.
 
@@ -159,8 +166,8 @@ between objects of different types instead of reporting them, and it peels
 an annotated tag to the commit it points at. It also says nothing about
 freshness or reachability.
 
-Reachability from an allowed ref after a proven fetch is the identity
-binding. An attacker who grinds a commit with a matching prefix and gets a
+Reachability from the object id a fetch in this run proved for an allowed
+ref is the identity binding. An attacker who grinds a commit with a matching prefix and gets a
 receipt for it still has to land that commit on an allowed ref. This module
 ships no git code. `memory_verify_resolver` is the git implementation.
 
