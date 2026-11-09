@@ -10,10 +10,17 @@ is `evidence_unreachable` and is never read.
 Root handles. Every bound root is opened once per run as a directory handle
 and checked against the `(st_dev, st_ino)` pinned when the configuration was
 parsed. Evidence paths resolve under that handle one component at a time with
-no-follow opens, never through the root's path string, and every directory and
-file on the way must sit on the root's device. The handle stays open while any
-evidence under the root is read, so a root that is renamed, replaced or
-removed and recreated after the check is never read through its new path.
+no-follow opens, never through the root's path string. The handle stays open
+while any evidence under the root is read, so a root that is renamed, replaced
+or removed and recreated after the check is never read through its new path.
+
+Containment. Every directory and file on the way must sit on the root's
+device. On Linux each opened descriptor must also report the root's mount id
+in `/proc/self/fdinfo`, so a bind mount of another directory on the same
+device is refused. When the mount id cannot be read, the root is refused. Other
+POSIX systems have no per-descriptor mount id, so they check the device only.
+That leaves one residual there: a same-device mount inside a root, which those
+systems do not create by default and only an administrator can add.
 
 On POSIX the root opens with `O_DIRECTORY | O_NOFOLLOW` at the path resolved
 at parse time. Windows has neither flag. There the root opens through the
@@ -40,11 +47,13 @@ reason codes, counts, kinds, ranks, digests and rule ids, never evidence text.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hmac
 import json
 import os
 import re
 import stat
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -84,12 +93,13 @@ EXCERPT_BYTES = 4 * 1024
 MAX_EXCERPTS = 3
 # A cited file is read whole for the digest check. A larger file is unreachable.
 READ_LIMIT = 1024 * 1024
-# Bytes of each source compared by the independence test, beside the item text.
-COMPARE_BYTES = 64 * 1024
 COPY_SPAN = 200
-# Past this many candidate extensions the pair counts as copied, so a crafted
-# repetitive input cannot make the test slow. It fails toward "not independent".
+# The independence test compares every source byte (up to READ_LIMIT) plus the item text.
+# Past this many candidate checks, or this many fingerprint positions in one input, the
+# pair counts as copied, so a crafted repetitive input cannot make the test slow. Both
+# caps fail toward "not independent".
 COPY_PROBES = 100_000
+MAX_PRINT_POSITIONS = 1 << 16
 MAX_DEPTH = 32
 
 HANDOFF_ROOTS = frozenset({"memory/handoff-inbox", *candidates.WRITER_INBOXES.values()})
@@ -153,11 +163,28 @@ def _open_root(workspace: vconfig.Workspace) -> int:
     return fd
 
 
+def _mount(fd: int) -> int | None:
+    """The descriptor's mount id where the platform reports one, else None. Raises OSError when it must and cannot."""
+    return dirfd.mount_id(fd) if dirfd.mount_ids_required() else None
+
+
 @dataclass(frozen=True)
 class HeldRoot:
     workspace: vconfig.Workspace
     fd: int
     device: int
+    # The root's mount id on Linux. Every descriptor opened under it must match.
+    mount: int | None = None
+
+    def contains(self, fd: int, metadata: os.stat_result) -> bool:
+        if metadata.st_dev != self.device:
+            return False
+        if self.mount is None:
+            return True
+        try:
+            return dirfd.mount_id(fd) == self.mount
+        except OSError:
+            return False
 
 
 class Roots:
@@ -185,7 +212,14 @@ class Roots:
                 except RootUnavailable:
                     self._held[workspace.identity] = None
                     continue
-                self._held[workspace.identity] = HeldRoot(workspace, fd, workspace.identity[0])
+                try:
+                    mount = _mount(fd)
+                except OSError:
+                    # Linux without a readable mount id cannot prove containment: refuse the root.
+                    os.close(fd)
+                    self._held[workspace.identity] = None
+                    continue
+                self._held[workspace.identity] = HeldRoot(workspace, fd, workspace.identity[0], mount)
         except BaseException:
             self.__exit__()
             raise
@@ -230,7 +264,7 @@ def _open_dir(parent: int, name: str) -> int:
 
 def _open_file(parent: int, name: str) -> int:
     if dirfd.posix_available():
-        return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0), dir_fd=parent)
+        return os.open(name, dirfd.file_flags(os.O_RDONLY | os.O_NONBLOCK), dir_fd=parent)
     return int(_nt().open_file(parent, name, os.O_RDONLY | getattr(os, "O_BINARY", 0)))
 
 
@@ -258,7 +292,7 @@ def read_under(root: HeldRoot, rel: str) -> tuple[bytes, os.stat_result]:
                 raise _Absent() from None
             opened.append(current)
             metadata = os.fstat(current)
-            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_dev != root.device:
+            if not stat.S_ISDIR(metadata.st_mode) or not root.contains(current, metadata):
                 raise OSError("evidence path leaves the bound root")
         name = _component(parts[-1])
         try:
@@ -267,8 +301,8 @@ def read_under(root: HeldRoot, rel: str) -> tuple[bytes, os.stat_result]:
             raise _Absent() from None
         try:
             before = os.fstat(fd)
-            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_dev != root.device:
-                raise OSError("evidence must be a regular single-link file on the root's device")
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not root.contains(fd, before):
+                raise OSError("evidence must be a regular single-link file on the root's mount")
             if before.st_size > READ_LIMIT:
                 raise ValueError("evidence file is too large")
             chunks: list[bytes] = []
@@ -321,7 +355,7 @@ class Excerpt:
 
 
 class Archive(Protocol):
-    def receipt_records(self, project: str, run_id: str) -> Sequence[ReceiptRecord] | None: ...
+    def receipt_records(self, project: str, run_id: str, path: str) -> Sequence[ReceiptRecord] | None: ...
 
     def bundle(self, bundle_id: str) -> Bundle | None: ...
 
@@ -407,31 +441,113 @@ class EngineArchive:
         projects = (project,) if isinstance(project, str) and project else ()
         return Bundle(projects, tuple(texts), _moment_ms(payload.get("generated_at")))
 
-    def receipt_records(self, project: str, run_id: str) -> list[ReceiptRecord] | None:
-        payload = self._run("search", [run_id, "--project", project, "--limit", "20", "--json"])
+    def receipt_records(self, project: str, run_id: str, path: str) -> list[ReceiptRecord] | None:
+        """Archive records of one verify receipt, or None when any reply is malformed or ambiguous.
+
+        The engine has no typed lookup by project, external id and path, so the
+        search is narrowed by every filter it offers: project, source,
+        collection and item kind. Each hit must carry those identities exactly
+        and a literal `integrity_mismatch: false`. Each hit is then read with
+        `show`, and the shown record must repeat the hit's id, source,
+        collection, kind and integrity flag. A record for this run must also
+        name this project and path exactly, with a well formed digest and a
+        known digest source. Any omitted, mistyped or contradicting field fails
+        the whole lookup, so the receipt stays medium.
+        """
+        arguments = [run_id, "--project", project, "--source", RECEIPT_SOURCE["kind"]]
+        arguments += [
+            "--collection",
+            RECEIPT_COLLECTION["external_id"],
+            "--kind",
+            RECEIPT_KIND,
+            "--limit",
+            "20",
+            "--json",
+        ]
+        payload = self._run("search", arguments)
         results = payload.get("results") if isinstance(payload, dict) else None
-        if not isinstance(results, list):
+        if not isinstance(results, list) or len(results) > 20:
             return None
+        external_id = f"brigade:work-verify:{run_id}"
         records = []
-        for row in results:
-            item_id = row.get("id") if isinstance(row, dict) else None
-            if not isinstance(item_id, str) or not RUN_ID.fullmatch(item_id):
-                continue
-            item = self._run("show", [item_id, "--json"])
-            if (
-                not isinstance(item, dict)
-                or item.get("external_id") != f"brigade:work-verify:{run_id}"
-                or item.get("live") is not True
-                or item.get("integrity_mismatch") is True
-            ):
-                continue
-            meta = item.get("metadata")
-            if not isinstance(meta, dict) or meta.get("run_id") != run_id or meta.get("project") != project:
-                continue
-            digest, source, path = meta.get("digest"), meta.get("digest_source"), meta.get("path")
-            if isinstance(digest, str) and isinstance(source, str) and isinstance(path, str):
-                records.append(ReceiptRecord(project, path, digest, source))
+        for hit in results:
+            if not _receipt_hit(hit):
+                return None
+            item = self._run("show", [hit["id"], "--json"])
+            if not _receipt_shown(item, hit):
+                return None
+            if item["external_id"] != external_id:
+                continue  # Another receipt whose text mentions this run id.
+            record = _receipt_metadata(item["metadata"], project, run_id, path)
+            if record is None:
+                return None
+            records.append(record)
         return records
+
+
+RECEIPT_SOURCE = {"kind": "brigade", "name": "Brigade"}
+RECEIPT_COLLECTION = {
+    "external_id": "brigade:work:verify-runs",
+    "kind": "brigade_work_verify_runs",
+    "name": "Brigade work verify runs",
+}
+RECEIPT_KIND = "brigade_work_verify_receipt"
+DIGEST_SOURCES = frozenset({"receipt_digest", "file_sha256"})
+ITEM_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+
+
+def _receipt_hit(hit: object) -> bool:
+    """A search hit that names exactly the receipt source, collection and kind, with no integrity mismatch."""
+    return (
+        isinstance(hit, dict)
+        and isinstance(hit.get("id"), str)
+        and ITEM_ID.fullmatch(hit["id"]) is not None
+        and hit.get("integrity_mismatch") is False
+        and hit.get("source_kind") == RECEIPT_SOURCE["kind"]
+        and hit.get("collection_name") == RECEIPT_COLLECTION["name"]
+        and hit.get("collection_kind") == RECEIPT_COLLECTION["kind"]
+        and hit.get("kind") == RECEIPT_KIND
+    )
+
+
+def _receipt_shown(item: object, hit: Mapping[str, Any]) -> bool:
+    """The shown record is the same live record as the search hit, with exact identities."""
+    if not isinstance(item, dict):
+        return False
+    source, collection = item.get("source"), item.get("collection")
+    return (
+        item.get("id") == hit["id"]
+        and isinstance(item.get("external_id"), str)
+        and item.get("kind") == hit["kind"]
+        and item.get("live") is True
+        and item.get("tombstoned") is False
+        and item.get("integrity_mismatch") is False
+        and isinstance(source, dict)
+        and {key: source.get(key) for key in RECEIPT_SOURCE} == RECEIPT_SOURCE
+        and source.get("kind") == hit["source_kind"]
+        and isinstance(collection, dict)
+        and {key: collection.get(key) for key in RECEIPT_COLLECTION} == RECEIPT_COLLECTION
+        and collection.get("name") == hit["collection_name"]
+        and collection.get("kind") == hit["collection_kind"]
+        and isinstance(item.get("metadata"), dict)
+    )
+
+
+def _receipt_metadata(meta: Mapping[str, Any], project: str, run_id: str, path: str) -> ReceiptRecord | None:
+    """The record's provenance, only when every field is present, typed and equal to what was asked."""
+    digest, source = meta.get("digest"), meta.get("digest_source")
+    if (
+        meta.get("receipt_type") != "work_verify"
+        or meta.get("run_id") != run_id
+        or meta.get("project") != project
+        or meta.get("path") != path
+        or not isinstance(digest, str)
+        or not digest.startswith("sha256:")
+        or DIGEST.fullmatch(digest.removeprefix("sha256:")) is None
+        or source not in DIGEST_SOURCES
+    ):
+        return None
+    return ReceiptRecord(project, path, digest, source)
 
 
 # --- Items --------------------------------------------------------------------------------
@@ -486,7 +602,7 @@ def _item(kind: str, rank: str, text: str, source: str, run_id: str | None, obse
         source=source,
         run_id=run_id,
         observed_ms=observed,
-        compare=raw[:COMPARE_BYTES] + b"\n" + text.encode(),
+        compare=raw + b"\n" + text.encode(),
     )
 
 
@@ -558,36 +674,96 @@ def receipt_authenticated(raw: bytes, payload: Mapping[str, Any], record: Receip
     return False
 
 
-def shares_span(a: bytes, b: bytes, span: int = COPY_SPAN) -> bool:
-    """Whether `a` and `b` share a run of at least `span` identical bytes.
+@dataclass(frozen=True)
+class _Prints:
+    positions: dict[int, list[int]]
+    saturated: bool
 
-    Any shared run of `span` bytes contains a window of `span // 2` bytes that
-    starts at a multiple of `span // 2` in `a`. Those windows are indexed, every
-    window of `b` is looked up, and each hit is extended in both directions.
+
+@functools.lru_cache(maxsize=16)
+def _fingerprints(data: bytes, span: int) -> _Prints:
+    """Winnowing fingerprints: in every window of `span - k + 1` consecutive k-grams, the rightmost minimal hash.
+
+    With k = span // 4, two inputs sharing a run of `span` bytes contain one
+    identical window of k-gram hashes, so both select the same hash at the
+    same offset inside the run. One pass over the input, O(n) time. Past
+    MAX_PRINT_POSITIONS selected positions (low-entropy input selects many) the
+    set is marked saturated and any shared hash counts as copied.
+    """
+    k = max(1, span // 4)
+    w = span - k + 1
+    positions: dict[int, list[int]] = {}
+    window: deque[tuple[int, int]] = deque()
+    last = -1
+    stored = 0
+    for i in range(len(data) - k + 1):
+        value = hash(data[i : i + k])
+        while window and window[-1][0] >= value:
+            window.pop()
+        window.append((value, i))
+        if window[0][1] <= i - w:
+            window.popleft()
+        if i >= w - 1 and window[0][1] != last:
+            value, last = window[0]
+            positions.setdefault(value, []).append(last)
+            stored += 1
+            if stored > MAX_PRINT_POSITIONS:
+                return _Prints(positions, True)
+    return _Prints(positions, False)
+
+
+def _run_length(a: bytes, b: bytes, i: int, j: int, span: int) -> int:
+    """Bytes shared around a[i] and b[j], back plus ahead, each side capped at `span`.
+
+    Each side is found by binary search over slice equality, which holds for
+    every length up to the true run, so a check costs O(log span) comparisons.
+    """
+    low, high = 0, min(i, j, span)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if a[i - middle : i] == b[j - middle : j]:
+            low = middle
+        else:
+            high = middle - 1
+    back = low
+    low, high = 0, min(len(a) - i, len(b) - j, span)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if a[i : i + middle] == b[j : j + middle]:
+            low = middle
+        else:
+            high = middle - 1
+    return back + low
+
+
+def shares_span(a: bytes, b: bytes, span: int = COPY_SPAN) -> bool:
+    """Whether `a` and `b` share a run of at least `span` identical bytes, over every byte of both.
+
+    Each input is fingerprinted once (see `_fingerprints`). Every position pair
+    under a shared fingerprint is checked with byte comparisons, extending back
+    and ahead by binary search, so a hash collision never counts. The cost is
+    one O(n) pass per input of up to READ_LIMIT plus ITEM_BYTES bytes, and at
+    most COPY_PROBES pair checks of O(log span) slice comparisons. Past either
+    cap (probes or saturation) the pair counts as copied.
     """
     if min(len(a), len(b)) < span:
         return False
-    step = max(1, span // 2)
-    anchors: dict[bytes, list[int]] = {}
-    for start in range(0, len(a) - step + 1, step):
-        anchors.setdefault(a[start : start + step], []).append(start)
+    first, second = _fingerprints(a, span), _fingerprints(b, span)
+    shared = first.positions.keys() & second.positions.keys()
+    if shared and (first.saturated or second.saturated):
+        return True
+    k = max(1, span // 4)
     probes = 0
-    for j in range(len(b) - step + 1):
-        starts = anchors.get(b[j : j + step])
-        if not starts:
-            continue
-        for i in starts:
-            probes += 1
-            if probes > COPY_PROBES:
-                return True
-            back = 0
-            while back < i and back < j and back < span and a[i - back - 1] == b[j - back - 1]:
-                back += 1
-            ahead = step
-            while i + ahead < len(a) and j + ahead < len(b) and back + ahead < span and a[i + ahead] == b[j + ahead]:
-                ahead += 1
-            if back + ahead >= span:
-                return True
+    for value in shared:
+        for i in first.positions[value]:
+            for j in second.positions[value]:
+                probes += 1
+                if probes > COPY_PROBES:
+                    return True
+                if a[i : i + k] != b[j : j + k]:
+                    continue
+                if _run_length(a, b, i, j, span) >= span:
+                    return True
     return False
 
 
@@ -677,10 +853,11 @@ def _record(archive: Archive, projects: tuple[str, ...], run_id: str, rel: str) 
     """The one archive record of this receipt under the scope's projects, else None."""
     records: list[ReceiptRecord] = []
     for project in projects:
-        found = archive.receipt_records(project, run_id)
-        if found is None:
+        found = archive.receipt_records(project, run_id, rel)
+        # A record that names another project or path than asked is a contradiction, not noise.
+        if found is None or any(record.project != project or record.path != rel for record in found):
             return None
-        records.extend(record for record in found if record.project == project and record.path == rel)
+        records.extend(found)
     # Re-imports of one receipt agree. Two projects or two digests make the record ambiguous.
     if len({(record.project, record.digest, record.digest_source) for record in records}) != 1:
         return None

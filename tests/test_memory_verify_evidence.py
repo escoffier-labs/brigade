@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -79,8 +81,8 @@ class Archive:
         self.excerpts = excerpts or {}
         self.calls: list[tuple] = []
 
-    def receipt_records(self, project, run_id):
-        self.calls.append(("receipt", project, run_id))
+    def receipt_records(self, project, run_id, path):
+        self.calls.append(("receipt", project, run_id, path))
         return [r for r in self.records.get((project, run_id), [])]
 
     def bundle(self, bundle_id):
@@ -577,34 +579,273 @@ def test_assembly_is_deterministic_and_reports_no_text(tmp_path):
         assert needle not in report
 
 
-def test_the_engine_archive_parses_fixed_replies_and_fails_closed():
-    _, digest = receipt()
-    replies = {
-        ("search", (RUN, "--project", "example", "--limit", "20", "--json")): {
-            "results": [{"id": "item-1"}, {"id": "item-2"}]
-        },
-        ("show", ("item-1", "--json")): {
-            "external_id": f"brigade:work-verify:{RUN}",
+RECEIPT_SEARCH = (
+    RUN,
+    "--project",
+    "example",
+    "--source",
+    "brigade",
+    "--collection",
+    "brigade:work:verify-runs",
+    "--kind",
+    "brigade_work_verify_receipt",
+    "--limit",
+    "20",
+    "--json",
+)
+
+
+def engine_replies(digest):
+    """Replies a real engine gives for one imported receipt plus one unrelated receipt that mentions the run."""
+    hit = {
+        "source_kind": "brigade",
+        "collection_name": "Brigade work verify runs",
+        "collection_kind": "brigade_work_verify_runs",
+        "kind": "brigade_work_verify_receipt",
+        "integrity_mismatch": False,
+    }
+
+    def shown(item_id, external_id, metadata):
+        return {
+            "id": item_id,
+            "external_id": external_id,
+            "kind": "brigade_work_verify_receipt",
             "live": True,
-            "metadata": {
+            "tombstoned": False,
+            "integrity_mismatch": False,
+            "source": {"kind": "brigade", "name": "Brigade"},
+            "collection": {
+                "external_id": "brigade:work:verify-runs",
+                "kind": "brigade_work_verify_runs",
+                "name": "Brigade work verify runs",
+            },
+            "metadata": metadata,
+        }
+
+    return {
+        ("search", RECEIPT_SEARCH): {"results": [{"id": "item-1", **hit}, {"id": "item-2", **hit}]},
+        ("show", ("item-1", "--json")): shown(
+            "item-1",
+            f"brigade:work-verify:{RUN}",
+            {
+                "receipt_type": "work_verify",
                 "run_id": RUN,
                 "project": "example",
                 "path": RECEIPT,
                 "digest": f"sha256:{digest}",
                 "digest_source": "receipt_digest",
             },
-        },
-        ("show", ("item-2", "--json")): {"external_id": "something-else", "live": True, "metadata": {}},
-        ("search", ("port listener", "--project", "example", "--limit", "3", "--json")): {
-            "results": [
-                {"id": "x1", "snippet": "kept", "integrity_mismatch": False, "created_at": "2026-11-01T00:00:00Z"},
-                {"id": "x2", "snippet": "mismatch", "integrity_mismatch": True},
-                {"id": "x3", "snippet": "missing flag"},
-            ]
-        },
+        ),
+        ("show", ("item-2", "--json")): shown("item-2", "brigade:work-verify:another-run", {"run_id": "another-run"}),
     }
-    archive = ev.EngineArchive(runner=lambda verb, arguments: replies.get((verb, tuple(arguments))))
-    assert archive.receipt_records("example", RUN) == [record(digest)]
+
+
+def engine(replies):
+    return ev.EngineArchive(
+        runner=lambda verb, arguments: json.loads(json.dumps(replies.get((verb, tuple(arguments)))))
+    )
+
+
+def test_the_engine_archive_parses_fixed_replies_and_fails_closed():
+    _, digest = receipt()
+    replies = engine_replies(digest)
+    replies[("search", ("port listener", "--project", "example", "--limit", "3", "--json"))] = {
+        "results": [
+            {"id": "x1", "snippet": "kept", "integrity_mismatch": False, "created_at": "2026-11-01T00:00:00Z"},
+            {"id": "x2", "snippet": "mismatch", "integrity_mismatch": True},
+            {"id": "x3", "snippet": "missing flag"},
+        ]
+    }
+    archive = engine(replies)
+    assert archive.receipt_records("example", RUN, RECEIPT) == [record(digest)]
     assert [e.excerpt_id for e in archive.search("example", "port listener", 3) or []] == ["x1"]
-    assert archive.receipt_records("missing", RUN) is None
+    assert archive.receipt_records("missing", RUN, RECEIPT) is None
     assert archive.search("missing", "port", 3) is None
+
+
+def _hit(replies, index=0):
+    return replies[("search", RECEIPT_SEARCH)]["results"][index]
+
+
+def _shown(replies):
+    return replies[("show", ("item-1", "--json"))]
+
+
+FORGERIES = {
+    "hit integrity flag missing": lambda r: _hit(r).pop("integrity_mismatch"),
+    "hit integrity flag not a boolean": lambda r: _hit(r).update(integrity_mismatch="false"),
+    "hit integrity flag null": lambda r: _hit(r).update(integrity_mismatch=None),
+    "hit from another source": lambda r: _hit(r).update(source_kind="codex"),
+    "hit from another collection": lambda r: _hit(r).update(collection_name="Imported notes"),
+    "hit of another kind": lambda r: _hit(r).update(kind="brigade_work_verify_note"),
+    "unrelated hit is malformed": lambda r: _hit(r, 1).pop("collection_kind"),
+    "hit id is an option": lambda r: _hit(r).update(id="--project"),
+    "shown integrity flag missing": lambda r: _shown(r).pop("integrity_mismatch"),
+    "shown integrity mismatch": lambda r: _shown(r).update(integrity_mismatch=True),
+    "shown record is another item": lambda r: _shown(r).update(id="item-9"),
+    "shown kind differs from the hit": lambda r: _shown(r).update(kind="brigade_run_receipt"),
+    "shown source name differs": lambda r: _shown(r)["source"].update(name="Forged"),
+    "shown collection id differs": lambda r: _shown(r)["collection"].update(external_id="other:collection"),
+    "shown record tombstoned": lambda r: _shown(r).update(tombstoned=True),
+    "shown liveness missing": lambda r: _shown(r).pop("live"),
+    "shown for another run": lambda r: _shown(r).update(external_id="brigade:work-verify:other-run"),
+    "metadata names another project": lambda r: _shown(r)["metadata"].update(project="example-two"),
+    "metadata path missing": lambda r: _shown(r)["metadata"].pop("path"),
+    "metadata path differs": lambda r: _shown(r)["metadata"].update(path=".brigade/receipts/receipt.json"),
+    "metadata run id differs": lambda r: _shown(r)["metadata"].update(run_id="other-run"),
+    "metadata receipt type missing": lambda r: _shown(r)["metadata"].pop("receipt_type"),
+    "metadata digest not hex": lambda r: _shown(r)["metadata"].update(digest="sha256:" + "Z" * 64),
+    "metadata digest without prefix": lambda r: _shown(r)["metadata"].update(
+        digest=_shown(r)["metadata"]["digest"].removeprefix("sha256:")
+    ),
+    "metadata digest a number": lambda r: _shown(r)["metadata"].update(digest=7),
+    "metadata digest source unknown": lambda r: _shown(r)["metadata"].update(digest_source="canonical_json_digest"),
+    "metadata is a list": lambda r: _shown(r).update(metadata=[]),
+    "search reply not an object": lambda r: r.update({("search", RECEIPT_SEARCH): ["item-1"]}),
+    "search reply missing": lambda r: r.pop(("search", RECEIPT_SEARCH)),
+    "show reply missing": lambda r: r.pop(("show", ("item-1", "--json"))),
+}
+
+
+@posix
+def test_engine_replies_authenticate_a_real_receipt(tmp_path):
+    root, parsed = setup(tmp_path)
+    corroborating(root)
+    _, digest = receipt()
+    [result] = run(card(RECEIPT, HANDOFF), parsed, engine(engine_replies(digest)))
+    assert result.items[0].rank == ev.AUTHENTICATED
+    assert result.abstain is None
+
+
+@pytest.mark.parametrize("name", sorted(FORGERIES))
+@posix
+def test_forged_or_malformed_engine_replies_stay_medium(tmp_path, name):
+    root, parsed = setup(tmp_path)
+    corroborating(root)
+    _, digest = receipt()
+    replies = engine_replies(digest)
+    FORGERIES[name](replies)
+    [result] = run(card(RECEIPT, HANDOFF), parsed, engine(replies))
+    assert all(i.rank != ev.AUTHENTICATED for i in result.items), name
+    assert result.abstain == ev.UNCORROBORATED
+
+
+@posix
+def test_a_second_record_with_another_digest_is_ambiguous(tmp_path):
+    root, parsed = setup(tmp_path)
+    corroborating(root)
+    _, digest = receipt()
+    replies = engine_replies(digest)
+    twin = json.loads(json.dumps(_shown(replies)))
+    twin["id"] = "item-2"
+    twin["metadata"]["digest"] = "sha256:" + "1" * 64
+    replies[("show", ("item-2", "--json"))] = twin
+    [result] = run(card(RECEIPT, HANDOFF), parsed, engine(replies))
+    assert result.abstain == ev.UNCORROBORATED
+
+
+# --- Mount containment (item 2) ------------------------------------------------------------
+
+
+def test_fdinfo_mount_ids_parse_or_fail_closed():
+    assert dirfd.parse_mount_id(b"pos:\t0\nflags:\t0100000\nmnt_id:\t31\nino:\t5\n") == 31
+    for data in (b"pos:\t0\nflags:\t0\n", b"mnt_id:\t\n", b"mnt_id:\t-3\n", b"mnt_id:\tabc\n"):
+        with pytest.raises(OSError):
+            dirfd.parse_mount_id(data)
+
+
+@pytest.mark.skipif(not dirfd.mount_ids_required(), reason="Linux fdinfo mount ids only")
+def test_linux_reads_a_real_mount_id(tmp_path):
+    fd = os.open(tmp_path, os.O_RDONLY)
+    try:
+        assert dirfd.mount_id(fd) >= 0
+    finally:
+        os.close(fd)
+    with pytest.raises(OSError):
+        dirfd.mount_id(-1)
+
+
+@posix
+def test_a_component_on_another_mount_of_the_same_device_is_refused(tmp_path, monkeypatch):
+    root, parsed = setup(tmp_path)
+    write(root, HANDOFF, "inside the root")
+    with ev.Roots(parsed) as roots:
+        [held] = roots.roots(SCOPE)
+        assert held is not None
+        inode = os.stat(root / "memory").st_ino
+        real = dirfd.mount_id if dirfd.mount_ids_required() else (lambda fd: 1)
+
+        def mount_id(fd):
+            # A bind mount: same device, a different mount for the `memory` directory.
+            return 999_999 if os.fstat(fd).st_ino == inode else real(fd)
+
+        monkeypatch.setattr(dirfd, "mount_ids_required", lambda: True)
+        monkeypatch.setattr(dirfd, "mount_id", mount_id)
+        held_mount = ev.HeldRoot(held.workspace, held.fd, held.device, real(held.fd))
+        with pytest.raises(OSError):
+            ev.read_under(held_mount, HANDOFF)
+        monkeypatch.setattr(dirfd, "mount_id", real)
+        assert ev.read_under(held_mount, HANDOFF)[0] == b"inside the root"
+
+
+@posix
+def test_a_root_without_a_readable_mount_id_is_refused_on_linux(tmp_path, monkeypatch):
+    root, parsed = setup(tmp_path)
+    write(root, HANDOFF, "inside the root")
+    monkeypatch.setattr(dirfd, "mount_ids_required", lambda: True)
+
+    def unreadable(fd):
+        raise dirfd.unavailable("mount identities")
+
+    monkeypatch.setattr(dirfd, "mount_id", unreadable)
+    [result] = run(card(HANDOFF), parsed, Archive())
+    assert result.abstain == ev.UNREACHABLE
+
+
+# --- Independence over the whole source (item 3) -------------------------------------------
+
+
+def words(seed, count):
+    vocabulary = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november".split()
+    state = seed
+    out = []
+    for _ in range(count):
+        state = (state * 1103515245 + 12345) % (1 << 31)
+        out.append(vocabulary[state % len(vocabulary)] + str(state % 97))
+    return " ".join(out)
+
+
+@posix
+def test_a_handoff_copying_receipt_stdout_after_64_kib_is_not_independent(tmp_path):
+    root, parsed = setup(tmp_path)
+    stdout = words(7, 16_000)
+    payload, digest = receipt(stdout=stdout)
+    raw = json.dumps(payload, indent=2).encode()
+    write(root, RECEIPT, raw)
+    archive = Archive(records={("example", RUN): [record(digest)]})
+    tail = stdout.encode()[90_000:90_240]
+    assert raw.find(tail) > 64 * 1024 and len(raw) <= ev.READ_LIMIT
+    write(root, HANDOFF, b"# Port check\n\n" + words(11, 300).encode() + b"\n" + tail + b"\n")
+    [result] = run(card(RECEIPT, HANDOFF), parsed, archive)
+    assert result.abstain == ev.UNCORROBORATED
+    write(root, HANDOFF, b"# Port check\n\n" + words(11, 300).encode() + b"\n")
+    [result] = run(card(RECEIPT, HANDOFF), parsed, archive)
+    assert result.abstain is None
+
+
+def test_shared_spans_are_found_anywhere_in_a_full_size_source():
+    noise = random.Random(5).randbytes(ev.READ_LIMIT)
+    other = random.Random(6).randbytes(4000)
+    for offset in (0, 65_536, 700_001, ev.READ_LIMIT - 200):
+        span = noise[offset : offset + 200]
+        assert ev.shares_span(noise, other[:1000] + span + other[1000:]), offset
+        assert not ev.shares_span(noise, other[:1000] + span[:199] + other[1000:]), offset
+
+
+def test_low_entropy_input_stays_bounded():
+    zeros = bytes(ev.READ_LIMIT)
+    started = time.monotonic()
+    assert ev.shares_span(zeros, b"x" * 100 + bytes(300) + b"y" * 100)
+    assert not ev.shares_span(zeros, bytes(range(1, 256)) * 4)
+    assert ev._fingerprints(zeros, ev.COPY_SPAN).saturated
+    assert time.monotonic() - started < 30

@@ -2188,7 +2188,10 @@ held while evidence under it is read. A cited path resolves under that handle
 one component at a time and must stay under `.brigade/work/verify-runs`,
 `.brigade/receipts`, `.brigade/evidence`, `memory/evidence`, the handoff inbox
 or a writer inbox. Links, hard links, mount crossings and files over 1 MiB are
-refused. On Windows the root opens through the handle-relative helper, which
+refused. On Linux every opened directory and file must also report the root's
+mount id in `/proc/self/fdinfo`, which refuses a bind mount on the same
+device, and a root whose mount id cannot be read is refused. Other POSIX
+systems check the device only. On Windows the root opens through the handle-relative helper, which
 refuses reparse points, and its file index is checked the same way. Without
 either backend every root is refused.
 
@@ -2212,7 +2215,9 @@ and stderr summaries form a separate medium item. A card gets no model call
 (`no_evidence`, `evidence_unreachable`, `evidence_flagged` or
 `uncorroborated`) unless an authenticated receipt and a second independently
 produced item remain, from a different file and run id, sharing no run of 200
-or more bytes, and drawn from neither command output nor related excerpts.
+or more bytes anywhere in either source, and drawn from neither command output
+nor related excerpts. The archive record must repeat the receipt's source,
+collection, kind, project, path and run exactly, with no integrity mismatch.
 
 ### Commands
 
