@@ -83,7 +83,20 @@ def _card(entry: object) -> bool:
 
 
 def validate(state: object) -> dict[str, Any]:
-    """Return `state` when it has exactly the documented shape, or raise VerifyStateError."""
+    """Return `state` when it has exactly the documented shape, or raise VerifyStateError.
+
+    This is the state parsing boundary: any error the checks raise on a
+    hostile shape becomes the fixed reason, never a traceback or file text.
+    """
+    try:
+        return _validate(state)
+    except VerifyStateError:
+        raise
+    except (TypeError, KeyError, AttributeError, ValueError, RecursionError):
+        raise VerifyStateError() from None
+
+
+def _validate(state: object) -> dict[str, Any]:
     if not isinstance(state, dict) or set(state) - TOP_KEYS or state.get("schema") != SCHEMA:
         raise VerifyStateError()
     count, paused = state.get("consecutive_failures"), state.get("paused")
@@ -103,7 +116,8 @@ def validate(state: object) -> dict[str, Any]:
         for field in ("since_day", "never_read"):
             if table.get(field) is not None and not _count(table[field]):
                 raise VerifyStateError()
-        # When the cached read counts were observed, in ms since the epoch. Never null.
+        # When cached read counts were observed, in ms since the epoch. Never null. Validated
+        # now so slice 9, which first writes counts, needs no format change. Not read yet.
         if "counts_ms" in table and not _count(table["counts_ms"]):
             raise VerifyStateError()
         cards = table.get("cards", {})

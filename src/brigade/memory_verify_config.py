@@ -36,8 +36,6 @@ MAX_WORKSPACES = 64
 MAX_ARCHIVE_PROJECTS = 32
 SEAT = re.compile(r"[a-z][a-z0-9._-]{0,127}")
 PROJECT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-DEFAULT_CACHED_COUNTS_MAX_AGE_HOURS = 24
-MAX_CACHED_COUNTS_MAX_AGE_HOURS = 168
 VERIFY_KEYS = frozenset(
     {
         "enabled",
@@ -46,7 +44,6 @@ VERIFY_KEYS = frozenset(
         "cards_per_run",
         "min_interval_days",
         "never_read_days",
-        "cached_counts_max_age_hours",
         "workspace",
     }
 )
@@ -60,6 +57,9 @@ HUB_KEY_REFUSAL = (
 
 
 MISSING_ROOT = "[[verify.workspace]] path must name an existing directory"
+IDENTITY_UNAVAILABLE = (
+    "verify_root_identity_unavailable: a workspace root or one of its parents has no stable directory identity"
+)
 ROOT_CHANGED = "verify_root_changed: a bound workspace root is no longer the directory configured"
 
 
@@ -89,7 +89,6 @@ class VerifyConfig:
     cards_per_run: int = DEFAULT_CARDS_PER_RUN
     min_interval_days: int = DEFAULT_MIN_INTERVAL_DAYS
     never_read_days: int = DEFAULT_NEVER_READ_DAYS
-    cached_counts_max_age_hours: int = DEFAULT_CACHED_COUNTS_MAX_AGE_HOURS
     workspaces: tuple[Workspace, ...] = ()
 
     def scopes(self) -> tuple[str, ...]:
@@ -132,15 +131,25 @@ _stat = os.stat
 _realpath = os.path.realpath
 
 
+def _identity(metadata: os.stat_result) -> Identity:
+    """(st_dev, st_ino), refused when the filesystem gives no stable inode (0 on POSIX, a zero file index on Windows).
+
+    Without one, equal identities prove nothing, so a replaced root would look unchanged.
+    """
+    if metadata.st_ino == 0:
+        raise VerifyConfigError(IDENTITY_UNAVAILABLE)
+    return metadata.st_dev, metadata.st_ino
+
+
 def _directory(path: str) -> Identity:
-    """The (st_dev, st_ino) of an existing directory, following links. Fixed error otherwise."""
+    """The identity of an existing directory, following links. Fixed error otherwise."""
     try:
         metadata = _stat(path)
     except (OSError, ValueError):
         raise VerifyConfigError(MISSING_ROOT) from None
     if not stat.S_ISDIR(metadata.st_mode):
         raise VerifyConfigError(MISSING_ROOT)
-    return metadata.st_dev, metadata.st_ino
+    return _identity(metadata)
 
 
 def _ancestors(resolved: str) -> set[Identity]:
@@ -151,7 +160,8 @@ def _ancestors(resolved: str) -> set[Identity]:
             metadata = _stat(str(parent))
         except (OSError, ValueError):
             raise VerifyConfigError(MISSING_ROOT) from None
-        found.add((metadata.st_dev, metadata.st_ino))
+        # A parent without a stable inode could hide or fake nesting, so it is refused too.
+        found.add(_identity(metadata))
     return found
 
 
@@ -247,13 +257,6 @@ def parse(data: dict[str, Any]) -> VerifyConfig:
         cards_per_run=_integer(table, "cards_per_run", DEFAULT_CARDS_PER_RUN, 1, MAX_CARDS_PER_RUN),
         min_interval_days=_integer(table, "min_interval_days", DEFAULT_MIN_INTERVAL_DAYS, 1, MAX_MIN_INTERVAL_DAYS),
         never_read_days=_integer(table, "never_read_days", DEFAULT_NEVER_READ_DAYS, 1, MAX_NEVER_READ_DAYS),
-        cached_counts_max_age_hours=_integer(
-            table,
-            "cached_counts_max_age_hours",
-            DEFAULT_CACHED_COUNTS_MAX_AGE_HOURS,
-            1,
-            MAX_CACHED_COUNTS_MAX_AGE_HOURS,
-        ),
         workspaces=_workspaces(table.get("workspace")),
     )
 

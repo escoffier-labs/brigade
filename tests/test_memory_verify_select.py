@@ -419,13 +419,12 @@ def test_live_runs_are_refused_before_any_hub_call(verify_setup, capsys, flags):
     assert hub.calls == []
 
 
-def cache(target, observed_ms, extra=None):
-    """Write a state file whose fleet scope caches counts for card `a`, observed at `observed_ms`."""
-    table = {"cards": {key("a", "fleet"): {"seen": NOW, "proposed": 0, "reads": [5, 10, 20]}}}
-    if observed_ms is not None:
-        table["counts_ms"] = observed_ms
+def cache(target, observed_ms):
+    """A state file whose fleet scope holds fresh-looking cached counts for card `a`."""
     state = vstate.fresh()
-    state["scopes"] = {"fleet": {**table, **(extra or {})}}
+    table = {"since_day": 1, "counts_ms": observed_ms}
+    table["cards"] = {key("a", "fleet"): {"seen": NOW, "proposed": 0, "reads": [5, 10, 20]}}
+    state["scopes"] = {"fleet": table}
     vstate.save(target, state)
 
 
@@ -433,64 +432,55 @@ def rate_limited(hub):
     hub.read_stats_reply = (429, {"error": SECRET, "code": hubc.READ_STATS_RATE_LIMITED})
 
 
-def wall_ms():
-    return int(time.time() * 1000)
-
-
-def test_a_fresh_cache_scores_but_never_reports_never_read(verify_setup, capsys):
+@pytest.mark.parametrize("cached", [False, True])
+def test_a_rate_limited_scope_is_skipped_and_cached_counts_change_nothing(verify_setup, capsys, cached):
     target, hub = verify_setup
     rate_limited(hub)
-    cache(target, wall_ms() - 3_600_000, extra={"since_day": 1})
-    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
-    assert code == 0 and report["read_stats"] == {"fleet": "cached"}
-    assert report["skipped"]["read_stats_limited"] == 1 and "read_stats_unavailable" not in report["skipped"]
-    scores = {item["card_id"]: item["score"] for item in report["selected"]}
-    # Cached reads score card a. Card b has none. Both are never verified (staleness 6).
-    assert scores == {"a": round(math.log2(1 + 20 + 10) + 6, 4), "b": 6.0}
-    # The cache even holds a since_day that covers the window, and never-read is still unknown.
-    assert report["never_read"] == {"count": None, "by_scope": {"fleet": None}}
-
-
-@pytest.mark.parametrize(
-    "observed",
-    [
-        pytest.param(lambda: wall_ms() - 25 * 3_600_000, id="stale"),
-        pytest.param(lambda: None, id="no-timestamp"),
-        pytest.param(lambda: wall_ms() + 3_600_000, id="future"),
-    ],
-)
-def test_an_unusable_cache_skips_the_scope(verify_setup, capsys, observed):
-    target, hub = verify_setup
-    rate_limited(hub)
-    cache(target, observed())
-    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
-    assert code == 0 and report["read_stats"] == {"fleet": "unavailable"}
+    if cached:
+        cache(target, int(time.time() * 1000) - 60_000)
+    code, report = verify(target, capsys, "run", "--dry-run", "--no-model", "--list-ids")
+    assert code == 0 and report["status"] == "completed"
+    assert report["read_stats"] == {"fleet": "unavailable"}
     assert report["selected"] == [] and report["eligible"] == 0
-    assert report["skipped"]["read_stats_unavailable"] == 1
-    assert report["never_read"] == {"count": None, "by_scope": {"fleet": None}}
+    assert report["skipped"]["read_stats_unavailable"] == 1 and report["skipped"]["read_stats_limited"] == 1
+    assert report["never_read"] == {"count": None, "by_scope": {"fleet": None}, "card_ids": []}
 
 
-def test_a_rate_limited_scope_with_no_cache_is_skipped(verify_setup, capsys):
-    target, hub = verify_setup
-    rate_limited(hub)
+def test_only_the_rate_limited_scope_is_skipped(setup, clock, tmp_path, capsys):
+    target, hub, _ = setup
+    hub._commit("card.put", "repo:second", "c", "---\nevidence: []\n---\nOther claim. ^c-123456\n", "live", "x")
+    for name in ("one", "two"):
+        (tmp_path / name).mkdir()
+    (target / ".brigade/memory-care.toml").write_text(
+        '[hub]\nmode="read"\nread_scopes=["fleet", "repo:second"]\n[verify]\n'
+        f'[[verify.workspace]]\nscope="fleet"\npath="{tmp_path / "one"}"\narchive_projects=[]\n'
+        f'[[verify.workspace]]\nscope="repo:second"\npath="{tmp_path / "two"}"\narchive_projects=[]\n'
+    )
+    original = hub.do_read_stats
+
+    def refuse_fleet(body):
+        if body["scope"] == "fleet":
+            return 429, {"error": SECRET, "code": hubc.READ_STATS_RATE_LIMITED}
+        return original(body)
+
+    hub.do_read_stats = refuse_fleet
     code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
-    assert code == 0 and report["read_stats"] == {"fleet": "unavailable"}
-    assert report["selected"] == [] and report["skipped"]["read_stats_unavailable"] == 1
+    assert code == 0
+    assert report["read_stats"] == {"fleet": "unavailable", "repo:second": "fresh"}
+    assert [(item["scope"], item["card_id"]) for item in report["selected"]] == [("repo:second", "c")]
+    assert report["never_read"]["by_scope"] == {"fleet": None, "repo:second": 0}
+    assert report["never_read"]["count"] is None
 
 
-def test_the_cache_age_limit_is_configurable(verify_setup, capsys, tmp_path):
-    target, hub = verify_setup
-    configure(target, tmp_path / "bound", extra="cached_counts_max_age_hours = 48\n")
-    rate_limited(hub)
-    cache(target, wall_ms() - 25 * 3_600_000)
-    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
-    assert code == 0 and report["read_stats"] == {"fleet": "cached"}
+def test_a_programming_error_outside_the_state_boundary_still_raises(verify_setup, monkeypatch):
+    target, _ = verify_setup
 
+    def broken(*args, **kwargs):
+        raise TypeError("a bug, not hostile input")
 
-@pytest.mark.parametrize("hours", [0, 169, True, "24"])
-def test_the_cache_age_limit_is_bounded(hours):
-    with pytest.raises(config.VerifyConfigError, match="cached_counts_max_age_hours"):
-        config.parse({"verify": {"cached_counts_max_age_hours": hours}})
+    monkeypatch.setattr(pick, "select", broken)
+    with pytest.raises(TypeError):
+        cli.main(["memory", "verify", "run", "--dry-run", "--no-model", "--target", str(target), "--json"])
 
 
 def test_a_refused_grant_fails_with_a_fixed_reason_and_no_state(verify_setup, capsys):
@@ -570,32 +560,6 @@ def test_read_stats_pacing_spans_scopes(setup, clock, tmp_path, capsys):
     assert all(later - earlier >= 1.0 for earlier, later in zip(admitted, admitted[1:], strict=False))
 
 
-def test_cached_counts_never_raise_on_malformed_entries():
-    good = {"seen": 1, "proposed": 0, "reads": [1, 2, 3]}
-    now, age = 10_000_000, 3_600_000
-
-    def cached(state):
-        return verify_cmd._cached(state, SCOPE, now_ms=now, max_age_ms=age)
-
-    assert cached({"scopes": {SCOPE: {"counts_ms": now - 5, "cards": {KEY: good}}}}) == {KEY: pick.Reads(1, 2, 3)}
-    for broken in (
-        {"scopes": {SCOPE: {"counts_ms": now, "cards": {KEY: {**good, "reads": None}}}}},
-        {"scopes": {SCOPE: {"counts_ms": now, "cards": {KEY: {**good, "reads": [1, 2]}}}}},
-        {"scopes": {SCOPE: {"counts_ms": now, "cards": {KEY: {**good, "reads": [1, -2, 3]}}}}},
-        {"scopes": {SCOPE: {"counts_ms": now, "cards": {KEY: {**good, "reads": ["1", 2, 3]}}}}},
-        {"scopes": {SCOPE: {"counts_ms": now, "cards": None}}},
-        {"scopes": {SCOPE: {"counts_ms": "x", "cards": {}}}},
-        {"scopes": {SCOPE: {"counts_ms": None, "cards": {}}}},
-        {"scopes": {SCOPE: {"counts_ms": now + 1, "cards": {}}}},
-        {"scopes": {SCOPE: {"counts_ms": now - age - 1, "cards": {}}}},
-        {"scopes": {SCOPE: {"cards": {KEY: good}}}},
-        {"scopes": {SCOPE: None}},
-        {"scopes": None},
-        None,
-    ):
-        assert cached(broken) is None
-
-
 # -- root identity -------------------------------------------------------------
 
 
@@ -656,3 +620,34 @@ def test_parsed_roots_keep_their_identity_and_revalidate(tmp_path):
     link.unlink()
     assert config.revalidate(bound) == config.ROOT_CHANGED
     assert str(tmp_path) not in config.ROOT_CHANGED
+
+
+def zero_inode(monkeypatch, victim):
+    """A filesystem without stable inodes for `victim`: stat reports st_ino 0."""
+    real = os.stat
+
+    def fake(path, *args, **kwargs):
+        result = real(path, *args, **kwargs)
+        if os.path.realpath(str(path)) != os.path.realpath(str(victim)):
+            return result
+        fields = list(result[:10])
+        fields[1] = 0
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(config, "_stat", fake)
+
+
+@pytest.mark.parametrize("where", ["root", "parent"])
+def test_a_root_without_a_stable_identity_is_refused(tmp_path, monkeypatch, where):
+    root = tmp_path / "parent" / "root"
+    root.mkdir(parents=True)
+    zero_inode(monkeypatch, root if where == "root" else tmp_path / "parent")
+    assert refused(workspace("repo:one", root, create=False)) == config.IDENTITY_UNAVAILABLE
+    assert config.IDENTITY_UNAVAILABLE.startswith("verify_root_identity_unavailable")
+
+
+def test_revalidate_refuses_a_root_that_lost_its_identity(tmp_path, monkeypatch):
+    (tmp_path / "root").mkdir()
+    [bound] = parse(workspace("repo:one", tmp_path / "root", create=False)).workspaces
+    zero_inode(monkeypatch, tmp_path / "root")
+    assert config.revalidate(bound) == config.ROOT_CHANGED

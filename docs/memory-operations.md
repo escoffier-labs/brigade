@@ -2142,7 +2142,6 @@ confirm_seat = "verify-confirm"
 cards_per_run = 12        # 1 to 64
 min_interval_days = 7     # 1 to 365
 never_read_days = 90      # 1 to 3650
-cached_counts_max_age_hours = 24  # 1 to 168
 
 [[verify.workspace]]
 scope = "repo:example"
@@ -2165,7 +2164,10 @@ Configuration fails, naming the rule but never the configured value, when:
 - `propose_seat` and `confirm_seat` name the same seat
 
 Roots are compared by directory identity (device and inode), never by
-spelling. A case-only variant on a case-insensitive filesystem, a symbolic
+spelling. A root, or any of its parents, on a filesystem that reports no
+stable inode (0, or a zero file index on Windows) is refused with
+`verify_root_identity_unavailable`, because equal identities would then prove
+nothing. A case-only variant on a case-insensitive filesystem, a symbolic
 link and a parent reached through a link all count as the same directory.
 Each parsed root keeps its identity, and the pass checks it again before it
 reads evidence under that root. A root that became a different directory
@@ -2208,7 +2210,7 @@ any other page.
 | `pending_ceiling` | The job already has 8 pending proposals, so nothing is selected |
 | `verify_deferred_slots` | Eligible, but the run's slots were full |
 | `read_stats_limited` | `read_stats` answered 429 for the scope |
-| `read_stats_unavailable` | After a 429, the state file had no usable counts for the scope, so nothing in it was selected |
+| `read_stats_unavailable` | The scope has no counts this run, so nothing in it is scored or selected |
 | `scope_unbound`, `scope_unreadable` | A hub read scope with no workspace entry, or a bound scope the hub settings do not read |
 
 ### Score and lanes
@@ -2238,18 +2240,18 @@ id.
 `never_read.count` counts live cards this job first saw at least
 `never_read_days` ago with no read recorded. It stays null until the hub's
 `read_counts_since_day` is also at least that old, and while counts are
-unavailable. A scope scored from cached counts after a 429 always reports
-null, because a read after the cached snapshot is unknown. With several scopes
-the total is null when any scope's count is.
+unavailable. With several scopes the total is null when any scope's count is.
 
-### Cached counts after a 429
+### When `read_stats` is rate limited
 
-When `read_stats` answers `429 memory_read_stats_rate_limited`, the run may
-score that scope from counts cached in the state file, but only when the
-cache records when it was observed (`counts_ms`), that time is not in the
-future, and it is at most `cached_counts_max_age_hours` old (default 24).
-Otherwise the scope is skipped with `read_stats_unavailable` and none of its
-cards are selected.
+When `read_stats` answers `429 memory_read_stats_rate_limited` for a scope,
+the run counts `read_stats_limited` and `read_stats_unavailable` and skips the
+scope: none of its cards are scored or selected, and its never-read count is
+null. Other scopes are unaffected. Counts cached in the state file are never
+used in place of a reply, because nothing writes a trusted snapshot of them
+yet. The state format already holds per-card `reads` and a per-scope
+`counts_ms`, so the later run that stores complete snapshots needs no format
+change.
 
 ### State file
 

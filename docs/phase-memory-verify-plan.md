@@ -321,6 +321,19 @@ Security review focus: cross-scope isolation, path handling, the
 authenticated-field boundary, and scan coverage of every byte that reaches a
 prompt.
 
+Slice 6 requirements carried from the slice 5 review:
+
+- Open each bound root as a directory handle (`O_DIRECTORY | O_NOFOLLOW` on
+  POSIX) and check the opened handle's `(st_dev, st_ino)` against the identity
+  pinned in the parsed workspace. `memory_verify_config.revalidate()` followed
+  by a separate open by path is not enough, because the path can change
+  between the two.
+- Resolve every evidence path relative to that handle, component by
+  component, with no-follow opens and a containment check, never through the
+  root's path string.
+- Hold the handle for as long as evidence under the root is read. That also
+  covers inode reuse after a root is removed and recreated.
+
 ## Slice 7. Isolated seat dispatch
 
 Depends on slice 5. Design: D3 (seats) and D4 (private cards and connector
@@ -442,6 +455,16 @@ of `tests/test_memory_reflect_hub.py`):
 - A duplicate pending reply records the existing id.
 - The pending ceiling stops new proposals.
 - Installing into the reflect job's folder is refused.
+
+Read count snapshots (carried from the slice 5 review): this slice adds the
+producer for the cached counts in `.brigade/memory/verify/state.json`. After a
+complete `read_stats` pagination of a scope, a non-dry run stores the whole
+scope snapshot (per-card `reads` and the scope's `counts_ms` from the program
+clock) in one atomic state write. Only then may a later run score a
+rate-limited scope from that snapshot, within a bounded age, and never use it
+for the never-read report. Slice 5 validates both fields but never reads them.
+Same-user tampering with the state file stays out of scope, as with the S24
+marker ruling, so the snapshot carries no HMAC.
 
 Security review focus: what reaches the hub, packet permissions and expiry,
 and the pre-run credential check.

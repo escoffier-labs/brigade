@@ -257,3 +257,15 @@ def test_a_malformed_counts_timestamp_fails_closed(tmp_path, value):
     with pytest.raises(vstate.VerifyStateError) as exc_info:
         vstate.load(tmp_path)
     assert_fixed(exc_info)
+
+
+def test_a_hostile_shape_inside_validation_maps_to_the_fixed_reason(tmp_path, monkeypatch):
+    write_raw(tmp_path, json.dumps(valid_state()).encode())
+
+    def explode(entry):
+        raise TypeError(SECRET)
+
+    monkeypatch.setattr(vstate, "_card", explode)
+    with pytest.raises(vstate.VerifyStateError) as exc_info:
+        vstate.load(tmp_path)
+    assert_fixed(exc_info)

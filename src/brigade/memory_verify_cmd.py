@@ -168,34 +168,6 @@ def _counts(client: hubc.MemoryHubClient, scope: str, pacer: Pacer) -> tuple[dic
     raise VerifyRunError("verify_read_stats_truncated", "read_stats listing exceeded the per-scope card bound")
 
 
-def _cached(state: dict[str, Any], scope: str, *, now_ms: int, max_age_ms: int) -> dict[str, pick.Reads] | None:
-    """Fresh counts cached in the state file, or None when they cannot stand in for a reply.
-
-    The cache must carry its observation time, that time must not be in the
-    future, and it must be at most `max_age_ms` old. Anything malformed makes
-    the whole scope's cache unavailable. Cached counts only score cards. They
-    never feed the never-read report, since a read after the snapshot is unknown.
-    """
-    scopes = state.get("scopes") if isinstance(state, dict) else None
-    table = scopes.get(scope) if isinstance(scopes, dict) else None
-    if not isinstance(table, dict):
-        return None
-    observed, cards = table.get("counts_ms"), table.get("cards", {})
-    if type(observed) is not int or not 0 <= observed <= now_ms or now_ms - observed > max_age_ms:
-        return None
-    if not isinstance(cards, dict):
-        return None
-    rows: dict[str, pick.Reads] = {}
-    for key, entry in cards.items():
-        if not isinstance(entry, dict) or "reads" not in entry:
-            continue
-        reads = entry["reads"]
-        if not isinstance(reads, list) or len(reads) != 3 or not all(type(v) is int and v >= 0 for v in reads):
-            return None
-        rows[key] = pick.Reads(*reads)
-    return rows
-
-
 def run_payload(*, target: Path, dry_run: bool, no_model: bool, list_ids: bool, now_ms: int | None = None) -> dict:
     if not (dry_run and no_model):
         raise VerifyRunError(
@@ -235,29 +207,23 @@ def run_payload(*, target: Path, dry_run: bool, no_model: bool, list_ids: bool, 
         listed: list[dict[str, str]] = []
         per_scope_since: dict[str, int | None] = {}
         pacer = Pacer()
-        max_age_ms = settings.cached_counts_max_age_hours * 3_600_000
         unavailable: set[str] = set()
         for scope in scopes:
-            since: int | None = None
             try:
                 rows, since = _counts(client, scope, pacer)
-                sources[scope] = "fresh"
             except hubc.HubRefusal as exc:
                 if exc.status != 429 or exc.code != hubc.READ_STATS_RATE_LIMITED:
                     raise
+                # No trusted producer writes cached counts yet (slice 9 adds one), so a
+                # rate-limited scope is skipped: nothing in it is scored or selected, and
+                # its never-read count is unknown. Counts in the state file are ignored.
                 skipped["read_stats_limited"] = skipped.get("read_stats_limited", 0) + 1
-                cached = _cached(state, scope, now_ms=now, max_age_ms=max_age_ms)
-                if cached is None:
-                    # No timestamp, a future one, stale or malformed: select nothing in this scope.
-                    sources[scope] = "unavailable"
-                    unavailable.add(scope)
-                    skipped["read_stats_unavailable"] = skipped.get("read_stats_unavailable", 0) + 1
-                    rows = {}
-                else:
-                    sources[scope] = "cached"
-                    rows = cached
+                skipped["read_stats_unavailable"] = skipped.get("read_stats_unavailable", 0) + 1
+                sources[scope] = "unavailable"
+                unavailable.add(scope)
+                continue
+            sources[scope] = "fresh"
             reads.update(rows)
-            # A scope served from cache, or not at all, reports never-read as unknown.
             per_scope_since[scope] = since
             entries.update(state["scopes"].get(scope, {}).get("cards", {}))
         selection = pick.select(
@@ -270,7 +236,7 @@ def run_payload(*, target: Path, dry_run: bool, no_model: bool, list_ids: bool, 
         )
         for scope in scopes:
             scoped = [head for head in valid if head["scope"] == scope]
-            if sources[scope] != "fresh":
+            if scope in unavailable:
                 never[scope] = None
                 continue
             ids = pick.never_read(
@@ -337,7 +303,7 @@ def dispatch(args: argparse.Namespace) -> int:
         payload = _failure("verify_hub_config", "invalid hub memory configuration or replica metadata")
     except OSError:
         payload = _failure("verify_io", "verify could not safely read local state")
-    except (ValueError, UnicodeError, RecursionError, TypeError, KeyError):
+    except (ValueError, UnicodeError, RecursionError):
         payload = _failure("verify_invalid", "verify received invalid state or data")
     if args.json:
         print(json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2))

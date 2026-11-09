@@ -5,7 +5,7 @@
   `[verify]` in `.brigade/memory-care.toml` binds each scope to one workspace root and an
   explicit archive project list. Roots must exist and are compared by directory identity, so
   roots bound to two scopes and nested roots are refused even through case-only spellings or
-  symlinks, and so are hub URL or credential keys. After a 429 from `read_stats`, a scope is
-  scored from cached counts only while they are at most `cached_counts_max_age_hours` old, and
-  its never-read count stays null. The verify state file has an 8 MiB limit and fails closed with a
+  symlinks, and so are roots without a stable inode and hub URL or credential keys. A scope
+  that `read_stats` rate limits is skipped for the run, and cached counts are never used in
+  place of a reply. The verify state file has an 8 MiB limit and fails closed with a
   fixed reason. The reflect lanes and verification share one fairness order helper.
