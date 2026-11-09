@@ -532,11 +532,16 @@ Slice 9's resolver implementation requires its own security review. This contrac
    by root, writable by neither group nor others, and neither setuid nor
    setgid. A git owned by the current user is refused, and so is one reached
    through a link whose target fails the rule. git's exec directory must
-   meet the same rule. git launches `git-remote-https` (and
+   meet the same rule, and the exec directory git reports must already be
+   canonical (its own real path). git launches `git-remote-https` (and
    `git-remote-http`, often its link target) by pathname from that exec
-   directory, which a held descriptor cannot cover. So before any fetch, each
-   of them that exists, its real target and the whole directory chain must
-   pass the same rule, and `git-remote-https` must exist. Otherwise the
+   directory, which a held descriptor cannot cover. So before any fetch, the
+   exact pathname git will launch is followed one link at a time, at most 8
+   hops. Every hop must sit in a canonical directory, with no symlinked
+   directory on the way, whose chain up to `/` passes the same rule, and the
+   final hop must be a native, root-owned regular file. A link that passes
+   through a directory another user can write is refused, even when its
+   canonical target is trusted. `git-remote-https` must exist. Otherwise the
    resolver returns None without fetching. The residual trust is a
    root-owned, root-chained native helper, the same level as git itself. No setting or environment variable can name another
    git. The verified file is opened once per run, the descriptor is checked
@@ -556,10 +561,22 @@ Slice 9's resolver implementation requires its own security review. This contrac
      the held descriptor must keep the HOME's identity. Its contents are
      removed through that descriptor: every subdirectory is opened the same
      way and checked against the entry just read, and nothing is reopened by
-     path. The empty HOME is then removed by name only after the name is
-     checked again against the same identity. `rmdir` removes only an empty
-     directory, so a swap after that last check cannot delete content. Any
-     mismatch leaves everything in place and logs it.
+     path. The removal is iterative, with an explicit stack of held
+     descriptors, and stops at a depth of 64 or after 10,000 entries,
+     leaving the rest in place. Immediately before each `unlink` or `rmdir`,
+     the name is checked again with `stat` relative to its held parent, and
+     an entry whose device and inode changed is skipped. The empty HOME is
+     then removed by name only after the name is checked again against the
+     same identity. Any mismatch leaves everything in place and logs it, and
+     nothing raises past cleanup.
+
+     One race remains and is accepted. Linux has no unlink or rmdir bound to
+     an inode, so between the last check and the syscall, a process running
+     as the same user could move an empty directory or a single entry into
+     the resolver's private 0700 directory under the checked name, and that
+     one entry would be removed. Such a process can already delete the
+     user's files directly, so it gains no capability. Nothing outside the
+     private directory is ever opened, traversed or removed.
    - `LC_ALL=C`
    - `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
      `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`
@@ -626,9 +643,14 @@ Slice 9's resolver implementation requires its own security review. This contrac
 11. Prove every allowed ref fresh in the current run without relying on the
     remote's configured fetch refspec. For each allowed ref
     `refs/remotes/<remote>/<branch>`, fetch with
-    `git fetch --porcelain --no-tags --prune <remote> +refs/heads/<branch>:refs/remotes/<remote>/<branch>`.
-    A refspec on the command line replaces the configured ones, so no tag or
-    other refspec from config applies. The porcelain output must list that
+    `git fetch --porcelain --verbose --refmap= --no-tags --prune <remote> +refs/heads/<branch>:refs/remotes/<remote>/<branch>`.
+    A refspec on the command line replaces the configured ones for what is
+    fetched, but git still applies configured `remote.<name>.fetch`
+    mappings to update other local refs. The fetch therefore also passes an
+    empty `--refmap=`, which makes git ignore every configured mapping, so
+    only the explicit destination can move. `remote.*.fetch` itself is not
+    refused, because every normal clone has one. With the empty refmap it has
+    no effect. The porcelain output must list that
     destination ref with an updated or up-to-date flag. git prints
     up-to-date refs in porcelain output only with `--verbose`, so the fetch
     passes it too, along with `--no-prune-tags`, because a configured

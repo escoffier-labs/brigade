@@ -97,7 +97,7 @@ The resolver MUST:
    directory above it owned by root, not group- or world-writable, and
    neither setuid nor setgid), executed from a held descriptor. Its
    `git-remote-https` and `git-remote-http` helpers must pass the same rule
-   before any fetch,
+   before any fetch at every link hop of the pathname git launches,
    with an environment built from scratch: only `PATH` (git's exec directory
    and the system directories), a private empty `HOME` that is removed only
    while it is still the directory the resolver made, `LC_ALL=C`,
@@ -136,7 +136,7 @@ The resolver MUST:
     there is no default and the resolver returns None. Local branches and
     tags are never allowed refs.
 11. Prove each allowed ref fresh in the current run with
-    `git fetch --porcelain --verbose --no-tags --prune <remote>
+    `git fetch --porcelain --verbose --refmap= --no-tags --prune <remote>
     +refs/heads/<branch>:refs/remotes/<remote>/<branch>`. The explicit refspec
     replaces the configured ones. The porcelain output must list the
     destination ref as updated or up to date, or, before git 2.41, the ref

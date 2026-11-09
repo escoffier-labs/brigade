@@ -1217,7 +1217,14 @@ def test_the_fetch_argv_pins_tags_prune_and_the_refspec(world, monkeypatch, porc
     assert world.resolve(short(target)) == target
     (args,) = fetches
     assert args[-2:] == ("origin", "+refs/heads/main:refs/remotes/origin/main")
-    for flag in ("--no-tags", "--no-prune-tags", "--prune", "--no-recurse-submodules", "--no-write-fetch-head"):
+    for flag in (
+        "--refmap=",
+        "--no-tags",
+        "--no-prune-tags",
+        "--prune",
+        "--no-recurse-submodules",
+        "--no-write-fetch-head",
+    ):
         assert flag in args
     assert ("--porcelain" in args and "--verbose" in args) is porcelain
 
@@ -1390,6 +1397,100 @@ def test_a_subdirectory_swapped_during_removal_is_never_emptied(made_home, monke
     collect(holder)
     assert swapped
     assert (home / "sub" / "keep.txt").read_text() == "keep\n"
+    assert left_in_place(caplog)
+
+
+# Deeper than the removal's depth bound. A literal, so the test does not lean on the module it checks.
+DEEPER_THAN_BOUND = 70
+
+
+def test_the_removal_bounds_are_fixed():
+    assert resolver.CLEAR_MAX_DEPTH == 64 < DEEPER_THAN_BOUND and resolver.CLEAR_MAX_ENTRIES == 10_000
+
+
+def test_a_nested_home_within_the_bounds_is_removed_completely(made_home, caplog):
+    holder, home, system_temp, _ = made_home
+    deep = home
+    for level in range(10):
+        deep = deep / f"d{level}"
+        deep.mkdir()
+        (deep / "f.txt").write_text("x")
+    collect(holder)
+    assert list(system_temp.iterdir()) == []
+    assert not left_in_place(caplog)
+
+
+def test_a_home_deeper_than_the_bound_leaves_residue_without_raising(made_home, caplog):
+    holder, home, _, _ = made_home
+    deep = home
+    for _level in range(DEEPER_THAN_BOUND):
+        deep = deep / "d"
+        deep.mkdir()
+    (deep / "bottom.txt").write_text("x")
+    collect(holder)  # a raise here would surface through the finalizer
+    assert (deep / "bottom.txt").exists()
+    assert any("deeper than" in record.getMessage() for record in caplog.records)
+    assert any("could not be removed" in record.getMessage() for record in caplog.records)
+
+
+def test_a_home_with_more_entries_than_the_bound_leaves_residue(made_home, monkeypatch, caplog):
+    holder, home, _, _ = made_home
+    monkeypatch.setattr(resolver, "CLEAR_MAX_ENTRIES", 5)
+    for index in range(12):
+        (home / f"f{index}.txt").write_text("x")
+    collect(holder)
+    assert len(list(home.iterdir())) == 12 - 5
+    assert any("more than 5 entries" in record.getMessage() for record in caplog.records)
+
+
+def swap_before_recheck(monkeypatch, target_name: str, swap) -> list:
+    """Run `swap` once, after `target_name` was verified and just before its re-check ahead of unlink or rmdir.
+
+    Hooks the resolver's own re-check, since patching os.stat would also change dirfd's platform probe.
+    """
+    real_same = resolver._same_entry
+    calls: list = []
+
+    def same_entry(parent_fd, name, identity):
+        if name == target_name and not calls:
+            calls.append(name)
+            swap()
+        return real_same(parent_fd, name, identity)
+
+    monkeypatch.setattr(resolver, "_same_entry", same_entry)
+    return calls
+
+
+def test_a_file_swapped_before_its_unlink_is_skipped(made_home, monkeypatch, caplog):
+    holder, home, _, sentinel = made_home
+    (home / "victim.txt").write_text("resolver scratch\n")
+    planted = sentinel / "planted.txt"
+    planted.write_text("keep\n")
+
+    def swap():
+        os.replace(planted, home / "victim.txt")
+
+    calls = swap_before_recheck(monkeypatch, "victim.txt", swap)
+    collect(holder)
+    assert calls
+    assert (home / "victim.txt").read_text() == "keep\n"
+    assert left_in_place(caplog)
+
+
+def test_a_directory_swapped_before_its_rmdir_is_skipped(made_home, monkeypatch, caplog):
+    holder, home, _, _ = made_home
+    (home / "sub").mkdir()
+    (home / "sub" / "own.txt").write_text("resolver scratch\n")
+
+    def swap():
+        os.rename(home / "sub", home / "sub-original")
+        (home / "sub").mkdir()
+
+    calls = swap_before_recheck(monkeypatch, "sub", swap)
+    collect(holder)
+    assert calls
+    assert (home / "sub").is_dir()  # the unrelated empty directory survived
+    assert not (home / "sub-original" / "own.txt").exists()  # the verified one was emptied through its descriptor
     assert left_in_place(caplog)
 
 
@@ -1770,3 +1871,79 @@ def test_a_helper_that_is_not_a_native_file_is_refused_before_any_fetch(world, m
     script.chmod(0o755)
     assert world.resolve(short(target)) is None
     assert "fetch" not in world.calls
+
+
+# --- Fix round 4: every hop of a helper pathname, and an empty refmap --------------------
+
+
+def test_a_helper_link_through_a_writable_directory_is_refused(world, monkeypatch):
+    """Codex P1 reproduction: the canonical target is trusted, but an intermediate link sits in a writable dir."""
+    target = world.commit("target")
+    exec_dir = fake_exec_dir(world, monkeypatch)
+    loose = world.root / "loose"
+    loose.mkdir()
+    os.symlink(real_helper(), loose / "hop")
+    loose.chmod(0o777)
+    try:
+        (exec_dir / "git-remote-https").unlink()
+        os.symlink(loose / "hop", exec_dir / "git-remote-https")
+        assert os.path.realpath(exec_dir / "git-remote-https") == real_helper()  # the old check saw only this
+        assert world.resolve(short(target)) is None
+        assert "fetch" not in world.calls
+    finally:
+        loose.chmod(0o700)
+
+
+def test_a_helper_reached_through_a_symlinked_directory_is_refused(world, monkeypatch):
+    target = world.commit("target")
+    exec_dir = fake_exec_dir(world, monkeypatch)
+    alias = exec_dir.parent / "alias"
+    os.symlink(exec_dir, alias)
+    (exec_dir / "git-remote-https").unlink()
+    os.symlink(alias / "git-remote-http", exec_dir / "git-remote-https")
+    assert world.resolve(short(target)) is None
+    assert "fetch" not in world.calls
+
+
+def test_a_helper_link_loop_is_refused(world, monkeypatch):
+    target = world.commit("target")
+    exec_dir = fake_exec_dir(world, monkeypatch)
+    (exec_dir / "git-remote-https").unlink()
+    os.symlink("loop-b", exec_dir / "git-remote-https")
+    os.symlink("git-remote-https", exec_dir / "loop-b")
+    assert world.resolve(short(target)) is None
+    assert "fetch" not in world.calls
+
+
+def test_an_exec_dir_reported_through_a_link_is_refused(world, monkeypatch):
+    target = world.commit("target")
+    exec_dir = fake_exec_dir(world, monkeypatch)
+    alias = exec_dir.parent / "alias-exec"
+    os.symlink(exec_dir, alias)
+    real = resolver._git
+
+    def reported(tool, cwd, *args):
+        if args == ("--exec-path",):
+            return resolver._Result(0, f"{alias}\n")
+        world.calls.append(args[0])
+        return real(tool, cwd, *args)
+
+    monkeypatch.setattr(resolver, "_git", reported)
+    assert world.resolve(short(target)) is None
+    assert "fetch" not in world.calls
+
+
+def test_the_real_exec_dir_helpers_pass_the_hop_check():
+    if os.name != "posix" or not proc.held_exec_supported():
+        pytest.skip("the resolver runs git only with held execution")
+    exec_dir = git(Path.cwd(), "--exec-path")
+    assert resolver.helpers_trusted(os.path.realpath(exec_dir))
+
+
+def test_a_configured_fetch_mapping_never_moves_a_local_ref(world):
+    """Codex P2 reproduction: remote.origin.fetch maps main onto a local tag. The resolver's fetch leaves it alone."""
+    git(world.workspace, "tag", "local-only", world.base)
+    plant(world, ("remote.origin.fetch", "+refs/heads/main:refs/tags/local-only"))
+    target = world.commit("target")
+    assert world.resolve(short(target)) == target
+    assert git(world.workspace, "rev-parse", "refs/tags/local-only") == world.base

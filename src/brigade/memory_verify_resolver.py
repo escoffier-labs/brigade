@@ -12,8 +12,11 @@
    `realpath`. It must be a native (ELF) regular file, and it and every
    directory from it up to `/` must be owned by root, writable by neither
    group nor others, and neither setuid nor setgid. git's exec directory
-   must meet the same rule, and so must `git-remote-https` and
-   `git-remote-http` there (and their real targets) before any fetch. The
+   must meet the same rule, and must be the canonical path git reports.
+   `git-remote-https` and `git-remote-http` there must pass before any
+   fetch at every hop of the pathname git launches: each hop in a
+   canonical, root-chained directory and the final one a native root-owned
+   file. The
    verified git is opened once per run and executed through that held
    descriptor (`fexecve`), so swapping the path after the check changes
    nothing. git launches its helpers by pathname, so for them the residual
@@ -47,6 +50,15 @@
 14. Its id must be 40 or 64 lowercase hex characters.
 15. It must be an ancestor of at least one proven object id, never a ref name.
 16. Anything else returns None.
+
+The private HOME is removed through held descriptors, iteratively and within
+fixed depth and entry bounds, and each name is checked again just before its
+`unlink` or `rmdir`. One race remains and is accepted: Linux has no unlink or
+rmdir bound to an inode, so a process running as the same user could move an
+empty directory or a single entry into the private 0700 directory under a
+checked name between that check and the syscall. Such a process can already
+delete the user's files, and nothing outside the private directory is ever
+opened, traversed or removed.
 
 Fetch proofs are cached in a `Run`, per repository and ref list, so the cards
 of one run share one fetch. A proof never outlives its `Run`: the next run
@@ -268,6 +280,38 @@ def find_git() -> str | None:
     return None
 
 
+# The most symlink hops a helper pathname may take before reaching its file.
+MAX_LINK_HOPS = 8
+
+
+def trusted_launch_path(path: str) -> bool:
+    """True when the exact pathname git will exec is safe at every hop, not only at its canonical target.
+
+    git launches a helper by this pathname, so a link anywhere along it that another user could retarget after
+    the check would let that user choose the binary. Each hop must sit in a canonical directory (no symlinked
+    directory on the way) whose chain up to `/` is root-owned and trusted, and the final hop must be a native,
+    root-owned regular file. Links are followed one hop at a time, at most `MAX_LINK_HOPS`.
+    """
+    current = os.path.normpath(path)
+    for _ in range(MAX_LINK_HOPS + 1):
+        directory = os.path.dirname(current)
+        if not os.path.isabs(current) or os.path.realpath(directory) != directory or not root_chain(directory):
+            return False
+        try:
+            metadata = os.lstat(current)
+        except (OSError, ValueError):
+            return False
+        if stat.S_ISLNK(metadata.st_mode):
+            try:
+                target = os.readlink(current)
+            except OSError:
+                return False
+            current = os.path.normpath(os.path.join(directory, target))
+            continue
+        return native_file(current) and _trusted_node(current, metadata)
+    return False
+
+
 def helpers_trusted(exec_dir: str) -> bool:
     """Every helper an https fetch can launch from `exec_dir` is a trusted executable. git-remote-https must exist.
 
@@ -280,7 +324,7 @@ def helpers_trusted(exec_dir: str) -> bool:
             if name == REQUIRED_HELPER:
                 return False
             continue
-        if trusted_executable(path) is None:
+        if not trusted_launch_path(path):
             return False
     return True
 
@@ -357,28 +401,95 @@ def _open_child_dir(parent_fd: int, name: str) -> int:
     return os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
 
 
-def _clear_held(fd: int) -> None:
-    """Remove everything inside the held directory `fd`, never following a link and never reopening by path.
+# Bounds on one HOME removal. Past either one the removal stops and leaves the rest in place.
+CLEAR_MAX_DEPTH = 64
+CLEAR_MAX_ENTRIES = 10_000
 
-    Each subdirectory is opened relative to its held parent with O_NOFOLLOW, and its descriptor must name the
-    entry just read before anything inside it is touched.
-    """
+
+@dataclass
+class _Frame:
+    """One held directory on the removal stack, with where it sits in its held parent."""
+
+    fd: int
+    names: list[str]
+    parent_fd: int | None = None
+    name: str = ""
+    identity: config.Identity = (0, 0)
+
+
+def _names(fd: int) -> list[str]:
     with os.scandir(fd) as entries:
-        names = [entry.name for entry in entries]
-    for name in names:
-        entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
-        if not stat.S_ISDIR(entry.st_mode):
-            os.unlink(name, dir_fd=fd)
-            continue
-        child = _open_child_dir(fd, name)
-        try:
+        return [entry.name for entry in entries]
+
+
+def _same_entry(parent_fd: int, name: str, identity: config.Identity) -> bool:
+    """Re-stat `name` relative to its held parent, without following a link, and compare device and inode."""
+    try:
+        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return (metadata.st_dev, metadata.st_ino) == identity
+
+
+def _clear_held(fd: int) -> bool:
+    """Remove everything inside the held directory `fd`. True when it is empty afterwards.
+
+    Iterative, with an explicit stack of held descriptors, so depth never reaches Python's recursion limit.
+    Every directory is opened relative to its held parent with O_NOFOLLOW and its descriptor must name the
+    entry just read. Immediately before each `unlink` or `rmdir`, the name is checked again with `stat` relative
+    to the held parent and must still have the verified device and inode, or that entry is skipped and logged. Deeper than
+    `CLEAR_MAX_DEPTH` or more than `CLEAR_MAX_ENTRIES` entries stops the removal with the rest left in place.
+    """
+    stack = [_Frame(fd, _names(fd))]
+    seen = 0
+    clean = True
+    try:
+        while stack:
+            frame = stack[-1]
+            if not frame.names:
+                stack.pop()
+                if frame.parent_fd is None:
+                    continue
+                os.close(frame.fd)
+                if _same_entry(frame.parent_fd, frame.name, frame.identity):
+                    try:
+                        os.rmdir(frame.name, dir_fd=frame.parent_fd)
+                    except OSError:
+                        clean = False
+                else:
+                    LOG.warning("verify resolver skipped a directory in its private HOME that changed")
+                    clean = False
+                continue
+            name = frame.names.pop()
+            seen += 1
+            if seen > CLEAR_MAX_ENTRIES:
+                LOG.warning("verify resolver left its private HOME in place: more than %d entries", CLEAR_MAX_ENTRIES)
+                return False
+            entry = os.stat(name, dir_fd=frame.fd, follow_symlinks=False)
+            identity = (entry.st_dev, entry.st_ino)
+            if not stat.S_ISDIR(entry.st_mode):
+                if _same_entry(frame.fd, name, identity):
+                    os.unlink(name, dir_fd=frame.fd)
+                else:
+                    LOG.warning("verify resolver skipped an entry in its private HOME that changed")
+                    clean = False
+                continue
+            if len(stack) >= CLEAR_MAX_DEPTH:
+                LOG.warning("verify resolver left its private HOME in place: deeper than %d", CLEAR_MAX_DEPTH)
+                return False
+            child = _open_child_dir(frame.fd, name)
             opened = os.fstat(child)
-            if (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
-                raise OSError("a directory inside the private HOME changed while it was removed")
-            _clear_held(child)
-        finally:
-            os.close(child)
-        os.rmdir(name, dir_fd=fd)
+            if (opened.st_dev, opened.st_ino) != identity:
+                os.close(child)
+                LOG.warning("verify resolver skipped a directory in its private HOME that changed")
+                clean = False
+                continue
+            stack.append(_Frame(child, _names(child), frame.fd, name, identity))
+        return clean
+    finally:
+        for frame in stack:
+            if frame.parent_fd is not None:
+                _close_quietly(frame.fd)
 
 
 def remove_home(home: _Home) -> bool:
@@ -388,8 +499,13 @@ def remove_home(home: _Home) -> bool:
     inode, owner, directory type). The HOME is opened relative to that held parent with O_NOFOLLOW and its
     descriptor must keep the HOME's identity. Its contents are removed through the held descriptor, so a HOME
     swapped after the check is never touched. The empty HOME is then removed by name only after that name is
-    re-checked against the same identity. `rmdir` removes only an empty directory, so a swap after the re-check
-    cannot delete content. Any mismatch leaves everything in place and logs it. Nothing raises.
+    re-checked against the same identity. Any mismatch leaves everything in place and logs it. Nothing raises.
+
+    Residual race, accepted: Linux has no unlink or rmdir bound to an inode, so between the last identity
+    re-check and the syscall, a process running as the same user could move an empty directory or a single
+    entry into this private 0700 directory under the checked name, and that one entry would be removed. Such a
+    process can already delete the user's files directly, so it gains nothing. Nothing outside the private
+    directory is ever opened, traversed or removed.
     """
     try:
         parent_fd = dirfd.open_directory_chain(Path(home.parent), writable=False)
@@ -402,9 +518,12 @@ def remove_home(home: _Home) -> bool:
                 if not _matches(os.fstat(home_fd), home.home_id):
                     LOG.warning("verify resolver left its private HOME in place: it was replaced")
                     return False
-                _clear_held(home_fd)
+                cleared = _clear_held(home_fd)
             finally:
                 os.close(home_fd)
+            if not cleared:
+                LOG.warning("verify resolver left its private HOME in place: part of it could not be removed")
+                return False
             if not _matches(os.stat(home.name, dir_fd=parent_fd, follow_symlinks=False), home.home_id):
                 LOG.warning("verify resolver left its private HOME in place: it was replaced during removal")
                 return False
@@ -453,8 +572,14 @@ def _tool(run: Run) -> GitTool | None:
     exec_dir = _output(bootstrap, home, "--exec-path")
     if exec_dir is None or not os.path.isabs(exec_dir):
         return None
+    # git launches helpers through the exec directory it reports, so that pathname must already be canonical.
     exec_real = os.path.realpath(exec_dir)
-    if not os.path.isdir(exec_real) or not root_chain(exec_real) or not helpers_trusted(exec_real):
+    if (
+        exec_real != os.path.normpath(exec_dir)
+        or not os.path.isdir(exec_real)
+        or not root_chain(exec_real)
+        or not helpers_trusted(exec_real)
+    ):
         return None
     run.tool, run.tool_failed = GitTool(real, fd, git_environment(home, exec_real)), False
     return run.tool
@@ -599,7 +724,16 @@ def _fetch_proves(tool: GitTool, cwd: str, ref: str, run: Run) -> str | None:
         return None
     remote, branch = _remote(ref)
     refspec = f"+refs/heads/{branch}:{ref}"
-    common = ("--no-tags", "--no-prune-tags", "--prune", "--no-recurse-submodules", "--no-write-fetch-head")
+    # An empty --refmap makes git ignore every configured remote.<name>.fetch mapping, so only the explicit
+    # refspec below can update a ref.
+    common = (
+        "--refmap=",
+        "--no-tags",
+        "--no-prune-tags",
+        "--prune",
+        "--no-recurse-submodules",
+        "--no-write-fetch-head",
+    )
     if version >= PORCELAIN_VERSION:
         # Without --verbose, porcelain output leaves out refs that were already up to date.
         result = _git(tool, cwd, "fetch", "--porcelain", "--verbose", *common, remote, refspec)
