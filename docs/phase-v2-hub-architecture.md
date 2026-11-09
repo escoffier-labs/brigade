@@ -2717,7 +2717,9 @@ Invariant tests, in S19a to S19e:
   carried. "Opened" means a card file read through the Read tool: any `.md`
   at any depth under a memory-care card root that card search would list,
   never a symlink or a path that leaves the root. It is recorded under the id
-  card search's own loader gives it.
+  card search's parser gives it, from a read bound to the validated file
+  (O_NOFOLLOW, the same device and inode) and capped at the hub's 512 KiB
+  card limit. With under 0.5 s of hook budget left the read is not observed.
   The Stop hook sends one `capture` per batch of keys not yet captured, at
   most 50 of each list, so a long session can produce several events under one
   `session_ref`. A batch the hub did not take is retried at the next Stop with
@@ -2731,7 +2733,8 @@ Invariant tests, in S19a to S19e:
   or world writable, and the home's parent may be writable by others only with
   the sticky bit. The checks, the read, the write and the inode binding go
   through the same directory descriptors. Opting out writes a connector marker
-  before removing it, so a failed removal still leaves recall on connector.
+  and removes it through those descriptors. If the removal fails, the marker is
+  read again and the opt-out succeeds only when it reads as connector.
   The marker prevents accidental local trust on a copied, synced or cloud home.
   A process running as the same user is out of scope, because it can read the
   hub token and the cards directly, and the principal's hub grants are the

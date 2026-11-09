@@ -223,37 +223,48 @@ def _validate(raw: object, home_identity: list[int] | None) -> str | None:
     return None
 
 
+def _load_in(dirs: _Dirs) -> dict | str:
+    """The marker's JSON read through the checked descriptors, or why it cannot be read."""
+    try:
+        fd = os.open(MARKER_NAME, _FILE_FLAGS, dir_fd=dirs.hooks)
+    except FileNotFoundError:
+        return NOT_ENABLED
+    except OSError:
+        return "marker unreadable"
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return "marker is not a regular file"
+        if info.st_uid != os.geteuid():
+            return "marker owned by another user"
+        if info.st_mode & 0o077:
+            return "marker readable or writable by others"
+        if info.st_size > _MARKER_MAX_BYTES:
+            return "marker too large"
+        data = os.read(fd, _MARKER_MAX_BYTES + 1)
+    finally:
+        os.close(fd)
+    try:
+        raw = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return "marker unreadable"
+    return raw if isinstance(raw, dict) else "marker malformed or from an older Brigade"
+
+
+def _refusal_text(refused: _Refused) -> str:
+    return NOT_ENABLED if str(refused).endswith(" missing") else str(refused)
+
+
 def _read_posix() -> str | None:
     try:
         with _Dirs(create=False) as dirs:
             _between_check_and_read()
-            try:
-                fd = os.open(MARKER_NAME, _FILE_FLAGS, dir_fd=dirs.hooks)
-            except FileNotFoundError:
-                return NOT_ENABLED
-            except OSError:
-                return "marker unreadable"
-            try:
-                info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode):
-                    return "marker is not a regular file"
-                if info.st_uid != os.geteuid():
-                    return "marker owned by another user"
-                if info.st_mode & 0o077:
-                    return "marker readable or writable by others"
-                if info.st_size > _MARKER_MAX_BYTES:
-                    return "marker too large"
-                data = os.read(fd, _MARKER_MAX_BYTES + 1)
-            finally:
-                os.close(fd)
-            try:
-                raw = json.loads(data.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                return "marker unreadable"
-            return _validate(raw, dirs.home_identity())
+            loaded = _load_in(dirs)
+            if isinstance(loaded, str):
+                return loaded
+            return _validate(loaded, dirs.home_identity())
     except _Refused as refused:
-        missing = str(refused).endswith(" missing")
-        return NOT_ENABLED if missing else str(refused)
+        return _refusal_text(refused)
 
 
 def _read_windows() -> str | None:
@@ -293,23 +304,27 @@ def audience() -> str:
         return CONNECTOR
 
 
+def _write_in(dirs: _Dirs, body: str) -> None:
+    """Replace the marker atomically inside the checked claude-hooks descriptor."""
+    tmp = f".{MARKER_NAME}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600, dir_fd=dirs.hooks)
+    try:
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, body.encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.replace(tmp, MARKER_NAME, src_dir_fd=dirs.hooks, dst_dir_fd=dirs.hooks)
+    finally:
+        try:
+            os.unlink(tmp, dir_fd=dirs.hooks)
+        except OSError:
+            pass
+
+
 def _write_posix(make_body: Callable[[list[int] | None], str]) -> None:
     with _Dirs(create=True) as dirs:
-        body = make_body(dirs.home_identity())
-        tmp = f".{MARKER_NAME}.{os.getpid()}.tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600, dir_fd=dirs.hooks)
-        try:
-            try:
-                os.fchmod(fd, 0o600)
-                os.write(fd, body.encode("utf-8"))
-            finally:
-                os.close(fd)
-            os.replace(tmp, MARKER_NAME, src_dir_fd=dirs.hooks, dst_dir_fd=dirs.hooks)
-        finally:
-            try:
-                os.unlink(tmp, dir_fd=dirs.hooks)
-            except OSError:
-                pass
+        _write_in(dirs, make_body(dirs.home_identity()))
 
 
 def _write_windows(make_body: Callable[[list[int] | None], str]) -> None:
@@ -360,28 +375,73 @@ def write_marker() -> str | None:
         return f"cannot write {marker_path()}: {type(exc).__name__}"
 
 
-def _unlink_marker() -> None:
-    marker_path().unlink(missing_ok=True)
+_CONNECTOR_BODY = json.dumps({"v": MARKER_VERSION, "audience": CONNECTOR}, sort_keys=True) + "\n"
+
+
+def _unlink_in(dirs: _Dirs | None) -> None:
+    """Remove the marker: through the checked descriptor on POSIX, by path on Windows."""
+    if dirs is None:
+        marker_path().unlink(missing_ok=True)
+        return
+    try:
+        os.unlink(MARKER_NAME, dir_fd=dirs.hooks)
+    except FileNotFoundError:
+        pass
+
+
+def _opt_out_posix() -> bool:
+    """True once the marker is gone or reads as connector through the same descriptors."""
+    try:
+        with _Dirs(create=True) as dirs:
+            try:
+                _write_in(dirs, _CONNECTOR_BODY)
+            except OSError:
+                pass  # the removal or the re-read below decides
+            try:
+                _unlink_in(dirs)
+                return True
+            except OSError:
+                pass
+            loaded = _load_in(dirs)
+            return (
+                isinstance(loaded, dict) and loaded.get("v") == MARKER_VERSION and loaded.get("audience") == CONNECTOR
+            )
+    except _Refused:
+        # The same checks refuse every read, so no marker here can grant local.
+        return marker_problem() is not None
+    except OSError:
+        return marker_problem() is not None
+
+
+def _opt_out_windows() -> bool:
+    try:
+        _write_windows(lambda _identity: _CONNECTOR_BODY)
+    except OSError:
+        pass
+    try:
+        _unlink_in(None)
+        return True
+    except OSError:
+        pass
+    try:
+        raw = json.loads(marker_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(raw, dict) and raw.get("v") == MARKER_VERSION and raw.get("audience") == CONNECTOR
 
 
 def opt_out() -> str | None:
-    """Opt this host out. Returns a fixed refusal only when local recall may still be on.
+    """Opt this host out. Returns a fixed refusal unless recall is left on connector.
 
-    A connector marker goes in first, atomically, then the file is removed as a
-    best effort, so a removal that fails still leaves the audience connector.
+    A connector marker goes in first, atomically, then the file is removed. If
+    the removal fails, the marker is read again through the same descriptors,
+    and only a connector marker counts as success.
     """
     try:
-        wrote = marker_path().exists() is False or _write(CONNECTOR) is None
-    except Exception:  # noqa: BLE001 - fall through to the removal
-        wrote = False
-    try:
-        _unlink_marker()
-        removed = True
-    except Exception:  # noqa: BLE001 - a failed removal is reported below, never raised
-        removed = False
-    if wrote or removed or marker_problem() is not None:
-        return None
-    return f"{OPT_OUT_FAILED} ({marker_path()})"
+        done = _opt_out_posix() if _POSIX else _opt_out_windows()
+    except Exception:  # noqa: BLE001 - an opt-out reports, never raises
+        done = False
+    return None if done else f"{OPT_OUT_FAILED} ({marker_path()})"
 
 
 def doctor_check(recall_active: bool = True) -> tuple[str, str, str]:

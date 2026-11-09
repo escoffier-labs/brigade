@@ -1771,15 +1771,24 @@ def _card_search_fields(path: Path, target: Path) -> dict[str, Any]:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {}
+    return card_fields_from_text(text, path.relative_to(target).as_posix(), stem=path.stem)
+
+
+def card_fields_from_text(text: str, rel: str, *, stem: str) -> dict[str, Any]:
+    """Search fields for one card's text, the parse every card search caller shares.
+
+    ``text`` is decoded with errors replaced and newlines universal, as
+    ``Path.read_text`` gives it. The hook's bounded reader calls this too.
+    """
     frontmatter, _ = _parse_frontmatter(text)
-    identity = card_identity(frontmatter, path.relative_to(target).as_posix())
+    identity = card_identity(frontmatter, rel)
     tags = frontmatter.get("tags")
     tags_list = [str(t) for t in tags] if isinstance(tags, list) else ([str(tags)] if tags else [])
     return {
-        "rel": path.relative_to(target).as_posix(),
+        "rel": rel,
         "card_id": identity.card_id,
         "card_aliases": list(identity.aliases),
-        "title": str(frontmatter.get("title") or path.stem),
+        "title": str(frontmatter.get("title") or stem),
         "tags": tags_list,
         "summary": str(frontmatter.get("description") or frontmatter.get("summary") or ""),
         "body": text,

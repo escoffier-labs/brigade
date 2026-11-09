@@ -26,7 +26,9 @@ import hmac
 import json
 import os
 import re
+import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -44,6 +46,16 @@ RECALL_RESERVE_SECONDS = 1.5
 RECALL_MIN_SECONDS = 1.0
 # A deadline this far past belongs to an earlier event in a long-lived process.
 _STALE_DEADLINE_SECONDS = 30.0
+# The hub's card size limit (memory_hub_import.MAX_TEXT_BYTES, pinned by a test).
+# A Read of anything larger is not recorded, so a huge or sparse file cannot
+# spend the hook's budget or memory.
+CARD_READ_MAX_BYTES = 512 * 1024
+# Below this much hook budget a card read is not observed at all.
+OBSERVE_MIN_SECONDS = 0.5
+_CARD_OPEN_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+)
+_POSIX = sys.platform != "win32"
 _EVENT_DEADLINE: list[float | None] = [None]
 _SESSION_REF_LABEL = b"brigade.memory.capture.session.v1\x00"
 _CARD_ID = r"[a-z0-9][a-z0-9._-]{0,127}"
@@ -317,13 +329,14 @@ def capture(target: Path, session_id: str, *, budget: float | None = None) -> st
         return "error"
 
 
-def card_under_roots(memory_root: Path, raw: Path) -> tuple[Path, Path] | None:
-    """``(card, root)`` when ``raw`` is a card search would list, else None.
+def card_under_roots(memory_root: Path, raw: Path) -> tuple[Path, Path, tuple[int, int]] | None:
+    """``(card, root, (st_dev, st_ino))`` when ``raw`` is a card search would list, else None.
 
     Mirrors ``memory_cmd._iter_cards``: any ``.md`` file at any depth under one
     of the memory-care ``card_roots`` that passes its include and exclude
     paths. A symlinked file, a raw ``..`` part and a path whose real location
-    leaves the card root are refused.
+    leaves the card root are refused. The identity binds the later read to
+    the file validated here.
     """
     from ..memory_cmd import MemoryCareConfig, _path_matches, load_config
 
@@ -334,6 +347,7 @@ def card_under_roots(memory_root: Path, raw: Path) -> tuple[Path, Path] | None:
         if raw.is_symlink() or not raw.is_file():
             return None
         real = raw.resolve()
+        info = os.stat(real)
         config = load_config(root) or MemoryCareConfig()
     except (OSError, ValueError):
         return None
@@ -349,21 +363,59 @@ def card_under_roots(memory_root: Path, raw: Path) -> tuple[Path, Path] | None:
             return None
         if config.exclude_paths and _path_matches(rel, config.exclude_paths):
             return None
-        return real, root
+        return real, root, (int(info.st_dev), int(info.st_ino))
     return None
 
 
-def opened_card_id(card: Path, memory_root: Path) -> str | None:
-    """The id card search gives this card, through search's own loader and parser.
+def _between_validate_and_read() -> None:
+    """No-op seam between card validation and the bounded read. Tests swap the file here."""
 
-    ``card`` is a real path under ``memory_root`` (from ``card_under_roots``),
-    so the front matter parse, its limits and the fallback match search.
+
+def read_card_bounded(card: Path, identity: tuple[int, int]) -> str | None:
+    """The validated card's text, or None when it changed, is not a regular file or is too large.
+
+    Opens with O_NOFOLLOW and O_NONBLOCK, checks the open file's device and
+    inode against the validation (POSIX; Windows opens by path and keeps the
+    size bound), and reads at most ``CARD_READ_MAX_BYTES``. The text is decoded
+    the way ``Path.read_text`` decodes it for card search.
     """
-    from ..card_identity import card_identity
-    from ..memory_cmd import _card_search_fields
+    try:
+        fd = os.open(card, _CARD_OPEN_FLAGS)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > CARD_READ_MAX_BYTES:
+            return None
+        if _POSIX and (int(info.st_dev), int(info.st_ino)) != identity:
+            return None
+        chunks: list[bytes] = []
+        size = 0
+        while size <= CARD_READ_MAX_BYTES:
+            chunk = os.read(fd, CARD_READ_MAX_BYTES + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > CARD_READ_MAX_BYTES:
+            return None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    text = b"".join(chunks).decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")  # universal newlines, as read_text
 
-    fields = _card_search_fields(card, memory_root)
-    card_id = fields.get("card_id") or card_identity({}, card.relative_to(memory_root).as_posix()).card_id
+
+def opened_card_id(card: Path, memory_root: Path, identity: tuple[int, int]) -> str | None:
+    """The id card search gives this card, from a bounded read through search's own parser."""
+    from ..memory_cmd import card_fields_from_text
+
+    _between_validate_and_read()
+    text = read_card_bounded(card, identity)
+    if text is None:
+        return None
+    card_id = card_fields_from_text(text, card.relative_to(memory_root).as_posix(), stem=card.stem)["card_id"]
     return card_id if _keys([card_id]) else None
 
 
@@ -402,6 +454,8 @@ def after_event(
     _EVENT_DEADLINE[0] = None
     try:
         if event == "PostToolUse" and payload.get("tool_name") == "Read":
+            if budget is not None and budget < OBSERVE_MIN_SECONDS:
+                return
             tool_input = payload.get("tool_input")
             file_path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
             if not isinstance(file_path, str) or not file_path.endswith(".md"):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import socket
 import sys
 import threading
@@ -872,10 +873,10 @@ def test_an_opt_out_in_a_read_only_directory_exits_2_without_a_traceback(wired, 
 def test_an_opt_out_whose_delete_fails_still_leaves_connector(wired, monkeypatch):
     target, _memory = wired
 
-    def refuse() -> None:
+    def refuse(_dirs: object) -> None:
         raise PermissionError("delete refused")
 
-    monkeypatch.setattr(recall_audience, "_unlink_marker", refuse)
+    monkeypatch.setattr(recall_audience, "_unlink_in", refuse)
     assert install_cmd.hooks_update(target=target, quiet=True, recall_audience_choice="connector") == 0
     stored = json.loads(recall_audience.marker_path().read_text(encoding="utf-8"))
     assert stored["audience"] == "connector"
@@ -895,3 +896,91 @@ def test_long_front_matter_gives_one_id_to_opened_and_pushed(wired):
     ledger = hub_recall.load(hub_recall.ledger_path(target, SESSION))
     assert CANONICAL_ID in ledger["pushed"]
     assert ledger["opened"] == [CANONICAL_ID]
+
+
+# --- round 4: bounded card reads bound to the validated file, budget floor, opt-out end state ---
+
+
+def test_the_card_read_ceiling_is_the_hubs_card_size_limit():
+    from brigade import memory_hub_import
+
+    assert hub_recall.CARD_READ_MAX_BYTES == memory_hub_import.MAX_TEXT_BYTES
+
+
+def _nested_card(memory: Path, card_id: str = NESTED_ID) -> Path:
+    nested = memory / "memory" / "cards" / "runbooks"
+    nested.mkdir(parents=True, exist_ok=True)
+    card = nested / "orbit.md"
+    card.write_text(f"---\nid: {card_id}\ntitle: Orbit runbook\ntags: [orbit]\n---\norbit steps\n", encoding="utf-8")
+    return card
+
+
+@posix_only
+@pytest.mark.parametrize("replacement", ["symlink", "other-file"])
+def test_a_card_swapped_after_validation_is_not_recorded(wired, monkeypatch, tmp_path, replacement):
+    target, memory = wired
+    card = _nested_card(memory)
+    decoy = tmp_path / "decoy.md"
+    decoy.write_text("---\nid: card-decoy\ntitle: Decoy\n---\nbody\n", encoding="utf-8")
+
+    def swap() -> None:
+        if replacement == "symlink":
+            card.unlink()
+            card.symlink_to(decoy)
+        else:
+            # Renamed over the card while the old file still exists, so its inode differs.
+            staged = card.with_name("orbit.staged")
+            staged.write_text(decoy.read_text(encoding="utf-8"), encoding="utf-8")
+            os.replace(staged, card)
+
+    monkeypatch.setattr(hub_recall, "_between_validate_and_read", swap)
+    assert not _read(target, card)
+    assert hub_recall.load(hub_recall.ledger_path(target, SESSION))["opened"] == []
+
+
+def test_an_oversized_card_is_skipped_quickly(wired):
+    target, memory = wired
+    huge = memory / "memory" / "cards" / "huge.md"
+    with huge.open("wb") as handle:
+        handle.write(b"---\nid: card-huge\ntitle: Huge\n---\n")
+        handle.truncate(8 * 1024 * 1024)  # sparse where the filesystem allows it
+    started = time.monotonic()
+    assert not _read(target, huge)
+    assert time.monotonic() - started < 1.0
+    assert hub_recall.load(hub_recall.ledger_path(target, SESSION))["opened"] == []
+
+
+def test_a_low_remaining_budget_skips_the_observation(wired):
+    target, memory = wired
+    card = _nested_card(memory)
+    read = _payload(target, "PostToolUse", tool_name="Read", tool_input={"file_path": str(card)})
+    hub_recall.after_event("PostToolUse", read, lambda: target, budget=hub_recall.OBSERVE_MIN_SECONDS / 2)
+    assert hub_recall.load(hub_recall.ledger_path(target, SESSION))["opened"] == []
+    hub_recall.after_event("PostToolUse", read, lambda: target, budget=5.0)
+    assert hub_recall.load(hub_recall.ledger_path(target, SESSION))["opened"] == [NESTED_ID]
+
+
+@posix_only
+def test_an_opt_out_whose_unlink_fails_with_a_local_marker_in_place_exits_2(wired, monkeypatch, capsys):
+    target, _memory = wired
+
+    def racing_unlink(dirs: object) -> None:
+        # Another writer puts a local marker back, then the removal fails.
+        identity = dirs.home_identity()  # type: ignore[attr-defined]
+        body = {"v": recall_audience.MARKER_VERSION, "audience": "local", **recall_audience._binding(identity)}
+        recall_audience._write_in(dirs, json.dumps(body, sort_keys=True))  # type: ignore[arg-type]
+        raise PermissionError("delete refused")
+
+    monkeypatch.setattr(recall_audience, "_unlink_in", racing_unlink)
+    assert install_cmd.hooks_update(target=target, recall_audience_choice="connector") == 2
+    err = capsys.readouterr().err
+    assert recall_audience.OPT_OUT_FAILED in err and "Traceback" not in err
+    assert recall_audience.audience() == "local"
+
+
+def test_an_opt_out_with_no_marker_writes_and_removes_through_the_same_directories(wired):
+    target, _memory = wired
+    recall_audience.marker_path().unlink()
+    assert install_cmd.hooks_update(target=target, quiet=True, recall_audience_choice="connector") == 0
+    assert not recall_audience.marker_path().exists()
+    assert recall_audience.audience() == "connector"
