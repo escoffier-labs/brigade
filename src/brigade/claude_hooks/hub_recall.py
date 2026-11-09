@@ -51,7 +51,7 @@ _CARD_ID = r"[a-z0-9][a-z0-9._-]{0,127}"
 _BRIEF_CARD_PATH = re.compile(rf"(?<![A-Za-z0-9._-])cards/({_CARD_ID})\.md(?![A-Za-z0-9_-])")
 _BRIEF_CARD_FIELD = re.compile(rf"\bcard_id[\"']?\s*[:=]\s*[\"']?({_CARD_ID})")
 _READ_CARD_PATH = re.compile(r"(?:^|[/\\])memory[/\\]cards[/\\]([A-Za-z0-9][A-Za-z0-9._-]{0,127})\.md$")
-_FRONTMATTER_READ_BYTES = 64 * 1024
+_FRONTMATTER_READ_CHARS = 64 * 1024
 
 
 __all__ = ["AUDIENCE_ENV", "REMOTE_ENV", "audience", "brief_card_ids", "capture", "recall_text"]
@@ -329,8 +329,10 @@ def opened_card_id(card: Path, name: str) -> str | None:
     from ..memory_cmd import _parse_frontmatter
 
     try:
-        with card.open("rb") as handle:
-            text = handle.read(_FRONTMATTER_READ_BYTES).decode("utf-8", errors="replace")
+        # Text mode, as card search's read_text: universal newlines turn a CRLF
+        # card (any Windows checkout) into the "---\n" the parser expects.
+        with card.open("r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read(_FRONTMATTER_READ_CHARS)
         frontmatter, _ = _parse_frontmatter(text)
     except (OSError, ValueError):
         frontmatter = {}
