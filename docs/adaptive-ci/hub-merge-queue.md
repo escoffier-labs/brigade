@@ -180,9 +180,11 @@ rewritten file. The control for it is human review of workflow changes. As of
 2026-11-09 that control is not enforced: the repository has no `CODEOWNERS`
 file, and `main`'s protection requires 0 approving reviews, no code-owner
 review, and only the `ci-gate` status (conversation resolution and admin
-enforcement are on). Requiring a code-owner review for `.github/workflows/`
-and `scripts/ci_*` would close that gap. This change does not alter protection
-settings.
+enforcement are on). A required code-owner review cannot close that gap here,
+because agents open pull requests from the maintainer's own account and GitHub
+does not let an author approve their own pull request (see "Review gates and
+account identity" in [`phase-adaptive-ci.md`](../phase-adaptive-ci.md#review-gates-and-account-identity)).
+This change does not alter protection settings.
 
 The documentation-only classifier had the same two problems as the first
 version of this selector: it loaded its code from `merge_group.base_sha` (the

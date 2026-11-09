@@ -342,29 +342,46 @@ an after window exists.
 Merge-group runs of `ci.yml` after #2436 merged. Minutes are `created_at` to
 `updated_at` of the run, not the report's wall metric, and each is one run.
 
-| run | queue entry | `hub` | selector reason | minutes |
-|---|---|---|---|---|
-| 42663340698 | #2433 | skipped | `no-hub-path-changed` | 11.4 |
-| 42664944828 | #2442 | ran | `hub-selection-source-changed` from #2441 ahead of it in the queue | 13.2 |
-| 42685668967 | #2454 | skipped | `no-hub-path-changed` | 10.4 |
-| 42687967106 | #2448 | skipped | `no-hub-path-changed` | 11.5 |
-| 42679381170 | #2439 | ran | `hub-path-changed` (cumulative range) | 12.5 |
-| 42679427735 | #2444 | ran | `hub-path-changed` (cumulative range) | 16.2 |
-| 42693841937 | #2446 | ran, failed | `hub-path-changed` (cumulative range; #2446 touches no hub path) | 10.8 |
+| run | queue entry | `hub` | published reason | why | minutes |
+|---|---|---|---|---|---|
+| 42663340698 | #2433 | skipped | `no-hub-path-changed` | no hub path in the range | 11.4 |
+| 42664944828 | #2442 | ran | `trusted-hub-selector-unavailable` | fail-closed fallback, see below; #2442 also changed `engines/hub/**` itself | 13.2 |
+| 42685668967 | #2454 | skipped | `no-hub-path-changed` | no hub path in the range | 10.4 |
+| 42687967106 | #2448 | skipped | `no-hub-path-changed` | no hub path in the range | 11.5 |
+| 42679377812 | #2437 | ran, failed | `hub-path-changed` | own diff (`src/brigade/fleet_client*.py`, `cli/fleet*.py` and others) | 12.9 |
+| 42679381170 | #2439 | ran | `hub-path-changed` | only from #2437 ahead of it in the queue | 12.5 |
+| 42679427735 | #2444 | ran | `hub-path-changed` | own diff (`src/brigade/fleet_client_message_credentials.py`) | 16.2 |
+| 42693841937 | #2446 | ran, failed | `hub-path-changed` | own diff (`src/brigade/memory_hub_client.py`, matched by `src/brigade/memory_hub_*.py`) | 10.8 |
 
-The #2442 row is the case the cumulative range exists for: #2442 changed no hub
-path, but the entry ahead of it changed the selector, so the hub suite ran.
-Runs between #2436 and #2441 landing also logged
-`trusted-hub-selector-unavailable`, the fail-closed fallback while the selector
-was not yet on `main`.
+The #2439 row is the case the cumulative range exists for. #2439's own diff
+touches no hub path (`.gitignore`, the baseline files, this document and
+`scripts/ci_timing_report.py` with its test). It was queued behind #2437, whose
+fleet client changes are hub paths, so the range from `main` to #2439's head
+held them and the hub suite ran. A selector that diffed only
+`base_sha..head_sha` would have skipped it.
 
-Two of the runs where the hub suite ran failed on hub tests unrelated to this
-campaign:
+The #2442 row shows the fail-closed default. `main` was at #2440 and held the
+selector from #2436, which wrote `hub` and `reason`. #2441, ahead of #2442 in
+the queue, changed the `ci.yml` step to also require `start`. #2442's group ran
+#2441's `ci.yml` against `main`'s older selector, the parse failed, and the step
+published `hub=true` with `trusted-hub-selector-unavailable`. The selector's own
+log line for that run said `hub-selection-source-changed`, which is not what the
+step published. No other run in this table published the fallback; the
+`trusted-hub-selector-unavailable` text in other logs is the step's default line
+before the selector's output replaces it.
+
+Two of the runs where the hub suite ran failed on hub tests, each passing in
+the other run:
 `read_counts_tests::the_sweep_stays_within_its_row_budget_and_finishes_over_several_ticks`
-(run 42693841937, the default 20 ms sweep time budget stopped the first tick at
-1,024 rows) and
+(run 42693841937, `left: (1024, true) right: (2000, true)`) and
 `push_withheld_tests::push_card_404_latency_does_not_separate_absent_and_withheld_ids`
-(run 42679377812, latency ratio 1.562 against a 1.5 bound). A failed queue entry
+(run 42679377812, `withheld 13.694945ms vs absent 8.768908ms: ratio 1.562`). The
+quoted values come from the job logs. The causes come from source: the first
+test runs under the default 20 ms sweep time budget
+(`engines/hub/src/memory/read_counts.rs`), which stopped the first tick at a
+chunk boundary, and the second asserts a ratio within 1.5
+(`push_withheld_tests.rs`). Neither failure comes from this campaign's changes.
+A failed queue entry
 that is re-queued starts a new workflow run with its own run id, not another
 attempt of the failed run. Its cost therefore shows up as extra `merge_group`
 runs in the window (the failed one in the `all` view, the retry in either
@@ -390,8 +407,9 @@ limit that no CI check can close:
   [`hub-merge-queue.md`](adaptive-ci/hub-merge-queue.md#trust-and-its-limit)
   and [`docs-classifier-trust.md`](adaptive-ci/docs-classifier-trust.md#trust-and-its-limit)).
   Workflow edits are covered only by review before they are queued;
-- a repository invariant test requires every `ci.yml` job to run under
-  `!cancelled()` so `ci-gate` sees it;
+- `tests/test_ci_workflow.py` checks that no runtime job is admitted when the
+  run is cancelled and that the `ci-gate` job covers every required job and
+  its dependencies;
 - the nightly `hub-nightly.yml` runs the full hub suite on `main` and opens
   or updates one tracking issue on failure, so a wrongly skipped hub change
   surfaces within a day.
@@ -450,7 +468,7 @@ for wall and runner time, seconds for a job family.
 | date | change | PR | metric | before | after | n |
 |---|---|---|---|---|---|---|
 <!-- adaptive-ci: append result rows directly below this line -->
-| 2026-11-09 | Test-audit pilot, grokbot tests | [#2438](https://github.com/escoffier-labs/brigade/pull/2438) | grokbot test LOC; grokbot line coverage | 33,044; 78.618% | 32,600 (-1.3%); 78.618% | 53 files |
+| 2026-11-09 | Test-audit pilot, grokbot tests | [#2438](https://github.com/escoffier-labs/brigade/pull/2438) | grokbot test LOC at the merge commit `7bc63865`; grokbot line coverage | 33,044; 78.618% | 32,595 (-1.4%); 78.618% | 53 files |
 
 ## Prior art
 
