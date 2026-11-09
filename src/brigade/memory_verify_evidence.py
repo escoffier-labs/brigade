@@ -510,7 +510,9 @@ class EngineArchive:
                 return None
             if "eligibility_status" in row:
                 reason = row.get("reason_code")
-                known = row.get("eligibility_status") == "ineligible" and reason in INELIGIBLE
+                known = (
+                    row.get("eligibility_status") == "ineligible" and isinstance(reason, str) and reason in INELIGIBLE
+                )
                 dropped.append(str(reason) if known else "ineligible")
                 continue
             item_id, snippet = row.get("id"), row.get("snippet")
@@ -534,7 +536,11 @@ class EngineArchive:
                 dropped.append(refused)
                 continue
             meta = shown.get("metadata")
-            if not isinstance(meta, dict) or meta.get("project") not in projects:
+            if not isinstance(meta, dict):
+                dropped.append("source_unowned")
+                continue
+            project = meta.get("project")
+            if not isinstance(project, str) or project not in projects:
                 dropped.append("source_unowned")
                 continue
             if not encodable(shown["text"]):
@@ -728,6 +734,7 @@ def _receipt_metadata(meta: Mapping[str, Any], project: str, run_id: str, path: 
         or not isinstance(digest, str)
         or not digest.startswith("sha256:")
         or DIGEST.fullmatch(digest.removeprefix("sha256:")) is None
+        or not isinstance(source, str)
         or source not in DIGEST_SOURCES
     ):
         return None
@@ -1162,11 +1169,54 @@ def _locate(roots: Roots, scope: str, rel: str) -> tuple[HeldRoot, bytes, os.sta
     return found[0] if len(found) == 1 else None
 
 
+# Raised by malformed engine data that reaches a check written for well formed data.
+ENGINE_DATA_ERRORS = (TypeError, ValueError, KeyError)
+
+
+def _archive_call(call: Callable[..., Any], *args: Any) -> Any:
+    """One archive lookup. Malformed engine data reads as no answer and never stops the run.
+
+    Only the archive call is guarded, so an error in this module's own code
+    still surfaces.
+    """
+    try:
+        return call(*args)
+    except ENGINE_DATA_ERRORS:
+        return None
+
+
+def _well_formed(bundle: object) -> TypeGuard[Bundle]:
+    """A Bundle whose fields have the types assembly relies on, so later set and time checks cannot raise."""
+    return (
+        isinstance(bundle, Bundle)
+        and isinstance(bundle.texts, tuple)
+        and all(isinstance(value, str) for value in bundle.texts)
+        and isinstance(bundle.times, tuple)
+        and isinstance(bundle.dropped, tuple)
+        and all(isinstance(value, str) for value in bundle.dropped)
+        and isinstance(bundle.lineage, frozenset)
+        and all(isinstance(value, str) for value in bundle.lineage)
+        and isinstance(bundle.complete, bool)
+    )
+
+
 def _record(archive: Archive, projects: tuple[str, ...], run_id: str, rel: str) -> ReceiptRecord | None:
     """The one archive record of this receipt under the scope's projects, else None."""
     records: list[ReceiptRecord] = []
     for project in projects:
-        found = archive.receipt_records(project, run_id, rel)
+        found = _archive_call(archive.receipt_records, project, run_id, rel)
+        if found is not None and (
+            not isinstance(found, (list, tuple))
+            or not all(
+                isinstance(record, ReceiptRecord)
+                and all(
+                    isinstance(value, str)
+                    for value in (record.project, record.path, record.digest, record.digest_source)
+                )
+                for record in found
+            )
+        ):
+            return None
         # A record that names another project or path than asked is a contradiction, not noise.
         if found is None or any(record.project != project or record.path != rel for record in found):
             return None
@@ -1284,8 +1334,8 @@ def _cited(
             return None, False
         if not projects:
             return None, False
-        bundle = archive.bundle(bundle_id, projects)
-        if bundle is None:
+        bundle = _archive_call(archive.bundle, bundle_id, projects)
+        if not _well_formed(bundle):
             return None, False
         for reason in bundle.dropped:
             assembly.count(f"bundle_source_{reason}")
@@ -1379,11 +1429,15 @@ def _excerpts(assembly: Assembly, archive: Archive, projects: tuple[str, ...], t
         return
     pooled: list[Excerpt] = []
     for project in projects:
-        found = archive.search(project, terms, limit)
-        if found is None:
+        found = _archive_call(archive.search, project, terms, limit)
+        if not isinstance(found, (list, tuple)):
             assembly.count("excerpts_unavailable")
             continue
-        pooled.extend(found)
+        pooled.extend(
+            excerpt
+            for excerpt in found
+            if isinstance(excerpt, Excerpt) and isinstance(excerpt.excerpt_id, str) and isinstance(excerpt.text, str)
+        )
     seen: set[str] = set()
     index = 0
     for excerpt in pooled:

@@ -1586,3 +1586,118 @@ def test_conversion_errors_from_the_platform_are_caught(monkeypatch, error):
 
     monkeypatch.setattr(ev, "datetime", Stub)
     assert ev._moment_ms("2026-11-09T00:00:00Z") is None
+
+
+# --- Codex round 4: malformed engine values fail closed ------------------------------------
+
+
+@pytest.mark.parametrize("digest_source", [[], {}, 1, None, ["receipt_digest"], {"receipt_digest": 1}])
+@posix
+def test_a_malformed_digest_source_leaves_the_receipt_unauthenticated_and_the_next_card_assembles(
+    tmp_path, digest_source
+):
+    root, parsed = setup(tmp_path)
+    corroborating(root)
+    _, digest = receipt()
+    replies = engine_replies(digest)
+    _shown(replies)["metadata"]["digest_source"] = digest_source
+    first, second = card(RECEIPT, HANDOFF), {**card(HANDOFF), "card_id": "card-next"}
+    results = run([first, second], parsed, engine(replies))
+    assert all(i.rank != ev.AUTHENTICATED for i in results[0].items)
+    assert results[0].abstain == ev.UNCORROBORATED
+    assert results[1].card_id == "card-next" and results[1].abstain == ev.UNCORROBORATED
+
+
+def test_malformed_bundle_reason_codes_and_projects_fail_closed():
+    rows = [
+        {"eligibility_status": "ineligible", "reason_code": ["integrity_mismatch"]},
+        {"eligibility_status": "ineligible", "reason_code": {"a": 1}},
+        bundle_source("s1", "x"),
+        bundle_source("s2", "y"),
+    ]
+    replies = bundle_replies("b1", rows, {"s1": "example", "s2": "example"})
+    replies[("show", ("s1", "--json"))]["metadata"]["project"] = ["example"]
+    replies[("show", ("s2", "--json"))]["metadata"]["project"] = {"example": True}
+    bundle = engine(replies).bundle("b1", ("example",))
+    assert bundle is not None
+    assert bundle.texts == ()
+    assert bundle.dropped == ("ineligible", "ineligible", "source_unowned", "source_unowned")
+
+
+class RaisingArchive(Archive):
+    def __init__(self, error, **kwargs):
+        super().__init__(**kwargs)
+        self.error = error
+
+    def receipt_records(self, project, run_id, path):
+        raise self.error("malformed engine reply")
+
+    def bundle(self, bundle_id, projects):
+        raise self.error("malformed engine reply")
+
+
+@pytest.mark.parametrize("error", [TypeError, ValueError, KeyError])
+@posix
+def test_engine_data_errors_mark_the_reference_unreachable_and_later_cards_continue(tmp_path, error):
+    root, parsed = setup(tmp_path)
+    corroborating(root)
+    archive = RaisingArchive(error)
+    first = card(RECEIPT, f"{BUNDLE}b1", HANDOFF)
+    second = {**card(HANDOFF), "card_id": "card-next"}
+    results = run([first, second], parsed, archive)
+    assert [i.rank for i in results[0].items if i.kind == ev.RECEIPT_FIELDS] == [ev.MEDIUM]
+    assert results[0].counts[ev.UNREACHABLE] == 1
+    assert results[1].card_id == "card-next"
+
+
+@posix
+def test_errors_outside_engine_data_still_surface(tmp_path):
+    root, parsed = setup(tmp_path)
+    corroborating(root)
+    with pytest.raises(AttributeError):
+        run(card(RECEIPT, HANDOFF), parsed, RaisingArchive(AttributeError))
+
+
+@pytest.mark.parametrize(
+    "bundle",
+    [
+        ev.Bundle(texts=["list"]),
+        ev.Bundle(texts=(1,)),
+        ev.Bundle(texts=("t",), times=[1]),
+        ev.Bundle(texts=("t",), lineage={"path:x"}),
+        ev.Bundle(texts=("t",), lineage=frozenset({1})),
+        ev.Bundle(texts=("t",), dropped=(["x"],)),
+        ev.Bundle(texts=("t",), complete="yes"),
+        "not a bundle",
+    ],
+)
+@posix
+def test_a_malformed_bundle_from_any_archive_is_unreachable(tmp_path, bundle):
+    _, parsed = setup(tmp_path)
+    [result] = run(card(f"{BUNDLE}b1"), parsed, Archive(bundles={"b1": bundle}))
+    assert result.abstain == ev.UNREACHABLE
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        "not a list",
+        [object()],
+        [ev.ReceiptRecord("example", RECEIPT, ["sha256:x"], "receipt_digest")],
+        [ev.ReceiptRecord("example", RECEIPT, "sha256:" + "0" * 64, None)],
+    ],
+)
+@posix
+def test_malformed_receipt_records_from_any_archive_leave_the_receipt_medium(tmp_path, records):
+    root, parsed = setup(tmp_path)
+    corroborating(root)
+    [result] = run(card(RECEIPT, HANDOFF), parsed, Archive(records={("example", RUN): records}))
+    assert all(i.rank != ev.AUTHENTICATED for i in result.items)
+
+
+@pytest.mark.parametrize("digest_source", [[], {}, 1])
+def test_receipt_records_returns_nothing_for_a_malformed_digest_source_without_raising(digest_source):
+    _, digest = receipt()
+    replies = engine_replies(digest)
+    _shown(replies)["metadata"]["digest_source"] = digest_source
+    assert engine(replies).receipt_records("example", RUN, RECEIPT) is None

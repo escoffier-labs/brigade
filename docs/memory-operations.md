@@ -2224,7 +2224,9 @@ after it, before 1970, or out of range counts as no time and is counted as
 An item left empty or holding only whitespace, including one the byte bounds
 cut to nothing, is dropped and counted as `evidence_empty`. A receipt or
 engine text holding a string that is not valid UTF-8, such as an escaped lone
-surrogate, makes that reference unreachable without stopping the run. A bundle with no
+surrogate, makes that reference unreachable without stopping the run. So does
+an archive reply with a value of the wrong type, such as a digest source that
+is a list: the reference fails closed and later cards still assemble. A bundle with no
 source left is `evidence_unreachable`. Each reachable item is cut on a UTF-8
 boundary (8 KiB per item, 32 KiB per card, 8 items, 3 excerpts of 4 KiB) and
 scanned with the memory rule bundle, both as rendered and, for receipts, as
