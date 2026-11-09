@@ -10,7 +10,7 @@ import re
 import stat
 import time
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterator
 from uuid import uuid4
 from ..fleet_client import FleetClientError
 from ..fleet_client_message_credentials import MessageAuthority
@@ -22,6 +22,9 @@ from .prompt_scan import egress_refusal
 from .runtime_config import Runtime
 from .safe_state import private_directory, trusted_directory, redact_credentials
 from .state import utc_now
+
+if TYPE_CHECKING:
+    from ..memory_hub_client import MemoryHubClient
 
 CARD_CHUNK_CHARS = 30000
 HANDOFF_ID_WINDOW_MS = 600_000
@@ -43,6 +46,8 @@ HANDOFF_REFUSAL_CODES = frozenset(
     }
 )
 POLICY_PATHS = (Path(".codex/AGENTS.md"), Path("AGENTS.md"), Path("ai-tools/AGENTS.md"))
+# Dot and Duet hub memory with no memory hub on this host: the fleet hub serves no memory.
+NO_MEMORY_HUB = "no-memory-hub"
 # The hub's `search` limit. A larger request is capped there and says so.
 HUB_SEARCH_LIMIT = 20
 _LOCAL_KEYS: tuple[str, ...] = ("card_id", "title", "path", "score", "summary", "tags", "card_aliases")
@@ -176,9 +181,9 @@ class MemoryTools:
         return self._run_brigade(tail, timeout=timeout, max_output=max_output)
 
     def memory_search(self, query: str, limit: int = 10) -> dict[str, Any]:
-        """Search memory cards. With hub memory on, Dot and Duet search the hub as their own principal.
+        """Search memory cards. With hub memory on, Dot and Duet search the memory hub in process.
 
-        Hub matches come from `_principal_search`, never the host node's credential or the replica. A
+        Hub matches come from `_principal_search`, never the fleet hub, a fleet credential or the replica. A
         principal memory profile (Grok Bot memory) runs `brigade memory search` with its own pinned
         credential, grant-scoped rather than push-restricted. With hub memory off, the search CLI
         reads local cards only.
@@ -248,10 +253,11 @@ class MemoryTools:
     def _principal_search(self, query: str, limit: int) -> dict[str, Any]:
         """Dot and Duet search with hub memory on (S23).
 
-        Hub matches come from hub `search` with `query_source: "connector"` as the listener-pinned connector
-        principal, so they hold only what `memory_hits` could send it: no other writer's unreviewed card
-        and no pending, flagged, private or retired version. The host node credential, an admin token in
-        its slot and the replica play no part, and an unavailable or refusing hub answers no hub matches.
+        Hub matches come from the memory hub's `search` with `query_source: "connector"`, sent with the
+        `[memory_hub]` read credential (`_memory_hub_client`), so they hold only what `memory_hits` could
+        send: no other writer's unreviewed card and no pending, flagged, private or retired version. The
+        fleet hub, the node and message credentials and the replica play no part. A host with no memory
+        hub, or an unavailable or refusing one, answers no hub matches and says why in `retrieval`.
         Local workspace cards are searched in process and returned apart, as `local_matches`.
         """
         from .. import memory_cmd
@@ -376,14 +382,13 @@ class MemoryTools:
         return item
 
     def push_search(self, query: str, limit: int) -> dict[str, Any]:
-        """Hub `search` with `query_source: "push"`, as this connector's own principal (S23).
+        """Memory hub `search` with `query_source: "push"`, with the `[memory_hub]` read credential (S23).
 
-        The connector principal's grants decide what it reads, never the host node's, so the runbook
-        grants Dot and Duet read on `fleet`. One call inside the search budget: the push is fail-open,
-        and the caller omits `memory_hits` on any error. The hub does not count these unsolicited
-        hits as reads.
+        That credential's grants decide what it reads, never the host node's. One call inside the search
+        budget: the push is fail-open, and the caller omits `memory_hits` on any error, including a host
+        with no memory hub. The hub does not count these unsolicited hits as reads.
         """
-        return self._principal_hub_search(query, limit, "push")
+        return self._memory_hub_search(query, limit, "push")
 
     def connector_search(self, query: str, limit: int) -> dict[str, Any]:
         """Hub `search` with `query_source: "connector"`: the agent's own `memory_search`.
@@ -391,34 +396,53 @@ class MemoryTools:
         The hub applies the same push filter as `push_search` and counts the matches as reads, so
         read statistics and never-read reports see explicit connector searches.
         """
-        return self._principal_hub_search(query, limit, "connector")
+        return self._memory_hub_search(query, limit, "connector")
 
-    def _principal_hub_search(self, query: str, limit: int, source: str) -> dict[str, Any]:
-        from ..memory_hub_client import SEARCH_BUDGET_SECONDS, MemoryHubClient
+    def _memory_hub_search(self, query: str, limit: int, source: str) -> dict[str, Any]:
+        from ..memory_hub_client import SEARCH_BUDGET_SECONDS
 
-        authority = self._principal_authority()
-        client = MemoryHubClient(authority.hub, authority.token)
+        client = self._memory_hub_client()
         return client.call("search", timeout=SEARCH_BUDGET_SECONDS, query=query, limit=limit, query_source=source)
 
+    def _memory_hub_client(self) -> MemoryHubClient:
+        """The memory hub Dot and Duet search and read: an explicit user-level `[memory_hub]` only.
+
+        The listener's message authority names the fleet hub, which serves no memory, so hub memory
+        reads use the memory hub and the read credential its `[memory_hub]` table names
+        (`connector_settings`). The `BRIGADE_MEMORY_HUB_*` pair, which belongs to the sync and mirror
+        units, the fleet values and a relative `BRIGADE_HOME` never choose it. With no such table this
+        raises `HubUnavailable("no-memory-hub")`, and nothing is sent to any hub. A `[memory_hub]`
+        that cannot be read raises `HubConfigError`.
+        """
+        from ..memory_hub_client import HubConfigError, HubUnavailable, MemoryHubClient, connector_settings
+
+        try:
+            settings = connector_settings(self.workspace)
+        except (ValueError, OSError) as exc:
+            raise HubConfigError("memory hub settings could not be read") from exc
+        if settings is None:
+            raise HubUnavailable(NO_MEMORY_HUB)
+        return MemoryHubClient(settings.hub_url, settings.token)
+
     def _hub_card(self, name: str, offset: int, scope: str | None = None) -> dict[str, Any] | None:
-        """A card only hub memory holds, or None. Dot and Duet read it push-safe as their own principal."""
+        """A card only hub memory holds, or None. Dot and Duet read it push-safe from the memory hub."""
         if self.profile.principal_memory:
             return self._cli_hub_card(name, offset, scope)
         return self._push_card(name, offset, scope)
 
     def _push_card(self, name: str, offset: int, scope: str | None) -> dict[str, Any] | None:
-        """Hub `card` with `push: true`, as this connector's pinned principal (S23).
+        """Memory hub `card` with `push: true`, with the `[memory_hub]` read credential (S23).
 
         The hub serves only a live head with a current clean scan receipt and push trust (reviewed,
         policy-promoted or imported, or unreviewed written by this principal), so `memory_card` opens no
-        more than `memory_hits` could send. The host node credential and the replica play no part: a card
-        the hub withholds, an unavailable hub or a head that moves between chunks answer None.
+        more than `memory_hits` could send. The fleet hub, the node and message credentials and the
+        replica play no part: a card the hub withholds, no memory hub, an unavailable hub or a head that
+        moves between chunks answer None.
         """
         from ..memory_hub_client import (
             HubConfigError,
             HubRefusal,
             HubUnavailable,
-            MemoryHubClient,
             content_hash,
             hub_mode,
             obj,
@@ -430,9 +454,8 @@ class MemoryTools:
                 return None
         except (HubConfigError, ValueError, OSError):
             return None
-        authority = self._principal_authority()
         try:
-            client = MemoryHubClient(authority.hub, authority.token)
+            client = self._memory_hub_client()
         except (HubUnavailable, HubConfigError):
             return None
         parts: list[str] = []
@@ -843,6 +866,7 @@ _RETRIEVAL_REASONS = frozenset(
     {
         "no-hub-configured",
         "no-node-credential",
+        NO_MEMORY_HUB,
         "timeout",
         "unreachable",
         "no-hub-memory",

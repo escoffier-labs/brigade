@@ -177,10 +177,12 @@ With hub memory on (`mode = "read"` or `"sync"`), hits come from the hub only:
  "next": "Read a card with memory_card(name=<card_id>, scope=<scope>)."}
 ```
 
-- The connector calls hub `search` with `query_source: "push"` as its own
-  message principal, never the host node. The hub answers only what that
-  principal's grants open, so the setup step grants Dot and Duet `read` on
-  `fleet` (see [Grants for memory hits](#grants-for-memory-hits)).
+- The connector calls `search` with `query_source: "push"` on the memory hub,
+  the `[memory_hub]` table in `~/.brigade/fleet.toml`, with that table's read
+  credential. It never uses `[fleet] hub_url`, which serves no memory, the host
+  node token or the listener's message principal. The hub answers only what
+  that credential's grants open (see
+  [Grants for memory hits](#grants-for-memory-hits)).
 - The hub pushes reviewed, policy-promoted and imported cards, and an
   unreviewed card only to the credential that wrote it. It re-reads each hit's
   head and current clean scan receipt before answering, so a retired, lowered
@@ -188,8 +190,8 @@ With hub memory on (`mode = "read"` or `"sync"`), hits come from the hub only:
   private-class text never leaves on this path.
 - `memory_search` and `memory_card` follow the same rules. `memory_search`
   calls hub `search` with `query_source: "connector"` (the push filter, counted
-  as a read) and `memory_card` calls `card` with `push: true`, both as the
-  connector principal, in process. The unsolicited `memory_hits` searches use
+  as a read) and `memory_card` calls `card` with `push: true`, both on the
+  memory hub with its read credential, in process. The unsolicited `memory_hits` searches use
   `query_source: "push"` and are not counted as reads. Neither ever
   returns another writer's unreviewed card, a pending, flagged or private
   version or a retired head, never uses the host node credential (or an admin
@@ -197,6 +199,11 @@ With hub memory on (`mode = "read"` or `"sync"`), hits come from the hub only:
   come back apart, in `local_matches`, labelled `source: "local"`. An
   unavailable or refusing hub leaves `matches` empty with a
   `hub_search_unavailable` or `hub_search_refused` warning.
+- A host with hub memory on and no `[memory_hub]` has no memory hub for Dot and
+  Duet. `memory_search` answers local cards only, with
+  `retrieval.reason: "no-memory-hub"` and the `hub_search_unavailable` warning,
+  hub `memory_card` reads answer `card_not_found`, and `memory_hits` is left
+  out. Nothing is sent to the fleet hub.
 - The Grok Bot memory profile is deliberately different: grant-scoped, not
   push-restricted. See [grokbot-memory-connector.md](grokbot-memory-connector.md).
 - A local card is never pushed in these modes. An unavailable hub, a refusal
@@ -236,18 +243,18 @@ Both sources share these rules:
 
 ### Grants for memory hits
 
-A message principal holds no memory grant until the hub admin adds one. Before
-turning on hub memory for a Dot or Duet workspace, grant each connector
-principal `read` on `fleet` with the hub's admin-only `grant` action on
-`POST /memory`, and nothing else:
+Dot and Duet read hub memory with the `[memory_hub]` credential, so the grants
+that matter are that principal's on the memory hub. Before turning on hub memory
+for a Dot or Duet workspace, give the memory hub's read principal `read` on
+`fleet` with the memory hub's admin-only `grant` action on `POST /memory`, and
+nothing else:
 
 ```json
-{"action": "grant", "principal": "<dot principal>", "scope": "fleet", "rights": ["read"], "client_event_id": "<26-character time-ordered id>"}
-{"action": "grant", "principal": "<duet principal>", "scope": "fleet", "rights": ["read"], "client_event_id": "<26-character time-ordered id>"}
+{"action": "grant", "principal": "<memory read principal>", "scope": "fleet", "rights": ["read"], "client_event_id": "<26-character time-ordered id>"}
 ```
 
-Use the `hub.principal` values from each runtime JSON. Without the grant the hub
-answers `memory_grant_missing` and the responses carry no `memory_hits`.
+Without the grant the memory hub answers `memory_grant_missing` and the
+responses carry no `memory_hits`.
 
 ## Security model
 

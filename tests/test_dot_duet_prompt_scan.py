@@ -40,7 +40,7 @@ REMOTE = (DOT, DUET)
 # test_grokbot_s26_profiles.py. These cases use local cards, which it never serves.
 EVERY_PROFILE = (DOT, DUET)
 SHA = "ab" * 32
-CONNECTOR_HUB = "https://hub.example.test:3774"
+CONNECTOR_HUB = "https://memory-hub.invalid:3774"
 # Built at runtime: a fixture, not a credential.
 CONNECTOR_TOKEN = "-".join(("fixture", "connector", "value")) * 2
 
@@ -61,10 +61,14 @@ def _expected(rule, code):
 class Scan(Fixture):
     def memory(self, profile):
         authority = lambda: SimpleNamespace(hub=CONNECTOR_HUB, token=CONNECTOR_TOKEN)  # noqa: E731
-        return MemoryTools(self.runtime, commands=self.runner, profile=profile, authority=authority)
+        tools = MemoryTools(self.runtime, commands=self.runner, profile=profile, authority=authority)
+        # Dot and Duet read the `[memory_hub]` hub with its read credential. How that is resolved from
+        # fleet.toml is covered in test_memory_hub_override.py.
+        tools._memory_hub_client = lambda: memory_hub_client.MemoryHubClient(CONNECTOR_HUB, CONNECTOR_TOKEN)
+        return tools
 
     def hub_cards(self, cards):
-        """Dot and Duet read hub cards in process, push-safe, as the connector principal (S23)."""
+        """Dot and Duet read hub cards in process, push-safe, from the memory hub (S23)."""
         sent = []
 
         def transport(url, token, body, timeout):
@@ -222,7 +226,7 @@ class TestRemoteProfiles(Scan):
                     "card_id": "hub-injection",
                     "blocked": "classic-injection",
                 }
-        # Every read is push-safe, with the connector's own credential, and nothing ran the CLI.
+        # Every read is push-safe, with the memory hub's read credential, and nothing ran the CLI.
         assert {(url, token) for url, token, _ in sent} == {(CONNECTOR_HUB + "/memory", CONNECTOR_TOKEN)}
         assert all(body["push"] is True for _, _, body in sent)
         assert self.runner.argvs() == []
