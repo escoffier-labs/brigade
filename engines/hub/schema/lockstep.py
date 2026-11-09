@@ -18,6 +18,58 @@ ROOT = Path(__file__).resolve().parents[3]
 REQUIRED = Path(__file__).with_name("required.json")
 
 
+_SQL_SPACE = " \t\n\r\x0b\x0c"
+
+
+def normalize(sql: str) -> str:
+    """One pass over the DDL, identical to Rust `schema::normalize` (normalize-cases.json).
+
+    Quoted text ('..', "..", `..` with doubled-quote escapes, and [..]) and
+    comments (`--` through its newline, `/* .. */`) are copied unchanged.
+    Elsewhere a whitespace run becomes one space, dropped at either end, after
+    `(`, and before `,` or `)`. SQLite's ADD COLUMN splices `, col` in front of
+    the closing parenthesis, so a newline there becomes ` ,`. Whitespace is
+    SQLite's ASCII set.
+    """
+    n = len(sql)
+
+    def find(start: int, needle: str) -> int:
+        j = sql.find(needle, start)
+        return n if j < 0 else j + len(needle)
+
+    out: list[str] = []
+    i, pending = 0, False
+    while i < n:
+        char = sql[i]
+        if char in _SQL_SPACE:
+            pending = True
+            i += 1
+            continue
+        if pending and out and out[-1] != "(" and char not in ",)":
+            out.append(" ")
+        pending = False
+        pair = sql[i : i + 2]
+        if char in "'\"`":
+            end = i + 1
+            while True:
+                end = find(end, char)
+                if end < n and sql[end] == char:
+                    end += 1
+                else:
+                    break
+        elif char == "[":
+            end = find(i + 1, "]")
+        elif pair == "--":
+            end = find(i + 2, "\n")
+        elif pair == "/*":
+            end = find(i + 2, "*/")
+        else:
+            end = i + 1
+        out.append(sql[i:end])
+        i = end
+    return "".join(out)
+
+
 def checks(sql: str) -> list[str]:
     """Extract balanced CHECK expressions, preserving nested parentheses."""
     result = []
@@ -39,7 +91,7 @@ def checks(sql: str) -> list[str]:
             elif char == ")":
                 depth -= 1
             i += 1
-        result.append(" ".join(sql[start : i - 1].split()))
+        result.append(normalize(sql[start : i - 1]))
     return sorted(result)
 
 
@@ -51,7 +103,7 @@ def snapshot(conn: sqlite3.Connection) -> dict:
     triggers = {}
     for kind, name, _, sql in objects:
         if kind == "trigger":
-            triggers[name] = " ".join(sql.split())
+            triggers[name] = normalize(sql)
         if kind != "table":
             continue
         columns = sorted([list(row)[1:] for row in conn.execute(f'PRAGMA table_xinfo("{name}")')])
@@ -64,7 +116,7 @@ def snapshot(conn: sqlite3.Connection) -> dict:
                 "origin": row[3],
                 "partial": row[4],
                 "columns": [[r[0], *r[2:]] for r in conn.execute(f'PRAGMA index_xinfo("{index}")')],
-                "sql": " ".join(((ddl[0] if ddl else None) or "").split()),
+                "sql": normalize((ddl[0] if ddl else None) or ""),
             }
         tables[name] = {
             "columns": columns,
@@ -73,7 +125,7 @@ def snapshot(conn: sqlite3.Connection) -> dict:
             "checks": checks(sql),
             "autoincrement": "AUTOINCREMENT" in sql.upper(),
             "column_order": [r[1] for r in conn.execute(f'PRAGMA table_xinfo("{name}")')],
-            "sql": " ".join(sql.split()),
+            "sql": normalize(sql),
         }
     return {
         "user_version": conn.execute("PRAGMA user_version").fetchone()[0],

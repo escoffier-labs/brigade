@@ -27,8 +27,56 @@ pub fn newer_than_supported<T: crate::writer::ReadTx + ?Sized>(tx: &T) -> rusqli
     };
     Ok(version > supported_version())
 }
+/// One pass over the DDL. Quoted text ('..', "..", `..` with doubled-quote
+/// escapes, and [..]) and comments (`--` through its newline, `/* .. */`) are
+/// copied unchanged. Elsewhere a whitespace run becomes one space, dropped at
+/// either end, after `(`, and before `,` or `)`. SQLite's ADD COLUMN splices
+/// `, col` in front of the closing parenthesis, so a newline there becomes
+/// ` ,`. Whitespace is SQLite's ASCII set. lockstep.py `normalize` must stay
+/// identical (normalize-cases.json).
 fn normalize(sql: &str) -> String {
-    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    let s: Vec<char> = sql.chars().collect();
+    let n = s.len();
+    let find = |from: usize, needle: &[char]| {
+        (from..n)
+            .find(|&j| s[j..].starts_with(needle))
+            .map_or(n, |j| j + needle.len())
+    };
+    let mut out: Vec<char> = Vec::with_capacity(n);
+    let (mut i, mut pending) = (0, false);
+    while i < n {
+        let c = s[i];
+        if matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c') {
+            pending = true;
+            i += 1;
+            continue;
+        }
+        if pending && !out.is_empty() && out.last() != Some(&'(') && !matches!(c, ',' | ')') {
+            out.push(' ');
+        }
+        pending = false;
+        let next = s.get(i + 1).copied();
+        let end = match c {
+            '\'' | '"' | '`' => {
+                let mut j = i + 1;
+                loop {
+                    j = find(j, &[c]);
+                    if j < n && s[j] == c {
+                        j += 1;
+                    } else {
+                        break j;
+                    }
+                }
+            }
+            '[' => find(i + 1, &[']']),
+            '-' if next == Some('-') => find(i + 2, &['\n']),
+            '/' if next == Some('*') => find(i + 2, &['*', '/']),
+            _ => i + 1,
+        };
+        out.extend_from_slice(&s[i..end]);
+        i = end;
+    }
+    out.into_iter().collect()
 }
 fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
@@ -153,7 +201,12 @@ pub fn check(c: &Connection) -> Result<(), String> {
     accepts(&actual)
 }
 fn accepts(actual: &Value) -> Result<(), String> {
-    let mut required: Value = serde_json::from_str(REQUIRED).map_err(|e| e.to_string())?;
+    accepts_against(
+        actual,
+        serde_json::from_str(REQUIRED).map_err(|e| e.to_string())?,
+    )
+}
+fn accepts_against(actual: &Value, mut required: Value) -> Result<(), String> {
     let variants = required
         .as_object_mut()
         .unwrap()
@@ -263,6 +316,117 @@ mod variant_tests {
             } else {
                 actual["tables"].as_object_mut().unwrap().remove(name);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod upgrade_layout_tests {
+    use super::*;
+    const PRODUCTION: &str = include_str!("../../schema/upgrade-fixtures/production-v50.sql");
+
+    #[test]
+    fn normalize_matches_lockstep_cases() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../../schema/normalize-cases.json")).unwrap();
+        for case in cases["cases"].as_array().unwrap() {
+            let input = case["input"].as_str().unwrap();
+            assert_eq!(
+                normalize(input),
+                case["output"].as_str().unwrap(),
+                "{input:?}"
+            );
+        }
+    }
+
+    /// Quoted text, comments and identifiers keep their whitespace: a CHECK,
+    /// default or trigger body that accepts other values must not compare equal.
+    #[test]
+    fn normalize_keeps_quoted_and_commented_whitespace_distinct() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../../schema/normalize-cases.json")).unwrap();
+        let distinct = cases["distinct"].as_array().unwrap();
+        assert!(!distinct.is_empty());
+        for pair in distinct {
+            let (a, b) = (pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
+            assert_ne!(normalize(a), normalize(b), "{a:?} vs {b:?}");
+        }
+    }
+
+    /// The reviewed startup schema with `tables` replaced from a DDL script.
+    fn with_tables(ddl: &str) -> Value {
+        let mut actual: Value = serde_json::from_str(REQUIRED).unwrap();
+        actual.as_object_mut().unwrap().remove("variants");
+        actual.as_object_mut().unwrap().remove("optional");
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(ddl).unwrap();
+        for (name, table) in snapshot(&c).unwrap()["tables"].as_object().unwrap() {
+            actual["tables"][name] = table.clone();
+        }
+        actual
+    }
+
+    fn required() -> Value {
+        serde_json::from_str(REQUIRED).unwrap()
+    }
+
+    #[test]
+    fn production_upgrade_layouts_are_accepted() {
+        accepts_against(&with_tables(PRODUCTION), required()).unwrap();
+    }
+
+    #[test]
+    fn whitespace_only_normalization_refuses_production_claims() {
+        let mut actual = with_tables(PRODUCTION);
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(PRODUCTION).unwrap();
+        let raw: String = c
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE name='claims'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let legacy = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_ne!(legacy, normalize(&raw));
+        actual["tables"]["claims"]["sql"] = json!(legacy);
+        assert!(accepts_against(&actual, required()).is_err());
+    }
+
+    #[test]
+    fn production_model_policy_needs_its_recorded_variant() {
+        let actual = with_tables(PRODUCTION);
+        let mut required = required();
+        let production = actual["tables"]["model_policy"].clone();
+        let variants = required["variants"]["model_policy"].as_array_mut().unwrap();
+        let before = variants.len();
+        variants.retain(|v| *v != production);
+        assert_eq!(
+            variants.len(),
+            before - 1,
+            "production variant is recorded once"
+        );
+        assert!(accepts_against(&actual, required).is_err());
+    }
+
+    #[test]
+    fn different_schemas_are_still_refused() {
+        for (from, to) in [
+            (", session TEXT)", ")"),
+            ("expires_at REAL NOT NULL", "expires_at TEXT NOT NULL"),
+            ("enabled INTEGER NOT NULL", "enabled TEXT NOT NULL"),
+            ("t3_model TEXT NOT NULL DEFAULT ''", "t3_model TEXT"),
+            (
+                "PRIMARY KEY,\n    provider",
+                "PRIMARY KEY,\n    extra TEXT,\n    provider",
+            ),
+        ] {
+            let changed = PRODUCTION.replacen(from, to, 1);
+            assert_ne!(changed, PRODUCTION, "{from}");
+            assert!(
+                accepts_against(&with_tables(&changed), required()).is_err(),
+                "{to}"
+            );
         }
     }
 }

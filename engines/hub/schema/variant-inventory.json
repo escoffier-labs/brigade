@@ -29,53 +29,6 @@
             "renewed_at",
             "ttl_seconds",
             "expires_at",
-            "harness",
-            "role",
-            "job",
-            "session",
-            "lock_token",
-            "lock_acquired_at",
-            "lock_run_dir"
-          ]
-        },
-        "sql": {
-          "fresh": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT )",
-          "upgraded": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL , harness TEXT, role TEXT, job TEXT, session TEXT, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT)"
-        }
-      },
-      "sources": [
-        "schema-02"
-      ]
-    },
-    {
-      "differences": {
-        "column_order": {
-          "fresh": [
-            "target",
-            "owner_node",
-            "owner_conductor",
-            "harness",
-            "role",
-            "job",
-            "session",
-            "holder_token",
-            "acquired_at",
-            "renewed_at",
-            "ttl_seconds",
-            "expires_at",
-            "lock_token",
-            "lock_acquired_at",
-            "lock_run_dir"
-          ],
-          "upgraded": [
-            "target",
-            "owner_node",
-            "owner_conductor",
-            "holder_token",
-            "acquired_at",
-            "renewed_at",
-            "ttl_seconds",
-            "expires_at",
             "lock_token",
             "lock_acquired_at",
             "lock_run_dir",
@@ -86,11 +39,13 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT )",
-          "upgraded": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT , harness TEXT, role TEXT, job TEXT, session TEXT)"
+          "fresh": "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT)",
+          "upgraded": "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT, harness TEXT, role TEXT, job TEXT, session TEXT)"
         }
       },
       "sources": [
+        "chain-v02-v03-v14-v15-v21",
+        "production-v50",
         "schema-03"
       ]
     },
@@ -133,11 +88,12 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT )",
+          "fresh": "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT)",
           "upgraded": "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, harness TEXT, role TEXT, job TEXT, session TEXT, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT)"
         }
       },
       "sources": [
+        "schema-02",
         "test_v2_claim_rows_survive_the_lease_column_upgrade"
       ]
     },
@@ -180,7 +136,7 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT )",
+          "fresh": "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT)",
           "upgraded": "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, lock_acquired_at TEXT, lock_run_dir TEXT)"
         }
       },
@@ -227,8 +183,8 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest) )",
-          "upgraded": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, received_at TEXT NOT NULL, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest) )"
+          "fresh": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest))",
+          "upgraded": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, received_at TEXT NOT NULL, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest))"
         }
       },
       "sources": [
@@ -286,11 +242,12 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest) )",
-          "upgraded": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, received_at TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest) )"
+          "fresh": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest))",
+          "upgraded": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, received_at TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest))"
         }
       },
       "sources": [
+        "chain-v02-v03-v14-v15-v21",
         "schema-01",
         "schema-02",
         "schema-03"
@@ -333,8 +290,8 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest) )",
-          "upgraded": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, received_at TEXT NOT NULL, repo_identity TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest) )"
+          "fresh": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest))",
+          "upgraded": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, received_at TEXT NOT NULL, repo_identity TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest))"
         }
       },
       "sources": [
@@ -381,8 +338,8 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest) )",
-          "upgraded": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, received_at TEXT NOT NULL, repo_identity TEXT, exit_status INTEGER, capability_fingerprint TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest) )"
+          "fresh": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest))",
+          "upgraded": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, received_at TEXT NOT NULL, repo_identity TEXT, exit_status INTEGER, capability_fingerprint TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest))"
         }
       },
       "sources": [
@@ -657,7 +614,7 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest) )",
+          "fresh": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest))",
           "upgraded": "CREATE TABLE events (node_id TEXT, run_id TEXT, sequence INTEGER, digest TEXT, repo TEXT, seat TEXT, harness TEXT, state TEXT, ts TEXT, received_at TEXT, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest))"
         }
       },
@@ -808,8 +765,8 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE fleet_events ( seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, subject TEXT NOT NULL, producer TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL)",
-          "upgraded": "CREATE TABLE fleet_events ( seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, subject TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL, producer TEXT NOT NULL DEFAULT '')"
+          "fresh": "CREATE TABLE fleet_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, subject TEXT NOT NULL, producer TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL)",
+          "upgraded": "CREATE TABLE fleet_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, subject TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL, producer TEXT NOT NULL DEFAULT '')"
         }
       },
       "sources": [
@@ -824,6 +781,8 @@
         "fresh",
         "user-version-22",
         "user-version-34",
+        "chain-v02-v03-v14-v15-v21",
+        "production-v50",
         "schema-01",
         "schema-02",
         "schema-03",
@@ -899,6 +858,8 @@
         "fresh",
         "user-version-22",
         "user-version-34",
+        "chain-v02-v03-v14-v15-v21",
+        "production-v50",
         "schema-01",
         "schema-02",
         "schema-03",
@@ -1097,8 +1058,8 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE fleet_message_principals ( principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT , role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT)",
-          "upgraded": "CREATE TABLE fleet_message_principals ( principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT , authorization_enrollment_epoch TEXT, grant_epoch TEXT, role TEXT NOT NULL DEFAULT 'agent', person TEXT)"
+          "fresh": "CREATE TABLE fleet_message_principals (principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT, role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT)",
+          "upgraded": "CREATE TABLE fleet_message_principals (principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT, role TEXT NOT NULL DEFAULT 'agent', person TEXT)"
         }
       },
       "sources": [
@@ -1136,8 +1097,8 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE fleet_message_principals ( principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT , role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT)",
-          "upgraded": "CREATE TABLE fleet_message_principals ( principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT, enrollment_id TEXT)"
+          "fresh": "CREATE TABLE fleet_message_principals (principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT, role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT)",
+          "upgraded": "CREATE TABLE fleet_message_principals (principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT, enrollment_id TEXT)"
         }
       },
       "sources": [
@@ -1554,24 +1515,13 @@
           "upgraded": []
         },
         "sql": {
-          "fresh": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT , sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)",
-          "upgraded": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, reply_to INTEGER, created_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT , client_id TEXT, payload_hash TEXT, received_at TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
+          "fresh": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)",
+          "upgraded": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, reply_to INTEGER, created_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, client_id TEXT, payload_hash TEXT, received_at TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
         }
       },
       "sources": [
         "test_fleet_hub_sealed",
         "test_fleet_messages"
-      ]
-    },
-    {
-      "differences": {
-        "sql": {
-          "fresh": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT , sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)",
-          "upgraded": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
-        }
-      },
-      "sources": [
-        "test_fleet_message_grants"
       ]
     },
     {
@@ -1625,8 +1575,8 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT , sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)",
-          "upgraded": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT , sender_label TEXT, thread TEXT, kind TEXT, sealed_reply_to INTEGER, envelope TEXT, content_state TEXT, envelope_bytes INTEGER)"
+          "fresh": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)",
+          "upgraded": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, sealed_reply_to INTEGER, envelope TEXT, content_state TEXT, envelope_bytes INTEGER)"
         }
       },
       "sources": [
@@ -1731,7 +1681,7 @@
         },
         "sql": {
           "fresh": null,
-          "upgraded": "CREATE TABLE fleet_model_inventory_aliases ( provider TEXT NOT NULL, canonical_model TEXT NOT NULL, native_model TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (provider, canonical_model) )"
+          "upgraded": "CREATE TABLE fleet_model_inventory_aliases (provider TEXT NOT NULL, canonical_model TEXT NOT NULL, native_model TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (provider, canonical_model))"
         }
       },
       "sources": [
@@ -1924,7 +1874,7 @@
               ],
               "origin": "c",
               "partial": 0,
-              "sql": "CREATE INDEX idx_fmi_obs_coverage ON fleet_model_inventory_observations ( provider, harness, account_id, captured_at )",
+              "sql": "CREATE INDEX idx_fmi_obs_coverage ON fleet_model_inventory_observations (provider, harness, account_id, captured_at)",
               "unique": 0
             },
             "sqlite_autoindex_fleet_model_inventory_observations_1": {
@@ -1953,7 +1903,7 @@
         },
         "sql": {
           "fresh": null,
-          "upgraded": "CREATE TABLE fleet_model_inventory_observations ( observation_id TEXT PRIMARY KEY, source TEXT NOT NULL, provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL DEFAULT 'cli_probe', created_at TEXT NOT NULL )"
+          "upgraded": "CREATE TABLE fleet_model_inventory_observations (observation_id TEXT PRIMARY KEY, source TEXT NOT NULL, provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL DEFAULT 'cli_probe', created_at TEXT NOT NULL)"
         }
       },
       "sources": [
@@ -2146,7 +2096,7 @@
         },
         "sql": {
           "fresh": null,
-          "upgraded": "CREATE TABLE fleet_model_inventory_projections ( provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', observation_id TEXT NOT NULL, source TEXT NOT NULL, scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (provider, harness, account_id) )"
+          "upgraded": "CREATE TABLE fleet_model_inventory_projections (provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', observation_id TEXT NOT NULL, source TEXT NOT NULL, scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (provider, harness, account_id))"
         }
       },
       "sources": [
@@ -2398,7 +2348,7 @@
         },
         "sql": {
           "fresh": null,
-          "upgraded": "CREATE TABLE fleet_policy_migration ( singleton INTEGER PRIMARY KEY CHECK (singleton = 1), activated INTEGER NOT NULL CHECK (activated IN (0, 1)), activated_at TEXT, activated_by TEXT, reason TEXT, preview_digest TEXT NOT NULL, policy_revision INTEGER NOT NULL, roster_revision INTEGER NOT NULL, preference_digest TEXT, candidate_digest TEXT )"
+          "upgraded": "CREATE TABLE fleet_policy_migration (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), activated INTEGER NOT NULL CHECK (activated IN (0, 1)), activated_at TEXT, activated_by TEXT, reason TEXT, preview_digest TEXT NOT NULL, policy_revision INTEGER NOT NULL, roster_revision INTEGER NOT NULL, preference_digest TEXT, candidate_digest TEXT)"
         }
       },
       "sources": [
@@ -2570,8 +2520,8 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE fleet_questions ( question_id TEXT PRIMARY KEY, caller TEXT NOT NULL, generation TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, operator TEXT NOT NULL, question TEXT NOT NULL, message_id INTEGER NOT NULL, created_at TEXT NOT NULL, deadline TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answer TEXT, answer_id INTEGER, source TEXT, answered_by TEXT, answered_at TEXT, late_answer_message_id INTEGER, late_answered_at TEXT, operator_reply_after_desktop_message_id INTEGER, operator_reply_after_desktop_at TEXT, UNIQUE(caller,generation,request_id) )",
-          "upgraded": "CREATE TABLE fleet_questions ( question_id TEXT PRIMARY KEY, caller TEXT NOT NULL, generation TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, operator TEXT NOT NULL, question TEXT NOT NULL, message_id INTEGER NOT NULL, created_at TEXT NOT NULL, deadline TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answer TEXT, answer_id INTEGER, source TEXT, answered_by TEXT, answered_at TEXT, operator_reply_after_desktop_at TEXT, operator_reply_after_desktop_message_id INTEGER, late_answered_at TEXT, late_answer_message_id INTEGER, UNIQUE(caller,generation,request_id) )"
+          "fresh": "CREATE TABLE fleet_questions (question_id TEXT PRIMARY KEY, caller TEXT NOT NULL, generation TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, operator TEXT NOT NULL, question TEXT NOT NULL, message_id INTEGER NOT NULL, created_at TEXT NOT NULL, deadline TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answer TEXT, answer_id INTEGER, source TEXT, answered_by TEXT, answered_at TEXT, late_answer_message_id INTEGER, late_answered_at TEXT, operator_reply_after_desktop_message_id INTEGER, operator_reply_after_desktop_at TEXT, UNIQUE(caller,generation,request_id))",
+          "upgraded": "CREATE TABLE fleet_questions (question_id TEXT PRIMARY KEY, caller TEXT NOT NULL, generation TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, operator TEXT NOT NULL, question TEXT NOT NULL, message_id INTEGER NOT NULL, created_at TEXT NOT NULL, deadline TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answer TEXT, answer_id INTEGER, source TEXT, answered_by TEXT, answered_at TEXT, operator_reply_after_desktop_at TEXT, operator_reply_after_desktop_message_id INTEGER, late_answered_at TEXT, late_answer_message_id INTEGER, UNIQUE(caller,generation,request_id))"
         }
       },
       "sources": [
@@ -3047,11 +2997,12 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE grokbot_jobs ( job_id TEXT NOT NULL PRIMARY KEY, role TEXT NOT NULL, repository TEXT NOT NULL, label TEXT NOT NULL, task_digest TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL, item_revision INTEGER NOT NULL, sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, queued_at TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, queue_ttl_seconds INTEGER, artifact_kind TEXT NOT NULL, private_snapshot_id TEXT, claimed_at TEXT, lease_token_digest TEXT, lease_generation INTEGER, lease_expires_at TEXT, cancel_requested_at TEXT, artifact_ref TEXT, artifact_digest TEXT, artifact_size INTEGER, owner_node TEXT, claimant_node TEXT, claimant_worker TEXT, queue_id TEXT )",
-          "upgraded": "CREATE TABLE grokbot_jobs ( job_id TEXT NOT NULL PRIMARY KEY, role TEXT NOT NULL, repository TEXT NOT NULL, label TEXT NOT NULL, task_digest TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL, item_revision INTEGER NOT NULL, sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, queued_at TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, artifact_kind TEXT NOT NULL, private_snapshot_id TEXT, claimed_at TEXT, lease_token_digest TEXT, lease_generation INTEGER, lease_expires_at TEXT, cancel_requested_at TEXT, artifact_ref TEXT, artifact_digest TEXT, artifact_size INTEGER, owner_node TEXT, claimant_node TEXT, claimant_worker TEXT, queue_id TEXT , queue_ttl_seconds INTEGER)"
+          "fresh": "CREATE TABLE grokbot_jobs (job_id TEXT NOT NULL PRIMARY KEY, role TEXT NOT NULL, repository TEXT NOT NULL, label TEXT NOT NULL, task_digest TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL, item_revision INTEGER NOT NULL, sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, queued_at TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, queue_ttl_seconds INTEGER, artifact_kind TEXT NOT NULL, private_snapshot_id TEXT, claimed_at TEXT, lease_token_digest TEXT, lease_generation INTEGER, lease_expires_at TEXT, cancel_requested_at TEXT, artifact_ref TEXT, artifact_digest TEXT, artifact_size INTEGER, owner_node TEXT, claimant_node TEXT, claimant_worker TEXT, queue_id TEXT)",
+          "upgraded": "CREATE TABLE grokbot_jobs (job_id TEXT NOT NULL PRIMARY KEY, role TEXT NOT NULL, repository TEXT NOT NULL, label TEXT NOT NULL, task_digest TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL, item_revision INTEGER NOT NULL, sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, queued_at TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, artifact_kind TEXT NOT NULL, private_snapshot_id TEXT, claimed_at TEXT, lease_token_digest TEXT, lease_generation INTEGER, lease_expires_at TEXT, cancel_requested_at TEXT, artifact_ref TEXT, artifact_digest TEXT, artifact_size INTEGER, owner_node TEXT, claimant_node TEXT, claimant_worker TEXT, queue_id TEXT, queue_ttl_seconds INTEGER)"
         }
       },
       "sources": [
+        "chain-v02-v03-v14-v15-v21",
         "schema-12",
         "schema-13",
         "schema-14",
@@ -3105,8 +3056,8 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE interactive_sessions ( node_id TEXT NOT NULL, harness TEXT NOT NULL, session_id TEXT NOT NULL, repo_identity TEXT NOT NULL, identity_scope TEXT NOT NULL, repo_label TEXT NOT NULL, checkout_path TEXT NOT NULL, branch TEXT, dirty_paths_json TEXT NOT NULL, dirty_truncated INTEGER NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, ended_at TEXT, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, cloud_context_json TEXT, provider_link_json TEXT, PRIMARY KEY (node_id, harness, session_id, repo_identity) )",
-          "upgraded": "CREATE TABLE interactive_sessions ( node_id TEXT NOT NULL, harness TEXT NOT NULL, session_id TEXT NOT NULL, repo_identity TEXT NOT NULL, identity_scope TEXT NOT NULL, repo_label TEXT NOT NULL, checkout_path TEXT NOT NULL, branch TEXT, dirty_paths_json TEXT NOT NULL, dirty_truncated INTEGER NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, ended_at TEXT, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, provider_link_json TEXT, cloud_context_json TEXT, PRIMARY KEY (node_id, harness, session_id, repo_identity) )"
+          "fresh": "CREATE TABLE interactive_sessions (node_id TEXT NOT NULL, harness TEXT NOT NULL, session_id TEXT NOT NULL, repo_identity TEXT NOT NULL, identity_scope TEXT NOT NULL, repo_label TEXT NOT NULL, checkout_path TEXT NOT NULL, branch TEXT, dirty_paths_json TEXT NOT NULL, dirty_truncated INTEGER NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, ended_at TEXT, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, cloud_context_json TEXT, provider_link_json TEXT, PRIMARY KEY (node_id, harness, session_id, repo_identity))",
+          "upgraded": "CREATE TABLE interactive_sessions (node_id TEXT NOT NULL, harness TEXT NOT NULL, session_id TEXT NOT NULL, repo_identity TEXT NOT NULL, identity_scope TEXT NOT NULL, repo_label TEXT NOT NULL, checkout_path TEXT NOT NULL, branch TEXT, dirty_paths_json TEXT NOT NULL, dirty_truncated INTEGER NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, ended_at TEXT, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, provider_link_json TEXT, cloud_context_json TEXT, PRIMARY KEY (node_id, harness, session_id, repo_identity))"
         }
       },
       "sources": [
@@ -3150,8 +3101,8 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL )",
-          "upgraded": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL , t3_model TEXT NOT NULL DEFAULT '')"
+          "fresh": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL)",
+          "upgraded": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL, t3_model TEXT NOT NULL DEFAULT '')"
         }
       },
       "sources": [
@@ -3197,6 +3148,50 @@
             "updated_at",
             "reasoning",
             "brigade_cli",
+            "t3_instance_id",
+            "t3_service_tier",
+            "brigade_model",
+            "t3_model"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL)",
+          "upgraded": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', brigade_cli TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
+        }
+      },
+      "sources": [
+        "chain-v02-v03-v14-v15-v21",
+        "production-v50"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "seat",
+            "provider",
+            "model",
+            "reasoning",
+            "enabled",
+            "limit_count",
+            "brigade_cli",
+            "brigade_model",
+            "t3_instance_id",
+            "t3_service_tier",
+            "t3_model",
+            "notes",
+            "updated_at"
+          ],
+          "upgraded": [
+            "seat",
+            "provider",
+            "model",
+            "enabled",
+            "limit_count",
+            "notes",
+            "updated_at",
+            "reasoning",
+            "brigade_cli",
             "brigade_model",
             "t3_instance_id",
             "t3_service_tier",
@@ -3204,14 +3199,15 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL )",
-          "upgraded": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL , reasoning TEXT NOT NULL DEFAULT 'none', brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
+          "fresh": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL)",
+          "upgraded": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
         }
       },
       "sources": [
         "schema-12",
         "schema-13",
-        "schema-14"
+        "schema-14",
+        "test_fleet_model_roster"
       ]
     },
     {
@@ -3249,8 +3245,8 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL )",
-          "upgraded": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL , brigade_model TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
+          "fresh": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL)",
+          "upgraded": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL, brigade_model TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
         }
       },
       "sources": [
@@ -3294,55 +3290,12 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL )",
+          "fresh": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL)",
           "upgraded": "CREATE TABLE \"model_policy\" (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
         }
       },
       "sources": [
         "model-policy-rebuild"
-      ]
-    },
-    {
-      "differences": {
-        "column_order": {
-          "fresh": [
-            "seat",
-            "provider",
-            "model",
-            "reasoning",
-            "enabled",
-            "limit_count",
-            "brigade_cli",
-            "brigade_model",
-            "t3_instance_id",
-            "t3_service_tier",
-            "t3_model",
-            "notes",
-            "updated_at"
-          ],
-          "upgraded": [
-            "seat",
-            "provider",
-            "model",
-            "enabled",
-            "limit_count",
-            "notes",
-            "updated_at",
-            "reasoning",
-            "brigade_cli",
-            "brigade_model",
-            "t3_instance_id",
-            "t3_service_tier",
-            "t3_model"
-          ]
-        },
-        "sql": {
-          "fresh": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL )",
-          "upgraded": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
-        }
-      },
-      "sources": [
-        "test_fleet_model_roster"
       ]
     }
   ],
@@ -3436,7 +3389,7 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE nodes ( node_id TEXT NOT NULL PRIMARY KEY, token_sha256 TEXT NOT NULL UNIQUE, label TEXT, created_at TEXT NOT NULL, revoked_at TEXT )",
+          "fresh": "CREATE TABLE nodes (node_id TEXT NOT NULL PRIMARY KEY, token_sha256 TEXT NOT NULL UNIQUE, label TEXT, created_at TEXT NOT NULL, revoked_at TEXT)",
           "upgraded": "CREATE TABLE nodes (node_id TEXT PRIMARY KEY, token_sha256 TEXT UNIQUE, label TEXT, created_at TEXT, revoked_at TEXT)"
         }
       },
@@ -3476,51 +3429,16 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE run_preference ( id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, orchestrator TEXT, research TEXT, security TEXT, scout TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT )",
-          "upgraded": "CREATE TABLE run_preference ( id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, orchestrator TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT , research TEXT, security TEXT, scout TEXT)"
-        }
-      },
-      "sources": [
-        "schema-13",
-        "schema-14",
-        "schema-15",
-        "schema-18"
-      ]
-    },
-    {
-      "differences": {
-        "column_order": {
-          "fresh": [
-            "id",
-            "impl",
-            "review",
-            "orchestrator",
-            "research",
-            "security",
-            "scout",
-            "notes",
-            "updated_at",
-            "updated_by"
-          ],
-          "upgraded": [
-            "id",
-            "impl",
-            "review",
-            "orchestrator",
-            "notes",
-            "updated_at",
-            "updated_by",
-            "research",
-            "security",
-            "scout"
-          ]
-        },
-        "sql": {
-          "fresh": "CREATE TABLE run_preference ( id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, orchestrator TEXT, research TEXT, security TEXT, scout TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT )",
+          "fresh": "CREATE TABLE run_preference (id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, orchestrator TEXT, research TEXT, security TEXT, scout TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT)",
           "upgraded": "CREATE TABLE run_preference (id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, orchestrator TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT, research TEXT, security TEXT, scout TEXT)"
         }
       },
       "sources": [
+        "chain-v02-v03-v14-v15-v21",
+        "schema-13",
+        "schema-14",
+        "schema-15",
+        "schema-18",
         "test_run_preference"
       ]
     }
@@ -3565,8 +3483,8 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE work_links ( link_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, link_type TEXT NOT NULL, external_key TEXT NOT NULL, display_ref TEXT, url TEXT, external_state TEXT, external_updated_at TEXT, source_policy TEXT NOT NULL, source_acceptance_json TEXT NOT NULL, synced_at TEXT NOT NULL, stale_at TEXT, adapter_id TEXT, owner_node TEXT, source_version TEXT, FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT, UNIQUE (link_type, external_key) )",
-          "upgraded": "CREATE TABLE work_links ( link_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, link_type TEXT NOT NULL, external_key TEXT NOT NULL, display_ref TEXT, url TEXT, external_state TEXT, external_updated_at TEXT, source_policy TEXT NOT NULL, source_acceptance_json TEXT NOT NULL, synced_at TEXT NOT NULL, stale_at TEXT, source_version TEXT, adapter_id TEXT, owner_node TEXT, FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT, UNIQUE (link_type, external_key) )"
+          "fresh": "CREATE TABLE work_links (link_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, link_type TEXT NOT NULL, external_key TEXT NOT NULL, display_ref TEXT, url TEXT, external_state TEXT, external_updated_at TEXT, source_policy TEXT NOT NULL, source_acceptance_json TEXT NOT NULL, synced_at TEXT NOT NULL, stale_at TEXT, adapter_id TEXT, owner_node TEXT, source_version TEXT, FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT, UNIQUE (link_type, external_key))",
+          "upgraded": "CREATE TABLE work_links (link_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, link_type TEXT NOT NULL, external_key TEXT NOT NULL, display_ref TEXT, url TEXT, external_state TEXT, external_updated_at TEXT, source_policy TEXT NOT NULL, source_acceptance_json TEXT NOT NULL, synced_at TEXT NOT NULL, stale_at TEXT, source_version TEXT, adapter_id TEXT, owner_node TEXT, FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT, UNIQUE (link_type, external_key))"
         }
       },
       "sources": [

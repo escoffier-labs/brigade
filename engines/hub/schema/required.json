@@ -146,7 +146,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_model_inventory_aliases ( provider TEXT NOT NULL, canonical_model TEXT NOT NULL, native_model TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (provider, canonical_model) )"
+        "sql": "CREATE TABLE fleet_model_inventory_aliases (provider TEXT NOT NULL, canonical_model TEXT NOT NULL, native_model TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (provider, canonical_model))"
       },
       "fleet_model_inventory_observations": {
         "autoincrement": false,
@@ -314,7 +314,7 @@
             ],
             "origin": "c",
             "partial": 0,
-            "sql": "CREATE INDEX idx_fmi_obs_coverage ON fleet_model_inventory_observations ( provider, harness, account_id, captured_at )",
+            "sql": "CREATE INDEX idx_fmi_obs_coverage ON fleet_model_inventory_observations (provider, harness, account_id, captured_at)",
             "unique": 0
           },
           "sqlite_autoindex_fleet_model_inventory_observations_1": {
@@ -340,7 +340,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_model_inventory_observations ( observation_id TEXT PRIMARY KEY, source TEXT NOT NULL, provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL DEFAULT 'cli_probe', created_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE fleet_model_inventory_observations (observation_id TEXT PRIMARY KEY, source TEXT NOT NULL, provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL DEFAULT 'cli_probe', created_at TEXT NOT NULL)"
       },
       "fleet_model_inventory_projections": {
         "autoincrement": false,
@@ -505,7 +505,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_model_inventory_projections ( provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', observation_id TEXT NOT NULL, source TEXT NOT NULL, scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (provider, harness, account_id) )"
+        "sql": "CREATE TABLE fleet_model_inventory_projections (provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', observation_id TEXT NOT NULL, source TEXT NOT NULL, scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (provider, harness, account_id))"
       },
       "fleet_policy_migration": {
         "autoincrement": false,
@@ -609,7 +609,7 @@
         ],
         "foreign_keys": [],
         "indexes": {},
-        "sql": "CREATE TABLE fleet_policy_migration ( singleton INTEGER PRIMARY KEY CHECK (singleton = 1), activated INTEGER NOT NULL CHECK (activated IN (0, 1)), activated_at TEXT, activated_by TEXT, reason TEXT, preview_digest TEXT NOT NULL, policy_revision INTEGER NOT NULL, roster_revision INTEGER NOT NULL, preference_digest TEXT, candidate_digest TEXT )"
+        "sql": "CREATE TABLE fleet_policy_migration (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), activated INTEGER NOT NULL CHECK (activated IN (0, 1)), activated_at TEXT, activated_by TEXT, reason TEXT, preview_digest TEXT NOT NULL, policy_revision INTEGER NOT NULL, roster_revision INTEGER NOT NULL, preference_digest TEXT, candidate_digest TEXT)"
       },
       "fleet_project_boards": {
         "autoincrement": false,
@@ -1474,7 +1474,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE admin_stats_snapshots ( snapshot_id TEXT PRIMARY KEY, taken_at TEXT NOT NULL, source_set TEXT NOT NULL, schema TEXT NOT NULL, payload_json TEXT NOT NULL, digest TEXT NOT NULL)"
+      "sql": "CREATE TABLE admin_stats_snapshots (snapshot_id TEXT PRIMARY KEY, taken_at TEXT NOT NULL, source_set TEXT NOT NULL, schema TEXT NOT NULL, payload_json TEXT NOT NULL, digest TEXT NOT NULL)"
     },
     "admin_stats_weeks": {
       "autoincrement": false,
@@ -1544,7 +1544,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE admin_stats_weeks ( week TEXT PRIMARY KEY, partial INTEGER NOT NULL, taken_at TEXT NOT NULL, payload_json TEXT NOT NULL)"
+      "sql": "CREATE TABLE admin_stats_weeks (week TEXT PRIMARY KEY, partial INTEGER NOT NULL, taken_at TEXT NOT NULL, payload_json TEXT NOT NULL)"
     },
     "agent_actions": {
       "autoincrement": false,
@@ -2294,7 +2294,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE claim_fences ( target TEXT NOT NULL PRIMARY KEY, generation INTEGER NOT NULL CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807) )"
+      "sql": "CREATE TABLE claim_fences (target TEXT NOT NULL PRIMARY KEY, generation INTEGER NOT NULL CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807))"
     },
     "claim_retired_holders": {
       "autoincrement": false,
@@ -2441,7 +2441,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE claim_retired_holders ( target TEXT NOT NULL, owner_node TEXT NOT NULL, holder_token TEXT NOT NULL, generation INTEGER NOT NULL CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807), retired_at REAL NOT NULL CHECK (typeof(retired_at) IN ('integer', 'real') AND retired_at >= 0 AND retired_at <= 1.7976931348623157e308), PRIMARY KEY (target, owner_node, holder_token) )"
+      "sql": "CREATE TABLE claim_retired_holders (target TEXT NOT NULL, owner_node TEXT NOT NULL, holder_token TEXT NOT NULL, generation INTEGER NOT NULL CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807), retired_at REAL NOT NULL CHECK (typeof(retired_at) IN ('integer', 'real') AND retired_at >= 0 AND retired_at <= 1.7976931348623157e308), PRIMARY KEY (target, owner_node, holder_token))"
     },
     "claims": {
       "autoincrement": false,
@@ -2639,7 +2639,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT )"
+      "sql": "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT)"
     },
     "cloud_global_state": {
       "autoincrement": false,
@@ -2671,7 +2671,7 @@
       ],
       "foreign_keys": [],
       "indexes": {},
-      "sql": "CREATE TABLE cloud_global_state ( singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1), limit_count INTEGER NOT NULL CHECK (limit_count BETWEEN 0 AND 64) )"
+      "sql": "CREATE TABLE cloud_global_state (singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1), limit_count INTEGER NOT NULL CHECK (limit_count BETWEEN 0 AND 64))"
     },
     "cloud_leases": {
       "autoincrement": false,
@@ -2878,7 +2878,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE cloud_leases ( lease_id TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, provider_task_id TEXT, repo TEXT, label TEXT, prompt_hash TEXT, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, state TEXT NOT NULL, admitted_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, artifact_ref TEXT, released_at TEXT )"
+      "sql": "CREATE TABLE cloud_leases (lease_id TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, provider_task_id TEXT, repo TEXT, label TEXT, prompt_hash TEXT, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, state TEXT NOT NULL, admitted_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, artifact_ref TEXT, released_at TEXT)"
     },
     "cloud_provider_state": {
       "autoincrement": false,
@@ -3002,7 +3002,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE cloud_provider_state ( provider TEXT NOT NULL PRIMARY KEY, enabled INTEGER NOT NULL, limit_count INTEGER NOT NULL, hosted INTEGER NOT NULL, circuit_state TEXT NOT NULL, reason TEXT, subscription_pool TEXT, reset_at TEXT, expires_at TEXT, updated_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE cloud_provider_state (provider TEXT NOT NULL PRIMARY KEY, enabled INTEGER NOT NULL, limit_count INTEGER NOT NULL, hosted INTEGER NOT NULL, circuit_state TEXT NOT NULL, reason TEXT, subscription_pool TEXT, reset_at TEXT, expires_at TEXT, updated_at TEXT NOT NULL)"
     },
     "dashboard_enrollment_codes": {
       "autoincrement": false,
@@ -3475,7 +3475,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest) )"
+      "sql": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest))"
     },
     "fleet_audit_log": {
       "autoincrement": true,
@@ -3540,7 +3540,7 @@
       ],
       "foreign_keys": [],
       "indexes": {},
-      "sql": "CREATE TABLE fleet_audit_log ( id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL, detail TEXT NOT NULL)"
+      "sql": "CREATE TABLE fleet_audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL, detail TEXT NOT NULL)"
     },
     "fleet_dispatch_intents": {
       "autoincrement": false,
@@ -3646,7 +3646,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_dispatch_intents ( decision_id TEXT NOT NULL PRIMARY KEY, reservation_id TEXT NOT NULL, session_id TEXT NOT NULL, origin_node TEXT NOT NULL, target_node TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE fleet_dispatch_intents (decision_id TEXT NOT NULL PRIMARY KEY, reservation_id TEXT NOT NULL, session_id TEXT NOT NULL, origin_node TEXT NOT NULL, target_node TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
     },
     "fleet_event_attempts": {
       "autoincrement": false,
@@ -3705,7 +3705,7 @@
           "unique": 0
         }
       },
-      "sql": "CREATE TABLE fleet_event_attempts ( subscription_id TEXT NOT NULL, attempted_at REAL NOT NULL)"
+      "sql": "CREATE TABLE fleet_event_attempts (subscription_id TEXT NOT NULL, attempted_at REAL NOT NULL)"
     },
     "fleet_event_deliveries": {
       "autoincrement": false,
@@ -3829,7 +3829,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_event_deliveries ( seq INTEGER NOT NULL, subscription_id TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL, attempted_at REAL, PRIMARY KEY (seq, subscription_id))"
+      "sql": "CREATE TABLE fleet_event_deliveries (seq INTEGER NOT NULL, subscription_id TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL, attempted_at REAL, PRIMARY KEY (seq, subscription_id))"
     },
     "fleet_event_subscriptions": {
       "autoincrement": false,
@@ -4033,7 +4033,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_event_subscriptions ( id TEXT NOT NULL PRIMARY KEY, principal_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL, filter_value TEXT, url TEXT NOT NULL, secret TEXT NOT NULL, previous_secret TEXT, rotate_until REAL, created_at REAL NOT NULL, expires_at REAL, cursor_seq INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, generation TEXT NOT NULL DEFAULT '')"
+      "sql": "CREATE TABLE fleet_event_subscriptions (id TEXT NOT NULL PRIMARY KEY, principal_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL, filter_value TEXT, url TEXT NOT NULL, secret TEXT NOT NULL, previous_secret TEXT, rotate_until REAL, created_at REAL NOT NULL, expires_at REAL, cursor_seq INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, generation TEXT NOT NULL DEFAULT '')"
     },
     "fleet_event_verifications": {
       "autoincrement": false,
@@ -4092,7 +4092,7 @@
           "unique": 0
         }
       },
-      "sql": "CREATE TABLE fleet_event_verifications ( principal_id TEXT NOT NULL, attempted_at REAL NOT NULL)"
+      "sql": "CREATE TABLE fleet_event_verifications (principal_id TEXT NOT NULL, attempted_at REAL NOT NULL)"
     },
     "fleet_events": {
       "autoincrement": true,
@@ -4261,7 +4261,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_events ( seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, subject TEXT NOT NULL, producer TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL)"
+      "sql": "CREATE TABLE fleet_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, subject TEXT NOT NULL, producer TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL)"
     },
     "fleet_finding_grants": {
       "autoincrement": false,
@@ -4322,7 +4322,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_finding_grants ( principal_id TEXT PRIMARY KEY, granted_at REAL NOT NULL, enrollment_epoch TEXT NOT NULL)"
+      "sql": "CREATE TABLE fleet_finding_grants (principal_id TEXT PRIMARY KEY, granted_at REAL NOT NULL, enrollment_epoch TEXT NOT NULL)"
     },
     "fleet_findings": {
       "autoincrement": false,
@@ -4500,7 +4500,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_findings ( finding_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, first_seen REAL NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','reported','resolved')), report_ref TEXT, reservation_id TEXT, generation INTEGER NOT NULL DEFAULT 0, holder TEXT, expires_at REAL, CHECK(generation >= 0))"
+      "sql": "CREATE TABLE fleet_findings (finding_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, first_seen REAL NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','reported','resolved')), report_ref TEXT, reservation_id TEXT, generation INTEGER NOT NULL DEFAULT 0, holder TEXT, expires_at REAL, CHECK(generation >= 0))"
     },
     "fleet_machine_telemetry": {
       "autoincrement": false,
@@ -4642,7 +4642,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_machine_telemetry ( node_id TEXT NOT NULL PRIMARY KEY, machine TEXT, observed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, status TEXT NOT NULL, load REAL, running TEXT NOT NULL, active_claims TEXT NOT NULL, usable_seats TEXT NOT NULL, credential_state TEXT NOT NULL, observed_id TEXT NOT NULL, updated_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE fleet_machine_telemetry (node_id TEXT NOT NULL PRIMARY KEY, machine TEXT, observed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, status TEXT NOT NULL, load REAL, running TEXT NOT NULL, active_claims TEXT NOT NULL, usable_seats TEXT NOT NULL, credential_state TEXT NOT NULL, observed_id TEXT NOT NULL, updated_at TEXT NOT NULL)"
     },
     "fleet_mesh_statements": {
       "autoincrement": false,
@@ -5039,7 +5039,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_message_principals ( principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT , role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT)"
+      "sql": "CREATE TABLE fleet_message_principals (principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT, role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT)"
     },
     "fleet_message_send_grants": {
       "autoincrement": false,
@@ -5107,7 +5107,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_message_send_grants ( principal_id TEXT NOT NULL, pattern TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(principal_id, pattern))"
+      "sql": "CREATE TABLE fleet_message_send_grants (principal_id TEXT NOT NULL, pattern TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(principal_id, pattern))"
     },
     "fleet_message_sends": {
       "autoincrement": true,
@@ -5206,7 +5206,7 @@
           "unique": 0
         }
       },
-      "sql": "CREATE TABLE fleet_message_sends ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, client_id TEXT NOT NULL, received_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE fleet_message_sends (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, client_id TEXT NOT NULL, received_at TEXT NOT NULL)"
     },
     "fleet_messages": {
       "autoincrement": true,
@@ -5600,7 +5600,7 @@
           "unique": 0
         }
       },
-      "sql": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT , sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
+      "sql": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
     },
     "fleet_policy_acknowledged": {
       "autoincrement": false,
@@ -5816,7 +5816,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_policy_acknowledged ( receipt_key TEXT NOT NULL PRIMARY KEY, external_session_id TEXT NOT NULL, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, origin TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL, source TEXT NOT NULL, effective TEXT NOT NULL, sources TEXT NOT NULL, selected TEXT, overrides TEXT, override_reason TEXT, context_hash TEXT, loaded_at TEXT NOT NULL, acknowledged_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE fleet_policy_acknowledged (receipt_key TEXT NOT NULL PRIMARY KEY, external_session_id TEXT NOT NULL, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, origin TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL, source TEXT NOT NULL, effective TEXT NOT NULL, sources TEXT NOT NULL, selected TEXT, overrides TEXT, override_reason TEXT, context_hash TEXT, loaded_at TEXT NOT NULL, acknowledged_at TEXT NOT NULL)"
     },
     "fleet_policy_acknowledged_history": {
       "autoincrement": true,
@@ -6019,7 +6019,7 @@
           "unique": 0
         }
       },
-      "sql": "CREATE TABLE fleet_policy_acknowledged_history ( history_id INTEGER PRIMARY KEY AUTOINCREMENT, receipt_key TEXT NOT NULL, external_session_id TEXT NOT NULL, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, origin TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL, source TEXT NOT NULL, effective TEXT NOT NULL, sources TEXT NOT NULL, selected TEXT, overrides TEXT, override_reason TEXT, context_hash TEXT, loaded_at TEXT NOT NULL, acknowledged_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE fleet_policy_acknowledged_history (history_id INTEGER PRIMARY KEY AUTOINCREMENT, receipt_key TEXT NOT NULL, external_session_id TEXT NOT NULL, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, origin TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL, source TEXT NOT NULL, effective TEXT NOT NULL, sources TEXT NOT NULL, selected TEXT, overrides TEXT, override_reason TEXT, context_hash TEXT, loaded_at TEXT NOT NULL, acknowledged_at TEXT NOT NULL)"
     },
     "fleet_policy_delegations": {
       "autoincrement": false,
@@ -6284,7 +6284,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_policy_delegations ( delegation_id TEXT NOT NULL PRIMARY KEY, parent_request_id TEXT NOT NULL, origin_node TEXT NOT NULL, decision_id TEXT NOT NULL, reservation_id TEXT NOT NULL, session_id TEXT NOT NULL, consumer TEXT NOT NULL, adapter TEXT NOT NULL, repo_identity TEXT NOT NULL, seat TEXT NOT NULL, workload TEXT NOT NULL, policy_version INTEGER NOT NULL, policy_digest TEXT NOT NULL, target_machine TEXT NOT NULL, target_node TEXT NOT NULL, source_revision TEXT NOT NULL, parent_metadata TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, document TEXT NOT NULL )"
+      "sql": "CREATE TABLE fleet_policy_delegations (delegation_id TEXT NOT NULL PRIMARY KEY, parent_request_id TEXT NOT NULL, origin_node TEXT NOT NULL, decision_id TEXT NOT NULL, reservation_id TEXT NOT NULL, session_id TEXT NOT NULL, consumer TEXT NOT NULL, adapter TEXT NOT NULL, repo_identity TEXT NOT NULL, seat TEXT NOT NULL, workload TEXT NOT NULL, policy_version INTEGER NOT NULL, policy_digest TEXT NOT NULL, target_machine TEXT NOT NULL, target_node TEXT NOT NULL, source_revision TEXT NOT NULL, parent_metadata TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, document TEXT NOT NULL)"
     },
     "fleet_policy_meta": {
       "autoincrement": false,
@@ -6333,7 +6333,7 @@
       ],
       "foreign_keys": [],
       "indexes": {},
-      "sql": "CREATE TABLE fleet_policy_meta ( singleton INTEGER PRIMARY KEY CHECK (singleton = 1), current_revision INTEGER NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT )"
+      "sql": "CREATE TABLE fleet_policy_meta (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), current_revision INTEGER NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT)"
     },
     "fleet_policy_pending": {
       "autoincrement": false,
@@ -6558,7 +6558,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_policy_pending ( pending_key TEXT NOT NULL PRIMARY KEY, session_id TEXT NOT NULL, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, origin TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL, overrides TEXT, override_reason TEXT, effective TEXT NOT NULL, sources TEXT NOT NULL, selected TEXT, instructions TEXT, context_hash TEXT, source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE fleet_policy_pending (pending_key TEXT NOT NULL PRIMARY KEY, session_id TEXT NOT NULL, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, origin TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL, overrides TEXT, override_reason TEXT, effective TEXT NOT NULL, sources TEXT NOT NULL, selected TEXT, instructions TEXT, context_hash TEXT, source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
     },
     "fleet_policy_revisions": {
       "autoincrement": false,
@@ -6641,7 +6641,7 @@
       ],
       "foreign_keys": [],
       "indexes": {},
-      "sql": "CREATE TABLE fleet_policy_revisions ( revision INTEGER PRIMARY KEY, schema TEXT NOT NULL, digest TEXT NOT NULL, document TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL, parent_revision INTEGER )"
+      "sql": "CREATE TABLE fleet_policy_revisions (revision INTEGER PRIMARY KEY, schema TEXT NOT NULL, digest TEXT NOT NULL, document TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL, parent_revision INTEGER)"
     },
     "fleet_policy_sessions": {
       "autoincrement": false,
@@ -6814,7 +6814,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_policy_sessions ( session_id TEXT NOT NULL PRIMARY KEY, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, revision INTEGER, digest TEXT, source TEXT NOT NULL, loaded_at TEXT NOT NULL, refresh_state TEXT NOT NULL DEFAULT 'none', refresh_requested_at TEXT, refresh_updated_at TEXT, refresh_detail TEXT, updated_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE fleet_policy_sessions (session_id TEXT NOT NULL PRIMARY KEY, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, revision INTEGER, digest TEXT, source TEXT NOT NULL, loaded_at TEXT NOT NULL, refresh_state TEXT NOT NULL DEFAULT 'none', refresh_requested_at TEXT, refresh_updated_at TEXT, refresh_detail TEXT, updated_at TEXT NOT NULL)"
     },
     "fleet_questions": {
       "autoincrement": false,
@@ -7115,7 +7115,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_questions ( question_id TEXT PRIMARY KEY, caller TEXT NOT NULL, generation TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, operator TEXT NOT NULL, question TEXT NOT NULL, message_id INTEGER NOT NULL, created_at TEXT NOT NULL, deadline TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answer TEXT, answer_id INTEGER, source TEXT, answered_by TEXT, answered_at TEXT, late_answer_message_id INTEGER, late_answered_at TEXT, operator_reply_after_desktop_message_id INTEGER, operator_reply_after_desktop_at TEXT, UNIQUE(caller,generation,request_id) )"
+      "sql": "CREATE TABLE fleet_questions (question_id TEXT PRIMARY KEY, caller TEXT NOT NULL, generation TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, operator TEXT NOT NULL, question TEXT NOT NULL, message_id INTEGER NOT NULL, created_at TEXT NOT NULL, deadline TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answer TEXT, answer_id INTEGER, source TEXT, answered_by TEXT, answered_at TEXT, late_answer_message_id INTEGER, late_answered_at TEXT, operator_reply_after_desktop_message_id INTEGER, operator_reply_after_desktop_at TEXT, UNIQUE(caller,generation,request_id))"
     },
     "fleet_quota_meta": {
       "autoincrement": false,
@@ -7155,7 +7155,7 @@
       ],
       "foreign_keys": [],
       "indexes": {},
-      "sql": "CREATE TABLE fleet_quota_meta ( singleton INTEGER PRIMARY KEY CHECK (singleton = 1), version INTEGER NOT NULL, updated_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE fleet_quota_meta (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), version INTEGER NOT NULL, updated_at TEXT NOT NULL)"
     },
     "fleet_quota_observations": {
       "autoincrement": false,
@@ -7362,7 +7362,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_quota_observations ( observation_id TEXT NOT NULL PRIMARY KEY, account_id TEXT NOT NULL, pool_id TEXT NOT NULL, provider TEXT NOT NULL, source TEXT NOT NULL, source_ref TEXT, collected_at TEXT NOT NULL, provider_time TEXT, expires_at TEXT, status TEXT NOT NULL, digest TEXT NOT NULL, document TEXT NOT NULL, raw TEXT NOT NULL, overrides_observation_id TEXT, reason TEXT, created_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE fleet_quota_observations (observation_id TEXT NOT NULL PRIMARY KEY, account_id TEXT NOT NULL, pool_id TEXT NOT NULL, provider TEXT NOT NULL, source TEXT NOT NULL, source_ref TEXT, collected_at TEXT NOT NULL, provider_time TEXT, expires_at TEXT, status TEXT NOT NULL, digest TEXT NOT NULL, document TEXT NOT NULL, raw TEXT NOT NULL, overrides_observation_id TEXT, reason TEXT, created_at TEXT NOT NULL)"
     },
     "fleet_read_snapshot_groups": {
       "autoincrement": false,
@@ -8021,7 +8021,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_reservations ( reservation_id TEXT NOT NULL PRIMARY KEY, decision_id TEXT NOT NULL, session_id TEXT NOT NULL, machine TEXT NOT NULL, seat TEXT NOT NULL, node_id TEXT NOT NULL, origin_node TEXT NOT NULL, state TEXT NOT NULL, accepted INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE fleet_reservations (reservation_id TEXT NOT NULL PRIMARY KEY, decision_id TEXT NOT NULL, session_id TEXT NOT NULL, machine TEXT NOT NULL, seat TEXT NOT NULL, node_id TEXT NOT NULL, origin_node TEXT NOT NULL, state TEXT NOT NULL, accepted INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
     },
     "fleet_route_decisions": {
       "autoincrement": false,
@@ -8266,7 +8266,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_route_decisions ( decision_id TEXT NOT NULL PRIMARY KEY, request_key TEXT NOT NULL UNIQUE, request_digest TEXT NOT NULL, admission_generation INTEGER NOT NULL DEFAULT 0, policy_version INTEGER NOT NULL, policy_digest TEXT NOT NULL, origin TEXT, origin_node TEXT NOT NULL, session_id TEXT NOT NULL, consumer TEXT, repo_identity TEXT, workload TEXT, work_id TEXT, selected_machine TEXT, selected_seat TEXT, reservation_id TEXT, reason TEXT, override_reason TEXT, request_document TEXT, document TEXT NOT NULL, created_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE fleet_route_decisions (decision_id TEXT NOT NULL PRIMARY KEY, request_key TEXT NOT NULL UNIQUE, request_digest TEXT NOT NULL, admission_generation INTEGER NOT NULL DEFAULT 0, policy_version INTEGER NOT NULL, policy_digest TEXT NOT NULL, origin TEXT, origin_node TEXT NOT NULL, session_id TEXT NOT NULL, consumer TEXT, repo_identity TEXT, workload TEXT, work_id TEXT, selected_machine TEXT, selected_seat TEXT, reservation_id TEXT, reason TEXT, override_reason TEXT, request_document TEXT, document TEXT NOT NULL, created_at TEXT NOT NULL)"
     },
     "grokbot_actor_policy": {
       "autoincrement": false,
@@ -8354,7 +8354,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE grokbot_actor_policy ( node_id TEXT NOT NULL PRIMARY KEY, queue_owner_node_id TEXT NOT NULL, queue_id TEXT NOT NULL, actor_kind TEXT NOT NULL, role TEXT, enabled INTEGER NOT NULL )"
+      "sql": "CREATE TABLE grokbot_actor_policy (node_id TEXT NOT NULL PRIMARY KEY, queue_owner_node_id TEXT NOT NULL, queue_id TEXT NOT NULL, actor_kind TEXT NOT NULL, role TEXT, enabled INTEGER NOT NULL)"
     },
     "grokbot_jobs": {
       "autoincrement": false,
@@ -8756,7 +8756,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE grokbot_jobs ( job_id TEXT NOT NULL PRIMARY KEY, role TEXT NOT NULL, repository TEXT NOT NULL, label TEXT NOT NULL, task_digest TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL, item_revision INTEGER NOT NULL, sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, queued_at TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, queue_ttl_seconds INTEGER, artifact_kind TEXT NOT NULL, private_snapshot_id TEXT, claimed_at TEXT, lease_token_digest TEXT, lease_generation INTEGER, lease_expires_at TEXT, cancel_requested_at TEXT, artifact_ref TEXT, artifact_digest TEXT, artifact_size INTEGER, owner_node TEXT, claimant_node TEXT, claimant_worker TEXT, queue_id TEXT )"
+      "sql": "CREATE TABLE grokbot_jobs (job_id TEXT NOT NULL PRIMARY KEY, role TEXT NOT NULL, repository TEXT NOT NULL, label TEXT NOT NULL, task_digest TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL, item_revision INTEGER NOT NULL, sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, queued_at TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, queue_ttl_seconds INTEGER, artifact_kind TEXT NOT NULL, private_snapshot_id TEXT, claimed_at TEXT, lease_token_digest TEXT, lease_generation INTEGER, lease_expires_at TEXT, cancel_requested_at TEXT, artifact_ref TEXT, artifact_digest TEXT, artifact_size INTEGER, owner_node TEXT, claimant_node TEXT, claimant_worker TEXT, queue_id TEXT)"
     },
     "grokbot_operations": {
       "autoincrement": false,
@@ -8896,7 +8896,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE grokbot_operations ( job_id TEXT NOT NULL, operation_id TEXT NOT NULL, action TEXT NOT NULL, request_digest TEXT NOT NULL, result_revision INTEGER NOT NULL, result_state TEXT NOT NULL, result_json TEXT NOT NULL, timestamp TEXT NOT NULL, actor_node_id TEXT, queue_id TEXT, queue_owner_node_id TEXT, PRIMARY KEY (job_id, operation_id) )"
+      "sql": "CREATE TABLE grokbot_operations (job_id TEXT NOT NULL, operation_id TEXT NOT NULL, action TEXT NOT NULL, request_digest TEXT NOT NULL, result_revision INTEGER NOT NULL, result_state TEXT NOT NULL, result_json TEXT NOT NULL, timestamp TEXT NOT NULL, actor_node_id TEXT, queue_id TEXT, queue_owner_node_id TEXT, PRIMARY KEY (job_id, operation_id))"
     },
     "hub_meta": {
       "autoincrement": false,
@@ -9165,7 +9165,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE interactive_sessions ( node_id TEXT NOT NULL, harness TEXT NOT NULL, session_id TEXT NOT NULL, repo_identity TEXT NOT NULL, identity_scope TEXT NOT NULL, repo_label TEXT NOT NULL, checkout_path TEXT NOT NULL, branch TEXT, dirty_paths_json TEXT NOT NULL, dirty_truncated INTEGER NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, ended_at TEXT, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, cloud_context_json TEXT, provider_link_json TEXT, PRIMARY KEY (node_id, harness, session_id, repo_identity) )"
+      "sql": "CREATE TABLE interactive_sessions (node_id TEXT NOT NULL, harness TEXT NOT NULL, session_id TEXT NOT NULL, repo_identity TEXT NOT NULL, identity_scope TEXT NOT NULL, repo_label TEXT NOT NULL, checkout_path TEXT NOT NULL, branch TEXT, dirty_paths_json TEXT NOT NULL, dirty_truncated INTEGER NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, ended_at TEXT, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, cloud_context_json TEXT, provider_link_json TEXT, PRIMARY KEY (node_id, harness, session_id, repo_identity))"
     },
     "model_admission_audit": {
       "autoincrement": false,
@@ -9357,7 +9357,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE model_admission_audit ( node_id TEXT NOT NULL, request_id TEXT NOT NULL, phase TEXT NOT NULL, consumer TEXT NOT NULL, source TEXT NOT NULL, roster_revision INTEGER NOT NULL, roster_digest TEXT NOT NULL, seat TEXT, provider TEXT, model TEXT, reasoning TEXT, consumer_binding TEXT, request_digest TEXT NOT NULL, decision TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (node_id, request_id, phase) )"
+      "sql": "CREATE TABLE model_admission_audit (node_id TEXT NOT NULL, request_id TEXT NOT NULL, phase TEXT NOT NULL, consumer TEXT NOT NULL, source TEXT NOT NULL, roster_revision INTEGER NOT NULL, roster_digest TEXT NOT NULL, seat TEXT, provider TEXT, model TEXT, reasoning TEXT, consumer_binding TEXT, request_digest TEXT NOT NULL, decision TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (node_id, request_id, phase))"
     },
     "model_consumer_defaults": {
       "autoincrement": false,
@@ -9418,7 +9418,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE model_consumer_defaults ( consumer TEXT NOT NULL PRIMARY KEY, seat TEXT NOT NULL, updated_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE model_consumer_defaults (consumer TEXT NOT NULL PRIMARY KEY, seat TEXT NOT NULL, updated_at TEXT NOT NULL)"
     },
     "model_launch_proofs": {
       "autoincrement": false,
@@ -9536,7 +9536,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE model_launch_proofs ( node_id TEXT NOT NULL, consumer TEXT NOT NULL, policy_session_id TEXT NOT NULL, proof_key TEXT NOT NULL, request_id TEXT NOT NULL, request_digest TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (node_id, consumer, policy_session_id, proof_key) )"
+      "sql": "CREATE TABLE model_launch_proofs (node_id TEXT NOT NULL, consumer TEXT NOT NULL, policy_session_id TEXT NOT NULL, proof_key TEXT NOT NULL, request_id TEXT NOT NULL, request_digest TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (node_id, consumer, policy_session_id, proof_key))"
     },
     "model_leases": {
       "autoincrement": false,
@@ -9770,7 +9770,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE model_leases ( lease_id TEXT NOT NULL PRIMARY KEY, seat TEXT NOT NULL, owner_node TEXT NOT NULL, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, expires_at REAL NOT NULL, released_at TEXT , provider TEXT, model TEXT, launch_model TEXT, account_id TEXT, pool TEXT, decision_id TEXT, session_id TEXT, consumer TEXT, context_hash TEXT, request_id TEXT, policy_digest TEXT, policy_version INTEGER)"
+      "sql": "CREATE TABLE model_leases (lease_id TEXT NOT NULL PRIMARY KEY, seat TEXT NOT NULL, owner_node TEXT NOT NULL, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, expires_at REAL NOT NULL, released_at TEXT, provider TEXT, model TEXT, launch_model TEXT, account_id TEXT, pool TEXT, decision_id TEXT, session_id TEXT, consumer TEXT, context_hash TEXT, request_id TEXT, policy_digest TEXT, policy_version INTEGER)"
     },
     "model_policy": {
       "autoincrement": false,
@@ -9921,7 +9921,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL)"
     },
     "model_roster_meta": {
       "autoincrement": false,
@@ -9970,7 +9970,7 @@
       ],
       "foreign_keys": [],
       "indexes": {},
-      "sql": "CREATE TABLE model_roster_meta ( singleton INTEGER PRIMARY KEY CHECK (singleton = 1), revision INTEGER NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT )"
+      "sql": "CREATE TABLE model_roster_meta (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), revision INTEGER NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT)"
     },
     "nodes": {
       "autoincrement": false,
@@ -10071,7 +10071,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE nodes ( node_id TEXT NOT NULL PRIMARY KEY, token_sha256 TEXT NOT NULL UNIQUE, label TEXT, created_at TEXT NOT NULL, revoked_at TEXT )"
+      "sql": "CREATE TABLE nodes (node_id TEXT NOT NULL PRIMARY KEY, token_sha256 TEXT NOT NULL UNIQUE, label TEXT, created_at TEXT NOT NULL, revoked_at TEXT)"
     },
     "retired_models": {
       "autoincrement": false,
@@ -10166,7 +10166,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE retired_models ( provider TEXT NOT NULL, family TEXT NOT NULL, match_kind TEXT NOT NULL, permanent INTEGER NOT NULL, reason_code TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (provider, family) )"
+      "sql": "CREATE TABLE retired_models (provider TEXT NOT NULL, family TEXT NOT NULL, match_kind TEXT NOT NULL, permanent INTEGER NOT NULL, reason_code TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (provider, family))"
     },
     "run_preference": {
       "autoincrement": false,
@@ -10269,7 +10269,7 @@
       ],
       "foreign_keys": [],
       "indexes": {},
-      "sql": "CREATE TABLE run_preference ( id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, orchestrator TEXT, research TEXT, security TEXT, scout TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT )"
+      "sql": "CREATE TABLE run_preference (id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, orchestrator TEXT, research TEXT, security TEXT, scout TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT)"
     },
     "work_campaign_members": {
       "autoincrement": false,
@@ -10407,7 +10407,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE work_campaign_members ( campaign_key TEXT NOT NULL REFERENCES work_campaigns(campaign_key) ON DELETE RESTRICT, repo TEXT NOT NULL, work_id TEXT NOT NULL UNIQUE REFERENCES work_items(work_id) ON DELETE RESTRICT, override TEXT NOT NULL DEFAULT '', spec_fingerprint TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (campaign_key, repo) )"
+      "sql": "CREATE TABLE work_campaign_members (campaign_key TEXT NOT NULL REFERENCES work_campaigns(campaign_key) ON DELETE RESTRICT, repo TEXT NOT NULL, work_id TEXT NOT NULL UNIQUE REFERENCES work_items(work_id) ON DELETE RESTRICT, override TEXT NOT NULL DEFAULT '', spec_fingerprint TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (campaign_key, repo))"
     },
     "work_campaigns": {
       "autoincrement": false,
@@ -10539,7 +10539,7 @@
           "unique": 0
         }
       },
-      "sql": "CREATE TABLE work_campaigns ( campaign_key TEXT PRIMARY KEY, work_id TEXT NOT NULL UNIQUE REFERENCES work_items(work_id) ON DELETE RESTRICT, created_at TEXT NOT NULL, created_by TEXT NOT NULL )"
+      "sql": "CREATE TABLE work_campaigns (campaign_key TEXT PRIMARY KEY, work_id TEXT NOT NULL UNIQUE REFERENCES work_items(work_id) ON DELETE RESTRICT, created_at TEXT NOT NULL, created_by TEXT NOT NULL)"
     },
     "work_create_keys": {
       "autoincrement": false,
@@ -10636,7 +10636,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE work_create_keys ( actor_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, fingerprint TEXT NOT NULL, work_id TEXT NOT NULL, received_at TEXT NOT NULL, PRIMARY KEY (actor_id, idempotency_key), FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT )"
+      "sql": "CREATE TABLE work_create_keys (actor_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, fingerprint TEXT NOT NULL, work_id TEXT NOT NULL, received_at TEXT NOT NULL, PRIMARY KEY (actor_id, idempotency_key), FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT)"
     },
     "work_events": {
       "autoincrement": false,
@@ -11130,7 +11130,7 @@
           "unique": 0
         }
       },
-      "sql": "CREATE TABLE work_events ( work_id TEXT NOT NULL, event_id TEXT NOT NULL, event_type TEXT NOT NULL, from_status TEXT, to_status TEXT, actor_type TEXT NOT NULL, actor_id TEXT, node_id TEXT, run_id TEXT, detail_json TEXT NOT NULL, occurred_at TEXT NOT NULL, received_at TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (work_id, event_id), FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT )"
+      "sql": "CREATE TABLE work_events (work_id TEXT NOT NULL, event_id TEXT NOT NULL, event_type TEXT NOT NULL, from_status TEXT, to_status TEXT, actor_type TEXT NOT NULL, actor_id TEXT, node_id TEXT, run_id TEXT, detail_json TEXT NOT NULL, occurred_at TEXT NOT NULL, received_at TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (work_id, event_id), FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT)"
     },
     "work_import_keys": {
       "autoincrement": false,
@@ -11310,7 +11310,7 @@
           "unique": 0
         }
       },
-      "sql": "CREATE TABLE work_import_keys ( adapter_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, fingerprint TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL, unchanged INTEGER NOT NULL DEFAULT 0, refused INTEGER NOT NULL DEFAULT 0, received_at TEXT NOT NULL, owner_node TEXT, PRIMARY KEY (adapter_id, idempotency_key) )"
+      "sql": "CREATE TABLE work_import_keys (adapter_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, fingerprint TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL, unchanged INTEGER NOT NULL DEFAULT 0, refused INTEGER NOT NULL DEFAULT 0, received_at TEXT NOT NULL, owner_node TEXT, PRIMARY KEY (adapter_id, idempotency_key))"
     },
     "work_items": {
       "autoincrement": false,
@@ -11678,7 +11678,7 @@
           "unique": 0
         }
       },
-      "sql": "CREATE TABLE work_items ( work_id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, scope TEXT, status TEXT NOT NULL, priority TEXT NOT NULL, burn_eligible INTEGER NOT NULL, burn_rank INTEGER NOT NULL, token_appetite TEXT NOT NULL, execution_mode TEXT NOT NULL, acceptance_json TEXT NOT NULL, blocker TEXT, review_after TEXT, spend_by TEXT, ready_at TEXT, attempt_count INTEGER NOT NULL, version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT )"
+      "sql": "CREATE TABLE work_items (work_id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, scope TEXT, status TEXT NOT NULL, priority TEXT NOT NULL, burn_eligible INTEGER NOT NULL, burn_rank INTEGER NOT NULL, token_appetite TEXT NOT NULL, execution_mode TEXT NOT NULL, acceptance_json TEXT NOT NULL, blocker TEXT, review_after TEXT, spend_by TEXT, ready_at TEXT, attempt_count INTEGER NOT NULL, version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT)"
     },
     "work_links": {
       "autoincrement": false,
@@ -12190,7 +12190,7 @@
           "unique": 0
         }
       },
-      "sql": "CREATE TABLE work_links ( link_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, link_type TEXT NOT NULL, external_key TEXT NOT NULL, display_ref TEXT, url TEXT, external_state TEXT, external_updated_at TEXT, source_policy TEXT NOT NULL, source_acceptance_json TEXT NOT NULL, synced_at TEXT NOT NULL, stale_at TEXT, adapter_id TEXT, owner_node TEXT, source_version TEXT, FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT, UNIQUE (link_type, external_key) )"
+      "sql": "CREATE TABLE work_links (link_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, link_type TEXT NOT NULL, external_key TEXT NOT NULL, display_ref TEXT, url TEXT, external_state TEXT, external_updated_at TEXT, source_policy TEXT NOT NULL, source_acceptance_json TEXT NOT NULL, synced_at TEXT NOT NULL, stale_at TEXT, adapter_id TEXT, owner_node TEXT, source_version TEXT, FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT, UNIQUE (link_type, external_key))"
     },
     "work_schema_meta": {
       "autoincrement": false,
@@ -12242,7 +12242,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE work_schema_meta ( key TEXT PRIMARY KEY, value TEXT NOT NULL )"
+      "sql": "CREATE TABLE work_schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     },
     "work_sync_cursors": {
       "autoincrement": false,
@@ -12339,7 +12339,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE work_sync_cursors ( adapter_id TEXT PRIMARY KEY, source_type TEXT NOT NULL, owner_node TEXT NOT NULL, cursor TEXT, last_success_at TEXT, last_error_code TEXT, updated_at TEXT NOT NULL )"
+      "sql": "CREATE TABLE work_sync_cursors (adapter_id TEXT PRIMARY KEY, source_type TEXT NOT NULL, owner_node TEXT NOT NULL, cursor TEXT, last_success_at TEXT, last_error_code TEXT, updated_at TEXT NOT NULL)"
     }
   },
   "triggers": {
@@ -12349,15 +12349,15 @@
     "fleet_questions_reply": "CREATE TRIGGER fleet_questions_reply AFTER INSERT ON fleet_messages BEGIN UPDATE fleet_questions SET status='answered', answer=NEW.body, answer_id=NEW.id, source='operator_reply', answered_by=NEW.sender, answered_at=NEW.received_at WHERE status='pending' AND message_id=NEW.reply_to AND operator=NEW.sender AND caller=NEW.recipient AND NEW.received_at<=deadline AND (EXISTS (SELECT 1 FROM nodes WHERE node_id=caller AND token_sha256=generation AND revoked_at IS NULL) OR EXISTS (SELECT 1 FROM fleet_message_principals WHERE principal_id=caller AND token_hash=generation AND revoked_at IS NULL)); UPDATE fleet_questions SET status='timeout', late_answer_message_id=NEW.id, late_answered_at=NEW.received_at WHERE status IN ('pending','timeout') AND message_id=NEW.reply_to AND operator=NEW.sender AND caller=NEW.recipient AND NEW.received_at>deadline AND late_answer_message_id IS NULL AND (EXISTS (SELECT 1 FROM nodes WHERE node_id=caller AND token_sha256=generation AND revoked_at IS NULL) OR EXISTS (SELECT 1 FROM fleet_message_principals WHERE principal_id=caller AND token_hash=generation AND revoked_at IS NULL)); UPDATE fleet_questions SET operator_reply_after_desktop_message_id=NEW.id, operator_reply_after_desktop_at=NEW.received_at WHERE status='answered' AND source='caller_reported_desktop' AND message_id=NEW.reply_to AND operator=NEW.sender AND caller=NEW.recipient AND operator_reply_after_desktop_message_id IS NULL AND (EXISTS (SELECT 1 FROM nodes WHERE node_id=caller AND token_sha256=generation AND revoked_at IS NULL) OR EXISTS (SELECT 1 FROM fleet_message_principals WHERE principal_id=caller AND token_hash=generation AND revoked_at IS NULL)); END",
     "fleet_read_snapshot_delete": "CREATE TRIGGER fleet_read_snapshot_delete AFTER DELETE ON fleet_read_snapshots BEGIN DELETE FROM fleet_read_snapshot_rows WHERE snapshot_id=OLD.snapshot_id; DELETE FROM fleet_read_snapshot_groups WHERE snapshot_id=OLD.snapshot_id; END",
     "fleet_read_snapshot_total": "CREATE TRIGGER fleet_read_snapshot_total AFTER UPDATE OF visible ON fleet_read_snapshot_rows WHEN OLD.visible != NEW.visible BEGIN UPDATE fleet_read_snapshot_groups SET total=total+NEW.visible-OLD.visible WHERE snapshot_id=NEW.snapshot_id AND kind=NEW.kind; END",
-    "fleet_read_visibility_fleet_message_principals_delete": "CREATE TRIGGER fleet_read_visibility_fleet_message_principals_delete AFTER DELETE ON fleet_message_principals BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (recipient=OLD.principal_id OR caller=OLD.principal_id) AND 1; END",
-    "fleet_read_visibility_fleet_message_principals_insert": "CREATE TRIGGER fleet_read_visibility_fleet_message_principals_insert AFTER INSERT ON fleet_message_principals BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (recipient=NEW.principal_id OR caller=NEW.principal_id) AND 1; END",
-    "fleet_read_visibility_fleet_message_principals_update": "CREATE TRIGGER fleet_read_visibility_fleet_message_principals_update AFTER UPDATE OF revoked_at,role ON fleet_message_principals BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (recipient=OLD.principal_id OR recipient=NEW.principal_id OR caller=OLD.principal_id OR caller=NEW.principal_id) AND 1; END",
-    "fleet_read_visibility_fleet_message_send_grants_delete": "CREATE TRIGGER fleet_read_visibility_fleet_message_send_grants_delete AFTER DELETE ON fleet_message_send_grants BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (caller=OLD.principal_id) AND 1; END",
-    "fleet_read_visibility_fleet_message_send_grants_insert": "CREATE TRIGGER fleet_read_visibility_fleet_message_send_grants_insert AFTER INSERT ON fleet_message_send_grants BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (caller=NEW.principal_id) AND 1; END",
-    "fleet_read_visibility_fleet_message_send_grants_update": "CREATE TRIGGER fleet_read_visibility_fleet_message_send_grants_update AFTER UPDATE OF pattern,principal_id ON fleet_message_send_grants BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (caller=OLD.principal_id OR caller=NEW.principal_id) AND 1; END",
-    "fleet_read_visibility_nodes_delete": "CREATE TRIGGER fleet_read_visibility_nodes_delete AFTER DELETE ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (recipient=OLD.node_id OR caller=OLD.node_id) AND 1; END",
-    "fleet_read_visibility_nodes_insert": "CREATE TRIGGER fleet_read_visibility_nodes_insert AFTER INSERT ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (recipient=NEW.node_id OR caller=NEW.node_id) AND 1; END",
-    "fleet_read_visibility_nodes_update": "CREATE TRIGGER fleet_read_visibility_nodes_update AFTER UPDATE OF revoked_at ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (recipient=OLD.node_id OR recipient=NEW.node_id OR caller=OLD.node_id OR caller=NEW.node_id) AND 1; END"
+    "fleet_read_visibility_fleet_message_principals_delete": "CREATE TRIGGER fleet_read_visibility_fleet_message_principals_delete AFTER DELETE ON fleet_message_principals BEGIN UPDATE fleet_read_snapshot_rows SET visible=(((caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))) AND (kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)))) WHERE (recipient=OLD.principal_id OR caller=OLD.principal_id) AND 1; END",
+    "fleet_read_visibility_fleet_message_principals_insert": "CREATE TRIGGER fleet_read_visibility_fleet_message_principals_insert AFTER INSERT ON fleet_message_principals BEGIN UPDATE fleet_read_snapshot_rows SET visible=(((caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))) AND (kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)))) WHERE (recipient=NEW.principal_id OR caller=NEW.principal_id) AND 1; END",
+    "fleet_read_visibility_fleet_message_principals_update": "CREATE TRIGGER fleet_read_visibility_fleet_message_principals_update AFTER UPDATE OF revoked_at,role ON fleet_message_principals BEGIN UPDATE fleet_read_snapshot_rows SET visible=(((caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))) AND (kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)))) WHERE (recipient=OLD.principal_id OR recipient=NEW.principal_id OR caller=OLD.principal_id OR caller=NEW.principal_id) AND 1; END",
+    "fleet_read_visibility_fleet_message_send_grants_delete": "CREATE TRIGGER fleet_read_visibility_fleet_message_send_grants_delete AFTER DELETE ON fleet_message_send_grants BEGIN UPDATE fleet_read_snapshot_rows SET visible=(((caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))) AND (kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)))) WHERE (caller=OLD.principal_id) AND 1; END",
+    "fleet_read_visibility_fleet_message_send_grants_insert": "CREATE TRIGGER fleet_read_visibility_fleet_message_send_grants_insert AFTER INSERT ON fleet_message_send_grants BEGIN UPDATE fleet_read_snapshot_rows SET visible=(((caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))) AND (kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)))) WHERE (caller=NEW.principal_id) AND 1; END",
+    "fleet_read_visibility_fleet_message_send_grants_update": "CREATE TRIGGER fleet_read_visibility_fleet_message_send_grants_update AFTER UPDATE OF pattern,principal_id ON fleet_message_send_grants BEGIN UPDATE fleet_read_snapshot_rows SET visible=(((caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))) AND (kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)))) WHERE (caller=OLD.principal_id OR caller=NEW.principal_id) AND 1; END",
+    "fleet_read_visibility_nodes_delete": "CREATE TRIGGER fleet_read_visibility_nodes_delete AFTER DELETE ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=(((caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))) AND (kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)))) WHERE (recipient=OLD.node_id OR caller=OLD.node_id) AND 1; END",
+    "fleet_read_visibility_nodes_insert": "CREATE TRIGGER fleet_read_visibility_nodes_insert AFTER INSERT ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=(((caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))) AND (kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)))) WHERE (recipient=NEW.node_id OR caller=NEW.node_id) AND 1; END",
+    "fleet_read_visibility_nodes_update": "CREATE TRIGGER fleet_read_visibility_nodes_update AFTER UPDATE OF revoked_at ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=(((caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))) AND (kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)))) WHERE (recipient=OLD.node_id OR recipient=NEW.node_id OR caller=OLD.node_id OR caller=NEW.node_id) AND 1; END"
   },
   "user_version": 50,
   "variants": {
@@ -12947,7 +12947,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE admin_stats_snapshots ( snapshot_id TEXT PRIMARY KEY, taken_at TEXT NOT NULL, source_set TEXT NOT NULL, schema TEXT NOT NULL, payload_json TEXT NOT NULL, digest TEXT NOT NULL)"
+        "sql": "CREATE TABLE admin_stats_snapshots (snapshot_id TEXT PRIMARY KEY, taken_at TEXT NOT NULL, source_set TEXT NOT NULL, schema TEXT NOT NULL, payload_json TEXT NOT NULL, digest TEXT NOT NULL)"
       }
     ],
     "admin_stats_weeks": [
@@ -13019,7 +13019,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE admin_stats_weeks ( week TEXT PRIMARY KEY, partial INTEGER NOT NULL, taken_at TEXT NOT NULL, payload_json TEXT NOT NULL)"
+        "sql": "CREATE TABLE admin_stats_weeks (week TEXT PRIMARY KEY, partial INTEGER NOT NULL, taken_at TEXT NOT NULL, payload_json TEXT NOT NULL)"
       }
     ],
     "agent_actions": [
@@ -13783,7 +13783,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE claim_fences ( target TEXT NOT NULL PRIMARY KEY, generation INTEGER NOT NULL CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807) )"
+        "sql": "CREATE TABLE claim_fences (target TEXT NOT NULL PRIMARY KEY, generation INTEGER NOT NULL CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807))"
       }
     ],
     "claim_retired_holders": [
@@ -13932,7 +13932,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE claim_retired_holders ( target TEXT NOT NULL, owner_node TEXT NOT NULL, holder_token TEXT NOT NULL, generation INTEGER NOT NULL CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807), retired_at REAL NOT NULL CHECK (typeof(retired_at) IN ('integer', 'real') AND retired_at >= 0 AND retired_at <= 1.7976931348623157e308), PRIMARY KEY (target, owner_node, holder_token) )"
+        "sql": "CREATE TABLE claim_retired_holders (target TEXT NOT NULL, owner_node TEXT NOT NULL, holder_token TEXT NOT NULL, generation INTEGER NOT NULL CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807), retired_at REAL NOT NULL CHECK (typeof(retired_at) IN ('integer', 'real') AND retired_at >= 0 AND retired_at <= 1.7976931348623157e308), PRIMARY KEY (target, owner_node, holder_token))"
       }
     ],
     "claims": [
@@ -14132,205 +14132,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT )"
-      },
-      {
-        "autoincrement": false,
-        "checks": [],
-        "column_order": [
-          "target",
-          "owner_node",
-          "owner_conductor",
-          "holder_token",
-          "acquired_at",
-          "renewed_at",
-          "ttl_seconds",
-          "expires_at",
-          "harness",
-          "role",
-          "job",
-          "session",
-          "lock_token",
-          "lock_acquired_at",
-          "lock_run_dir"
-        ],
-        "columns": [
-          [
-            "acquired_at",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "expires_at",
-            "REAL",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "harness",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "holder_token",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "job",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "lock_acquired_at",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "lock_run_dir",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "lock_token",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "owner_conductor",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "owner_node",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "renewed_at",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "role",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "session",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "target",
-            "TEXT",
-            1,
-            null,
-            1,
-            0
-          ],
-          [
-            "ttl_seconds",
-            "INTEGER",
-            1,
-            null,
-            0,
-            0
-          ]
-        ],
-        "foreign_keys": [],
-        "indexes": {
-          "claims_owner_expiry": {
-            "columns": [
-              [
-                0,
-                "owner_node",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                1,
-                "expires_at",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                2,
-                null,
-                0,
-                "BINARY",
-                0
-              ]
-            ],
-            "origin": "c",
-            "partial": 0,
-            "sql": "CREATE INDEX claims_owner_expiry ON claims (owner_node, expires_at)",
-            "unique": 0
-          },
-          "sqlite_autoindex_claims_1": {
-            "columns": [
-              [
-                0,
-                "target",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                1,
-                null,
-                0,
-                "BINARY",
-                0
-              ]
-            ],
-            "origin": "pk",
-            "partial": 0,
-            "sql": "",
-            "unique": 1
-          }
-        },
-        "sql": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL , harness TEXT, role TEXT, job TEXT, session TEXT, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT)"
+        "sql": "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, harness TEXT, role TEXT, job TEXT, session TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT)"
       },
       {
         "autoincrement": false,
@@ -14528,7 +14330,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE claims ( target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT , harness TEXT, role TEXT, job TEXT, session TEXT)"
+        "sql": "CREATE TABLE claims (target TEXT NOT NULL PRIMARY KEY, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, lock_token TEXT, lock_acquired_at TEXT, lock_run_dir TEXT, harness TEXT, role TEXT, job TEXT, session TEXT)"
       },
       {
         "autoincrement": false,
@@ -14958,7 +14760,7 @@
         ],
         "foreign_keys": [],
         "indexes": {},
-        "sql": "CREATE TABLE cloud_global_state ( singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1), limit_count INTEGER NOT NULL CHECK (limit_count BETWEEN 0 AND 64) )"
+        "sql": "CREATE TABLE cloud_global_state (singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1), limit_count INTEGER NOT NULL CHECK (limit_count BETWEEN 0 AND 64))"
       }
     ],
     "cloud_leases": [
@@ -15167,7 +14969,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE cloud_leases ( lease_id TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, provider_task_id TEXT, repo TEXT, label TEXT, prompt_hash TEXT, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, state TEXT NOT NULL, admitted_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, artifact_ref TEXT, released_at TEXT )"
+        "sql": "CREATE TABLE cloud_leases (lease_id TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, provider_task_id TEXT, repo TEXT, label TEXT, prompt_hash TEXT, owner_node TEXT NOT NULL, owner_conductor TEXT, holder_token TEXT NOT NULL, state TEXT NOT NULL, admitted_at TEXT NOT NULL, renewed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, artifact_ref TEXT, released_at TEXT)"
       }
     ],
     "cloud_provider_state": [
@@ -15293,7 +15095,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE cloud_provider_state ( provider TEXT NOT NULL PRIMARY KEY, enabled INTEGER NOT NULL, limit_count INTEGER NOT NULL, hosted INTEGER NOT NULL, circuit_state TEXT NOT NULL, reason TEXT, subscription_pool TEXT, reset_at TEXT, expires_at TEXT, updated_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE cloud_provider_state (provider TEXT NOT NULL PRIMARY KEY, enabled INTEGER NOT NULL, limit_count INTEGER NOT NULL, hosted INTEGER NOT NULL, circuit_state TEXT NOT NULL, reason TEXT, subscription_pool TEXT, reset_at TEXT, expires_at TEXT, updated_at TEXT NOT NULL)"
       }
     ],
     "dashboard_enrollment_codes": [
@@ -15772,7 +15574,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest) )"
+        "sql": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, received_at TEXT NOT NULL, PRIMARY KEY (node_id, run_id, sequence, digest))"
       },
       {
         "autoincrement": false,
@@ -16054,7 +15856,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, received_at TEXT NOT NULL, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest) )"
+        "sql": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, received_at TEXT NOT NULL, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest))"
       },
       {
         "autoincrement": false,
@@ -16336,7 +16138,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, received_at TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest) )"
+        "sql": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, received_at TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, repo_identity TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest))"
       },
       {
         "autoincrement": false,
@@ -16618,7 +16420,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, received_at TEXT NOT NULL, repo_identity TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest) )"
+        "sql": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, exit_status INTEGER, capability_fingerprint TEXT, received_at TEXT NOT NULL, repo_identity TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest))"
       },
       {
         "autoincrement": false,
@@ -16900,7 +16702,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE events ( node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, received_at TEXT NOT NULL, repo_identity TEXT, exit_status INTEGER, capability_fingerprint TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest) )"
+        "sql": "CREATE TABLE events (node_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, digest TEXT NOT NULL, repo TEXT, seat TEXT, harness TEXT, state TEXT NOT NULL, ts TEXT NOT NULL, received_at TEXT NOT NULL, repo_identity TEXT, exit_status INTEGER, capability_fingerprint TEXT, context TEXT, PRIMARY KEY (node_id, run_id, sequence, digest))"
       },
       {
         "autoincrement": false,
@@ -17249,7 +17051,7 @@
         ],
         "foreign_keys": [],
         "indexes": {},
-        "sql": "CREATE TABLE fleet_audit_log ( id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL, detail TEXT NOT NULL)"
+        "sql": "CREATE TABLE fleet_audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL, detail TEXT NOT NULL)"
       }
     ],
     "fleet_dispatch_intents": [
@@ -17357,7 +17159,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_dispatch_intents ( decision_id TEXT NOT NULL PRIMARY KEY, reservation_id TEXT NOT NULL, session_id TEXT NOT NULL, origin_node TEXT NOT NULL, target_node TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE fleet_dispatch_intents (decision_id TEXT NOT NULL PRIMARY KEY, reservation_id TEXT NOT NULL, session_id TEXT NOT NULL, origin_node TEXT NOT NULL, target_node TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
       }
     ],
     "fleet_event_attempts": [
@@ -17418,7 +17220,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE fleet_event_attempts ( subscription_id TEXT NOT NULL, attempted_at REAL NOT NULL)"
+        "sql": "CREATE TABLE fleet_event_attempts (subscription_id TEXT NOT NULL, attempted_at REAL NOT NULL)"
       }
     ],
     "fleet_event_deliveries": [
@@ -17544,7 +17346,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_event_deliveries ( seq INTEGER NOT NULL, subscription_id TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL, attempted_at REAL, PRIMARY KEY (seq, subscription_id))"
+        "sql": "CREATE TABLE fleet_event_deliveries (seq INTEGER NOT NULL, subscription_id TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL, attempted_at REAL, PRIMARY KEY (seq, subscription_id))"
       }
     ],
     "fleet_event_subscriptions": [
@@ -17750,7 +17552,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_event_subscriptions ( id TEXT NOT NULL PRIMARY KEY, principal_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL, filter_value TEXT, url TEXT NOT NULL, secret TEXT NOT NULL, previous_secret TEXT, rotate_until REAL, created_at REAL NOT NULL, expires_at REAL, cursor_seq INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, generation TEXT NOT NULL DEFAULT '')"
+        "sql": "CREATE TABLE fleet_event_subscriptions (id TEXT NOT NULL PRIMARY KEY, principal_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL, filter_value TEXT, url TEXT NOT NULL, secret TEXT NOT NULL, previous_secret TEXT, rotate_until REAL, created_at REAL NOT NULL, expires_at REAL, cursor_seq INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, generation TEXT NOT NULL DEFAULT '')"
       }
     ],
     "fleet_event_verifications": [
@@ -17811,7 +17613,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE fleet_event_verifications ( principal_id TEXT NOT NULL, attempted_at REAL NOT NULL)"
+        "sql": "CREATE TABLE fleet_event_verifications (principal_id TEXT NOT NULL, attempted_at REAL NOT NULL)"
       }
     ],
     "fleet_events": [
@@ -17982,7 +17784,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_events ( seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, subject TEXT NOT NULL, producer TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL)"
+        "sql": "CREATE TABLE fleet_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, subject TEXT NOT NULL, producer TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL)"
       },
       {
         "autoincrement": true,
@@ -18151,7 +17953,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_events ( seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, subject TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL, producer TEXT NOT NULL DEFAULT '')"
+        "sql": "CREATE TABLE fleet_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, subject TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL, producer TEXT NOT NULL DEFAULT '')"
       }
     ],
     "fleet_finding_grants": [
@@ -18214,7 +18016,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_finding_grants ( principal_id TEXT PRIMARY KEY, granted_at REAL NOT NULL, enrollment_epoch TEXT NOT NULL)"
+        "sql": "CREATE TABLE fleet_finding_grants (principal_id TEXT PRIMARY KEY, granted_at REAL NOT NULL, enrollment_epoch TEXT NOT NULL)"
       }
     ],
     "fleet_findings": [
@@ -18394,7 +18196,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_findings ( finding_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, first_seen REAL NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','reported','resolved')), report_ref TEXT, reservation_id TEXT, generation INTEGER NOT NULL DEFAULT 0, holder TEXT, expires_at REAL, CHECK(generation >= 0))"
+        "sql": "CREATE TABLE fleet_findings (finding_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, first_seen REAL NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','reported','resolved')), report_ref TEXT, reservation_id TEXT, generation INTEGER NOT NULL DEFAULT 0, holder TEXT, expires_at REAL, CHECK(generation >= 0))"
       }
     ],
     "fleet_machine_telemetry": [
@@ -18538,7 +18340,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_machine_telemetry ( node_id TEXT NOT NULL PRIMARY KEY, machine TEXT, observed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, status TEXT NOT NULL, load REAL, running TEXT NOT NULL, active_claims TEXT NOT NULL, usable_seats TEXT NOT NULL, credential_state TEXT NOT NULL, observed_id TEXT NOT NULL, updated_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE fleet_machine_telemetry (node_id TEXT NOT NULL PRIMARY KEY, machine TEXT, observed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, status TEXT NOT NULL, load REAL, running TEXT NOT NULL, active_claims TEXT NOT NULL, usable_seats TEXT NOT NULL, credential_state TEXT NOT NULL, observed_id TEXT NOT NULL, updated_at TEXT NOT NULL)"
       }
     ],
     "fleet_mcp_reports": [
@@ -19013,7 +18815,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_message_principals ( principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT , role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT)"
+        "sql": "CREATE TABLE fleet_message_principals (principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT, role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT)"
       },
       {
         "autoincrement": false,
@@ -19190,7 +18992,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_message_principals ( principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT , authorization_enrollment_epoch TEXT, grant_epoch TEXT, role TEXT NOT NULL DEFAULT 'agent', person TEXT)"
+        "sql": "CREATE TABLE fleet_message_principals (principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, enrollment_id TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT, role TEXT NOT NULL DEFAULT 'agent', person TEXT)"
       },
       {
         "autoincrement": false,
@@ -19367,7 +19169,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_message_principals ( principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT, enrollment_id TEXT)"
+        "sql": "CREATE TABLE fleet_message_principals (principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, role TEXT NOT NULL DEFAULT 'agent', person TEXT, authorization_enrollment_epoch TEXT, grant_epoch TEXT, enrollment_id TEXT)"
       }
     ],
     "fleet_message_send_grants": [
@@ -19437,7 +19239,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_message_send_grants ( principal_id TEXT NOT NULL, pattern TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(principal_id, pattern))"
+        "sql": "CREATE TABLE fleet_message_send_grants (principal_id TEXT NOT NULL, pattern TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(principal_id, pattern))"
       }
     ],
     "fleet_message_sends": [
@@ -19538,7 +19340,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE fleet_message_sends ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, client_id TEXT NOT NULL, received_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE fleet_message_sends (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, client_id TEXT NOT NULL, received_at TEXT NOT NULL)"
       }
     ],
     "fleet_messages": [
@@ -19934,7 +19736,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT , sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
+        "sql": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
       },
       {
         "autoincrement": true,
@@ -20317,401 +20119,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, reply_to INTEGER, created_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT , client_id TEXT, payload_hash TEXT, received_at TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
-      },
-      {
-        "autoincrement": true,
-        "checks": [],
-        "column_order": [
-          "id",
-          "sender",
-          "recipient",
-          "subject",
-          "body",
-          "reference",
-          "priority",
-          "client_id",
-          "payload_hash",
-          "reply_to",
-          "created_at",
-          "received_at",
-          "acked_at",
-          "acked_by",
-          "sender_label",
-          "thread",
-          "kind",
-          "envelope",
-          "content_state",
-          "envelope_bytes",
-          "sealed_reply_to"
-        ],
-        "columns": [
-          [
-            "acked_at",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "acked_by",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "body",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "client_id",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "content_state",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "created_at",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "envelope",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "envelope_bytes",
-            "INTEGER",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "id",
-            "INTEGER",
-            0,
-            null,
-            1,
-            0
-          ],
-          [
-            "kind",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "payload_hash",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "priority",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "received_at",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "recipient",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "reference",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "reply_to",
-            "INTEGER",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "sealed_reply_to",
-            "INTEGER",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "sender",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "sender_label",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "subject",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "thread",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ]
-        ],
-        "foreign_keys": [
-          [
-            0,
-            0,
-            "fleet_messages",
-            "reply_to",
-            "id",
-            "NO ACTION",
-            "NO ACTION",
-            "NONE"
-          ]
-        ],
-        "indexes": {
-          "fleet_messages_created_at": {
-            "columns": [
-              [
-                0,
-                "created_at",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                1,
-                null,
-                0,
-                "BINARY",
-                0
-              ]
-            ],
-            "origin": "c",
-            "partial": 0,
-            "sql": "CREATE INDEX fleet_messages_created_at ON fleet_messages (created_at)",
-            "unique": 0
-          },
-          "fleet_messages_inbox": {
-            "columns": [
-              [
-                0,
-                "recipient",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                1,
-                "id",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                2,
-                null,
-                0,
-                "BINARY",
-                0
-              ]
-            ],
-            "origin": "c",
-            "partial": 0,
-            "sql": "CREATE INDEX fleet_messages_inbox ON fleet_messages (recipient, id)",
-            "unique": 0
-          },
-          "fleet_messages_reply_to": {
-            "columns": [
-              [
-                0,
-                "reply_to",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                1,
-                null,
-                0,
-                "BINARY",
-                0
-              ]
-            ],
-            "origin": "c",
-            "partial": 0,
-            "sql": "CREATE INDEX fleet_messages_reply_to ON fleet_messages (reply_to)",
-            "unique": 0
-          },
-          "fleet_messages_sealed_acked": {
-            "columns": [
-              [
-                0,
-                "acked_at",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                1,
-                "id",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                2,
-                null,
-                0,
-                "BINARY",
-                0
-              ]
-            ],
-            "origin": "c",
-            "partial": 1,
-            "sql": "CREATE INDEX fleet_messages_sealed_acked ON fleet_messages (acked_at,id) WHERE content_state='sealed'",
-            "unique": 0
-          },
-          "fleet_messages_sender": {
-            "columns": [
-              [
-                0,
-                "sender",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                1,
-                "id",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                2,
-                null,
-                0,
-                "BINARY",
-                0
-              ]
-            ],
-            "origin": "c",
-            "partial": 0,
-            "sql": "CREATE INDEX fleet_messages_sender ON fleet_messages (sender, id)",
-            "unique": 0
-          },
-          "fleet_messages_sender_client": {
-            "columns": [
-              [
-                0,
-                "sender",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                1,
-                "client_id",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                2,
-                null,
-                0,
-                "BINARY",
-                0
-              ]
-            ],
-            "origin": "c",
-            "partial": 0,
-            "sql": "CREATE UNIQUE INDEX fleet_messages_sender_client ON fleet_messages (sender, client_id)",
-            "unique": 1
-          },
-          "fleet_messages_unacked_recipient": {
-            "columns": [
-              [
-                0,
-                "recipient",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                1,
-                null,
-                0,
-                "BINARY",
-                0
-              ]
-            ],
-            "origin": "c",
-            "partial": 1,
-            "sql": "CREATE INDEX fleet_messages_unacked_recipient ON fleet_messages (recipient) WHERE acked_at IS NULL",
-            "unique": 0
-          }
-        },
-        "sql": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
+        "sql": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, reply_to INTEGER, created_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, client_id TEXT, payload_hash TEXT, received_at TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
       },
       {
         "autoincrement": true,
@@ -21105,7 +20513,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE fleet_messages ( id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT , sender_label TEXT, thread TEXT, kind TEXT, sealed_reply_to INTEGER, envelope TEXT, content_state TEXT, envelope_bytes INTEGER)"
+        "sql": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, sealed_reply_to INTEGER, envelope TEXT, content_state TEXT, envelope_bytes INTEGER)"
       }
     ],
     "fleet_model_inventory_aliases": [
@@ -21184,7 +20592,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_model_inventory_aliases ( provider TEXT NOT NULL, canonical_model TEXT NOT NULL, native_model TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (provider, canonical_model) )"
+        "sql": "CREATE TABLE fleet_model_inventory_aliases (provider TEXT NOT NULL, canonical_model TEXT NOT NULL, native_model TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (provider, canonical_model))"
       }
     ],
     "fleet_model_inventory_observations": [
@@ -21354,7 +20762,7 @@
             ],
             "origin": "c",
             "partial": 0,
-            "sql": "CREATE INDEX idx_fmi_obs_coverage ON fleet_model_inventory_observations ( provider, harness, account_id, captured_at )",
+            "sql": "CREATE INDEX idx_fmi_obs_coverage ON fleet_model_inventory_observations (provider, harness, account_id, captured_at)",
             "unique": 0
           },
           "sqlite_autoindex_fleet_model_inventory_observations_1": {
@@ -21380,7 +20788,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_model_inventory_observations ( observation_id TEXT PRIMARY KEY, source TEXT NOT NULL, provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL DEFAULT 'cli_probe', created_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE fleet_model_inventory_observations (observation_id TEXT PRIMARY KEY, source TEXT NOT NULL, provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL DEFAULT 'cli_probe', created_at TEXT NOT NULL)"
       }
     ],
     "fleet_model_inventory_projections": [
@@ -21547,7 +20955,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_model_inventory_projections ( provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', observation_id TEXT NOT NULL, source TEXT NOT NULL, scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (provider, harness, account_id) )"
+        "sql": "CREATE TABLE fleet_model_inventory_projections (provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', observation_id TEXT NOT NULL, source TEXT NOT NULL, scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (provider, harness, account_id))"
       }
     ],
     "fleet_policy_acknowledged": [
@@ -21765,7 +21173,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_policy_acknowledged ( receipt_key TEXT NOT NULL PRIMARY KEY, external_session_id TEXT NOT NULL, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, origin TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL, source TEXT NOT NULL, effective TEXT NOT NULL, sources TEXT NOT NULL, selected TEXT, overrides TEXT, override_reason TEXT, context_hash TEXT, loaded_at TEXT NOT NULL, acknowledged_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE fleet_policy_acknowledged (receipt_key TEXT NOT NULL PRIMARY KEY, external_session_id TEXT NOT NULL, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, origin TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL, source TEXT NOT NULL, effective TEXT NOT NULL, sources TEXT NOT NULL, selected TEXT, overrides TEXT, override_reason TEXT, context_hash TEXT, loaded_at TEXT NOT NULL, acknowledged_at TEXT NOT NULL)"
       }
     ],
     "fleet_policy_acknowledged_history": [
@@ -21970,7 +21378,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE fleet_policy_acknowledged_history ( history_id INTEGER PRIMARY KEY AUTOINCREMENT, receipt_key TEXT NOT NULL, external_session_id TEXT NOT NULL, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, origin TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL, source TEXT NOT NULL, effective TEXT NOT NULL, sources TEXT NOT NULL, selected TEXT, overrides TEXT, override_reason TEXT, context_hash TEXT, loaded_at TEXT NOT NULL, acknowledged_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE fleet_policy_acknowledged_history (history_id INTEGER PRIMARY KEY AUTOINCREMENT, receipt_key TEXT NOT NULL, external_session_id TEXT NOT NULL, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, origin TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL, source TEXT NOT NULL, effective TEXT NOT NULL, sources TEXT NOT NULL, selected TEXT, overrides TEXT, override_reason TEXT, context_hash TEXT, loaded_at TEXT NOT NULL, acknowledged_at TEXT NOT NULL)"
       }
     ],
     "fleet_policy_delegations": [
@@ -22237,7 +21645,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_policy_delegations ( delegation_id TEXT NOT NULL PRIMARY KEY, parent_request_id TEXT NOT NULL, origin_node TEXT NOT NULL, decision_id TEXT NOT NULL, reservation_id TEXT NOT NULL, session_id TEXT NOT NULL, consumer TEXT NOT NULL, adapter TEXT NOT NULL, repo_identity TEXT NOT NULL, seat TEXT NOT NULL, workload TEXT NOT NULL, policy_version INTEGER NOT NULL, policy_digest TEXT NOT NULL, target_machine TEXT NOT NULL, target_node TEXT NOT NULL, source_revision TEXT NOT NULL, parent_metadata TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, document TEXT NOT NULL )"
+        "sql": "CREATE TABLE fleet_policy_delegations (delegation_id TEXT NOT NULL PRIMARY KEY, parent_request_id TEXT NOT NULL, origin_node TEXT NOT NULL, decision_id TEXT NOT NULL, reservation_id TEXT NOT NULL, session_id TEXT NOT NULL, consumer TEXT NOT NULL, adapter TEXT NOT NULL, repo_identity TEXT NOT NULL, seat TEXT NOT NULL, workload TEXT NOT NULL, policy_version INTEGER NOT NULL, policy_digest TEXT NOT NULL, target_machine TEXT NOT NULL, target_node TEXT NOT NULL, source_revision TEXT NOT NULL, parent_metadata TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, document TEXT NOT NULL)"
       }
     ],
     "fleet_policy_meta": [
@@ -22288,7 +21696,7 @@
         ],
         "foreign_keys": [],
         "indexes": {},
-        "sql": "CREATE TABLE fleet_policy_meta ( singleton INTEGER PRIMARY KEY CHECK (singleton = 1), current_revision INTEGER NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT )"
+        "sql": "CREATE TABLE fleet_policy_meta (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), current_revision INTEGER NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT)"
       }
     ],
     "fleet_policy_migration": [
@@ -22394,7 +21802,7 @@
         ],
         "foreign_keys": [],
         "indexes": {},
-        "sql": "CREATE TABLE fleet_policy_migration ( singleton INTEGER PRIMARY KEY CHECK (singleton = 1), activated INTEGER NOT NULL CHECK (activated IN (0, 1)), activated_at TEXT, activated_by TEXT, reason TEXT, preview_digest TEXT NOT NULL, policy_revision INTEGER NOT NULL, roster_revision INTEGER NOT NULL, preference_digest TEXT, candidate_digest TEXT )"
+        "sql": "CREATE TABLE fleet_policy_migration (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), activated INTEGER NOT NULL CHECK (activated IN (0, 1)), activated_at TEXT, activated_by TEXT, reason TEXT, preview_digest TEXT NOT NULL, policy_revision INTEGER NOT NULL, roster_revision INTEGER NOT NULL, preference_digest TEXT, candidate_digest TEXT)"
       }
     ],
     "fleet_policy_pending": [
@@ -22621,7 +22029,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_policy_pending ( pending_key TEXT NOT NULL PRIMARY KEY, session_id TEXT NOT NULL, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, origin TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL, overrides TEXT, override_reason TEXT, effective TEXT NOT NULL, sources TEXT NOT NULL, selected TEXT, instructions TEXT, context_hash TEXT, source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE fleet_policy_pending (pending_key TEXT NOT NULL PRIMARY KEY, session_id TEXT NOT NULL, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, origin TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL, overrides TEXT, override_reason TEXT, effective TEXT NOT NULL, sources TEXT NOT NULL, selected TEXT, instructions TEXT, context_hash TEXT, source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
       }
     ],
     "fleet_policy_revisions": [
@@ -22706,7 +22114,7 @@
         ],
         "foreign_keys": [],
         "indexes": {},
-        "sql": "CREATE TABLE fleet_policy_revisions ( revision INTEGER PRIMARY KEY, schema TEXT NOT NULL, digest TEXT NOT NULL, document TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL, parent_revision INTEGER )"
+        "sql": "CREATE TABLE fleet_policy_revisions (revision INTEGER PRIMARY KEY, schema TEXT NOT NULL, digest TEXT NOT NULL, document TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL, parent_revision INTEGER)"
       }
     ],
     "fleet_policy_sessions": [
@@ -22881,7 +22289,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_policy_sessions ( session_id TEXT NOT NULL PRIMARY KEY, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, revision INTEGER, digest TEXT, source TEXT NOT NULL, loaded_at TEXT NOT NULL, refresh_state TEXT NOT NULL DEFAULT 'none', refresh_requested_at TEXT, refresh_updated_at TEXT, refresh_detail TEXT, updated_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE fleet_policy_sessions (session_id TEXT NOT NULL PRIMARY KEY, consumer TEXT NOT NULL, owner_node TEXT NOT NULL, repo_identity TEXT, revision INTEGER, digest TEXT, source TEXT NOT NULL, loaded_at TEXT NOT NULL, refresh_state TEXT NOT NULL DEFAULT 'none', refresh_requested_at TEXT, refresh_updated_at TEXT, refresh_detail TEXT, updated_at TEXT NOT NULL)"
       }
     ],
     "fleet_project_boards": [
@@ -23272,7 +22680,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_questions ( question_id TEXT PRIMARY KEY, caller TEXT NOT NULL, generation TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, operator TEXT NOT NULL, question TEXT NOT NULL, message_id INTEGER NOT NULL, created_at TEXT NOT NULL, deadline TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answer TEXT, answer_id INTEGER, source TEXT, answered_by TEXT, answered_at TEXT, late_answer_message_id INTEGER, late_answered_at TEXT, operator_reply_after_desktop_message_id INTEGER, operator_reply_after_desktop_at TEXT, UNIQUE(caller,generation,request_id) )"
+        "sql": "CREATE TABLE fleet_questions (question_id TEXT PRIMARY KEY, caller TEXT NOT NULL, generation TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, operator TEXT NOT NULL, question TEXT NOT NULL, message_id INTEGER NOT NULL, created_at TEXT NOT NULL, deadline TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answer TEXT, answer_id INTEGER, source TEXT, answered_by TEXT, answered_at TEXT, late_answer_message_id INTEGER, late_answered_at TEXT, operator_reply_after_desktop_message_id INTEGER, operator_reply_after_desktop_at TEXT, UNIQUE(caller,generation,request_id))"
       },
       {
         "autoincrement": false,
@@ -23573,7 +22981,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_questions ( question_id TEXT PRIMARY KEY, caller TEXT NOT NULL, generation TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, operator TEXT NOT NULL, question TEXT NOT NULL, message_id INTEGER NOT NULL, created_at TEXT NOT NULL, deadline TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answer TEXT, answer_id INTEGER, source TEXT, answered_by TEXT, answered_at TEXT, operator_reply_after_desktop_at TEXT, operator_reply_after_desktop_message_id INTEGER, late_answered_at TEXT, late_answer_message_id INTEGER, UNIQUE(caller,generation,request_id) )"
+        "sql": "CREATE TABLE fleet_questions (question_id TEXT PRIMARY KEY, caller TEXT NOT NULL, generation TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, operator TEXT NOT NULL, question TEXT NOT NULL, message_id INTEGER NOT NULL, created_at TEXT NOT NULL, deadline TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answer TEXT, answer_id INTEGER, source TEXT, answered_by TEXT, answered_at TEXT, operator_reply_after_desktop_at TEXT, operator_reply_after_desktop_message_id INTEGER, late_answered_at TEXT, late_answer_message_id INTEGER, UNIQUE(caller,generation,request_id))"
       }
     ],
     "fleet_quota_meta": [
@@ -23615,7 +23023,7 @@
         ],
         "foreign_keys": [],
         "indexes": {},
-        "sql": "CREATE TABLE fleet_quota_meta ( singleton INTEGER PRIMARY KEY CHECK (singleton = 1), version INTEGER NOT NULL, updated_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE fleet_quota_meta (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), version INTEGER NOT NULL, updated_at TEXT NOT NULL)"
       }
     ],
     "fleet_quota_observations": [
@@ -23824,7 +23232,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_quota_observations ( observation_id TEXT NOT NULL PRIMARY KEY, account_id TEXT NOT NULL, pool_id TEXT NOT NULL, provider TEXT NOT NULL, source TEXT NOT NULL, source_ref TEXT, collected_at TEXT NOT NULL, provider_time TEXT, expires_at TEXT, status TEXT NOT NULL, digest TEXT NOT NULL, document TEXT NOT NULL, raw TEXT NOT NULL, overrides_observation_id TEXT, reason TEXT, created_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE fleet_quota_observations (observation_id TEXT NOT NULL PRIMARY KEY, account_id TEXT NOT NULL, pool_id TEXT NOT NULL, provider TEXT NOT NULL, source TEXT NOT NULL, source_ref TEXT, collected_at TEXT NOT NULL, provider_time TEXT, expires_at TEXT, status TEXT NOT NULL, digest TEXT NOT NULL, document TEXT NOT NULL, raw TEXT NOT NULL, overrides_observation_id TEXT, reason TEXT, created_at TEXT NOT NULL)"
       }
     ],
     "fleet_read_snapshot_groups": [
@@ -24610,7 +24018,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_reservations ( reservation_id TEXT NOT NULL PRIMARY KEY, decision_id TEXT NOT NULL, session_id TEXT NOT NULL, machine TEXT NOT NULL, seat TEXT NOT NULL, node_id TEXT NOT NULL, origin_node TEXT NOT NULL, state TEXT NOT NULL, accepted INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE fleet_reservations (reservation_id TEXT NOT NULL PRIMARY KEY, decision_id TEXT NOT NULL, session_id TEXT NOT NULL, machine TEXT NOT NULL, seat TEXT NOT NULL, node_id TEXT NOT NULL, origin_node TEXT NOT NULL, state TEXT NOT NULL, accepted INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
       }
     ],
     "fleet_route_decisions": [
@@ -24857,7 +24265,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE fleet_route_decisions ( decision_id TEXT NOT NULL PRIMARY KEY, request_key TEXT NOT NULL UNIQUE, request_digest TEXT NOT NULL, admission_generation INTEGER NOT NULL DEFAULT 0, policy_version INTEGER NOT NULL, policy_digest TEXT NOT NULL, origin TEXT, origin_node TEXT NOT NULL, session_id TEXT NOT NULL, consumer TEXT, repo_identity TEXT, workload TEXT, work_id TEXT, selected_machine TEXT, selected_seat TEXT, reservation_id TEXT, reason TEXT, override_reason TEXT, request_document TEXT, document TEXT NOT NULL, created_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE fleet_route_decisions (decision_id TEXT NOT NULL PRIMARY KEY, request_key TEXT NOT NULL UNIQUE, request_digest TEXT NOT NULL, admission_generation INTEGER NOT NULL DEFAULT 0, policy_version INTEGER NOT NULL, policy_digest TEXT NOT NULL, origin TEXT, origin_node TEXT NOT NULL, session_id TEXT NOT NULL, consumer TEXT, repo_identity TEXT, workload TEXT, work_id TEXT, selected_machine TEXT, selected_seat TEXT, reservation_id TEXT, reason TEXT, override_reason TEXT, request_document TEXT, document TEXT NOT NULL, created_at TEXT NOT NULL)"
       }
     ],
     "fleet_skill_reports": [
@@ -25140,7 +24548,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE grokbot_actor_policy ( node_id TEXT NOT NULL PRIMARY KEY, queue_owner_node_id TEXT NOT NULL, queue_id TEXT NOT NULL, actor_kind TEXT NOT NULL, role TEXT, enabled INTEGER NOT NULL )"
+        "sql": "CREATE TABLE grokbot_actor_policy (node_id TEXT NOT NULL PRIMARY KEY, queue_owner_node_id TEXT NOT NULL, queue_id TEXT NOT NULL, actor_kind TEXT NOT NULL, role TEXT, enabled INTEGER NOT NULL)"
       }
     ],
     "grokbot_jobs": [
@@ -25544,7 +24952,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE grokbot_jobs ( job_id TEXT NOT NULL PRIMARY KEY, role TEXT NOT NULL, repository TEXT NOT NULL, label TEXT NOT NULL, task_digest TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL, item_revision INTEGER NOT NULL, sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, queued_at TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, queue_ttl_seconds INTEGER, artifact_kind TEXT NOT NULL, private_snapshot_id TEXT, claimed_at TEXT, lease_token_digest TEXT, lease_generation INTEGER, lease_expires_at TEXT, cancel_requested_at TEXT, artifact_ref TEXT, artifact_digest TEXT, artifact_size INTEGER, owner_node TEXT, claimant_node TEXT, claimant_worker TEXT, queue_id TEXT )"
+        "sql": "CREATE TABLE grokbot_jobs (job_id TEXT NOT NULL PRIMARY KEY, role TEXT NOT NULL, repository TEXT NOT NULL, label TEXT NOT NULL, task_digest TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL, item_revision INTEGER NOT NULL, sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, queued_at TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, queue_ttl_seconds INTEGER, artifact_kind TEXT NOT NULL, private_snapshot_id TEXT, claimed_at TEXT, lease_token_digest TEXT, lease_generation INTEGER, lease_expires_at TEXT, cancel_requested_at TEXT, artifact_ref TEXT, artifact_digest TEXT, artifact_size INTEGER, owner_node TEXT, claimant_node TEXT, claimant_worker TEXT, queue_id TEXT)"
       },
       {
         "autoincrement": false,
@@ -25946,7 +25354,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE grokbot_jobs ( job_id TEXT NOT NULL PRIMARY KEY, role TEXT NOT NULL, repository TEXT NOT NULL, label TEXT NOT NULL, task_digest TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL, item_revision INTEGER NOT NULL, sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, queued_at TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, artifact_kind TEXT NOT NULL, private_snapshot_id TEXT, claimed_at TEXT, lease_token_digest TEXT, lease_generation INTEGER, lease_expires_at TEXT, cancel_requested_at TEXT, artifact_ref TEXT, artifact_digest TEXT, artifact_size INTEGER, owner_node TEXT, claimant_node TEXT, claimant_worker TEXT, queue_id TEXT , queue_ttl_seconds INTEGER)"
+        "sql": "CREATE TABLE grokbot_jobs (job_id TEXT NOT NULL PRIMARY KEY, role TEXT NOT NULL, repository TEXT NOT NULL, label TEXT NOT NULL, task_digest TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL, item_revision INTEGER NOT NULL, sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, queued_at TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, artifact_kind TEXT NOT NULL, private_snapshot_id TEXT, claimed_at TEXT, lease_token_digest TEXT, lease_generation INTEGER, lease_expires_at TEXT, cancel_requested_at TEXT, artifact_ref TEXT, artifact_digest TEXT, artifact_size INTEGER, owner_node TEXT, claimant_node TEXT, claimant_worker TEXT, queue_id TEXT, queue_ttl_seconds INTEGER)"
       }
     ],
     "grokbot_operations": [
@@ -26088,7 +25496,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE grokbot_operations ( job_id TEXT NOT NULL, operation_id TEXT NOT NULL, action TEXT NOT NULL, request_digest TEXT NOT NULL, result_revision INTEGER NOT NULL, result_state TEXT NOT NULL, result_json TEXT NOT NULL, timestamp TEXT NOT NULL, actor_node_id TEXT, queue_id TEXT, queue_owner_node_id TEXT, PRIMARY KEY (job_id, operation_id) )"
+        "sql": "CREATE TABLE grokbot_operations (job_id TEXT NOT NULL, operation_id TEXT NOT NULL, action TEXT NOT NULL, request_digest TEXT NOT NULL, result_revision INTEGER NOT NULL, result_state TEXT NOT NULL, result_json TEXT NOT NULL, timestamp TEXT NOT NULL, actor_node_id TEXT, queue_id TEXT, queue_owner_node_id TEXT, PRIMARY KEY (job_id, operation_id))"
       }
     ],
     "hub_meta": [
@@ -26361,7 +25769,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE interactive_sessions ( node_id TEXT NOT NULL, harness TEXT NOT NULL, session_id TEXT NOT NULL, repo_identity TEXT NOT NULL, identity_scope TEXT NOT NULL, repo_label TEXT NOT NULL, checkout_path TEXT NOT NULL, branch TEXT, dirty_paths_json TEXT NOT NULL, dirty_truncated INTEGER NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, ended_at TEXT, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, cloud_context_json TEXT, provider_link_json TEXT, PRIMARY KEY (node_id, harness, session_id, repo_identity) )"
+        "sql": "CREATE TABLE interactive_sessions (node_id TEXT NOT NULL, harness TEXT NOT NULL, session_id TEXT NOT NULL, repo_identity TEXT NOT NULL, identity_scope TEXT NOT NULL, repo_label TEXT NOT NULL, checkout_path TEXT NOT NULL, branch TEXT, dirty_paths_json TEXT NOT NULL, dirty_truncated INTEGER NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, ended_at TEXT, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, cloud_context_json TEXT, provider_link_json TEXT, PRIMARY KEY (node_id, harness, session_id, repo_identity))"
       },
       {
         "autoincrement": false,
@@ -26578,7 +25986,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE interactive_sessions ( node_id TEXT NOT NULL, harness TEXT NOT NULL, session_id TEXT NOT NULL, repo_identity TEXT NOT NULL, identity_scope TEXT NOT NULL, repo_label TEXT NOT NULL, checkout_path TEXT NOT NULL, branch TEXT, dirty_paths_json TEXT NOT NULL, dirty_truncated INTEGER NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, ended_at TEXT, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, provider_link_json TEXT, cloud_context_json TEXT, PRIMARY KEY (node_id, harness, session_id, repo_identity) )"
+        "sql": "CREATE TABLE interactive_sessions (node_id TEXT NOT NULL, harness TEXT NOT NULL, session_id TEXT NOT NULL, repo_identity TEXT NOT NULL, identity_scope TEXT NOT NULL, repo_label TEXT NOT NULL, checkout_path TEXT NOT NULL, branch TEXT, dirty_paths_json TEXT NOT NULL, dirty_truncated INTEGER NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, ended_at TEXT, ttl_seconds INTEGER NOT NULL, expires_at REAL NOT NULL, provider_link_json TEXT, cloud_context_json TEXT, PRIMARY KEY (node_id, harness, session_id, repo_identity))"
       }
     ],
     "model_admission_audit": [
@@ -26772,7 +26180,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE model_admission_audit ( node_id TEXT NOT NULL, request_id TEXT NOT NULL, phase TEXT NOT NULL, consumer TEXT NOT NULL, source TEXT NOT NULL, roster_revision INTEGER NOT NULL, roster_digest TEXT NOT NULL, seat TEXT, provider TEXT, model TEXT, reasoning TEXT, consumer_binding TEXT, request_digest TEXT NOT NULL, decision TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (node_id, request_id, phase) )"
+        "sql": "CREATE TABLE model_admission_audit (node_id TEXT NOT NULL, request_id TEXT NOT NULL, phase TEXT NOT NULL, consumer TEXT NOT NULL, source TEXT NOT NULL, roster_revision INTEGER NOT NULL, roster_digest TEXT NOT NULL, seat TEXT, provider TEXT, model TEXT, reasoning TEXT, consumer_binding TEXT, request_digest TEXT NOT NULL, decision TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (node_id, request_id, phase))"
       }
     ],
     "model_consumer_defaults": [
@@ -26835,7 +26243,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE model_consumer_defaults ( consumer TEXT NOT NULL PRIMARY KEY, seat TEXT NOT NULL, updated_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE model_consumer_defaults (consumer TEXT NOT NULL PRIMARY KEY, seat TEXT NOT NULL, updated_at TEXT NOT NULL)"
       }
     ],
     "model_launch_proofs": [
@@ -26955,7 +26363,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE model_launch_proofs ( node_id TEXT NOT NULL, consumer TEXT NOT NULL, policy_session_id TEXT NOT NULL, proof_key TEXT NOT NULL, request_id TEXT NOT NULL, request_digest TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (node_id, consumer, policy_session_id, proof_key) )"
+        "sql": "CREATE TABLE model_launch_proofs (node_id TEXT NOT NULL, consumer TEXT NOT NULL, policy_session_id TEXT NOT NULL, proof_key TEXT NOT NULL, request_id TEXT NOT NULL, request_digest TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (node_id, consumer, policy_session_id, proof_key))"
       }
     ],
     "model_leases": [
@@ -27191,7 +26599,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE model_leases ( lease_id TEXT NOT NULL PRIMARY KEY, seat TEXT NOT NULL, owner_node TEXT NOT NULL, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, expires_at REAL NOT NULL, released_at TEXT , provider TEXT, model TEXT, launch_model TEXT, account_id TEXT, pool TEXT, decision_id TEXT, session_id TEXT, consumer TEXT, context_hash TEXT, request_id TEXT, policy_digest TEXT, policy_version INTEGER)"
+        "sql": "CREATE TABLE model_leases (lease_id TEXT NOT NULL PRIMARY KEY, seat TEXT NOT NULL, owner_node TEXT NOT NULL, holder_token TEXT NOT NULL, acquired_at TEXT NOT NULL, expires_at REAL NOT NULL, released_at TEXT, provider TEXT, model TEXT, launch_model TEXT, account_id TEXT, pool TEXT, decision_id TEXT, session_id TEXT, consumer TEXT, context_hash TEXT, request_id TEXT, policy_digest TEXT, policy_version INTEGER)"
       }
     ],
     "model_policy": [
@@ -27344,7 +26752,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL)"
       },
       {
         "autoincrement": false,
@@ -27495,7 +26903,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL , t3_model TEXT NOT NULL DEFAULT '')"
+        "sql": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL, t3_model TEXT NOT NULL DEFAULT '')"
       },
       {
         "autoincrement": false,
@@ -27510,159 +26918,8 @@
           "updated_at",
           "reasoning",
           "brigade_cli",
-          "brigade_model",
           "t3_instance_id",
           "t3_service_tier",
-          "t3_model"
-        ],
-        "columns": [
-          [
-            "brigade_cli",
-            "TEXT",
-            1,
-            "''",
-            0,
-            0
-          ],
-          [
-            "brigade_model",
-            "TEXT",
-            1,
-            "''",
-            0,
-            0
-          ],
-          [
-            "enabled",
-            "INTEGER",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "limit_count",
-            "INTEGER",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "model",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "notes",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "provider",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "reasoning",
-            "TEXT",
-            1,
-            "'none'",
-            0,
-            0
-          ],
-          [
-            "seat",
-            "TEXT",
-            1,
-            null,
-            1,
-            0
-          ],
-          [
-            "t3_instance_id",
-            "TEXT",
-            1,
-            "''",
-            0,
-            0
-          ],
-          [
-            "t3_model",
-            "TEXT",
-            1,
-            "''",
-            0,
-            0
-          ],
-          [
-            "t3_service_tier",
-            "TEXT",
-            1,
-            "''",
-            0,
-            0
-          ],
-          [
-            "updated_at",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ]
-        ],
-        "foreign_keys": [],
-        "indexes": {
-          "sqlite_autoindex_model_policy_1": {
-            "columns": [
-              [
-                0,
-                "seat",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                1,
-                null,
-                0,
-                "BINARY",
-                0
-              ]
-            ],
-            "origin": "pk",
-            "partial": 0,
-            "sql": "",
-            "unique": 1
-          }
-        },
-        "sql": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL , reasoning TEXT NOT NULL DEFAULT 'none', brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
-      },
-      {
-        "autoincrement": false,
-        "checks": [],
-        "column_order": [
-          "seat",
-          "provider",
-          "model",
-          "reasoning",
-          "enabled",
-          "limit_count",
-          "brigade_cli",
-          "t3_instance_id",
-          "t3_service_tier",
-          "notes",
-          "updated_at",
           "brigade_model",
           "t3_model"
         ],
@@ -27797,158 +27054,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE model_policy ( seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL , brigade_model TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
-      },
-      {
-        "autoincrement": false,
-        "checks": [],
-        "column_order": [
-          "seat",
-          "provider",
-          "model",
-          "enabled",
-          "limit_count",
-          "notes",
-          "updated_at",
-          "reasoning",
-          "brigade_cli",
-          "brigade_model",
-          "t3_instance_id",
-          "t3_service_tier",
-          "t3_model"
-        ],
-        "columns": [
-          [
-            "brigade_cli",
-            "TEXT",
-            1,
-            "''",
-            0,
-            0
-          ],
-          [
-            "brigade_model",
-            "TEXT",
-            1,
-            "''",
-            0,
-            0
-          ],
-          [
-            "enabled",
-            "INTEGER",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "limit_count",
-            "INTEGER",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "model",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "notes",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "provider",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "reasoning",
-            "TEXT",
-            1,
-            "'none'",
-            0,
-            0
-          ],
-          [
-            "seat",
-            "TEXT",
-            1,
-            null,
-            1,
-            0
-          ],
-          [
-            "t3_instance_id",
-            "TEXT",
-            1,
-            "''",
-            0,
-            0
-          ],
-          [
-            "t3_model",
-            "TEXT",
-            1,
-            "''",
-            0,
-            0
-          ],
-          [
-            "t3_service_tier",
-            "TEXT",
-            1,
-            "''",
-            0,
-            0
-          ],
-          [
-            "updated_at",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ]
-        ],
-        "foreign_keys": [],
-        "indexes": {
-          "sqlite_autoindex_model_policy_1": {
-            "columns": [
-              [
-                0,
-                "seat",
-                0,
-                "BINARY",
-                1
-              ],
-              [
-                1,
-                null,
-                0,
-                "BINARY",
-                0
-              ]
-            ],
-            "origin": "pk",
-            "partial": 0,
-            "sql": "",
-            "unique": 1
-          }
-        },
-        "sql": "CREATE TABLE \"model_policy\" (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
+        "sql": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', brigade_cli TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
       },
       {
         "autoincrement": false,
@@ -28100,6 +27206,308 @@
           }
         },
         "sql": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
+      },
+      {
+        "autoincrement": false,
+        "checks": [],
+        "column_order": [
+          "seat",
+          "provider",
+          "model",
+          "reasoning",
+          "enabled",
+          "limit_count",
+          "brigade_cli",
+          "t3_instance_id",
+          "t3_service_tier",
+          "notes",
+          "updated_at",
+          "brigade_model",
+          "t3_model"
+        ],
+        "columns": [
+          [
+            "brigade_cli",
+            "TEXT",
+            1,
+            "''",
+            0,
+            0
+          ],
+          [
+            "brigade_model",
+            "TEXT",
+            1,
+            "''",
+            0,
+            0
+          ],
+          [
+            "enabled",
+            "INTEGER",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "limit_count",
+            "INTEGER",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "model",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "notes",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "provider",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "reasoning",
+            "TEXT",
+            1,
+            "'none'",
+            0,
+            0
+          ],
+          [
+            "seat",
+            "TEXT",
+            1,
+            null,
+            1,
+            0
+          ],
+          [
+            "t3_instance_id",
+            "TEXT",
+            1,
+            "''",
+            0,
+            0
+          ],
+          [
+            "t3_model",
+            "TEXT",
+            1,
+            "''",
+            0,
+            0
+          ],
+          [
+            "t3_service_tier",
+            "TEXT",
+            1,
+            "''",
+            0,
+            0
+          ],
+          [
+            "updated_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_model_policy_1": {
+            "columns": [
+              [
+                0,
+                "seat",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        },
+        "sql": "CREATE TABLE model_policy (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL, limit_count INTEGER, brigade_cli TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', notes TEXT, updated_at TEXT NOT NULL, brigade_model TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
+      },
+      {
+        "autoincrement": false,
+        "checks": [],
+        "column_order": [
+          "seat",
+          "provider",
+          "model",
+          "enabled",
+          "limit_count",
+          "notes",
+          "updated_at",
+          "reasoning",
+          "brigade_cli",
+          "brigade_model",
+          "t3_instance_id",
+          "t3_service_tier",
+          "t3_model"
+        ],
+        "columns": [
+          [
+            "brigade_cli",
+            "TEXT",
+            1,
+            "''",
+            0,
+            0
+          ],
+          [
+            "brigade_model",
+            "TEXT",
+            1,
+            "''",
+            0,
+            0
+          ],
+          [
+            "enabled",
+            "INTEGER",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "limit_count",
+            "INTEGER",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "model",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "notes",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "provider",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "reasoning",
+            "TEXT",
+            1,
+            "'none'",
+            0,
+            0
+          ],
+          [
+            "seat",
+            "TEXT",
+            1,
+            null,
+            1,
+            0
+          ],
+          [
+            "t3_instance_id",
+            "TEXT",
+            1,
+            "''",
+            0,
+            0
+          ],
+          [
+            "t3_model",
+            "TEXT",
+            1,
+            "''",
+            0,
+            0
+          ],
+          [
+            "t3_service_tier",
+            "TEXT",
+            1,
+            "''",
+            0,
+            0
+          ],
+          [
+            "updated_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_model_policy_1": {
+            "columns": [
+              [
+                0,
+                "seat",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        },
+        "sql": "CREATE TABLE \"model_policy\" (seat TEXT NOT NULL PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, enabled INTEGER NOT NULL, limit_count INTEGER, notes TEXT, updated_at TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT 'none', brigade_cli TEXT NOT NULL DEFAULT '', brigade_model TEXT NOT NULL DEFAULT '', t3_instance_id TEXT NOT NULL DEFAULT '', t3_service_tier TEXT NOT NULL DEFAULT '', t3_model TEXT NOT NULL DEFAULT '')"
       }
     ],
     "model_roster_meta": [
@@ -28150,7 +27558,7 @@
         ],
         "foreign_keys": [],
         "indexes": {},
-        "sql": "CREATE TABLE model_roster_meta ( singleton INTEGER PRIMARY KEY CHECK (singleton = 1), revision INTEGER NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT )"
+        "sql": "CREATE TABLE model_roster_meta (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), revision INTEGER NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT)"
       }
     ],
     "nodes": [
@@ -28253,7 +27661,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE nodes ( node_id TEXT NOT NULL PRIMARY KEY, token_sha256 TEXT NOT NULL UNIQUE, label TEXT, created_at TEXT NOT NULL, revoked_at TEXT )"
+        "sql": "CREATE TABLE nodes (node_id TEXT NOT NULL PRIMARY KEY, token_sha256 TEXT NOT NULL UNIQUE, label TEXT, created_at TEXT NOT NULL, revoked_at TEXT)"
       },
       {
         "autoincrement": false,
@@ -28451,7 +27859,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE retired_models ( provider TEXT NOT NULL, family TEXT NOT NULL, match_kind TEXT NOT NULL, permanent INTEGER NOT NULL, reason_code TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (provider, family) )"
+        "sql": "CREATE TABLE retired_models (provider TEXT NOT NULL, family TEXT NOT NULL, match_kind TEXT NOT NULL, permanent INTEGER NOT NULL, reason_code TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (provider, family))"
       }
     ],
     "run_preference": [
@@ -28556,110 +27964,7 @@
         ],
         "foreign_keys": [],
         "indexes": {},
-        "sql": "CREATE TABLE run_preference ( id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, orchestrator TEXT, research TEXT, security TEXT, scout TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT )"
-      },
-      {
-        "autoincrement": false,
-        "checks": [
-          "id = 1"
-        ],
-        "column_order": [
-          "id",
-          "impl",
-          "review",
-          "orchestrator",
-          "notes",
-          "updated_at",
-          "updated_by",
-          "research",
-          "security",
-          "scout"
-        ],
-        "columns": [
-          [
-            "id",
-            "INTEGER",
-            0,
-            null,
-            1,
-            0
-          ],
-          [
-            "impl",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "notes",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "orchestrator",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "research",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "review",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "scout",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "security",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ],
-          [
-            "updated_at",
-            "TEXT",
-            1,
-            null,
-            0,
-            0
-          ],
-          [
-            "updated_by",
-            "TEXT",
-            0,
-            null,
-            0,
-            0
-          ]
-        ],
-        "foreign_keys": [],
-        "indexes": {},
-        "sql": "CREATE TABLE run_preference ( id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, orchestrator TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT , research TEXT, security TEXT, scout TEXT)"
+        "sql": "CREATE TABLE run_preference (id INTEGER PRIMARY KEY CHECK (id = 1), impl TEXT, review TEXT, orchestrator TEXT, research TEXT, security TEXT, scout TEXT, notes TEXT, updated_at TEXT NOT NULL, updated_by TEXT)"
       },
       {
         "autoincrement": false,
@@ -28902,7 +28207,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE work_campaign_members ( campaign_key TEXT NOT NULL REFERENCES work_campaigns(campaign_key) ON DELETE RESTRICT, repo TEXT NOT NULL, work_id TEXT NOT NULL UNIQUE REFERENCES work_items(work_id) ON DELETE RESTRICT, override TEXT NOT NULL DEFAULT '', spec_fingerprint TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (campaign_key, repo) )"
+        "sql": "CREATE TABLE work_campaign_members (campaign_key TEXT NOT NULL REFERENCES work_campaigns(campaign_key) ON DELETE RESTRICT, repo TEXT NOT NULL, work_id TEXT NOT NULL UNIQUE REFERENCES work_items(work_id) ON DELETE RESTRICT, override TEXT NOT NULL DEFAULT '', spec_fingerprint TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (campaign_key, repo))"
       }
     ],
     "work_campaigns": [
@@ -29036,7 +28341,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE work_campaigns ( campaign_key TEXT PRIMARY KEY, work_id TEXT NOT NULL UNIQUE REFERENCES work_items(work_id) ON DELETE RESTRICT, created_at TEXT NOT NULL, created_by TEXT NOT NULL )"
+        "sql": "CREATE TABLE work_campaigns (campaign_key TEXT PRIMARY KEY, work_id TEXT NOT NULL UNIQUE REFERENCES work_items(work_id) ON DELETE RESTRICT, created_at TEXT NOT NULL, created_by TEXT NOT NULL)"
       }
     ],
     "work_create_keys": [
@@ -29135,7 +28440,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE work_create_keys ( actor_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, fingerprint TEXT NOT NULL, work_id TEXT NOT NULL, received_at TEXT NOT NULL, PRIMARY KEY (actor_id, idempotency_key), FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT )"
+        "sql": "CREATE TABLE work_create_keys (actor_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, fingerprint TEXT NOT NULL, work_id TEXT NOT NULL, received_at TEXT NOT NULL, PRIMARY KEY (actor_id, idempotency_key), FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT)"
       }
     ],
     "work_events": [
@@ -29631,7 +28936,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE work_events ( work_id TEXT NOT NULL, event_id TEXT NOT NULL, event_type TEXT NOT NULL, from_status TEXT, to_status TEXT, actor_type TEXT NOT NULL, actor_id TEXT, node_id TEXT, run_id TEXT, detail_json TEXT NOT NULL, occurred_at TEXT NOT NULL, received_at TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (work_id, event_id), FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT )"
+        "sql": "CREATE TABLE work_events (work_id TEXT NOT NULL, event_id TEXT NOT NULL, event_type TEXT NOT NULL, from_status TEXT, to_status TEXT, actor_type TEXT NOT NULL, actor_id TEXT, node_id TEXT, run_id TEXT, detail_json TEXT NOT NULL, occurred_at TEXT NOT NULL, received_at TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (work_id, event_id), FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT)"
       }
     ],
     "work_import_keys": [
@@ -29813,7 +29118,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE work_import_keys ( adapter_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, fingerprint TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL, unchanged INTEGER NOT NULL DEFAULT 0, refused INTEGER NOT NULL DEFAULT 0, received_at TEXT NOT NULL, owner_node TEXT, PRIMARY KEY (adapter_id, idempotency_key) )"
+        "sql": "CREATE TABLE work_import_keys (adapter_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, fingerprint TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL, unchanged INTEGER NOT NULL DEFAULT 0, refused INTEGER NOT NULL DEFAULT 0, received_at TEXT NOT NULL, owner_node TEXT, PRIMARY KEY (adapter_id, idempotency_key))"
       }
     ],
     "work_items": [
@@ -30183,7 +29488,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE work_items ( work_id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, scope TEXT, status TEXT NOT NULL, priority TEXT NOT NULL, burn_eligible INTEGER NOT NULL, burn_rank INTEGER NOT NULL, token_appetite TEXT NOT NULL, execution_mode TEXT NOT NULL, acceptance_json TEXT NOT NULL, blocker TEXT, review_after TEXT, spend_by TEXT, ready_at TEXT, attempt_count INTEGER NOT NULL, version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT )"
+        "sql": "CREATE TABLE work_items (work_id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, scope TEXT, status TEXT NOT NULL, priority TEXT NOT NULL, burn_eligible INTEGER NOT NULL, burn_rank INTEGER NOT NULL, token_appetite TEXT NOT NULL, execution_mode TEXT NOT NULL, acceptance_json TEXT NOT NULL, blocker TEXT, review_after TEXT, spend_by TEXT, ready_at TEXT, attempt_count INTEGER NOT NULL, version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT)"
       }
     ],
     "work_links": [
@@ -30697,7 +30002,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE work_links ( link_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, link_type TEXT NOT NULL, external_key TEXT NOT NULL, display_ref TEXT, url TEXT, external_state TEXT, external_updated_at TEXT, source_policy TEXT NOT NULL, source_acceptance_json TEXT NOT NULL, synced_at TEXT NOT NULL, stale_at TEXT, adapter_id TEXT, owner_node TEXT, source_version TEXT, FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT, UNIQUE (link_type, external_key) )"
+        "sql": "CREATE TABLE work_links (link_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, link_type TEXT NOT NULL, external_key TEXT NOT NULL, display_ref TEXT, url TEXT, external_state TEXT, external_updated_at TEXT, source_policy TEXT NOT NULL, source_acceptance_json TEXT NOT NULL, synced_at TEXT NOT NULL, stale_at TEXT, adapter_id TEXT, owner_node TEXT, source_version TEXT, FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT, UNIQUE (link_type, external_key))"
       },
       {
         "autoincrement": false,
@@ -31209,7 +30514,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE work_links ( link_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, link_type TEXT NOT NULL, external_key TEXT NOT NULL, display_ref TEXT, url TEXT, external_state TEXT, external_updated_at TEXT, source_policy TEXT NOT NULL, source_acceptance_json TEXT NOT NULL, synced_at TEXT NOT NULL, stale_at TEXT, source_version TEXT, adapter_id TEXT, owner_node TEXT, FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT, UNIQUE (link_type, external_key) )"
+        "sql": "CREATE TABLE work_links (link_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, link_type TEXT NOT NULL, external_key TEXT NOT NULL, display_ref TEXT, url TEXT, external_state TEXT, external_updated_at TEXT, source_policy TEXT NOT NULL, source_acceptance_json TEXT NOT NULL, synced_at TEXT NOT NULL, stale_at TEXT, source_version TEXT, adapter_id TEXT, owner_node TEXT, FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE RESTRICT, UNIQUE (link_type, external_key))"
       }
     ],
     "work_schema_meta": [
@@ -31263,7 +30568,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE work_schema_meta ( key TEXT PRIMARY KEY, value TEXT NOT NULL )"
+        "sql": "CREATE TABLE work_schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
       }
     ],
     "work_sync_cursors": [
@@ -31362,7 +30667,7 @@
             "unique": 1
           }
         },
-        "sql": "CREATE TABLE work_sync_cursors ( adapter_id TEXT PRIMARY KEY, source_type TEXT NOT NULL, owner_node TEXT NOT NULL, cursor TEXT, last_success_at TEXT, last_error_code TEXT, updated_at TEXT NOT NULL )"
+        "sql": "CREATE TABLE work_sync_cursors (adapter_id TEXT PRIMARY KEY, source_type TEXT NOT NULL, owner_node TEXT NOT NULL, cursor TEXT, last_success_at TEXT, last_error_code TEXT, updated_at TEXT NOT NULL)"
       }
     ]
   }
