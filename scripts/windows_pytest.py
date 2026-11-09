@@ -127,9 +127,13 @@ def discover_files(repo: Path) -> list[str]:
     return sorted(path.relative_to(tests).as_posix() for path in tests.rglob("test_*.py") if path.is_file())
 
 
-def load_selected_files(path: Path, discovered: list[str]) -> list[str]:
-    """Read portable names relative to tests/, rejecting stale or unsafe input."""
-    files = sorted({portable_test_name(line) for line in path.read_text(encoding="utf-8").splitlines() if line})
+def load_selected_files(path: Path, discovered: list[str], *, keep_order: bool = False) -> list[str]:
+    """Read portable names relative to tests/, rejecting stale or unsafe input.
+
+    keep_order starts files in the listed order instead of sorting them by name.
+    """
+    names = [portable_test_name(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    files = list(dict.fromkeys(names)) if keep_order else sorted(set(names))
     if not files:
         raise ValueError("selected file list is empty; skip the driver for empty selections")
     missing = sorted(set(files).difference(discovered))
@@ -830,6 +834,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--files-from", type=Path, help="newline-separated portable file names relative to tests/")
+    parser.add_argument(
+        "--keep-order",
+        action="store_true",
+        help="start --files-from files in the listed order, so a planner can run its heaviest files first",
+    )
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
@@ -849,6 +858,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
             parser.error("--base-ref is required for --check-allowlist-only")
     elif args.record is None:
         parser.error("--record is required for the full Windows harness")
+    if args.keep_order and args.files_from is None:
+        parser.error("--keep-order requires --files-from")
     return args
 
 
@@ -918,7 +929,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if unknown_serial:
             raise ValueError("serial selectors not discovered: " + ", ".join(unknown_serial))
         if args.files_from is not None:
-            files = load_selected_files(args.files_from, files)
+            files = load_selected_files(args.files_from, files, keep_order=args.keep_order)
             serial.intersection_update(files)
         record_progress([])
         if args.base_ref:
