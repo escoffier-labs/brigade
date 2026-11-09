@@ -552,13 +552,15 @@ def _digest_index(parent: int, skip: tuple[set[str], set[tuple[int, int]]] | Non
     return known
 
 
-def _known_digests(dest_fd: int, tracked: tuple[set[str], set[tuple[int, int]]]) -> set[str]:
-    """Content ingest will see or has already archived at the destination.
+def _known_digests(dest_fd: int) -> set[str]:
+    """Content already archived in the destination's `processed/`.
 
-    A git-tracked file in the inbox is never ingested, so its bytes do not
-    count as delivered.
+    Only archived content counts as delivered. A pending destination file
+    can still change before ingest reads it, so a matching pending copy is
+    no proof of delivery. Rescue publishes its own copy, and ingest's in-run
+    dedupe handles the duplicate.
     """
-    known = _digest_index(dest_fd, tracked)
+    known: set[str] = set()
     try:
         processed = dirfd.open_child_directory(dest_fd, "processed", writable=False)
     except FileNotFoundError:
@@ -809,7 +811,7 @@ class _Dest:
                 tracked = _tracked(self.root.joinpath(*parts))
                 if tracked is None:
                     raise OSError("destination git tracking unknown")
-                known = _known_digests(fd, tracked)
+                known = _known_digests(fd)
             except BaseException:
                 os.close(fd)
                 raise

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import handoff_worktrees, ingest as ingest_mod, runguard
+from brigade import dirfd, handoff_worktrees, ingest as ingest_mod, runguard
 from brigade.claude_hooks import runtime as hook_runtime
 from brigade.install import install_selection
 from brigade.selection import Selection
@@ -79,6 +79,39 @@ def _plain_repo(path: Path) -> Path:
     _git(path, "init", "-q")
     _git(path, "commit", "-q", "--allow-empty", "-m", "init")
     return path
+
+
+def _open_append_writer(path: Path) -> int:
+    """An append descriptor like a handoff writer's.
+
+    On Windows the CRT opens files without FILE_SHARE_DELETE, so no other
+    process could rename the file while it is open and rescue would fail
+    closed with claim-failed. Open with full sharing there, as a writer that
+    lets its file be moved must, so the late-write paths are exercised.
+    """
+    if os.name != "nt":
+        return os.open(path, os.O_WRONLY | os.O_APPEND)
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel32.CreateFileW
+    create.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create.restype = wintypes.HANDLE
+    file_append_data, share_all, open_existing, normal = 0x0004, 0x0007, 3, 0x80
+    handle = create(str(path), file_append_data, share_all, None, open_existing, normal, None)
+    if handle in (None, wintypes.HANDLE(-1).value):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_APPEND)
 
 
 def _on_first_fsync(monkeypatch, action) -> None:
@@ -242,7 +275,11 @@ def test_guard_failure_in_decide_stays_fatal(tmp_target: Path, monkeypatch):
 
 def test_untrusted_fields_stay_out_of_logs_and_receipts(tmp_target: Path, capsys):
     inbox = _seed(tmp_target)
-    name = "2026-11-08-0900-evil\x1b[31m.md"
+    # Windows rejects control characters in filenames, so it gets a
+    # right-to-left override instead. Both must be escaped in output.
+    unsafe = "\u202e" if os.name == "nt" else "\x1b"
+    escaped = "\\u202e" if os.name == "nt" else "\\x1b"
+    name = f"2026-11-08-0900-evil{unsafe}[31m.md"
     (inbox / name).write_text(
         "# Memory Handoff\n\n## Recommended memory action\ncreate-card\n\n"
         "## Target card\nSENTINEL-TARGET\x07/../x.md\n\n"
@@ -254,15 +291,15 @@ def test_untrusted_fields_stay_out_of_logs_and_receipts(tmp_target: Path, capsys
     assert "[unsafe-card-name]" in out
     assert "SENTINEL-TARGET" not in out
     assert "SENTINEL-CONTENT" not in out
-    assert "\x1b" not in out and "\x07" not in out
-    assert "\\x1b" in out
+    assert unsafe not in out and "\x07" not in out
+    assert escaped in out
     reviews = list((tmp_target / "memory" / "handoff-inbox").glob("*.md"))
     assert len(reviews) == 1
     header = reviews[0].read_text().split("-->", 1)[0]
     assert "reason: unsafe-card-name" in header
     assert "SENTINEL-TARGET" not in header
-    assert "\x1b" not in header
-    assert "\x1b" not in reviews[0].name
+    assert unsafe not in header
+    assert unsafe not in reviews[0].name
 
 
 # Codex 4507466523: review drafts never overwrite each other.
@@ -539,7 +576,7 @@ def test_large_ignored_tree_does_not_block_removal(tmp_path: Path, monkeypatch):
 
 
 def _listed_prefixes(worktree: Path) -> list[tuple[str, ...]]:
-    root_fd = os.open(worktree.resolve(), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    root_fd = dirfd.open_directory_chain(worktree.resolve(), writable=False)
     try:
         return handoff_worktrees._worktree_listing(worktree.resolve(), root_fd)[0]
     finally:
@@ -593,7 +630,8 @@ def test_included_core_worktree_is_overridden(tmp_path: Path):
     decoy = tmp_path / "decoy"
     decoy.mkdir()
     included = tmp_path / "included.gitconfig"
-    included.write_text(f"[core]\n\tworktree = {decoy}\n")
+    # Forward slashes: git config reads a backslash as an escape.
+    included.write_text(f"[core]\n\tworktree = {decoy.as_posix()}\n")
     _git(main, "config", "includeIf.gitdir:**/worktrees/**.path", str(included))
 
     listed = None if not hasattr(handoff_worktrees, "_worktree_listing") else _listed_prefixes(linked)
@@ -845,6 +883,31 @@ def test_project_handoff_with_unwalkable_destination_keeps_worktree(tmp_path: Pa
     assert pending.is_file()
     assert not (outside / ".claude").exists()
     assert "destination-unavailable" in capsys.readouterr().err
+
+
+# Codex 4508062574: a pending destination copy is not proof of delivery.
+
+
+def test_pending_destination_copy_changed_after_indexing_is_not_a_duplicate(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    dest = main / ".claude" / "memory-handoffs"
+    main_copy = _handoff(dest, "pending.md", "X-CONTENT")
+    source = _handoff(linked / ".claude" / "memory-handoffs", "pending.md", "X-CONTENT")
+    real = handoff_worktrees._known_digests
+
+    def known(*args, **kwargs):
+        digests = real(*args, **kwargs)
+        main_copy.write_text(_HANDOFF.format(summary="Y-CONTENT"))  # writer changes the main copy
+        return digests
+
+    monkeypatch.setattr(handoff_worktrees, "_known_digests", known)
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    assert [r.state for r in results] == ["delivered"]
+    assert not source.exists()
+    bodies = [p.read_text() for p in dest.glob("*.md") if p.name != "TEMPLATE.md"]
+    assert _HANDOFF.format(summary="X-CONTENT") in bodies  # X is still pending in main
+    assert _HANDOFF.format(summary="Y-CONTENT") in bodies
 
 
 # Daybreak 1: linked inboxes must stay inside the configured repository.
@@ -1218,7 +1281,7 @@ def test_late_append_before_unlink_is_kept_in_source(tmp_path: Path, monkeypatch
     main, linked = _repo_with_worktree(tmp_path)
     inbox = linked / ".claude" / "memory-handoffs"
     source = _handoff(inbox, "2026-11-08-0900-slow.md", "first part")
-    writer = os.open(source, os.O_WRONLY | os.O_APPEND)
+    writer = _open_append_writer(source)
     _append_after_publish(monkeypatch, writer, b"late tail\n")
     try:
         runguard.remove_worktree(main, linked, force=True)
@@ -1238,7 +1301,7 @@ def test_oversize_late_append_is_kept_under_a_skipped_name(tmp_path: Path, monke
     source = _handoff(inbox, "2026-11-08-0900-slow.md", "first part")
     monkeypatch.setattr(handoff_worktrees, "MAX_HANDOFF_BYTES", 200)
     tail = b"x" * 1000 + b"\n"
-    writer = os.open(source, os.O_WRONLY | os.O_APPEND)
+    writer = _open_append_writer(source)
     _append_after_publish(monkeypatch, writer, tail)
     try:
         results = handoff_worktrees.rescue_pending_handoffs(linked, main)
@@ -1262,12 +1325,15 @@ def _long_base(tmp_path: Path, length: int = 200) -> Path:
 
 
 def test_oversize_recovery_file_keeps_worktree_on_later_forced_removal(tmp_path: Path, monkeypatch, capsys):
-    main, linked = _repo_with_worktree(_long_base(tmp_path))
-    assert len(str(linked)) >= 200
+    # Windows git cannot write object paths past MAX_PATH, so its base is
+    # shorter. The recovery path still exceeds the 160 character warning bound.
+    length = 140 if os.name == "nt" else 200
+    main, linked = _repo_with_worktree(_long_base(tmp_path, length))
+    assert len(str(linked)) >= length
     inbox = linked / ".claude" / "memory-handoffs"
     source = _handoff(inbox, "2026-11-08-0900-slow.md", "first part")
     monkeypatch.setattr(handoff_worktrees, "MAX_HANDOFF_BYTES", 200)
-    writer = os.open(source, os.O_WRONLY | os.O_APPEND)
+    writer = _open_append_writer(source)
     _append_after_publish(monkeypatch, writer, b"x" * 1000 + b"\n")
     try:
         runguard.remove_worktree(main, linked, force=True)
@@ -1319,7 +1385,7 @@ def test_continuously_growing_source_does_not_hang_rescue(tmp_path: Path, monkey
     main, linked = _repo_with_worktree(tmp_path)
     inbox = linked / ".claude" / "memory-handoffs"
     source = _handoff(inbox, "2026-11-08-0900-firehose.md", "start")
-    writer = os.open(source, os.O_WRONLY | os.O_APPEND)
+    writer = _open_append_writer(source)
     state = {"armed": False, "appends": 0}
     _grow_on_every_read(monkeypatch, writer, 128 * 1024, state)
     real = handoff_worktrees._publish_bytes
@@ -1350,7 +1416,7 @@ def test_no_read_of_the_source_after_unlink(tmp_path: Path, monkeypatch):
     main, linked = _repo_with_worktree(tmp_path)
     inbox = linked / ".claude" / "memory-handoffs"
     source = _handoff(inbox, "2026-11-08-0900-firehose.md", "start")
-    writer = os.open(source, os.O_WRONLY | os.O_APPEND)
+    writer = _open_append_writer(source)
     state = {"armed": False, "appends": 0}
     _grow_on_every_read(monkeypatch, writer, 128 * 1024, state)
     real_unlink = handoff_worktrees.dirfd.unlink_child
@@ -1367,7 +1433,15 @@ def test_no_read_of_the_source_after_unlink(tmp_path: Path, monkeypatch):
         os.close(writer)
 
     assert state["appends"] == 0
-    assert [r.state for r in results] == ["delivered"]
+    reasons = [(r.state, r.reason) for r in results]
+    if os.name == "nt":
+        # Windows keeps an unlinked name visible (delete pending) while another
+        # handle, here the writer's, is still open, so the post-pass check
+        # keeps the worktree until that writer closes. The handoff is delivered.
+        assert reasons == [("delivered", ""), ("failed", "pending-after-rescue")]
+    else:
+        assert reasons == [("delivered", "")]
+    assert (main / ".claude" / "memory-handoffs" / source.name).is_file()
 
 
 def test_final_check_deadline_keeps_the_claim(tmp_path: Path, monkeypatch):
@@ -1470,6 +1544,7 @@ def test_broken_git_metadata_does_not_move_a_committed_handoff(tmp_path: Path):
     committed = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-committed.md", "committed")
     _git(linked, "add", "-f", "--", str(committed.relative_to(linked)))
     _git(linked, "commit", "-q", "-m", "track")
+    (linked / ".git").unlink()  # hidden on Windows, so replace rather than overwrite
     (linked / ".git").write_text("gitdir: " + str(tmp_path / "missing-admin-dir") + "\n")
 
     results = handoff_worktrees.rescue_pending_handoffs(linked, main)
