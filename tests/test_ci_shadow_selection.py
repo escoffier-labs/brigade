@@ -370,6 +370,16 @@ def test_junit_files_with_no_testcases_are_incomplete(tmp_path, report_repo):
     assert any("no testcases" in e for e in result["errors"])
 
 
+def test_one_empty_shard_among_populated_failing_shards_is_incomplete(tmp_path, report_repo):
+    junit(tmp_path / "j" / "shadow-junit-0.xml", [("tests/test_a.py", "t", 1.0, True)])
+    empty = tmp_path / "j" / "shadow-junit-1.xml"
+    empty.write_text("<testsuites><testsuite name='pytest'/></testsuites>")
+    result = report.build_report(selective_plan(tmp_path), tmp_path / "j", 2, "failure", report_repo)
+    assert result["status"] == "incomplete"
+    assert result["shards"]["found"] == 1
+    assert any("shadow-junit-1.xml" in e for e in result["errors"])
+
+
 def test_report_main_records_the_digest_and_the_pull_request_number_but_no_names(tmp_path, report_repo, monkeypatch):
     plan = json.loads(selective_plan(tmp_path).read_text())
     plan["selector_digest"] = "abc123"

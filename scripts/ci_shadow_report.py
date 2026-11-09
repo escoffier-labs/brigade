@@ -99,6 +99,10 @@ def build_report(
         except (OSError, ET.ParseError, ValueError) as exc:
             errors.append(f"junit unreadable: {path.name}: {type(exc).__name__}")
             continue
+        if not n:
+            # An empty shard is missing evidence even when other shards have results.
+            errors.append(f"junit file holds no testcases: {path.name}")
+            continue
         report["shards"]["found"] += 1
         for name, value in s.items():
             seconds[name] = seconds.get(name, 0.0) + value
@@ -108,8 +112,6 @@ def build_report(
         tests += n
     if report["shards"]["found"] != shards_expected:
         errors.append(f"expected {shards_expected} junit files, found {report['shards']['found']}")
-    if report["shards"]["found"] and not tests:
-        errors.append("junit files hold no testcases")
     if unattributed:
         errors.append(f"{unattributed} failing testcases could not be attributed to a test file")
     if shards_result == "failure" and not failing and not unattributed:
