@@ -1738,3 +1738,32 @@ def test_a_deeply_nested_json_evidence_file_never_stops_the_run(tmp_path):
     first, second = run([card(deep), card(RECEIPT, HANDOFF)], parsed, archive)
     assert first.abstain is not None
     assert second.abstain is None
+
+
+def _nested(depth):
+    value: object = []
+    for _ in range(depth - 1):
+        value = [value]
+    return value
+
+
+def test_engine_replies_get_the_depth_and_size_bound():
+    deep = ev.EngineArchive(runner=lambda verb, arguments: {"results": _nested(ev.MAX_JSON_DEPTH + 5)})
+    assert deep.search("example", "port", 3) is None
+    wide = ev.EngineArchive(runner=lambda verb, arguments: {"results": [0] * (ev.MAX_JSON_NODES + 1)})
+    assert wide.search("example", "port", 3) is None
+
+
+def test_an_engine_runner_recursion_error_is_absent_not_fatal():
+    def runner(verb, arguments):
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+
+    assert ev.EngineArchive(runner=runner).search("example", "port", 3) is None
+
+
+def test_shallow_bounds_depth_and_node_count():
+    assert ev._shallow(_nested(ev.MAX_JSON_DEPTH))
+    assert not ev._shallow(_nested(ev.MAX_JSON_DEPTH + 1))
+    assert ev._shallow([0] * (ev.MAX_JSON_NODES - 1))
+    assert not ev._shallow([0] * (ev.MAX_JSON_NODES + 1))
+    assert ev._shallow({"a": [1, {"b": 2}], "c": "d"})

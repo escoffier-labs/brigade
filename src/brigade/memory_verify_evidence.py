@@ -415,22 +415,32 @@ def encodable(value: object) -> bool:
 
 
 MAX_JSON_DEPTH = 64  # evidence JSON is shallow, and later walks recurse once per level
+MAX_JSON_NODES = 200_000  # well above any 1 MiB evidence file or engine reply Brigade reads
+_DONE = object()
 
 
 def _shallow(value: object) -> bool:
-    """Whether no list or object in ``value`` nests deeper than ``MAX_JSON_DEPTH``, checked without recursion."""
-    stack: list[tuple[object, int]] = [(value, 1)]
+    """Whether ``value`` nests no deeper than ``MAX_JSON_DEPTH`` and holds at most ``MAX_JSON_NODES`` values.
+
+    A depth-first walk over iterators, without recursion. Its extra memory grows
+    with depth, not width, and the node cap bounds its time on wide input.
+    """
+    nodes = 1
+    if not isinstance(value, (dict, list)):
+        return True
+    stack: list[Iterator[object]] = [iter(value.values() if isinstance(value, dict) else value)]
     while stack:
-        node, depth = stack.pop()
-        if isinstance(node, dict):
-            children: Any = node.values()
-        elif isinstance(node, list):
-            children = node
-        else:
+        child = next(stack[-1], _DONE)
+        if child is _DONE:
+            stack.pop()
             continue
-        if depth > MAX_JSON_DEPTH:
+        nodes += 1
+        if nodes > MAX_JSON_NODES:
             return False
-        stack.extend((child, depth + 1) for child in children)
+        if isinstance(child, (dict, list)):
+            if len(stack) >= MAX_JSON_DEPTH:
+                return False
+            stack.append(iter(child.values() if isinstance(child, dict) else child))
     return True
 
 
@@ -462,9 +472,11 @@ class EngineArchive:
 
     def _run(self, verb: str, arguments: list[str]) -> Any:
         try:
-            return self._runner(verb, arguments)
-        except (OSError, ValueError):
+            reply = self._runner(verb, arguments)
+        except (OSError, ValueError, RecursionError):
             return None
+        # Engine replies get the same depth and size bound as evidence files.
+        return reply if _shallow(reply) else None
 
     def search(self, project: str, query: str, limit: int) -> list[Excerpt] | None:
         payload = self._run("search", [query, "--project", project, "--limit", str(limit), "--json"])
