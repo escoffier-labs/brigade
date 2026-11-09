@@ -1,0 +1,52 @@
+# Paths that select the Rust hub suite (hub-rust, the reusable hub.yml).
+#
+# Single source for two readers:
+# - pull_request and push: the `hub_filter` dorny/paths-filter step in ci.yml
+#   reads this file from the checked-out tree.
+# - merge_group: scripts/ci_hub_select.py reads this file from the trusted
+#   tip of main, never from the proposal, and parses it strictly. Keep the
+#   exact shape: one `hub:` key, then one single-quoted pattern per line.
+#   Patterns use only letters, digits, `_`, `.`, `/`, `-` and `*`.
+#
+# tests/test_ci_workflow.py checks that every file hub.yml runs and every
+# brigade module the hub tests import directly matches a pattern here.
+# Transitive imports are covered by the nightly full run (hub-nightly.yml).
+hub:
+  - 'engines/hub/**'
+  - 'engines/brigade-guard/**'
+  - 'src/brigade/guard/**'
+  - 'src/brigade/untrusted.py'
+  - 'src/brigade/memory_content_scan.py'
+  - 'scripts/memory_scan_bundle.py'
+  - 'tests/test_memory_content_scan.py'
+  - 'tests/fixtures/memory-scan-corpus.json'
+  - 'tests/fixtures/memory-scan-groups.json'
+  - 'tests/fixtures/memory-scan-adversarial.json'
+  - 'tests/fixtures/memory-scan-private.json'
+  - 'tests/fixtures/memory-scan-secrets.json'
+  - 'tests/test_memory_scan_private.py'
+  - 'tests/test_memory_scan_nfkc.py'
+  - 'tests/fixtures/memory-scan-nfkc.json'
+  - 'tests/memory_scan_adversarial.py'
+  - 'src/brigade/fleet_hub_server.py'
+  - 'tests/test_fleet_hub_server.py'
+  - 'src/brigade/fleet_hub*.py'
+  - 'src/brigade/fleet_client*.py'
+  - 'src/brigade/fleet_admin_stats.py'
+  - 'src/brigade/fleet_owners.py'
+  - 'src/brigade/__init__.py'
+  - 'src/brigade/__main__.py'
+  - 'src/brigade/cli/__init__.py'
+  - 'src/brigade/cli/fleet*.py'
+  - 'registry/skills/verify-brigade/**'
+  - 'src/brigade/memory_bm25.py'
+  - 'src/brigade/memory_cmd.py'
+  - 'src/brigade/memory_hub_*.py'
+  - 'src/brigade/memory_retrieval_eval/**'
+  - 'evals/memory-retrieval/**'
+  - 'pyproject.toml'
+  - '.github/workflows/hub.yml'
+  - '.github/workflows/hub-nightly.yml'
+  - '.github/workflows/ci.yml'
+  - 'scripts/ci_hub_paths.yml'
+  - 'scripts/ci_hub_select.py'

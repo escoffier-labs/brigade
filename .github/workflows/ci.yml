@@ -28,10 +28,10 @@ jobs:
       evidence_ledger: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.evidence_ledger }}
       notify: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.notify }}
       fleet_hub_container: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.fleet_hub_container }}
-      # Fail closed: only a validated classification plus a successful filter
-      # step reporting exactly 'false' skips the hub suite. Merge groups use
-      # the same filter on merge_group.base_sha..head_sha (see docs/adaptive-ci).
-      hub: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || steps.filter.outcome != 'success' && 'true' || steps.filter.outputs.hub == 'false' && 'false' || 'true' }}
+      # Fail closed: only exactly 'false' skips the hub suite. Merge groups take
+      # it from the trusted selector loaded from main (hub_merge_group);
+      # pull requests and pushes from the hub_filter step. docs/adaptive-ci.
+      hub: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && (steps.hub_merge_group.outputs.hub == 'false' && 'false' || 'true') || steps.hub_filter.outcome != 'success' && 'true' || steps.hub_filter.outputs.hub == 'false' && 'false' || 'true' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -132,16 +132,9 @@ jobs:
               stream.write(output)
           PY
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
-        # In a merge group, run only after the trusted classifier validated
-        # base_sha and head_sha and fetched base_sha. Skipped selects hub; an
-        # error fails this job, and ci-gate requires it to succeed.
-        if: ${{ github.event_name != 'merge_group' || steps.docs.outputs.uncertain == 'false' }}
+        if: ${{ github.event_name != 'merge_group' }}
         id: filter
         with:
-          # Empty outside merge_group, so pull_request and push keep their
-          # existing diff source. In a merge group this is the whole group diff.
-          base: ${{ github.event.merge_group.base_sha }}
-          ref: ${{ github.event.merge_group.head_sha }}
           filters: |
             mesh:
               - 'src/brigade/fleet_mesh_*.py'
@@ -169,36 +162,73 @@ jobs:
               - 'ops/fleet-hub/**'
               - 'tests/fleet_hub_container_smoke.py'
               - '.github/workflows/ci.yml'
-            hub:
-              - 'engines/hub/**'
-              - 'engines/brigade-guard/**'
-              - 'src/brigade/guard/**'
-              - 'src/brigade/untrusted.py'
-              - 'src/brigade/memory_content_scan.py'
-              - 'scripts/memory_scan_bundle.py'
-              - 'tests/test_memory_content_scan.py'
-              - 'tests/fixtures/memory-scan-corpus.json'
-              - 'tests/fixtures/memory-scan-groups.json'
-              - 'tests/fixtures/memory-scan-adversarial.json'
-              - 'tests/fixtures/memory-scan-private.json'
-              - 'tests/fixtures/memory-scan-secrets.json'
-              - 'tests/test_memory_scan_private.py'
-              - 'tests/test_memory_scan_nfkc.py'
-              - 'tests/fixtures/memory-scan-nfkc.json'
-              - 'tests/memory_scan_adversarial.py'
-              - 'src/brigade/fleet_hub_server.py'
-              - 'tests/test_fleet_hub_server.py'
-              - 'src/brigade/fleet_hub*.py'
-              - 'registry/skills/verify-brigade/hub_contract*'
-              - 'registry/skills/verify-brigade/hub_readonly.py'
-              - 'registry/skills/verify-brigade/hub_audit.py'
-              - 'src/brigade/memory_bm25.py'
-              - 'src/brigade/memory_cmd.py'
-              - 'src/brigade/memory_hub_*.py'
-              - 'src/brigade/memory_retrieval_eval/**'
-              - 'evals/memory-retrieval/**'
-              - '.github/workflows/hub.yml'
-              - '.github/workflows/ci.yml'
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        # Same action and diff source as the step above. The hub path list
+        # lives in one file that the merge-group selector also reads (from main).
+        if: ${{ github.event_name != 'merge_group' }}
+        id: hub_filter
+        with:
+          filters: scripts/ci_hub_paths.yml
+      - name: Select hub suite for the merge group from trusted main
+        id: hub_merge_group
+        if: ${{ github.event_name == 'merge_group' }}
+        run: |
+          # Load the selector and its path list from the tip of main, never
+          # from the proposal. A main without the selector runs the hub suite.
+          python3 -I -S - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+          import tempfile
+
+          def git(*args):
+              return subprocess.run(
+                  ["git", "--no-replace-objects", *args], check=True,
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
+              ).stdout
+
+          result = {"hub": "true", "reason": "trusted-hub-selector-unavailable"}
+          try:
+              # A fixed refspec: the target never comes from the event or the proposal.
+              git("fetch", "--no-tags", "--no-recurse-submodules", "--depth=1", "origin", "+refs/heads/main:refs/ci-hub-select/main")
+              target = git("rev-parse", "--verify", "refs/ci-hub-select/main^{commit}").decode().strip()
+              if not re.fullmatch(r"[0-9a-f]{40}", target):
+                  raise ValueError("invalid target")
+              entry = git("ls-tree", "-z", target, "--", "scripts/ci_hub_select.py")
+              match = re.fullmatch(rb"100644 blob ([0-9a-f]{40})\tscripts/ci_hub_select.py\x00", entry)
+              if not match:
+                  raise ValueError("missing or unsafe selector")
+              blob = match[1].decode("ascii")
+              if not 0 < int(git("cat-file", "-s", blob)) <= 131072:
+                  raise ValueError("invalid selector size")
+              source = git("cat-file", "blob", blob)
+              with tempfile.TemporaryDirectory(prefix="ci-hub-select-", dir=os.environ["RUNNER_TEMP"]) as directory:
+                  trusted = Path(directory) / "selector.py"
+                  trusted.write_bytes(source)
+                  output = Path(directory) / "output"
+                  completed = subprocess.run(
+                      [sys.executable, "-I", "-S", str(trusted)], check=True, timeout=300,
+                      env=dict(os.environ, GITHUB_OUTPUT=str(output), CI_HUB_TARGET=target),
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                  )
+                  print(completed.stdout.decode("utf-8", "replace"), end="")
+                  candidate = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                  if (
+                      set(candidate) != {"hub", "reason"}
+                      or candidate["hub"] not in {"true", "false"}
+                      or not re.fullmatch(r"[a-z-]{1,80}", candidate["reason"])
+                  ):
+                      raise ValueError("invalid selector output")
+                  result = candidate
+          except (KeyError, TypeError, ValueError, UnicodeError, OSError, subprocess.SubprocessError):
+              pass
+          output = "".join(f"{key}={value}\n" for key, value in result.items())
+          print(output, end="")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as stream:
+              stream.write(output)
+          PY
 
   code-graph-msrv:
     name: MSRV (Rust 1.85)
@@ -831,8 +861,9 @@ jobs:
               and changes.get("outputs", {}).get("fleet_hub_container") == "false"
               and os.environ["EVENT_NAME"] != "merge_group"
           )
-          # Merge groups now compute `hub` from base_sha..head_sha, so the
-          # same exact-'false' rule applies on every event.
+          # `hub` is exactly 'false' only when its selector proved no hub path
+          # changed: in a merge group the trusted selector from main over the
+          # merge base with main, so the same rule applies on every event.
           hub_skip_allowed = (
               changes.get("result") == "success"
               and changes.get("outputs", {}).get("hub") == "false"

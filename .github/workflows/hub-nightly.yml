@@ -1,9 +1,10 @@
 name: hub-nightly
 
-# Merge groups run hub-rust only when the hub path filter matches, so a new
-# stable toolchain (for example a new clippy lint) could otherwise go unseen
-# until someone touches hub paths. This runs the full reusable hub suite on
-# main every night. A failure shows as a failed scheduled run.
+# Merge groups run hub-rust only when a hub path changed, so a new stable
+# toolchain (for example a new clippy lint) or a change reaching the hub suite
+# through a transitive import could otherwise go unseen. This runs the full
+# reusable hub suite on main every night. The job time limits live in hub.yml,
+# because a job that calls a reusable workflow cannot set timeout-minutes.
 on:
   schedule:
     - cron: "30 4 * * *"
@@ -22,3 +23,34 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/hub.yml
+
+  report-failure:
+    # Keeps one open tracking issue: a new failure comments on it instead of
+    # opening a duplicate. Only this job can write issues.
+    needs: hub-rust
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && (needs.hub-rust.result == 'failure' || needs.hub-rust.result == 'cancelled') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the hub nightly tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RESULT: ${{ needs.hub-rust.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          label=hub-nightly
+          title="hub nightly failing"
+          gh label create "$label" --color D93F0B --description "Open hub nightly failure tracker" --force
+          body="hub-nightly result: $RESULT
+          Run: $RUN_URL
+          Commit: $SHA"
+          number=$(gh issue list --state open --label "$label" --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --label "$label" --body "$body"
+          fi

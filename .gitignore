@@ -66,6 +66,8 @@ Thumbs.db
 !/scripts/measure_work_store.py
 !/scripts/verify-fast
 !/scripts/ci_pytest_shard.py
+!/scripts/ci_hub_paths.yml
+!/scripts/ci_hub_select.py
 !/scripts/changelog_fragments.py
 !/scripts/windows_affected_tests.py
 !/scripts/windows_pytest.py
