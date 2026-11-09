@@ -707,8 +707,21 @@ def _save_probes(target: Path, seats: dict[str, dict[str, Any]]) -> None:
                 dirfd.unlink_child(parent, temporary.name)
 
 
+def _record(target: Path, recorded: dict[str, dict[str, Any]]) -> None:
+    try:
+        _save_probes(target, recorded)
+    except (OSError, ValueError):
+        raise SeatRefused("verify_workdir", "verify could not record its probe results") from None
+
+
 def doctor_payload(target: Path, propose: str | None, confirm: str | None, *, timeout: float) -> dict[str, Any]:
-    """Resolve and probe both seats, record passes and drop stale ones. Codes and names only."""
+    """Resolve and probe both seats, record passes and drop stale ones. Codes and names only.
+
+    A seat's recorded pass is removed, durably, before its probe starts, and a
+    new pass is written only after its own probe succeeds. A later seat's probe
+    that raises or is interrupted therefore never leaves an earlier seat's
+    stale pass on disk.
+    """
     try:
         pair = resolve_pair(target, propose, confirm)
     except SeatRefused as exc:
@@ -717,18 +730,16 @@ def doctor_payload(target: Path, propose: str | None, confirm: str | None, *, ti
     with vstate.locked(target):
         recorded = load_probes(target)
         for seat in pair:
+            if recorded.pop(seat.name, None) is not None:
+                _record(target, recorded)
             code = probe(target, seat, timeout=timeout)
             row = {"role": seat.role, "seat": seat.name, "cli": seat.adapter, "model": seat.model}
             if code is None:
                 recorded[seat.name] = {"fingerprint": seat.fingerprint, "passed_ms": int(CLOCK() * 1000)}
+                _record(target, recorded)
                 rows.append({**row, "status": "isolated"})
             else:
-                recorded.pop(seat.name, None)
                 rows.append({**row, "status": "refused", "code": code})
-        try:
-            _save_probes(target, recorded)
-        except (OSError, ValueError):
-            raise SeatRefused("verify_workdir", "verify could not record its probe results") from None
     failed = [row for row in rows if row["status"] != "isolated"]
     if failed:
         return {"status": "refused", "code": failed[0]["code"], "reason": "a seat failed its probe", "seats": rows}

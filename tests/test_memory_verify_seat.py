@@ -813,3 +813,31 @@ def test_no_journal_report_or_output_holds_prompt_or_reply_text(target, monkeypa
         assert secret not in out.out + out.err
     assert not list(target.rglob("*journal*"))
     assert leftovers(target) == []
+
+
+@SAFE
+def test_a_failed_probe_is_invalidated_on_disk_before_the_next_seat_runs(target, monkeypatch, capsys):
+    write_care(target)
+    monkeypatch.setattr(seats, "LAUNCH", echo_probe)
+    assert cli.main(["memory", "verify", "doctor", "--target", str(target), "--json"]) == 0
+    capsys.readouterr()
+    seats.ready(target, "verify-propose", "verify-confirm")
+    calls = []
+
+    def first_fails_second_interrupted(argv, *, timeout, env, cwd, stdin):
+        calls.append(argv)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return result(stdout=stream(cwd, argv, nonce_of(stdin), init=init_event(cwd, argv, tools=["Bash"])))
+
+    monkeypatch.setattr(seats, "LAUNCH", first_fails_second_interrupted)
+    propose, confirm = seats.resolve_pair(target, "verify-propose", "verify-confirm")
+    with pytest.raises(KeyboardInterrupt):
+        seats.doctor_payload(target, "verify-propose", "verify-confirm", timeout=30)
+    assert len(calls) == 2
+    assert propose.name not in seats.load_probes(target)
+    assert confirm.name not in seats.load_probes(target)
+    with pytest.raises(seats.SeatRefused) as caught:
+        seats.ready(target, "verify-propose", "verify-confirm")
+    assert caught.value.code == "verify_seat_not_isolated" and "propose_seat" in str(caught.value)
+    assert leftovers(target) == []
