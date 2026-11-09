@@ -66,6 +66,7 @@ Thumbs.db
 !/scripts/measure_work_store.py
 !/scripts/verify-fast
 !/scripts/ci_pytest_shard.py
+!/scripts/ci_timing_report.py
 !/scripts/ci_selection_core.py
 !/scripts/ci_test_selection.py
 !/scripts/ci_shadow_report.py
