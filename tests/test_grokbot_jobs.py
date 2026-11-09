@@ -24,6 +24,20 @@ NOW = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
 REPORT_TEXT = "PRIVATE_SCOUT_FINDING_TOKEN_alpha\nScout findings for example/brigade.\n"
 
 
+@pytest.fixture
+def hub_wire(monkeypatch: pytest.MonkeyPatch):
+    """A configured hub on a claimable node with the deadline thread run inline; call it with the POST fake."""
+    monkeypatch.setattr(fleet_client_grokbot, "load_fleet_config", lambda: {"hub_url": "http://hub", "token": "node"})
+    monkeypatch.setattr(fleet_client_grokbot._client, "resolve_node_id", lambda: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    monkeypatch.setattr(fleet_client_grokbot._client, "_node_id_is_claimable", lambda _node: True)
+    monkeypatch.setattr(fleet_client_grokbot._client, "_run_with_deadline", lambda operation, timeout: operation())
+
+    def install_post(handler) -> None:
+        monkeypatch.setattr(fleet_client_grokbot, "_post_grokbot_blocking", handler)
+
+    return install_post
+
+
 def _spec() -> dict[str, object]:
     return {
         "label": "Add queue foundation",
@@ -1273,112 +1287,87 @@ def _hub_enqueue_probe(
     return probes
 
 
-def test_a_hub_enqueue_that_times_out_after_the_commit_keeps_the_snapshot(tmp_path: Path, monkeypatch):
-    job_id = _derived_hub_job_id("in-doubt")
-    probes = _hub_enqueue_probe(
-        monkeypatch,
-        outcome=TimeoutError("client gave up after the hub committed"),
-        listing=_hub_listing(job_id),
-    )
-
-    with pytest.raises(TimeoutError):
-        grokbot_jobs.enqueue(tmp_path, _spec(), "in-doubt", now=NOW)
-
-    # An enqueueing actor holds `list`, not `status`, and the hub scopes the
-    # listing to its queue, so the probe passes no role filter.
-    assert probes == [{"include_all": True}]
-    assert (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").is_file()
+_REFUSED = fleet_client_grokbot.GrokbotHubDecision(False, "refused")
+_TIMED_OUT = TimeoutError("client gave up after the hub committed")
 
 
-def test_a_hub_enqueue_failure_keeps_the_snapshot_when_the_hub_cannot_answer(tmp_path: Path, monkeypatch):
-    job_id = _derived_hub_job_id("unavailable")
-    probes = _hub_enqueue_probe(
-        monkeypatch,
-        outcome=fleet_client_grokbot.GrokbotHubDecision(False, "refused"),
-        listing=fleet_client_grokbot.GrokbotHubDecision(False, "hub-unavailable"),
-    )
+@pytest.mark.parametrize(
+    ("outcome", "listing", "expected", "probed", "snapshot_kept"),
+    [
+        pytest.param(
+            _TIMED_OUT, lambda job_id: _hub_listing(job_id), TimeoutError, True, True, id="timeout-after-commit"
+        ),
+        pytest.param(
+            _REFUSED,
+            lambda _id: fleet_client_grokbot.GrokbotHubDecision(False, "hub-unavailable"),
+            "refused",
+            True,
+            True,
+            id="hub-cannot-answer",
+        ),
+        pytest.param(
+            _REFUSED,
+            lambda _id: fleet_client_grokbot.GrokbotHubDecision(False, "auth-failed"),
+            "refused",
+            True,
+            True,
+            id="listing-refused",
+        ),
+        pytest.param(
+            _TIMED_OUT, RuntimeError("the listing itself failed"), TimeoutError, True, True, id="probe-raises"
+        ),
+        pytest.param(
+            _REFUSED,
+            lambda job_id: _hub_listing("grokbot-someone-elses-job", job_id),
+            "refused",
+            True,
+            True,
+            id="hub-holds-job",
+        ),
+        pytest.param(
+            fleet_client_grokbot.GrokbotHubDecision(False, "invalid-request"),
+            lambda _id: _hub_listing("grokbot-someone-elses-job"),
+            "invalid-request",
+            True,
+            False,
+            id="plain-refusal-hub-holds-no-such-job",
+        ),
+        pytest.param(
+            fleet_client_grokbot.GrokbotHubDecision(False, "idempotency-conflict"),
+            lambda _id: _hub_listing(),
+            "idempotency-conflict",
+            False,
+            True,
+            id="duplicate-key-conflict",
+        ),
+        pytest.param(
+            fleet_client_grokbot.GrokbotHubDecision(False, "operation-mismatch"),
+            lambda _id: _hub_listing(),
+            "operation-mismatch",
+            False,
+            True,
+            id="duplicate-key-operation-mismatch",
+        ),
+    ],
+)
+def test_a_failed_hub_enqueue_keeps_the_snapshot_unless_the_hub_holds_no_such_job(
+    tmp_path: Path, monkeypatch, outcome, listing, expected, probed: bool, snapshot_kept: bool
+):
+    key = "hub-enqueue"
+    job_id = _derived_hub_job_id(key)
+    # An enqueueing actor holds `list`, not `status`, and the hub scopes the listing to its queue, so the
+    # probe passes no role filter. A duplicate-key refusal never probes the hub at all.
+    probes = _hub_enqueue_probe(monkeypatch, outcome=outcome, listing=listing(job_id) if callable(listing) else listing)
 
-    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^refused$"):
-        grokbot_jobs.enqueue(tmp_path, _spec(), "unavailable", now=NOW)
+    if isinstance(expected, str):
+        with pytest.raises(grokbot_jobs.GrokbotJobError, match=f"^{expected}$"):
+            grokbot_jobs.enqueue(tmp_path, _spec(), key, now=NOW)
+    else:
+        with pytest.raises(expected):
+            grokbot_jobs.enqueue(tmp_path, _spec(), key, now=NOW)
 
-    assert probes == [{"include_all": True}]
-    assert (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").is_file()
-
-
-def test_a_hub_enqueue_failure_keeps_the_snapshot_when_the_listing_is_refused(tmp_path: Path, monkeypatch):
-    job_id = _derived_hub_job_id("auth-refused")
-    probes = _hub_enqueue_probe(
-        monkeypatch,
-        outcome=fleet_client_grokbot.GrokbotHubDecision(False, "refused"),
-        listing=fleet_client_grokbot.GrokbotHubDecision(False, "auth-failed"),
-    )
-
-    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^refused$"):
-        grokbot_jobs.enqueue(tmp_path, _spec(), "auth-refused", now=NOW)
-
-    assert probes == [{"include_all": True}]
-    assert (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").is_file()
-
-
-def test_a_hub_enqueue_failure_keeps_the_snapshot_when_the_probe_raises(tmp_path: Path, monkeypatch):
-    job_id = _derived_hub_job_id("probe-raises")
-    probes = _hub_enqueue_probe(
-        monkeypatch,
-        outcome=TimeoutError("client gave up after the hub committed"),
-        listing=RuntimeError("the listing itself failed"),
-    )
-
-    with pytest.raises(TimeoutError):
-        grokbot_jobs.enqueue(tmp_path, _spec(), "probe-raises", now=NOW)
-
-    assert probes == [{"include_all": True}]
-    assert (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").is_file()
-
-
-@pytest.mark.parametrize("reason", ["idempotency-conflict", "operation-mismatch"])
-def test_a_duplicate_key_refusal_keeps_the_snapshot_without_probing_the_hub(tmp_path: Path, monkeypatch, reason: str):
-    job_id = _derived_hub_job_id(f"duplicate-{reason}")
-    probes = _hub_enqueue_probe(
-        monkeypatch,
-        outcome=fleet_client_grokbot.GrokbotHubDecision(False, reason),
-        listing=_hub_listing(),
-    )
-
-    with pytest.raises(grokbot_jobs.GrokbotJobError, match=f"^{reason}$"):
-        grokbot_jobs.enqueue(tmp_path, _spec(), f"duplicate-{reason}", now=NOW)
-
-    assert probes == []
-    assert (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").is_file()
-
-
-def test_a_plain_refusal_removes_the_snapshot_when_the_hub_holds_no_such_job(tmp_path: Path, monkeypatch):
-    job_id = _derived_hub_job_id("refused")
-    probes = _hub_enqueue_probe(
-        monkeypatch,
-        outcome=fleet_client_grokbot.GrokbotHubDecision(False, "invalid-request"),
-        listing=_hub_listing("grokbot-someone-elses-job"),
-    )
-
-    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^invalid-request$"):
-        grokbot_jobs.enqueue(tmp_path, _spec(), "refused", now=NOW)
-
-    assert probes == [{"include_all": True}]
-    assert not (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").exists()
-
-
-def test_a_refusal_keeps_the_snapshot_when_the_hub_still_holds_the_job(tmp_path: Path, monkeypatch):
-    job_id = _derived_hub_job_id("held")
-    probes = _hub_enqueue_probe(
-        monkeypatch,
-        outcome=fleet_client_grokbot.GrokbotHubDecision(False, "refused"),
-        listing=_hub_listing("grokbot-someone-elses-job", job_id),
-    )
-
-    with pytest.raises(grokbot_jobs.GrokbotJobError, match="^refused$"):
-        grokbot_jobs.enqueue(tmp_path, _spec(), "held", now=NOW)
-
-    assert probes == [{"include_all": True}]
-    assert (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").is_file()
+    assert probes == ([{"include_all": True}] if probed else [])
+    assert (_hub_snapshot_dir(tmp_path) / f"{job_id}.json").exists() is snapshot_kept
 
 
 def test_configured_hub_enqueue_is_fail_closed_and_local_only_without_hub(tmp_path: Path, monkeypatch):
@@ -1491,22 +1480,8 @@ def test_safe_artifact_metadata_includes_report_size():
     assert metadata["private_snapshot_id"] == "snap"
 
 
-def test_hub_validation_refusal_is_not_hub_unavailable(monkeypatch):
-    from brigade import fleet_client_grokbot
-
-    monkeypatch.setattr(fleet_client_grokbot, "load_fleet_config", lambda: {"hub_url": "http://hub", "token": "node"})
-    monkeypatch.setattr(fleet_client_grokbot._client, "resolve_node_id", lambda: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-    monkeypatch.setattr(fleet_client_grokbot._client, "_node_id_is_claimable", lambda _node: True)
-    monkeypatch.setattr(
-        fleet_client_grokbot,
-        "_post_grokbot_blocking",
-        lambda *args, **kwargs: (400, {"error": "grokbot artifact size is invalid"}),
-    )
-    monkeypatch.setattr(
-        fleet_client_grokbot._client,
-        "_run_with_deadline",
-        lambda operation, timeout: operation(),
-    )
+def test_hub_validation_refusal_is_not_hub_unavailable(hub_wire):
+    hub_wire(lambda *args, **kwargs: (400, {"error": "grokbot artifact size is invalid"}))
     decision = fleet_client_grokbot.complete(
         "grokbot-" + "a" * 24,
         lease_id="lease-a",
@@ -2224,7 +2199,8 @@ def _hub_job_payload(job_id: str, *, state: str = "queued", **extra: object) -> 
     return payload
 
 
-def test_hub_claim_forwards_worker_label_in_the_outbound_request_body(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("label", ["builder-2", None])
+def test_hub_claim_sends_the_worker_label_only_when_one_is_given(tmp_path: Path, monkeypatch, hub_wire, label):
     """Pin the one hub-side thing the listener actually controls: the request body.
 
     The listener cannot make the hub keep the label, so assert on what goes out
@@ -2232,8 +2208,6 @@ def test_hub_claim_forwards_worker_label_in_the_outbound_request_body(tmp_path: 
     way the real hub does today, with no ``worker_label`` on the returned row,
     so the projection is expected to come back without one.
     """
-    from brigade import fleet_client_grokbot
-
     job_id = "grokbot-" + "a" * 24
     bodies: list[dict[str, object]] = []
 
@@ -2253,42 +2227,19 @@ def test_hub_claim_forwards_worker_label_in_the_outbound_request_body(tmp_path: 
         }
 
     monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
-    monkeypatch.setattr(fleet_client_grokbot, "load_fleet_config", lambda: {"hub_url": "http://hub", "token": "node"})
-    monkeypatch.setattr(fleet_client_grokbot._client, "resolve_node_id", lambda: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-    monkeypatch.setattr(fleet_client_grokbot._client, "_node_id_is_claimable", lambda _node: True)
-    monkeypatch.setattr(fleet_client_grokbot._client, "_run_with_deadline", lambda operation, timeout: operation())
-    monkeypatch.setattr(fleet_client_grokbot, "_post_grokbot_blocking", fake_post)
+    hub_wire(fake_post)
 
-    result = grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60, worker_label="builder-2")
+    result = grokbot_jobs.claim(
+        tmp_path, job_id, "bot-a", "lease-a", 60, **({} if label is None else {"worker_label": label})
+    )
 
     claim_body = next(body for body in bodies if body["action"] == "claim")
-    assert claim_body["worker_label"] == "builder-2"
     assert claim_body["lease_id"] == "lease-a"
+    if label is None:
+        assert "worker_label" not in claim_body
+    else:
+        assert claim_body["worker_label"] == label
     assert "worker_label" not in result
-
-
-def test_hub_claim_omits_worker_label_from_the_body_when_none_is_sent(tmp_path: Path, monkeypatch):
-    from brigade import fleet_client_grokbot
-
-    job_id = "grokbot-" + "b" * 24
-    bodies: list[dict[str, object]] = []
-
-    def fake_post(_hub, _token, body, timeout):
-        bodies.append(dict(body))
-        if body["action"] == "status":
-            return 200, {"job": _hub_job_payload(job_id)}
-        return 200, {"claimed": True, "job": _hub_job_payload(job_id, state="claimed", item_revision=2)}
-
-    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target=None: True)
-    monkeypatch.setattr(fleet_client_grokbot, "load_fleet_config", lambda: {"hub_url": "http://hub", "token": "node"})
-    monkeypatch.setattr(fleet_client_grokbot._client, "resolve_node_id", lambda: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-    monkeypatch.setattr(fleet_client_grokbot._client, "_node_id_is_claimable", lambda _node: True)
-    monkeypatch.setattr(fleet_client_grokbot._client, "_run_with_deadline", lambda operation, timeout: operation())
-    monkeypatch.setattr(fleet_client_grokbot, "_post_grokbot_blocking", fake_post)
-
-    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 60)
-
-    assert "worker_label" not in next(body for body in bodies if body["action"] == "claim")
 
 
 _HUB_FEED_NODE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"

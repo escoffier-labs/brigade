@@ -1227,3 +1227,32 @@ async fn the_raw_query_guard_is_bytes_and_apart_from_the_normalized_limit() {
     assert!(normalized.contains("256 characters"), "{normalized}");
     assert_ne!(normalized, raw_message);
 }
+
+#[test]
+fn front_matter_literals_past_the_python_bounds_stay_text() {
+    use text::{LITERAL_MAX_CHARS, LITERAL_MAX_DEPTH, literal_within_bounds};
+    let tags = |value: &str| text::fields(&format!("---\ntags: {value}\n---\nbody\n"), "b").tags;
+    // At the depth cap the list still evaluates. One more level stays text.
+    assert!(literal_within_bounds(&nested(LITERAL_MAX_DEPTH)));
+    assert!(!literal_within_bounds(&nested(LITERAL_MAX_DEPTH + 1)));
+    assert_eq!(
+        tags(&nested(LITERAL_MAX_DEPTH + 1)),
+        vec![nested(LITERAL_MAX_DEPTH + 1)]
+    );
+    // Openers inside quotes do not count, so a tag full of brackets still parses.
+    let quoted = format!("['{}', 'b']", "[".repeat(40));
+    assert!(literal_within_bounds(&quoted));
+    assert_eq!(tags(&quoted), vec!["[".repeat(40), "b".to_string()]);
+    // Length counts code points.
+    let long = format!("['{}']", "é".repeat(LITERAL_MAX_CHARS - 4));
+    assert!(literal_within_bounds(&long));
+    let over = format!("['{}']", "é".repeat(LITERAL_MAX_CHARS - 3));
+    assert!(!literal_within_bounds(&over));
+    // Like the Python scan, closers before openers let the depth go negative.
+    let skew = format!(
+        "[]]]]{}{}",
+        "[".repeat(LITERAL_MAX_DEPTH + 3),
+        "]".repeat(LITERAL_MAX_DEPTH + 3)
+    );
+    assert!(literal_within_bounds(&skew));
+}

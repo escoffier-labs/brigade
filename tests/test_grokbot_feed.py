@@ -263,7 +263,12 @@ def test_preflight_rejects_invalid_limits_without_writing(tmp_path: Path, limit:
     assert not _queue_root(tmp_path).exists()
 
 
-def test_preflight_rejects_invalid_later_job_without_writing(tmp_path: Path):
+@pytest.mark.parametrize(
+    "run",
+    [grokbot_feed.preflight, lambda target, manifest: grokbot_feed.apply(target, manifest, limit=1)],
+    ids=["preflight", "apply"],
+)
+def test_an_invalid_later_entry_rejects_the_manifest_without_writing(tmp_path: Path, run):
     later = _spec(label="Broken later job")
     later.pop("instructions")
     manifest = _write_manifest(
@@ -272,7 +277,7 @@ def test_preflight_rejects_invalid_later_job_without_writing(tmp_path: Path):
     )
 
     with pytest.raises(grokbot_feed.FeedError) as exc:
-        grokbot_feed.preflight(tmp_path, manifest)
+        run(tmp_path, manifest)
 
     assert exc.value.reason == "missing-key"
     assert not _queue_root(tmp_path).exists()
@@ -405,21 +410,6 @@ def test_apply_hub_replay_is_skipped_without_duplicate_job_or_event(tmp_path: Pa
         assert connection.execute("SELECT COUNT(*) FROM events WHERE harness='grokbot'").fetchone()[0] == event_count
     finally:
         connection.close()
-
-
-def test_apply_invalid_later_entry_prevents_all_writes(tmp_path: Path):
-    later = _spec(label="Broken later job")
-    later.pop("instructions")
-    manifest = _write_manifest(
-        tmp_path / "feed.json",
-        _manifest(_entry("task-a", _spec(label="First")), _entry("task-b", later)),
-    )
-
-    with pytest.raises(grokbot_feed.FeedError) as exc:
-        grokbot_feed.apply(tmp_path, manifest, limit=1)
-
-    assert exc.value.reason == "missing-key"
-    assert not _queue_root(tmp_path).exists()
 
 
 def test_apply_stops_on_unexpected_queue_error_with_generic_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

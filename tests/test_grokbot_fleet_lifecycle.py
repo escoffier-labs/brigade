@@ -89,7 +89,17 @@ def test_absolute_reference_accepts_posix_and_drive_roots_and_rejects_unc():
             _required_absolute_path(rejected)
 
 
-def test_paths_overlap_detects_backslash_nesting(monkeypatch):
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        (r"C:\a", r"C:\a\b"),
+        (r"C:\a\b", r"C:\a"),
+        (r"C:\Brigade\State", r"c:\brigade"),
+        (r"c:\brigade", r"C:\Brigade\State"),
+    ],
+    ids=["backslash-parent", "backslash-child", "case-differs-child", "case-differs-parent"],
+)
+def test_paths_overlap_on_windows_nests_on_backslashes_and_ignores_case(monkeypatch, left, right):
     import ntpath
     from types import SimpleNamespace
 
@@ -97,8 +107,7 @@ def test_paths_overlap_detects_backslash_nesting(monkeypatch):
 
     with monkeypatch.context() as patched:
         patched.setattr(runtime_mod, "os", SimpleNamespace(name="nt", path=ntpath))
-        assert runtime_mod.paths_overlap(r"C:\a", r"C:\a\b") is True
-        assert runtime_mod.paths_overlap(r"C:\a\b", r"C:\a") is True
+        assert runtime_mod.paths_overlap(left, right) is True
 
 
 def test_paths_overlap_treats_backslash_as_literal_on_posix():
@@ -107,18 +116,6 @@ def test_paths_overlap_treats_backslash_as_literal_on_posix():
     if os.name != "posix":
         pytest.skip("backslash is a literal filename character only on POSIX")
     assert paths_overlap("/a/b\\c", "/a/b") is False
-
-
-def test_paths_overlap_is_case_insensitive_on_windows(monkeypatch):
-    import ntpath
-    from types import SimpleNamespace
-
-    from brigade.grokbot_fleet import runtime_config as runtime_mod
-
-    with monkeypatch.context() as patched:
-        patched.setattr(runtime_mod, "os", SimpleNamespace(name="nt", path=ntpath))
-        assert runtime_mod.paths_overlap(r"C:\Brigade\State", r"c:\brigade") is True
-        assert runtime_mod.paths_overlap(r"c:\brigade", r"C:\Brigade\State") is True
 
 
 def test_paths_overlap_handles_root_operand_and_rejects_trailing_alias(monkeypatch):

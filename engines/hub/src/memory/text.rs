@@ -273,6 +273,52 @@ pub const MAX_NESTING: usize = 200;
 /// `SyntaxError`, so the raw text stays.
 const INT_MAX_STR_DIGITS: usize = 4300;
 
+/// `frontmatter_literal.LITERAL_MAX_CHARS`: a longer bracketed value stays text.
+pub const LITERAL_MAX_CHARS: usize = 16_384;
+/// `frontmatter_literal.LITERAL_MAX_DEPTH`: deeper nesting stays text.
+pub const LITERAL_MAX_DEPTH: usize = 32;
+
+/// Port of `brigade.frontmatter_literal._within_bounds` (#2415): whether a
+/// bracketed front matter value is short and shallow enough to evaluate.
+/// Length counts code points, as `len(str)` does. Openers inside a quoted
+/// string do not count, and a backslash escapes the next character inside
+/// quotes, exactly as the Python scan treats them.
+pub fn literal_within_bounds(value: &str) -> bool {
+    if value.chars().count() > LITERAL_MAX_CHARS {
+        return false;
+    }
+    let openers = value
+        .chars()
+        .filter(|c| matches!(c, '[' | '(' | '{'))
+        .count();
+    if openers <= LITERAL_MAX_DEPTH {
+        return true;
+    }
+    let (mut depth, mut quote, mut escaped) = (0isize, None::<char>, false);
+    for c in value.chars() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+        } else if c == '\'' || c == '"' {
+            quote = Some(c);
+        } else if matches!(c, '[' | '(' | '{') {
+            depth += 1;
+            if depth > LITERAL_MAX_DEPTH as isize {
+                return false;
+            }
+        } else if matches!(c, ']' | ')' | '}') {
+            // Python's scan lets the depth go negative, and so does this one.
+            depth -= 1;
+        }
+    }
+    true
+}
+
 /// The subset of `ast.literal_eval` front-matter lists use: strings (with
 /// the `r` and `u` prefixes, escapes and implicit concatenation), integers in
 /// any base and floats with one sign, `True`, `False`, `None`, lists and
@@ -632,7 +678,10 @@ pub fn front_matter(text: &str) -> Vec<(String, Value)> {
             continue;
         }
         let parsed = if value.starts_with('[') && value.ends_with(']') {
-            match literal_eval(value) {
+            match literal_within_bounds(value)
+                .then(|| literal_eval(value))
+                .flatten()
+            {
                 Some(lit @ (Lit::List(_) | Lit::Tuple(_))) => Value::Lit(lit),
                 _ => Value::Str(value.into()),
             }
