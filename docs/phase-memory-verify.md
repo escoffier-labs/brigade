@@ -516,14 +516,21 @@ Slice 9's resolver implementation requires its own security review. This contrac
    and `GIT_GRAFT_FILE`. The wrapper then sets exactly these:
    `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` (`NUL` on
    Windows), `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`. System
-   and global config, including the XDG location, are never read.
+   and global config, including the XDG location, are never read. The proxy
+   and TLS variables curl reads are removed as well: `http_proxy`,
+   `https_proxy`, `all_proxy` and `no_proxy` in either case,
+   `CURL_CA_BUNDLE`, `SSL_CERT_FILE` and `SSL_CERT_DIR`, so the fetch uses
+   the system trust store and connects directly.
 3. Pass `--no-replace-objects` and these `-c` overrides on every call:
    `core.fsmonitor=false`, `core.hooksPath` set to a directory that does not
    exist, `credential.helper=` (empty, which clears every helper),
    `core.askPass=`, `core.alternateRefsCommand=`, `maintenance.auto=false`,
-   `gc.auto=0`, `fetch.recurseSubmodules=false`, `protocol.allow=never` and
-   `protocol.https.allow=always`. SSH and every other transport are not
-   allowed, so no `core.sshCommand` or `GIT_SSH_COMMAND` is set.
+   `gc.auto=0`, `fetch.recurseSubmodules=false`, `protocol.allow=never`,
+   `protocol.https.allow=always`, `http.sslVerify=true`, `http.proxy=`
+   (empty), `http.followRedirects=false`, `http.extraHeader=` (empty, which
+   clears every header) and `http.cookieFile=` (empty). SSH and every other
+   transport are not allowed, so no `core.sshCommand` or `GIT_SSH_COMMAND`
+   is set.
 4. Work in the git repository at the `[[verify.workspace]]` path bound to the
    card's scope, and refuse when `git rev-parse --show-toplevel` names any
    other directory.
@@ -533,7 +540,10 @@ Slice 9's resolver implementation requires its own security review. This contrac
    `core.hooksPath`, `core.sshCommand`, `core.gitProxy`, `core.askPass`,
    `core.alternateRefsCommand`, any `credential.*`, any `alias.*`,
    `url.*.insteadOf` or `url.*.pushInsteadOf`, `remote.*.vcs`,
-   `remote.*.uploadpack`, or `protocol.*`. The `-c` overrides cover what
+   `remote.*.uploadpack`, `remote.*.proxy` or `remote.*.proxyAuthMethod`,
+   any `http.*` key (including the per-URL `http.<url>.*` form, so no TLS,
+   CA, client certificate, proxy, redirect, header or cookie setting from
+   the repository applies), or `protocol.*`. The `-c` overrides cover what
    they can. Includes cannot be overridden, so a repository that has one is
    refused and never read. git never lets an alias shadow a built-in
    command, and aliases are refused anyway.

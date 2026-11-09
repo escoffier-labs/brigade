@@ -474,9 +474,12 @@ of `tests/test_memory_reflect_hub.py`):
   path and a `reference-transaction` hook that would write a marker file, a
   credential helper, an alias, an `insteadOf` rewrite, `ext::` and `file://`
   remote URLs, an alternate refs command, a remote helper, a grafts file, a
-  tag refspec in config, an inherited `GIT_DIR`, and a fetch whose porcelain
-  output does not prove the destination ref. A planted replacement ref leaves
-  the result unchanged.
+  tag refspec in config, an inherited `GIT_DIR`, local `http.sslVerify=false`,
+  a per-URL `http.<url>.proxy`, `remote.<name>.proxy`, `http.extraHeader`,
+  `http.followRedirects=true`, an inherited `https_proxy` pointing at a local
+  listener that records any connection, and a fetch whose porcelain output
+  does not prove the destination ref. A planted replacement ref leaves the
+  result unchanged.
 - Principal and scope quota replies stop proposing without a failure.
 - A duplicate pending reply records the existing id.
 - The pending ceiling stops new proposals.

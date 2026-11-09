@@ -91,18 +91,23 @@ The resolver MUST:
    `--no-pager` and no prompt.
 2. Remove every inherited `GIT_*` variable, then set exactly
    `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
-   `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`.
+   `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`. Also remove the
+   curl proxy and TLS variables (`*_proxy` in either case, `CURL_CA_BUNDLE`,
+   `SSL_CERT_FILE`, `SSL_CERT_DIR`).
 3. Pass `--no-replace-objects` and `-c` overrides on every call:
    `core.fsmonitor=false`, `core.hooksPath` at a missing directory,
    `credential.helper=`, `core.askPass=`, `core.alternateRefsCommand=`,
    `maintenance.auto=false`, `gc.auto=0`, `fetch.recurseSubmodules=false`,
-   `protocol.allow=never` and `protocol.https.allow=always`. No SSH.
+   `protocol.allow=never`, `protocol.https.allow=always`,
+   `http.sslVerify=true`, `http.proxy=`, `http.followRedirects=false`,
+   `http.extraHeader=` and `http.cookieFile=`. No SSH.
 4. Work in the `[[verify.workspace]]` repository bound to the card's scope,
    with `git rev-parse --show-toplevel` equal to that path.
 5. Read local config with `git config --local --no-includes --list` and
    return None for any include or includeIf, core.fsmonitor, core.hooksPath,
    core.sshCommand, core.gitProxy, core.askPass, core.alternateRefsCommand,
-   credential, alias, url insteadOf, remote vcs or uploadpack, or protocol
+   credential, alias, url insteadOf, remote vcs, uploadpack, proxy or
+   proxyAuthMethod, any http.* key (per-URL forms included), or protocol
    entry.
 6. Accept only `https` URLs for the remotes of allowed refs. `ext::`, `fd::`,
    `file::`, `file://`, local paths and every other transport return None.
