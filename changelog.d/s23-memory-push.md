@@ -22,6 +22,8 @@
   replica, so a search returns no card text `memory_hits` could not send. Local workspace cards
   come back apart as `local_matches`. The Grok Bot memory profile stays grant-scoped.
   `connector` applies the push filter and counts its matches as reads, as any explicit search
-  does. The unsolicited `memory_hits` searches (`push`) are not counted.
+  does. The unsolicited `memory_hits` searches (`push`) are not counted. Explicit connector
+  searches still append their search-log record, from the matches they show, so follow-up and
+  redundancy metrics keep counting them.
 - A push `card` read without a scope considers only push-eligible copies, so withheld copies
   never cause `memory_card_ambiguous` or appear in its scope list.

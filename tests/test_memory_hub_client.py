@@ -7,6 +7,7 @@ import dataclasses
 import hashlib
 import io
 import json
+import shutil
 import os
 import stat
 import threading
@@ -2988,3 +2989,49 @@ def test_dot_memory_search_holds_only_what_push_could_send(hub, tmp_path, monkey
     assert down["matches"] == [] and down["warning"] == "hub_search_unavailable"
     assert down["retrieval"]["hub"] == "unavailable" and "fallback" not in down["retrieval"]
     assert [m["card_id"] for m in down["local_matches"]] == ["local"]
+
+
+# --- S23 fix round 4: connector searches keep feeding the search log ---------------------------------
+
+
+def _search_log(target: Path) -> list[dict]:
+    path = target / ".brigade" / "memory" / "search-log.jsonl"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+
+def test_dot_memory_search_appends_the_cli_search_log_record(hub, tmp_path):
+    target = workspace(tmp_path, mode="read", local="---\ntitle: Local otter\n---\notter local text\n")
+    _put(hub, "fleet", "reviewed", "otter reviewed")
+    hub.cards[("fleet", "reviewed")]["trust"] = "reviewed"
+    _put(hub, "fleet", "node-draft", "otter node draft")
+    tools = _dot_cli(target)
+    tools.memory_search("otter")
+    [entry] = _search_log(target)
+    # The CLI's record shape, from the matches the response showed: the withheld draft adds nothing.
+    assert set(entry) == {"ts", "query", "card_ids", "card_aliases"}
+    assert (entry["query"], entry["card_ids"]) == ("otter", ["reviewed", "local"])
+    assert "node-draft" not in json.dumps(entry) and "otter reviewed" not in json.dumps(entry)
+    tools.memory_search("otter")
+    status = memory_cmd.search_recall_status(target)
+    assert status["searches"] == 2
+
+
+def test_an_unwritable_search_log_still_returns_the_search(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "fleet", "reviewed", "otter reviewed")
+    hub.cards[("fleet", "reviewed")]["trust"] = "reviewed"
+    tools = _dot_cli(target)
+    expected = tools.memory_search("otter")
+    (target / ".brigade" / "memory" / "search-log.jsonl").unlink()
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("log store exploded")
+
+    original = memory_cmd._record_search_log
+    monkeypatch.setattr(memory_cmd, "_record_search_log", broken)
+    assert tools.memory_search("otter") == expected
+    monkeypatch.setattr(memory_cmd, "_record_search_log", original)
+    # A log path the writer cannot create fails open too.
+    shutil.rmtree(target / ".brigade" / "memory")
+    (target / ".brigade" / "memory").write_text("not a directory", encoding="utf-8")
+    assert tools.memory_search("otter") == expected

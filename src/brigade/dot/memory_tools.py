@@ -322,7 +322,23 @@ class MemoryTools:
         )
         if warning:
             payload["warning"] = warning
+        self._log_search(query, [*hub_matches, *local_matches])
         return payload
+
+    def _log_search(self, query: str, shown: list[dict[str, Any]]) -> None:
+        """Append the search-log record the CLI writes for an explicit search, fail-open.
+
+        Only an explicit `memory_search` reaches here, never the unsolicited `memory_hits`. The record
+        holds what the CLI logs (time, normalized query, top card ids and aliases), taken from the matches
+        this response shows, so a card the hub withheld adds nothing.
+        """
+        from .. import memory_cmd
+
+        try:
+            memory_cmd._record_search_log(self.workspace, query=query, matches=shown)
+        except Exception:
+            # A log failure never changes the tool response.
+            return
 
     def _workspace_label(self) -> str | None:
         if not self.profile.prompt_load_scan:
