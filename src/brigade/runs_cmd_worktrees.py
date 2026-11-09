@@ -114,6 +114,8 @@ def prune_worktrees(
             if apply:
                 try:
                     runguard.remove_worktree(repo_root, path, force=False)
+                    if path.exists():
+                        raise runguard.RunGuardError("kept: worktree still exists (pending handoffs or git refusal)")
                     removed.append(path)
                 except (runguard.RunGuardError, OSError) as exc:
                     classification["removable"] = False

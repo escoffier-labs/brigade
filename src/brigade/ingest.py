@@ -9,6 +9,7 @@ Conservative by design:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -21,7 +22,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List
 
-from . import dirfd
+from . import dirfd, handoff_worktrees
 from .card_fingerprint import (
     CardMatch,
     ensure_card_id_frontmatter,
@@ -77,19 +78,18 @@ SKIP_INVALID_SOURCE_CONFIG = "invalid handoff source config"
 
 # Git state that would point `git -C <inbox>` at some other repository or
 # stop discovery short of the one that owns the inbox.
-_GIT_LOCATION_ENV = (
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_COMMON_DIR",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_CEILING_DIRECTORIES",
-)
-_TRACKED_SKIP_REASON = "tracked by git or tracking unverifiable; left in place"
+_GIT_LOCATION_ENV = handoff_worktrees.GIT_LOCATION_ENV
+_TRACKED_SKIP_CODE = "tracked-or-unverifiable"
+_MAX_DRAFT_SUFFIX = 1000
+_HANDLED_KINDS = frozenset({"promoted", "reinforced", "routed", "inboxed"})
 
 
 class StaleCardError(OSError):
     """The card no longer matches the expected SHA a handoff was written against."""
+
+
+class ChangedHandoffError(OSError):
+    """The handoff's bytes differ from the snapshot that was delivered."""
 
 
 class TrackedHandoffError(RuntimeError):
@@ -124,7 +124,16 @@ class IngestStats:
     routed: int = 0
     inboxed: int = 0
     skipped: int = 0
+    failed: int = 0
     actions: List[str] = field(default_factory=list)
+    # sha256 of every handoff handled this run, so one handoff copied into
+    # several worktree inboxes is ingested once.
+    seen_digests: set[str] = field(default_factory=set)
+
+    @property
+    def status(self) -> str:
+        """ok, or partial when some handoffs failed and the rest still ran."""
+        return "partial" if self.failed else "ok"
 
 
 def _resolve_inbox_paths(target: Path) -> list[Path]:
@@ -140,8 +149,11 @@ def _resolve_inbox_paths(target: Path) -> list[Path]:
 
     paths: list[Path] = []
     seen: set[str] = set()
+    declared: dict[Path, list[str]] = {}
 
-    def add(path: Path) -> None:
+    def add(path: Path, root: Path | None = None, rel: str | None = None) -> None:
+        if root is not None and rel is not None:
+            declared.setdefault(root, []).append(rel)
         if not path.is_dir():
             return
         resolved = path.resolve()
@@ -153,19 +165,36 @@ def _resolve_inbox_paths(target: Path) -> list[Path]:
 
     cfg = load_config(target)
     if cfg is None:
-        add(target / ".claude" / "memory-handoffs")
+        add(target / ".claude" / "memory-handoffs", target, ".claude/memory-handoffs")
     else:
         for h in sorted(cfg.selection.harnesses):
             rel = WRITER_INBOXES.get(h)
             if rel:
-                add(target / rel)
-    for extra in _handoff_source_inbox_paths(target):
-        add(extra)
+                add(target / rel, target, rel)
+    for root, rel in _handoff_source_inboxes(target):
+        add(root / rel, root, rel)
+    # Handoffs written in a linked worktree of a watched root are found
+    # through `git worktree list`, never a directory walk.
+    for root, rels in declared.items():
+        # A root below its checkout's top level maps to the same subdirectory
+        # in each linked checkout, walked without following links.
+        prefix = handoff_worktrees.checkout_prefix(root)
+        if prefix is None:
+            continue
+        for worktree in handoff_worktrees.linked_worktrees(root):
+            for rel in dict.fromkeys(rels):
+                inbox = handoff_worktrees.contained_inbox(worktree, "/".join((*prefix, rel)))
+                if inbox is not None:
+                    add(inbox)
     return paths
 
 
 def _handoff_source_inbox_paths(target: Path) -> list[Path]:
-    """Inbox directories declared in `.brigade/handoff-sources.json`.
+    return [root / rel for root, rel in _handoff_source_inboxes(target)]
+
+
+def _handoff_source_inboxes(target: Path) -> list[tuple[Path, str]]:
+    """(root, inbox) pairs declared in `.brigade/handoff-sources.json`.
 
     Raises ValueError when the file exists but cannot be read or parsed, so
     ingest does not go green while omitting configured roots.
@@ -185,7 +214,7 @@ def _handoff_source_inbox_paths(target: Path) -> list[Path]:
         config = _load_sources(target, sources_path)
     except (OSError, ValueError) as exc:
         raise ValueError(f"invalid handoff source config {sources_path}: {exc}") from exc
-    return [watched.root / watched.inbox for watched in config.watched]
+    return [(watched.root, watched.inbox) for watched in config.watched]
 
 
 def run(
@@ -253,20 +282,44 @@ def ingest_into(
 
     for handoffs_dir in handoff_dirs:
         processed_dir = handoffs_dir / "processed"
-        handoffs, tracked = _list_handoffs(handoffs_dir)
+        try:
+            handoffs, tracked = _list_handoffs(handoffs_dir)
+        except OSError:
+            _record_failure(stats, handoffs_dir, "inbox-unreadable")
+            continue
         for path in tracked:
             stats.skipped += 1
-            stats.actions.append(f"skip   {path.name}  ({_TRACKED_SKIP_REASON})")
+            stats.actions.append(_summary("skip", path.name, _TRACKED_SKIP_CODE))
         for path in handoffs:
-            stats.processed += 1
-            sections = parse(path)
-            outcome = decide(
-                sections,
-                target=owner,
-                promote_cards=promote_cards,
-                route_documents=route_documents,
-            )
+            # One unreadable or unarchivable handoff is recorded and skipped;
+            # it must not abort the rest of the batch.
             try:
+                # One read. The digest, the parse and every delivered copy
+                # come from these bytes, so the digest names what was handled.
+                snapshot = path.read_bytes()
+                sha = hashlib.sha256(snapshot).hexdigest()
+                if sha in stats.seen_digests:
+                    if not dry_run:
+                        _archive(path, processed_dir, sha)
+                    stats.skipped += 1
+                    stats.actions.append(_summary("skip", path.name, "duplicate-content"))
+                    continue
+                # Bad bytes or malformed structure belong to this handoff
+                # only. Guard and invariant failures further on stay fatal.
+                try:
+                    sections = parse(path, snapshot)
+                except UnicodeDecodeError:
+                    _record_failure(stats, path, "invalid-encoding")
+                    continue
+                except ValueError:
+                    _record_failure(stats, path, "invalid-content")
+                    continue
+                outcome = decide(
+                    sections,
+                    target=owner,
+                    promote_cards=promote_cards,
+                    route_documents=route_documents,
+                )
                 action = _execute(
                     outcome,
                     handoff_path=path,
@@ -275,9 +328,24 @@ def ingest_into(
                     inbox_dir=inbox_dir,
                     processed_dir=processed_dir,
                     dry_run=dry_run,
+                    snapshot=snapshot,
                 )
             except TrackedHandoffError:
-                action = Action("skipped", f"skip   {path.name}  ({_TRACKED_SKIP_REASON})")
+                action = Action("skipped", _summary("skip", path.name, _TRACKED_SKIP_CODE))
+            except ChangedHandoffError:
+                # Changed since it was read: what was delivered is not what
+                # sits here, so leave it pending and do not count the digest.
+                _record_failure(stats, path, "handoff-changed")
+                continue
+            except OSError:
+                _record_failure(stats, path, "io-error")
+                continue
+            # Only content that was published, appended or archived counts as
+            # handled. A retryable skip leaves the handoff pending, so a later
+            # identical copy must not be archived as its duplicate.
+            if action.kind in _HANDLED_KINDS:
+                stats.seen_digests.add(sha)
+            stats.processed += 1
             stats.actions.append(action.summary)
             if action.kind == "promoted":
                 stats.promoted += 1
@@ -292,9 +360,9 @@ def ingest_into(
     return 0
 
 
-def parse(path: Path) -> Dict[str, str]:
+def parse(path: Path, data: bytes | None = None) -> Dict[str, str]:
     """Split a handoff into sections keyed by lowercased ## heading."""
-    body = path.read_text(encoding="utf-8")
+    body = data.decode("utf-8") if data is not None else path.read_text(encoding="utf-8")
     sections: Dict[str, str] = {}
     last_name = None
     last_pos = 0
@@ -316,6 +384,9 @@ class Outcome:
     dest: Path | None = None
     reason: str = ""
     match: CardMatch | None = None
+    # Stable reason code. `reason` can quote handoff fields and is never
+    # written to logs, reports or review receipts; `code` is.
+    code: str = ""
 
 
 def _normalize_for_dedupe(text: str) -> str:
@@ -340,13 +411,18 @@ def decide(
     route_documents: bool,
 ) -> Outcome:
     if "memory proposal notification" in sections:
-        return Outcome("inboxed", reason="memory proposal notification requires explicit digest-bound review/apply")
+        return Outcome(
+            "inboxed",
+            code="proposal-notification",
+            reason="memory proposal notification requires explicit digest-bound review/apply",
+        )
     action = sections.get("recommended memory action", "").strip().lower()
 
     stray = [s for s in sections if s not in KNOWN_SECTIONS]
     if stray:
         return Outcome(
             "inboxed",
+            code="unknown-sections",
             reason=f"unknown sections present ({len(stray)}); the parser may have split content",
         )
 
@@ -355,34 +431,46 @@ def decide(
         content = sections.get("suggested card content", "")
         content, fence_error = normalize_suggested_card_content(content)
         if not safe_card_name(card):
-            return Outcome("inboxed", reason="target card name unsafe")
+            return Outcome("inboxed", code="unsafe-card-name", reason="target card name unsafe")
         if fence_error:
-            return Outcome("inboxed", reason=fence_error)
+            return Outcome("inboxed", code="card-fence-error", reason=fence_error)
         # The same parser and structure rules lint and draft use, so the three agree.
         structure = card_frontmatter_structure_problems(content)
         if structure:
-            return Outcome("inboxed", reason="; ".join(structure))
+            return Outcome("inboxed", code="card-frontmatter-invalid", reason="; ".join(structure))
         reserved = _identity_migration_fields(content.lstrip())
         if reserved:
             return Outcome(
                 "inboxed",
+                code="identity-migration-fields",
                 reason=f"identity migration metadata requires review: {', '.join(reserved)}",
             )
         dest = target / "memory" / "cards" / card
         # Both actions can replace the named path. Do not let an ordinary
         # handoff discard reviewed migration keys, even under create-card.
         if any(path.is_symlink() for path in (target, target / "memory", dest.parent, dest)):
-            return Outcome("inboxed", reason="card destination is symlinked; requires review")
+            return Outcome(
+                "inboxed", code="card-destination-symlinked", reason="card destination is symlinked; requires review"
+            )
         if dest.exists():
             if not dest.is_file():
-                return Outcome("inboxed", reason="card destination is not a regular file; requires review")
+                return Outcome(
+                    "inboxed",
+                    code="card-destination-not-regular",
+                    reason="card destination is not a regular file; requires review",
+                )
             try:
                 governed = _identity_migration_fields(read_text_nofollow(dest))
             except OSError:
-                return Outcome("inboxed", reason="cannot safely inspect card destination; requires review")
+                return Outcome(
+                    "inboxed",
+                    code="card-destination-unreadable",
+                    reason="cannot safely inspect card destination; requires review",
+                )
             if governed:
                 return Outcome(
                     "inboxed",
+                    code="governed-card-migration",
                     reason=f"governed card identity migration requires review: {', '.join(governed)}",
                 )
         # A stale base must not silently replace a card that changed after the
@@ -391,13 +479,20 @@ def decide(
         if action == "update-card" and expected:
             current = read_card_bytes(target, card)
             if not SHA256_RE.fullmatch(expected):
-                return Outcome("inboxed", reason=f"{EXPECTED_SHA_SECTION} is not 64 hex characters")
+                return Outcome(
+                    "inboxed", code="expected-sha-invalid", reason=f"{EXPECTED_SHA_SECTION} is not 64 hex characters"
+                )
             if current is not None and not sha_matches(current, expected):
-                return Outcome("inboxed", reason=f"update-card {EXPECTED_SHA_SECTION} does not match the current card")
+                return Outcome(
+                    "inboxed",
+                    code="expected-sha-mismatch",
+                    reason=f"update-card {EXPECTED_SHA_SECTION} does not match the current card",
+                )
         sig = scan_untrusted(content)
         if sig.flagged:
             return Outcome(
                 "inboxed",
+                code="card-injection-signal",
                 reason=f"injection signal in card content ({sig.count} marker(s))",
             )
         # create-card only: reinforce known facts instead of filing near-duplicates.
@@ -406,23 +501,24 @@ def decide(
             match_outcome = _decide_create_card_match(content, target=target)
             if match_outcome is not None:
                 return match_outcome
-        return Outcome("promoted", dest=dest)
+        return Outcome("promoted", code="card-promoted", dest=dest)
 
     if action == "no-card" and route_documents:
         document = sections.get("target document", "").strip()
         content = sections.get("suggested document content", "")
         if not document:
-            return Outcome("inboxed", reason="no-card handoff missing target document")
+            return Outcome("inboxed", code="missing-target-document", reason="no-card handoff missing target document")
         if not safe_document_target(document):
-            return Outcome("inboxed", reason="target document not in safe list")
+            return Outcome("inboxed", code="unsafe-target-document", reason="target document not in safe list")
         destination_problem = document_destination_problem(document, target)
         if destination_problem:
-            return Outcome("inboxed", reason=destination_problem)
+            return Outcome("inboxed", code="document-destination-unsafe", reason=destination_problem)
         if not content.strip():
-            return Outcome("inboxed", reason="empty document content")
+            return Outcome("inboxed", code="empty-document-content", reason="empty document content")
         if "\n## " in ("\n" + content):
             return Outcome(
                 "inboxed",
+                code="document-has-headings",
                 reason="document content contains `##` headings (would parse as new section)",
             )
         dest = target / document
@@ -432,27 +528,36 @@ def decide(
         normalized_existing = _normalize_for_dedupe(existing)
         normalized_suggested = _normalize_for_dedupe(content)
         if normalized_suggested and normalized_suggested in normalized_existing:
-            return Outcome("inboxed", reason="document content already present in the target document")
+            return Outcome(
+                "inboxed",
+                code="document-content-present",
+                reason="document content already present in the target document",
+            )
         anchor = _first_meaningful_line(content)
         if anchor and anchor in existing:
-            return Outcome("inboxed", reason="document anchor already present in the target document")
+            return Outcome(
+                "inboxed",
+                code="document-anchor-present",
+                reason="document anchor already present in the target document",
+            )
         # Bootstrap files load into the session prefix every turn and silently
         # truncate past ~12k chars. Refuse an append that would push the file
         # over its budget; route to the inbox so a human trims or re-homes it.
         budget_problem = bootstrap_budget_problem(document, content, target)
         if budget_problem:
-            return Outcome("inboxed", reason=budget_problem)
+            return Outcome("inboxed", code="bootstrap-budget-exceeded", reason=budget_problem)
         sig = scan_untrusted(content)
         if sig.flagged:
             return Outcome(
                 "inboxed",
+                code="document-injection-signal",
                 reason=f"injection signal in document content ({sig.count} marker(s))",
             )
-        return Outcome("routed", dest=dest)
+        return Outcome("routed", code="document-appended", dest=dest)
 
     if action == "":
-        return Outcome("inboxed", reason="missing `Recommended memory action`")
-    return Outcome("skipped", reason="action not auto-handled")
+        return Outcome("inboxed", code="missing-action", reason="missing `Recommended memory action`")
+    return Outcome("skipped", code="action-not-auto-handled", reason="action not auto-handled")
 
 
 def _decide_create_card_match(content: str, *, target: Path) -> Outcome | None:
@@ -465,6 +570,7 @@ def _decide_create_card_match(content: str, *, target: Path) -> Outcome | None:
     if match.kind == "exact":
         return Outcome(
             "reinforced",
+            code="card-reinforced",
             dest=match.path,
             reason=f"exact fingerprint match for {rel}",
             match=match,
@@ -473,11 +579,13 @@ def _decide_create_card_match(content: str, *, target: Path) -> Outcome | None:
     if match.opposite_polarity:
         return Outcome(
             "inboxed",
+            code="contradiction-candidate",
             reason=(f"contradiction candidate vs {rel} (similarity={similarity}, opposite polarity); do not reinforce"),
             match=match,
         )
     return Outcome(
         "inboxed",
+        code="near-match-proposal",
         reason=(f"near-match reinforce proposal: {rel} (similarity={similarity}); reviewer veto before merging"),
         match=match,
     )
@@ -681,11 +789,13 @@ def _execute(
     inbox_dir: Path,
     processed_dir: Path,
     dry_run: bool,
+    snapshot: bytes | None = None,
 ) -> Action:
     from .inbox_lock import InboxLockTimeout
     from .memory_evidence_log import log_match
 
     name = handoff_path.name
+    snapshot_sha = hashlib.sha256(snapshot).hexdigest() if snapshot is not None else None
     # Re-check before destination writes as well as at the final archive boundary.
     if not dry_run and _is_tracked(handoff_path, _git_tracked_files(handoff_path.parent)):
         raise TrackedHandoffError(f"refusing to ingest git-tracked handoff {handoff_path}")
@@ -699,34 +809,36 @@ def _execute(
         try:
             _publish_promoted_card(dest, target, sections, dry_run=dry_run, expected_sha=expected_sha)
         except InboxLockTimeout:
-            return Action("skipped", f"skip → {name} (card publication busy; retry handoff later)")
+            return Action("skipped", _summary("skip", name, "card-publication-busy"))
         except (OSError, ValueError) as exc:
             # A reviewed migration may have arrived after decide(). Route the
             # original handoff for review without replacing that revision.
+            stale = isinstance(exc, StaleCardError)
+            code = "expected-sha-stale" if stale else "card-publication-changed"
             reason = (
                 f"update-card {EXPECTED_SHA_SECTION} no longer matches the card; requires review"
-                if isinstance(exc, StaleCardError)
+                if stale
                 else "card publication changed or became governed; requires review"
             )
             return _execute(
-                Outcome("inboxed", reason=reason),
+                Outcome("inboxed", code=code, reason=reason),
                 handoff_path,
                 target,
                 sections,
                 inbox_dir,
                 processed_dir,
                 dry_run,
+                snapshot,
             )
-        summary = f"promote → {dest.relative_to(target)}  ({name})"
+        summary = _summary("promote", name, outcome.code)
         if not dry_run:
-            _archive(handoff_path, processed_dir)
+            _archive(handoff_path, processed_dir, snapshot_sha)
         return Action("promoted", summary)
 
     if outcome.kind == "reinforced":
         dest = outcome.dest
         assert dest is not None
-        rel = dest.relative_to(target).as_posix()
-        summary = f"reinforce → {rel}  ({name}; matched existing card)"
+        summary = _summary("reinforce", name, outcome.code, _match_meta(outcome, target))
         if not dry_run:
             evidence_pointer = _evidence_pointer(handoff_path, sections=sections, target=target)
             reinforce_existing_card(
@@ -734,50 +846,57 @@ def _execute(
                 today=date.today(),
                 evidence_pointer=evidence_pointer,
             )
-            log_match(target, outcome.match, _archive(handoff_path, processed_dir))
+            log_match(target, outcome.match, _archive(handoff_path, processed_dir, snapshot_sha))
         return Action("reinforced", summary)
 
     if outcome.kind == "routed":
         dest = outcome.dest  # type: ignore[assignment]
         assert dest is not None
         content = sections.get("suggested document content", "").strip()
-        summary = f"append → {dest.relative_to(target)}  ({name})"
+        summary = _summary("append", name, outcome.code)
         if not dry_run:
             try:
                 _append_document_nofollow(target, dest, "\n\n" + content + "\n")
             except OSError:
                 return _execute(
-                    Outcome("inboxed", reason="document destination is linked or unwritable; requires review"),
+                    Outcome(
+                        "inboxed",
+                        code="document-destination-unwritable",
+                        reason="document destination is linked or unwritable; requires review",
+                    ),
                     handoff_path,
                     target,
                     sections,
                     inbox_dir,
                     processed_dir,
                     dry_run,
+                    snapshot,
                 )
-            _archive(handoff_path, processed_dir)
+            _archive(handoff_path, processed_dir, snapshot_sha)
         return Action("routed", summary)
 
     if outcome.kind in ("inboxed", "skipped"):
         slug = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        dest = inbox_dir / f"{slug}-{handoff_path.stem}.md"
+        # Ordinary names pass through unchanged; anything else is replaced.
+        stem = re.sub(r"[^A-Za-z0-9._-]", "_", handoff_path.stem)[:120]
         verb = "inbox" if outcome.kind == "inboxed" else "skip-inbox"
-        summary = f"{verb} → {dest.relative_to(target)}  ({name}; {outcome.reason})"
+        summary = _summary(verb, name, outcome.code, _match_meta(outcome, target))
         if not dry_run:
             inbox_dir.mkdir(parents=True, exist_ok=True)
             # Copy the original file verbatim so reviewers see what the
             # harness actually wrote, not a reconstruction.
-            original = handoff_path.read_text(encoding="utf-8")
+            original = snapshot.decode("utf-8") if snapshot is not None else handoff_path.read_text(encoding="utf-8")
             header = (
-                f"<!-- routed from {handoff_path.name}\n     reason: {outcome.reason}\n     routed-at: {slug} -->\n\n"
+                f"<!-- routed from {handoff_worktrees.safe_text(handoff_path.name)}\n"
+                f"     reason: {outcome.code}{_match_meta(outcome, target)}\n     routed-at: {slug} -->\n\n"
             )
-            dest.write_text(header + original, encoding="utf-8")
+            dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
             log_match(target, outcome.match, dest)
-            _archive(handoff_path, processed_dir)
+            _archive(handoff_path, processed_dir, snapshot_sha)
         # Both inboxed and skipped are now archived; classify them uniformly.
         return Action("inboxed", summary)
 
-    return Action("skipped", f"skip   {name}  ({outcome.reason})")
+    return Action("skipped", _summary("skip", name, outcome.code))
 
 
 def _frontmatter(text: str) -> tuple[dict[str, str], bool]:
@@ -830,8 +949,8 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
     An absent git binary or a directory outside any work tree yields an empty
     set. Any other failure returns None so callers can fail closed.
     """
-    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_ENV}
-    env["LC_ALL"] = "C"
+    # Rescue relies on this check too: no injected config or location.
+    env = handoff_worktrees.sanitized_git_env()
     env["GIT_DISCOVERY_ACROSS_FILESYSTEM"] = "true"
     try:
         directory = directory.resolve()
@@ -960,7 +1079,7 @@ def _list_handoffs(handoffs_dir: Path) -> tuple[List[Path], List[Path]]:
     out: List[Path] = []
     tracked: List[Path] = []
     for p in sorted(handoffs_dir.iterdir()):
-        if p.is_file() and p.suffix == ".md" and p.name != "TEMPLATE.md":
+        if p.is_file() and handoff_worktrees.is_handoff_filename(p.name):
             if _is_tracked(p, tracked_files):
                 tracked.append(p)
             else:
@@ -968,10 +1087,12 @@ def _list_handoffs(handoffs_dir: Path) -> tuple[List[Path], List[Path]]:
     return out, tracked
 
 
-def _archive(src: Path, processed_dir: Path) -> Path:
+def _archive(src: Path, processed_dir: Path, expected_sha: str | None = None) -> Path:
     # Re-check right before the move: a file tracked after listing must stay.
     if _is_tracked(src, _git_tracked_files(src.parent)):
         raise TrackedHandoffError(f"refusing to archive git-tracked handoff {src}")
+    if expected_sha is not None and hashlib.sha256(src.read_bytes()).hexdigest() != expected_sha:
+        raise ChangedHandoffError(f"handoff changed since it was read: {src.name}")
     processed_dir.mkdir(parents=True, exist_ok=True)
     dest = processed_dir / src.name
     if dest.exists():
@@ -979,6 +1100,54 @@ def _archive(src: Path, processed_dir: Path) -> Path:
         dest = processed_dir / f"{src.stem}-{stamp}{src.suffix}"
     shutil.move(str(src), dest)
     return dest
+
+
+def _write_review_draft(inbox_dir: Path, base: str, text: str) -> Path:
+    """Create a new review draft, never replacing an existing one.
+
+    Sanitizing and truncating handoff names can map two handoffs to one
+    stem within the same second, so a taken name gets a numbered suffix.
+    """
+    for index in range(_MAX_DRAFT_SUFFIX):
+        dest = inbox_dir / (f"{base}.md" if index == 0 else f"{base}-{index}.md")
+        try:
+            with dest.open("x", encoding="utf-8") as handle:
+                handle.write(text)
+        except FileExistsError:
+            continue
+        return dest
+    raise OSError(f"no free review draft name for {base}")
+
+
+def _summary(verb: str, name: str, code: str, meta: str = "") -> str:
+    """One action line: verb, safely encoded handoff filename, reason code.
+
+    Never carries handoff fields, content-derived text or exception text.
+    """
+    return f"{verb:<10} {handoff_worktrees.safe_text(name)}  [{code or 'unclassified'}]{meta}"
+
+
+def _match_meta(outcome: Outcome, target: Path) -> str:
+    """Bounded metadata about a matched existing card (from the card index)."""
+    match = outcome.match
+    if match is None:
+        return ""
+    try:
+        rel = match.path.relative_to(target).as_posix()
+    except ValueError:
+        rel = match.path.name
+    meta = f"  match={handoff_worktrees.safe_text(rel)}"
+    similarity = getattr(match, "similarity", None)
+    if isinstance(similarity, (int, float)):
+        meta += f" similarity={similarity:.2f}"
+    if getattr(match, "opposite_polarity", False):
+        meta += " polarity=opposite"
+    return meta
+
+
+def _record_failure(stats: IngestStats, path: Path, code: str) -> None:
+    stats.failed += 1
+    stats.actions.append(_summary("fail", path.name, code) + f"  in={handoff_worktrees.safe_text(path.parent)}")
 
 
 def _report(stats: IngestStats, dry_run: bool) -> None:
@@ -989,7 +1158,10 @@ def _report(stats: IngestStats, dry_run: bool) -> None:
     print(
         f"{tag}Processed {stats.processed}  Promoted {stats.promoted}  "
         f"Reinforced {stats.reinforced}  Routed {stats.routed}  "
-        f"Inboxed {stats.inboxed}  Skipped {stats.skipped}"
+        f"Inboxed {stats.inboxed}  Skipped {stats.skipped}  Failed {stats.failed}"
     )
-    if stats.processed == 0:
+    if stats.failed:
+        print(f"{tag}PARTIAL: {stats.failed} handoff(s) failed and were left in place; the rest were ingested")
+    elif stats.processed == 0:
         print(f"{tag}NO_UPDATES")
+    print(f"{tag}Status {stats.status}")

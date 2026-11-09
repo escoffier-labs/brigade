@@ -18,7 +18,7 @@ from queue import Empty
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterator
 
-from .. import localio, work_mode
+from .. import handoff_worktrees, localio, work_mode
 from ..component_paths import cache_root
 from ..isolated_exec import module_argv, trusted_cwd
 from ..wiring import expand_user_path, resolve_wired_target
@@ -34,7 +34,7 @@ from . import (
     write_attribution,
 )
 from .fingerprint import repo_worktree_fingerprint
-from .handoff_close import HANDOFF_STOP_NOTE as _HANDOFF_STOP_NOTE, closes_nothing_durable as _closes_nothing_durable
+from .handoff_close import closes_nothing_durable as _closes_nothing_durable, handoff_stop_note as _handoff_stop_note
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
 from .session_state import (
@@ -1960,9 +1960,7 @@ def _is_handoff_path(target: Path, raw_path: object) -> bool:
     if not path.is_absolute():
         path = target / path
     try:
-        path = path.resolve()
-        inbox = (target / ".claude" / "memory-handoffs").resolve()
-        return path.is_relative_to(inbox)
+        return handoff_worktrees.is_handoff_path(target, path.resolve())
     except OSError:
         return False
 
@@ -2081,10 +2079,9 @@ def _receipt_since(target: Path, started_at: object, *, session_fingerprint: str
 
 def _handoff_since(target: Path, started_at: object) -> bool:
     started = localio.parse_iso_datetime(started_at)
-    inbox = target / ".claude" / "memory-handoffs"
-    if started is None or not inbox.is_dir():
+    if started is None:
         return False
-    for path in inbox.glob("*.md"):
+    for path in (p for inbox in handoff_worktrees.handoff_inboxes(target) for p in inbox.glob("*.md")):
         if path.name == "TEMPLATE.md":
             continue
         try:
@@ -2583,7 +2580,7 @@ def _handle_event(
                 *shared_tree_notes,
             ]
             if handoff_target is not None:
-                records.append(_HANDOFF_STOP_NOTE)
+                records.append(_handoff_stop_note(handoff_target))
             return _additional_context(
                 "Stop",
                 "",
@@ -2597,7 +2594,7 @@ def _handle_event(
                 "",
                 target=handoff_target,
                 session_id=session_id,
-                records=[f"Verification is recorded. {_HANDOFF_STOP_NOTE}"],
+                records=[f"Verification is recorded. {_handoff_stop_note(handoff_target)}"],
             )
     return None
 

@@ -11,6 +11,7 @@ import os
 import shlex
 import shutil
 import stat
+import sys
 import tempfile
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -1523,6 +1524,8 @@ def remove_worktree(repo: Path, worktree_path: Path, *, force: bool = False) -> 
     if not worktree_path.exists():
         return
     root = git_root(repo)
+    if not _deliver_worktree_handoffs(worktree_path, root):
+        return
     args = ["worktree", "remove"]
     if force:
         args.append("--force")
@@ -1530,6 +1533,39 @@ def remove_worktree(repo: Path, worktree_path: Path, *, force: bool = False) -> 
     result = _git(root, *args, timeout=120.0)
     if result.code != 0:
         shutil.rmtree(worktree_path, ignore_errors=True)
+
+
+def _deliver_worktree_handoffs(worktree_path: Path, root: Path) -> bool:
+    """Move pending Memory Handoffs to the main checkout before removal.
+
+    Returns False when any handoff could not be delivered; the caller then
+    keeps the worktree so the handoff is not deleted with it.
+    """
+    from . import handoff_worktrees
+
+    try:
+        # Only a main checkout that owns the same common git dir as `root`,
+        # held open from validation through every write.
+        held = handoff_worktrees.open_main_checkout_for(worktree_path, repo=root)
+        try:
+            dest, dest_fd = held if held is not None else (None, None)
+            results = handoff_worktrees.rescue_pending_handoffs(worktree_path, dest, dest_fd=dest_fd)
+        finally:
+            if held is not None:
+                os.close(held[1])
+    except Exception as exc:  # noqa: BLE001 - callers run this from finally blocks
+        print(f"brigade: kept worktree {worktree_path}: handoff rescue error ({type(exc).__name__})", file=sys.stderr)
+        return False
+    failed = [r for r in results if r.state == "failed"]
+    for rescue in failed:
+        print(
+            f"brigade: handoff not delivered [{rescue.reason}] from {handoff_worktrees.safe_path(rescue.source)}"
+            + (f" kept as {handoff_worktrees.safe_path(rescue.dest)}" if rescue.dest else ""),
+            file=sys.stderr,
+        )
+    if failed:
+        print(f"brigade: kept worktree {worktree_path} so {len(failed)} pending handoff(s) survive", file=sys.stderr)
+    return not failed
 
 
 def brigade_worktree_root() -> Path:

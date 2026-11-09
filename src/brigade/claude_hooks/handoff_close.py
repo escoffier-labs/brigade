@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 HANDOFF_STOP_NOTE = (
@@ -10,6 +11,17 @@ HANDOFF_STOP_NOTE = (
     "`Nothing durable: <reason>`."
 )
 _NOTHING_DURABLE_PREFIX = "nothing durable:"
+_OWN_INBOX = "`.claude/memory-handoffs/`"
+
+
+def handoff_stop_note(target: Path) -> str:
+    """The Stop note for `target`, naming the inbox that outlives a linked worktree.
+
+    Outside a linked worktree this is `HANDOFF_STOP_NOTE` unchanged.
+    """
+    from .. import handoff_worktrees
+
+    return HANDOFF_STOP_NOTE.replace(_OWN_INBOX, handoff_worktrees.stop_hint(target), 1)
 
 
 def closes_nothing_durable(payload: dict[str, Any]) -> bool:

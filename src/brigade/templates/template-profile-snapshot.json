@@ -555,10 +555,10 @@
   "renders": {
     "repo-claude": [
       {
-        "byte_size": 1108,
+        "byte_size": 1125,
         "dst": ".brigade/handoff-sources.example.json",
         "rendered": false,
-        "sha256": "4d32bfa7dfa7816841aadf1c2efa6a049198c1face8bf721e6203c0333701a58"
+        "sha256": "562302a86ac8c273166f087c54b4440485e754cfc9e56c4d3ecdffbb7acce7ea"
       },
       {
         "byte_size": 872,
@@ -599,10 +599,10 @@
     ],
     "repo-claude-full": [
       {
-        "byte_size": 1108,
+        "byte_size": 1125,
         "dst": ".brigade/handoff-sources.example.json",
         "rendered": false,
-        "sha256": "4d32bfa7dfa7816841aadf1c2efa6a049198c1face8bf721e6203c0333701a58"
+        "sha256": "562302a86ac8c273166f087c54b4440485e754cfc9e56c4d3ecdffbb7acce7ea"
       },
       {
         "byte_size": 872,
@@ -673,10 +673,10 @@
         "sha256": "c06f4555a0c83196253ba661fdf82418414bd3cf2d172789e086fb6183ff4229"
       },
       {
-        "byte_size": 1108,
+        "byte_size": 1125,
         "dst": ".brigade/handoff-sources.example.json",
         "rendered": false,
-        "sha256": "4d32bfa7dfa7816841aadf1c2efa6a049198c1face8bf721e6203c0333701a58"
+        "sha256": "562302a86ac8c273166f087c54b4440485e754cfc9e56c4d3ecdffbb7acce7ea"
       },
       {
         "byte_size": 511,

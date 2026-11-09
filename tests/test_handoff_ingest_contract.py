@@ -452,7 +452,7 @@ def test_stale_card_between_decide_and_publish_is_routed_to_review(tmp_path: Pat
     card.write_bytes(edited.encode("utf-8"))
     action = _execute(ws, handoff, outcome)
     assert action.kind == "inboxed"
-    assert "no longer matches the card" in action.summary
+    assert "[expected-sha-stale]" in action.summary
     assert card.read_text(encoding="utf-8") == edited
     assert list((ws / "memory" / "handoff-inbox").glob("*.md"))
 
