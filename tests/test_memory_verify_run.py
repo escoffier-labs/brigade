@@ -928,8 +928,8 @@ def test_a_lost_reply_then_expiry_holds_the_card_until_its_tombstone_ages_out(ve
 def test_identical_ops_after_an_expired_stage_reuse_the_same_request_id(verify_hub, resolver, monkeypatch):
     target, hub, _, _ = verify_hub
     monkeypatch.setattr(vc, "secrets", FixedSecrets)
-    # The hub may have stored this request although no reply arrived. Here it answers retryable.
-    hub.propose_reply = (503, {"code": "memory_writer_busy", "error": "busy", "retryable": True})
+    # The reply is lost, so the hub may have stored this request.
+    hub.propose_reply = (503, {})
     now = int(time.time() * 1000)
     run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
     (first,) = [call for call in hub.calls if call["action"] == "propose"]
@@ -991,6 +991,35 @@ def test_at_the_tombstone_cap_no_proposal_opens_and_every_hold_stays(verify_hub,
     held = [entry for entry in state_of(target)["submissions"].values() if entry.get("expired")]
     assert len(held) == run_mod.MAX_TOMBSTONES
     assert "verified" not in entry_for(target, CARD_ID)  # Deferred, so no cooldown.
+
+
+def test_tombstones_that_reconcile_adds_count_toward_the_cap(verify_hub, resolver):
+    target, hub, _, _ = verify_hub
+    hub._commit("card.put", SCOPE, SECOND_ID, card_text((BLOCK, CLAIM)), "live", hubc.event_id())
+    # Two corrections meet a retryable refusal, so both stages wait for a replay.
+    hub.propose_reply = (503, {"code": "memory_writer_busy", "error": "busy", "retryable": True})
+    now = int(time.time() * 1000) - 8 * DAY
+    run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    assert len(packets(target)) == 2
+    hub.propose_reply = None
+    # Treat both as lost replies: the hub may hold them, so expiry keeps each as a tombstone.
+    state = state_of(target)
+    for entry in state["submissions"].values():
+        entry["unsettled"] = True
+    vstate.save(target, state)
+    # A third card arrives, and 511 tombstones are live: one short of the cap.
+    third = "card-third"
+    hub._commit("card.put", SCOPE, third, card_text((BLOCK, CLAIM)), "live", hubc.event_id())
+    expiry = now + pk.STAGE_DAYS * DAY
+    tombstones(target, run_mod.MAX_TOMBSTONES - 1, expiry)
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=expiry)
+    # Reconcile expires both stages into tombstones, which puts the run over the cap before any proposal.
+    assert report["skipped"][run_mod.STAGE_EXPIRED] == 2
+    live = [entry for entry in state_of(target)["submissions"].values() if entry.get("expired")]
+    assert len(live) == run_mod.MAX_TOMBSTONES + 1
+    # Every card checked in that run is deferred at the cap, the third one included.
+    assert report["proposals"] == [] and report["skipped"][run_mod.DEFERRED_TOMBSTONES] == 3
+    assert "verified" not in entry_for(target, third)
 
 
 def test_a_tombstone_that_ages_out_frees_a_slot_for_a_proposal(verify_hub, capsys, resolver):
@@ -1089,6 +1118,45 @@ def test_a_stale_manifest_after_a_lost_reply_keeps_the_card_held(verify_hub, res
     assert tombstone["expired"] is True and tombstone["client_event_id"] == pending["client_event_id"]
 
 
+def later_runs(target, now):
+    """Healthy runs 8 and 9 days after `now`."""
+    return [
+        run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now + days * DAY)
+        for days in (8, 9)
+    ]
+
+
+def test_an_expired_request_the_hub_refused_holds_nothing(verify_hub, resolver):
+    target, hub, fake, _ = verify_hub
+    now = int(time.time() * 1000) - 10 * DAY
+    hub.propose_reply = (429, {"code": "memory_proposal_scope_quota", "error": "quota"})
+    run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    assert "unsettled" not in next(iter(state_of(target)["submissions"].values()))
+    hub.propose_reply = None
+    eight, nine = later_runs(target, now)
+    # The quota answer was definite, so the expired request is forgotten and the card is checked again.
+    assert eight["skipped"][run_mod.STAGE_EXPIRED] == 1
+    assert CARD_ID in {card["card_id"] for card in eight["cards"]}
+    assert [item["card_id"] for item in eight["proposals"]] == [CARD_ID]
+    assert run_mod.UNRESOLVED_REQUEST not in eight["skipped"] and run_mod.UNRESOLVED_REQUEST not in nine["skipped"]
+    assert not any(entry.get("expired") for entry in state_of(target)["submissions"].values())
+
+
+def test_an_expired_request_whose_reply_was_lost_keeps_the_hold(verify_hub, resolver):
+    target, hub, fake, _ = verify_hub
+    now = int(time.time() * 1000) - 10 * DAY
+    hub.propose_reply = (503, {})
+    run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    assert next(iter(state_of(target)["submissions"].values()))["unsettled"] is True
+    hub.propose_reply = None
+    proposes = sum(1 for call in hub.calls if call["action"] == "propose")
+    eight, nine = later_runs(target, now)
+    assert eight["skipped"][run_mod.STAGE_EXPIRED] == 1 and eight["proposals"] == []
+    assert eight["skipped"][run_mod.UNRESOLVED_REQUEST] == 1 and nine["skipped"][run_mod.UNRESOLVED_REQUEST] == 1
+    assert CARD_ID not in {card["card_id"] for card in nine["cards"]}
+    assert sum(1 for call in hub.calls if call["action"] == "propose") == proposes
+
+
 def test_a_stage_with_an_altered_append_evidence_op_is_refused(verify_hub, capsys, resolver):
     target, hub, _, _ = verify_hub
     hub.propose_reply = (429, {"code": "memory_proposal_scope_quota", "error": "quota"})
@@ -1103,9 +1171,14 @@ def test_a_stage_with_an_altered_append_evidence_op_is_refused(verify_hub, capsy
     hub.calls.clear()
     status, report = verify(target, capsys)
     assert status == 0 and report["skipped"][run_mod.OPS_MISMATCH] == 1
-    assert writes(hub) == [] and packets(target) == []
-    # No new request id was minted from the altered stage.
-    assert [entry["client_event_id"] for entry in state_of(target)["submissions"].values()] == [request]
+    # The altered stage is never sent and its request id is never reused.
+    altered = record["ops"]
+    for call in writes(hub):
+        if call["action"] == "propose":
+            assert call["ops"] != altered and call["client_event_id"] != request
+    # The hub had refused the request by quota, so nothing holds the card: a fresh check proposes it.
+    assert [item["card_id"] for item in report["proposals"]] == [CARD_ID]
+    assert not any(entry.get("expired") for entry in state_of(target)["submissions"].values())
 
 
 def test_a_transient_attach_failure_is_replayed_by_the_next_healthy_run(verify_hub, capsys, resolver):
@@ -1141,8 +1214,8 @@ def test_a_staged_submission_for_a_scope_no_longer_bound_is_never_sent(verify_hu
     status, report = verify(target, capsys)
     assert status == 0 and report["skipped"][run_mod.SCOPE_UNBOUND] == 1
     assert writes(hub) == [] and packets(target) == []
-    (pending,) = state_of(target)["submissions"].values()
-    assert pending["refused"] == run_mod.SCOPE_UNBOUND
+    # The hub had answered the request, so it is forgotten rather than held.
+    assert state_of(target)["submissions"] == {}
     assert state_of(target)["scopes"][SCOPE]["cards"][fairness.key_digest(SCOPE, [CARD_ID])]["verdict"] == (
         run_mod.SCOPE_UNBOUND
     )

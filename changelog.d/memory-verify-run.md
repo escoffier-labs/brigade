@@ -31,3 +31,6 @@
   refuses as unbindable, is checked afresh with a new manifest instead of being
   cached as a final refusal. A full packet directory defers the card without
   a cooldown.
+- Only a verify request that may have opened a proposal keeps a tombstone and
+  its card's hold. A request the hub refused or quota-stopped is forgotten
+  when its stage is discarded, so the card is checked again.

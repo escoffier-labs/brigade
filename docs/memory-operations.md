@@ -2562,9 +2562,9 @@ card, evidence or model text, and it is scanned before attachment
 | `manifest_transient` | Attaching the manifest met a 5xx, 408, 429, `retryable` or uncoded refusal. The stage and request id stay for the next run. Only a coded 4xx refusal is final (`manifest_refused`) |
 | `verify_packet_unbound` | The hub answered duplicate pending, and `proposal_show` did not list exactly one bound verifier manifest with this stage's manifest digest. No packet is published under that id, and the stage is discarded |
 | `verify_binding_unchecked` | The `proposal_show` read for a duplicate failed. The stage stays for the next run, until it expires |
-| `verify_stage_ops_mismatch` | A stage's ops no longer hash to the digest the request id ledger keeps. Nothing is sent, the request is closed and no new id is minted |
-| `verify_scope_unbound` | A stage's scope is no longer bound in `[[verify.workspace]]` or readable. Nothing is sent to it and the request is closed |
-| `verify_stage_expired` | A stage without a result reached its 7-day limit. It is deleted, its request id is kept as a tombstone and the card is eligible again |
+| `verify_stage_ops_mismatch` | A stage's ops no longer hash to the digest the request id ledger keeps. The stage is never sent and no id is minted from it. Its request follows the shared rule: held as a tombstone when unsettled, forgotten otherwise |
+| `verify_scope_unbound` | A stage's scope is no longer bound in `[[verify.workspace]]` or readable. Nothing is sent to it, and its request follows the shared rule |
+| `verify_stage_expired` | A stage without a result reached its 7-day limit. It is deleted. Its request id is kept as a tombstone only when the request is unsettled, and is forgotten otherwise |
 | `verify_manifest_expired` | A replay's manifest was attached 23 hours ago or more, or the hub answered `memory_manifest_binding_invalid`. The hub binds a verifier manifest only within 24 hours of attaching it, so the stage is discarded and the card stays eligible for a fresh check. A request the hub definitely refused is forgotten, and one whose reply may have been lost becomes a tombstone |
 | `request_id_reused` | A submission's ops matched a tombstone, so it was sent under the expired request's id |
 | `verify_unresolved_request` | The card has a live tombstone, so it is not selected and no new correction is proposed for it |
@@ -2635,10 +2635,14 @@ deleted and the card's verdict becomes `verify_stage_expired`, which makes the
 card eligible again. Packets of settled proposals expire 14 days after
 settling, as above.
 
-The hub may have stored the expired request even though no reply arrived, so
-its ledger entry is not deleted. It becomes a tombstone holding the request
-id, the digest of the full ops and the card's 32-hex key digest (never its
-id), keyed by the ops digest. The hub's duplicate-pending rule compares whole
+Every path that discards a stage without sending it (stage expiry, manifest
+expiry, an unbound scope and an ops mismatch) follows one rule for its
+request. A request the hub answered definitely, by a refusal or a quota
+reply, cannot have opened a proposal, so it is forgotten and the card stays
+eligible. A request that is still `unsettled`, sent without a definite
+answer, may have opened one even though no reply arrived. Its ledger entry
+becomes a tombstone holding the request id, the digest of the full ops and
+the card's 32-hex key digest (never its id), keyed by the ops digest. The hub's duplicate-pending rule compares whole
 proposal digests, not cards, and each check's prompts carry fresh nonces, so
 a regenerated correction for the same card would open a second proposal. The
 client prevents that: while a tombstone lives, its card is not selected

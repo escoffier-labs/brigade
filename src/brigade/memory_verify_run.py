@@ -331,6 +331,11 @@ def evict_tombstones(submissions: dict[str, dict[str, Any]], now: int) -> int:
     return live
 
 
+def _live_tombstones(state: dict[str, Any]) -> int:
+    """Tombstones in the ledger now, counted at each new proposal so ones reconcile just added count too."""
+    return sum(1 for pending in state.get("submissions", {}).values() if pending.get("expired"))
+
+
 def _held_cards(state: dict[str, Any]) -> frozenset[str]:
     """Cards with a live tombstone: a request that may have opened a proposal under an unknown id."""
     return frozenset(
@@ -630,8 +635,6 @@ class Sender:
     # Scopes bound in `[[verify.workspace]]` and readable by the hub settings, right now.
     bound: frozenset[str] = frozenset()
     reasons: dict[tuple[str, str], str] = field(default_factory=dict)
-    # MAX_TOMBSTONES live tombstones: no new proposal opens until one ages out.
-    tombstones_full: bool = False
 
     @property
     def ledger(self) -> dict[str, dict[str, Any]]:
@@ -724,18 +727,22 @@ class Sender:
                 "card": fairness.key_digest(staged.scope, [staged.card_id]),
             }
 
-    def manifest_expired(self, staged: packets.Stage, current: dict[str, Any]) -> str:
-        """Retire a submission whose manifest the hub will no longer bind, so the card is checked afresh.
+    def retire(self, staged: packets.Stage, current: dict[str, Any] | None, code: str) -> str:
+        """Discard a stage whose request will not be sent again, under one rule for every path.
 
-        A request the hub definitely answered without opening is forgotten. One
-        whose answer may have been lost becomes a tombstone, which keeps the card's hold.
+        Stage expiry, manifest expiry, an unbound scope and an ops mismatch all
+        end here. A request that may have opened a proposal (`unsettled`: sent
+        without a definite answer) becomes a tombstone, which keeps the card's
+        hold. Any other request is forgotten and the card stays eligible. A
+        request with a known proposal id is left in the ledger as it is.
         """
         packets.drop(self.target, staged)
-        if current.get("unsettled"):
-            self.bury(staged, current)
-        else:
-            del self.ledger[staged.digest]
-        self.record(staged, MANIFEST_EXPIRED, eligible=True)
+        if current is not None and not current.get("proposal_id") and self.ledger.get(staged.digest) is current:
+            if current.get("unsettled"):
+                self.bury(staged, current)
+            else:
+                del self.ledger[staged.digest]
+        self.record(staged, code, eligible=True)
         return DROPPED
 
     def send(self, staged: packets.Stage, *, replay: bool) -> str:
@@ -752,12 +759,9 @@ class Sender:
             packets.drop(self.target, staged)
             return DROPPED
         if remembered.get("ops_sha256") != staged.ops_sha256:
-            # The request is closed for good: neither the stage nor a fresh check mints a new id for it.
-            if not remembered.get("proposal_id") and not remembered.get("refused"):
-                remembered["refused"] = OPS_MISMATCH
-            packets.drop(self.target, staged)
-            self.record(staged, OPS_MISMATCH, eligible=False)
-            return REFUSED
+            # The stage no longer matches the request the ledger published, so it is never sent and
+            # no id is minted from it. The request itself follows the shared retirement rule.
+            return self.retire(staged, remembered, OPS_MISMATCH)
         if remembered.get("proposal_id"):
             if remembered.get("duplicate"):
                 return self.bind_duplicate(staged, remembered["proposal_id"])
@@ -769,7 +773,7 @@ class Sender:
             packets.drop(self.target, staged)
             return REFUSED
         if replay and staged.manifest_stale(self.now):
-            return self.manifest_expired(staged, remembered)
+            return self.retire(staged, remembered, MANIFEST_EXPIRED)
         hold = (
             tally.stop
             if tally.stop is not None
@@ -831,7 +835,7 @@ class Sender:
         if replay and sent.outcome == ledger.FAILED and sent.code == BINDING_INVALID and current is not None:
             # The manifest aged past the hub's unbound lifetime: not a verdict on the correction.
             current.pop("refused", None)
-            return self.manifest_expired(staged, current)
+            return self.retire(staged, current, MANIFEST_EXPIRED)
         tally.attempted += 1
         if sent.outcome == ledger.FAILED:
             tally.failed += 1
@@ -858,11 +862,11 @@ class Sender:
         """At run start: check, then finalize or replay every stage.
 
         A stage whose scope is no longer bound and readable is discarded with
-        `verify_scope_unbound` and its request is marked refused, so nothing is
-        sent to that scope and no new id is minted. A stage of an unresolved
-        submission older than `STAGE_DAYS` is discarded with
-        `verify_stage_expired`, its request is forgotten and its card becomes
-        eligible again. Returns the cards whose submission is still unresolved.
+        `verify_scope_unbound`, so nothing is sent to that scope. A stage of an
+        unresolved submission older than `STAGE_DAYS` is discarded with
+        `verify_stage_expired`. Both follow `retire`: an unsettled request
+        becomes a tombstone that holds its card, and any other is forgotten.
+        Returns the cards whose submission is still unresolved.
         """
         found, invalid = packets.staged(self.target, ledger._submission_digest)
         self.tally.skip("packets_stage_invalid", invalid)
@@ -871,18 +875,10 @@ class Sender:
             current = self.ledger.get(staged.digest)
             ours = current is not None and current.get("proposal_id") and not current.get("duplicate")
             if staged.scope not in self.bound:
-                packets.drop(self.target, staged)
-                if current is not None and not current.get("proposal_id") and not current.get("refused"):
-                    current["refused"] = SCOPE_UNBOUND
-                self.record(staged, SCOPE_UNBOUND, eligible=False)
+                self.retire(staged, current, SCOPE_UNBOUND)
                 continue
             if not ours and staged.expired(self.now):
-                packets.drop(self.target, staged)
-                if current is not None and not current.get("proposal_id"):
-                    # The hub may hold this request even though no reply arrived. Keep its id as a
-                    # tombstone, keyed by the full ops digest, so identical ops are resent under it.
-                    self.bury(staged, current)
-                self.record(staged, STAGE_EXPIRED, eligible=True)
+                self.retire(staged, current, STAGE_EXPIRED)
                 continue
             if self.send(staged, replay=True) == UNRESOLVED:
                 unresolved.add((staged.scope, staged.card_id))
@@ -906,10 +902,9 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
     tally.skip("proposal_show_failed", unread)
     tables: dict[str, dict[str, dict[str, Any]]] = {}
     unresolved: set[tuple[str, str]] = set()
-    tombstones = sum(1 for pending in state.get("submissions", {}).values() if pending.get("expired"))
     if not dry_run:
         tables = _remember(state, picked, updates, now)
-        tombstones = evict_tombstones(state.setdefault("submissions", {}), now)
+        evict_tombstones(state.setdefault("submissions", {}), now)
         vstate.save(target, state)  # The one write that carries every complete read count snapshot.
     known = {key: entry for cards in tables.values() for key, entry in cards.items()} if not dry_run else picked.entries
     sender = Sender(
@@ -924,7 +919,6 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
         _pending_count(known),
         status["principal"],
         frozenset(scope for scope in settings.scopes() if scope in hub_settings.read_scopes),
-        tombstones_full=tombstones >= MAX_TOMBSTONES,
     )
     if not dry_run:
         unresolved = sender.reconcile()
@@ -1066,7 +1060,7 @@ def _propose(
     if tally.stop is not None:
         tally.skip(DEFERRED_QUOTA)
         return DEFERRED
-    if sender.tombstones_full:
+    if _live_tombstones(sender.state) >= MAX_TOMBSTONES:
         # Fail closed: a new request could become one more tombstone, and live ones are never dropped.
         tally.skip(DEFERRED_TOMBSTONES)
         return DEFERRED
