@@ -8,7 +8,8 @@ import os
 import re
 import time
 import uuid
-from dataclasses import replace
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +71,19 @@ def _code(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value) is not None
 
 
+def valid_submission(digest: object, pending: object) -> bool:
+    """One S19d ledger entry: the request id published before `propose`, then its proposal id or refusal."""
+    return (
+        _digest(digest)
+        and isinstance(pending, dict)
+        and not set(pending) - {"client_event_id", "proposal_id", "refused"}
+        and _event_id(pending.get("client_event_id"))
+        and not ("proposal_id" in pending and not _event_id(pending["proposal_id"]))
+        and not ("refused" in pending and not _code(pending["refused"]))
+        and not ("proposal_id" in pending and "refused" in pending)
+    )
+
+
 def schedule_status(target: Path) -> dict[str, Any]:
     try:
         state = io.read_object(target / STATE, private=True)
@@ -86,17 +100,8 @@ def schedule_status(target: Path) -> dict[str, Any]:
         submissions = state.get("submissions", {})
         if not isinstance(submissions, dict) or (submissions and "binding" not in state):
             raise ValueError(STATE_ERROR)
-        for digest, pending in submissions.items():
-            if (
-                not _digest(digest)
-                or not isinstance(pending, dict)
-                or set(pending) - {"client_event_id", "proposal_id", "refused"}
-                or not _event_id(pending.get("client_event_id"))
-                or ("proposal_id" in pending and not _event_id(pending["proposal_id"]))
-                or ("refused" in pending and not _code(pending["refused"]))
-                or ("proposal_id" in pending and "refused" in pending)
-            ):
-                raise ValueError(STATE_ERROR)
+        if not all(valid_submission(digest, pending) for digest, pending in submissions.items()):
+            raise ValueError(STATE_ERROR)
         for lane in LANES:
             schedule = state.get(lane, {})
             if not isinstance(schedule, dict) or (schedule and "binding" not in state):
@@ -285,6 +290,86 @@ def _ops(heads: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, i
             continue
         ops.extend(group_ops)
     return ops, skipped
+
+
+# Outcomes of one `submit`.
+OPENED, DUPLICATE, QUOTA, FAILED, DENIED, UNAVAILABLE = (
+    "opened",
+    "duplicate",
+    "quota",
+    "failed",
+    "denied",
+    "unavailable",
+)
+
+
+@dataclass(frozen=True)
+class Submitted:
+    outcome: str
+    proposal_id: str | None = None
+    # A fixed hub code for DENIED and UNAVAILABLE.
+    code: str | None = None
+    # Hub codes of the refusals this submission met, in order. Never hub text.
+    refusals: tuple[str, ...] = ()
+
+
+def submit(
+    client: hubc.MemoryHubClient,
+    ledger: dict[str, dict[str, Any]],
+    digest: str,
+    ops: list[dict[str, Any]],
+    *,
+    base_epoch: str,
+    save: Callable[[], None],
+) -> Submitted:
+    """Open one proposal through the S19d request id ledger.
+
+    `ledger[digest]` holds the request id, published through `save` before the
+    call so a lost response replays the same request, then the proposal id or
+    the final refusal code. An expired or conflicting id is re-minted once.
+    Quota refusals and hub unavailability are outcomes, not exceptions, and a
+    duplicate pending proposal records the existing id. Raises ReflectError when
+    the hub answers with no open proposal.
+    """
+    refusals: list[str] = []
+    for attempt in range(2):
+        pending = dict(ledger.get(digest) or {"client_event_id": hubc.event_id()})
+        ledger[digest] = pending
+        save()
+        try:
+            opened = client.call("propose", base_epoch=base_epoch, client_event_id=pending["client_event_id"], ops=ops)
+        except hubc.HubRefusal as exc:
+            code = exc.code if _code(exc.code) else "hub_refused"
+            if exc.status == 429 and code in QUOTA_REFUSALS:
+                return Submitted(QUOTA, code=code, refusals=tuple(refusals))
+            if exc.status == 409 and code == DUPLICATE_PENDING:
+                existing = exc.body.get("proposal_id")
+                if _event_id(existing):
+                    pending["proposal_id"] = existing
+                else:
+                    pending["refused"] = code
+                save()
+                return Submitted(DUPLICATE, proposal_id=pending.get("proposal_id"), refusals=tuple(refusals))
+            refusals.append(code)
+            if exc.denies_access:
+                return Submitted(DENIED, code=code, refusals=tuple(refusals))
+            if code in ("memory_client_event_expired", "memory_client_event_conflict"):
+                ledger.pop(digest)
+                save()
+                if attempt == 0:
+                    continue  # Re-mint and retry this op once, within this run.
+            elif 400 <= exc.status < 500 and exc.status not in (408, 429) and exc.body.get("retryable") is not True:
+                pending["refused"] = code
+                save()
+            return Submitted(FAILED, code=code, refusals=tuple(refusals))
+        except hubc.HubUnavailable:
+            return Submitted(UNAVAILABLE, code="hub_unavailable", refusals=tuple(refusals))
+        if not _event_id(opened.get("proposal_id")) or opened.get("state") not in ("pending", "held"):
+            raise ReflectError("hub_reflect_proposal_invalid", "hub returned no open reflect proposal")
+        pending["proposal_id"] = opened["proposal_id"]
+        save()
+        return Submitted(OPENED, proposal_id=pending["proposal_id"], refusals=tuple(refusals))
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _check_replica_files(target: Path, *, scope: str | None, dry_run: bool) -> None:
@@ -481,7 +566,7 @@ def _reflect(
     remaining = unremembered(exact) + alternating
     selected = remaining[:limit]
     proposals = []
-    refused = []
+    refused: list[dict[str, str]] = []
     error = None
     failed_ops = 0
     attempted = len(selected)
@@ -499,63 +584,28 @@ def _reflect(
                 tables[lane][name][key][1] = now
 
         for position, (digest, ops) in enumerate(selected):
-            stop = False
-            for attempt in range(2):
-                pending = dict(previous.get(digest) or {"client_event_id": hubc.event_id()})
-                previous[digest] = pending
-                # Publish the id before the call so a lost response replays the same request.
-                _save(target, state)
-                try:
-                    opened = client.call(
-                        "propose", base_epoch=report["log_epoch"], client_event_id=pending["client_event_id"], ops=ops
-                    )
-                except hubc.HubRefusal as exc:
-                    code = exc.code if _code(exc.code) else "hub_refused"
-                    if exc.status == 429 and code in QUOTA_REFUSALS:
-                        # A full quota is back pressure, not a failure: stop and leave the rest for later runs.
-                        skipped["proposal_quota"] = skipped.get("proposal_quota", 0) + len(selected) - position
-                        attempted, stop = position, True
-                        break
-                    if exc.status == 409 and code == DUPLICATE_PENDING:
-                        existing = exc.body.get("proposal_id")
-                        if _event_id(existing):
-                            pending["proposal_id"] = existing
-                            served(digest)
-                        else:
-                            pending["refused"] = code
-                        _save(target, state)
-                        skipped["duplicate_pending"] = skipped.get("duplicate_pending", 0) + 1
-                        break
-                    refused.append({"op_digest": digest, "code": code})
-                    if exc.denies_access:
-                        error = code
-                        break
-                    if code in ("memory_client_event_expired", "memory_client_event_conflict"):
-                        previous.pop(digest)
-                        _save(target, state)
-                        if attempt == 0:
-                            continue  # Re-mint and retry this op once, within this run.
-                    elif (
-                        400 <= exc.status < 500
-                        and exc.status not in (408, 429)
-                        and exc.body.get("retryable") is not True
-                    ):
-                        pending["refused"] = code
-                        _save(target, state)
-                    failed_ops += 1
-                    break
-                except hubc.HubUnavailable:
-                    error = "hub_unavailable"
-                    break
-                if not _event_id(opened.get("proposal_id")) or opened.get("state") not in ("pending", "held"):
-                    raise ReflectError("hub_reflect_proposal_invalid", "hub returned no open reflect proposal")
-                pending["proposal_id"] = opened["proposal_id"]
+            sent = submit(
+                client, previous, digest, ops, base_epoch=report["log_epoch"], save=lambda: _save(target, state)
+            )
+            refused.extend({"op_digest": digest, "code": code} for code in sent.refusals)
+            if sent.outcome == QUOTA:
+                # A full quota is back pressure, not a failure: stop and leave the rest for later runs.
+                skipped["proposal_quota"] = skipped.get("proposal_quota", 0) + len(selected) - position
+                attempted = position
+                break
+            if sent.outcome in (DENIED, UNAVAILABLE):
+                error = sent.code
+                break
+            if sent.outcome == FAILED:
+                failed_ops += 1
+                continue
+            if sent.proposal_id is not None:
                 served(digest)
                 _save(target, state)
-                proposals.append({"proposal_id": pending["proposal_id"]})
-                break
-            if error is not None or stop:
-                break
+            if sent.outcome == DUPLICATE:
+                skipped["duplicate_pending"] = skipped.get("duplicate_pending", 0) + 1
+            else:
+                proposals.append({"proposal_id": sent.proposal_id})
         if served_any:
             state[FIRST_LANE] = NEAR_LANE if first == LINK_LANE else LINK_LANE
         # Only final refusals of ops attempted this run count, never cached skips, recovered ids or quota stops.

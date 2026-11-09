@@ -412,11 +412,10 @@ def test_text_output_has_no_card_text(verify_setup, capsys):
     assert "Same claim" not in out and "selected fleet a " in out
 
 
-@pytest.mark.parametrize("flags", [[], ["--dry-run"], ["--no-model"]])
-def test_live_runs_are_refused_before_any_hub_call(verify_setup, capsys, flags):
+def test_no_model_without_dry_run_is_refused_before_any_hub_call(verify_setup, capsys):
     target, hub = verify_setup
-    code, report = verify(target, capsys, "run", *flags)
-    assert code == 2 and report["code"] == "verify_live_unavailable"
+    code, report = verify(target, capsys, "run", "--no-model")
+    assert code == 2 and report["code"] == "verify_no_model_requires_dry_run"
     assert hub.calls == []
 
 

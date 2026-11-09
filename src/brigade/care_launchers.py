@@ -5,7 +5,7 @@ from __future__ import annotations
 import shlex
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .isolated_exec import module_argv
 
@@ -40,7 +40,58 @@ def explicit_workspace(body: str) -> str | None:
     return None
 
 
+MEMORY_VERIFY_ID = "memory-verify"
+
+
+def verify_entry(entry_type: type[CareEntry]) -> CareEntry:
+    """The memory verification pass, in its own verify folder (phase-memory-verify D3)."""
+    from .care_schedules import MEMORY_VERIFY_CALENDAR, MEMORY_VERIFY_SCHEDULE
+
+    return entry_type(
+        entry_id=MEMORY_VERIFY_ID,
+        schedule=MEMORY_VERIFY_SCHEDULE,
+        on_calendar=MEMORY_VERIFY_CALENDAR,
+        description="Brigade hub memory verification proposals",
+        kind="verify",
+    )
+
+
+def install_refusal(target: Path, entries: tuple[CareEntry, ...]) -> str | None:
+    """Refuse memory-verify in the reflect job's folder, beside memory-reflect, or without its own credential."""
+    if not any(entry.kind == "verify" for entry in entries):
+        return None
+    if any(entry.kind == "reflect" for entry in entries):
+        return "memory-verify and memory-reflect need separate folders; install them from each folder"
+    from .memory_verify_run import install_refusal as refusal
+
+    reason = refusal(target)
+    return f"care entry {MEMORY_VERIFY_ID} is not installable: {reason}" if reason else None
+
+
+def hub_job_status(target: Path, entry: CareEntry, payload: dict[str, Any]) -> dict[str, Any]:
+    """Pause state for the hub memory jobs, from their own state files."""
+    try:
+        if entry.kind == "verify":
+            from .memory_verify_state import load
+
+            state = load(target)
+        else:
+            from .memory_reflect_hub import schedule_status
+
+            state = schedule_status(target)
+        payload.update({k: state[k] for k in ("consecutive_failures", "paused")})
+        payload["last_receipt"] = {"status": state.get("last_status")} if "last_status" in state else None
+        payload["repeated_failure"] = state["paused"]
+    except (OSError, ValueError):
+        payload.update(paused=True, state_error=f"{entry.entry_id} state is unreadable")
+    return payload
+
+
 def entry_argv(entry: CareEntry, workspace: Path) -> list[str]:
+    if entry.kind == "verify":
+        return module_argv(
+            "brigade", "memory", "verify", "run", "--scheduled", "--target", str(workspace.expanduser().resolve())
+        )
     if entry.entry_id == "memory-reflect":
         argv = module_argv(
             "brigade",

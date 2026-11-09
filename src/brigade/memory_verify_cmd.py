@@ -1,7 +1,9 @@
-"""`brigade memory verify status`, `doctor` and `run --dry-run --no-model`.
+"""`brigade memory verify status`, `doctor` and `run`.
 
-`run` selects and reports. It calls no model, submits nothing, attaches
-nothing and writes no state: a dry run leaves the pause counter alone.
+`run --dry-run --no-model` selects and reports. It calls no model, submits
+nothing, attaches nothing and writes no state: a dry run leaves the pause
+counter alone. Every other run goes through `memory_verify_run`, which reuses
+the selection here.
 `doctor` resolves both verify seats and runs the isolation probe on each
 (`memory_verify_seat`), recording passes in `probes.json`. Output holds scope
 names, card ids, seat names, scores, reason codes and counts. It never holds
@@ -15,7 +17,7 @@ import argparse
 import json
 import re
 import time
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +43,8 @@ PAGE_PAUSE_SECONDS = 1.05
 MONOTONIC = time.monotonic
 SLEEP = time.sleep
 SCORE_DIGITS = 4
+# How old a stored read count snapshot may be and still score a rate-limited scope: two daily runs.
+SNAPSHOT_MAX_AGE_MS = 2 * 86_400_000
 SCOPE_LIMIT = f"verify per-scope bound exceeded ({MAX_SCOPE_CARDS} cards)"
 HUB_CODE = re.compile(r"[a-z][a-z0-9_]{0,127}")
 
@@ -54,10 +58,10 @@ class VerifyRunError(ValueError):
 
 
 def register(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("verify", help="Select hub cards for evidence-checked verification (dry run only).")
+    parser = sub.add_parser("verify", help="Check hub cards against local evidence and open reviewed corrections.")
     commands = parser.add_subparsers(dest="memory_verify_command", required=True)
     status = commands.add_parser("status", help="Show the verify job's pause state and last never-read counts.")
-    run = commands.add_parser("run", help="Score and select verification candidates without a model.")
+    run = commands.add_parser("run", help="Select cards, check them with both seats and open pinned proposals.")
     doctor = commands.add_parser("doctor", help="Probe propose_seat and confirm_seat for tool-free, recall-free calls.")
     doctor.add_argument(
         "--timeout", type=int, default=int(seats.PROBE_TIMEOUT), help="Per-probe timeout in seconds (30 to 600)."
@@ -65,9 +69,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     for command in (status, run, doctor):
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    run.add_argument("--dry-run", action="store_true", help="Submit, attach and write nothing. Required for now.")
-    run.add_argument("--no-model", action="store_true", help="Call no seat. Required for now.")
+    run.add_argument("--dry-run", action="store_true", help="Submit, attach and write nothing, and leave the pause.")
+    run.add_argument("--no-model", action="store_true", help="Call no seat. Needs --dry-run.")
     run.add_argument("--list-ids", action="store_true", help="Also print never-read card ids, never titles or text.")
+    run.add_argument("--scheduled", action="store_true", help="Skip a run paused after three failures.")
 
 
 def _check_overlap(target: Path) -> None:
@@ -121,8 +126,8 @@ def _binding(identity: str, principal: object, log_epoch: object) -> str:
 
 def _heads(
     target: Path, settings: hubc.HubSettings, client: hubc.MemoryHubClient, scopes: list[str]
-) -> tuple[list[dict], str]:
-    """Pull the bound scopes into verify's own replica and return their live heads and the binding.
+) -> tuple[list[dict], str, str, str]:
+    """Pull the bound scopes into verify's own replica: live heads, the binding, the principal and the log epoch.
 
     Every store access, the pull included, runs relocated to
     `.brigade/memory/verify/hub/`, so the shared replica under
@@ -135,7 +140,7 @@ def _heads(
 
 def _pull_heads(
     target: Path, settings: hubc.HubSettings, client: hubc.MemoryHubClient, scopes: list[str]
-) -> tuple[list[dict], str]:
+) -> tuple[list[dict], str, str, str]:
     """Pull only the bound scopes, as reflect does with --scope, so an unbound scope never counts here.
 
     Cards of scopes no longer bound are dropped from verify's replica by the narrowed pull.
@@ -174,7 +179,8 @@ def _pull_heads(
         counts[head["scope"]] = counts.get(head["scope"], 0) + 1
         if counts[head["scope"]] > MAX_SCOPE_CARDS:
             raise VerifyRunError("verify_scope_limit", SCOPE_LIMIT)
-    return heads, _binding(client.identity, report["principal"], report["log_epoch"])
+    binding = _binding(client.identity, report["principal"], report["log_epoch"])
+    return heads, binding, str(report["principal"]), str(report["log_epoch"])
 
 
 class Pacer:
@@ -215,130 +221,217 @@ def _counts(client: hubc.MemoryHubClient, scope: str, pacer: Pacer) -> tuple[dic
     raise VerifyRunError("verify_read_stats_truncated", "read_stats listing exceeded the per-scope card bound")
 
 
-def run_payload(*, target: Path, dry_run: bool, no_model: bool, list_ids: bool, now_ms: int | None = None) -> dict:
-    if not (dry_run and no_model):
-        raise VerifyRunError(
-            "verify_live_unavailable", "memory verify run needs --dry-run --no-model until the verification pass lands"
+@dataclass
+class Picked:
+    """What selection learned. Card ids, keys, counts and codes only, never card text."""
+
+    heads: list[dict[str, Any]]
+    binding: str
+    principal: str
+    log_epoch: str
+    same_binding: bool
+    ignored: int
+    entries: dict[str, dict[str, Any]]
+    selection: pick.Selection
+    skipped: dict[str, int]
+    sources: dict[str, str]
+    never: dict[str, int | None]
+    listed: list[dict[str, str]]
+    since: dict[str, int | None]
+    # Fresh, completely paginated counts per scope: what a non-dry run may store as a snapshot.
+    complete: dict[str, dict[str, pick.Reads]] = field(default_factory=dict)
+
+
+def _snapshot(state: dict[str, Any], scope: str, now: int) -> dict[str, pick.Reads] | None:
+    """A scope's cached read counts, or None when there is none or it is older than SNAPSHOT_MAX_AGE_MS.
+
+    Used only to score a rate-limited scope, never for the never-read report.
+    """
+    table = state["scopes"].get(scope, {})
+    observed = table.get("counts_ms")
+    if observed is None or not 0 <= now - observed <= SNAPSHOT_MAX_AGE_MS:
+        return None
+    return {key: pick.Reads(*entry["reads"]) for key, entry in table.get("cards", {}).items() if "reads" in entry}
+
+
+def select_cards(
+    target: Path,
+    state: dict[str, Any],
+    settings: config.VerifyConfig,
+    hub_settings: hubc.HubSettings,
+    client: hubc.MemoryHubClient,
+    now: int,
+    *,
+    pending: dict[str, dict[str, Any]] | None = None,
+) -> Picked:
+    """Pull the bound scopes, page their read counts and pick this run's cards.
+
+    `pending` overrides card history entries, so a caller that refreshed
+    remembered proposals selects against their current state.
+    """
+    skipped: dict[str, int] = {}
+    scopes = [scope for scope in settings.scopes() if scope in hub_settings.read_scopes]
+    unread = len(settings.scopes()) - len(scopes)
+    unbound = len([scope for scope in hub_settings.read_scopes if scope not in settings.scopes()])
+    if unread:
+        skipped["scope_unreadable"] = unread
+    if unbound:
+        skipped["scope_unbound"] = unbound
+    # The replica may hold every read scope a folder can configure until the narrowed
+    # pull trims it, so the card bound is what an ordinary pull allows: the per-scope
+    # bound for each of up to READ_SCOPES_MAX scopes. The byte ceiling is what binds
+    # memory, and _heads checks the per-scope bound on bound scopes only.
+    max_cards = MAX_SCOPE_CARDS * hubc.READ_SCOPES_MAX
+    try:
+        with store.limits.bounded(max_cards=max_cards, max_bytes=MAX_REPLICA_BYTES + REPLICA_FILE_SLACK):
+            heads, binding, principal, log_epoch = _heads(target, hub_settings, client, scopes)
+    except store.limits.ReplicaLimitError as exc:
+        if exc.kind == "cards":
+            raise VerifyRunError("verify_scope_limit", SCOPE_LIMIT) from None
+        raise
+    # History from another hub, principal or log epoch is ignored for selection.
+    same_binding = state.get("binding") == binding
+    ignored = 0 if same_binding else sum(len(t.get("cards", {})) for t in state["scopes"].values())
+    valid = []
+    for head in heads:
+        if hubc.valid_card_id(head.get("card_id")) and hubc.valid_scope(head.get("scope")):
+            valid.append(head)
+        else:
+            skipped["invalid_head"] = skipped.get("invalid_head", 0) + 1
+    reads: dict[str, pick.Reads] = {}
+    entries: dict[str, dict[str, Any]] = {}
+    sources: dict[str, str] = {}
+    never: dict[str, int | None] = {}
+    listed: list[dict[str, str]] = []
+    per_scope_since: dict[str, int | None] = {}
+    complete: dict[str, dict[str, pick.Reads]] = {}
+    pacer = Pacer()
+    unavailable: set[str] = set()
+    for scope in scopes:
+        # History loads for every bound scope under a matching binding, read stats or not,
+        # so a rate-limited scope's pending proposals still count toward the job-wide ceiling.
+        # Only scoring and selection skip a scope without counts.
+        if same_binding:
+            entries.update(state["scopes"].get(scope, {}).get("cards", {}))
+        try:
+            rows, since = _counts(client, scope, pacer)
+        except hubc.HubRefusal as exc:
+            if exc.status != 429 or exc.code != hubc.READ_STATS_RATE_LIMITED:
+                raise
+            skipped["read_stats_limited"] = skipped.get("read_stats_limited", 0) + 1
+            # A snapshot from a complete earlier pagination under this binding, within its
+            # bounded age, may score the scope. Its never-read count stays unknown.
+            cached = _snapshot(state, scope, now) if same_binding else None
+            if cached is None:
+                skipped["read_stats_unavailable"] = skipped.get("read_stats_unavailable", 0) + 1
+                sources[scope] = "unavailable"
+                unavailable.add(scope)
+            else:
+                sources[scope] = "cached"
+                reads.update(cached)
+                per_scope_since[scope] = None
+            continue
+        sources[scope] = "fresh"
+        reads.update(rows)
+        complete[scope] = rows
+        per_scope_since[scope] = since
+    if pending is not None:
+        entries.update(pending)
+    selection = pick.select(
+        [head for head in valid if head["scope"] not in unavailable],
+        entries=entries,
+        reads=reads,
+        slots=settings.cards_per_run,
+        now_ms=now,
+        min_interval_days=settings.min_interval_days,
+    )
+    for scope in scopes:
+        scoped = [head for head in valid if head["scope"] == scope]
+        if sources.get(scope) != "fresh":
+            never[scope] = None
+            continue
+        ids = pick.never_read(
+            scoped,
+            entries=entries,
+            reads=reads,
+            since_day=per_scope_since[scope],
+            now_ms=now,
+            never_read_days=settings.never_read_days,
         )
+        never[scope] = None if ids is None else len(ids)
+        listed.extend({"scope": scope, "card_id": card_id} for card_id in ids or ())
+    for reason, count in selection.skipped.items():
+        skipped[reason] = skipped.get(reason, 0) + count
+    return Picked(
+        heads=valid,
+        binding=binding,
+        principal=principal,
+        log_epoch=log_epoch,
+        same_binding=same_binding,
+        ignored=ignored,
+        entries=entries,
+        selection=selection,
+        skipped=skipped,
+        sources=sources,
+        never=never,
+        listed=listed,
+        since=per_scope_since,
+        complete=complete,
+    )
+
+
+def report(picked: Picked, state: dict[str, Any], *, list_ids: bool) -> dict[str, Any]:
+    """Selection fields of a run report: ids, scores, lanes, codes and counts."""
+    known = [count for count in picked.never.values() if count is not None]
+    payload: dict[str, Any] = {
+        "cards_seen": len(picked.heads),
+        "eligible": picked.selection.eligible,
+        "selected": [
+            {"scope": card.scope, "card_id": card.card_id, "score": round(card.score, SCORE_DIGITS), "lane": lane}
+            for card, lane in picked.selection.selected
+        ],
+        "skipped": dict(sorted(picked.skipped.items())),
+        "read_stats": picked.sources,
+        "never_read": {
+            "count": sum(known) if known and len(known) == len(picked.never) else None,
+            "by_scope": picked.never,
+        },
+    }
+    if not picked.same_binding and (picked.ignored or "binding" in state):
+        payload["notes"] = [{"code": "verify_binding_changed", "ignored_card_entries": picked.ignored}]
+    if list_ids:
+        payload["never_read"]["card_ids"] = picked.listed
+    return payload
+
+
+def configured(target: Path) -> config.VerifyConfig:
+    try:
+        settings = config.load(target)
+    except config.VerifyConfigError as exc:
+        raise VerifyRunError("verify_config", str(exc)) from None
+    if not settings.workspaces:
+        raise VerifyRunError("verify_not_configured", "no [[verify.workspace]] binds a scope")
+    return settings
+
+
+def run_payload(*, target: Path, dry_run: bool, no_model: bool, list_ids: bool, now_ms: int | None = None) -> dict:
+    """`run --dry-run --no-model`: select and report. No model, no hub write, no state write."""
+    if not (dry_run and no_model):
+        raise VerifyRunError("verify_no_model_requires_dry_run", "--no-model needs --dry-run")
     _check_overlap(target)
     now = int(time.time() * 1000) if now_ms is None else now_ms
     with vstate.locked(target):
         state = vstate.load(target)
-        try:
-            settings = config.load(target)
-        except config.VerifyConfigError as exc:
-            raise VerifyRunError("verify_config", str(exc)) from None
-        if not settings.workspaces:
-            raise VerifyRunError("verify_not_configured", "no [[verify.workspace]] binds a scope")
+        settings = configured(target)
         hub_settings, client = _hub(target)
-        skipped: dict[str, int] = {}
-        scopes = [scope for scope in settings.scopes() if scope in hub_settings.read_scopes]
-        unread = len(settings.scopes()) - len(scopes)
-        unbound = len([scope for scope in hub_settings.read_scopes if scope not in settings.scopes()])
-        if unread:
-            skipped["scope_unreadable"] = unread
-        if unbound:
-            skipped["scope_unbound"] = unbound
-        # The replica may hold every read scope a folder can configure until the narrowed
-        # pull trims it, so the card bound is what an ordinary pull allows: the per-scope
-        # bound for each of up to READ_SCOPES_MAX scopes. The byte ceiling is what binds
-        # memory, and _heads checks the per-scope bound on bound scopes only.
-        max_cards = MAX_SCOPE_CARDS * hubc.READ_SCOPES_MAX
-        try:
-            with store.limits.bounded(max_cards=max_cards, max_bytes=MAX_REPLICA_BYTES + REPLICA_FILE_SLACK):
-                heads, binding = _heads(target, hub_settings, client, scopes)
-        except store.limits.ReplicaLimitError as exc:
-            if exc.kind == "cards":
-                raise VerifyRunError("verify_scope_limit", SCOPE_LIMIT) from None
-            raise
-        # History from another hub, principal or log epoch is ignored for selection.
-        same_binding = state.get("binding") == binding
-        ignored = 0 if same_binding else sum(len(t.get("cards", {})) for t in state["scopes"].values())
-        valid = []
-        for head in heads:
-            if hubc.valid_card_id(head.get("card_id")) and hubc.valid_scope(head.get("scope")):
-                valid.append(head)
-            else:
-                skipped["invalid_head"] = skipped.get("invalid_head", 0) + 1
-        reads: dict[str, pick.Reads] = {}
-        entries: dict[str, dict[str, Any]] = {}
-        sources: dict[str, str] = {}
-        never: dict[str, int | None] = {}
-        listed: list[dict[str, str]] = []
-        per_scope_since: dict[str, int | None] = {}
-        pacer = Pacer()
-        unavailable: set[str] = set()
-        for scope in scopes:
-            # History loads for every bound scope under a matching binding, read stats or not,
-            # so a rate-limited scope's pending proposals still count toward the job-wide ceiling.
-            # Only scoring and selection skip a scope without counts.
-            if same_binding:
-                entries.update(state["scopes"].get(scope, {}).get("cards", {}))
-            try:
-                rows, since = _counts(client, scope, pacer)
-            except hubc.HubRefusal as exc:
-                if exc.status != 429 or exc.code != hubc.READ_STATS_RATE_LIMITED:
-                    raise
-                # No trusted producer writes cached counts yet (slice 9 adds one), so a
-                # rate-limited scope is skipped: nothing in it is scored or selected, and
-                # its never-read count is unknown. Counts in the state file are ignored.
-                skipped["read_stats_limited"] = skipped.get("read_stats_limited", 0) + 1
-                skipped["read_stats_unavailable"] = skipped.get("read_stats_unavailable", 0) + 1
-                sources[scope] = "unavailable"
-                unavailable.add(scope)
-                continue
-            sources[scope] = "fresh"
-            reads.update(rows)
-            per_scope_since[scope] = since
-        selection = pick.select(
-            [head for head in valid if head["scope"] not in unavailable],
-            entries=entries,
-            reads=reads,
-            slots=settings.cards_per_run,
-            now_ms=now,
-            min_interval_days=settings.min_interval_days,
-        )
-        for scope in scopes:
-            scoped = [head for head in valid if head["scope"] == scope]
-            if scope in unavailable:
-                never[scope] = None
-                continue
-            ids = pick.never_read(
-                scoped,
-                entries=entries,
-                reads=reads,
-                since_day=per_scope_since[scope],
-                now_ms=now,
-                never_read_days=settings.never_read_days,
-            )
-            never[scope] = None if ids is None else len(ids)
-            listed.extend({"scope": scope, "card_id": card_id} for card_id in ids or ())
-        for reason, count in selection.skipped.items():
-            skipped[reason] = skipped.get(reason, 0) + count
-        known = [count for count in never.values() if count is not None]
-        payload: dict[str, Any] = {
+        picked = select_cards(target, state, settings, hub_settings, client, now)
+        return {
             "status": "completed",
             "dry_run": True,
             "model": False,
-            "cards_seen": len(valid),
-            "eligible": selection.eligible,
-            "selected": [
-                {"scope": card.scope, "card_id": card.card_id, "score": round(card.score, SCORE_DIGITS), "lane": lane}
-                for card, lane in selection.selected
-            ],
-            "skipped": dict(sorted(skipped.items())),
-            "read_stats": sources,
-            "never_read": {
-                "count": sum(known) if known and len(known) == len(never) else None,
-                "by_scope": never,
-            },
+            **report(picked, state, list_ids=list_ids),
             "state": vstate.summary(target),
         }
-        if not same_binding and (ignored or "binding" in state):
-            payload["notes"] = [{"code": "verify_binding_changed", "ignored_card_entries": ignored}]
-        if list_ids:
-            payload["never_read"]["card_ids"] = listed
-        return payload
 
 
 def doctor_payload(target: Path, timeout: int) -> dict[str, Any]:
@@ -369,8 +462,16 @@ def dispatch(args: argparse.Namespace) -> int:
             payload = status_payload(target)
         elif args.memory_verify_command == "doctor":
             payload = doctor_payload(target, args.timeout)
+        elif args.dry_run and args.no_model:
+            payload = run_payload(target=target, dry_run=True, no_model=True, list_ids=args.list_ids)
+        elif args.no_model:
+            raise VerifyRunError("verify_no_model_requires_dry_run", "--no-model needs --dry-run")
         else:
-            payload = run_payload(target=target, dry_run=args.dry_run, no_model=args.no_model, list_ids=args.list_ids)
+            from . import memory_verify_run
+
+            payload = memory_verify_run.run_payload(
+                target=target, dry_run=args.dry_run, list_ids=args.list_ids, scheduled=args.scheduled
+            )
     except VerifyRunError as exc:
         payload = _failure(exc.code, str(exc))
     except vstate.VerifyStateError as exc:
@@ -410,6 +511,10 @@ def dispatch(args: argparse.Namespace) -> int:
             print(f"skipped {reason} {count}")
         for note in payload.get("notes", []):
             print(f"note {note['code']} {note['ignored_card_entries']}")
+        for item in payload.get("proposals", []):
+            print(f"proposal {item['scope']} {item['card_id']} {item['proposal_id']}")
+        if payload["status"] == "paused":
+            print("scheduled verification is paused. Run memory verify run manually to resume after a success.")
         if "never_read" in payload:
             count = payload["never_read"]["count"]
             print(f"never_read {'unknown' if count is None else count}")
@@ -419,6 +524,6 @@ def dispatch(args: argparse.Namespace) -> int:
 
 
 def _exit(payload: dict[str, Any]) -> int:
-    if payload["status"] in ("ok", "completed"):
+    if payload["status"] in ("ok", "completed", "paused"):
         return 0
-    return 2 if payload.get("code") == "verify_live_unavailable" else 1
+    return 2 if payload.get("code") == "verify_no_model_requires_dry_run" else 1

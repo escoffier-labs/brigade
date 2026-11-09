@@ -2256,21 +2256,25 @@ collection, kind, project, path and run exactly, with no integrity mismatch.
 ```bash
 brigade memory verify status --target <verify-folder>
 brigade memory verify run --dry-run --no-model --target <verify-folder> [--list-ids]
+brigade memory verify run --dry-run --target <verify-folder>
+brigade memory verify run --target <verify-folder> [--scheduled]
 ```
 
 `status` reports whether verification is configured, the number of bound
 scopes and workspaces, the pause state and the never-read count from the last
 recorded run. It makes no hub call.
 
-`run` requires both `--dry-run` and `--no-model` until the model-backed pass
-lands. Anything else is refused with `verify_live_unavailable` (exit 2)
-before any hub call. The dry run pulls the replica, reads per-card counts
-with `read_stats`, scores every card in the bound scopes and prints the
-selected card ids, their scores and lanes, and counted skip reasons. It calls
-no seat, submits and attaches nothing, and writes no state, so the pause
-counter does not move. Output never holds card text, titles or evidence.
-`--list-ids` adds the never-read card ids, still without titles or text.
-Failures print a fixed code and reason only.
+`run --dry-run --no-model` pulls the replica, reads per-card counts with
+`read_stats`, scores every card in the bound scopes and prints the selected
+card ids, their scores and lanes, and counted skip reasons. It calls no seat,
+submits and attaches nothing, and writes no state, so the pause counter does
+not move. `--no-model` without `--dry-run` is refused with
+`verify_no_model_requires_dry_run` (exit 2) before any hub call.
+`run --dry-run` also calls both seats and checks their replies, then attaches,
+submits and writes nothing, and leaves the pause counter alone. A plain `run`
+is the live pass described under "The live run". Output never holds card
+text, titles or evidence. `--list-ids` adds the never-read card ids, still
+without titles or text. Failures print a fixed code and reason only.
 
 Verify keeps its own hub replica under `.brigade/memory/verify/hub/`, with its
 own building directory and locks. It never reads, locks or writes the shared
@@ -2459,15 +2463,116 @@ unavailable. With several scopes the total is null when any scope's count is.
 
 ### When `read_stats` is rate limited
 
+After a scope's `read_stats` listing has been paged to the end, a non-dry
+run stores the whole scope snapshot in one atomic state write: `reads` for
+every live card of the scope (zero for a card with no row) and the scope's
+`counts_ms`, the run's own clock. A listing that stops early, by a refusal or
+a rate limit on a later page, stores nothing for that scope.
+
 When `read_stats` answers `429 memory_read_stats_rate_limited` for a scope,
-the run counts `read_stats_limited` and `read_stats_unavailable` and skips the
-scope: none of its cards are scored or selected, and its never-read count is
-null. Other scopes are unaffected. The scope's card history still loads, so
-its pending proposals count toward the job-wide pending ceiling. Counts cached in the state file are never
-used in place of a reply, because nothing writes a trusted snapshot of them
-yet. The state format already holds per-card `reads` and a per-scope
-`counts_ms`, so the later run that stores complete snapshots needs no format
-change.
+the run counts `read_stats_limited`. If the state holds a snapshot of that
+scope under the same binding, no more than two days old, the scope is scored
+from it and reported as `cached`. Otherwise the run also counts
+`read_stats_unavailable` and skips the scope: none of its cards are scored or
+selected. Either way the scope's never-read count is null, because a snapshot
+never feeds the never-read report. Other scopes are unaffected. The scope's
+card history still loads, so its pending proposals count toward the job-wide
+pending ceiling. The snapshot carries no MAC: tampering by the same user is
+out of scope, as for the reflect markers.
+
+### The live run
+
+A run without `--dry-run` takes these steps in order:
+
+1. It refuses a folder that holds the reflect job's state
+   (`.brigade/memory/reflect/`) with `verify_reflect_folder`.
+2. It reads the hub's `status` and stops before any model call or hub write
+   unless the credential is not the admin credential
+   (`verify_admin_credential`), the hub advertises both `verifier_floor` and
+   `verifier_manifests` (`verify_hub_floor_missing`), `verifier` is true
+   (`verify_not_verifier`) and `reflect_principal` is false
+   (`verify_reflect_principal`). Nothing is inferred from preflight hold
+   reasons.
+3. It resolves both seats with their recorded probes.
+4. It reads every remembered pending proposal with `proposal_show`. A
+   proposal that is no longer pending or held frees its card and its place
+   under the ceiling of 8.
+5. It selects cards, stores the read count snapshots, assembles evidence and
+   calls the seats one card at a time.
+6. For a card whose checks produce an op, it builds a local review packet and
+   a manifest, attaches the manifest with `evidence.attach` and opens one
+   proposal for that one card. The proposal holds the correction ops and an
+   `append_evidence` op that cites the manifest, all pinned to the card's
+   revision and block hashes. Submission reuses reflect's request id ledger,
+   so a lost reply replays the same request.
+
+Commit-id expansions need a git resolver, which a later slice adds. Until
+then every expansion abstains with `verify_commit_unresolved`, so no
+`replace_block` is opened.
+
+What reaches the hub: the reads above, the manifest and the proposal ops. The
+manifest is `brigade.memory-verify-manifest.v1` JSON with the card, each
+block's verdict and confidence code, the reference, kind, trust rank,
+observation time, sha256 and quoted byte ranges of each item the quotes used,
+the rule ids of dropped items, the seat names and pinned models, and the
+digests of the instructions, the packet and the prompt input. It carries no
+card, evidence or model text, and it is scanned before attachment
+(`verify_manifest_unclean`). Its evidence id is
+`<principal>/memory-verify/<sha256 of the manifest>`.
+
+| Run reason | Meaning |
+|---|---|
+| `dry_run_proposal` | A dry run would have attached and proposed for this card |
+| `verify_deferred_proposals` | The run already opened 4 new proposals |
+| `pending_ceiling` | The job already has 8 pending proposals |
+| `proposal_quota` | The hub answered a proposal quota. The run stops proposing and still verifies the rest |
+| `evidence_quota` | The hub answered a retained evidence quota. Handled like `proposal_quota` |
+| `evidence_cap` | The card already holds the most manifests this principal may attach to it |
+| `duplicate_pending` | The hub already holds this proposal. Its id is remembered |
+| `already_proposed`, `refused` | The ledger already holds a proposal id or a final refusal for this correction |
+| `verify_packet_cap` | The packet directory has no room, so nothing was attached or proposed |
+| `seat_quota`, `seat_quota_deferred` | A seat answered a rate limit. The run stops verifying without a failure |
+| `seat_timeout`, `seat_failed` | One call failed. The card is skipped and not marked verified |
+| `verify_deferred_time` | The 20-minute wall clock ran out before this card |
+| `packets_settled`, `packets_expired` | Packets marked terminal or deleted this run |
+
+A run fails, and counts toward the pause, on a transport, configuration or
+authorization error, on a failed pre-run check, on a refused seat, on a seat
+authentication or isolation failure, when every model call fails
+(`verify_seats_failed`) and when the hub refuses every proposal the run
+attempted (`all_proposals_refused`). Three consecutive failed non-dry runs
+pause the scheduled job. `--scheduled` then returns `paused` without a hub
+call, and only a successful non-dry manual run clears the pause.
+
+### Review packets
+
+Each opened proposal has a packet at
+`.brigade/memory/verify/packets/<proposal-id>.json`: the evidence texts with
+their trust ranks and whether they counted, the scan findings of dropped
+items, the seats, both prompts and raw replies, the outcomes and the ops. The
+directory is owner-only (0700) and every packet is owner-only (0600). The
+manifest's `packet_sha256` binds the packet bytes.
+
+When a run finds a packet's proposal no longer open, it renames the packet to
+`<proposal-id>.t<ms>.json` with the time it noticed, and a later run deletes it
+14 days after that. The directory holds at most 64 MiB. A new packet first
+displaces the oldest terminal packets, never an open one. When there is still
+no room, the card is deferred with `verify_packet_cap` before anything is
+attached.
+
+### Scheduling
+
+```bash
+brigade memory care install --target <verify-folder> --entry memory-verify
+```
+
+The `memory-verify` entry runs `brigade memory verify run --scheduled` at
+11:00, an hour after `memory-reflect`. Install refuses the reflect job's
+folder, an install that names both entries, a folder without
+`[hub] mode = "read"`, and any credential other than the folder's own explicit
+memory hub credential: a folder that would fall back to the fleet node token,
+or an override that names a fleet node or admin token. `brigade care status`
+reads the entry's pause state from the verify state file.
 
 ### State file
 
@@ -2475,9 +2580,9 @@ change.
 `schedule.json`: owner-only, read without following links, written through an
 exclusive temporary file and an atomic rename, and held under its own
 `state.lock`. It is limited to 8 MiB. It holds key digests, days, revisions,
-verdict codes, proposal ids and cached read counts, never card ids or text.
-Three consecutive failed runs pause the scheduled job, separately from the
-reflect job's pause.
+verdict codes, proposal ids, cached read counts and the request id ledger,
+never card ids or text. Three consecutive failed runs pause the scheduled
+job, separately from the reflect job's pause.
 
 A state file that is oversized, malformed, linked or readable by others makes
 every verify command fail closed with `verify_state` and the fixed reason

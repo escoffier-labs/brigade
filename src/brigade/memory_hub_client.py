@@ -90,6 +90,8 @@ READ_SCOPES_MAX = 64
 _UNAVAILABLE_STATUSES = {408, 429}
 # Coded proposal quota answers are hub decisions, so callers can stop proposing.
 QUOTA_REFUSALS = {"memory_proposal_principal_quota", "memory_proposal_scope_quota"}
+# Retained-storage budgets for verifier manifests (phase-memory-verify D5). Back pressure, like the proposal quotas.
+EVIDENCE_QUOTA_REFUSALS = {"memory_evidence_retained_principal_quota", "memory_evidence_retained_scope_quota"}
 # `read_stats` allows one request per second and 600 a day per principal. The hub
 # says so with this code, so a caller can stop instead of retrying at once.
 READ_STATS_RATE_LIMITED = "memory_read_stats_rate_limited"
@@ -629,7 +631,8 @@ class MemoryHubClient:
                 raise HubRefusal(status, {"code": "memory_rescan_status", "error": "rescan requires HTTP 200"})
             return payload
         code = payload.get("code")
-        if status == 429 and isinstance(code, str) and (code in QUOTA_REFUSALS or code == READ_STATS_RATE_LIMITED):
+        coded = QUOTA_REFUSALS | EVIDENCE_QUOTA_REFUSALS | {READ_STATS_RATE_LIMITED}
+        if status == 429 and isinstance(code, str) and code in coded:
             raise HubRefusal(status, payload)
         if 300 <= status < 400 or status in _UNAVAILABLE_STATUSES:
             # A redirect is never followed with the credential, and 408 or 429
