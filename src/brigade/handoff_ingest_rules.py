@@ -12,8 +12,8 @@ Two layers:
   `Expected card SHA256` section format for `update-card`.
 * Workspace rules read the canonical workspace (`<workspace>/memory/cards`,
   bootstrap documents): the expected SHA must match the live card, `create-card`
-  must not collide with an existing card, and an append must fit the bootstrap
-  budget. They are skipped when the workspace is not given or not reachable.
+  must not collide with an existing card by file name or by derived card id, and
+  an append must fit the bootstrap budget. They are skipped when the workspace is not given or not reachable.
 """
 
 from __future__ import annotations
@@ -135,18 +135,87 @@ def expected_sha_format_problem(value: str) -> str | None:
     return None
 
 
+class CardIdIndex:
+    """Card ids held by the workspace's cards, read once and shared across a run.
+
+    Built lazily from the same card set and the same derivation `memory hub push`
+    counts, so a collision here is a collision there. Callers that check several
+    handoffs share one index and `register` each card they add, which keeps the
+    cost at one read of the workspace instead of one per handoff.
+    """
+
+    def __init__(self, workspace: Path) -> None:
+        self._workspace = workspace.expanduser().resolve()
+        self._holders: dict[str, set[str]] | None = None
+
+    def _load(self) -> dict[str, set[str]]:
+        if self._holders is None:
+            from . import memory_cmd
+            from .memory_hub_sync import publication_identity
+
+            holders: dict[str, set[str]] = {}
+            for fields in memory_cmd.search_card_fields(self._workspace):
+                card_id, _ = publication_identity(fields["body"], fields["rel"])
+                holders.setdefault(card_id, set()).add(fields["rel"])
+            self._holders = holders
+        return self._holders
+
+    def holders(self, card_id: str, *, excluding: str = "") -> list[str]:
+        """Sorted root-relative paths of the cards that hold `card_id`, leaving out `excluding`."""
+        return sorted(rel for rel in self._load().get(card_id, ()) if rel != excluding)
+
+    def register(self, rel: str, text: str) -> None:
+        """Record the card at `rel` with `text`, replacing any id it held before."""
+        from .memory_hub_sync import publication_identity
+
+        holders = self._load()
+        for paths in holders.values():
+            paths.discard(rel)
+        holders.setdefault(publication_identity(_normalized_card_text(text), rel)[0], set()).add(rel)
+
+
+def _normalized_card_text(content: str) -> str:
+    """Card text as push reads it from disk: no BOM or leading blanks, universal newlines."""
+    return content.removeprefix("\ufeff").lstrip().replace("\r\n", "\n")
+
+
+def card_id_collision_problem(index: CardIdIndex, content: str, target_card: str) -> str | None:
+    """Reason a new card `target_card` holding `content` would share an id with another card, or None.
+
+    A card without an `id` takes its `topic`, so two files can end up with one id
+    and push then refuses both as `card-id-collision`. The card's own file never
+    counts, so a card that already holds the id is not its own collision.
+    """
+    from .memory_hub_sync import publication_identity
+
+    rel = (CARDS_RELATIVE / target_card).as_posix()
+    card_id, _ = publication_identity(_normalized_card_text(content), rel)
+    holders = index.holders(card_id, excluding=rel)
+    if not holders:
+        return None
+    return (
+        f"card-id-collision: create-card derives the card id `{card_id}`, which {holders[0]} already holds "
+        "(an id-less card takes its `topic` as its id). Add an explicit minted `id: card-<uuid4>` or change the topic"
+    )
+
+
 def card_state_problems(
     *,
     action: str,
     target_card: str,
     expected_sha: str,
     workspace: Path | None,
+    suggested_content: str | None = None,
+    card_ids: CardIdIndex | None = None,
 ) -> tuple[list[str], list[str]]:
     """Return (errors, warnings) for the expected SHA and the live card state.
 
     The SHA format rule always runs for update-card. The state rules run only when
     `<workspace>/memory/cards` exists. An unverifiable update-card is a warning, not
     an error, so linting outside a memory workspace stays usable.
+
+    With `suggested_content`, create-card also refuses a card whose derived id an
+    existing card holds under another file. `card_ids` shares one index across handoffs.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -172,8 +241,17 @@ def card_state_problems(
                 f"update-card {EXPECTED_SHA_SECTION} does not match the current card "
                 "(the card changed after the SHA was read, re-read it)"
             )
-    elif reachable and existing is not None:
-        errors.append("create-card target card already exists in the workspace cards (use update-card)")
+    elif action == "create-card" and reachable:
+        if existing is not None:
+            errors.append("create-card target card already exists in the workspace cards (use update-card)")
+        elif suggested_content is not None and workspace is not None:
+            problem = card_id_collision_problem(
+                card_ids if card_ids is not None else CardIdIndex(workspace),
+                suggested_content,
+                target_card,
+            )
+            if problem:
+                errors.append(problem)
     return errors, warnings
 
 

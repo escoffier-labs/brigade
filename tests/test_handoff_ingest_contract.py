@@ -356,7 +356,8 @@ def test_ingest_still_promotes_update_card_without_the_optional_sha_section(tmp_
 
 def test_valid_drafts_for_every_action_are_written_and_lint_clean(tmp_path: Path):
     _workspace(tmp_path)
-    created = _draft(tmp_path, action="create-card", target_card="fresh-card.md", content=CARD, draft_id="a")
+    fresh = CARD.replace("topic: contract-card", "topic: fresh-card")
+    created = _draft(tmp_path, action="create-card", target_card="fresh-card.md", content=fresh, draft_id="a")
     updated = _draft(tmp_path, action="update-card", target_card="contract-card.md", content=UPDATED, draft_id="b")
     documented = _draft(tmp_path, action="no-card", target_document="rules/team.md", content="Do it.", draft_id="c")
     for payload in (created, updated, documented):

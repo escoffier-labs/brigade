@@ -34,10 +34,13 @@ from .card_fingerprint import (
 )
 from .handoff_content import normalize_suggested_card_content
 from .handoff_ingest_rules import (
+    CARDS_RELATIVE,
     EXPECTED_SHA_SECTION,
     SHA256_RE,
+    CardIdIndex,
     bootstrap_budget_problem,
     card_frontmatter_structure_problems,
+    card_id_collision_problem,
     document_destination_problem,
     safe_card_name,
     read_card_bytes,
@@ -280,6 +283,9 @@ def ingest_into(
         print(f"brigade ingest: no handoff inbox at {legacy}", file=sys.stderr)
         return NO_HANDOFF_INBOX
 
+    # Read the cards' ids once for the whole run. Each promoted card is added to it,
+    # so two handoffs in one run cannot both claim an id.
+    card_ids = CardIdIndex(owner)
     for handoffs_dir in handoff_dirs:
         processed_dir = handoffs_dir / "processed"
         try:
@@ -319,6 +325,7 @@ def ingest_into(
                     target=owner,
                     promote_cards=promote_cards,
                     route_documents=route_documents,
+                    card_ids=card_ids,
                 )
                 action = _execute(
                     outcome,
@@ -329,6 +336,7 @@ def ingest_into(
                     processed_dir=processed_dir,
                     dry_run=dry_run,
                     snapshot=snapshot,
+                    card_ids=card_ids,
                 )
             except TrackedHandoffError:
                 action = Action("skipped", _summary("skip", path.name, _TRACKED_SKIP_CODE))
@@ -409,6 +417,7 @@ def decide(
     target: Path,
     promote_cards: bool,
     route_documents: bool,
+    card_ids: CardIdIndex | None = None,
 ) -> Outcome:
     if "memory proposal notification" in sections:
         return Outcome(
@@ -501,6 +510,16 @@ def decide(
             match_outcome = _decide_create_card_match(content, target=target)
             if match_outcome is not None:
                 return match_outcome
+            if not dest.exists():
+                # The card is written with the id it holds, or a freshly minted one, so judge
+                # it by that. An existing destination keeps its own id and is not a new card.
+                collision = card_id_collision_problem(
+                    card_ids if card_ids is not None else CardIdIndex(target),
+                    ensure_card_id_frontmatter(content.strip() + "\n"),
+                    card,
+                )
+                if collision:
+                    return Outcome("inboxed", code="card-id-collision", reason=collision)
         return Outcome("promoted", code="card-promoted", dest=dest)
 
     if action == "no-card" and route_documents:
@@ -696,8 +715,19 @@ def _write_card_descriptor_bound(
 
 
 def _publish_promoted_card(
-    dest: Path, target: Path, sections: Dict[str, str], *, dry_run: bool, expected_sha: str = ""
+    dest: Path,
+    target: Path,
+    sections: Dict[str, str],
+    *,
+    dry_run: bool,
+    expected_sha: str = "",
+    card_ids: CardIdIndex | None = None,
 ) -> None:
+    """Publish (or, in a dry run, simulate) one card and record its id in `card_ids`.
+
+    The card is recorded as soon as the write returns, before the caller archives the
+    handoff, so a failed archive cannot leave the index without a card that is on disk.
+    """
     from contextlib import nullcontext
 
     from .card_identity import valid_card_id
@@ -719,11 +749,15 @@ def _publish_promoted_card(
             raise StaleCardError("expected card SHA256 no longer matches the card")
         return text
 
+    built = ""
+
     def build_content(raw: str | None) -> str:
+        nonlocal built
         content = ensure_fingerprint_frontmatter(sections.get("suggested card content", "").strip() + "\n")
         existing, _ = _frontmatter(raw or "")
         existing_id = valid_card_id(existing.get("id")) or valid_card_id(existing.get("card_id"))
-        return ensure_card_id_frontmatter(content, preserve_id=existing_id)
+        built = ensure_card_id_frontmatter(content, preserve_id=existing_id)
+        return built
 
     lock_path = target / ".brigade/memory/proposals/proposal.lock"
     if not dry_run:
@@ -737,9 +771,13 @@ def _publish_promoted_card(
             parent_fence(dest)
             if dest.is_symlink() or (dest.exists() and not dest.is_file()):
                 raise OSError("publication must be a regular file")
-            check_state(dest.read_bytes() if dest.exists() else None)
-            return
-        _write_card_descriptor_bound(dest, target, check_state, build_content)
+            build_content(check_state(dest.read_bytes() if dest.exists() else None))
+        else:
+            _write_card_descriptor_bound(dest, target, check_state, build_content)
+    if card_ids is not None:
+        # `built` is the text written, or in a dry run the text the same builder would
+        # write, so an update-card that omits an id keeps the destination's id in both.
+        card_ids.register((CARDS_RELATIVE / dest.name).as_posix(), built)
 
 
 def _append_document_nofollow(target: Path, dest: Path, text: str) -> None:
@@ -790,6 +828,7 @@ def _execute(
     processed_dir: Path,
     dry_run: bool,
     snapshot: bytes | None = None,
+    card_ids: CardIdIndex | None = None,
 ) -> Action:
     from .inbox_lock import InboxLockTimeout
     from .memory_evidence_log import log_match
@@ -807,7 +846,9 @@ def _execute(
         if sections.get("recommended memory action", "").strip().lower() == "update-card":
             expected_sha = sections.get(EXPECTED_SHA_SECTION.lower(), "").strip().lower()
         try:
-            _publish_promoted_card(dest, target, sections, dry_run=dry_run, expected_sha=expected_sha)
+            _publish_promoted_card(
+                dest, target, sections, dry_run=dry_run, expected_sha=expected_sha, card_ids=card_ids
+            )
         except InboxLockTimeout:
             return Action("skipped", _summary("skip", name, "card-publication-busy"))
         except (OSError, ValueError) as exc:

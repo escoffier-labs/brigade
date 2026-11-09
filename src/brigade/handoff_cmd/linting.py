@@ -16,6 +16,7 @@ from typing import Any
 from .. import scrub
 from ..budgets import HANDOFF_BACKLOG_STALE_SECONDS
 from ..config import load_config as load_brigade_config
+from ..handoff_ingest_rules import CardIdIndex
 from ..localio import write_json as _write_json
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
@@ -283,10 +284,14 @@ def lint_targets(
         if paths
         else _issue_ops_mod._pending_handoff_paths(target, sources=sources)
     )
-    return tuple(lint_file(path, workspace=workspace or target) for path in candidates)
+    # One card id index for the whole run: each create-card compares against it
+    # instead of re-reading every card.
+    lint_workspace = workspace or target
+    card_ids = CardIdIndex(lint_workspace)
+    return tuple(lint_file(path, workspace=lint_workspace, card_ids=card_ids) for path in candidates)
 
 
-def lint_file(path: Path, *, workspace: Path | None = None) -> HandoffLintResult:
+def lint_file(path: Path, *, workspace: Path | None = None, card_ids: CardIdIndex | None = None) -> HandoffLintResult:
     path = path.expanduser().resolve()
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -298,15 +303,22 @@ def lint_file(path: Path, *, workspace: Path | None = None) -> HandoffLintResult
             errors=(f"cannot read handoff file: {exc}",),
             warnings=(),
         )
-    return lint_text(text, path=path, workspace=workspace)
+    return lint_text(text, path=path, workspace=workspace, card_ids=card_ids)
 
 
-def lint_text(text: str, *, path: Path | None = None, workspace: Path | None = None) -> HandoffLintResult:
+def lint_text(
+    text: str,
+    *,
+    path: Path | None = None,
+    workspace: Path | None = None,
+    card_ids: CardIdIndex | None = None,
+) -> HandoffLintResult:
     """Lint an in-memory handoff without reopening an untrusted filesystem path.
 
     `workspace` is the memory workspace whose cards and bootstrap documents the
     ingester will read. With it, lint also runs the ingester's state checks (the
-    expected SHA matches the live card, no create-card collision, bootstrap budget).
+    expected SHA matches the live card, no create-card collision by file name or by
+    derived card id, bootstrap budget). `card_ids` shares one card id index across calls.
     """
     source_path = Path("<memory-handoff>") if path is None else path
     errors: list[str] = []
@@ -354,7 +366,9 @@ def lint_text(text: str, *, path: Path | None = None, workspace: Path | None = N
             errors.append("Recommended memory action must be one of: " + ", ".join(HANDOFF_ACTIONS))
 
     if action in CARD_ACTIONS:
-        _issue_ops_mod._lint_card_action(sections, errors, warnings, action=action, workspace=workspace)
+        _issue_ops_mod._lint_card_action(
+            sections, errors, warnings, action=action, workspace=workspace, card_ids=card_ids
+        )
     elif action == NO_CARD_ACTION:
         # A memory proposal notification is advisory: ingest inboxes it before any routing,
         # so its target document is never written and needs no allow-list check.
