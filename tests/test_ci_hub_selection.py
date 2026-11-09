@@ -396,6 +396,7 @@ def _replace_main(queue, *changes, remove=()):
             marks=pytest.mark.skipif(os.name == "nt", reason="POSIX executable bits"),
         ),
         ("selector-broken", "trusted-hub-selector-unavailable"),
+        ("selector-duplicate-key", "trusted-hub-selector-unavailable"),
         ("paths-missing", "missing-or-unsafe-path-list"),
         ("paths-oversize", "missing-or-unsafe-path-list"),
         ("paths-empty", "missing-or-unsafe-path-list"),
@@ -411,6 +412,11 @@ def test_an_unusable_trusted_selector_or_path_list_selects_the_hub_suite(queue, 
         _replace_main(queue)
     elif problem == "selector-broken":
         _replace_main(queue, ("scripts/ci_hub_select.py", "invalid python syntax!\n"))
+    elif problem == "selector-duplicate-key":
+        # A dict over these lines would keep the last `hub`, reading hub=false.
+        _replace_main(
+            queue, ("scripts/ci_hub_select.py", _selector_writing("hub=true\\nreason=forged\\nstart=\\nhub=false\\n"))
+        )
     elif problem == "paths-missing":
         _replace_main(queue, remove=["scripts/ci_hub_paths.yml"])
     elif problem == "paths-oversize":
@@ -423,6 +429,39 @@ def test_an_unusable_trusted_selector_or_path_list_selects_the_hub_suite(queue, 
     (head,) = _enqueue(queue, ["src/brigade/other.py"])
     base = _run(queue.seed, "rev-parse", "main")
     assert _select(queue, head, base) == {"hub": "true", "reason": reason}
+
+
+def _selector_writing(output, printed=""):
+    return (
+        "import os\nfrom pathlib import Path\n"
+        f"print({printed!r})\n"
+        f"Path(os.environ['GITHUB_OUTPUT']).write_text('{output}', encoding='utf-8')\n"
+    )
+
+
+def _inert_blocks(stdout):
+    blocks = re.findall(r"^::stop-commands::([0-9a-f]{32})\n(.*?)\n::\1::$", stdout, re.MULTILINE | re.DOTALL)
+    outside = re.sub(r"^::stop-commands::([0-9a-f]{32})\n.*?\n::\1::$", "", stdout, flags=re.MULTILINE | re.DOTALL)
+    return [block for _, block in blocks], outside
+
+
+def test_the_selector_stdout_is_printed_with_workflow_commands_disabled(queue):
+    (head,) = _enqueue(queue, ["src/brigade/other.py"])
+    _select(queue, head, queue.main)
+    blocks, outside = _inert_blocks(queue.stdout)
+    assert len(blocks) == 1 and "hub selection: main " in blocks[0], queue.stdout
+    assert "hub selection:" not in outside
+    _replace_main(
+        queue,
+        (
+            "scripts/ci_hub_select.py",
+            _selector_writing("hub=true\\nreason=printed\\nstart=\\n", "::warning::from stdout"),
+        ),
+    )
+    assert _select(queue, head, queue.main) == {"hub": "true", "reason": "printed"}
+    blocks, outside = _inert_blocks(queue.stdout)
+    assert len(blocks) == 1 and "::warning::from stdout" in blocks[0], queue.stdout
+    assert "::warning::" not in outside
 
 
 def test_a_failed_fetch_of_main_selects_the_hub_suite(queue):

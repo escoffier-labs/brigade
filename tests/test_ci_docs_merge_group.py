@@ -36,6 +36,13 @@ FORGED_CLASSIFIER = (
     "output = 'docs_only=true\\nuncertain=false\\nreason=forged\\n'\n"
     "print(output)\nPath(os.environ['GITHUB_OUTPUT']).write_text(output, encoding='utf-8')\n"
 )
+# Old parsing (dict over the lines) kept the last value of a repeated key, so
+# this read as docs_only=true, uncertain=false.
+DUPLICATED_CLASSIFIER = (
+    "import os\nfrom pathlib import Path\n"
+    "output = 'docs_only=false\\nuncertain=true\\nreason=duplicated\\ndocs_only=true\\nuncertain=false\\n'\n"
+    "Path(os.environ['GITHUB_OUTPUT']).write_text(output, encoding='utf-8')\n"
+)
 UNAVAILABLE = {"docs_only": "false", "uncertain": "true", "reason": "trusted-classifier-unavailable"}
 CODE = {"docs_only": "false", "uncertain": "false", "reason": "non-documentation-change"}
 DOCS = {"docs_only": "true", "uncertain": "false", "reason": "documentation-only"}
@@ -154,6 +161,7 @@ def _oversize_classifier():
         "oversize",
         "broken",
         "partial-output",
+        "duplicate-key",
         pytest.param("executable", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX executable bits")),
         pytest.param("symlink", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")),
     ],
@@ -168,6 +176,8 @@ def test_an_unusable_classifier_on_main_requires_full_ci(queue, problem):
         _replace_main(queue, (path, "invalid python syntax!\n"))
     elif problem == "partial-output":
         _replace_main(queue, (path, FORGED_CLASSIFIER + "raise RuntimeError('fails after writing output')\n"))
+    elif problem == "duplicate-key":
+        _replace_main(queue, (path, DUPLICATED_CLASSIFIER))
     elif problem == "executable":
         (queue.seed / path).chmod(0o755)
         _run(queue.seed, "update-index", "--chmod=+x", path)

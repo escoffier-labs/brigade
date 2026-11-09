@@ -61,6 +61,22 @@ jobs:
                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
               ).stdout
 
+          def echo_inert(text):
+              # Show the selector's own output with workflow commands disabled.
+              token = secrets.token_hex(16)
+              print(f"::stop-commands::{token}")
+              print(text)
+              print(f"::{token}::")
+
+          def parse_output(text, keys):
+              # Exactly one line per expected key: a missing, repeated or
+              # unknown key fails, never collapses into a dict.
+              pairs = [line.split("=", 1) for line in text.splitlines()]
+              names = [pair[0] for pair in pairs]
+              if len(pairs) != len(keys) or any(len(pair) != 2 for pair in pairs) or sorted(names) != sorted(keys):
+                  raise ValueError("invalid helper output")
+              return dict(pairs)
+
           result = {"hub": "true", "reason": "trusted-hub-selector-unavailable", "start": "", "target": ""}
           try:
               # A fixed refspec: the target never comes from the event or the proposal.
@@ -87,17 +103,12 @@ jobs:
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                       )
                   except subprocess.CalledProcessError as error:
-                      # Show the tail of the selector's stderr with workflow commands disabled.
-                      token = secrets.token_hex(16)
-                      print(f"::stop-commands::{token}")
-                      print(error.stderr.decode("utf-8", "replace")[-2000:])
-                      print(f"::{token}::")
+                      echo_inert(error.stderr.decode("utf-8", "replace")[-2000:])
                       raise
-                  print(completed.stdout.decode("utf-8", "replace"), end="")
-                  candidate = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+                  echo_inert(completed.stdout.decode("utf-8", "replace")[-2000:])
+                  candidate = parse_output(output.read_text(encoding="utf-8"), ("hub", "reason", "start"))
                   if (
-                      set(candidate) != {"hub", "reason", "start"}
-                      or candidate["hub"] not in {"true", "false"}
+                      candidate["hub"] not in {"true", "false"}
                       or not re.fullmatch(r"[a-z-]{1,80}", candidate["reason"])
                       or not re.fullmatch(r"(?:[0-9a-f]{40})?", candidate["start"])
                   ):
@@ -151,6 +162,15 @@ jobs:
                   kind = git("cat-file", "-t", value)
               if kind != b"commit\n":
                   raise ValueError("not a commit")
+
+          def parse_output(text, keys):
+              # Exactly one line per expected key: a missing, repeated or
+              # unknown key fails, never collapses into a dict.
+              pairs = [line.split("=", 1) for line in text.splitlines()]
+              names = [pair[0] for pair in pairs]
+              if len(pairs) != len(keys) or any(len(pair) != 2 for pair in pairs) or sorted(names) != sorted(keys):
+                  raise ValueError("invalid helper output")
+              return dict(pairs)
 
           result = {"docs_only": "false", "uncertain": "true", "reason": "trusted-classifier-unavailable"}
           try:
@@ -211,10 +231,9 @@ jobs:
                       env=dict(environment, GITHUB_OUTPUT=str(output), **extra),
                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                   )
-                  candidate = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+                  candidate = parse_output(output.read_text(encoding="utf-8"), ("docs_only", "uncertain", "reason"))
                   if (
-                      set(candidate) != {"docs_only", "uncertain", "reason"}
-                      or candidate["docs_only"] not in {"true", "false"}
+                      candidate["docs_only"] not in {"true", "false"}
                       or candidate["uncertain"] not in {"true", "false"}
                       or (candidate["docs_only"] == "true" and candidate["uncertain"] != "false")
                       or not re.fullmatch(r"[a-z-]{1,80}", candidate["reason"])

@@ -147,7 +147,7 @@ run on `main` is the backstop for that, and for new toolchain releases.
 | --- | --- | --- |
 | Documentation classifier uncertain (`uncertain` not `'false'`) | `'true'` | suite runs and must pass |
 | `main` cannot be fetched, or has no selector, or the selector is a symlink, executable, oversize or broken | `'true'` | suite runs and must pass |
-| Selector output missing, partial or invalid | `'true'` | suite runs and must pass |
+| Selector output missing, partial, invalid, or with a repeated or unknown key | `'true'` | suite runs and must pass |
 | `base_ref` not `refs/heads/main`, or head mismatch | `'true'` | suite runs and must pass |
 | History fetch fails, no merge base within 256 commits (`no-merge-base`), several merge bases (`ambiguous-merge-base`), or merge base not below `base_sha` | `'true'` | suite runs and must pass |
 | Path list missing, not a regular file, empty, over 16 KiB, or not in the one accepted format | `'true'` | suite runs and must pass |

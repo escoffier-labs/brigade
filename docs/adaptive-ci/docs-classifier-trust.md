@@ -70,8 +70,11 @@ the cumulative range that group would have run the full suite.
    target=<the refs/ci-trusted/main commit, or empty if it never ran>
    ```
 
-   The bootstrap accepts the selector's output only when the keys are exactly
-   `hub`, `reason` and `start`, and `start` is empty or 40 hex digits.
+   The bootstrap accepts the selector's output only when it has exactly three
+   `key=value` lines, one each for `hub`, `reason` and `start`, and `start` is
+   empty or 40 hex digits. A repeated or unknown key fails, so a repeated
+   `hub=false` line cannot override an earlier `hub=true`. The docs step parses
+   the classifier's output the same way.
 2. **Classifier source.** The `docs` step maps
    `CI_TRUSTED_MAIN: steps.hub_merge_group.outputs.target` and
    `CI_MERGE_GROUP_START: steps.hub_merge_group.outputs.start` into its
@@ -79,21 +82,26 @@ the cumulative range that group would have run the full suite.
    - checks `merge_group.head_sha == GITHUB_SHA == HEAD`.
    - resolves `refs/ci-trusted/main` and requires it to equal
      `CI_TRUSTED_MAIN`, so the classifier comes from the commit the range was
-     validated against.
+     validated against. Nothing fetches the ref again between the two steps,
+     so this is a consistency check between the selector's output and the
+     ref, not a guard against `main` moving.
    - requires `CI_MERGE_GROUP_START` to be a 40-digit commit id.
    - loads `scripts/ci_docs_only.py` from that `main` commit with
      `git ls-tree` and `git cat-file`: a regular non-executable blob
      (mode `100644`) of 1 to 131072 bytes.
-   - runs it with `python3 -I -S` and passes `CI_MERGE_GROUP_START` only in a
-     merge group.
+   - runs it with `python3 -I -S` and passes `CI_TRUSTED_MAIN` and
+     `CI_MERGE_GROUP_START` only in a merge group.
 3. **Classifier range.** For `merge_group`, `ci_docs_only.py` now requires
-   `base_ref == refs/heads/main` and a valid `CI_MERGE_GROUP_START`. It checks
-   that the start is an ancestor of `base_sha` and that `base_sha` is an
-   ancestor of the head, and then diffs `start..head` instead of
-   `base_sha..head`. The diff rules (raw, NUL-delimited, renames off, modes
+   `base_ref == refs/heads/main`, a valid `CI_TRUSTED_MAIN` and a valid
+   `CI_MERGE_GROUP_START`. It checks that the start is an ancestor of `main`
+   and of `base_sha`, and that `base_sha` is an ancestor of the head, and then
+   diffs `start..head` instead of `base_sha..head`. The `main` check is what
+   makes the range cumulative: `start == base_sha` passes the other two
+   checks, and while entry A is not on `main` it would hide A's change. The diff rules (raw, NUL-delimited, renames off, modes
    `100644` only, documentation allowlist) are unchanged.
 4. **Pull requests and pushes** keep their source and range. The bootstrap
-   removes `CI_MERGE_GROUP_START` from the classifier's environment for them.
+   removes `CI_TRUSTED_MAIN` and `CI_MERGE_GROUP_START` from the classifier's
+   environment for them.
 
 The gate expressions are unchanged. Every job that `docs_skips` covers still
 runs unless `needs.changes.outputs.docs_only` is exactly `'true'`, and every
@@ -111,17 +119,20 @@ Every row gives `docs_only=false`, `uncertain=true`, which runs full CI.
 | `base_ref` is not `refs/heads/main` | hub selector, and again in the classifier | `trusted-classifier-unavailable` or `unexpected-target-branch` |
 | No merge base within 256 commits, or several | hub selector (`no-merge-base`, `ambiguous-merge-base`) | `trusted-classifier-unavailable` |
 | Merge base not below `base_sha`, or `base_sha` not in the head | hub selector, and again in the classifier | `trusted-classifier-unavailable` or `cumulative-range-not-below-group-base` |
-| `refs/ci-trusted/main` differs from the commit the selector used | docs bootstrap | `trusted-classifier-unavailable` |
+| Start not in `main`'s history (for example `start == base_sha` before entry A merges) | classifier | `cumulative-range-not-below-group-base` |
+| `refs/ci-trusted/main` differs from the selector's `target` | docs bootstrap | `trusted-classifier-unavailable` |
 | Classifier missing on `main`, a symlink, executable, over 128 KiB or broken | docs bootstrap | `trusted-classifier-unavailable` |
-| Classifier output missing, partial or invalid | docs bootstrap | `trusted-classifier-unavailable` |
+| Classifier output missing, partial, invalid, or with a repeated or unknown key | docs bootstrap | `trusted-classifier-unavailable` |
+| `CI_TRUSTED_MAIN` missing (an older bootstrap) | classifier | `missing-trusted-main` |
 | `CI_MERGE_GROUP_START` missing or not a commit id (an older bootstrap) | classifier | `missing-cumulative-range` |
 
 When the hub selector fails it also selects the hub suite, so these cases cost
 a full run and never skip anything.
 
-A failing selector's stderr (last 2000 characters) is now printed in the
-`changes` log between `::stop-commands::<random token>` and `::<token>::`, so
-it cannot issue workflow commands.
+The selector's own output is printed in the `changes` log between
+`::stop-commands::<random token>` and `::<token>::`, so it cannot issue
+workflow commands: its stdout on success, the last 2000 characters of its
+stderr on failure.
 
 ## Tests
 
@@ -135,12 +146,16 @@ checkout:
   never has its classifier run, and its change counts as code.
 - Documentation behind documentation, and documentation behind a code entry
   that has since merged, still skip.
-- Every row of the table above except the last, which only an older
-  bootstrap can reach.
+- Every row of the table above. The two rows only an older bootstrap can
+  reach run the classifier directly.
+- The selector's stdout and stderr both stay inside a `::stop-commands::`
+  block.
 
 Mutation checks: loading the classifier from `base_sha` again fails the
-forged-classifier tests, and diffing `base_sha..head` again fails the
-queued-behind test.
+forged-classifier tests, diffing `base_sha..head` again fails the
+queued-behind test, dropping the `main` ancestry check fails the
+`start == base_sha` case, and parsing helper output with `dict()` again fails
+the repeated-key cases.
 
 ## Trust and its limit
 
