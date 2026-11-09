@@ -72,7 +72,11 @@ def _code(value: object) -> bool:
 
 
 # Optional ledger fields another job may keep beside the request id. Reflect keeps none.
-LEDGER_FIELDS = {"ops_sha256": _digest, "duplicate": lambda value: value is True}
+LEDGER_FIELDS = {
+    "ops_sha256": _digest,
+    "duplicate": lambda value: value is True,
+    "expired": lambda value: value is True,
+}
 
 
 def valid_submission(digest: object, pending: object, extra: frozenset[str] = frozenset()) -> bool:

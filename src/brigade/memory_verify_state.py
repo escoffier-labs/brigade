@@ -46,8 +46,9 @@ CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 TOP_KEYS = frozenset({"schema", "consecutive_failures", "paused", "last_status", "binding", "scopes", "submissions"})
 # The S19d request id ledger, shared with reflect: one entry per correction, keyed by its ops digest.
 MAX_SUBMISSIONS = 4096
-# Verify keeps the digest of the full submitted ops, and marks an id a duplicate reply named.
-LEDGER_EXTRA = frozenset({"ops_sha256", "duplicate"})
+# Verify keeps the digest of the full submitted ops, marks an id a duplicate reply named, and
+# keeps the request id of an expired stage as a tombstone keyed by that ops digest.
+LEDGER_EXTRA = frozenset({"ops_sha256", "duplicate", "expired"})
 SCOPE_KEYS = frozenset({"since_day", "never_read", "counts_ms", "cards"})
 CARD_KEYS = frozenset({"seen", "proposed", "verified", "revision", "evidence", "verdict", "pending", "reads"})
 

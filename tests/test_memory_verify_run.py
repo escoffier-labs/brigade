@@ -198,7 +198,11 @@ def verify_hub(tmp_path, monkeypatch):
     clock = Clock()
     monkeypatch.setattr(verify_cmd, "MONOTONIC", clock.monotonic)
     monkeypatch.setattr(verify_cmd, "SLEEP", clock.sleep)
-    configure(target, tmp_path / "bound", extra='propose_seat = "propose-seat"\nconfirm_seat = "confirm-seat"\n')
+    configure(
+        target,
+        tmp_path / "bound",
+        extra='enabled = true\npropose_seat = "propose-seat"\nconfirm_seat = "confirm-seat"\n',
+    )
     fake = Seats()
     monkeypatch.setattr(run_mod, "READY", fake.ready)
     monkeypatch.setattr(run_mod, "CALL", fake.call)
@@ -264,6 +268,19 @@ def test_a_hub_without_the_floor_or_a_wrong_principal_fails_before_any_model_cal
     assert {call["action"] for call in hub.calls} == {"status"}
     assert report["schedule"] == {"consecutive_failures": 1, "paused": False}
     assert packets(target) == []
+
+
+@pytest.mark.parametrize("flags", [["--scheduled"], [], ["--dry-run"]])
+def test_a_disabled_pass_makes_no_model_call_no_hub_request_and_no_state_write(verify_hub, capsys, tmp_path, flags):
+    target, hub, fake, _ = verify_hub
+    configure(target, tmp_path / "bound", extra='propose_seat = "propose-seat"\nconfirm_seat = "confirm-seat"\n')
+    status, report = verify(target, capsys, *flags)
+    assert status == 1 and report["code"] == run_mod.DISABLED and report["reason"] == run_mod.DISABLED_REASON
+    assert fake.calls == [] and fake.ready_calls == 0 and hub.calls == []
+    assert not (target / vstate.STATE).exists()
+    # The read-only preview keeps working, as it did before the pass could run.
+    assert verify(target, capsys, "--dry-run", "--no-model")[0] == 0
+    assert fake.calls == []
 
 
 def test_a_refused_seat_fails_the_run_before_any_hub_write(verify_hub, capsys, monkeypatch):
@@ -836,15 +853,63 @@ def test_an_expired_unresolved_stage_is_deleted_and_its_card_checked_again(verif
     assert report["skipped"][run_mod.STAGE_EXPIRED] == 1 and packets(target) == []
     entry = entry_for(target, CARD_ID)
     assert entry["verdict"] == run_mod.STAGE_EXPIRED and "verified" not in entry
-    assert state_of(target)["submissions"] == {}
-    # The next run checks the card again and stages it under a new request.
+    # The request id stays behind as a tombstone keyed by the full ops digest.
+    ((key, tombstone),) = state_of(target)["submissions"].items()
+    assert tombstone == {"client_event_id": old_request, "ops_sha256": key, "expired": True}
+    # The next run checks the card again. Its fresh check has different ops, so it gets a new request.
     calls = len(fake.calls)
     report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=expiry + 1)
     assert len(fake.calls) > calls
-    (request,) = [entry["client_event_id"] for entry in state_of(target)["submissions"].values()]
-    assert request != old_request
+    ledger = state_of(target)["submissions"]
+    (request,) = [entry["client_event_id"] for entry in ledger.values() if not entry.get("expired")]
+    assert request != old_request and ledger[key] == tombstone
+    assert "request_id_reused" not in report["skipped"]
     record = json.loads((target / pk.PACKETS / staged).read_bytes())
     assert record["created_ms"] == expiry + 1
+
+
+def test_identical_ops_after_an_expired_stage_reuse_the_same_request_id(verify_hub, resolver, monkeypatch):
+    target, hub, _, _ = verify_hub
+    monkeypatch.setattr(vc, "secrets", FixedSecrets)
+    # The hub may have stored this request although no reply arrived. Here it answers retryable.
+    hub.propose_reply = (503, {"code": "memory_writer_busy", "error": "busy", "retryable": True})
+    now = int(time.time() * 1000)
+    run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    (first,) = [call for call in hub.calls if call["action"] == "propose"]
+    hub.propose_reply = (429, {"code": "memory_proposal_scope_quota", "error": "quota"})
+    # The stage expires. The same run checks the card again, rebuilds identical ops and resends them.
+    report = run_mod.run_payload(
+        target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now + pk.STAGE_DAYS * DAY
+    )
+    assert report["skipped"][run_mod.STAGE_EXPIRED] == 1 and report["skipped"]["request_id_reused"] == 1
+    second = [call for call in hub.calls if call["action"] == "propose"][-1]
+    assert second["ops"] == first["ops"] and second["client_event_id"] == first["client_event_id"]
+    # The tombstone is consumed: the live entry holds the reused id.
+    ((pending),) = state_of(target)["submissions"].values()
+    assert pending["client_event_id"] == first["client_event_id"] and "expired" not in pending
+
+
+def test_tombstones_are_bounded_by_age_and_count(verify_hub, monkeypatch):
+    target, hub, _, _ = verify_hub
+    now = int(time.time() * 1000)
+    run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    ages = [run_mod.TOMBSTONE_DAYS * DAY, run_mod.TOMBSTONE_DAYS * DAY - DAY, 3 * DAY, 2 * DAY, DAY]
+    state = state_of(target)
+    for index, age in enumerate(ages):
+        key = f"{index:064x}"
+        state["submissions"][key] = {
+            "client_event_id": hubc.event_id(now - age),
+            "ops_sha256": key,
+            "expired": True,
+        }
+    vstate.save(target, state)
+    run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    # Under the cap, only the request 90 days old ages out.
+    assert sorted(state_of(target)["submissions"]) == [f"{index:064x}" for index in range(1, 5)]
+    # Over the cap, the oldest go first and the youngest stay.
+    monkeypatch.setattr(run_mod, "MAX_TOMBSTONES", 2)
+    run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    assert sorted(state_of(target)["submissions"]) == [f"{3:064x}", f"{4:064x}"]
 
 
 def test_a_stage_with_an_altered_append_evidence_op_is_refused(verify_hub, capsys, resolver):
@@ -891,7 +956,7 @@ def test_a_staged_submission_for_a_scope_no_longer_bound_is_never_sent(verify_hu
     other.mkdir()
     (target / ".brigade/memory-care.toml").write_text(
         '[hub]\nmode="read"\nread_scopes=["fleet", "repo:second"]\n'
-        '[verify]\npropose_seat = "propose-seat"\nconfirm_seat = "confirm-seat"\n'
+        '[verify]\nenabled = true\npropose_seat = "propose-seat"\nconfirm_seat = "confirm-seat"\n'
         f'[[verify.workspace]]\nscope="repo:second"\npath="{other}"\narchive_projects=[]\n'
     )
     hub.propose_reply = None

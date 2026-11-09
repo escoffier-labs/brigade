@@ -79,6 +79,9 @@ MAX_NEW_PROPOSALS = 4
 PENDING_CEILING = pick.PENDING_CEILING
 # proposal_show reads per run. The ceiling keeps remembered proposals far below this.
 MAX_SHOWS = 64
+# Request ids of expired stages, kept so identical ops are resent under the same id. The oldest go first.
+TOMBSTONE_DAYS = 90
+MAX_TOMBSTONES = 512
 DAY_MS = pick.DAY_MS
 PACKET_SCHEMA = "brigade.memory-verify-packet.v1"
 MANIFEST_SCHEMA = "brigade.memory-verify-manifest.v1"
@@ -92,6 +95,8 @@ EVIDENCE_CONFLICT = "memory_evidence_conflict"
 EVIDENCE_CAPS = frozenset({"memory_evidence_principal_cap", "memory_evidence_workspace_cap"})
 COMPONENT = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 REFLECT_REFUSAL = "the verify folder must not be the reflect job's folder. Give memory-verify its own folder"
+DISABLED = "verify_disabled"
+DISABLED_REASON = "[verify] enabled is false, so no verify run calls a seat or the hub. Set enabled = true to run it"
 
 # Injectable for tests: the seat layer, evidence assembly, the archive and the clock.
 READY: Callable[..., tuple[seats.Seat, seats.Seat]] = seats.ready
@@ -304,7 +309,24 @@ def _remember(
     room = vstate.MAX_SUBMISSIONS - 4 * MAX_NEW_PROPOSALS
     for _, digest in settled[: max(0, len(submissions) - room)]:
         del submissions[digest]
+    evict_tombstones(submissions, now)
     return tables
+
+
+def evict_tombstones(submissions: dict[str, dict[str, Any]], now: int) -> int:
+    """Drop tombstones whose request is `TOMBSTONE_DAYS` old, then the oldest past `MAX_TOMBSTONES`."""
+    tombstones = sorted(
+        (pending["client_event_id"], key) for key, pending in submissions.items() if pending.get("expired")
+    )
+    keep = []
+    for minted, key in tombstones:
+        if now - (hubc.event_id_ms(minted) or 0) >= TOMBSTONE_DAYS * DAY_MS:
+            del submissions[key]
+        else:
+            keep.append(key)
+    for key in keep[: max(0, len(keep) - MAX_TOMBSTONES)]:
+        del submissions[key]
+    return len(tombstones) - min(len(keep), MAX_TOMBSTONES)
 
 
 def _verdict(result: contract.CardResult) -> str:
@@ -786,7 +808,16 @@ class Sender:
             if not ours and staged.expired(self.now):
                 packets.drop(self.target, staged)
                 if current is not None and not current.get("proposal_id"):
+                    # The hub may hold this request even though no reply arrived. Keep its id as a
+                    # tombstone, keyed by the full ops digest, so identical ops are resent under it.
                     del self.ledger[staged.digest]
+                    ops = current.get("ops_sha256")
+                    if ops is not None and not current.get("refused"):
+                        self.ledger[ops] = {
+                            "client_event_id": current["client_event_id"],
+                            "ops_sha256": ops,
+                            "expired": True,
+                        }
                 self.record(staged, STAGE_EXPIRED, eligible=True)
                 continue
             if self.send(staged, replay=True) == UNRESOLVED:
@@ -1000,7 +1031,15 @@ def _propose(
     # transient failure from here on leaves a request the next run can replay exactly.
     current = sender.ledger.get(digest)
     if current is None or current.get("ops_sha256") != staged.ops_sha256:
-        sender.ledger[digest] = {"client_event_id": hubc.event_id(), "ops_sha256": staged.ops_sha256}
+        request = hubc.event_id()
+        tombstone = sender.ledger.get(staged.ops_sha256)
+        if tombstone is not None and tombstone.get("expired") and tombstone.get("ops_sha256") == staged.ops_sha256:
+            # Identical ops to an expired request: resend under its id, so the hub's idempotency
+            # answers with the original proposal if that request ever landed. Other ops get a new id.
+            del sender.ledger[staged.ops_sha256]
+            request = tombstone["client_event_id"]
+            tally.skip("request_id_reused")
+        sender.ledger[digest] = {"client_event_id": request, "ops_sha256": staged.ops_sha256}
         sender.save()
     packets.stage(sender.target, staged)
     return sender.send(staged, replay=False)
@@ -1033,8 +1072,15 @@ def _failure(exc: BaseException) -> dict[str, Any]:
 def run_payload(
     *, target: Path, dry_run: bool, list_ids: bool, scheduled: bool, now_ms: int | None = None
 ) -> dict[str, Any]:
-    """One verify run with the seats. A non-dry run counts toward, or clears, the pause."""
+    """One verify run with the seats. A non-dry run counts toward, or clears, the pause.
+
+    With `[verify] enabled = false` it refuses with `verify_disabled` before any
+    seat call, hub request or state write. Only `run --dry-run --no-model`,
+    which calls no seat, still previews selection while the pass is disabled.
+    """
     cmd._check_overlap(target)
+    if not cmd.configured(target).enabled:
+        raise VerifyRunError(DISABLED, DISABLED_REASON)
     now = int(time.time() * 1000) if now_ms is None else now_ms
     with vstate.locked(target):
         state = vstate.load(target)

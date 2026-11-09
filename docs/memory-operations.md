@@ -2271,7 +2271,13 @@ submits and attaches nothing, and writes no state, so the pause counter does
 not move. `--no-model` without `--dry-run` is refused with
 `verify_no_model_requires_dry_run` (exit 2) before any hub call.
 `run --dry-run` also calls both seats and checks their replies, then attaches,
-submits and writes nothing, and leaves the pause counter alone. A plain `run`
+submits and writes nothing, and leaves the pause counter alone.
+With `[verify] enabled = false`, every run that would call a seat (`run`,
+`run --scheduled` and `run --dry-run`) refuses with `verify_disabled` and
+exits 1 before any seat call, hub request or state write, so an installed
+care job does nothing and its log shows why. `run --dry-run --no-model`
+calls no seat and keeps working, so selection can be previewed before the
+pass is enabled. A plain `run`
 is the live pass described under "The live run". Output never holds card
 text, titles or evidence. `--list-ids` adds the never-read card ids, still
 without titles or text. Failures print a fixed code and reason only.
@@ -2554,7 +2560,8 @@ card, evidence or model text, and it is scanned before attachment
 | `verify_binding_unchecked` | The `proposal_show` read for a duplicate failed. The stage stays for the next run, until it expires |
 | `verify_stage_ops_mismatch` | A stage's ops no longer hash to the digest the request id ledger keeps. Nothing is sent, the request is closed and no new id is minted |
 | `verify_scope_unbound` | A stage's scope is no longer bound in `[[verify.workspace]]` or readable. Nothing is sent to it and the request is closed |
-| `verify_stage_expired` | A stage without a result reached its 7-day limit. It is deleted, the request is forgotten and the card is eligible again |
+| `verify_stage_expired` | A stage without a result reached its 7-day limit. It is deleted, its request id is kept as a tombstone and the card is eligible again |
+| `request_id_reused` | A submission's ops matched a tombstone, so it was sent under the expired request's id |
 | `proposal_show_failed` | A remembered proposal could not be read. It still counts as open this run |
 
 A run fails, and counts toward the pause, on a transport, configuration or
@@ -2605,9 +2612,20 @@ principal holding `read`, `reflect` and `read_stats` always records
 
 A stage holds card text, evidence, prompts and raw replies, so it expires.
 A stage whose submission still has no result 7 days after it was created is
-deleted, its request is forgotten and the card's verdict becomes
-`verify_stage_expired`, which makes the card eligible again. Packets of
-settled proposals expire 14 days after settling, as above.
+deleted and the card's verdict becomes `verify_stage_expired`, which makes the
+card eligible again. Packets of settled proposals expire 14 days after
+settling, as above.
+
+The hub may have stored the expired request even though no reply arrived, so
+its ledger entry is not deleted. It becomes a tombstone holding only the
+request id and the digest of the full ops, keyed by that digest. When a later
+check builds a submission with exactly those ops, it is sent under the
+tombstone's request id (`request_id_reused`), and the hub's idempotency
+answers with the original proposal if it exists. Different ops get a new id.
+Because each check's prompts carry fresh nonces, a regenerated submission
+usually differs, and a pending duplicate is then caught by the
+duplicate-pending reply instead. Tombstones are kept for 90 days from the
+request's creation and at most 512 at a time, oldest evicted first.
 
 When a run finds a packet's proposal no longer open, it renames the packet to
 `<proposal-id>.t<ms>.json` with the time it noticed, and a later run deletes it

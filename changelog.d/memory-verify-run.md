@@ -17,3 +17,8 @@
   transient attach error is retried instead of treated as final, and a
   duplicate pending reply publishes a packet only when the hub lists its
   manifest as bound to that proposal.
+- An expired verify stage keeps its request id as a tombstone for 90 days, at
+  most 512 at a time, so identical ops are resent under the same id instead of
+  a new one.
+- `[verify] enabled = false` now stops every verify run that would call a seat,
+  scheduled runs included, with `verify_disabled` before any hub request.
