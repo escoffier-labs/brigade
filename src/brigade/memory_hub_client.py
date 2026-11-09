@@ -244,11 +244,14 @@ def display_url(url: str) -> str:
 
 
 def _user_config(path: Path | None = None) -> dict[str, Any]:
-    """`~/.brigade/fleet.toml` (under `BRIGADE_HOME` when set), or `path`, or {} when absent."""
-    from . import fleet_client
+    """`~/.brigade/fleet.toml` (under `BRIGADE_HOME` when set), or `path`, or {} when absent or relative."""
+    from . import fleet_home_guard
 
     if path is None:
-        path = fleet_client.brigade_home() / fleet_client.FLEET_CONFIG_REL_PATH.name
+        # A relative BRIGADE_HOME would let the working directory choose `[memory_hub]` (#2423).
+        path = fleet_home_guard.fleet_config_path()
+        if path is None:
+            return {}
     try:
         if not path.is_file():
             return {}
@@ -295,11 +298,16 @@ def _table_override(config: dict[str, Any]) -> tuple[str, str] | None:
 
 def _same_file(first: Path, raw_second: str) -> bool:
     """Whether `raw_second` (a `[fleet]` token path, as `brigade fleet` reads it) names the file `first`."""
+    from . import fleet_home_guard
+
+    base = fleet_home_guard.fleet_config_path()
     candidates = [raw_second.strip()]
     if "\\" in raw_second:
         candidates.append(raw_second.strip().replace("\\", "/"))
     for candidate in candidates:
-        second = Path(candidate).expanduser()
+        second = fleet_home_guard.token_path(candidate, base) if base is not None else None
+        if second is None:
+            continue
         try:
             if os.path.samefile(first, second):
                 return True

@@ -39,8 +39,7 @@ def _token_snapshot() -> tuple[str, str, str]:
     is dropped when that same read names a hub other than the effective one,
     so an environment hub never pairs with another hub's file token.
     """
-    client = _client()
-    from .fleet_home_guard import user_fleet_section
+    from .fleet_home_guard import read_token_file, user_fleet_section
 
     section = user_fleet_section()
     raw_hub = section.get("hub_url")
@@ -51,7 +50,7 @@ def _token_snapshot() -> tuple[str, str, str]:
         value = os.environ.get(env_name, "").strip()
         path = section.get(file_key)
         if not value and isinstance(path, str) and path.strip() and file_hub in ("", hub_url):
-            value = client._read_token_file(path)
+            value = read_token_file(path)
         tokens.append(value)
     return hub_url, tokens[0], tokens[1]
 

@@ -5,11 +5,14 @@ holds its own ``.brigade/fleet.toml`` could then choose the fleet hub and the to
 contents are sent to it. Every fleet reader resolves the home here, so a relative ``BRIGADE_HOME``
 never selects a fleet file: strict and stateful callers get ``RelativeBrigadeHomeError``, and
 best-effort callers see no file and log one warning per process.
+
+A token file named in that ``fleet.toml`` resolves the same way: ``~`` expands, and a relative path
+is read under the directory of that ``fleet.toml``, never under the working directory.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 from . import fleet_client
@@ -63,3 +66,44 @@ def user_fleet_section(*, strict: bool = False) -> dict[str, Any]:
     """The ``[fleet]`` table of the user-level ``fleet.toml``; {} when absent or refused."""
     path = fleet_config_path(strict=strict)
     return {} if path is None else fleet_client._read_fleet_section(path, strict=strict)
+
+
+def resolve_against(path: PurePath, config_dir: PurePath) -> PurePath | None:
+    """``path`` when absolute, else ``path`` under ``config_dir``.
+
+    None for a Windows drive-relative (``C:token``) or root-relative (``\\token``) path, which would
+    still follow the working drive or directory.
+    """
+    if path.is_absolute():
+        return path
+    if path.drive or path.root:
+        return None
+    return config_dir / path
+
+
+def token_path(raw: str, config_path: Path) -> Path | None:
+    """A token file path from ``config_path``: ``~`` expanded, a relative one under its directory."""
+    resolved = resolve_against(Path(raw.strip()).expanduser(), config_path.parent)
+    return None if resolved is None else Path(resolved)
+
+
+def read_token_file(raw: str, config_path: Path | None = None) -> str:
+    """The token in a file named by the user-level ``fleet.toml`` (``config_path`` by default), or "".
+
+    A path written with Windows backslashes is tried as written first, then with ``/``.
+    """
+    base = config_path if config_path is not None else fleet_config_path()
+    if base is None:
+        return ""
+    candidates = [raw.strip()]
+    if "\\" in raw:
+        candidates.append(raw.strip().replace("\\", "/"))
+    for candidate in candidates:
+        path = token_path(candidate, base)
+        if path is None:
+            continue
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+    return ""

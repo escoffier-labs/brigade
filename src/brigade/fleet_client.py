@@ -251,7 +251,7 @@ def load_fleet_settings(*, strict: bool = False) -> dict[str, str]:
     admin_token = os.environ.get("BRIGADE_FLEET_TOKEN", "").strip()
     node_token = os.environ.get("BRIGADE_FLEET_NODE_TOKEN", "").strip()
     if not (hub_url and admin_token and node_token):
-        from .fleet_home_guard import user_fleet_section
+        from .fleet_home_guard import read_token_file, user_fleet_section
 
         section = user_fleet_section(strict=strict)
         if not hub_url and isinstance(section.get("hub_url"), str):
@@ -259,11 +259,11 @@ def load_fleet_settings(*, strict: bool = False) -> dict[str, str]:
         if not admin_token:
             token_file = section.get("token_file")
             if isinstance(token_file, str) and token_file.strip():
-                admin_token = _read_token_file(token_file)
+                admin_token = read_token_file(token_file)
         if not node_token:
             node_token_file = section.get("node_token_file")
             if isinstance(node_token_file, str) and node_token_file.strip():
-                node_token = _read_token_file(node_token_file)
+                node_token = read_token_file(node_token_file)
     return {"hub_url": hub_url, "admin_token": admin_token, "node_token": node_token}
 
 
@@ -285,20 +285,6 @@ def load_fleet_config(*, strict: bool = False) -> dict[str, str]:
             _SHARED_TOKEN_WARNED = True
             _LOG.warning(_SHARED_TOKEN_WARNING)
     return _claim_lifecycle._FleetConfig(settings, token)
-
-
-def _read_token_file(raw_path: str) -> str:
-    """Read a token file; tolerate a Windows path written with backslashes
-    (tried as-is first, then with backslashes normalized to ``/``)."""
-    candidates = [raw_path.strip()]
-    if "\\" in raw_path:
-        candidates.append(raw_path.strip().replace("\\", "/"))
-    for candidate in candidates:
-        try:
-            return Path(candidate).expanduser().read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-    return ""
 
 
 def _read_fleet_section(config_path: Path, *, strict: bool = False) -> dict[str, Any]:

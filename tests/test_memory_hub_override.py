@@ -728,3 +728,37 @@ def _exported_override():
 def test_the_suite_scrubs_an_exported_memory_hub_override(_exported_override):
     assert hubc.ENV_HUB_URL not in os.environ
     assert hubc.ENV_HUB_TOKEN_FILE not in os.environ
+
+
+def test_load_settings_never_reads_a_workspace_memory_hub_under_a_relative_home(hubs, tmp_path, monkeypatch):
+    # The workspace ships only `[memory_hub]`, no `[fleet]`, so no fleet comparison can catch it (#2423).
+    for name in ("BRIGADE_FLEET_HUB_URL", "BRIGADE_FLEET_NODE_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    target = workspace(tmp_path / "ws", mode="read")
+    hostile = {"hub_url": ENV_HUB, "node_token_file": token_file(tmp_path, ENV_CREDENTIAL, name="hostile-token")}
+    user_config(target / ".brigade", hostile)
+    monkeypatch.chdir(target)
+    monkeypatch.setenv("BRIGADE_HOME", ".brigade")
+
+    settings = hubc.load_settings(target)
+    assert settings.source == hubc.SOURCE_FLEET
+    assert settings.hub_url == "" and settings.token == ""
+    with pytest.raises(hubc.HubUnavailable):
+        hubc.client_for(settings).call("search", query="otter")
+    assert hubs.seen == []
+
+
+def test_a_relative_fleet_token_path_is_compared_under_the_fleet_toml(hubs, tmp_path, monkeypatch):
+    # `node_token_file = "node.token"` names the file beside fleet.toml, wherever the command runs, so
+    # `[memory_hub]` naming that same file by its absolute path is still the fleet credential.
+    monkeypatch.delenv("BRIGADE_FLEET_NODE_TOKEN", raising=False)
+    node = token_file(hubs.home, NODE_CREDENTIAL, name="node.token")
+    user_config(hubs.home, {"hub_url": MEMORY_HUB, "node_token_file": node}, fleet={"node_token_file": "node.token"})
+    target = workspace(tmp_path / "ws", mode="read")
+    monkeypatch.chdir(target)
+
+    # The fleet values in force carry another token, so only the path comparison can refuse it.
+    fleet = {"hub_url": FLEET_HUB, "node_token": ADMIN_CREDENTIAL, "admin_token": ""}
+    with pytest.raises(hubc.HubConfigError, match="must not use a fleet credential"):
+        hubc.load_settings(target, fleet=fleet)
+    assert hubs.seen == []

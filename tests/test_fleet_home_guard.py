@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -20,6 +20,7 @@ from brigade import (
 )
 from brigade import fleet_client_message_credentials as credentials
 from brigade import fleet_client_messages as messages
+from tests._home import set_home
 
 USER_HUB = "http://192.0.2.10:8787"
 WORKSPACE_HUB = "https://attacker.invalid"
@@ -183,3 +184,84 @@ def test_the_default_home_still_works(tmp_path, monkeypatch, no_fleet_env):
     assert settings["hub_url"] == USER_HUB
     assert settings["node_token"] == "user-node-token"
     assert fleet_client.home_identity_target() == user
+
+
+def test_relative_token_files_resolve_under_the_fleet_toml_not_the_working_directory(
+    tmp_path, monkeypatch, no_fleet_env
+):
+    home = tmp_path / "user-home" / ".brigade"
+    home.mkdir(parents=True)
+    _token(home / "node.token", "home-node-token")
+    _token(home / "admin.token", "home-admin-token")
+    (home / "fleet.toml").write_text(
+        f'[fleet]\nhub_url = "{USER_HUB}"\nnode_token_file = "node.token"\ntoken_file = "admin.token"\n',
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _token(workspace / "node.token", "workspace-node-token")
+    _token(workspace / "admin.token", "workspace-admin-token")
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
+
+    settings = fleet_client.load_fleet_settings(strict=True)
+    assert settings["node_token"] == "home-node-token"
+    assert settings["admin_token"] == "home-admin-token"
+    assert fleet_claim_lifecycle._token_snapshot() == (USER_HUB, "home-node-token", "home-admin-token")
+
+
+def test_a_tilde_token_file_still_expands(tmp_path, monkeypatch, no_fleet_env):
+    user = set_home(monkeypatch, tmp_path / "profile")
+    home = user / ".brigade"
+    home.mkdir(parents=True)
+    _token(user / "fleet-node.token", "tilde-node-token")
+    (home / "fleet.toml").write_text('[fleet]\nnode_token_file = "~/fleet-node.token"\n', encoding="utf-8")
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+
+    assert fleet_client.load_fleet_settings()["node_token"] == "tilde-node-token"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("node.token", PureWindowsPath("C:/BrigadeHome/.brigade/node.token")),
+        ("tokens\\node.token", PureWindowsPath("C:/BrigadeHome/.brigade/tokens/node.token")),
+        ("D:\\secrets\\node.token", PureWindowsPath("D:/secrets/node.token")),
+        ("\\\\server\\share\\node.token", PureWindowsPath("//server/share/node.token")),
+        ("C:node.token", None),
+        ("\\node.token", None),
+    ],
+)
+def test_windows_token_paths_resolve_or_refuse(raw, expected):
+    base = PureWindowsPath("C:/BrigadeHome/.brigade")
+    assert fleet_home_guard.resolve_against(PureWindowsPath(raw), base) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("node.token", PurePosixPath("/srv/brigade-home/.brigade/node.token")),
+        ("/etc/node.token", PurePosixPath("/etc/node.token")),
+    ],
+)
+def test_posix_token_paths_resolve(raw, expected):
+    assert fleet_home_guard.resolve_against(PurePosixPath(raw), PurePosixPath("/srv/brigade-home/.brigade")) == expected
+
+
+@pytest.mark.parametrize(
+    ("home", "accepted"),
+    [
+        (PureWindowsPath("C:/BrigadeHome/.brigade"), True),
+        (PureWindowsPath("//server/share/.brigade"), True),
+        (PureWindowsPath("C:.brigade"), False),
+        (PureWindowsPath("/.brigade"), False),
+        (PureWindowsPath(".brigade"), False),
+        (PurePosixPath("/srv/brigade-home/.brigade"), True),
+        (PurePosixPath(".brigade"), False),
+    ],
+)
+def test_the_absolute_home_check_on_windows_and_posix_paths(home, accepted, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: home)
+    assert (fleet_home_guard.absolute_brigade_home() == home) is accepted
+    assert (fleet_home_guard.absolute_brigade_home() is None) is not accepted
