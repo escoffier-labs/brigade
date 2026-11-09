@@ -153,3 +153,58 @@ brigade run cloud grokbot pack install-service --id grokbot-memory --target <wor
 
 There are no bearer flags. The watch runs only the `route_down` and
 `hub_credential_invalid` checks, because there is no inbox to go stale.
+
+## Job references (`memory_refs`)
+
+The Grok Bot feeds (`feed`, `scout-feed` and `build-feed` with `--apply`) can
+attach up to five card references to a new job as `memory_refs`. The search
+runs as this pack's principal (`agent:grokbot-memory`), so a job never names a
+card the bot cannot open with `memory_card`. References are off until the
+operator names that principal's token file in the user-level fleet
+configuration. Only `~/.brigade/fleet.toml` (`$BRIGADE_HOME/fleet.toml` when
+`BRIGADE_HOME` is set) is read. A relative `BRIGADE_HOME` would resolve against
+the working directory, so it turns references off before anything is read. A
+workspace file, the pack instance file and the runtime JSON never set or
+override the path.
+
+```toml
+[grokbot_memory]
+token_file = "/absolute/path/to/grokbot-memory-token"
+```
+
+Point `token_file` at the same credential file as this pack's
+`hub.message_token_file`. The file must be an absolute path to a regular file
+owned by the user who runs the feeds, not a symlink, at most 4 KiB, and hold
+one token. On POSIX it must have no group or world access (`chmod 600`). The
+token goes only to the fleet hub in `[fleet] hub_url`. A token equal to this
+host's node or admin credential is refused. Before references turn on, the
+hub's message `identity` action must authenticate the token as exactly
+`agent:grokbot-memory`, so a Dot, Duet or other agent token with wider grants
+cannot stand in for the bot. A hub that cannot answer leaves references off.
+Windows is not supported: with the key set there, references stay off and the
+file is never opened.
+
+`brigade run cloud grokbot doctor --instance <role>` prints one `memory-refs`
+line with a fixed reason and never the token or its path:
+
+- `ok` when references are on
+- `skipped` when the key is absent, and references stay off
+- `fail` when the key is set but the home, the file, the path, the platform or the hub identity is refused, and references stay off
+
+Dot, Duet and interactive `brigade memory` search do not read this section and
+keep their own principals.
+
+### Rollout on the live Grok Bot host
+
+1. Confirm the `grokbot-memory` pack doctor passes, so its token file already
+   meets the private-file checks.
+2. Add the `[grokbot_memory]` table above to the feed user's
+   `~/.brigade/fleet.toml`, with `token_file` set to the pack's
+   `hub.message_token_file`.
+3. Run `brigade run cloud grokbot doctor --instance <role>` as that user and
+   check for `memory-refs: ok`, which also proves the hub confirmed the token
+   as `agent:grokbot-memory`.
+4. Run the next feed `--apply` and check that a new job carries
+   `memory_refs`. Jobs queued before the change keep the envelope they have.
+
+To turn references off again, remove the table. The next feed run attaches none.

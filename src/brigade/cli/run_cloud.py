@@ -1674,10 +1674,15 @@ def _dispatch_grokbot_ops(args, target: Path) -> int:
             return 0
 
         if command == "doctor":
+            from .. import grokbot_memory_credential
+
             checks = grokbot_ops.doctor(target, instance, client_id=args.client_id)
             for check in checks:
                 print(f"{check['check']}: {check['status']}")
-            return _doctor_exit_code(checks)
+            # Host-wide: whether feeds attach memory_refs, and the fixed reason. Never the token or its path.
+            memory_refs = grokbot_memory_credential.doctor_check()
+            print(f"{memory_refs['check']}: {memory_refs['status']} ({memory_refs['detail']})")
+            return _doctor_exit_code([*checks, memory_refs])
 
         if command == "canary":
             result = grokbot_ops.canary(target, instance, client_id=args.client_id)

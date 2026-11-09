@@ -2854,10 +2854,12 @@ S25 as built (dispatch packets, `src/brigade/dispatch_memory.py`):
   Grok Bot memory principal's own credential (`agent:grokbot-memory`, push
   source), so the hub's grants for that principal decide which cards they may
   name, and they name hub cards only. Without that credential on the host the
-  feeds compute no references. The grokbot-memory unit finds its token through
-  the workspace pack instance file, and a workspace file must not choose where
-  a credential is read from, so no host has that credential yet. A user-level
-  location is a follow-up. They are left out of the
+  feeds compute no references. A workspace file must not choose where a
+  credential is read from, so the only source is `[grokbot_memory] token_file`
+  in the user-level `~/.brigade/fleet.toml` (#2416), read with the private-file
+  checks of the other message credentials, only under an absolute Brigade
+  home and only after the hub's `identity` answer names `agent:grokbot-memory`.
+  `brigade run cloud grokbot doctor` reports it as `memory-refs`. They are left out of the
   task hash, so a changed card never breaks an idempotent re-apply. The hub
   enqueue payload is unchanged: metadata only, with no task text and no
   references, because a hub column would need a lockstep schema change with

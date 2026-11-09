@@ -36,7 +36,9 @@ hub card <card_id> --scope <scope>`` for a hub card, the path in the memory
 workspace for a local card. A connector cannot open a local card, so a
 connector packet and a Grok Bot reference never name one. Grok Bot references
 are searched with the Grok Bot memory principal's own credential, so they name
-only cards that principal may read. Without that credential there are none.
+only cards that principal may read. That credential comes only from
+``[grokbot_memory] token_file`` in the user-level fleet.toml. Without it there
+are none.
 
 Every packet is built for the connector audience except one: Worklore
 ``handoff show``, which prints to the operator's own terminal, asks
@@ -596,12 +598,15 @@ Authority = Callable[[], "tuple[str, str] | None"]
 def grokbot_memory_authority() -> tuple[str, str] | None:
     """The hub URL and token of the Grok Bot memory principal (``agent:grokbot-memory``), or None.
 
-    None for now: the grokbot-memory unit finds its token through the workspace
-    pack instance file (``.brigade/grokbot/packs/grokbot-memory.json``), and a
-    workspace file must not choose where a credential is read from. Until a
-    user-level location exists, the feeds compute no references.
+    The token comes only from ``[grokbot_memory] token_file`` in the user-level
+    ``~/.brigade/fleet.toml`` (#2416), read with the private-file checks every
+    message credential gets. A workspace file never chooses the path. Absent or
+    refused, there is no authority and the feeds compute no references.
+    ``brigade run cloud grokbot doctor`` says why in its ``memory-refs`` line.
     """
-    return None
+    from . import grokbot_memory_credential
+
+    return grokbot_memory_credential.resolve().authority
 
 
 def job_refs(
