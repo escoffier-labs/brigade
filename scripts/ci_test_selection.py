@@ -68,6 +68,7 @@ INVARIANT_TESTS = (
     "tests/test_posix_facade_guard.py",
     "tests/test_phase257_facades.py",
     "tests/test_verify_brigade_skill.py",
+    "tests/test_retired_engine_names.py",
 )
 CLI_SUBPROCESS = re.compile(r"""["']-m["']\s*,\s*["']brigade["']|-m brigade\b|\[\s*["']brigade["']\s*,\s*["'][a-z]""")
 # Selection policies, widest last. A `closure:K` reason means the test reaches a changed module
