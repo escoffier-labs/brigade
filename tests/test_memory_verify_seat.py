@@ -906,3 +906,51 @@ def test_a_failed_probe_is_invalidated_on_disk_before_the_next_seat_runs(target,
         seats.ready(target, "verify-propose", "verify-confirm")
     assert caught.value.code == "verify_seat_not_isolated" and "propose_seat" in str(caught.value)
     assert leftovers(target) == []
+
+
+def ollama_tags(digests: dict[str, str]):
+    """A loopback daemon holding several local models, keyed by name, with the given manifest digests."""
+
+    def api(path, body):
+        if path == "/api/tags":
+            return {
+                "models": [
+                    {"name": name, "model": name, "digest": digest, "size": 4_000_000}
+                    for name, digest in digests.items()
+                ]
+            }
+        return {"details": {"format": "gguf"}, "model_info": {"general.architecture": "llama"}}
+
+    return api
+
+
+OLLAMA_PAIR = """
+[agents.llama-8b]
+cli = "ollama:llama3:8b"
+role = "reviewer"
+"""
+
+
+@POSIX
+def test_two_ollama_names_on_one_manifest_digest_are_one_model(target, monkeypatch):
+    write_roster(target, OLLAMA_PAIR)
+    monkeypatch.setattr(seats, "OLLAMA_API", ollama_tags({"llama3:latest": DIGEST_A, "llama3:8b": DIGEST_A}))
+    with pytest.raises(seats.SeatRefused) as caught:
+        seats.resolve_pair(target, "local", "llama-8b")
+    assert caught.value.code == "verify_seat_same_model"
+    monkeypatch.setattr(seats, "OLLAMA_API", ollama_tags({"llama3:latest": DIGEST_A, "llama3:8b": "d" * 64}))
+    first, second = seats.resolve_pair(target, "local", "llama-8b")
+    assert (first.ollama_digest, second.ollama_digest) == (DIGEST_A, "d" * 64)
+
+
+@SAFE
+def test_an_ollama_retag_onto_the_other_seats_manifest_is_refused_before_launch(target, monkeypatch):
+    write_roster(target, OLLAMA_PAIR)
+    monkeypatch.setattr(seats, "OLLAMA_API", ollama_tags({"llama3:latest": DIGEST_A, "llama3:8b": "d" * 64}))
+    _, second = seats.resolve_pair(target, "local", "llama-8b")
+    monkeypatch.setattr(seats, "OLLAMA_API", ollama_tags({"llama3:latest": DIGEST_A, "llama3:8b": DIGEST_A}))
+    with seats.work_area(target) as area:
+        with pytest.raises(seats.SeatRefused) as caught:
+            seats.call(area, second, PROMPT_SECRET, timeout=30)
+        assert dirfd.child_names(area.files_fd, 8) == []
+    assert caught.value.code == "verify_seat_not_isolated"

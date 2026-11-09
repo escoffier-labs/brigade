@@ -522,7 +522,11 @@ def resolve_pair(target: Path, propose: str | None, confirm: str | None) -> tupl
     loaded = _roster(target)
     first = resolve(target, propose, "propose", loaded=loaded)
     second = resolve(target, confirm, "confirm", loaded=loaded)
-    if first.model_key == second.model_key:
+    # Two Ollama names can tag one manifest (`llama3:latest` and `llama3:8b`), so the digest counts too.
+    # Each seat's digest is checked again against its own before every launch (`_rebind`), so a
+    # retag after this point cannot make the two seats one model without refusing the call.
+    same_digest = first.ollama_digest is not None and first.ollama_digest == second.ollama_digest
+    if first.model_key == second.model_key or same_digest:
         raise SeatRefused("verify_seat_same_model", "propose_seat and confirm_seat must pin different models")
     return first, second
 
