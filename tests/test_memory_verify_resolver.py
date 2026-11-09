@@ -1367,9 +1367,10 @@ def test_an_empty_directory_swapped_in_after_the_contents_are_removed_survives(m
     real_clear = resolver._clear_held
 
     def clear_then_swap(fd):
-        real_clear(fd)
+        cleared = real_clear(fd)
         os.rename(home, original)
         home.mkdir()
+        return cleared
 
     monkeypatch.setattr(resolver, "_clear_held", clear_then_swap)
     collect(holder)
@@ -1608,6 +1609,21 @@ def test_a_symlinked_git_whose_target_is_not_root_owned_is_refused(tmp_path, mon
 def test_only_root_owned_nodes_without_group_or_world_write_are_trusted(uid, mode, trusted):
     metadata = os.stat_result((mode, 1, 1, 1, uid, 0, 0, 0, 0, 0))
     assert resolver._trusted_node("/usr/bin/git", metadata) is trusted
+
+
+@posix
+def test_a_git_that_is_not_a_native_file_is_refused(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    git_path = tree(root, "usr", "bin") / "git"
+    git_path.write_text("#!/bin/sh\nexit 0\n")
+    git_path.chmod(0o755)
+    fake_root(monkeypatch, root)
+    monkeypatch.setattr(resolver, "GIT_CANDIDATES", (str(git_path),))
+    assert resolver.find_git() is None
+    git_path.unlink()
+    shutil.copy2(real_git(), git_path)
+    git_path.chmod(0o755)
+    assert resolver.find_git() == os.path.realpath(git_path)  # the control: the native binary passes
 
 
 @posix
