@@ -4,7 +4,6 @@ from tests.dot_support import requires_local_state
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -271,10 +270,10 @@ def test_pushing_profiles_describe_memory_hits_and_the_grok_inbox_does_not():
     assert not profile.GROKBOT_INBOX.memory_push
 
 
-# The connector principal's credential
+# The memory hub's read credential
 
 
-def test_push_search_uses_the_connector_principal_and_the_push_source(monkeypatch, tmp_path):
+def test_push_search_uses_the_memory_hub_and_the_push_source(monkeypatch, tmp_path):
     sent = []
 
     def transport(url, token, body, timeout):
@@ -282,21 +281,40 @@ def test_push_search_uses_the_connector_principal_and_the_push_source(monkeypatc
         return 200, {"matches": []}
 
     monkeypatch.setattr(memory_hub_client, "urllib_transport", transport)
-    authority = SimpleNamespace(hub="https://hub.example.test:3774", token=FAKE_CREDENTIAL)
-    runtime = SimpleNamespace(
-        paths=SimpleNamespace(workspace=tmp_path, bin=SimpleNamespace(), state_dir=tmp_path),
+    home = tmp_path / "brigade-home"
+    home.mkdir()
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
+    for name in ("BRIGADE_FLEET_HUB_URL", "BRIGADE_FLEET_NODE_TOKEN", "BRIGADE_FLEET_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    for name in (memory_hub_client.ENV_HUB_URL, memory_hub_client.ENV_HUB_TOKEN_FILE):
+        monkeypatch.delenv(name, raising=False)
+    token = home / "memory-read-token"
+    token.write_text(FAKE_CREDENTIAL, encoding="utf-8")
+    token.chmod(0o600)
+    (home / "fleet.toml").write_text(
+        "[fleet]\nhub_url = 'https://fleet-hub.invalid:3774'\n"
+        f"[memory_hub]\nhub_url = 'https://memory-hub.invalid:3774'\nnode_token_file = '{token}'\n",
+        encoding="utf-8",
     )
+    workspace = tmp_path / "workspace"
+    (workspace / ".brigade").mkdir(parents=True)
+    (workspace / ".brigade" / "memory-care.toml").write_text('[hub]\nmode = "read"\nscope = "fleet"\n')
     tools = MemoryTools.__new__(MemoryTools)
-    tools.runtime, tools._authority = runtime, lambda: authority
+    tools.workspace = workspace
+
+    def message_authority():
+        raise AssertionError("the fleet message authority is never used for hub memory")
+
+    tools._authority = message_authority
     assert tools.push_search("release", 5) == {"matches": []}
-    url, token, body, timeout = sent[0]
-    assert url == "https://hub.example.test:3774/memory" and token == authority.token
+    url, sent_token, body, timeout = sent[0]
+    assert url == "https://memory-hub.invalid:3774/memory" and sent_token == FAKE_CREDENTIAL
     assert body == {"action": "search", "query": "release", "limit": 5, "query_source": "push"}
     assert timeout == memory_hub_client.SEARCH_BUDGET_SECONDS
     # The agent's own memory_search is a read on the hub, so it names the connector source instead.
     assert tools.connector_search("release", 5) == {"matches": []}
     assert sent[1][2] == {"action": "search", "query": "release", "limit": 5, "query_source": "connector"}
-    assert sent[1][1] == authority.token
+    assert sent[1][:2] == ("https://memory-hub.invalid:3774/memory", FAKE_CREDENTIAL)
 
 
 # Through the adapter

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -15,9 +14,9 @@ from brigade import memory_hub_search as hub_search
 from brigade import memory_hub_store as store
 from brigade import memory_hub_sync as sync
 from brigade.dot import process as dot_process
+from brigade.dot.profile import DOT, DUET
 from tests._home import set_home
 from tests.test_memory_hub_client import (
-    CONNECTOR_CREDENTIAL,
     HUB_URL,
     NODE_CREDENTIAL,
     OTHER_CREDENTIAL,
@@ -144,20 +143,76 @@ def test_memory_uses_the_override_while_fleet_settings_stay_on_fleet(hubs, tmp_p
     assert len(hubs.fleet.calls) == seeded
 
 
+def _never_the_message_authority():
+    raise AssertionError("Dot and Duet hub memory must not use the listener's fleet message authority")
+
+
+def _fleet_and_memory_hub(hubs: Router, tmp_path: Path, monkeypatch, *, memory_hub: bool) -> Path:
+    """A host like the Dot and Duet hosts: `[fleet]` on one hub, and `[memory_hub]` on another when asked."""
+    for name in ("BRIGADE_FLEET_HUB_URL", "BRIGADE_FLEET_NODE_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    fleet = {"hub_url": FLEET_HUB, "node_token_file": token_file(tmp_path, NODE_CREDENTIAL, name="node-token")}
+    memory = {"hub_url": MEMORY_HUB, "node_token_file": token_file(tmp_path)} if memory_hub else None
+    user_config(hubs.home, memory, fleet=fleet)
+    assert fleet_client.load_fleet_settings()["hub_url"] == FLEET_HUB
+    return workspace(tmp_path / "ws", mode="read", **{"local-otter": "# Local otter\notter local notes\n"})
+
+
+def _dot_tools(target: Path, profile):
+    tools = _dot_cli(target, memory_hub=False)
+    tools.profile = profile
+    tools._authority = _never_the_message_authority
+    return tools
+
+
 @POSIX_DOT
-def test_dot_and_duet_memory_tools_use_the_enrolling_hub_not_the_override(hubs, tmp_path):
-    # Dot and Duet search and read hub cards as the connector principal, so they use the hub that
-    # enrolled it, never the `[memory_hub]` override: its credential never reaches another hub (S23).
-    put(hubs.memory, "repo:test/app", "otter", "otter decoy")
-    put(hubs.fleet, "repo:test/app", "otter", "otter notes")
+@pytest.mark.parametrize("profile", [DOT, DUET], ids=["dot", "duet"])
+def test_dot_and_duet_memory_tools_use_the_memory_hub_not_the_fleet_hub(hubs, tmp_path, monkeypatch, profile):
+    # The fleet hub serves no memory. Dot and Duet search, read and push from `[memory_hub]` with its
+    # read credential, never `[fleet] hub_url`, the node token or the listener's message principal.
+    target = _fleet_and_memory_hub(hubs, tmp_path, monkeypatch, memory_hub=True)
+    put(hubs.memory, "repo:test/app", "otter", "otter notes")
+    hubs.memory.cards[("repo:test/app", "otter")]["trust"] = "reviewed"
+    put(hubs.fleet, "repo:test/app", "otter", "otter decoy", token=NODE_CREDENTIAL)
     hubs.fleet.cards[("repo:test/app", "otter")]["trust"] = "reviewed"
-    tools = _dot_cli(overridden(hubs, tmp_path))
-    tools._authority = lambda: SimpleNamespace(hub=FLEET_HUB, token=CONNECTOR_CREDENTIAL)
+    fleet_calls = len(hubs.fleet.calls)
+    tools = _dot_tools(target, profile)
     hubs.seen.clear()
+    hubs.memory.calls.clear()
+
     found = tools.memory_search("otter")
     assert [(m["card_id"], m["source"]) for m in found["matches"]] == [("otter", "hub")]
+    assert [m["card_id"] for m in found["local_matches"]] == ["local-otter"]
+    assert found["retrieval"] == {"hub": "ok", "degraded": False} and "warning" not in found
     assert tools.memory_card("otter", scope="repo:test/app")["content"] == "otter notes\n"
-    assert set(hubs.seen) == {(FLEET_HUB, CONNECTOR_CREDENTIAL)}
+    assert tools.push_search("otter", 3)["matches"][0]["card_id"] == "otter"
+
+    sources = [c["query_source"] for c in hubs.memory.calls if c["action"] == "search"]
+    assert sources == ["connector", "push"]
+    assert all(c["push"] is True for c in hubs.memory.calls if c["action"] == "card")
+    assert set(hubs.seen) == {(MEMORY_HUB, OTHER_CREDENTIAL)}
+    assert len(hubs.fleet.calls) == fleet_calls and tools.commands.argv == []
+
+
+@POSIX_DOT
+@pytest.mark.parametrize("profile", [DOT, DUET], ids=["dot", "duet"])
+def test_dot_and_duet_without_a_memory_hub_answer_local_only_and_send_nothing(hubs, tmp_path, monkeypatch, profile):
+    # `[fleet]` alone: hub memory has no memory hub here, so nothing goes to the fleet hub with the
+    # node token. Search answers local cards with a no-memory-hub status, and hub cards are not found.
+    target = _fleet_and_memory_hub(hubs, tmp_path, monkeypatch, memory_hub=False)
+    put(hubs.fleet, "repo:test/app", "otter", "otter decoy", token=NODE_CREDENTIAL)
+    hubs.fleet.cards[("repo:test/app", "otter")]["trust"] = "reviewed"
+    hubs.seen.clear()
+    tools = _dot_tools(target, profile)
+
+    found = tools.memory_search("otter")
+    assert found["matches"] == [] and [m["card_id"] for m in found["local_matches"]] == ["local-otter"]
+    assert found["retrieval"] == {"hub": "unavailable", "degraded": True, "reason": "no-memory-hub"}
+    assert found["warning"] == "hub_search_unavailable"
+    assert tools.memory_card("otter", scope="repo:test/app") == {"error": "card_not_found", "name": "otter"}
+    with pytest.raises(hubc.HubUnavailable, match="no-memory-hub"):
+        tools.push_search("otter", 3)
+    assert hubs.seen == [] and tools.commands.argv == []
 
 
 def test_the_dot_child_environment_carries_brigade_home_and_no_hub_variables(hubs, monkeypatch, tmp_path):

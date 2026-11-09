@@ -28,7 +28,7 @@ from brigade import memory_hub_sync as sync
 NODE_CREDENTIAL = "-".join(("fixture", "node", "credential", "0123456789"))
 OTHER_CREDENTIAL = "-".join(("fixture", "other", "credential", "0123456789"))
 ADMIN_CREDENTIAL = "-".join(("fixture", "admin", "credential", "0123456789"))
-# Dot's and Duet's own message principal: memory_card reads with it, never the node credential (S23).
+# The `[memory_hub]` read credential Dot and Duet search and read with, never the node credential.
 CONNECTOR_CREDENTIAL = "-".join(("fixture", "connector", "credential", "0123456789"))
 # What the hub pushes to every reader. agent-unreviewed goes only to its writer.
 PUSH_TRUST = {"reviewed", "policy-promoted", "imported"}
@@ -831,14 +831,27 @@ class _Runner:
         return SimpleNamespace(timed_out=False, overflow=False, stdout=json.dumps(self.reply).encode())
 
 
-def _dot_memory(target: Path, reply: dict):
+def _dot_memory_hub(token: str = CONNECTOR_CREDENTIAL) -> None:
+    """Point `[memory_hub]` in the test's fleet.toml at the fake hub, with `token` as its read credential."""
+    home = Path(os.environ["BRIGADE_HOME"])
+    home.mkdir(parents=True, exist_ok=True)
+    token_path = home / "memory-read-token"
+    token_path.write_text(token, encoding="utf-8")
+    token_path.chmod(0o600)
+    (home / "fleet.toml").write_text(
+        f"[memory_hub]\nhub_url = '{HUB_URL}'\nnode_token_file = '{token_path}'\n", encoding="utf-8"
+    )
+
+
+def _dot_memory(target: Path, reply: dict, *, memory_hub: bool = True):
     from brigade.dot.memory_tools import MemoryTools
     from brigade.dot.profile import DUET
 
     tools = MemoryTools.__new__(MemoryTools)
     tools.workspace, tools.cards, tools.profile = target, target / "memory" / "cards", DUET
-    # The listener-pinned connector principal. Dot and Duet card reads use it, never the node credential.
-    tools._authority = lambda: SimpleNamespace(hub=HUB_URL, token=CONNECTOR_CREDENTIAL)
+    if memory_hub and os.environ.get("BRIGADE_HOME"):
+        # Dot and Duet hub reads go to `[memory_hub]` with its read credential, never the node's.
+        _dot_memory_hub()
     tools.commands = _Runner(reply)
     tools.runtime = SimpleNamespace(paths=SimpleNamespace(bin=SimpleNamespace(brigade="brigade")))
     tools.environment = {}
@@ -868,15 +881,15 @@ def test_dot_memory_card_reads_a_hub_only_card(hub, tmp_path):
     assert hub.calls == []
 
 
-@pytest.mark.parametrize("credential", [CONNECTOR_CREDENTIAL, NODE_CREDENTIAL], ids=["connector", "node"])
-def test_dot_memory_card_opens_only_what_push_could_send(hub, tmp_path, credential):
+@pytest.mark.parametrize("writer", [NODE_CREDENTIAL, CONNECTOR_CREDENTIAL], ids=["node", "reader"])
+def test_dot_memory_card_opens_only_what_push_could_send(hub, tmp_path, writer):
     """Another writer's unreviewed card, a retired head and a reviewed one, as the connector reads them.
 
-    The NODE_CREDENTIAL case is the negative check: a connector reading as the node, which wrote the
-    unreviewed card, would open it.
+    The reader-wrote case is the negative check: an unreviewed card opens only for the credential that
+    wrote it, so the same read opens it once the `[memory_hub]` read credential is its writer.
     """
     target = workspace(tmp_path, mode="read")
-    _put(hub, "fleet", "node-draft", "node draft text")
+    _put(hub, "fleet", "node-draft", "node draft text", token=writer)
     _put(hub, "fleet", "reviewed", "reviewed text")
     hub.cards[("fleet", "reviewed")]["trust"] = "reviewed"
     _put(hub, "fleet", "gone", "retired text")
@@ -887,11 +900,10 @@ def test_dot_memory_card_opens_only_what_push_could_send(hub, tmp_path, credenti
         "retire", client_event_id=hubc.event_id(), **retire
     )
     tools = _dot_memory(target, {})
-    tools._authority = lambda: SimpleNamespace(hub=HUB_URL, token=credential)
     assert tools.memory_card("reviewed", scope="fleet")["content"] == "reviewed text\n"
     assert tools.memory_card("gone", scope="fleet") == {"error": "card_not_found", "name": "gone"}
     draft = tools.memory_card("node-draft", scope="fleet")
-    if credential == CONNECTOR_CREDENTIAL:
+    if writer == NODE_CREDENTIAL:
         assert draft == {"error": "card_not_found", "name": "node-draft"}
     else:
         assert draft["content"] == "node draft text\n"
@@ -930,10 +942,10 @@ class _CliRunner:
         return SimpleNamespace(timed_out=False, overflow=False, stdout=out.getvalue().encode())
 
 
-def _dot_cli(target: Path):
+def _dot_cli(target: Path, *, memory_hub: bool = True):
     for directory in (target, target / "memory", target / "memory" / "cards"):
         directory.chmod(0o755)
-    tools = _dot_memory(target, {})
+    tools = _dot_memory(target, {}, memory_hub=memory_hub)
     tools.commands = _CliRunner()
     return tools
 
