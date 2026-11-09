@@ -16,6 +16,7 @@ import pytest
 from tests.test_ci_workflow import ROOT, _workflow_bash_command, _workflow_step_section
 
 SELECTOR = ROOT / "scripts/ci_hub_select.py"
+CLASSIFIER = ROOT / "scripts/ci_docs_only.py"
 PATHS = ROOT / "scripts/ci_hub_paths.yml"
 STEP = "Select hub suite for the merge group from trusted main"
 
@@ -212,7 +213,7 @@ def _run(cwd, *args):
 def _write(repo, path, content="new\n"):
     target = repo / path
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content)
+    target.write_text(content, encoding="utf-8")
 
 
 def _commit(repo, *changes, message="change"):
@@ -224,8 +225,7 @@ def _commit(repo, *changes, message="change"):
     return _run(repo, "rev-parse", "HEAD")
 
 
-@pytest.fixture
-def queue(tmp_path):
+def _make_queue(tmp_path):
     origin = tmp_path / "origin.git"
     seed = tmp_path / "seed"
     _run(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
@@ -240,12 +240,18 @@ def queue(tmp_path):
         ("README.md", "base\n"),
         ("scripts/ci_hub_select.py", SELECTOR.read_text(encoding="utf-8")),
         ("scripts/ci_hub_paths.yml", PATHS.read_text(encoding="utf-8")),
+        ("scripts/ci_docs_only.py", CLASSIFIER.read_text(encoding="utf-8")),
         ("engines/hub/src/lib.rs", "pub fn hub() {}\n"),
         ("src/brigade/other.py", "VALUE = 1\n"),
         message="base",
     )
     _run(seed, "push", "-q", "origin", "main")
     return SimpleNamespace(tmp=tmp_path, origin=origin, seed=seed, main=main)
+
+
+@pytest.fixture
+def queue(tmp_path):
+    return _make_queue(tmp_path)
 
 
 def _enqueue(queue, *entries):
@@ -257,7 +263,8 @@ def _enqueue(queue, *entries):
     return heads
 
 
-def _select(queue, head, base, *, base_ref="refs/heads/main", origin=None, **environment):
+def _run_step(queue, step_name, head, base, *, base_ref="refs/heads/main", origin=None, **environment):
+    """Run one literal ci.yml `changes` step for a merge group; return its outputs."""
     work = queue.tmp / "work"
     if not work.exists():
         _run(queue.tmp, "init", "-q", str(work))
@@ -268,13 +275,16 @@ def _select(queue, head, base, *, base_ref="refs/heads/main", origin=None, **env
     if origin is not None:
         _run(work, "remote", "set-url", "origin", origin)
     event = queue.tmp / "event.json"
-    event.write_text(json.dumps({"merge_group": {"base_sha": base, "head_sha": head, "base_ref": base_ref}}))
+    event.write_text(
+        json.dumps({"merge_group": {"base_sha": base, "head_sha": head, "base_ref": base_ref}}), encoding="utf-8"
+    )
     output = queue.tmp / "output.txt"
-    output.write_text("")
+    output.write_text("", encoding="utf-8")
     runner_temp = queue.tmp / "runner-temp"
     runner_temp.mkdir(exist_ok=True)
-    step = _workflow_step_section((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"), "changes", STEP)
-    script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+    step = _workflow_step_section((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"), "changes", step_name)
+    # The step ends at the next step, named or not.
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n      - ", 1)[0])
     result = subprocess.run(
         _workflow_bash_command(script),
         cwd=work,
@@ -291,9 +301,21 @@ def _select(queue, head, base, *, base_ref="refs/heads/main", origin=None, **env
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
-    assert set(values) == {"hub", "reason"}
-    return values
+    queue.stdout = result.stdout
+    return dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+
+
+def _select(queue, head, base, **options):
+    values = _run_step(queue, STEP, head, base, **options)
+    queue.selected = values
+    assert set(values) == {"hub", "reason", "start", "target"}
+    # The range start and main commit exist only for a validated range.
+    assert re.fullmatch(r"(?:[0-9a-f]{40})?", values["start"])
+    assert re.fullmatch(r"(?:[0-9a-f]{40})?", values["target"])
+    if values["start"]:
+        assert values["target"] == _run(queue.origin, "rev-parse", "refs/heads/main")
+        assert values["start"] == _run(queue.seed, "merge-base", values["target"], head)
+    return {"hub": values["hub"], "reason": values["reason"]}
 
 
 def test_an_entry_queued_behind_a_hub_change_selects_the_hub_suite(queue):
@@ -411,6 +433,7 @@ def test_a_failed_fetch_of_main_selects_the_hub_suite(queue):
         "hub": "true",
         "reason": "trusted-hub-selector-unavailable",
     }
+    assert queue.selected["start"] == queue.selected["target"] == ""
 
 
 def test_a_failed_history_fetch_selects_the_hub_suite(queue):
@@ -429,7 +452,8 @@ def test_a_main_with_no_merge_base_selects_the_hub_suite(queue):
         message="unrelated main",
     )
     _run(queue.seed, "push", "-qf", "origin", "HEAD:refs/heads/main")
-    assert _select(queue, head, queue.main) == {"hub": "true", "reason": "trusted-hub-selection-failed"}
+    assert _select(queue, head, queue.main) == {"hub": "true", "reason": "no-merge-base"}
+    assert queue.selected["start"] == ""
 
 
 def test_a_group_base_below_the_merge_base_selects_the_hub_suite(queue):

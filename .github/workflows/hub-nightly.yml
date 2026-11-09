@@ -54,3 +54,29 @@ jobs:
           else
             gh issue create --title "$title" --label "$label" --body "$body"
           fi
+
+  report-recovery:
+    # The next passing nightly says so on the open tracking issue and closes
+    # it, so an open issue always means the latest nightly failed.
+    needs: hub-rust
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.hub-rust.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Close the hub nightly tracking issue after a passing run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          label=hub-nightly
+          number=$(gh issue list --state open --label "$label" --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "hub-nightly recovered
+          Run: $RUN_URL
+          Commit: $SHA"
+            gh issue close "$number" --reason completed
+          fi

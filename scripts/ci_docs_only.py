@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Conservatively classify the complete GitHub CI event diff, without dependencies."""
+"""Conservatively classify the complete GitHub CI event diff, without dependencies.
+
+In a merge group, ci.yml loads this file from the tip of main and passes
+CI_MERGE_GROUP_START: the merge base of main and the group head, which the
+trusted hub selector (scripts/ci_hub_select.py) validated. `merge_group.base_sha`
+is the previous queue entry's head, so `base_sha..head_sha` would miss every
+entry queued ahead of this one. Pull requests and pushes diff from their own
+base as before.
+"""
 
 import json
 import os
@@ -26,6 +34,7 @@ ROOT_DOCS = {
 DOC_SUFFIXES = {".md", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
 POLICY_NAMES = {"AGENTS.md", "CLAUDE.md", "SKILL.md"}
 SHA = re.compile(r"[0-9a-f]{40}")
+TARGET_REF = "refs/heads/main"
 
 
 def git(*args: str) -> bytes:
@@ -38,6 +47,16 @@ def commit_sha(value: object) -> str:
     if not isinstance(value, str) or not SHA.fullmatch(value) or value == "0" * 40:
         raise ValueError("missing-or-invalid-commit")
     return value
+
+
+def is_ancestor(older: str, newer: str) -> bool:
+    try:
+        git("merge-base", "--is-ancestor", older, newer)
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 1:
+            return False
+        raise
+    return True
 
 
 def ensure_commit(sha: str) -> None:
@@ -68,7 +87,7 @@ def documentation_path(path: bytes) -> bool:
 
 def classify() -> tuple[bool, bool, str]:
     try:
-        event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+        event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
         head = commit_sha(os.environ["GITHUB_SHA"])
         if git("rev-parse", "HEAD").decode().strip() != head:
             raise ValueError("checkout-head-mismatch")
@@ -81,9 +100,21 @@ def classify() -> tuple[bool, bool, str]:
                 raise ValueError("not-the-pull-request-test-merge")
             base = commit_sha(parents[0])
         elif event_name == "merge_group":
-            base = commit_sha(event["merge_group"]["base_sha"])
-            if commit_sha(event["merge_group"]["head_sha"]) != head:
+            group = event["merge_group"]
+            if group["base_ref"] != TARGET_REF:
+                raise ValueError("unexpected-target-branch")
+            if commit_sha(group["head_sha"]) != head:
                 raise ValueError("merge-group-head-mismatch")
+            group_base = commit_sha(group["base_sha"])
+            start = os.environ.get("CI_MERGE_GROUP_START", "")
+            if not SHA.fullmatch(start):
+                raise ValueError("missing-cumulative-range")
+            base = commit_sha(start)
+            ensure_commit(group_base)
+            ensure_commit(base)
+            # The range must contain base_sha..head_sha and every entry ahead of it.
+            if not (is_ancestor(base, group_base) and is_ancestor(group_base, head)):
+                raise ValueError("cumulative-range-not-below-group-base")
         elif event_name == "push":
             base = commit_sha(event["before"])
             if commit_sha(event["after"]) != head:
@@ -134,6 +165,9 @@ def classify() -> tuple[bool, bool, str]:
                 "checkout-head-mismatch",
                 "not-the-pull-request-test-merge",
                 "merge-group-head-mismatch",
+                "unexpected-target-branch",
+                "missing-cumulative-range",
+                "cumulative-range-not-below-group-base",
                 "push-head-mismatch",
                 "unsupported-event",
                 "empty-or-unreadable-diff",
@@ -150,7 +184,7 @@ def main() -> None:
     docs_only, uncertain, reason = classify()
     output = f"docs_only={str(docs_only).lower()}\nuncertain={str(uncertain).lower()}\nreason={reason}\n"
     print(output, end="")
-    with Path(os.environ["GITHUB_OUTPUT"]).open("a") as stream:
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
         stream.write(output)
 
 

@@ -8,6 +8,10 @@ every speculative queue entry ahead of this one, not only this entry's change:
 `merge_group.base_sha` is the previous entry's head, so `base_sha..head_sha`
 alone would miss a hub change made by an earlier entry. Any doubt selects the
 suite. No dependencies beyond the standard library and git.
+
+It also reports the start of that range (`start`), once validated, so the
+documentation-only classifier in the merge group classifies the same
+cumulative range. An empty `start` makes that classifier take full CI.
 """
 
 import json
@@ -46,6 +50,7 @@ REASONS = frozenset(
         "checkout-head-mismatch",
         "merge-group-head-mismatch",
         "base-not-in-head",
+        "no-merge-base",
         "ambiguous-merge-base",
         "merge-base-above-group-base",
         "missing-or-unsafe-path-list",
@@ -170,7 +175,22 @@ def changed_paths(start: str, head: str) -> set[str]:
     return paths
 
 
-def select() -> tuple[bool, str]:
+def merge_base(target: str, head: str) -> str:
+    try:
+        bases = git("merge-base", "--all", target, head).decode().split()
+    except subprocess.CalledProcessError as error:
+        # Exit 1 with no output: no common history within the fetched depth.
+        if error.returncode == 1 and not error.stdout:
+            raise Fail("no-merge-base") from error
+        raise
+    if not bases:
+        raise Fail("no-merge-base")
+    if len(bases) != 1:
+        raise Fail("ambiguous-merge-base")
+    return commit_sha(bases[0])
+
+
+def select() -> tuple[bool, str, str]:
     if os.environ["GITHUB_EVENT_NAME"] != "merge_group":
         raise Fail("unsupported-event")
     group = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))["merge_group"]
@@ -191,10 +211,7 @@ def select() -> tuple[bool, str]:
         git("cat-file", "-e", f"{sha}^{{commit}}")
     if not is_ancestor(base, head):
         raise Fail("base-not-in-head")
-    bases = git("merge-base", "--all", target, head).decode().split()
-    if len(bases) != 1:
-        raise Fail("ambiguous-merge-base")
-    start = commit_sha(bases[0])
+    start = merge_base(target, head)
     # The trusted start must sit at or below the group's own base, so the
     # range always contains base_sha..head_sha and every entry ahead of it.
     if not is_ancestor(start, base):
@@ -203,20 +220,21 @@ def select() -> tuple[bool, str]:
     paths = changed_paths(start, head)
     print(f"hub selection: main {target}, merge base {start}, head {head}, {len(paths)} changed paths")
     if paths & SELECTION_SOURCES:
-        return True, "hub-selection-source-changed"
+        return True, "hub-selection-source-changed", start
     if any(matches(path, patterns) for path in paths):
-        return True, "hub-path-changed"
-    return False, "no-hub-path-changed"
+        return True, "hub-path-changed", start
+    return False, "no-hub-path-changed", start
 
 
 def main() -> None:
+    # Every failure leaves `start` empty, which also fails the docs classifier closed.
     try:
-        hub, reason = select()
+        hub, reason, start = select()
     except Fail as error:
-        hub, reason = True, str(error) if str(error) in REASONS else "trusted-hub-selection-failed"
+        hub, reason, start = True, str(error) if str(error) in REASONS else "trusted-hub-selection-failed", ""
     except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError):
-        hub, reason = True, "trusted-hub-selection-failed"
-    output = f"hub={str(hub).lower()}\nreason={reason}\n"
+        hub, reason, start = True, "trusted-hub-selection-failed", ""
+    output = f"hub={str(hub).lower()}\nreason={reason}\nstart={start}\n"
     print(output, end="")
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
         stream.write(output)

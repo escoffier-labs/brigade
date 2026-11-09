@@ -1836,7 +1836,7 @@ def test_ci_merge_groups_force_non_hub_component_checks_and_select_hub_from_trus
     assert "        id: hub_merge_group\n        if: ${{ github.event_name == 'merge_group' }}\n" in selector
     body = selector.split("        run: |\n", 1)[1]
     assert "${{" not in body
-    assert '"+refs/heads/main:refs/ci-hub-select/main"' in body
+    assert '"+refs/heads/main:refs/ci-trusted/main"' in body
     assert '"ls-tree", "-z", target, "--", "scripts/ci_hub_select.py"' in body
     assert '[sys.executable, "-I", "-S", str(trusted)]' in body
     assert "python3 -I -S - <<'PY'" in body
@@ -2238,7 +2238,11 @@ def test_hub_nightly_runs_the_full_reusable_hub_suite_on_main():
     assert "permissions:\n  contents: read" in header
     assert "group: hub-nightly-main" in header
     assert "cancel-in-progress: false" in header
-    assert re.findall(r"^  ([a-z0-9][a-z0-9-]*):$", jobs, re.MULTILINE) == ["hub-rust", "report-failure"]
+    assert re.findall(r"^  ([a-z0-9][a-z0-9-]*):$", jobs, re.MULTILINE) == [
+        "hub-rust",
+        "report-failure",
+        "report-recovery",
+    ]
     job = _workflow_job_section(text, "hub-rust")
     assert "if: ${{ github.ref == 'refs/heads/main' }}" in job
     assert "uses: ./.github/workflows/hub.yml" in job
@@ -2264,9 +2268,9 @@ def test_hub_nightly_reports_failures_to_one_tracking_issue_with_scoped_permissi
         "(needs.hub-rust.result == 'failure' || needs.hub-rust.result == 'cancelled') }}\n" in report
     )
     assert "    timeout-minutes: 5\n" in report
-    # Only this job may write issues, and nothing else.
+    # Only the two report jobs may write issues, and nothing else.
     assert "    permissions:\n      issues: write\n    steps:\n" in report
-    assert text.count("issues: write") == 1
+    assert text.count("issues: write") == 2
     assert "uses:" not in report
     assert "GH_TOKEN: ${{ github.token }}" in report
     # One tracker: comment on the open labelled issue, create only if none.
@@ -2276,6 +2280,28 @@ def test_hub_nightly_reports_failures_to_one_tracking_issue_with_scoped_permissi
     assert 'gh issue create --title "$title" --label "$label"' in report
     script = report.split("        run: |\n", 1)[1]
     assert script.index("gh issue comment") < script.index("gh issue create")
+
+
+def test_hub_nightly_closes_the_tracking_issue_on_the_next_passing_run():
+    text = (ROOT / ".github/workflows/hub-nightly.yml").read_text(encoding="utf-8")
+    recovery = _workflow_job_section(text, "report-recovery")
+    assert "    needs: hub-rust\n" in recovery
+    assert (
+        "    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.hub-rust.result == 'success' }}\n"
+        in recovery
+    )
+    assert "    timeout-minutes: 5\n" in recovery
+    assert "    permissions:\n      issues: write\n    steps:\n" in recovery
+    assert "uses:" not in recovery
+    script = recovery.split("        run: |\n", 1)[1]
+    # Only the open labelled tracker, and only when there is one.
+    assert 'gh issue list --state open --label "$label" --limit 1' in script
+    assert 'if [ -n "$number" ]; then' in script
+    assert script.index('gh issue comment "$number" --body "hub-nightly recovered') < script.index(
+        'gh issue close "$number" --reason completed'
+    )
+    assert "gh issue create" not in script
+    assert "gh label" not in script
 
 
 def test_mesh_actions_are_pinned_to_full_commits():
@@ -2434,7 +2460,9 @@ def test_workflow_classifier_excludes_checkout_and_pythonpath_imports(history):
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("event", ["pull_request", "merge_group", "push"])
+# Merge groups classify from trusted main over the cumulative range instead:
+# tests/test_ci_docs_merge_group.py.
+@pytest.mark.parametrize("event", ["pull_request", "push"])
 def test_authoritative_event_range_includes_all_changes(history, event):
     repo, git, base = history
     git("switch", "-qc", "feature")

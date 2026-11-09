@@ -62,7 +62,12 @@ commits that passed the queue, since the ruleset has no bypass actors.
    ref from the event or the proposal), loads `scripts/ci_hub_select.py` from
    that commit with `git ls-tree` and `git cat-file`, requires a regular
    non-executable file of at most 128 KiB, and runs it with `python3 -I -S`.
-   This is the same pattern as the documentation-only classifier.
+   It is the first step after checkout, because the documentation-only
+   classifier reuses its result in merge groups
+   ([docs-classifier-trust.md](docs-classifier-trust.md)): the step also
+   outputs the `main` commit it used (`target`) and the validated start of the
+   cumulative range (`start`, empty on any failure). The fixed ref is
+   `refs/ci-trusted/main`.
 2. **What the selector does.** It checks the event (`merge_group`,
    `base_ref == refs/heads/main`, `head_sha == GITHUB_SHA == HEAD`), deepens
    history for `main`, the head and `base_sha` to 256 commits, and requires
@@ -115,8 +120,9 @@ commits that passed the queue, since the ruleset has no bypass actors.
    daily and on `workflow_dispatch`, on `main` only. On failure (or a timed-out
    or cancelled hub job in a run that was not itself cancelled) a separate
    `report-failure` job opens a `hub nightly failing` issue labelled
-   `hub-nightly`, or comments on the open one. Only that job has
-   `issues: write`. `hub.yml` now sets `timeout-minutes` on both jobs (45 for
+   `hub-nightly`, or comments on the open one. A later passing nightly runs
+   `report-recovery`, which comments "hub-nightly recovered" with the run link
+   on the open issue and closes it. Only those two jobs have `issues: write`. `hub.yml` now sets `timeout-minutes` on both jobs (45 for
    the x86 toolchains against a measured max of 15.2 min, 30 for arm64), because a job
    that calls a reusable workflow cannot set its own limit.
 
@@ -143,7 +149,7 @@ run on `main` is the backstop for that, and for new toolchain releases.
 | `main` cannot be fetched, or has no selector, or the selector is a symlink, executable, oversize or broken | `'true'` | suite runs and must pass |
 | Selector output missing, partial or invalid | `'true'` | suite runs and must pass |
 | `base_ref` not `refs/heads/main`, or head mismatch | `'true'` | suite runs and must pass |
-| History fetch fails, no merge base within 256 commits, several merge bases, or merge base not below `base_sha` | `'true'` | suite runs and must pass |
+| History fetch fails, no merge base within 256 commits (`no-merge-base`), several merge bases (`ambiguous-merge-base`), or merge base not below `base_sha` | `'true'` | suite runs and must pass |
 | Path list missing, not a regular file, empty, over 16 KiB, or not in the one accepted format | `'true'` | suite runs and must pass |
 | Range touches a workflow or a selection source | `'true'` | suite runs and must pass |
 | `hub_merge_group` step skipped or errored in a merge group | `'true'` | suite runs and must pass |
@@ -164,20 +170,26 @@ forces the suite.
 
 The bootstrap step itself lives in `ci.yml`, and in a merge group GitHub runs
 the head's `ci.yml`. A proposal that rewrites `ci.yml` can change any gate,
-this one included, for example by writing `hub=false` directly. No check inside
-the workflow can prevent that. The control for it is human review of workflow
-changes. As of 2026-11-09 that control is not enforced: the repository has no
-`CODEOWNERS` file, and `main`'s protection requires 0 approving reviews, no
-code-owner review, and only the `ci-gate` status (conversation resolution and
-admin enforcement are on). Requiring a code-owner review for `.github/workflows/`
+this one included, for example by writing `hub=false` directly. That reach is
+wider than the proposal's own group. Every group queued behind entry A is
+built on A's head, so it runs A's `ci.yml`: a workflow rewrite in A controls
+the gates of every group behind A, not only A's own. With `HEADGREEN`, a green
+group behind A merges A along with it, even when A's own group failed. No check
+inside the workflow can prevent that, because the check would be part of the
+rewritten file. The control for it is human review of workflow changes. As of
+2026-11-09 that control is not enforced: the repository has no `CODEOWNERS`
+file, and `main`'s protection requires 0 approving reviews, no code-owner
+review, and only the `ci-gate` status (conversation resolution and admin
+enforcement are on). Requiring a code-owner review for `.github/workflows/`
 and `scripts/ci_*` would close that gap. This change does not alter protection
 settings.
 
-A related, older gap: the documentation-only classifier also uses
-`merge_group.base_sha..head_sha`, so a documentation-only entry queued behind a
-failing code entry can skip every runtime job. In the measured window this
-happened once (run 41602345826, PR 2217: docs-only by `base_sha..head_sha`, not
-by the cumulative range). That classifier is outside this change.
+The documentation-only classifier had the same two problems as the first
+version of this selector: it loaded its code from `merge_group.base_sha` (the
+previous entry's head) and classified `base_sha..head_sha`. That is fixed:
+in merge groups it now loads from the same `main` commit as this selector and
+classifies the cumulative range this selector validates. The measured impact
+and the gate logic are in [docs-classifier-trust.md](docs-classifier-trust.md).
 
 ## Before and After
 
