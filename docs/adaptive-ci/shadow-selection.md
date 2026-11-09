@@ -40,9 +40,10 @@ other job waits on them. The junit upload step is the only
 required shard. `tests/test_ci_workflow.py` pins all of this.
 
 The report job never fails the workflow, and it does not hide problems: a
-missing plan, a missing or unreadable junit file, a failing testcase with no
-`file`, or a shard that failed with no attributable test failure each set
-`status: incomplete` and add an entry to `errors` in the artifact. If the
+missing plan, a missing or unreadable junit file, junit files with no testcases,
+a failing testcase that cannot be attributed to a discovered test file, a
+selector error, or a shard that failed with no attributable test failure each
+set `status: incomplete` and add an entry to `errors` in the artifact. If the
 script cannot start at all, the step writes `status: error`.
 
 ## The plan
@@ -85,8 +86,13 @@ phase 257 facades, verify skill, retired engine names).
 | anything under `tests/` that is not a test file (helpers, fixtures, data) | `test-support` |
 | a non-Python file under `src/brigade` | `src-data` |
 | a path outside `src/brigade`, `scripts`, `tests`, `docs`, `changelog.d`, `.github` and root `*.md` (engines, registry, packaging, root config) | `unmapped-path` |
+| a changed `.py` path under `src/` or `scripts/` that no longer exists at head | `deleted-module` |
 | empty diff, no test files discovered, unparseable test, src or script file | `empty-diff`, `no-tests-discovered`, `unparseable-source` |
 | any exception in the selector or the diff | `selector-error:<Type>`, `diff-error:<Type>` |
+
+A deleted module is a trigger because the import graph is built from the head
+tree: `from pkg import gone` has no edge to a module that no longer exists, so
+the importing tests would not be found.
 
 In full mode `selected` lists every test file with reason `full`, and the
 artifact keeps the triggering paths so the evaluator can show which areas to
@@ -99,22 +105,43 @@ map next.
 `full_paths`, `changed_count`, `test_files_total`, `tests_run`,
 `total_test_seconds`, `failing_files`, `failing_test_count`,
 `unattributed_failures`, per-file junit seconds, shard counts (expected, found,
-job result), run id, attempt, sha, and for each policy: `selected_files`,
-`selected_fraction`, `selected_seconds`, `escape_files` and `escape_nodeids`.
+job result), `selector_digest`, run id, attempt, sha, `pr_number` (the number
+only, `null` outside a pull request, and no user or branch names), and for each
+policy: `selected_files`, `selected_fraction`, `selected_seconds`, `escape_files` and `escape_nodeids`.
 An escape is a failing test file outside the policy's selection. A failure
 that is not caused by the pull request (a flaky test, a break on the base) is
 still recorded as an escape, on purpose: the record is triaged when read.
+A plan that carries a selector error has no selection, so the report records no
+per-policy entries for it and the job summary shows no escape count.
+
+A testcase belongs to the discovered test file named by its junit `file`. When
+that is not a test file (a test class inherited from a helper reports the
+helper's path), the file is derived from the xunit1 `classname` module path if
+that is a discovered test file. Otherwise a failure is unattributed and the run
+is `incomplete`.
+
+`selector_digest` is a SHA-256 over `scripts/ci_test_selection.py` (which holds
+`FULL_PATHS`, `INVARIANT_TESTS` and `POLICIES`) and `scripts/ci_selection_core.py`.
+It changes whenever either file changes, so runs made by different selector
+versions can be told apart.
 
 ## Evaluating
 
 ```bash
 python scripts/ci_shadow_evaluate.py --gh-runs 200        # pulls artifacts with gh
 python scripts/ci_shadow_evaluate.py --dir ./artifacts    # downloaded artifacts
+python scripts/ci_shadow_evaluate.py --dir ./artifacts --selector-digest 3f9a1c  # one selector version
 ```
+
+`--selector-digest` keeps only runs whose plan has that digest (prefix match).
+The report always lists the digests seen with their run counts, before the filter.
 
 It reports runs by status, the full-mode rate and its reasons and most frequent
 paths, and per policy: median selected fraction, escape runs and the escape
-rate per failing selective run, and the would-be test-seconds share. The
+rate per failing selective run, and the would-be test-seconds share. Failing
+selective runs and escape runs are also counted as distinct pull requests (by
+`pr_number`, else the run's sha), because repeated pushes to one failing pull
+request would otherwise inflate both. The
 seconds are summed junit testcase durations. They are not wall time: shards run
 in parallel with four xdist workers each, and install and setup time is not in
 them, so the share bounds the saving in test work and does not predict job
@@ -200,8 +227,10 @@ Skipping is a separate decision made from the evaluator's output, never from
 this document. Proposed minimum, per policy:
 
 1. At least 100 complete (`status: ok`) selective-mode pull request runs that
-   have failing tests, after the last change to `scripts/ci_test_selection.py`.
-   Any selector change resets the count. With zero escapes in 100 runs the 95%
+   have failing tests, all with the same `selector_digest` (the evaluator's
+   `--selector-digest`), so any change to the selector or its core resets the
+   count. Count distinct pull requests as well as runs, and prefer the distinct
+   pull request figure when they differ. With zero escapes in 100 runs the 95%
    upper bound on the escape rate is about 3% per failing run, which is the
    most this rule can claim.
 2. Zero unexplained escapes. Each escape is triaged: a failure that also fails

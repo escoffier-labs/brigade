@@ -121,7 +121,8 @@ def test_empty_diff_and_selector_failure_fail_open(repo, tmp_path_factory, monke
     nowhere = tmp_path_factory.mktemp("empty")
     plan = selector.select(nowhere, ["src/brigade/a.py"])
     assert plan["mode"] == "full"
-    assert plan["full_triggers"] == [{"path": "*", "reason": "no-tests-discovered"}]
+    # The module is also missing from this empty tree, so it adds a deleted-module trigger.
+    assert {"path": "*", "reason": "no-tests-discovered"} in plan["full_triggers"]
     monkeypatch.setattr(selector, "discover_tests", lambda *a, **k: (_ for _ in ()).throw(OSError("denied")))
     failed = selector.select(repo, ["src/brigade/a.py"])
     assert failed["mode"] == "full"
@@ -168,7 +169,14 @@ def selective_plan(tmp_path):
     return path
 
 
-def test_report_names_failures_outside_each_policy_as_escapes(tmp_path):
+@pytest.fixture
+def report_repo(tmp_path):
+    for name in ("a", "b", "z"):
+        write(tmp_path / "repo", f"tests/test_{name}.py")
+    return tmp_path / "repo"
+
+
+def test_report_names_failures_outside_each_policy_as_escapes(tmp_path, report_repo):
     junit(
         tmp_path / "j" / "shadow-junit-0.xml",
         [
@@ -177,7 +185,7 @@ def test_report_names_failures_outside_each_policy_as_escapes(tmp_path):
             ("tests/test_z.py", "t3", 4.0, True),
         ],
     )
-    result = report.build_report(selective_plan(tmp_path), tmp_path / "j", 1, "failure")
+    result = report.build_report(selective_plan(tmp_path), tmp_path / "j", 1, "failure", report_repo)
     assert result["status"] == "ok"
     assert result["failing_files"] == ["tests/test_b.py", "tests/test_z.py"]
     lazy = result["policies"]["lazy-1"]
@@ -189,28 +197,29 @@ def test_report_names_failures_outside_each_policy_as_escapes(tmp_path):
     assert result["total_test_seconds"] == 7.0
 
 
-def test_report_is_incomplete_rather_than_clean_when_evidence_is_missing(tmp_path):
+def test_report_is_incomplete_rather_than_clean_when_evidence_is_missing(tmp_path, report_repo):
     junit(tmp_path / "j" / "shadow-junit-0.xml", [("tests/test_a.py", "t1", 1.0, False)])
-    missing_shard = report.build_report(selective_plan(tmp_path), tmp_path / "j", 4, "failure")
+    missing_shard = report.build_report(selective_plan(tmp_path), tmp_path / "j", 4, "failure", report_repo)
     assert missing_shard["status"] == "incomplete"
     assert any("expected 4 junit files" in e for e in missing_shard["errors"])
     assert any("shows no failing test" in e for e in missing_shard["errors"])
-    no_plan = report.build_report(tmp_path / "absent.json", tmp_path / "j", 1, "success")
+    no_plan = report.build_report(tmp_path / "absent.json", tmp_path / "j", 1, "success", report_repo)
     assert no_plan["status"] == "incomplete"
     assert no_plan["policies"] == {}
     (tmp_path / "j" / "bad.xml").write_text("<testsuites><oops")
     assert any(
-        "unreadable" in e for e in report.build_report(selective_plan(tmp_path), tmp_path / "j", 1, "success")["errors"]
+        "unreadable" in e
+        for e in report.build_report(selective_plan(tmp_path), tmp_path / "j", 1, "success", report_repo)["errors"]
     )
 
 
-def test_report_counts_a_failure_without_a_file_attribute_as_incomplete(tmp_path):
+def test_report_counts_a_failure_without_a_file_attribute_as_incomplete(tmp_path, report_repo):
     path = tmp_path / "j" / "shadow-junit-0.xml"
     path.parent.mkdir()
     path.write_text(
         '<testsuites><testsuite><testcase name="t" time="1"><error message="m"/></testcase></testsuite></testsuites>'
     )
-    result = report.build_report(selective_plan(tmp_path), tmp_path / "j", 1, "failure")
+    result = report.build_report(selective_plan(tmp_path), tmp_path / "j", 1, "failure", report_repo)
     assert result["unattributed_failures"] == 1
     assert result["status"] == "incomplete"
 
@@ -267,3 +276,145 @@ def test_evaluator_counts_escapes_per_failing_selective_run_and_excludes_incompl
     # 3 selective runs at 10s plus one full run at 100s, of 400s total.
     assert policy["selected_seconds_share"] == pytest.approx(130 / 400)
     assert "escapes: 1 runs" in evaluate.render(result)
+
+
+def test_selector_digest_is_stable_changes_with_the_selector_source_and_is_on_every_plan(repo, monkeypatch, tmp_path):
+    digest = selector.selector_digest()
+    assert len(digest) == 64
+    assert digest == selector.selector_digest()
+    assert selector.select(repo, ["src/brigade/a.py"])["selector_digest"] == digest
+    assert selector.select(repo, [])["selector_digest"] == digest  # full-mode plans carry it too
+    # Editing a rule table (here a copy of the module) changes the digest.
+    copy = tmp_path / "scripts"
+    copy.mkdir()
+    for name in selector.SELECTOR_SOURCES:
+        (copy / name).write_bytes((selector.Path(selector.__file__).parent / name).read_bytes())
+    monkeypatch.setattr(selector, "__file__", str(copy / "ci_test_selection.py"))
+    assert selector.selector_digest() == digest
+    text = (copy / "ci_test_selection.py").read_text(encoding="utf-8")
+    (copy / "ci_test_selection.py").write_text(
+        text.replace('"tests/test_retired_engine_names.py",', ""), encoding="utf-8"
+    )
+    assert selector.selector_digest() != digest
+
+
+def test_a_deleted_module_forces_full_mode_even_when_an_importer_names_it_through_its_package(repo):
+    write(repo, "src/brigade/pkg/__init__.py")
+    write(repo, "tests/test_gone.py", "from brigade.pkg import gone\n")
+    # src/brigade/pkg/gone.py is in the diff but not in the head tree.
+    plan = selector.select(repo, ["src/brigade/pkg/gone.py"])
+    assert plan["mode"] == "full"
+    assert plan["full_triggers"] == [{"path": "src/brigade/pkg/gone.py", "reason": "deleted-module"}]
+    assert "tests/test_gone.py" in plan["selected"]
+    write(repo, "scripts/helper.py")
+    (repo / "scripts/helper.py").unlink()
+    assert selector.select(repo, ["scripts/helper.py"])["full_triggers"][0]["reason"] == "deleted-module"
+    # An existing changed module is unaffected, and a deleted test file stays a plain removal.
+    assert selector.select(repo, ["src/brigade/a.py"])["mode"] == "selective"
+    assert selector.select(repo, ["tests/test_removed.py"])["mode"] == "selective"
+
+
+def test_junit_attributes_an_inherited_test_through_the_classname_else_counts_it_unattributed(tmp_path, report_repo):
+    path = tmp_path / "j" / "shadow-junit-0.xml"
+    path.parent.mkdir()
+    path.write_text(
+        "<testsuites><testsuite>"
+        # Defined in a helper, collected from test_z: classname names the collecting module.
+        '<testcase classname="tests.test_z.TestInherited" name="t1" file="tests/helpers.py" time="1">'
+        "<failure message='x'/></testcase>"
+        "</testsuite></testsuites>"
+    )
+    result = report.build_report(selective_plan(tmp_path), tmp_path / "j", 1, "failure", report_repo)
+    assert result["failing_files"] == ["tests/test_z.py"]
+    assert result["unattributed_failures"] == 0
+    assert result["status"] == "ok"
+    # No discovered test file in the file attribute or the classname: fail closed.
+    path.write_text(
+        '<testsuites><testsuite><testcase classname="helpers.Base" name="t1" file="tests/helpers.py" time="1">'
+        "<failure message='x'/></testcase></testsuite></testsuites>"
+    )
+    result = report.build_report(selective_plan(tmp_path), tmp_path / "j", 1, "failure", report_repo)
+    assert result["unattributed_failures"] == 1
+    assert result["status"] == "incomplete"
+    assert result["failing_files"] == []
+
+
+def test_a_fallback_plan_records_no_per_policy_escapes_and_stays_incomplete(tmp_path, report_repo):
+    plan = {
+        "mode": "full",
+        "error": "OSError: denied",
+        "changed": [],
+        "full_triggers": [{"path": "*", "reason": "diff-error:OSError"}],
+        "selected": {},
+        "test_files_total": 0,
+    }
+    (tmp_path / "plan.json").write_text(json.dumps(plan))
+    junit(tmp_path / "j" / "shadow-junit-0.xml", [("tests/test_z.py", "t", 1.0, True)])
+    result = report.build_report(tmp_path / "plan.json", tmp_path / "j", 1, "failure", report_repo)
+    assert result["status"] == "incomplete"
+    assert result["policies"] == {}
+    assert result["failing_files"] == ["tests/test_z.py"]
+    # main prints the bare status for a plan without policies, so the job summary carries no escapes=N.
+    output = tmp_path / "out.json"
+    args = ["--plan", str(tmp_path / "plan.json"), "--junit-dir", str(tmp_path / "j"), "--output", str(output)]
+    assert report.main([*args, "--shards", "1", "--repo", str(report_repo)]) == 0
+    assert json.loads(output.read_text())["policies"] == {}
+
+
+def test_junit_files_with_no_testcases_are_incomplete(tmp_path, report_repo):
+    path = tmp_path / "j" / "shadow-junit-0.xml"
+    path.parent.mkdir()
+    path.write_text("<testsuites><testsuite name='pytest'/></testsuites>")
+    result = report.build_report(selective_plan(tmp_path), tmp_path / "j", 1, "success", report_repo)
+    assert result["status"] == "incomplete"
+    assert any("no testcases" in e for e in result["errors"])
+
+
+def test_report_main_records_the_digest_and_the_pull_request_number_but_no_names(tmp_path, report_repo, monkeypatch):
+    plan = json.loads(selective_plan(tmp_path).read_text())
+    plan["selector_digest"] = "abc123"
+    (tmp_path / "plan.json").write_text(json.dumps(plan))
+    junit(tmp_path / "j" / "shadow-junit-0.xml", [("tests/test_a.py", "t", 1.0, False)])
+    monkeypatch.setenv("GITHUB_REF", "refs/pull/77/merge")
+    monkeypatch.setenv("GITHUB_SHA", "deadbeef")
+    output = tmp_path / "out.json"
+    args = ["--plan", str(tmp_path / "plan.json"), "--junit-dir", str(tmp_path / "j"), "--output", str(output)]
+    assert report.main([*args, "--shards", "1", "--repo", str(report_repo)]) == 0
+    data = json.loads(output.read_text())
+    assert (data["selector_digest"], data["pr_number"], data["sha"]) == ("abc123", 77, "deadbeef")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/some-branch")
+    report.main([*args, "--shards", "1", "--repo", str(report_repo)])
+    data = json.loads(output.read_text())
+    assert data["pr_number"] is None
+    assert "some-branch" not in output.read_text()
+
+
+def test_evaluator_filters_by_selector_digest_and_reports_distinct_prs(tmp_path):
+    def record(digest, pr, sha, **kw):
+        return {**run_record(**kw), "selector_digest": digest, "pr_number": pr, "sha": sha}
+
+    runs = [
+        record("old1", 1, "s1", failing=["tests/test_a.py"], escapes=["tests/test_a.py"]),
+        record("new2", 5, "s2", failing=["tests/test_b.py"], escapes=["tests/test_b.py"]),
+        record("new2", 5, "s3", failing=["tests/test_b.py"], escapes=["tests/test_b.py"]),  # same PR, new push
+        record("new2", None, "s4", failing=["tests/test_c.py"]),  # no PR number: head SHA identifies it
+        record("new2", None, "s4", failing=["tests/test_c.py"]),
+        {**run_record(failing=["tests/test_d.py"]), "selector_digest": ""},  # a run from before the digest existed
+    ]
+    everything = evaluate.evaluate(runs)
+    assert everything["selector_digests"] == {"old1": 1, "new2": 4, "unknown": 1}
+    result = evaluate.evaluate(runs, "new2")
+    assert result["selector_digests"] == {"old1": 1, "new2": 4, "unknown": 1}  # still lists what exists
+    assert result["runs"] == 4
+    assert result["selective_failing_runs"] == 4
+    assert result["selective_failing_prs"] == 2
+    policy = result["policies"]["lazy-1"]
+    assert (policy["escape_runs"], policy["escape_prs"]) == (2, 1)
+    text = evaluate.render(result)
+    assert "new2 x4" in text
+    assert "4 runs, 2 distinct PRs" in text
+    assert "2 runs, 1 distinct PRs" in text
+    out = tmp_path / "artifacts"
+    for i, record_ in enumerate(runs):
+        write(out, f"{i}/shadow-selection.json", json.dumps(record_))
+    assert evaluate.main(["--dir", str(out), "--selector-digest", "new2", "--json"]) == 0

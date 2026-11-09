@@ -25,12 +25,16 @@ How a selective plan is built (see docs/adaptive-ci/shadow-selection.md):
 3. A changed doc, workflow or changelog fragment selects tests that mention its
    path, its file name or its top-level directory.
 4. A fixed set of whole-tree invariant tests is always selected.
+
+Every plan records `selector_digest`, a SHA-256 over this file and `ci_selection_core.py`, so
+the evaluator can drop runs made by an earlier version of the selector.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import re
 import subprocess
@@ -77,6 +81,19 @@ CLI_SUBPROCESS = re.compile(r"""["']-m["']\s*,\s*["']brigade["']|-m brigade\b|\[
 # widest policy so one run scores all of them.
 POLICIES: dict[str, int | None] = {"import-time": 0, "lazy-1": 1, "full-closure": None}
 DOTTED = re.compile(r"^brigade(?:\.\w+)+(?::\w+)?$")
+# Files whose contents define how a plan is built, including FULL_PATHS, INVARIANT_TESTS and POLICIES above.
+SELECTOR_SOURCES = ("ci_test_selection.py", "ci_selection_core.py")
+
+
+def selector_digest() -> str:
+    """SHA-256 over the selector's own source, so plans from different selector versions can be told apart."""
+    here = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for name in SELECTOR_SOURCES:
+        digest.update(name.encode() + b"\0")
+        # Normalize line endings so a Windows checkout with autocrlf hashes like Linux.
+        digest.update((here / name).read_bytes().replace(b"\r\n", b"\n") + b"\0")
+    return digest.hexdigest()
 
 
 def policy_files(plan: dict, policy: str) -> set[str]:
@@ -317,11 +334,12 @@ def select(repo: Path, changed: Sequence[str], graph: Graph | None = None) -> di
     test_files: dict[str, Path] = {}
     try:
         test_files = discover_tests(repo, TEST_PATTERNS)
-        return _select(repo, changed, test_files, graph)
+        plan = _select(repo, changed, test_files, graph)
     except Exception as exc:  # noqa: BLE001 - fail open on anything at all
         plan = full_plan(repo, changed, [{"path": "*", "reason": f"selector-error:{type(exc).__name__}"}], test_files)
         plan["error"] = f"{type(exc).__name__}: {exc}"
-        return plan
+    plan["selector_digest"] = selector_digest()
+    return plan
 
 
 def _select(repo: Path, changed: list[str], test_files: dict[str, Path], graph: Graph | None = None) -> dict:
@@ -332,6 +350,10 @@ def _select(repo: Path, changed: list[str], test_files: dict[str, Path], graph: 
         if kind == "full":
             reason, _, target = detail.partition(":")
             triggers.append({"path": target, "reason": reason})
+        elif kind in ("module", "script") and path.endswith(".py") and not (repo / path).exists():
+            # The graph is built from the head tree, so a deleted module has no node and an
+            # importer of it (`from pkg import gone`) has no edge to follow. Run everything.
+            triggers.append({"path": path, "reason": "deleted-module"})
         else:
             kinds[kind].append(path)
     if not changed:
@@ -421,6 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "selected": {},
             "test_files_total": 0,
             "error": f"{type(exc).__name__}: {exc}",
+            "selector_digest": selector_digest(),
         }
     plan["base"], plan["head"] = args.base, args.head
     args.output.parent.mkdir(parents=True, exist_ok=True)
