@@ -1703,6 +1703,7 @@ def test_receipt_records_returns_nothing_for_a_malformed_digest_source_without_r
     assert engine(replies).receipt_records("example", RUN, RECEIPT) is None
 
 
+@posix
 def test_an_epoch_completion_time_is_kept_and_never_replaced_by_the_file_mtime(tmp_path):
     root, parsed = setup(tmp_path)
     payload, digest = receipt(completed_at="1970-01-01T00:00:00+00:00")
@@ -1730,6 +1731,7 @@ def test_encodable_refuses_a_value_too_deep_to_render():
     assert ev.encodable(value) is False
 
 
+@posix
 def test_a_deeply_nested_json_evidence_file_never_stops_the_run(tmp_path):
     root, parsed = setup(tmp_path)
     archive = corroborating(root)
@@ -1769,6 +1771,7 @@ def test_shallow_bounds_depth_and_node_count():
     assert ev._shallow({"a": [1, {"b": 2}], "c": "d"})
 
 
+@posix
 def test_a_handoff_copying_multiline_receipt_stdout_is_not_independent(tmp_path):
     root, parsed = setup(tmp_path)
     lines = [f"tests/test_port.py::test_listener_case_{n:02d} PASSED in 0.{n:02d}s" for n in range(14)]
