@@ -10,9 +10,10 @@ variants and all platform checks.
 ## Land the compatible workflow
 
 Merge the workflow with `merge_group: checks_requested` support before enabling
-merge queue. Merge groups bypass the path filter and classify all four component
-flags as the string `true`: code graph, evidence ledger, notify, Fleet Hub
-container, and the Rust hub suite. Pushes and pull requests retain path filtering. Public pull requests
+merge queue. Merge groups classify these component flags as the string `true`:
+code graph, evidence ledger, notify, and Fleet Hub container. The Rust hub flag
+uses the `hub` path filter on the exact `merge_group.base_sha..head_sha` diff
+([hub merge queue](../adaptive-ci/hub-merge-queue.md)). Pushes and pull requests retain path filtering. Public pull requests
 and merge-group jobs continue to use hosted runners.
 
 Preserve current branch protections, review requirements, and conversation
@@ -26,8 +27,10 @@ It always runs and requires success from the 9 jobs behind the former 20
 required statuses plus their 4 dependencies. A missing or extra dependency
 fails closed. Fleet Hub container may skip only after successful classification
 marks it unchanged, and never in a merge group. The Rust hub suite (`hub-rust`,
-the reusable `hub.yml` on stable and 1.85.0) follows the same rule, so a failing
-hub job blocks the merge and the queue always runs it on the merged tree. The
+the reusable `hub.yml` on stable and 1.85.0) may skip only when successful
+classification sets `hub` to exactly `false`, in a merge group too, where that
+flag comes from the batch diff. A failing hub job still blocks the merge.
+`hub-nightly.yml` runs the full suite on `main` every night. The
 gate excludes the optional
 trusted-runner-canary.
 

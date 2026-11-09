@@ -28,7 +28,10 @@ jobs:
       evidence_ledger: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.evidence_ledger }}
       notify: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.notify }}
       fleet_hub_container: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.fleet_hub_container }}
-      hub: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.hub }}
+      # Fail closed: only a validated classification plus a successful filter
+      # step reporting exactly 'false' skips the hub suite. Merge groups use
+      # the same filter on merge_group.base_sha..head_sha (see docs/adaptive-ci).
+      hub: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || steps.filter.outcome != 'success' && 'true' || steps.filter.outputs.hub == 'false' && 'false' || 'true' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -128,10 +131,17 @@ jobs:
           with Path(os.environ["GITHUB_OUTPUT"]).open("a") as stream:
               stream.write(output)
           PY
-      - uses: dorny/paths-filter@v4
-        if: ${{ github.event_name != 'merge_group' }}
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        # In a merge group, run only after the trusted classifier validated
+        # base_sha and head_sha and fetched base_sha. Skipped selects hub; an
+        # error fails this job, and ci-gate requires it to succeed.
+        if: ${{ github.event_name != 'merge_group' || steps.docs.outputs.uncertain == 'false' }}
         id: filter
         with:
+          # Empty outside merge_group, so pull_request and push keep their
+          # existing diff source. In a merge group this is the whole group diff.
+          base: ${{ github.event.merge_group.base_sha }}
+          ref: ${{ github.event.merge_group.head_sha }}
           filters: |
             mesh:
               - 'src/brigade/fleet_mesh_*.py'
@@ -821,10 +831,11 @@ jobs:
               and changes.get("outputs", {}).get("fleet_hub_container") == "false"
               and os.environ["EVENT_NAME"] != "merge_group"
           )
+          # Merge groups now compute `hub` from base_sha..head_sha, so the
+          # same exact-'false' rule applies on every event.
           hub_skip_allowed = (
               changes.get("result") == "success"
               and changes.get("outputs", {}).get("hub") == "false"
-              and os.environ["EVENT_NAME"] != "merge_group"
           )
           mesh_jobs = {"mesh-compatibility", "mesh-cross-version", "mesh-without-extra"}
           mesh_skip_allowed = (

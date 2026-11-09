@@ -1,0 +1,24 @@
+name: hub-nightly
+
+# Merge groups run hub-rust only when the hub path filter matches, so a new
+# stable toolchain (for example a new clippy lint) could otherwise go unseen
+# until someone touches hub paths. This runs the full reusable hub suite on
+# main every night. A failure shows as a failed scheduled run.
+on:
+  schedule:
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hub-nightly-main
+  cancel-in-progress: false
+
+jobs:
+  hub-rust:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/hub.yml
