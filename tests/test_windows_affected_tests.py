@@ -57,6 +57,9 @@ def test_package_init_and_deleted_module_still_select_importers(tmp_path):
         "pyproject.toml",
         "scripts/windows_pytest.py",
         "scripts/windows_pytest_diagnostics.py",
+        "scripts/windows_affected_tests.py",
+        # The selection primitives moved here; a change to them must still reach the Windows lane.
+        "scripts/ci_selection_core.py",
         "tests/windows_pytest_allowlist.json",
         "src/brigade/__init__.py",
         ".github/workflows/ci.yml",

@@ -122,7 +122,14 @@ def test_docs_classification_gates_every_runtime_job_without_implicit_success():
                 continue
             assert not _job_admitted(text, name, docs="true", event=event), name
             # All event-eligible runtime work remains enabled for code/unknown.
-            pr_only = {"windows-affected-plan", "windows-affected-shard", "windows-affected-tests", "pr-tier-shadow"}
+            pr_only = {
+                "windows-affected-plan",
+                "windows-affected-shard",
+                "windows-affected-tests",
+                "pr-tier-shadow",
+                "shadow-plan",
+                "shadow-selection",
+            }
             eligible = name not in pr_only | {"trusted-runner-canary"}
             eligible |= name in pr_only and event == "pull_request"
             eligible |= name == "trusted-runner-canary" and event == "push"
@@ -1762,6 +1769,8 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
         "windows-affected-shard",
         "windows-affected-tests",
         "pr-tier-shadow",
+        "shadow-plan",
+        "shadow-selection",
         "hub-rust",
         "mesh-compatibility",
         "mesh-cross-version",
@@ -1779,6 +1788,9 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
             runner = "ubuntu-latest"
         assert re.findall(r"^    runs-on: (.+)$", section, re.MULTILINE) == [runner], job
         assert "self-hosted" not in section
+        if job == "test-shards":
+            # The one non-blocking step: a shadow-junit upload outage must not fail a required shard.
+            section = section.replace(_workflow_step_section(text, job, "Upload shadow junit"), "")
         assert "continue-on-error" not in section
 
 
@@ -1839,7 +1851,7 @@ def test_ci_merge_groups_force_non_hub_component_checks_and_select_hub_from_trus
     assert "        id: hub_merge_group\n        if: ${{ github.event_name == 'merge_group' }}\n" in selector
     body = selector.split("        run: |\n", 1)[1]
     assert "${{" not in body
-    assert '"+refs/heads/main:refs/ci-hub-select/main"' in body
+    assert '"+refs/heads/main:refs/ci-trusted/main"' in body
     assert '"ls-tree", "-z", target, "--", "scripts/ci_hub_select.py"' in body
     assert '[sys.executable, "-I", "-S", str(trusted)]' in body
     assert "python3 -I -S - <<'PY'" in body
@@ -2296,7 +2308,11 @@ def test_hub_nightly_runs_the_full_reusable_hub_suite_on_main():
     assert "permissions:\n  contents: read" in header
     assert "group: hub-nightly-main" in header
     assert "cancel-in-progress: false" in header
-    assert re.findall(r"^  ([a-z0-9][a-z0-9-]*):$", jobs, re.MULTILINE) == ["hub-rust", "report-failure"]
+    assert re.findall(r"^  ([a-z0-9][a-z0-9-]*):$", jobs, re.MULTILINE) == [
+        "hub-rust",
+        "report-failure",
+        "report-recovery",
+    ]
     job = _workflow_job_section(text, "hub-rust")
     assert "if: ${{ github.ref == 'refs/heads/main' }}" in job
     assert "uses: ./.github/workflows/hub.yml" in job
@@ -2322,9 +2338,9 @@ def test_hub_nightly_reports_failures_to_one_tracking_issue_with_scoped_permissi
         "(needs.hub-rust.result == 'failure' || needs.hub-rust.result == 'cancelled') }}\n" in report
     )
     assert "    timeout-minutes: 5\n" in report
-    # Only this job may write issues, and nothing else.
+    # Only the two report jobs may write issues, and nothing else.
     assert "    permissions:\n      issues: write\n    steps:\n" in report
-    assert text.count("issues: write") == 1
+    assert text.count("issues: write") == 2
     assert "uses:" not in report
     assert "GH_TOKEN: ${{ github.token }}" in report
     # One tracker: comment on the open labelled issue, create only if none.
@@ -2334,6 +2350,89 @@ def test_hub_nightly_reports_failures_to_one_tracking_issue_with_scoped_permissi
     assert 'gh issue create --title "$title" --label "$label"' in report
     script = report.split("        run: |\n", 1)[1]
     assert script.index("gh issue comment") < script.index("gh issue create")
+
+
+def test_hub_nightly_closes_the_tracking_issue_on_the_next_passing_run():
+    text = (ROOT / ".github/workflows/hub-nightly.yml").read_text(encoding="utf-8")
+    recovery = _workflow_job_section(text, "report-recovery")
+    assert "    needs: hub-rust\n" in recovery
+    assert (
+        "    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.hub-rust.result == 'success' }}\n"
+        in recovery
+    )
+    assert "    timeout-minutes: 5\n" in recovery
+    assert "    permissions:\n      issues: write\n    steps:\n" in recovery
+    assert "uses:" not in recovery
+    script = recovery.split("        run: |\n", 1)[1]
+    # Every open labelled tracker, not only the first one.
+    assert "gh issue list --state open --label \"$label\" --limit 500 --json number --jq '.[].number'" in script
+    assert "--limit 1 " not in script
+    assert "for number in $numbers; do" in script
+    assert script.index('gh issue comment "$number" --body "hub-nightly recovered') < script.index(
+        'gh issue close "$number" --reason completed'
+    )
+    assert "gh issue create" not in script
+    assert "gh label" not in script
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake gh is a POSIX shell script")
+@pytest.mark.parametrize("open_issues", [[], [7], [3, 7, 12]])
+def test_hub_nightly_recovery_comments_on_and_closes_every_open_tracking_issue(tmp_path, open_issues):
+    text = (ROOT / ".github/workflows/hub-nightly.yml").read_text(encoding="utf-8")
+    recovery = _workflow_job_section(text, "report-recovery")
+    script = textwrap.dedent(recovery.split("        run: |\n", 1)[1])
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_gh = bin_dir / "gh"
+    # Record each call's argv (unit separator between args, record separator
+    # between calls) and answer `gh issue list` the way --jq '.[].number' does.
+    fake_gh.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\037" "$@" >> "$GH_LOG"\n'
+        'printf "\\036" >> "$GH_LOG"\n'
+        'if [ "$1 $2" = "issue list" ]; then printf "%s" "$OPEN_ISSUES"; fi\n',
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    log = tmp_path / "gh.log"
+    log.write_text("", encoding="utf-8")
+    subprocess.run(
+        _workflow_bash_command(script, "-eo", "pipefail"),
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            GH_LOG=str(log),
+            OPEN_ISSUES="".join(f"{number}\n" for number in open_issues),
+            RUN_URL="https://github.com/example/project/actions/runs/123",
+            SHA="abc123",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    calls = [record.split("\x1f")[:-1] for record in log.read_text(encoding="utf-8").split("\x1e")[:-1]]
+    body = "hub-nightly recovered\nRun: https://github.com/example/project/actions/runs/123\nCommit: abc123"
+    expected = [
+        [
+            "issue",
+            "list",
+            "--state",
+            "open",
+            "--label",
+            "hub-nightly",
+            "--limit",
+            "500",
+            "--json",
+            "number",
+            "--jq",
+            ".[].number",
+        ]
+    ]
+    for number in open_issues:
+        expected.append(["issue", "comment", str(number), "--body", body])
+        expected.append(["issue", "close", str(number), "--reason", "completed"])
+    assert calls == expected
 
 
 def test_mesh_actions_are_pinned_to_full_commits():
@@ -2492,7 +2591,9 @@ def test_workflow_classifier_excludes_checkout_and_pythonpath_imports(history):
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("event", ["pull_request", "merge_group", "push"])
+# Merge groups classify from trusted main over the cumulative range instead:
+# tests/test_ci_docs_merge_group.py.
+@pytest.mark.parametrize("event", ["pull_request", "push"])
 def test_authoritative_event_range_includes_all_changes(history, event):
     repo, git, base = history
     git("switch", "-qc", "feature")
@@ -2986,3 +3087,37 @@ def test_s18_round2_hub_filter_tracks_scan_inputs(path):
     assert "on:\n  workflow_call:\n" in workflow
     assert "Memory scan bundle" in workflow
     assert "Missing memory scanner fails closed" in workflow
+
+
+def test_shadow_selection_jobs_are_pull_request_only_and_outside_the_required_gate():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    gate_needs = set(re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE))
+    shadow_jobs = {"shadow-plan", "shadow-selection"}
+    assert not gate_needs & shadow_jobs
+    for job in shadow_jobs:
+        section = _workflow_job_section(text, job)
+        assert "continue-on-error: true" in section
+        assert "github.event_name == 'pull_request'" in section
+        assert "needs.changes.outputs.docs_only != 'true'" in section
+        assert "contents: read" in section
+        assert "persist-credentials: false" in section
+    # No other job may wait on a shadow job, or a shadow failure could block required work.
+    for name in re.findall(r"^  ([a-z][a-z0-9-]*):$", text.split("jobs:\n", 1)[1], re.MULTILINE):
+        if name not in shadow_jobs and name != "shadow-selection":
+            needs = re.search(r"^    needs: (.+)$", _workflow_job_section(text, name), re.MULTILINE)
+            assert not needs or not any(job in needs[1] for job in shadow_jobs), name
+
+
+def test_shadow_junit_is_requested_only_on_pull_request_python312_shards():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    step = _workflow_step_section(text, "test-shards", "Pytest shard with coverage")
+    assert "SHADOW_JUNIT: ${{ github.event_name == 'pull_request' && format(" in step
+    assert "--dist=worksteal $SHADOW_JUNIT --cov=" in step
+    # The plain (non-coverage) shard step and the grokbot assertion never write junit.
+    assert "junit" not in _workflow_step_section(text, "test-shards", "Pytest shard")
+    assert "junit" not in _workflow_step_section(text, "test-shards", "Assert grokbot MCP tests run without skips")
+    upload = _workflow_step_section(text, "test-shards", "Upload shadow junit")
+    assert "continue-on-error: true" in upload
+    assert "github.event_name == 'pull_request'" in upload

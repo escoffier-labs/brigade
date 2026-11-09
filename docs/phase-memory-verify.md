@@ -239,7 +239,7 @@ calls, so it does not inflate the counts it ranks by.
 | Card | Replica head: card id, scope, revision, trust, scan state and anchored blocks with their ids and hashes | 16 KiB of card text and 16 verified blocks per card |
 | Cited evidence | The card's `evidence` front matter, resolved only inside the roots bound to the card's scope | 8 KiB per item, 32 KiB per card, 8 items per card |
 | Related excerpts | `brigade evidence search`, limited to the archive projects listed for the scope, with a query built from the card title and its rarest block terms | 3 excerpts of at most 4 KiB each |
-| Related cards | A lexical search of the local replica in the same scope | 3 card ids with titles, used only as `supersede_card` targets |
+| Related cards | Not passed in v1 | `superseded` is deferred (check 6), so no related card ids or titles reach the prompt |
 
 ### Per-scope evidence isolation
 
@@ -379,28 +379,102 @@ the reviewer decides whether it is true:
 
 1. Every quote must be an exact substring, 20 to 400 bytes long, of the
    evidence item it names.
-2. `contradicted`, `changed`, `superseded` and `history` need quotes from at
-   least two independently produced items. At least one of those quotes must
-   fall inside the authenticated fields of a receipt. Quotes from command
-   output or low-rank excerpts can add context but cannot meet this rule.
-3. `changed` needs its quoting evidence to be newer than the head revision's
-   log time.
+2. The only v1 correction is expanding an abbreviated commit id that the
+   card marks as a commit reference. A marked reference is the whole word
+   `commit` or `commits` in any case, exactly one space, then 7 to 39
+   lowercase hex characters with a digit, bare or as a single-backtick code
+   span. That rule comes from the cards themselves. In a sample of about
+   2,000 operator cards, 61 of the 63 explicitly marked abbreviated ids used
+   one of those two forms. The other two used a colon with an unbalanced
+   backtick, and no card carried a `commit` front-matter key. Hex tokens with no such marker
+   (artifact digests, fingerprints, ids in paths or URLs, and bare
+   abbreviations) are far more common and are never corrected.
+
+   After the normalization of rule 9, the replacement must equal the block
+   except that marked abbreviations become full commit ids (40 or 64
+   lowercase hex) that start with the exact old token. Any other added,
+   removed or reordered word or punctuation, a negation included, abstains
+   with `verify_edit_out_of_scope`. A changed hex token that is not a marked
+   reference abstains with `verify_not_commit_reference`. An old token that
+   is already full length, or a new id that does not start with the old
+   token, abstains with `verify_not_abbreviation`. One id is never swapped
+   for another, so "not in commit X" cannot be retargeted.
+
+   An abbreviation shorter than 12 hex characters abstains with
+   `verify_abbreviation_too_short`. A 7-character prefix is 28 bits, so an
+   attacker can grind a commit that starts with it, get an authentic receipt
+   for that commit, and point a claim such as "Do not commit X to the
+   release index" at it. The cost is real: in the same card sample, 1 of
+   the 61 accepted marked abbreviations is 12 characters or longer, and 52
+   are exactly 7. Until slice 9 lands its resolver, v1 expands almost none of
+   today's cards. "Commit resolver contract" below says when the minimum
+   drops to 7.
+
+   Commit identity is bound in two steps before corroboration. Every
+   authenticated `commit` and `baseline_commit` value in the card's assembled
+   evidence, quoted or not, that starts with the abbreviation must name
+   exactly one full id. None or several abstain with
+   `verify_commit_ambiguous`, even when both seats pick the same one. Then
+   the caller's resolver must return that same id, or the block abstains
+   with `verify_commit_unresolved`. Without a resolver every expansion
+   abstains. The resolver's normative rules are in "Commit resolver
+   contract" below. The contract module stays pure and ships only a test
+   fake. Slice 9 implements the git resolver.
+
+   Each expanded id must appear in quotes from two independently produced
+   countable items. One of them must be an authenticated receipt quote that
+   covers a whole `commit` or `baseline_commit` field holding exactly that
+   id. Those two fields are the whole allowlist, because their values are
+   typed full commit ids. Every other authenticated field is excluded.
+   `argv` is text the caller chose, so `echo "the color is red"` would
+   otherwise authenticate any sentence. `status` and the times read the same
+   on almost every receipt. `run_id`, `manifest_id` and `tree_fingerprint`
+   are Brigade's own bookkeeping. Untyped value fields such as `exit_code`
+   are excluded too, because a bare value cannot say which claim it belongs
+   to. Quotes from command output or low-rank excerpts never hold an id.
+
+   A receipt proves that its worktree used a commit. It does not prove that
+   a hex token in a card was a commit, or that the receipt concerns the
+   card's subject. The marker answers the first question and the prefix
+   rule keeps the referent fixed, which is why expansion is the only edit.
+   Broader corrections need typed claim predicates that bind the claim's
+   subject and relation to receipt metadata, for example an exit status
+   bound to the command a claim names. The reply schema cannot express them
+   and the client cannot check them yet, so they are deferred past v1.
+   Until then every other correction abstains, and the D7 metrics measure
+   that cost.
+3. `changed` needs rule 2 to hold using only evidence newer than the head
+   revision's log time.
 4. A replacement or `previously` text must differ from the block, stay a
    single paragraph with no newline, carriage return or `^`, and be at most 1.5 times the block length plus 200 bytes,
    within the hub's 8,192-byte limit.
-5. Novelty check: every URL, path, host-like name, email address, code span,
-   command-line flag and number of three or more digits in a replacement or
-   `previously` text must appear in the original block or in a quote. A reply
-   that adds one is rejected with `verify_novel_token`.
-6. `superseded_by` must be one of the related card ids supplied for that call,
-   live, in the same scope and with a newer head revision. `superseded` may
-   produce an op only for a card with exactly one claim block.
-   `supersede_card` retires the whole card and the mirror then drops it, so
-   on a card with several claim blocks it would remove claims the verdict
-   never covered. The related-card input of ids and titles also cannot show
-   that the successor holds those other claims. A `superseded` verdict on a
-   multi-block card therefore abstains with `supersede_partial`, which the run
-   report counts.
+5. Novelty check: every URL, path, host-like name, IP address, email
+   address, code span, command-line flag and number of three or more digits
+   in a replacement or `previously` text must appear in the original block,
+   or in quotes from two independently produced items that can meet rule 2.
+   Tokens compare by their canonical reading: NFKC, then a fixed table that
+   maps dot, slash, backslash, at, colon and dash lookalikes (such as
+   U+3002, U+2024, U+2215 and U+29F8) to ASCII, then up to three rounds of
+   strict percent decoding (UTF-8 only) and HTML character references. Hosts,
+   addresses and emails compare without case. A word that still holds an
+   escape after the last round, or decodes to invalid UTF-8, has no
+   canonical reading and is rejected. So is a word with a non-ASCII
+   punctuation or symbol character between two letters or digits, which
+   catches lookalikes the table does not list. A token counts only as a
+   whole word or a whole code span, and quotes from command output or
+   excerpts never count. One planted handoff therefore cannot introduce a
+   token. A reply that adds one is rejected with `verify_novel_token`.
+6. `superseded` abstains in v1 with `verify_supersede_deferred` and never
+   opens `supersede_card`. `history` abstains with `verify_history_deferred`,
+   because an expansion names the same commit and so states no earlier
+   value. `supersede_card` retires the whole card, and
+   nothing in the reply binds the source card's claim to the target card.
+   Ids and titles of related cards cannot show that the target holds the
+   corrected claim, and evidence quoted for the source does not mention the
+   target. Re-enabling it needs the target card's claim text in the prompt
+   and evidence that binds the source claim to that target. It also needs
+   the single-claim-block rule, because retiring a card with several claim
+   blocks would remove claims the verdict never covered.
 7. The replacement and history text are scanned locally with the hub's bundle
    before submission, and the hub scans them again on `propose`.
 8. Only `high` confidence produces an op. `medium`, `low` and `insufficient`
@@ -408,8 +482,8 @@ the reviewer decides whether it is true:
 9. The confirm seat repeats the call with the evidence order shuffled and a
    fresh nonce, and its reply must pass checks 1 to 8 on its own. The two
    seats must then agree on the resulting operation, not only the verdict:
-   the same op type, the same `other_card` for `supersede_card`, and for
-   `replace_block` or `add_previously` the same text after normalization.
+   the same op type, the same refs for `append_evidence`, and for
+   `replace_block` the same text after normalization.
    Check 4 already holds both texts to one newline-free paragraph.
    Normalization then only strips claim anchors (` ^c-xxxxxx`) and leading
    and trailing ASCII spaces and tabs, and collapses each internal run of ASCII
@@ -425,15 +499,149 @@ the reviewer decides whether it is true:
 These checks catch malformed, ungrounded and steered replies. They cannot
 prove the evidence right, so every op still waits for a reviewer.
 
+### Commit resolver contract
+
+`verify_card` takes `resolve_commit(abbreviation)`, which returns a full
+commit id or None. The contract module calls it only for a marked
+abbreviation that has exactly one authenticated candidate, and accepts the
+result only when it equals that candidate. With no resolver every expansion
+abstains. The rules below are normative for the slice 9 implementation.
+Slice 9's resolver implementation requires its own security review. This contract is the minimum it must meet. The resolver MUST:
+
+1. Run every git command through one wrapper that applies rules 2 to 4 to
+   each call, with a fixed timeout, no stdin, `--no-pager`, and no prompt.
+   No git command bypasses it.
+2. Build the environment from scratch. Every inherited `GIT_*` variable is
+   removed, including `GIT_DIR`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`
+   and `GIT_GRAFT_FILE`. The wrapper then sets exactly these:
+   `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` (`NUL` on
+   Windows), `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`. System
+   and global config, including the XDG location, are never read. The proxy
+   and TLS variables curl reads are removed as well: `http_proxy`,
+   `https_proxy`, `all_proxy` and `no_proxy` in either case,
+   `CURL_CA_BUNDLE`, `SSL_CERT_FILE` and `SSL_CERT_DIR`, so the fetch uses
+   the system trust store and connects directly.
+3. Pass `--no-replace-objects` and these `-c` overrides on every call:
+   `core.fsmonitor=false`, `core.hooksPath` set to a directory that does not
+   exist, `credential.helper=` (empty, which clears every helper),
+   `core.askPass=`, `core.alternateRefsCommand=`, `maintenance.auto=false`,
+   `gc.auto=0`, `fetch.recurseSubmodules=false`, `protocol.allow=never`,
+   `protocol.https.allow=always`, `http.sslVerify=true`, `http.proxy=`
+   (empty), `http.followRedirects=false`, `http.extraHeader=` (empty, which
+   clears every header) and `http.cookieFile=` (empty). SSH and every other
+   transport are not allowed, so no `core.sshCommand` or `GIT_SSH_COMMAND`
+   is set.
+4. Work in the git repository at the `[[verify.workspace]]` path bound to the
+   card's scope, and refuse when `git rev-parse --show-toplevel` names any
+   other directory.
+5. Read the repository's local config with
+   `git config --local --no-includes --list` and return None when it holds
+   any of: `include.*` or `includeIf.*`, `core.fsmonitor`,
+   `core.hooksPath`, `core.sshCommand`, `core.gitProxy`, `core.askPass`,
+   `core.alternateRefsCommand`, any `credential.*`, any `alias.*`,
+   `url.*.insteadOf` or `url.*.pushInsteadOf`, `remote.*.vcs`,
+   `remote.*.uploadpack`, `remote.*.proxy` or `remote.*.proxyAuthMethod`,
+   any `http.*` key (including the per-URL `http.<url>.*` form, so no TLS,
+   CA, client certificate, proxy, redirect, header or cookie setting from
+   the repository applies), or `protocol.*`. The `-c` overrides cover what
+   they can. Includes cannot be overridden, so a repository that has one is
+   refused and never read. git never lets an alias shadow a built-in
+   command, and aliases are refused anyway.
+6. Validate the URL of every remote that an allowed ref names. Each
+   `remote.<name>.url` value must use the `https` scheme. `ext::`, `fd::`,
+   `file::`, `file://`, local paths, `ssh`, `git` and any other transport
+   or remote helper return None.
+7. Ignore replacement refs and refuse grafts. `--no-replace-objects` and
+   `GIT_NO_REPLACE_OBJECTS=1` stop every `refs/replace/` entry from
+   applying. A grafts file at `git rev-parse --git-path info/grafts` that
+   exists returns None, and `GIT_GRAFT_FILE` is already removed by rule 2.
+8. Return None for an abbreviation shorter than the contract minimum
+   without calling git. git itself refuses `--disambiguate` below 4 hex
+   digits, and the contract minimum (12, then 7) is always above that
+   floor.
+9. Return None for a shallow or incomplete repository.
+   `git rev-parse --is-shallow-repository` must print exactly `false`, and
+   `extensions.partialClone` must be unset, because missing history or
+   objects could hide a second match.
+10. Take the allowed refs from a new `commit_refs` key on the
+    `[[verify.workspace]]` entry. It lists fully qualified remote-tracking
+    refs such as `refs/remotes/origin/main`. When the key is absent, the
+    default is the single ref that `git symbolic-ref refs/remotes/origin/HEAD`
+    names, which is the remote-tracking default branch. If that symbolic ref
+    is unset there is no default, and the resolver returns None. Local
+    branches and tags are never allowed refs, because a local process can
+    create or move them without a fetch. Same-user tampering with
+    remote-tracking refs stays out of scope, as in the S24 marker ruling.
+11. Prove every allowed ref fresh in the current run without relying on the
+    remote's configured fetch refspec. For each allowed ref
+    `refs/remotes/<remote>/<branch>`, fetch with
+    `git fetch --porcelain --no-tags --prune <remote> +refs/heads/<branch>:refs/remotes/<remote>/<branch>`.
+    A refspec on the command line replaces the configured ones, so no tag or
+    other refspec from config applies. The porcelain output must list that
+    destination ref with an updated or up-to-date flag. With a git older than
+    2.41, which has no `--porcelain`, the resolver instead compares the
+    destination ref after the fetch with `git ls-remote <remote>
+    refs/heads/<branch>` from the same run, and they must match. A failed,
+    timed out or rejected fetch, a missing destination ref, a mismatch, or a
+    ref proven only in an earlier run returns None.
+12. Evaluate ambiguity across the complete available object database, not
+    only the allowed refs. `git rev-parse --disambiguate=<abbreviation>`
+    lists every object of any type (loose, packed and alternates) whose id
+    starts with the prefix, reachable or not, and never consults ref names.
+    Exactly one line must come back, or the resolver returns None. A second
+    object on another ref, an unreachable object or a blob with the same
+    prefix makes the abbreviation ambiguous.
+13. Check that `git cat-file -t <id>` prints exactly `commit`, or return
+    None.
+14. Check that the id is exactly 40 or 64 lowercase hex characters, and
+    return it in that spelling. The contract then requires it to equal the
+    unique authenticated candidate.
+15. Check reachability separately with
+    `git merge-base --is-ancestor <id> <ref>` against each allowed ref. Exit
+    0 for at least one ref passes. Exit 1 for every ref, or any other exit,
+    returns None.
+16. Return None on any missing object, ambiguity, command error, nonzero
+    exit, timeout or unparsable output.
+
+Slice 9 tests plant each hostile setting from rules 2 to 7 in a scratch
+repository: an include, an fsmonitor command, a hooks path and a
+`reference-transaction` hook that would write a marker file, a credential
+helper, an alias, an `insteadOf` rewrite, `ext::` and `file://` remote URLs,
+an alternate refs command, a remote helper, a grafts file, a tag refspec in
+config and an inherited `GIT_DIR`. Each test asserts None and that no marker
+file appeared. A planted replacement ref must leave the result unchanged.
+
+`git rev-parse --verify <abbreviation>^{commit}` alone is insufficient. It
+resolves ref names before object ids, so a local branch or tag named like
+the abbreviation would answer instead of the object. The `^{commit}` peel
+uses the object type to break ties between a commit and a tree, blob or tag
+with the same prefix instead of reporting the ambiguity. It also peels an
+annotated tag whose id matches to the commit the tag points at, which is a
+different id. And it says nothing about freshness or reachability.
+
+Reachability from an allowed ref after a proven fetch is the identity
+binding. A receipt proves only that some worktree used a commit. Grinding a
+commit with a matching prefix and getting a receipt for it is not enough
+unless the attacker can also land that commit on an allowed ref.
+
+The minimum abbreviation stays at 12 hex characters until slice 9 ships this
+resolver with a test for every None case above, including an abbreviation
+that is ambiguous only because of an object on another ref and a shallow
+clone. Slice 9 then lowers the minimum to 7. Exact equality with the unique
+authenticated candidate plus allowed-ref reachability means a ground commit
+must land on an allowed ref, so prefix length stops being the defense. In
+the card sample, 1 of the 61 accepted marked abbreviations qualifies at 12
+characters and 52 qualify at 7.
+
 ### Mapping to ops
 
 | Verdict | Op | Notes |
 |---|---|---|
-| `contradicted` | `replace_block` with the replacement | The hub appends `previously X, now Y`, so the old wording stays in history. |
+| `contradicted` | `replace_block` with the replacement | v1: a marked abbreviated commit id expanded to its full id (check 2). The hub appends `previously X, now Y`, so the old wording stays in history. |
 | `changed` | `replace_block` with the replacement | Same op. The verdict is kept in the manifest so reviewers can tell a wrong claim from a stale one. |
-| `history` | `add_previously` with the `previously` text | The claim is current, but cited older evidence records a different earlier value a reader may meet. |
-| `superseded` | `supersede_card` with the related card as `other_card` | Single-claim-block cards only (check 6). The newer card already holds the corrected claim. A multi-block card abstains with `supersede_partial`. |
-| `supported` with uncited support | `append_evidence` | Only with `[verify] propose_confirmations = true`, default false. |
+| `history` | None in v1 | Abstains with `verify_history_deferred` (check 6). `add_previously` returns with typed claim predicates. |
+| `superseded` | None in v1 | Abstains with `verify_supersede_deferred` (check 6). |
+| `supported` with uncited support | `append_evidence` | Only with `[verify] propose_confirmations = true`, default false. Every content word of the claim must meet the rule 2 corroboration rule. Eligibility is per evidence item: a ref is cited only when every assembled item whose source maps to it is a quoted countable item holding claim material. A receipt yields a fields item and a context-only output item with one source, so its ref is never cited through the fields item. Command output and excerpts never become citations. |
 | `supported` otherwise | None | Recorded in local state as verified. |
 
 Each proposal names one card. Every correction proposal also carries an
@@ -586,8 +794,8 @@ into another.
 | Wrong correction | High confidence only, exact quotes, two independent items with one authenticated, the same op and text from a separately pinned model, and a reviewer who sees the trust labels. |
 | Planted command, URL, path or host | The novelty check rejects any such token that is not in the block or a quote. Command output cannot satisfy the authenticated-evidence rule. The hub scan rejects blocked content. |
 | Queue flooding | At most 4 new proposals per run and 8 pending for the principal. A rejected correction is not proposed again until the card revision or cited evidence changes. |
-| Chosen supersede target | Targets come only from the client's related-card list for that call, in the same scope, live and newer. |
-| Cross-card or cross-scope leakage | One card per call, evidence only from the scope's own roots and projects, and only the titles of three related cards from the same scope. |
+| Chosen supersede target | `superseded` opens no op in v1 (check 6). |
+| Cross-card or cross-scope leakage | One card per call and evidence only from the scope's own roots and projects. No other card's text or title reaches the prompt in v1. |
 | Flagged input | Cards with non-clean scans are not eligible. Flagged excerpts are dropped before the call and listed in the packet. |
 | Automatic-apply holds | None before review. A manifest's `contrary` stance activates only when a reviewer accepts its proposal (D5). |
 

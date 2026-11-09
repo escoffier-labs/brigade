@@ -16,6 +16,7 @@ import pytest
 from tests.test_ci_workflow import ROOT, _workflow_bash_command, _workflow_step_section
 
 SELECTOR = ROOT / "scripts/ci_hub_select.py"
+CLASSIFIER = ROOT / "scripts/ci_docs_only.py"
 PATHS = ROOT / "scripts/ci_hub_paths.yml"
 STEP = "Select hub suite for the merge group from trusted main"
 
@@ -64,6 +65,35 @@ def test_the_shared_path_list_parses_strictly_and_selects_its_own_sources():
 )
 def test_matcher_follows_picomatch_dot_semantics(pattern, path, expected):
     assert ci_hub_select.matches(path, (pattern,)) is expected
+
+
+@pytest.mark.parametrize(
+    ("pattern", "path", "expected"),
+    [
+        ("engines/hub/**", "engines/hub", True),
+        ("**/b.py", "b.py", True),
+        ("**/b.py", "x/y/b.py", True),
+        ("a/**/b/**/c", "a/x/b/y/b/c", True),
+        ("a/**/b/**/c", "a/x/b/y/c/d", False),
+        ("a/**/b.py", "a/b.py/c", False),
+        ("a/*/b", "a/b", False),
+    ],
+)
+def test_matcher_backtracks_over_double_star(pattern, path, expected):
+    assert ci_hub_select.matches(path, (pattern,)) is expected
+
+
+def test_matcher_has_no_recursion_depth_limit():
+    # A proposal controls its paths: any depth must match without error.
+    deep = "/".join(["a"] * 5000)
+    assert ci_hub_select.matches(f"engines/hub/{deep}/lib.rs", HUB_PATTERNS)
+    assert not ci_hub_select.matches(f"docs/{deep}/guide.md", HUB_PATTERNS)
+    assert ci_hub_select.matches(f"x/{deep}/y.py", ("x/**/y.py",))
+    assert not ci_hub_select.matches(f"x/{deep}/z.py", ("x/**/y.py",))
+    # A recursive matcher recursed once per pattern segment, so only a deep
+    # pattern (from main, never the proposal) reached the recursion limit.
+    assert ci_hub_select.matches(f"{deep}/b.py", (f"{deep}/*.py",))
+    assert not ci_hub_select.matches(f"{deep}/b.rs", (f"{deep}/*.py",))
 
 
 @pytest.mark.parametrize(
@@ -212,7 +242,7 @@ def _run(cwd, *args):
 def _write(repo, path, content="new\n"):
     target = repo / path
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content)
+    target.write_text(content, encoding="utf-8")
 
 
 def _commit(repo, *changes, message="change"):
@@ -224,8 +254,7 @@ def _commit(repo, *changes, message="change"):
     return _run(repo, "rev-parse", "HEAD")
 
 
-@pytest.fixture
-def queue(tmp_path):
+def _make_queue(tmp_path):
     origin = tmp_path / "origin.git"
     seed = tmp_path / "seed"
     _run(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
@@ -240,12 +269,18 @@ def queue(tmp_path):
         ("README.md", "base\n"),
         ("scripts/ci_hub_select.py", SELECTOR.read_text(encoding="utf-8")),
         ("scripts/ci_hub_paths.yml", PATHS.read_text(encoding="utf-8")),
+        ("scripts/ci_docs_only.py", CLASSIFIER.read_text(encoding="utf-8")),
         ("engines/hub/src/lib.rs", "pub fn hub() {}\n"),
         ("src/brigade/other.py", "VALUE = 1\n"),
         message="base",
     )
     _run(seed, "push", "-q", "origin", "main")
     return SimpleNamespace(tmp=tmp_path, origin=origin, seed=seed, main=main)
+
+
+@pytest.fixture
+def queue(tmp_path):
+    return _make_queue(tmp_path)
 
 
 def _enqueue(queue, *entries):
@@ -257,7 +292,13 @@ def _enqueue(queue, *entries):
     return heads
 
 
-def _select(queue, head, base, *, base_ref="refs/heads/main", origin=None, **environment):
+def _run_step(queue, step_name, head, base, *, base_ref="refs/heads/main", origin=None, **environment):
+    """Run one literal ci.yml `changes` step for a merge group; return its outputs.
+
+    The step text always comes from this checkout's ci.yml: the workflow is
+    held fixed. On GitHub a head that rewrites ci.yml runs its own bootstrap,
+    the documented trust limit, which no test here can model.
+    """
     work = queue.tmp / "work"
     if not work.exists():
         _run(queue.tmp, "init", "-q", str(work))
@@ -268,13 +309,16 @@ def _select(queue, head, base, *, base_ref="refs/heads/main", origin=None, **env
     if origin is not None:
         _run(work, "remote", "set-url", "origin", origin)
     event = queue.tmp / "event.json"
-    event.write_text(json.dumps({"merge_group": {"base_sha": base, "head_sha": head, "base_ref": base_ref}}))
+    event.write_text(
+        json.dumps({"merge_group": {"base_sha": base, "head_sha": head, "base_ref": base_ref}}), encoding="utf-8"
+    )
     output = queue.tmp / "output.txt"
-    output.write_text("")
+    output.write_text("", encoding="utf-8")
     runner_temp = queue.tmp / "runner-temp"
     runner_temp.mkdir(exist_ok=True)
-    step = _workflow_step_section((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"), "changes", STEP)
-    script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+    step = _workflow_step_section((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"), "changes", step_name)
+    # The step ends at the next step, named or not.
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n      - ", 1)[0])
     result = subprocess.run(
         _workflow_bash_command(script),
         cwd=work,
@@ -291,9 +335,21 @@ def _select(queue, head, base, *, base_ref="refs/heads/main", origin=None, **env
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
-    assert set(values) == {"hub", "reason"}
-    return values
+    queue.stdout = result.stdout
+    return dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+
+
+def _select(queue, head, base, **options):
+    values = _run_step(queue, STEP, head, base, **options)
+    queue.selected = values
+    assert set(values) == {"hub", "reason", "start", "target"}
+    # The range start and main commit exist only for a validated range.
+    assert re.fullmatch(r"(?:[0-9a-f]{40})?", values["start"])
+    assert re.fullmatch(r"(?:[0-9a-f]{40})?", values["target"])
+    if values["start"]:
+        assert values["target"] == _run(queue.origin, "rev-parse", "refs/heads/main")
+        assert values["start"] == _run(queue.seed, "merge-base", values["target"], head)
+    return {"hub": values["hub"], "reason": values["reason"]}
 
 
 def test_an_entry_queued_behind_a_hub_change_selects_the_hub_suite(queue):
@@ -330,12 +386,13 @@ def test_a_head_that_rewrites_the_filter_and_selector_cannot_skip_the_hub_suite(
         "import os\nfrom pathlib import Path\n"
         "Path(os.environ['GITHUB_OUTPUT']).write_text('hub=false\\nreason=forged\\n')\n"
     )
+    # The head leaves ci.yml alone: this runs main's bootstrap, and a head that
+    # rewrote ci.yml would run its own instead (the trust limit).
     (head,) = _enqueue(
         queue,
         [
             ("scripts/ci_hub_paths.yml", forged_list),
             ("scripts/ci_hub_select.py", forged_selector),
-            ".github/workflows/ci.yml",
             "engines/hub/src/lib.rs",
         ],
     )
@@ -374,6 +431,7 @@ def _replace_main(queue, *changes, remove=()):
             marks=pytest.mark.skipif(os.name == "nt", reason="POSIX executable bits"),
         ),
         ("selector-broken", "trusted-hub-selector-unavailable"),
+        ("selector-duplicate-key", "trusted-hub-selector-unavailable"),
         ("paths-missing", "missing-or-unsafe-path-list"),
         ("paths-oversize", "missing-or-unsafe-path-list"),
         ("paths-empty", "missing-or-unsafe-path-list"),
@@ -389,6 +447,11 @@ def test_an_unusable_trusted_selector_or_path_list_selects_the_hub_suite(queue, 
         _replace_main(queue)
     elif problem == "selector-broken":
         _replace_main(queue, ("scripts/ci_hub_select.py", "invalid python syntax!\n"))
+    elif problem == "selector-duplicate-key":
+        # A dict over these lines would keep the last `hub`, reading hub=false.
+        _replace_main(
+            queue, ("scripts/ci_hub_select.py", _selector_writing("hub=true\\nreason=forged\\nstart=\\nhub=false\\n"))
+        )
     elif problem == "paths-missing":
         _replace_main(queue, remove=["scripts/ci_hub_paths.yml"])
     elif problem == "paths-oversize":
@@ -403,6 +466,39 @@ def test_an_unusable_trusted_selector_or_path_list_selects_the_hub_suite(queue, 
     assert _select(queue, head, base) == {"hub": "true", "reason": reason}
 
 
+def _selector_writing(output, printed=""):
+    return (
+        "import os\nfrom pathlib import Path\n"
+        f"print({printed!r})\n"
+        f"Path(os.environ['GITHUB_OUTPUT']).write_text('{output}', encoding='utf-8')\n"
+    )
+
+
+def _inert_blocks(stdout):
+    blocks = re.findall(r"^::stop-commands::([0-9a-f]{32})\n(.*?)\n::\1::$", stdout, re.MULTILINE | re.DOTALL)
+    outside = re.sub(r"^::stop-commands::([0-9a-f]{32})\n.*?\n::\1::$", "", stdout, flags=re.MULTILINE | re.DOTALL)
+    return [block for _, block in blocks], outside
+
+
+def test_the_selector_stdout_is_printed_with_workflow_commands_disabled(queue):
+    (head,) = _enqueue(queue, ["src/brigade/other.py"])
+    _select(queue, head, queue.main)
+    blocks, outside = _inert_blocks(queue.stdout)
+    assert len(blocks) == 1 and "hub selection: main " in blocks[0], queue.stdout
+    assert "hub selection:" not in outside
+    _replace_main(
+        queue,
+        (
+            "scripts/ci_hub_select.py",
+            _selector_writing("hub=true\\nreason=printed\\nstart=\\n", "::warning::from stdout"),
+        ),
+    )
+    assert _select(queue, head, queue.main) == {"hub": "true", "reason": "printed"}
+    blocks, outside = _inert_blocks(queue.stdout)
+    assert len(blocks) == 1 and "::warning::from stdout" in blocks[0], queue.stdout
+    assert "::warning::" not in outside
+
+
 def test_a_failed_fetch_of_main_selects_the_hub_suite(queue):
     (head,) = _enqueue(queue, ["src/brigade/other.py"])
     _select(queue, head, queue.main)
@@ -411,6 +507,7 @@ def test_a_failed_fetch_of_main_selects_the_hub_suite(queue):
         "hub": "true",
         "reason": "trusted-hub-selector-unavailable",
     }
+    assert queue.selected["start"] == queue.selected["target"] == ""
 
 
 def test_a_failed_history_fetch_selects_the_hub_suite(queue):
@@ -429,7 +526,8 @@ def test_a_main_with_no_merge_base_selects_the_hub_suite(queue):
         message="unrelated main",
     )
     _run(queue.seed, "push", "-qf", "origin", "HEAD:refs/heads/main")
-    assert _select(queue, head, queue.main) == {"hub": "true", "reason": "trusted-hub-selection-failed"}
+    assert _select(queue, head, queue.main) == {"hub": "true", "reason": "no-merge-base"}
+    assert queue.selected["start"] == ""
 
 
 def test_a_group_base_below_the_merge_base_selects_the_hub_suite(queue):
