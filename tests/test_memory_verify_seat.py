@@ -511,7 +511,9 @@ def test_a_binary_swapped_after_verification_never_receives_the_prompt(target, t
         replacement.chmod(0o700)
         os.replace(replacement, target.executable)
         seen["fds"] = (held_fd,)
-        seen["result"] = proc.run_held(argv, held_fd, **kwargs)
+        # argv[0] is only a display name. Some distributions ship echo as a single-utility
+        # build that refuses any other argv[0], so name it after the copied program.
+        seen["result"] = proc.run_held(["echo", *argv[1:]], held_fd, **kwargs)
         return seen["result"]
 
     monkeypatch.setattr(seats, "LAUNCH", swap_then_spawn)
