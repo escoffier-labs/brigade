@@ -38,9 +38,10 @@ connector packet and a Grok Bot reference never name one. Grok Bot references
 are searched with the Grok Bot memory principal's own credential, so they name
 only cards that principal may read. Without that credential there are none.
 
-Every packet is built for the connector audience for now. ``build`` keeps an
-``audience`` parameter so a local audience can be wired later, but no caller
-passes ``local`` and nothing here reads a host marker.
+Every packet is built for the connector audience except one: Worklore
+``handoff show``, which prints to the operator's own terminal, asks
+``claude_hooks.recall_audience.audience()`` and passes ``local`` only when the
+S24 local recall marker grants it. Nothing in this module reads the marker.
 
 At most one recall runs per process. A dispatch that arrives while one is in
 flight gets no block at once. A worker that runs past ten budgets is abandoned
@@ -88,11 +89,11 @@ LOCAL = "local"
 CONNECTOR = "connector"
 AUDIENCES = frozenset({LOCAL, CONNECTOR})
 # Where the audience is chosen. Every dispatch packet is a connector audience
-# for now. After the S24 local recall marker (#2408) merges, `handoff show` may
-# use `claude_hooks.recall_audience.audience()` here. aboyeur prompts stay
-# connector regardless, because a run may dispatch them to cloud seats and to
-# seats on other fleet nodes. The model providers behind the operator's own
-# local harnesses are inside the private boundary (phase-memory-verify D4).
+# except `handoff show`, whose caller picks it from the S24 local recall marker.
+# aboyeur prompts stay connector regardless, because a run may dispatch them to
+# cloud seats and to seats on other fleet nodes. The model providers behind the
+# operator's own local harnesses are inside the private boundary
+# (phase-memory-verify D4).
 DEFAULT_AUDIENCE = CONNECTOR
 LOCAL_SCOPE = "local"
 LOCAL_TRUST = "local"
