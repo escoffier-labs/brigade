@@ -172,6 +172,11 @@ fn steps(h: &Hub, credential: &super::Credential, ruleset: &str, body: Json) -> 
     (reply.status, count.load(Ordering::Relaxed))
 }
 
+/// Rounds of the latency check: the fewest before it may stop early, and the
+/// most before it gives up and fails on the ratio it has.
+const MIN_ROUNDS: usize = 8;
+const MAX_ROUNDS: usize = 80;
+
 /// A hub holding one eligible card and one the node may not push: `hidden`
 /// has a flagged scan. `first` sorts before it, so the decoy head an absent
 /// id reads is an eligible card, not the withheld one.
@@ -215,10 +220,8 @@ async fn push_card_404_does_the_same_store_work_for_absent_and_withheld_ids() {
 async fn push_card_404_latency_does_not_separate_absent_and_withheld_ids() {
     let h = withheld_hub().await;
     let read = |id: &str| json!({"action":"card","card_id":id,"push":true});
-    // Interleaved batches, best batch per id, so load on a shared runner
-    // falls on both sides alike and a slow batch cannot decide the ratio.
-    // The bound is loose on purpose: the instruction count above is the
-    // exact check, and this one bounds what a caller can time end to end.
+    // The bound is loose on purpose: the instruction count above is the exact
+    // check, and this one bounds what a caller can time end to end.
     let batch = |id: &'static str| {
         let h = &h;
         async move {
@@ -230,14 +233,36 @@ async fn push_card_404_latency_does_not_separate_absent_and_withheld_ids() {
             start.elapsed()
         }
     };
+    let within = |absent: Duration, withheld: Duration| {
+        (1.0 / 1.5..=1.5).contains(&(withheld.as_secs_f64() / absent.as_secs_f64()))
+    };
+    // A batch is about 6 ms, so one scheduler stall on a shared runner moves a
+    // single batch by tens of percent. It fell on one side often enough to
+    // fail 2 of 25 runs under CPU contention, in both directions. Load only
+    // ever adds time, so the fastest batch per id converges on its true cost
+    // and more rounds only tighten it. The rounds alternate which id runs
+    // first, so neither owns the cold side of a pair, and one batch per id
+    // warms the store's caches and is discarded. Sampling stops once the
+    // fastest batches fall inside the bound. A real asymmetry keeps them
+    // apart however many rounds run, so it still fails once the rounds run out.
+    batch("absent").await;
+    batch("hidden").await;
     let (mut absent, mut withheld) = (Duration::MAX, Duration::MAX);
-    for _ in 0..7 {
-        absent = absent.min(batch("absent").await);
-        withheld = withheld.min(batch("hidden").await);
+    for round in 0..MAX_ROUNDS {
+        if round % 2 == 0 {
+            absent = absent.min(batch("absent").await);
+            withheld = withheld.min(batch("hidden").await);
+        } else {
+            withheld = withheld.min(batch("hidden").await);
+            absent = absent.min(batch("absent").await);
+        }
+        if round + 1 >= MIN_ROUNDS && within(absent, withheld) {
+            break;
+        }
     }
     let ratio = withheld.as_secs_f64() / absent.as_secs_f64();
     assert!(
-        (1.0 / 1.5..=1.5).contains(&ratio),
+        within(absent, withheld),
         "withheld {withheld:?} vs absent {absent:?}: ratio {ratio:.3}"
     );
 }

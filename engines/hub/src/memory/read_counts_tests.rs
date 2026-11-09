@@ -809,7 +809,11 @@ fn seed_days(db: &Connection, days: &[i64], cards: usize) {
 
 #[test]
 fn the_sweep_stays_within_its_row_budget_and_finishes_over_several_ticks() {
-    let counts = ReadCounts::default();
+    // The row budget keeps its default (2,000). The time budget is raised past
+    // anything a loaded runner reaches, so only rows can end a tick: on the
+    // default 20 ms a slow first tick stopped at a chunk boundary (1,024 rows).
+    let counts = ReadCounts::new(limits(|l| l.sweep_ms = 1_000));
+    assert_eq!(counts.limits().sweep_rows, 2_000);
     let now = 1_800_000_000_000;
     let today = day(now);
     let db = memory_db();
@@ -842,6 +846,7 @@ fn the_sweep_stays_within_its_row_budget_and_finishes_over_several_ticks() {
     assert_eq!(count(&db, "SELECT count(*) FROM memory_read_days"), 10);
     assert_eq!(meta(&db, "read_days_rows"), Some("10".into()));
     assert_eq!(counts.stats.budget("sweep_rows"), 2);
+    assert_eq!(counts.stats.budget("sweep_ms"), 0);
 }
 
 #[test]
