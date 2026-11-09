@@ -263,6 +263,17 @@ def test_legacy_enforced_name_reads_and_sets_as_engineer(tmp_path: Path, capsys)
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def test_mode_set_rejects_unknown_mode_without_naming_the_alias(tmp_path: Path, capsys) -> None:
+    target = _wired(tmp_path)
+    path = target / config.CONFIG_REL_PATH
+    before = path.read_text(encoding="utf-8")
+    assert cli.main(["work", "mode", "set", "enforce", "--target", str(target)]) == 2
+    err = capsys.readouterr().err
+    assert "mode must be one of: engineer, yolo" in err
+    assert "enforced" not in err
+    assert path.read_text(encoding="utf-8") == before
+
+
 def test_yolo_brief_drops_verification_wording(tmp_path: Path, capsys) -> None:
     target = _wired(tmp_path)
     assert cli.main(["work", "brief", "--target", str(target)]) == 0
