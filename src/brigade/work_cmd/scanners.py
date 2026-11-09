@@ -1886,6 +1886,15 @@ def _scanner_import_identity(metadata: os.stat_result) -> tuple[int, int, int, i
     return metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink
 
 
+def _scanner_import_directory_identity(metadata: os.stat_result) -> tuple[int, int, int]:
+    # A directory's link count moves whenever anything creates or removes a
+    # subdirectory in it, so it is not part of the identity. Including it made a
+    # sibling mkdir in any ancestor (a shared /tmp, a busy workspace parent) look
+    # like a swapped path component and rejected a legitimate import (#2417).
+    # Device and inode still change when a component is swapped for another one.
+    return metadata.st_dev, metadata.st_ino, metadata.st_mode
+
+
 def _validate_scanner_import_leaf(parent: int, name: str, descriptor: int) -> None:
     opened = os.fstat(descriptor)
     named = os.stat(name, dir_fd=parent, follow_symlinks=False)
@@ -1907,7 +1916,7 @@ def _validate_scanner_import_directories(anchor: int, directories: list[tuple[in
         if (
             not stat.S_ISDIR(opened.st_mode)
             or not stat.S_ISDIR(named.st_mode)
-            or _scanner_import_identity(opened) != _scanner_import_identity(named)
+            or _scanner_import_directory_identity(opened) != _scanner_import_directory_identity(named)
         ):
             raise OSError("scanner import parent no longer matches its held descriptor")
         parent = descriptor
@@ -1933,8 +1942,8 @@ def _open_scanner_import_directory(parent: int, name: str, flags: int) -> int:
         named = os.stat(name, dir_fd=parent, follow_symlinks=False)
         if (
             not stat.S_ISDIR(opened.st_mode)
-            or _scanner_import_identity(intended) != _scanner_import_identity(opened)
-            or _scanner_import_identity(intended) != _scanner_import_identity(named)
+            or _scanner_import_directory_identity(intended) != _scanner_import_directory_identity(opened)
+            or _scanner_import_directory_identity(intended) != _scanner_import_directory_identity(named)
         ):
             raise OSError("scanner import directory no longer matches its held descriptor")
         return descriptor
