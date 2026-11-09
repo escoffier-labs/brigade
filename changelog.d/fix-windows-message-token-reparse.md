@@ -1,0 +1,1 @@
+- On Windows, message, Dot, Duet and memory hub node token files are now opened without following a symlink or reparse point swapped in after the path check. A link at the token path is refused instead of read.

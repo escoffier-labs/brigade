@@ -19,6 +19,7 @@ pytest_plugins = ["tests._fleet_message_fixtures"]
 POSIX_MODE = pytest.mark.skipif(sys.platform == "win32", reason="Credential POSIX mode checks do not apply on Windows")
 POSIX_OWNER = pytest.mark.skipif(sys.platform == "win32", reason="Windows has no POSIX credential owner UID")
 POSIX_FIFO = pytest.mark.skipif(sys.platform == "win32", reason="Windows has no POSIX mkfifo credential fixture")
+WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="Windows reparse-point open semantics")
 
 
 def token_file(tmp_path, name="agent", value=None):
@@ -807,3 +808,85 @@ def test_client_node_grants_preserve_endpoint_guard_and_hub_error(configured, mo
     )
     with pytest.raises(fleet_client.FleetClientError):
         client.set_principal_grants(None, [], node_id="node-a")
+
+
+def _symlink_or_skip(link, target, **kwargs):
+    try:
+        link.symlink_to(target, **kwargs)
+    except OSError as error:
+        # ERROR_PRIVILEGE_NOT_HELD: no SeCreateSymbolicLinkPrivilege and no Developer Mode.
+        if sys.platform == "win32" and getattr(error, "winerror", None) == 1314:
+            pytest.skip("creating a symlink needs the symlink privilege or Developer Mode")
+        raise
+
+
+def test_token_swapped_for_link_between_check_and_open_is_refused(tmp_path, monkeypatch):
+    # Issue #2422: a writer of the parent directory swaps the checked file for a link to a
+    # valid token it planted. Windows has no O_NOFOLLOW, so the open itself must refuse it.
+    path = token_file(tmp_path, "agent")
+    planted = token_file(tmp_path, "planted")
+    real_lstat = os.lstat
+    swapped = []
+
+    def lstat_then_swap(target, *args, **kwargs):
+        result = real_lstat(target, *args, **kwargs)
+        if os.fspath(target) == str(path) and not swapped:
+            swapped.append(True)
+            path.unlink()
+            _symlink_or_skip(path, planted)
+        return result
+
+    monkeypatch.setattr(credentials.os, "lstat", lstat_then_swap)
+    with pytest.raises(fleet_client.FleetClientError) as error:
+        credentials.read_message_token_file(str(path))
+    assert swapped and error.value.code == "token_file_invalid"
+    assert planted.read_text() not in str(error.value)
+
+
+def test_token_open_fails_closed_without_a_no_follow_primitive(tmp_path, monkeypatch):
+    path = token_file(tmp_path)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    monkeypatch.setattr(sys, "platform", "fixture-os")
+    with pytest.raises(fleet_client.FleetClientError):
+        credentials.read_message_token_file(str(path))
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("kind", ["symlink", "junction"])
+def test_windows_token_open_refuses_reparse_point_without_race(tmp_path, kind):
+    import _winapi
+
+    target = token_file(tmp_path, "target")
+    link = tmp_path / "link"
+    if kind == "symlink":
+        _symlink_or_skip(link, target)
+    else:
+        target_dir = tmp_path / "target-dir"
+        target_dir.mkdir()
+        _winapi.CreateJunction(str(target_dir), str(link))
+    # The handle check alone refuses the link, with no lstat check in front of it.
+    with pytest.raises(OSError):
+        fd = credentials._open_token_fd(str(link))
+        os.close(fd)
+    with pytest.raises(fleet_client.FleetClientError):
+        credentials.read_message_token_file(str(link))
+
+
+@WINDOWS_ONLY
+def test_windows_token_reads_through_the_no_follow_handle(tmp_path, monkeypatch):
+    from brigade.work_cmd import nt_dirfd
+
+    path = token_file(tmp_path)
+    opened = []
+    real_open = nt_dirfd.open_path_file
+
+    def spy(target, flags, *args):
+        opened.append(target)
+        return real_open(target, flags, *args)
+
+    monkeypatch.setattr(nt_dirfd, "open_path_file", spy)
+    assert credentials.read_message_token_file(str(path)) == path.read_text()
+    # A relative path resolves against the working directory before the \\?\ prefix.
+    monkeypatch.chdir(tmp_path)
+    assert credentials.read_message_token_file(path.name) == path.read_text()
+    assert opened == [str(path), str(path)]
