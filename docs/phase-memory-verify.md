@@ -257,6 +257,9 @@ confirm_seat = "verify-confirm"
 scope = "repo:example"
 path = "/absolute/path/to/workspace"
 archive_projects = ["example"]
+# Optional. Remote-tracking refs the commit resolver may prove reachability
+# from. Without it, the single ref refs/remotes/origin/HEAD names.
+commit_refs = ["refs/remotes/origin/main"]
 ```
 
 The rules:
@@ -400,15 +403,19 @@ the reviewer decides whether it is true:
    token, abstains with `verify_not_abbreviation`. One id is never swapped
    for another, so "not in commit X" cannot be retargeted.
 
-   An abbreviation shorter than 12 hex characters abstains with
-   `verify_abbreviation_too_short`. A 7-character prefix is 28 bits, so an
-   attacker can grind a commit that starts with it, get an authentic receipt
-   for that commit, and point a claim such as "Do not commit X to the
-   release index" at it. The cost is real: in the same card sample, 1 of
-   the 61 accepted marked abbreviations is 12 characters or longer, and 52
-   are exactly 7. Until slice 9 lands its resolver, v1 expands almost none of
-   today's cards. "Commit resolver contract" below says when the minimum
-   drops to 7.
+   An abbreviation shorter than 7 hex characters abstains. A token that
+   short is not a marked reference at all, so it abstains with
+   `verify_edit_out_of_scope`, and `verify_abbreviation_too_short` stays as
+   a second guard. A 7-character prefix is 28 bits, so an attacker can grind
+   a commit that starts with it, get an authentic receipt for that commit,
+   and point a claim such as "Do not commit X to the release index" at it.
+   Prefix length alone is therefore not the defense. The slice 8 minimum was
+   12, and in the same card sample only 1 of the 61 accepted marked
+   abbreviations is 12 characters or longer, while 52 are exactly 7. Slice 9a
+   lowered the minimum to 7 when it shipped the resolver below, because
+   exact equality with the unique authenticated candidate plus reachability
+   from a freshly fetched allowed ref means a ground commit must also land
+   on an allowed ref.
 
    Commit identity is bound in two steps before corroboration. Every
    authenticated `commit` and `baseline_commit` value in the card's assembled
@@ -510,17 +517,81 @@ Slice 9's resolver implementation requires its own security review. This contrac
 
 1. Run every git command through one wrapper that applies rules 2 to 4 to
    each call, with a fixed timeout, no stdin, `--no-pager`, and no prompt.
-   No git command bypasses it.
-2. Build the environment from scratch. Every inherited `GIT_*` variable is
-   removed, including `GIT_DIR`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`
-   and `GIT_GRAFT_FILE`. The wrapper then sets exactly these:
-   `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` (`NUL` on
-   Windows), `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`. System
-   and global config, including the XDG location, are never read. The proxy
-   and TLS variables curl reads are removed as well: `http_proxy`,
-   `https_proxy`, `all_proxy` and `no_proxy` in either case,
-   `CURL_CA_BUNDLE`, `SSL_CERT_FILE` and `SSL_CERT_DIR`, so the fetch uses
-   the system trust store and connects directly.
+   No git command bypasses it. A timeout kills git's whole process group,
+   and helpers that outlive git after a normal exit are reaped too.
+   Commit expansion is POSIX-only in v1. The resolver runs git only where
+   `proc.run_held` can execute a held descriptor (Linux `fexecve`). On
+   Windows, and on any other platform, it returns None for every
+   abbreviation with the fixed reason `verify_resolver_unsupported_platform`
+   and never starts a process. Enabling Windows needs install roots whose
+   ACLs are validated first.
+2. Run only a root-owned git, and build its environment from scratch. git is
+   the first of `/usr/bin/git`, `/bin/git` and `/usr/local/bin/git` that
+   exists, resolved with `realpath`. The real file must be a native (ELF)
+   regular file, and it and every directory from it up to `/` must be owned
+   by root, writable by neither group nor others, and neither setuid nor
+   setgid. A git owned by the current user is refused, and so is one reached
+   through a link whose target fails the rule. git's exec directory must
+   meet the same rule, and the exec directory git reports must already be
+   canonical (its own real path). git launches `git-remote-https` (and
+   `git-remote-http`, often its link target) by pathname from that exec
+   directory, which a held descriptor cannot cover. So before any fetch, the
+   exact pathname git will launch is followed one link at a time, at most 8
+   hops, exactly as the kernel would. A link target is never normalized,
+   because the kernel resolves `..` from where a link really points. It must
+   be a bare name in the same directory or an absolute path whose every
+   component is a plain name, and an empty, `.` or `..` component is refused
+   at any hop. Every hop's directory chain up to `/` is checked with `lstat`
+   under the same rule, so no symlinked directory is on the way, and the
+   final hop must be a native, root-owned regular file. A link that passes
+   through a directory another user can write is refused, even when its
+   canonical target is trusted. `git-remote-https` must exist. Otherwise the
+   resolver returns None without fetching. The residual trust is a
+   root-owned, root-chained native helper, the same level as git itself. No setting or environment variable can name another
+   git. The verified file is opened once per run, the descriptor is checked
+   against the path (device and inode), and every call executes that
+   descriptor with `fexecve`. Replacing the path after the check changes
+   nothing, and a script is never run this way. Nothing is copied from the
+   caller's environment, which holds exactly:
+   - `PATH`: git's exec directory plus those of `/usr/bin`, `/bin` and
+     `/usr/local/bin` whose real directory passes the same chain rule, as
+     real paths without duplicates. A directory that fails is dropped.
+   - `HOME`: an empty 0700 directory made with `mkdtemp` inside a 0700
+     parent the resolver made with `mkdtemp` under the fixed `/tmp`. When
+     the run ends, both are removed only while they are still the
+     directories the resolver made. The parent is reached without following
+     any link and must keep its device, inode, owner and type. The HOME is
+     opened relative to the held parent with `O_DIRECTORY|O_NOFOLLOW`, and
+     the held descriptor must keep the HOME's identity. Its contents are
+     removed through that descriptor: every subdirectory is opened the same
+     way and checked against the entry just read, and nothing is reopened by
+     path. The removal is iterative, with an explicit stack of held
+     descriptors, and stops at a depth of 64 or after 10,000 entries,
+     leaving the rest in place. Immediately before each `unlink` or `rmdir`,
+     the name is checked again with `stat` relative to its held parent, and
+     an entry whose device and inode changed is skipped. The empty HOME is
+     then removed by name only after the name is checked again against the
+     same identity. Any mismatch leaves everything in place and logs it, and
+     nothing raises past cleanup.
+
+     One race remains and is accepted. Linux has no unlink or rmdir bound to
+     an inode, so between the last check and the syscall, a process running
+     as the same user could move an empty directory or a single entry into
+     the resolver's private 0700 directory under the checked name, and that
+     one entry would be removed. Such a process can already delete the
+     user's files directly, so it gains no capability. Nothing outside the
+     private directory is ever opened, traversed or removed.
+   - `LC_ALL=C`
+   - `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+     `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`
+
+   So every `GIT_*` variable from the caller (`GIT_DIR`,
+   `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, `GIT_GRAFT_FILE` and the
+   rest) never reaches git. Neither do the loader variables (`LD_*`,
+   `DYLD_*`), `OPENSSL_*`, `SSLKEYLOGFILE`, every `*_proxy`, `CURL_*`,
+   `SSL_CERT_*` and `XDG_*`. System and global config are never read, the
+   fetch uses the system trust store and it connects directly. No
+   production code path adds a CA or any other TLS setting.
 3. Pass `--no-replace-objects` and these `-c` overrides on every call:
    `core.fsmonitor=false`, `core.hooksPath` set to a directory that does not
    exist, `credential.helper=` (empty, which clears every helper),
@@ -557,7 +628,7 @@ Slice 9's resolver implementation requires its own security review. This contrac
    exists returns None, and `GIT_GRAFT_FILE` is already removed by rule 2.
 8. Return None for an abbreviation shorter than the contract minimum
    without calling git. git itself refuses `--disambiguate` below 4 hex
-   digits, and the contract minimum (12, then 7) is always above that
+   digits, and the contract minimum (7, lowered from 12 by slice 9a) is always above that
    floor.
 9. Return None for a shallow or incomplete repository.
    `git rev-parse --is-shallow-repository` must print exactly `false`, and
@@ -570,20 +641,51 @@ Slice 9's resolver implementation requires its own security review. This contrac
     names, which is the remote-tracking default branch. If that symbolic ref
     is unset there is no default, and the resolver returns None. Local
     branches and tags are never allowed refs, because a local process can
-    create or move them without a fetch. Same-user tampering with
-    remote-tracking refs stays out of scope, as in the S24 marker ruling.
+    create or move them without a fetch. A remote-tracking ref can be moved
+    locally too, so after its proof (rule 11) the resolver never trusts the
+    ref name again, only the object id the fetch proved. An allowed ref,
+    explicit or defaulted, must also be a plain ref. A forced fetch into a
+    symbolic ref updates its referent, so `refs/remotes/origin/main`
+    pointing at `refs/heads/local-only` would let the fetch overwrite a
+    local branch, even with an empty refmap. Before any fetch, and again on
+    every later card, the resolver runs `git symbolic-ref -q <ref>` on each
+    allowed ref and returns None when it exits 0. Exit 1, for a plain ref or
+    one that does not exist yet (the fetch creates it as a plain ref),
+    passes, and any other exit refuses. `refs/remotes/origin/HEAD` is
+    symbolic by design, so the default reads its direct target with
+    `git symbolic-ref --quiet --no-recurse` and applies the same check to
+    that target. Following the chain to its end would hide a symbolic hop.
 11. Prove every allowed ref fresh in the current run without relying on the
     remote's configured fetch refspec. For each allowed ref
     `refs/remotes/<remote>/<branch>`, fetch with
-    `git fetch --porcelain --no-tags --prune <remote> +refs/heads/<branch>:refs/remotes/<remote>/<branch>`.
-    A refspec on the command line replaces the configured ones, so no tag or
-    other refspec from config applies. The porcelain output must list that
-    destination ref with an updated or up-to-date flag. With a git older than
+    `git fetch --porcelain --verbose --refmap= --no-tags --prune <remote> +refs/heads/<branch>:refs/remotes/<remote>/<branch>`.
+    A refspec on the command line replaces the configured ones for what is
+    fetched, but git still applies configured `remote.<name>.fetch`
+    mappings to update other local refs. The fetch therefore also passes an
+    empty `--refmap=`, which makes git ignore every configured mapping, so
+    only the explicit destination can move. It also passes
+    `--no-write-fetch-head`, because the proof never reads `FETCH_HEAD`. `remote.*.fetch` itself is not
+    refused, because every normal clone has one. With the empty refmap it has
+    no effect. The porcelain output must list that
+    destination ref with an updated or up-to-date flag. git prints
+    up-to-date refs in porcelain output only with `--verbose`, so the fetch
+    passes it too, along with `--no-prune-tags`, because a configured
+    `pruneTags` would otherwise add a tag refspec. With a git older than
     2.41, which has no `--porcelain`, the resolver instead compares the
     destination ref after the fetch with `git ls-remote <remote>
     refs/heads/<branch>` from the same run, and they must match. A failed,
     timed out or rejected fetch, a missing destination ref, a mismatch, or a
     ref proven only in an earlier run returns None.
+
+    The proof is the object id, not the ref. Per run and per repository, the
+    resolver keeps the exact id each allowed ref's fetch proved: the
+    destination ref's value that the porcelain line names, or the value
+    `ls-remote` matched. Before a later card in the same run uses those ids,
+    it re-reads every allowed ref with `git show-ref --verify` and compares.
+    If any ref no longer names its proven id, something other than this
+    run's fetch moved it. The resolver does not refetch to re-prove. It drops
+    the proof and returns None for that card and for every later card for
+    that repository in the run. The next run fetches and proves again.
 12. Evaluate ambiguity across the complete available object database, not
     only the allowed refs. `git rev-parse --disambiguate=<abbreviation>`
     lists every object of any type (loose, packed and alternates) whose id
@@ -597,9 +699,10 @@ Slice 9's resolver implementation requires its own security review. This contrac
     return it in that spelling. The contract then requires it to equal the
     unique authenticated candidate.
 15. Check reachability separately with
-    `git merge-base --is-ancestor <id> <ref>` against each allowed ref. Exit
-    0 for at least one ref passes. Exit 1 for every ref, or any other exit,
-    returns None.
+    `git merge-base --is-ancestor <id> <proven-id>` against the proven object
+    id of each allowed ref (rule 11), never against a ref name, which could
+    have moved since the fetch. Exit 0 for at least one proven id passes.
+    Exit 1 for every one, or any other exit, returns None.
 16. Return None on any missing object, ambiguity, command error, nonzero
     exit, timeout or unparsable output.
 
@@ -619,15 +722,16 @@ with the same prefix instead of reporting the ambiguity. It also peels an
 annotated tag whose id matches to the commit the tag points at, which is a
 different id. And it says nothing about freshness or reachability.
 
-Reachability from an allowed ref after a proven fetch is the identity
-binding. A receipt proves only that some worktree used a commit. Grinding a
+Reachability from the object id a fetch in this run proved for an allowed
+ref is the identity binding. A receipt proves only that some worktree used a commit. Grinding a
 commit with a matching prefix and getting a receipt for it is not enough
 unless the attacker can also land that commit on an allowed ref.
 
-The minimum abbreviation stays at 12 hex characters until slice 9 ships this
-resolver with a test for every None case above, including an abbreviation
-that is ambiguous only because of an object on another ref and a shallow
-clone. Slice 9 then lowers the minimum to 7. Exact equality with the unique
+The minimum abbreviation stayed at 12 hex characters until slice 9a shipped
+this resolver (`src/brigade/memory_verify_resolver.py`) with a test for every
+None case above, including an abbreviation that is ambiguous only because of
+an object on another ref and a shallow clone. Slice 9a then lowered the
+minimum to 7. Exact equality with the unique
 authenticated candidate plus allowed-ref reachability means a ground commit
 must land on an allowed ref, so prefix length stops being the defense. In
 the card sample, 1 of the 61 accepted marked abbreviations qualifies at 12

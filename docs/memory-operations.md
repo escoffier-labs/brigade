@@ -2151,7 +2151,22 @@ never_read_days = 90      # 1 to 3650
 scope = "repo:example"
 path = "/absolute/path/to/workspace"
 archive_projects = ["example"]
+commit_refs = ["refs/remotes/origin/main"]  # optional, 1 to 8 refs
 ```
+
+The commit resolver runs only a root-owned git: the first of
+`/usr/bin/git`, `/bin/git` and `/usr/local/bin/git`, whose real file and
+every directory above it must be owned by root and not writable by group or
+others. No setting names another git. Commit expansion is POSIX-only in v1:
+on Windows every abbreviation abstains with
+`verify_resolver_unsupported_platform`.
+
+`commit_refs` lists the remote-tracking refs a commit id must be reachable
+from before a verification may expand its abbreviation. Each entry is a fully
+qualified `refs/remotes/<remote>/<branch>` ref, and the remote's URL must use
+`https`. Without the key, the default is the single ref that
+`refs/remotes/origin/HEAD` names. If that symbolic ref is unset, no
+abbreviation in the scope expands. Local branches and tags are never allowed.
 
 Configuration fails, naming the rule but never the configured value, when:
 
@@ -2166,6 +2181,8 @@ Configuration fails, naming the rule but never the configured value, when:
   `~/.brigade/fleet.toml` or the `BRIGADE_MEMORY_HUB_URL` and
   `BRIGADE_MEMORY_HUB_TOKEN_FILE` pair, which the folder must use
 - `propose_seat` and `confirm_seat` name the same seat
+- `commit_refs` is empty, longer than 8 entries, repeats a ref, or names
+  anything other than `refs/remotes/<remote>/<branch>`
 
 Roots are compared by directory identity (device and inode), never by
 spelling. A root, or any of its parents, on a filesystem that reports no

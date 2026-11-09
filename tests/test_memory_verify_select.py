@@ -341,6 +341,55 @@ def test_the_workspace_file_never_names_a_hub_url_or_credential_path(tmp_path, n
     assert refused(workspace("repo:one", tmp_path / "w", **{name: value})) == config.HUB_KEY_REFUSAL
 
 
+def test_commit_refs_default_to_empty_and_parse_when_listed(tmp_path):
+    plain, listed = parse(
+        workspace("repo:one", tmp_path / "one"),
+        workspace(
+            "repo:two",
+            tmp_path / "two",
+            commit_refs=["refs/remotes/origin/main", "refs/remotes/upstream/release/2.x"],
+        ),
+    ).workspaces
+    assert plain.commit_refs == ()
+    assert listed.commit_refs == ("refs/remotes/origin/main", "refs/remotes/upstream/release/2.x")
+
+
+@pytest.mark.parametrize(
+    "refs",
+    [
+        [],
+        "refs/remotes/origin/main",
+        ["refs/heads/main"],
+        ["refs/tags/v1"],
+        ["main"],
+        ["origin/main"],
+        ["refs/remotes/origin"],
+        ["refs/remotes/origin/HEAD"],
+        ["refs/remotes/origin/../heads/main"],
+        ["refs/remotes/origin/a..b"],
+        ["refs/remotes/origin/.hidden"],
+        ["refs/remotes/origin/main.lock"],
+        ["refs/remotes/origin/main."],
+        ["refs/remotes/origin//main"],
+        ["refs/remotes/-origin/main"],
+        ["refs/remotes/origin/ma in"],
+        ["refs/remotes/origin/ma~1"],
+        ["refs/remotes/origin/main", "refs/remotes/origin/main"],
+        [f"refs/remotes/origin/b{index}" for index in range(config.MAX_COMMIT_REFS + 1)],
+        [1],
+    ],
+)
+def test_invalid_commit_refs_fail(tmp_path, refs):
+    message = refused(workspace("repo:one", tmp_path / "w", commit_refs=refs))
+    assert "commit_refs" in message
+
+
+def test_git_executable_is_no_longer_a_setting(tmp_path):
+    """The resolver runs only a root-owned git from fixed system directories, so no setting can name one."""
+    message = refused(workspace("repo:one", tmp_path / "w"), git_executable="/usr/bin/git")
+    assert "unknown keys" in message and "git_executable" in message
+
+
 # -- commands -----------------------------------------------------------------
 
 

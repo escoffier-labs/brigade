@@ -35,7 +35,8 @@ reason code:
    changed token that is not a marked reference with
    `verify_not_commit_reference`, a full-length token or a full id that does
    not start with the old token with `verify_not_abbreviation`, and an
-   abbreviation under 12 hex characters with `verify_abbreviation_too_short`.
+   abbreviation under `MIN_ABBREVIATION` (7) hex characters with
+   `verify_abbreviation_too_short`.
    Every authenticated `commit` and `baseline_commit` value in the assembled
    evidence that starts with the abbreviation must name one full id
    (`verify_commit_ambiguous`), and the caller's `resolve_commit` must
@@ -88,12 +89,22 @@ hostile settings slice 9 tests must plant. Slice 9's resolver implementation req
 The resolver MUST:
 
 1. Run every git command through one wrapper with a fixed timeout, no stdin,
-   `--no-pager` and no prompt.
-2. Remove every inherited `GIT_*` variable, then set exactly
+   `--no-pager` and no prompt, killing git's whole process group on a
+   timeout. POSIX-only in v1: without held-descriptor execution (Windows
+   included) every expansion abstains and no process starts.
+2. Run only a root-owned git (`/usr/bin/git`, `/bin/git` or
+   `/usr/local/bin/git`, its real file a native executable and it and every
+   directory above it owned by root, not group- or world-writable, and
+   neither setuid nor setgid), executed from a held descriptor. Its
+   `git-remote-https` and `git-remote-http` helpers must pass the same rule
+   before any fetch at every link hop of the pathname git launches, with
+   each link target taken literally (a bare name or a plain absolute path,
+   never `.` or `..`),
+   with an environment built from scratch: only `PATH` (git's exec directory
+   and the system directories), a private empty `HOME` that is removed only
+   while it is still the directory the resolver made, `LC_ALL=C`,
    `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
-   `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`. Also remove the
-   curl proxy and TLS variables (`*_proxy` in either case, `CURL_CA_BUNDLE`,
-   `SSL_CERT_FILE`, `SSL_CERT_DIR`).
+   `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`.
 3. Pass `--no-replace-objects` and `-c` overrides on every call:
    `core.fsmonitor=false`, `core.hooksPath` at a missing directory,
    `credential.helper=`, `core.askPass=`, `core.alternateRefsCommand=`,
@@ -125,14 +136,18 @@ The resolver MUST:
     When it is absent, the default is the single ref that
     `git symbolic-ref refs/remotes/origin/HEAD` names. If that is unset,
     there is no default and the resolver returns None. Local branches and
-    tags are never allowed refs.
+    tags are never allowed refs, and an allowed ref that is itself symbolic
+    (`git symbolic-ref -q` exits 0) returns None before any fetch.
 11. Prove each allowed ref fresh in the current run with
-    `git fetch --porcelain --no-tags --prune <remote>
+    `git fetch --porcelain --verbose --refmap= --no-tags --prune <remote>
     +refs/heads/<branch>:refs/remotes/<remote>/<branch>`. The explicit refspec
     replaces the configured ones. The porcelain output must list the
     destination ref as updated or up to date, or, before git 2.41, the ref
     must equal `git ls-remote <remote> refs/heads/<branch>` from the same run.
-    Anything else, or a proof from an earlier run, returns None.
+    Anything else, or a proof from an earlier run, returns None. The run keeps
+    the object id each fetch proved. A later card re-reads each ref with
+    `show-ref` and, if one moved, returns None for the rest of the run
+    without refetching.
 12. Run `git rev-parse --disambiguate=<abbreviation>`. It lists every object
     of any type in the complete object database (loose, packed and
     alternates) whose id starts with the prefix, reachable or not, and never
@@ -141,8 +156,9 @@ The resolver MUST:
 13. Check `git cat-file -t <id>` prints exactly `commit`, otherwise return
     None.
 14. Check that the id is exactly 40 or 64 lowercase hex characters.
-15. Check `git merge-base --is-ancestor <id> <ref>` exits 0 for at least one
-    allowed ref. Exit 1 for every ref, or any other exit, returns None.
+15. Check `git merge-base --is-ancestor <id> <proven-id>` exits 0 for at
+    least one allowed ref's proven object id, never a ref name. Exit 1 for
+    every one, or any other exit, returns None.
 16. Return None on any command error, nonzero exit, timeout or unparsable
     output, and never raise to signal success.
 
@@ -153,10 +169,10 @@ between objects of different types instead of reporting them, and it peels
 an annotated tag to the commit it points at. It also says nothing about
 freshness or reachability.
 
-Reachability from an allowed ref after a proven fetch is the identity
-binding. An attacker who grinds a commit with a matching prefix and gets a
+Reachability from the object id a fetch in this run proved for an allowed
+ref is the identity binding. An attacker who grinds a commit with a matching prefix and gets a
 receipt for it still has to land that commit on an allowed ref. This module
-ships no git code.
+ships no git code. `memory_verify_resolver` is the git implementation.
 
 Results carry codes, verdicts, block ids and digests. The only free text that
 leaves this module is the op text, which goes to the hub as the proposal.
@@ -269,9 +285,11 @@ Seat = Callable[[str], "str | None"]
 # Maps a marked abbreviation to the full commit id it names, or None. The module docstring's resolver
 # contract lists the MUST rules a slice 9 implementation follows.
 Resolver = Callable[[str], "str | None"]
-# Shorter marked abbreviations never expand: a 7-character prefix is 28 bits, cheap to grind. Slice 9 lowers
-# this to 7 once its resolver enforces the contract above with tests for every None case (D3).
-MIN_ABBREVIATION = 12
+# Shorter marked abbreviations never expand. Slice 9a lowered this from 12 to 7 once its resolver
+# (`memory_verify_resolver`) enforced the contract above with a test for every None case (D3). A 7-character
+# prefix is cheap to grind, but exact equality with the unique authenticated candidate plus reachability from a
+# freshly fetched allowed ref means a ground commit must also land on that ref.
+MIN_ABBREVIATION = 7
 
 
 class Abstain(Exception):

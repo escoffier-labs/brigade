@@ -8,6 +8,8 @@ root must exist, and roots are compared by directory identity (device and
 inode), so a case-only spelling, a symlink alias or a differently spelled
 parent cannot make one directory look like two. Each parsed workspace keeps
 that identity, and `revalidate()` checks it again before evidence is read.
+An optional `commit_refs` list names the remote-tracking refs the commit
+resolver (`memory_verify_resolver`) proves reachability from.
 The workspace file never carries a hub URL or a credential path. Those stay in
 the user-level fleet settings, as for `[hub]`.
 """
@@ -34,6 +36,7 @@ DEFAULT_NEVER_READ_DAYS = 90
 MAX_NEVER_READ_DAYS = 3650
 MAX_WORKSPACES = 64
 MAX_ARCHIVE_PROJECTS = 32
+MAX_COMMIT_REFS = 8
 SEAT = re.compile(r"[a-z][a-z0-9._-]{0,127}")
 PROJECT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 VERIFY_KEYS = frozenset(
@@ -47,7 +50,9 @@ VERIFY_KEYS = frozenset(
         "workspace",
     }
 )
-WORKSPACE_KEYS = frozenset({"scope", "path", "archive_projects"})
+WORKSPACE_KEYS = frozenset({"scope", "path", "archive_projects", "commit_refs"})
+# One component of a remote name or branch: no leading dot or dash, no `..`, no `.lock` suffix.
+REF_COMPONENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,99}")
 # Named so the refusal says where these settings belong instead of "unknown key".
 HUB_KEYS = frozenset({"hub_url", "url", "node_token_file", "token_file", "token", "credential", "credential_file"})
 HUB_KEY_REFUSAL = (
@@ -79,6 +84,9 @@ class Workspace:
     # directory's (st_dev, st_ino), which revalidate() checks before any evidence read.
     resolved: str = ""
     identity: Identity = (0, 0)
+    # Fully qualified remote-tracking refs the commit resolver may prove reachability from. Empty means the
+    # default, the single ref `refs/remotes/origin/HEAD` names (D3 "Commit resolver contract", rule 10).
+    commit_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -178,6 +186,42 @@ def revalidate(workspace: Workspace) -> str | None:
     return None if current == workspace.identity else ROOT_CHANGED
 
 
+def valid_commit_ref(value: object) -> bool:
+    """True for `refs/remotes/<remote>/<branch>` in conservative ASCII. Local branches and tags never qualify.
+
+    The remote is the first component after `refs/remotes/`, so a remote name never holds a slash. A
+    component cannot start with a dot or end with `.lock` or a dot, and the branch is never `HEAD`.
+    """
+    if not isinstance(value, str) or not value.startswith("refs/remotes/") or len(value) > 255:
+        return False
+    parts = value.split("/")[2:]
+    return (
+        len(parts) >= 2
+        and parts[1:] != ["HEAD"]
+        and all(
+            REF_COMPONENT.fullmatch(part) is not None and ".." not in part and not part.endswith((".", ".lock"))
+            for part in parts
+        )
+    )
+
+
+def _commit_refs(item: dict[str, Any]) -> tuple[str, ...]:
+    if "commit_refs" not in item:
+        return ()
+    refs = item["commit_refs"]
+    if (
+        not isinstance(refs, list)
+        or not 1 <= len(refs) <= MAX_COMMIT_REFS
+        or not all(valid_commit_ref(ref) for ref in refs)
+        or len(set(refs)) != len(refs)
+    ):
+        raise VerifyConfigError(
+            f"[[verify.workspace]] commit_refs must list 1 to {MAX_COMMIT_REFS} distinct fully qualified "
+            "remote-tracking refs (refs/remotes/<remote>/<branch>)"
+        )
+    return tuple(refs)
+
+
 def _workspaces(raw: object) -> tuple[Workspace, ...]:
     if raw is None:
         return ()
@@ -212,10 +256,18 @@ def _workspaces(raw: object) -> tuple[Workspace, ...]:
                 "distinct archive project names"
             )
         assert isinstance(scope, str)
+        commit_refs = _commit_refs(item)
         identity = _directory(path)
         resolved = os.path.normcase(_realpath(path))
         entries.append(
-            Workspace(scope=scope, path=path, archive_projects=tuple(projects), resolved=resolved, identity=identity)
+            Workspace(
+                scope=scope,
+                path=path,
+                archive_projects=tuple(projects),
+                resolved=resolved,
+                identity=identity,
+                commit_refs=commit_refs,
+            )
         )
     # Ownership compares directory identity, never spelling: a case-only variant on a
     # case-insensitive filesystem, a symlink alias and a differently spelled parent
