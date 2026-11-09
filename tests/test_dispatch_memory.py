@@ -893,18 +893,29 @@ def test_recall_stays_off_after_the_abandoned_worker_cap(tmp_path, monkeypatch, 
     monkeypatch.setattr(dispatch_memory, "BUDGET_SECONDS", 0.1)
     target = _workspace(tmp_path)
     release = threading.Event()
-    hung = FakeHub([], {}, hang=release)
+    started: list[str] = []
+    started_lock = threading.Lock()
+
+    # Every worker holds its slot until release. A real select returns at once when its thread
+    # starts after the 0.1 s deadline on a loaded runner, which frees the slot and lets the next
+    # dispatch take it cleanly, so the number of workers would depend on timing.
+    def held(*args, **kwargs):
+        with started_lock:
+            started.append(threading.current_thread().name)
+        release.wait(10)
+        return None
+
+    monkeypatch.setattr(dispatch_memory, "select", held)
     try:
         for _ in range(8):
-            assert dispatch_memory.build(target, "hub deploy", settings=SETTINGS, transport=hung) is None
+            assert dispatch_memory.build(target, "hub deploy", settings=SETTINGS) is None
             assert len(_recall_threads()) <= dispatch_memory.ABANDONED_MAX + 1
             clock[0] += 2.0  # every dispatch lands past the previous worker's stale window
-        # A worker records its search only once its thread runs, which can trail build() on a
-        # loaded runner. Wait for the last one before counting.
+        # A worker records its start only once its thread runs, which can trail build().
         deadline = time.monotonic() + 10
-        while hung.actions.count("search") < dispatch_memory.ABANDONED_MAX + 1 and time.monotonic() < deadline:
+        while len(started) < dispatch_memory.ABANDONED_MAX + 1 and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert hung.actions.count("search") == dispatch_memory.ABANDONED_MAX + 1
+        assert len(started) == dispatch_memory.ABANDONED_MAX + 1
         assert dispatch_memory._SLOT["off"] is True
         assert [r.getMessage() for r in caplog.records if r.name == dispatch_memory.__name__] == [
             dispatch_memory.RECALL_OFF_LINE
@@ -914,8 +925,8 @@ def test_recall_stays_off_after_the_abandoned_worker_cap(tmp_path, monkeypatch, 
     for thread in _recall_threads():
         thread.join(15)
     clock[0] += 100.0
-    assert dispatch_memory.build(target, "hub deploy", settings=SETTINGS, transport=hung) is None
-    assert hung.actions.count("search") == dispatch_memory.ABANDONED_MAX + 1  # recall stays off
+    assert dispatch_memory.build(target, "hub deploy", settings=SETTINGS) is None
+    assert len(started) == dispatch_memory.ABANDONED_MAX + 1  # recall stays off
 
 
 class TokenHub(FakeHub):
