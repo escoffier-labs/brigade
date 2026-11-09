@@ -543,7 +543,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # Stable check name. Maintainers may require it without changing this workflow.
+  # Stable check name for the Windows shards. Do not make it a required status on
+  # its own: like every job here it uses !cancelled(), so a cancelled run skips it,
+  # and GitHub counts a skipped required check as passing. Gate through ci-gate.
   windows-affected-tests:
     needs: [changes, windows-affected-plan, windows-affected-shard]
     name: windows-affected-tests

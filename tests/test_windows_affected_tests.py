@@ -169,6 +169,18 @@ def test_plan_keeps_a_small_selection_on_one_runner_and_caps_a_large_one():
     assert len(selector.plan_shards(huge, {}, 4.0)) == selector.MAX_SHARDS
 
 
+def test_plan_never_creates_an_empty_shard_for_few_heavy_files():
+    serial = sorted(selector.SERIAL_FILES)[0]
+    for names, weights in (
+        (["test_heavy.py"], {"test_heavy.py": 30000.0}),
+        ([serial], {serial: 3000.0}),
+        ([serial, "test_heavy.py"], {serial: 3000.0, "test_heavy.py": 30000.0}),
+    ):
+        shards = selector.plan_shards(names, weights, 4.0)
+        assert all(shards), shards
+        assert sorted(name for shard in shards for name in shard) == sorted(names)
+
+
 def test_plan_counts_serial_files_as_wall_time():
     serial = sorted(selector.SERIAL_FILES)[0]
     names = [serial, *(f"test_{i:02}.py" for i in range(30))]

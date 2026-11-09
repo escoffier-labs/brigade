@@ -142,7 +142,8 @@ def plan_shards(selected: Sequence[str], weights: dict[str, float], default: flo
         return []
     seconds = {name: weights.get(name, default) for name in selected}
     cost = {name: seconds[name] if name in SERIAL_FILES else seconds[name] / PARALLEL_SPEEDUP for name in selected}
-    count = shard_count(cost)
+    # Never more shards than files: an empty shard would fail the driver.
+    count = min(shard_count(cost), len(selected))
     loads = [0.0] * count
     shards: list[list[str]] = [[] for _ in range(count)]
     for name in sorted(selected, key=lambda name: (-cost[name], name)):
