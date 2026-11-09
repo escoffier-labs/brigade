@@ -54,6 +54,7 @@ import os
 import posixpath
 import re
 import stat
+import time
 import unicodedata
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -347,7 +348,8 @@ class Bundle:
     """The eligible, owned sources of one bundle, and a reason code for every source dropped."""
 
     texts: tuple[str, ...]
-    observed_ms: int | None = None
+    # Creation times of the kept sources, unfiltered. Assembly drops any later than the run time.
+    times: tuple[int, ...] = ()
     dropped: tuple[str, ...] = ()
     # The lineage keys of every source kept, so independence sees through the bundle.
     lineage: frozenset[str] = frozenset()
@@ -371,15 +373,32 @@ class Archive(Protocol):
 
 
 def _moment_ms(value: object) -> int | None:
+    """Unix milliseconds of an ISO 8601 time, or None for anything unparsable or out of range."""
     if not isinstance(value, str) or not value or len(value) > 64:
         return None
     try:
         moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return int(moment.timestamp() * 1000)
+    except (OverflowError, OSError, ValueError):
         return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return int(moment.timestamp() * 1000)
+
+
+# A source may be stamped up to this long after the run started, for clock skew between
+# the machine that wrote it and this one. Anything later cannot be an observation yet.
+CLOCK_SKEW_MS = 5 * 60 * 1000
+
+
+def fresh(moment: int | None, now_ms: int) -> int | None:
+    """An observation time no earlier than the epoch and no later than the run time plus skew, else None.
+
+    A later time would make evidence look newer than every verification, so it
+    counts as no time at all.
+    """
+    if type(moment) is not int or moment < 0 or moment > now_ms + CLOCK_SKEW_MS:
+        return None
+    return moment
 
 
 def encodable(value: object) -> bool:
@@ -532,9 +551,9 @@ class EngineArchive:
                 identity = lineage(meta.get("path"), meta.get("run_id"), shown.get("external_id"))
             keys |= identity
         # The engine stamps `regenerated_at` with the time of each read, so it says nothing
-        # about the evidence. The bundle is as new as the newest source it keeps, if any.
-        observed = max(times) if times else None
-        return Bundle(tuple(texts), observed, tuple(dropped), frozenset(keys), complete)
+        # about the evidence. Each kept source's creation time is returned, and assembly
+        # takes the newest one that is not in the future.
+        return Bundle(tuple(texts), tuple(times), tuple(dropped), frozenset(keys), complete)
 
     def receipt_records(self, project: str, run_id: str, path: str) -> list[ReceiptRecord] | None:
         """Archive records of one verify receipt, or None when any reply is malformed or ambiguous.
@@ -1090,6 +1109,8 @@ class Assembly:
     flagged: list[Flag] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
     abstain: str | None = None
+    # The run time every observation time is checked against. See `fresh`.
+    now_ms: int = 0
 
     def count(self, reason: str, amount: int = 1) -> None:
         self.counts[reason] = self.counts.get(reason, 0) + amount
@@ -1157,11 +1178,17 @@ def _record(archive: Archive, projects: tuple[str, ...], run_id: str, rel: str) 
 
 
 def _file_items(
-    archive: Archive, projects: tuple[str, ...], held: HeldRoot, rel: str, raw: bytes, metadata: os.stat_result
+    archive: Archive,
+    projects: tuple[str, ...],
+    held: HeldRoot,
+    rel: str,
+    raw: bytes,
+    metadata: os.stat_result,
+    now_ms: int,
 ) -> list[Item] | None:
     text = raw.decode("utf-8")
     source = f"file:{held.workspace.identity[0]}:{held.workspace.identity[1]}:{rel}"
-    observed = metadata.st_mtime_ns // 1_000_000
+    observed = fresh(metadata.st_mtime_ns // 1_000_000, now_ms)
     root = _evidence_root(rel)
     run = RUN_DIR.fullmatch(rel)
     if run and run[2] == "receipt.json":
@@ -1175,7 +1202,7 @@ def _file_items(
             record = _record(archive, projects, run_id, rel)
             rank = AUTHENTICATED if receipt_authenticated(raw, payload, record) else MEDIUM
             fields, output = split_receipt(payload)
-            observed = _moment_ms(payload.get("completed_at")) or observed
+            observed = fresh(_moment_ms(payload.get("completed_at")), now_ms) or observed
             keys = lineage(rel, run_id, f"brigade:work-verify:{run_id}")
             fields_text = _rendered(fields)
             items = [
@@ -1231,6 +1258,14 @@ def bundle_ref(ref: str) -> str | None:
     return None
 
 
+def _newest(times: Sequence[int], assembly: Assembly) -> int | None:
+    """The newest of these times that is not in the future, else None. Future times are counted."""
+    kept = [moment for moment in times if fresh(moment, assembly.now_ms) is not None]
+    if len(kept) != len(times):
+        assembly.count("observed_in_future", len(times) - len(kept))
+    return max(kept) if kept else None
+
+
 def _attested(ref: str) -> bool:
     """An S19e-1 attested id, `<principal>/<workspace>/<local>`, whose bytes have no hub read action."""
     parts = ref.split("/")
@@ -1260,7 +1295,14 @@ def _cited(
         text = "\n".join(bundle.texts)
         raw = text.encode()
         item = _item(
-            EVIDENCE_BUNDLE, MEDIUM, text, f"bundle:{bundle_id}", None, bundle.observed_ms, raw, lineage=bundle.lineage
+            EVIDENCE_BUNDLE,
+            MEDIUM,
+            text,
+            f"bundle:{bundle_id}",
+            None,
+            _newest(bundle.times, assembly),
+            raw,
+            lineage=bundle.lineage,
         )
         if not bundle.complete:
             # A source without a canonical identity could be a paraphrase of anything.
@@ -1278,7 +1320,7 @@ def _cited(
         return None, False
     held, raw, metadata = located
     try:
-        return _file_items(archive, projects, held, rel, raw, metadata), False
+        return _file_items(archive, projects, held, rel, raw, metadata, assembly.now_ms), False
     except UnicodeDecodeError:
         return None, False
 
@@ -1360,7 +1402,8 @@ def _excerpts(assembly: Assembly, archive: Archive, projects: tuple[str, ...], t
             assembly.count(FLAGGED)
         else:
             raw = excerpt.text.encode()
-            item = _item(EXCERPT, LOW, final, f"excerpt:{excerpt.excerpt_id}", None, excerpt.observed_ms, raw)
+            observed = fresh(excerpt.observed_ms, assembly.now_ms)
+            item = _item(EXCERPT, LOW, final, f"excerpt:{excerpt.excerpt_id}", None, observed, raw)
             assembly.excerpts.append(item)
         index += 1
 
@@ -1372,19 +1415,22 @@ def assemble(
     *,
     card_bytes: int = DEFAULT_CARD_BYTES,
     excerpts: int = MAX_EXCERPTS,
+    now_ms: int | None = None,
 ) -> Assembly:
     """Every input a card's model call may see, or the reason it gets none.
 
     `head` is a replica head: `scope`, `card_id` and `text`. The returned
     assembly's `abstain` is one of the four pre-call reason codes, or None when
-    the evidence meets the corroboration rule and a call may be made.
+    the evidence meets the corroboration rule and a call may be made. `now_ms`
+    is the run time that observation times are checked against, the current
+    time when omitted.
     """
     if type(card_bytes) is not int or not MIN_CARD_BYTES <= card_bytes <= MAX_CARD_BYTES:
         raise ValueError(f"cited evidence per card must be from {MIN_CARD_BYTES} to {MAX_CARD_BYTES} bytes")
     if type(excerpts) is not int or not 0 <= excerpts <= MAX_EXCERPTS:
         raise ValueError(f"related excerpts per card must be from 0 to {MAX_EXCERPTS}")
     scope, card_id, text = str(head.get("scope")), str(head.get("card_id")), head.get("text")
-    assembly = Assembly(card_id=card_id, scope=scope)
+    assembly = Assembly(card_id=card_id, scope=scope, now_ms=_now_ms() if now_ms is None else now_ms)
     if not isinstance(text, str):
         assembly.abstain = NO_EVIDENCE
         return assembly
@@ -1457,8 +1503,17 @@ def assemble_all(
     *,
     card_bytes: int = DEFAULT_CARD_BYTES,
     excerpts: int = MAX_EXCERPTS,
+    now_ms: int | None = None,
 ) -> Iterator[Assembly]:
-    """Assemble each card while every bound root stays held, in input order."""
+    """Assemble each card while every bound root stays held, in input order.
+
+    One run time, `now_ms` or the current time, applies to every card.
+    """
+    run_ms = _now_ms() if now_ms is None else now_ms
     with Roots(config) as roots:
         for head in heads:
-            yield assemble(head, roots, archive, card_bytes=card_bytes, excerpts=excerpts)
+            yield assemble(head, roots, archive, card_bytes=card_bytes, excerpts=excerpts, now_ms=run_ms)
+
+
+def _now_ms() -> int:
+    return time.time_ns() // 1_000_000

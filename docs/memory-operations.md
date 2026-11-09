@@ -2216,6 +2216,10 @@ Otherwise it still reaches the prompt as context and counts
 separators, relative to the evidence directory. A bundle's observation time is
 the newest creation time among the sources it keeps. The engine's regeneration
 time is never used, and a bundle whose sources carry no valid time has none.
+Every observation time (bundle sources, receipt completion, file modification
+and excerpts) is checked against one run time. A time more than five minutes
+after it, before 1970, or out of range counts as no time and is counted as
+`observed_in_future` for bundle sources.
 
 An item left empty or holding only whitespace, including one the byte bounds
 cut to nothing, is dropped and counted as `evidence_empty`. A receipt or

@@ -1426,7 +1426,9 @@ def test_a_bundle_takes_the_newest_time_of_the_sources_it_keeps():
     replies[("show", ("c", "--json"))]["created_at"] = "2026-11-09T00:00:00Z"  # Dropped as unowned.
     bundle = engine(replies).bundle("b2", ("example",))
     assert bundle is not None
-    assert bundle.observed_ms == ev._moment_ms("2022-06-01T00:00:00Z")
+    assert sorted(bundle.times) == [ev._moment_ms("2021-01-01T00:00:00Z"), ev._moment_ms("2022-06-01T00:00:00Z")]
+    assembly = ev.Assembly("card", SCOPE, now_ms=ev._moment_ms("2026-11-09T00:00:00Z") or 0)
+    assert ev._newest(bundle.times, assembly) == ev._moment_ms("2022-06-01T00:00:00Z")
 
 
 @posix
@@ -1474,3 +1476,113 @@ def test_unencodable_bundle_and_excerpt_texts_are_dropped():
     assert bundle.dropped == ("source_text_invalid",)
     row = {"id": "h1", "snippet": "s", "integrity_mismatch": False, "trust_label": "verified"}
     assert excerpt_hits(row, source_show("h1", "example", text="bad \udc00")) == []
+
+
+# --- Daybreak round 4: future observation times --------------------------------------------
+
+NOW_MS = ev._moment_ms("2026-11-09T06:00:00Z") or 0
+MINUTE = 60_000
+
+
+def two_dated_sources(first, second):
+    replies = bundle_replies(
+        "b-old", [bundle_source("o1", "x"), bundle_source("o2", "y")], {"o1": "example", "o2": "example"}
+    )
+    for item_id, moment in (("o1", first), ("o2", second)):
+        shown = replies[("show", ("o2" if item_id == "o2" else "o1", "--json"))]
+        if moment is None:
+            shown.pop("created_at", None)
+        else:
+            shown["created_at"] = moment
+    return replies
+
+
+def newest_day(tmp_path, replies):
+    _, parsed = setup(tmp_path)
+    [result] = run(card(f"{BUNDLE}b-old"), parsed, engine(replies), now_ms=NOW_MS)
+    evidence = result.evidence()
+    assert evidence is not None
+    return evidence.newest_day, result
+
+
+@posix
+def test_a_far_future_source_is_ignored_for_freshness(tmp_path):
+    day, result = newest_day(tmp_path, two_dated_sources("2021-05-01T00:00:00Z", "2100-01-01T00:00:00Z"))
+    assert day == (ev._moment_ms("2021-05-01T00:00:00Z") or 0) // ev.select.DAY_MS
+    assert result.counts["observed_in_future"] == 1
+
+
+@posix
+def test_a_bundle_with_only_future_sources_has_no_time(tmp_path):
+    day, result = newest_day(tmp_path, two_dated_sources("2100-01-01T00:00:00Z", "2099-06-01T00:00:00Z"))
+    assert day == 0
+    assert [i.observed_ms for i in result.items] == [None]
+
+
+@pytest.mark.parametrize(
+    ("offset", "kept"), [(4 * MINUTE, True), (5 * MINUTE, True), (5 * MINUTE + 1000, False), (6 * MINUTE, False)]
+)
+def test_the_clock_skew_allowance_is_five_minutes(offset, kept):
+    assert ev.CLOCK_SKEW_MS == 5 * MINUTE
+    assert (ev.fresh(NOW_MS + offset, NOW_MS) is not None) is kept
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "9999-12-31T23:59:59Z",
+        "9999-12-31T23:59:59-23:59",
+        "0001-01-01T00:00:00+23:59",
+        "0001-01-01T00:00:00Z",
+        "2026-02-30T00:00:00Z",
+        "+275760-09-13T00:00:00Z",
+        "x" * 64,
+        12345,
+        None,
+    ],
+)
+def test_extreme_or_malformed_times_raise_nothing_and_give_no_time(value):
+    assert ev.fresh(ev._moment_ms(value), NOW_MS) is None
+
+
+@pytest.mark.parametrize("moment", [10**30, -(10**30), -1, True, 2**63])
+def test_out_of_range_epoch_milliseconds_give_no_time(moment):
+    assert ev.fresh(moment, NOW_MS) is None
+
+
+@posix
+def test_receipt_and_handoff_times_in_the_future_give_no_time(tmp_path):
+    root, parsed = setup(tmp_path)
+    payload, digest = receipt(completed_at="2100-01-01T00:00:00+00:00")
+    write(root, RECEIPT, json.dumps(payload))
+    write(root, HANDOFF, "# Port check\n\nThe listener moved during the November rollout.\n")
+    future = (NOW_MS + 24 * 60 * MINUTE) / 1000
+    for rel in (RECEIPT, HANDOFF):
+        os.utime(root / rel, (future, future))
+    archive = Archive(records={("example", RUN): [record(digest)]})
+    [result] = run(card(RECEIPT, HANDOFF), parsed, archive, now_ms=NOW_MS)
+    assert result.abstain is None
+    assert [i.observed_ms for i in result.items] == [None, None, None]
+    assert result.evidence() is not None and result.evidence().newest_day == 0
+    past = (NOW_MS - 3 * 24 * 60 * MINUTE) / 1000
+    for rel in (RECEIPT, HANDOFF):
+        os.utime(root / rel, (past, past))
+    [result] = run(card(RECEIPT, HANDOFF), parsed, archive, now_ms=NOW_MS)
+    assert result.evidence() is not None and result.evidence().newest_day == int(past * 1000) // ev.select.DAY_MS
+
+
+@pytest.mark.parametrize("error", [OverflowError, OSError, ValueError])
+def test_conversion_errors_from_the_platform_are_caught(monkeypatch, error):
+    class Moment:
+        tzinfo = ev.timezone.utc
+
+        def timestamp(self):
+            raise error("out of range for this platform")
+
+    class Stub:
+        @staticmethod
+        def fromisoformat(value):
+            return Moment()
+
+    monkeypatch.setattr(ev, "datetime", Stub)
+    assert ev._moment_ms("2026-11-09T00:00:00Z") is None
