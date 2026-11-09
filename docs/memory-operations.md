@@ -2240,6 +2240,64 @@ any other page.
 | `read_stats_unavailable` | The scope has no counts this run, so nothing in it is scored or selected |
 | `scope_unbound`, `scope_unreadable` | A hub read scope with no workspace entry, or a bound scope the hub settings do not read |
 
+### Seats and the isolation probe
+
+```bash
+brigade memory verify doctor --target <verify-folder> [--timeout 120] [--json]
+```
+
+`propose_seat` and `confirm_seat` name seats in the local roster. They are
+resolved with the same roster lookup, model pins and CLI adapters as
+`brigade run --worker`, with no planning, synthesis, fleet claims or
+worktrees. A seat is refused before any prompt is written when:
+
+| Code | Cause |
+|---|---|
+| `verify_seat_unconfigured` | `[verify]` is missing either seat |
+| `verify_seat_unknown` | The seat is not in the local roster. Seats the hub synthesizes for other fleet nodes are never used in v1 |
+| `verify_seat_connector` | The seat's prompts would reach a connector audience: a `codex-cloud:` seat, a hosted chat session (`oracle`), an endpoint outside loopback, or an Ollama cloud model |
+| `verify_seat_not_isolated` | The adapter has no isolation profile, the seat sets a custom `command`, `env`, a non-direct transport or a reasoning pin, or it has no passing probe for its current fingerprint |
+| `verify_seat_disallowed` | `limits.allow_models` does not allow the seat |
+| `verify_seat_unpinned` | The seat pins no exact model id. A Claude seat needs a full `claude-...` id, not an alias such as `opus` |
+| `verify_seat_same_model` | Both seats resolve to one model, ignoring a bracketed context suffix and Ollama's default `:latest` tag |
+| `verify_seat_unavailable` | The seat's CLI is not installed or not runnable |
+
+Two adapters have isolation profiles in v1:
+
+- `claude` runs with `--safe-mode` (no hooks, so no memory recall, and no
+  CLAUDE.md discovery, plugins, skills or MCP servers), `--tools ""` (no
+  built-in tools), `--strict-mcp-config` with an empty MCP configuration,
+  `--disable-slash-commands` and `--no-session-persistence`, so no transcript
+  of the prompt is kept.
+- `ollama:<model>` runs `ollama run` without its experimental agent loop.
+  `OLLAMA_HOST` is never passed, so it reaches only the loopback daemon.
+
+`doctor` probes each seat in a fresh, empty working directory whose parent
+holds a canary file and project instruction files with a second canary. A
+seat passes when its reply starts with the probe nonce, holds neither canary,
+and its working directory is still empty. A pass is recorded in
+`.brigade/memory/verify/probes.json` (owner-only) as a fingerprint of the seat
+name, adapter, pinned model, profile argv and resolved executable. The pass
+refuses a seat whose current fingerprint has no recorded pass, so editing the
+seat or upgrading its CLI needs another `doctor` run. The probe makes one
+model call per seat with the fixed probe prompt and no card text.
+
+Every call writes its prompt and reply to owner-only files in a private call
+directory under `.brigade/memory/verify/work/` and runs the seat with an
+empty private working directory, a private temporary directory and an
+allowlisted environment that carries no Brigade, hub or provider endpoint
+variable. The call directory is removed when the call's work is done, on
+success, error, timeout and interrupt alike, and a directory a killed run left
+behind is removed the next time one opens. A seat that leaves anything in its
+working directory fails the call with `verify_seat_not_isolated`. A rate
+limit or quota reply maps to `seat_quota`, a login failure to `seat_auth`
+(a run failure), and a timeout to `seat_timeout`. Prompt and reply text never
+reach the run journal, a receipt, a report or the command output.
+
+The work area needs descriptor-relative, no-follow directory operations, as
+the state file does, so on Windows the pass refuses with
+`verify_workdir_unavailable` before creating anything.
+
 ### Score and lanes
 
 ```text

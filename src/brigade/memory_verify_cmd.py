@@ -1,9 +1,12 @@
-"""`brigade memory verify status` and `memory verify run --dry-run --no-model`.
+"""`brigade memory verify status`, `doctor` and `run --dry-run --no-model`.
 
-This slice selects and reports. It calls no model, submits nothing, attaches
-nothing and writes no state: a dry run leaves the pause counter alone. Output
-holds scope names, card ids, scores, reason codes and counts. It never holds
-card text, titles or evidence, and failures carry fixed reasons only.
+`run` selects and reports. It calls no model, submits nothing, attaches
+nothing and writes no state: a dry run leaves the pause counter alone.
+`doctor` resolves both verify seats and runs the isolation probe on each
+(`memory_verify_seat`), recording passes in `probes.json`. Output holds scope
+names, card ids, seat names, scores, reason codes and counts. It never holds
+card text, titles, evidence, prompts or replies, and failures carry fixed
+reasons only.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from . import memory_hub_store as store
 from . import memory_hub_sync as sync
 from . import memory_proposal_io as io
 from . import memory_verify_config as config
+from . import memory_verify_seat as seats
 from . import memory_verify_select as pick
 from . import memory_verify_state as vstate
 from .memory_reflect_hub import ReflectError, _check_replica_files
@@ -54,7 +58,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     commands = parser.add_subparsers(dest="memory_verify_command", required=True)
     status = commands.add_parser("status", help="Show the verify job's pause state and last never-read counts.")
     run = commands.add_parser("run", help="Score and select verification candidates without a model.")
-    for command in (status, run):
+    doctor = commands.add_parser("doctor", help="Probe propose_seat and confirm_seat for tool-free, recall-free calls.")
+    doctor.add_argument(
+        "--timeout", type=int, default=int(seats.PROBE_TIMEOUT), help="Per-probe timeout in seconds (30 to 600)."
+    )
+    for command in (status, run, doctor):
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     run.add_argument("--dry-run", action="store_true", help="Submit, attach and write nothing. Required for now.")
@@ -333,6 +341,21 @@ def run_payload(*, target: Path, dry_run: bool, no_model: bool, list_ids: bool, 
         return payload
 
 
+def doctor_payload(target: Path, timeout: int) -> dict[str, Any]:
+    """Probe both seats. Model calls happen here only, and only with the fixed probe prompt."""
+    if not 30 <= timeout <= 600:
+        raise VerifyRunError("verify_seat_timeout_invalid", "--timeout must be 30 to 600 seconds")
+    _check_overlap(target)
+    try:
+        settings = config.load(target)
+    except config.VerifyConfigError as exc:
+        raise VerifyRunError("verify_config", str(exc)) from None
+    try:
+        return seats.doctor_payload(target, settings.propose_seat, settings.confirm_seat, timeout=float(timeout))
+    except seats.SeatRefused as exc:
+        raise VerifyRunError(exc.code, str(exc)) from None
+
+
 def _failure(code: str, reason: str) -> dict[str, Any]:
     return {"status": "failed", "code": code, "reason": reason}
 
@@ -344,6 +367,8 @@ def dispatch(args: argparse.Namespace) -> int:
             pass
         if args.memory_verify_command == "status":
             payload = status_payload(target)
+        elif args.memory_verify_command == "doctor":
+            payload = doctor_payload(target, args.timeout)
         else:
             payload = run_payload(target=target, dry_run=args.dry_run, no_model=args.no_model, list_ids=args.list_ids)
     except VerifyRunError as exc:
@@ -369,7 +394,11 @@ def dispatch(args: argparse.Namespace) -> int:
     print(f"memory verify: {payload['status']}")
     if "reason" in payload or "error" in payload:
         print(f"error: {payload.get('code')}: {payload.get('reason', payload.get('error'))}")
-    if args.memory_verify_command == "status":
+    if args.memory_verify_command == "doctor":
+        for row in payload.get("seats", []):
+            suffix = f" {row['code']}" if "code" in row else ""
+            print(f"seat {row['role']} {row['seat']} {row['cli']} {row['model']} {row['status']}{suffix}")
+    elif args.memory_verify_command == "status":
         state = payload.get("state", {})
         print(f"paused: {str(state.get('paused')).lower()}  failures: {state.get('consecutive_failures', '-')}")
         for scope, count in state.get("never_read", {}).items():
