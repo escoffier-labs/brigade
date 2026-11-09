@@ -2302,11 +2302,15 @@ network or the filesystem. The switches, verified on every call, are the
 enforcement.
 
 The seat's executable is resolved to its canonical path, opened without
-following links and hashed with sha256, and the seat is launched by that
-canonical path. Immediately before every call the executable is resolved,
-opened and hashed again, and the call is refused with
+following links and hashed with sha256. Immediately before every call the
+executable is resolved, opened and hashed again, and the call is refused with
 `verify_seat_not_isolated` when its path, device, inode, size, modification
-time or digest differs.
+time or digest differs. The verified descriptor stays open until the seat
+process exists, and the seat execs that open file through `/proc/self/fd`
+rather than its path, so a file renamed or replaced after the check never
+receives the prompt. This needs Linux. On other POSIX systems every seat is
+refused with `verify_seat_not_isolated`, and Windows already refuses the work
+area.
 
 `doctor` probes each seat once. A seat passes when the call succeeds with the
 evidence above, its working directory stays empty, and its reply starts with

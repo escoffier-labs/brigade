@@ -2838,9 +2838,10 @@ S25 as built (dispatch packets, `src/brigade/dispatch_memory.py`):
   path in the memory workspace, which only a same-host recipient can open, so
   a connector packet never includes one, placeholders included.
 - Every packet is built for the `connector` audience, so private-class cards
-  never appear in one. Nothing reads the S24 local recall marker yet. `build`
-  keeps an `audience` parameter, and after #2408 merges `handoff show` may use
-  the S24 audience. A native T3 child on another machine gets the connector
+  never appear in one, with one exception: Worklore `handoff show`, which
+  prints to the operator's own terminal, uses the S24 audience. It asks the
+  S24 local recall marker and passes `local` to `build` only when the marker
+  grants it. A native T3 child on another machine gets the connector
   rendering of a packet or no block, never a local one.
 - `aboyeur` carries the block in front of the evidence brief, outside the
   6,000-byte brief budget, so planner, worker and synthesis prompts all see

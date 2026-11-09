@@ -54,9 +54,14 @@ the network or the filesystem. The switches above, verified per call, are the
 enforcement.
 
 The executable is resolved to its canonical path, opened without following
-links, hashed, and launched by that canonical path. Immediately before each
-launch it is resolved, opened and hashed again, and the call is refused when
-anything differs from the resolved seat.
+links and hashed. Immediately before each launch it is resolved, opened and
+hashed again, and the call is refused when anything differs from the resolved
+seat. The verified descriptor stays open through process creation, and the
+child execs that open file (`proc.run_held`, Linux `/proc/self/fd`), so
+a rename or replacement after the check cannot put another binary in front
+of the prompt. Platforms without that mechanism (other POSIX systems) refuse
+every seat with `verify_seat_not_isolated`. Windows already refuses the work
+area.
 
 `memory verify doctor` probes each seat once. A pass needs a successful call
 whose observable evidence holds (above), an unchanged empty working directory,
@@ -219,7 +224,7 @@ def _ollama_api(path: str, body: dict[str, Any] | None) -> dict[str, Any]:
 
 
 # Injectable for tests: scripted fake seats replace the launcher, the executable lookup and the daemon.
-LAUNCH: Callable[..., proc.Result] = proc.run
+LAUNCH: Callable[..., proc.Result] = proc.run_held
 RESOLVE: Callable[[str], proc.ExecutableIdentity] = agents.resolve_agent_executable
 OLLAMA_API: Callable[[str, dict[str, Any] | None], dict[str, Any]] = _ollama_api
 CLOCK: Callable[[], float] = time.time
@@ -373,12 +378,14 @@ def profile_problem(argv: list[str], adapter: str) -> str | None:
     return None
 
 
-def bind_executable(path: str) -> tuple[str, tuple[Any, ...]]:
-    """The canonical path and identity (device, inode, size, mtime, sha256) of a native executable.
+def open_executable(path: str) -> tuple[int, str, tuple[Any, ...]]:
+    """A held descriptor, the canonical path and the identity of a native executable.
 
-    The file is opened without following links and hashed through the held
-    descriptor. A script or interpreter launcher is refused in v1, because what
-    it runs is not the file that was hashed.
+    The identity is (device, inode, size, mtime, sha256). The file is opened
+    without following links and hashed through the descriptor, which the
+    caller keeps open and launches (`proc.run_held`), so what runs is the
+    file that was hashed. A script or interpreter launcher is refused in v1,
+    because what it runs is another file.
     """
     canonical = os.path.realpath(path)
     fd = dirfd.open_file_nofollow(Path(canonical), os.O_RDONLY)
@@ -393,14 +400,22 @@ def bind_executable(path: str) -> tuple[str, tuple[Any, ...]]:
                 head = chunk[:4]
             digest.update(chunk)
         after = os.fstat(fd)
-    finally:
+        if not head.startswith(NATIVE_MAGIC):
+            raise SeatRefused("verify_seat_not_isolated", "the seat CLI is a script or launcher, not a native binary")
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        if [getattr(before, name) for name in fields] != [getattr(after, name) for name in fields]:
+            raise SeatRefused("verify_seat_not_isolated", "the seat CLI changed while it was hashed")
+    except BaseException:
         os.close(fd)
-    if not head.startswith(NATIVE_MAGIC):
-        raise SeatRefused("verify_seat_not_isolated", "the seat CLI is a script or launcher, not a native binary")
-    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
-    if [getattr(before, name) for name in fields] != [getattr(after, name) for name in fields]:
-        raise SeatRefused("verify_seat_not_isolated", "the seat CLI changed while it was hashed")
-    return canonical, (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, digest.hexdigest())
+        raise
+    return fd, canonical, (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, digest.hexdigest())
+
+
+def bind_executable(path: str) -> tuple[str, tuple[Any, ...]]:
+    """The canonical path and identity of a native executable, without keeping it open."""
+    fd, canonical, identity = open_executable(path)
+    os.close(fd)
+    return canonical, identity
 
 
 def ollama_digest(model: str) -> str:
@@ -461,6 +476,11 @@ def resolve(target: Path, name: str, role: str, *, loaded: roster_mod.Roster | N
         raise SeatRefused("verify_seat_disallowed", f"{role}_seat is not allowed by limits.allow_models")
     model, key = _pinned(cli, agent)
     adapter = _adapter(cli)
+    if not proc.held_exec_supported():
+        raise SeatRefused(
+            "verify_seat_not_isolated",
+            f"{role}_seat refused: this platform cannot launch a verified executable from a held descriptor",
+        )
     canonical, identity = _bind(cli)
     digest = ollama_digest(model) if adapter == "ollama" else None
     builder, _, _ = PROFILES[adapter]
@@ -472,14 +492,20 @@ def resolve(target: Path, name: str, role: str, *, loaded: roster_mod.Roster | N
     return Seat(role, name, cli, adapter, model, key, tuple(argv), canonical, identity, digest, fingerprint)
 
 
-def _bind(cli: str) -> tuple[str, tuple[Any, ...]]:
+def _open_bound(cli: str) -> tuple[int, str, tuple[Any, ...]]:
     executable = RESOLVE(cli)
     if not executable.runnable or executable.path is None:
         raise SeatRefused("verify_seat_unavailable", "the seat CLI is not installed or not runnable")
     try:
-        return bind_executable(executable.path)
+        return open_executable(executable.path)
     except OSError:
         raise SeatRefused("verify_seat_unavailable", "the seat CLI could not be opened and hashed") from None
+
+
+def _bind(cli: str) -> tuple[str, tuple[Any, ...]]:
+    fd, canonical, identity = _open_bound(cli)
+    os.close(fd)
+    return canonical, identity
 
 
 def _roster(target: Path) -> roster_mod.Roster:
@@ -514,12 +540,22 @@ def ready(target: Path, propose: str | None, confirm: str | None) -> tuple[Seat,
     return pair
 
 
-def _rebind(seat: Seat) -> None:
-    """Refuse when the executable or the Ollama model no longer matches the resolved seat."""
-    if _bind(seat.cli) != (seat.executable, seat.identity):
-        raise SeatRefused("verify_seat_not_isolated", "the seat CLI changed after the seat was resolved")
-    if seat.adapter == "ollama" and ollama_digest(seat.model) != seat.ollama_digest:
-        raise SeatRefused("verify_seat_not_isolated", "the ollama model changed after the seat was resolved")
+def _rebind(seat: Seat) -> int:
+    """A held descriptor of the seat's executable, verified against the resolved seat.
+
+    Refused when the executable or the Ollama model no longer matches. The
+    caller launches through the descriptor and closes it.
+    """
+    fd, canonical, identity = _open_bound(seat.cli)
+    try:
+        if (canonical, identity) != (seat.executable, seat.identity):
+            raise SeatRefused("verify_seat_not_isolated", "the seat CLI changed after the seat was resolved")
+        if seat.adapter == "ollama" and ollama_digest(seat.model) != seat.ollama_digest:
+            raise SeatRefused("verify_seat_not_isolated", "the ollama model changed after the seat was resolved")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def _env(area: Area) -> dict[str, str]:
@@ -630,18 +666,22 @@ def call(area: Area, seat: Seat, prompt: str, *, timeout: float) -> Reply:
         raise SeatRefused("verify_prompt_too_large", "a verify prompt exceeds 64 KiB")
     if not MIN_TIMEOUT <= timeout <= MAX_TIMEOUT:
         raise SeatRefused("verify_seat_timeout_invalid", "a verify call timeout must be 1 to 600 seconds")
-    _rebind(seat)
-    area.calls += 1
-    stem = f"{area.calls:04d}-{seat.role}"
+    held = _rebind(seat)
     try:
-        area_mod.write(area.files_fd, f"{stem}.prompt", data)
-        if not area.check_identity():
-            return Reply("verify_seat_not_isolated", fatal=True)
-        result = LAUNCH(list(seat.argv), timeout=timeout, env=_env(area), cwd=area.cwd, stdin=data)
-        area_mod.write(area.files_fd, f"{stem}.reply", result.stdout.encode("utf-8", errors="replace"))
-        intact = area.check_identity()
-    except OSError:
-        raise SeatRefused("verify_workdir", "verify could not use its private work area") from None
+        area.calls += 1
+        stem = f"{area.calls:04d}-{seat.role}"
+        try:
+            area_mod.write(area.files_fd, f"{stem}.prompt", data)
+            if not area.check_identity():
+                return Reply("verify_seat_not_isolated", fatal=True)
+            # The child execs the verified open file, never whatever the path names by now.
+            result = LAUNCH(list(seat.argv), held, timeout=timeout, env=_env(area), cwd=area.cwd, stdin=data)
+            area_mod.write(area.files_fd, f"{stem}.reply", result.stdout.encode("utf-8", errors="replace"))
+            intact = area.check_identity()
+        except OSError:
+            raise SeatRefused("verify_workdir", "verify could not use its private work area") from None
+    finally:
+        os.close(held)
     if not intact:
         # A tool-free seat cannot write. Something in its working directory means it could.
         return Reply("verify_seat_not_isolated", fatal=True)

@@ -1435,6 +1435,54 @@ def run(
     )
 
 
+def run_held(
+    args: List[str],
+    held_fd: int,
+    *,
+    timeout: float = 30.0,
+    env: Optional[dict] = None,
+    cwd: Optional[Path] = None,
+    stdin: bytes | None = None,
+    process_registry: ProcessRegistry | None = None,
+) -> Result:
+    """Run the executable file open behind ``held_fd``, never whatever a path names at spawn time.
+
+    ``args[0]`` is only the display name. The child inherits ``held_fd`` and
+    nothing else (``run`` itself passes no descriptors), and execs it through
+    :func:`held_exec_path`. Timeout, tree termination and output bounds match
+    :func:`run`. Platforms without the mechanism raise ``OSError``.
+    """
+    return _launch_and_collect(
+        args,
+        subprocess.PIPE,
+        timeout=timeout,
+        env=env,
+        cwd=cwd,
+        stdin=stdin,
+        process_registry=process_registry,
+        executable=held_exec_path(held_fd),
+        pass_fds=(held_fd,),
+    )
+
+
+def held_exec_supported() -> bool:
+    """Whether a child can exec a file through an inherited descriptor (Linux ``/proc/self/fd``)."""
+    return sys.platform.startswith("linux") and os.path.isdir("/proc/self/fd")
+
+
+def held_exec_path(fd: int) -> str:
+    """The path that makes a child exec the open file behind ``fd``, passed with ``pass_fds=(fd,)``.
+
+    The child inherits ``fd`` at the same number, and the kernel resolves the
+    child's ``/proc/self/fd/<fd>`` magic link to that open file, never to a
+    path, so a rename or replacement after the file was opened cannot change
+    what runs. Platforms without the mechanism raise ``OSError``.
+    """
+    if not held_exec_supported():
+        raise OSError("launching a held executable descriptor is unavailable on this platform")
+    return f"/proc/self/fd/{fd}"
+
+
 def run_to_file(
     args: List[str],
     stdout_file: Any,
@@ -1476,6 +1524,8 @@ def _launch_and_collect(
     stdin: bytes | None = None,
     process_registry: ProcessRegistry | None = None,
     supervise_group: bool = False,
+    executable: str | None = None,
+    pass_fds: tuple[int, ...] = (),
 ) -> Result:
     _check_launch_allowed(process_registry)
     windows_launch = os.name == "nt"
@@ -1493,6 +1543,10 @@ def _launch_and_collect(
             )
     try:
         popen_kwargs: dict[str, Any] = dict(_process_group_kwargs(suspend=windows_launch))
+        if executable is not None:
+            popen_kwargs["executable"] = executable
+        if pass_fds:
+            popen_kwargs["pass_fds"] = pass_fds
         process = subprocess.Popen(
             args,
             stdout=stdout_target,

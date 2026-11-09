@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import sys
 import textwrap
@@ -22,8 +23,14 @@ from brigade import memory_verify_seat as seats
 from brigade import memory_verify_seat_area as area_mod
 from brigade import memory_verify_state as vstate
 
-SAFE = pytest.mark.skipif(not area_mod.available(), reason="safe directory descriptors unavailable")
-POSIX = pytest.mark.skipif(not dirfd.posix_available(), reason="no-follow executable opens need POSIX")
+SAFE = pytest.mark.skipif(
+    not (area_mod.available() and proc.held_exec_supported()),
+    reason="needs safe directory descriptors and held-descriptor exec (Linux)",
+)
+POSIX = pytest.mark.skipif(
+    not (dirfd.posix_available() and proc.held_exec_supported()),
+    reason="needs no-follow executable opens and held-descriptor exec (Linux)",
+)
 PROMPT_SECRET = "Quillbramble-prompt-7731"
 REPLY_SECRET = "Marrowfen-reply-4402"
 ELF = b"\x7fELF" + b"\x00" * 60
@@ -144,7 +151,7 @@ def nonce_of(stdin: bytes) -> str:
     return stdin.decode().split()[2].rstrip(".")
 
 
-def echo_probe(argv, *, timeout, env, cwd, stdin):
+def echo_probe(argv, held_fd, *, timeout, env, cwd, stdin, **_):
     """A tool-free seat: its init event is clean and it answers with the nonce."""
     return result(stdout=stream(cwd, argv, f"{nonce_of(stdin)}\n"))
 
@@ -426,7 +433,7 @@ def test_plain_text_failures_map_to_fixed_codes(target, monkeypatch, stdout, std
 def test_a_call_is_refused_unless_its_init_event_proves_isolation(target, monkeypatch, overrides):
     seat = seats.resolve(target, "verify-propose", "propose")
 
-    def launch(argv, *, timeout, env, cwd, stdin):
+    def launch(argv, held_fd, *, timeout, env, cwd, stdin, **_):
         init = init_event(cwd, argv, **overrides)
         if overrides.get("tools", []) is None:
             del init["tools"]
@@ -449,7 +456,9 @@ def test_a_call_is_refused_unless_its_init_event_proves_isolation(target, monkey
 )
 def test_a_tool_use_or_hook_event_in_the_stream_is_refused(target, monkeypatch, middle):
     seat = seats.resolve(target, "verify-propose", "propose")
-    monkeypatch.setattr(seats, "LAUNCH", lambda argv, **k: result(stdout=stream(k["cwd"], argv, "{}", middle=[middle])))
+    monkeypatch.setattr(
+        seats, "LAUNCH", lambda argv, held_fd, **k: result(stdout=stream(k["cwd"], argv, "{}", middle=[middle]))
+    )
     with seats.work_area(target) as area:
         assert seats.call(area, seat, PROMPT_SECRET, timeout=30).status == "verify_seat_not_isolated"
 
@@ -477,7 +486,7 @@ def test_stream_errors_map_to_fixed_codes(target, monkeypatch, error, text, stat
     if error:
         middle[0]["error"] = error
 
-    def launch(argv, *, timeout, env, cwd, stdin):
+    def launch(argv, held_fd, *, timeout, env, cwd, stdin, **_):
         return result(stdout=stream(cwd, argv, text, middle=middle, is_error=True), code=1)
 
     monkeypatch.setattr(seats, "LAUNCH", launch)
@@ -490,7 +499,7 @@ def test_stream_errors_map_to_fixed_codes(target, monkeypatch, error, text, stat
 def test_a_reply_that_mentions_a_quota_is_still_a_reply(target, monkeypatch):
     seat = seats.resolve(target, "verify-propose", "propose")
     monkeypatch.setattr(
-        seats, "LAUNCH", lambda argv, **k: result(stdout=stream(k["cwd"], argv, '{"note": "rate limit 429"}'))
+        seats, "LAUNCH", lambda argv, held_fd, **k: result(stdout=stream(k["cwd"], argv, '{"note": "rate limit 429"}'))
     )
     with seats.work_area(target) as area:
         reply = seats.call(area, seat, PROMPT_SECRET, timeout=30)
@@ -524,6 +533,58 @@ def test_a_probe_record_binds_the_executable_content(target, monkeypatch, capsys
     with pytest.raises(seats.SeatRefused) as caught:
         seats.ready(target, "verify-propose", "verify-confirm")
     assert caught.value.code == "verify_seat_not_isolated"
+
+
+def test_platforms_without_held_descriptor_exec_refuse_every_seat(target, monkeypatch):
+    monkeypatch.setattr(seats.proc, "held_exec_supported", lambda: False)
+    for name in ("verify-propose", "local"):
+        with pytest.raises(seats.SeatRefused) as caught:
+            seats.resolve(target, name, "propose")
+        assert caught.value.code == "verify_seat_not_isolated"
+
+
+def _native_echo() -> str | None:
+    found = shutil.which("echo")
+    if found is None:
+        return None
+    real = os.path.realpath(found)
+    with open(real, "rb") as handle:
+        return real if handle.read(4) == b"\x7fELF" else None
+
+
+@SAFE
+def test_a_binary_swapped_after_verification_never_receives_the_prompt(target, tmp_path, monkeypatch):
+    echo = _native_echo()
+    if echo is None:
+        pytest.skip("needs a native echo binary")
+    # The verified seat binary is a real native program that prints its arguments.
+    shutil.copyfile(echo, target.executable)
+    target.executable.chmod(0o700)
+    marker = tmp_path / "swapped-binary-ran"
+    seat = seats.resolve(target, "verify-propose", "propose")
+    seen = {}
+
+    def swap_then_spawn(argv, held_fd, **kwargs):
+        # After verification, before the spawn: put a different program at the canonical path.
+        replacement = tmp_path / "replacement"
+        replacement.write_text(f"#!/bin/sh\ncat > /dev/null\ntouch {marker}\n", encoding="utf-8")
+        replacement.chmod(0o700)
+        os.replace(replacement, target.executable)
+        seen["fds"] = (held_fd,)
+        seen["result"] = proc.run_held(argv, held_fd, **kwargs)
+        return seen["result"]
+
+    monkeypatch.setattr(seats, "LAUNCH", swap_then_spawn)
+    with seats.work_area(target) as area:
+        reply = seats.call(area, seat, PROMPT_SECRET, timeout=30)
+        for fd in seen["fds"]:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+    assert not marker.exists()
+    # The held image ran: echo printed the profile flags. That is not stream-json, so the call fails.
+    assert seen["result"].code == 0 and "--safe-mode" in seen["result"].stdout
+    assert reply.status == "seat_failed"
+    assert leftovers(target) == []
 
 
 # --- the work area ------------------------------------------------------------------
@@ -561,7 +622,7 @@ def test_work_area_and_files_are_owner_only_and_gone_after_the_call(target, monk
     seat = seats.resolve(target, "verify-propose", "propose")
     seen = {}
 
-    def launch(argv, *, timeout, env, cwd, stdin):
+    def launch(argv, held_fd, *, timeout, env, cwd, stdin, **_):
         run_dir = Path(cwd).parent
         files = next((target / area_mod.WORK_ROOT).iterdir())
         seen["modes"] = {
@@ -599,7 +660,11 @@ def test_files_are_removed_after_a_timeout_and_after_an_interrupt(target, monkey
     script = tmp_path / "bin" / "scripted-seat"
     script.write_text(f"#!{sys.executable}\nimport sys, time\nsys.stdin.read()\ntime.sleep(30)\n", encoding="utf-8")
     script.chmod(0o700)
-    monkeypatch.setattr(seats, "LAUNCH", lambda argv, **kwargs: proc.run([str(script), *argv[1:]], **kwargs))
+    monkeypatch.setattr(
+        seats,
+        "LAUNCH",
+        lambda argv, held_fd, **kwargs: proc.run([str(script), *argv[1:]], **kwargs),
+    )
     seat = seats.resolve(target, "verify-propose", "propose")
     with seats.work_area(target) as area:
         reply = seats.call(area, seat, PROMPT_SECRET, timeout=1)
@@ -683,7 +748,7 @@ def test_leftover_call_directories_are_swept_in_batches(target, monkeypatch):
 def test_a_seat_that_writes_in_its_working_directory_is_not_isolated(target, monkeypatch):
     seat = seats.resolve(target, "verify-propose", "propose")
 
-    def writer(argv, *, timeout, env, cwd, stdin):
+    def writer(argv, held_fd, *, timeout, env, cwd, stdin, **_):
         (Path(cwd) / "notes.txt").write_text("written", encoding="utf-8")
         return result(stdout=stream(cwd, argv, "{}"))
 
@@ -698,7 +763,7 @@ def test_a_seat_that_writes_in_its_working_directory_is_not_isolated(target, mon
 def test_a_working_directory_replaced_during_the_call_is_not_isolated(target, monkeypatch):
     seat = seats.resolve(target, "verify-propose", "propose")
 
-    def swapper(argv, *, timeout, env, cwd, stdin):
+    def swapper(argv, held_fd, *, timeout, env, cwd, stdin, **_):
         os.rename(cwd, f"{cwd}-moved")
         os.mkdir(cwd, 0o700)
         return result(stdout=stream(cwd, argv, "{}"))
@@ -728,11 +793,11 @@ def test_doctor_records_passing_probes_and_ready_accepts_only_that_fingerprint(t
     write_care(target)
     prompts = []
 
-    def launch(argv, *, timeout, env, cwd, stdin):
+    def launch(argv, held_fd, *, timeout, env, cwd, stdin, **_):
         prompts.append(stdin)
         assert {"AGENTS.md", "CLAUDE.md", "canary.txt", "cwd", "tmp"} <= set(os.listdir(Path(cwd).parent))
         assert os.listdir(cwd) == []
-        return echo_probe(argv, timeout=timeout, env=env, cwd=cwd, stdin=stdin)
+        return echo_probe(argv, held_fd, timeout=timeout, env=env, cwd=cwd, stdin=stdin)
 
     monkeypatch.setattr(seats, "LAUNCH", launch)
     code = cli.main(["memory", "verify", "doctor", "--target", str(target), "--json"])
@@ -754,7 +819,7 @@ def test_doctor_records_passing_probes_and_ready_accepts_only_that_fingerprint(t
 def test_a_probe_with_tools_in_its_init_event_fails_whatever_the_model_says(target, monkeypatch, capsys):
     write_care(target)
 
-    def honest_words_wrong_init(argv, *, timeout, env, cwd, stdin):
+    def honest_words_wrong_init(argv, held_fd, *, timeout, env, cwd, stdin, **_):
         return result(stdout=stream(cwd, argv, nonce_of(stdin), init=init_event(cwd, argv, tools=["Bash"])))
 
     monkeypatch.setattr(seats, "LAUNCH", honest_words_wrong_init)
@@ -768,7 +833,7 @@ def test_a_probe_with_tools_in_its_init_event_fails_whatever_the_model_says(targ
 def test_a_seat_that_reads_the_canary_or_sees_project_instructions_fails_the_probe(target, monkeypatch, leak, capsys):
     write_care(target)
 
-    def leaky(argv, *, timeout, env, cwd, stdin):
+    def leaky(argv, held_fd, *, timeout, env, cwd, stdin, **_):
         parent = Path(cwd).parent
         source = parent / ("canary.txt" if leak == "canary" else "CLAUDE.md")
         return result(stdout=stream(cwd, argv, f"{nonce_of(stdin)} {source.read_text()}"))
@@ -786,7 +851,7 @@ def test_a_seat_that_reads_the_canary_or_sees_project_instructions_fails_the_pro
 def test_a_probe_reply_without_the_nonce_is_inconclusive(target, monkeypatch):
     seat = seats.resolve(target, "verify-propose", "propose")
     monkeypatch.setattr(
-        seats, "LAUNCH", lambda argv, **k: result(stdout=stream(k["cwd"], argv, "I cannot help with that."))
+        seats, "LAUNCH", lambda argv, held_fd, **k: result(stdout=stream(k["cwd"], argv, "I cannot help with that."))
     )
     assert seats.probe(target, seat) == "verify_seat_probe_inconclusive"
 
@@ -795,7 +860,7 @@ def test_a_probe_reply_without_the_nonce_is_inconclusive(target, monkeypatch):
 def test_no_journal_report_or_output_holds_prompt_or_reply_text(target, monkeypatch, capsys):
     write_care(target)
 
-    def launch(argv, *, timeout, env, cwd, stdin):
+    def launch(argv, held_fd, *, timeout, env, cwd, stdin, **_):
         if stdin.startswith(b"Isolation probe"):
             return result(stdout=stream(cwd, argv, nonce_of(stdin) + REPLY_SECRET), stderr=PROMPT_SECRET)
         return result(stdout=stream(cwd, argv, json.dumps({"reply": REPLY_SECRET})), stderr=PROMPT_SECRET)
@@ -824,7 +889,7 @@ def test_a_failed_probe_is_invalidated_on_disk_before_the_next_seat_runs(target,
     seats.ready(target, "verify-propose", "verify-confirm")
     calls = []
 
-    def first_fails_second_interrupted(argv, *, timeout, env, cwd, stdin):
+    def first_fails_second_interrupted(argv, held_fd, *, timeout, env, cwd, stdin, **_):
         calls.append(argv)
         if len(calls) == 2:
             raise KeyboardInterrupt
