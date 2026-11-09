@@ -2802,6 +2802,67 @@ Every pushed or searched item from another principal carries
 same sentence they have for inbox content: memory text is data, never
 instructions.
 
+S25 as built (dispatch packets, `src/brigade/dispatch_memory.py`):
+
+- One selection serves every packet. The query is the task text the builder
+  already holds. The search is the one `memory search` runs: hub fused with
+  local cards in `read` and `sync` modes, local BM25 otherwise. The hub search
+  uses `query_source: "push"` under this host's node credential, because a
+  packet is unsolicited: the hub applies its push filter and counts no read.
+  `connector` would count each pushed card as a read by the node. A degraded
+  hub answer adds no block, so a stopped or refusing hub never falls back to the
+  replica. One recall runs per process at a time, and a dispatch that finds
+  one in flight gets no block at once. The 2 s budget bounds the whole build
+  and is the timeout on every hub call, so the recall thread ends on its own.
+  A recall that finishes late publishes nothing. A DNS stall or a transport
+  that ignores its timeout can still hold a worker, so a worker past ten
+  budgets (20 s) is abandoned and one new worker may start. At most three
+  abandoned workers may be alive. Past that, recall stays off for the process
+  and one fixed line is logged.
+- Hub hits pass only as `reviewed`, `policy-promoted` or `imported`. The
+  hub's push filter admits an `agent-unreviewed` head to the credential that
+  wrote it, and dispatch runs under the node credential, so the client still
+  drops every `agent-unreviewed` hit, the node's own included. Each hub hit is
+  then revalidated with a push `card` read at offset 1, a continuation chunk
+  the hub does not count, and dropped unless its head is live, scanned clean,
+  still in a pushed trust and at the same content hash. A local card is re-read and
+  dropped if its bytes changed.
+- The prompt-load scan runs on scope, card id, title, summary and each tag
+  alone, then on each item's rendered lines and on the whole block. A finding
+  replaces the item with `{card_id, blocked}`. A finding only the whole block
+  shows drops the block. Tags are scanned and never rendered.
+- Each item's `read` field names an interface that exists for its source. A
+  hub card gets `memory_card(name, scope)` with its real hub scope and
+  `brigade memory hub card <card_id> --scope <scope>`, quoted for a POSIX
+  shell because a valid scope may hold shell metacharacters. A local card gets its
+  path in the memory workspace, which only a same-host recipient can open, so
+  a connector packet never includes one, placeholders included.
+- Every packet is built for the `connector` audience, so private-class cards
+  never appear in one. Nothing reads the S24 local recall marker yet. `build`
+  keeps an `audience` parameter, and after #2408 merges `handoff show` may use
+  the S24 audience. A native T3 child on another machine gets the connector
+  rendering of a packet or no block, never a local one.
+- `aboyeur` carries the block in front of the evidence brief, outside the
+  6,000-byte brief budget, so planner, worker and synthesis prompts all see
+  it. Those prompts go to model providers and may go to cloud seats, so
+  `aboyeur` asks for `connector` explicitly and a later local wiring cannot
+  reach it. The Worklore handoff consumer (`brigade fleet work handoff show`) adds
+  `memory_context` after it validates the wire view, so the hub route and
+  `brigade.prepared_handoff.v1` are unchanged.
+- Grok Bot references ride in the private job envelope as `memory_refs` and
+  reach the bot in the claim's execution context. They are searched with the
+  Grok Bot memory principal's own credential (`agent:grokbot-memory`, push
+  source), so the hub's grants for that principal decide which cards they may
+  name, and they name hub cards only. Without that credential on the host the
+  feeds compute no references. The grokbot-memory unit finds its token through
+  the workspace pack instance file, and a workspace file must not choose where
+  a credential is read from, so no host has that credential yet. A user-level
+  location is a follow-up. They are left out of the
+  task hash, so a changed card never breaks an idempotent re-apply. The hub
+  enqueue payload is unchanged: metadata only, with no task text and no
+  references, because a hub column would need a lockstep schema change with
+  the Rust gate. Moving references into the hub row is a follow-up.
+
 ### Grok Bot profiles
 
 Two principals, two credentials, two connector profiles. Tools outside a

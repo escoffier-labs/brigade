@@ -807,7 +807,7 @@ def run(
     brief_set = briefs.arbitrate_briefs(task, code_graph=code_graph, drift_impact=drift_impact, evidence=evidence)
     code_graph = brief_set.code_graph
     drift_impact = brief_set.drift_impact
-    evidence = brief_set.evidence
+    evidence = briefs.with_memory_context(brief_set.evidence, cwd if code_graph_enabled else None, task)
     route = (
         route_brief(
             task,

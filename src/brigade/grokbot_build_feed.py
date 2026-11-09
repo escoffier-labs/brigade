@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from . import grokbot_feed, grokbot_jobs, grokbot_scout_feed
+from . import dispatch_memory, grokbot_feed, grokbot_jobs, grokbot_scout_feed
 
 POLICY_SCHEMA = "brigade.grokbot.build-feed.v1"
 ROLE = "implementation-worker"
@@ -105,7 +105,7 @@ def apply(target: Path, policy_path: Path, *, now: datetime | None = None) -> di
         assert isinstance(issue_number, int)
         assert isinstance(repository, str)
         assert isinstance(daily_limit, int)
-        spec = _worker_spec(policy, issue_number, selection["scout_report"])
+        spec = dispatch_memory.with_job_refs(target, _worker_spec(policy, issue_number, selection["scout_report"]))
         admission = grokbot_jobs.enqueue_implementation_worker(
             target,
             spec,

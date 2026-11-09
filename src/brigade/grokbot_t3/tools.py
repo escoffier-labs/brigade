@@ -52,12 +52,15 @@ class T3DispatchTools:
         runner: Any,
         ledger: Ledger,
         now: Callable[[], datetime] | None = None,
+        memory: Callable[[str], str] | None = None,
     ):
         self._dispatch_lock = threading.Lock()
         self.runtime = runtime
         self.runner = runner
         self.ledger = ledger
         self.now = now or (lambda: datetime.now(timezone.utc))
+        # S25: the task text -> a bounded connector-audience memory_context block, or "".
+        self.memory = memory
 
     def inventory(self) -> list[str]:
         return sorted(c.TOOLS if self.runtime.messaging_configured else c.T3_TOOLS)
@@ -202,14 +205,25 @@ class T3DispatchTools:
             raise c.T3DispatchError("daily-limit")
 
     def submit(self, args: dict[str, Any]) -> dict[str, Any]:
+        # Recall runs before the lock, inside its own budget, so it never holds up another submit.
+        block = self._memory_block(args.get("prompt"))
         if not self._dispatch_lock.acquire(timeout=5):
             raise c.T3DispatchError("unavailable")
         try:
-            return self._submit_locked(args)
+            return self._submit_locked(args, block)
         finally:
             self._dispatch_lock.release()
 
-    def _submit_locked(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _memory_block(self, prompt: object) -> str:
+        if self.memory is None or not isinstance(prompt, str):
+            return ""
+        try:
+            block = self.memory(prompt)
+        except Exception:  # noqa: BLE001 - memory never blocks dispatch
+            return ""
+        return block if isinstance(block, str) else ""
+
+    def _submit_locked(self, args: dict[str, Any], memory_block: str = "") -> dict[str, Any]:
         self._require_enabled()
         runtime = self.runtime
         repo = runtime.repositories.get(args["repository"])
@@ -233,6 +247,8 @@ class T3DispatchTools:
         host = self._choose_host(args["host"])
         title = f"[grokbot:{args['caller']}] {args['title']}"[: c.FLEET_TITLE_MAX].rstrip()
         prompt = compose_prompt(args["caller"], args["prompt"])
+        if memory_block and len(f"{prompt}\n\n{memory_block}".encode("utf-8")) <= runtime.prompt_max_bytes:
+            prompt = f"{prompt}\n\n{memory_block}"
         fallback_used = False
         # Reserve the slot before t3-fleet can launch anything; release it only once the outcome is durable or refused.
         reservation = self.ledger.record_in_doubt(args["caller"], now)

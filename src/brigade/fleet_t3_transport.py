@@ -934,9 +934,12 @@ class SourceTransport:
                         source_revision=None,
                     ),
                 )
+        from . import dispatch_memory
+
         outcome = execute_remote(
             resolution,
-            prompt,
+            # A native T3 child on another machine gets the connector audience (S25).
+            dispatch_memory.for_remote(prompt),
             title=task,
             cwd=self.cwd,
             client=self.client,

@@ -382,11 +382,17 @@ def _require_runtime_identity(runtime: Runtime) -> None:
             raise c.T3DispatchError("hub-error") from None
 
 
-def _tools_for(runtime: Runtime) -> T3DispatchTools:
+def _tools_for(runtime: Runtime, target: Path | None = None) -> T3DispatchTools:
+    from functools import partial
+
+    from .. import dispatch_memory
+
     return T3DispatchTools(
         runtime=runtime,
         runner=FleetRunner(runtime.t3_fleet_bin, runtime.git_bin, runtime_mode="full-access"),
         ledger=Ledger(runtime.ledger_path),
+        # The Grok Bot is always a connector audience (S25).
+        memory=partial(dispatch_memory.connector_text, target.expanduser().resolve()) if target else None,
     )
 
 
@@ -414,7 +420,7 @@ def build_listener_from_target(
         bearer=bearer,
         runtime_path=instance["runtime_path"],
     )
-    return config, _tools_for(runtime)
+    return config, _tools_for(runtime, target)
 
 
 def watch_once(target: Path) -> dict[str, int]:
@@ -433,7 +439,7 @@ def watch_once(target: Path) -> dict[str, int]:
 def intake_once(target: Path) -> dict[str, Any]:
     instance = _load_validated_instance(target)
     runtime = load_runtime(Path(instance["runtime_path"]))
-    tools = _tools_for(runtime)
+    tools = _tools_for(runtime, target)
     policy = runtime.intake
 
     def gh(argv: list[str]) -> tuple[int, str]:

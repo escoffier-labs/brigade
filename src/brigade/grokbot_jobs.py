@@ -36,6 +36,7 @@ from .grokbot_job_validation import (
     validate_idempotency_key as _validate_idempotency_key,
     validate_job_id as _validate_job_id,
     validate_lease_seconds as _validate_lease_seconds,
+    validate_memory_refs,
     validate_opaque_id as _validate_opaque_id,
     validate_ownership_paths as _validate_ownership_paths,
     validate_repository as _validate_repository,
@@ -84,7 +85,8 @@ REQUIRED_ENVELOPE_KEYS = frozenset(
         "timeout_seconds",
     }
 )
-OPTIONAL_ENVELOPE_KEYS = frozenset({"queue_ttl_seconds"})
+# ``memory_refs`` (S25): card references only, never card text, and never part of the task hash.
+OPTIONAL_ENVELOPE_KEYS = frozenset({"queue_ttl_seconds", "memory_refs"})
 # ``timeout_seconds`` is the execution budget, counted from ``claimed_at``.
 # ``queue_ttl_seconds`` bounds the wait before a claim, so a job that queued
 # behind other work is not charged for that wait (#1403).
@@ -1582,6 +1584,8 @@ def _validate_spec(spec: object) -> dict[str, Any]:
         queue_ttl = normalized["queue_ttl_seconds"]
         if type(queue_ttl) is not int or not QUEUE_TTL_SECONDS_MIN <= queue_ttl <= QUEUE_TTL_SECONDS_MAX:
             raise GrokbotJobError("invalid-queue-ttl")
+    if "memory_refs" in normalized:
+        normalized["memory_refs"] = validate_memory_refs(normalized["memory_refs"])
     return normalized
 
 
@@ -1600,6 +1604,8 @@ def _reject_sensitive_keys(value: object) -> None:
 
 
 def _task_hash(spec: dict[str, Any]) -> str:
+    # Card references follow the cards, so a changed card never changes a job's identity.
+    spec = {key: value for key, value in spec.items() if key != "memory_refs"}
     encoded = json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
@@ -1646,7 +1652,8 @@ def _store_task_snapshot(target: Path, job_id: str, envelope: dict[str, Any], ke
             and existing.get("job_id") == job_id
             and existing.get("task_hash") == payload["task_hash"]
             and existing.get("idempotency_key_hash") == key_hash
-            and existing.get("spec") == envelope
+            and isinstance(existing.get("spec"), dict)
+            and _task_hash(existing["spec"]) == payload["task_hash"]
         ):
             return
         raise GrokbotJobError("idempotency-conflict")
