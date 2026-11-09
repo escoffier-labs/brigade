@@ -381,8 +381,10 @@ the reviewer decides whether it is true:
    evidence item it names.
 2. `contradicted`, `changed`, `superseded` and `history` need quotes from at
    least two independently produced items. At least one of those quotes must
-   fall inside the authenticated fields of a receipt. Quotes from command
-   output or low-rank excerpts can add context but cannot meet this rule.
+   fall inside the authenticated fields of a receipt, and must carry field
+   values rather than only field names and JSON punctuation. Quotes from
+   command output or low-rank excerpts can add context but cannot meet this
+   rule.
 3. `changed` needs its quoting evidence to be newer than the head revision's
    log time.
 4. A replacement or `previously` text must differ from the block, stay a
@@ -390,8 +392,12 @@ the reviewer decides whether it is true:
    within the hub's 8,192-byte limit.
 5. Novelty check: every URL, path, host-like name, email address, code span,
    command-line flag and number of three or more digits in a replacement or
-   `previously` text must appear in the original block or in a quote. A reply
-   that adds one is rejected with `verify_novel_token`.
+   `previously` text must appear in the original block, or in quotes from two
+   independently produced items that can meet rule 2. A token counts only
+   as a whole word or a whole code span, judged after NFKC folding, and
+   quotes from command output or excerpts never count. One planted handoff
+   therefore cannot introduce a token. A reply that adds one is rejected with
+   `verify_novel_token`.
 6. `superseded_by` must be one of the related card ids supplied for that call,
    live, in the same scope and with a newer head revision. `superseded` may
    produce an op only for a card with exactly one claim block.
