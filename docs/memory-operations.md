@@ -2378,15 +2378,13 @@ following links and hashed with sha256. Immediately before every call the
 executable is resolved, opened and hashed again, and the call is refused with
 `verify_seat_not_isolated` when its path, device, inode, size, modification
 time or digest differs. The verified descriptor stays open until the seat
-process exists, and the seat execs that open file through `/proc/self/fd`
-rather than its path, so a file renamed or replaced after the check never
-receives the prompt. This needs Linux. On other POSIX systems every seat is
-refused with `verify_seat_not_isolated`, and Windows already refuses the work
-area. The descriptor is moved to 3 or above before the launch, so it is never
-the seat's stdin, stdout or stderr. It does survive the exec: the seat
-process and its children inherit one read-only descriptor to the seat
-executable. That residual is accepted for v1, because Python has no way to
-close it after the exec, and Claude seats run with tools disabled.
+process exists, and the seat execs that open file with `fexecve` rather than
+its path, so a file renamed or replaced after the check never receives the
+prompt. This needs Linux. On other POSIX systems every seat is refused with
+`verify_seat_not_isolated`, and Windows already refuses the work area. The
+descriptor is moved to 3 or above before the launch, so it is never the
+seat's stdin, stdout or stderr. A small launcher marks it close-on-exec right
+before the exec, so the seat process and its children do not inherit it.
 
 `doctor` probes each seat once. A seat passes when the call succeeds with the
 evidence above, its working directory stays empty, and its reply starts with
