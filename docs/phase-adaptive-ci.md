@@ -320,12 +320,69 @@ log. Add the PR link and move the status when a lane lands or stops.
 
 | # | workstream | status | lane file |
 |---|---|---|---|
-| 1 | Test-audit pruning pilot on the grokbot subsystem | in progress | `docs/adaptive-ci/test-audit-grokbot.md` (to be added) |
-| 2 | Windows affected-tests tail | in progress | `docs/adaptive-ci/windows-affected-tests-tail.md` (to be added) |
-| 3 | `hub-rust` path filtering in the merge queue | in progress | `docs/adaptive-ci/hub-rust-merge-queue.md` (to be added) |
-| 4 | Linux pull request test selection in shadow mode | in progress | `docs/adaptive-ci/linux-selection-shadow.md` (to be added) |
+| 1 | Test-audit pruning pilot on the grokbot subsystem | merged 2026-11-09 16:30Z ([#2438](https://github.com/escoffier-labs/brigade/pull/2438)) | [`docs/adaptive-ci/test-audit-grokbot.md`](adaptive-ci/test-audit-grokbot.md) |
+| 2 | Windows affected-tests tail | merged 2026-11-09 17:07Z ([#2440](https://github.com/escoffier-labs/brigade/pull/2440)), awaiting an after window | [`docs/adaptive-ci/windows-tail.md`](adaptive-ci/windows-tail.md) |
+| 3 | `hub-rust` path filtering in the merge queue | merged 2026-11-09 16:55Z ([#2436](https://github.com/escoffier-labs/brigade/pull/2436)), live, awaiting an after window | [`docs/adaptive-ci/hub-merge-queue.md`](adaptive-ci/hub-merge-queue.md) |
+| 4 | Linux pull request test selection in shadow mode | merged 2026-11-09 17:47Z ([#2435](https://github.com/escoffier-labs/brigade/pull/2435)), collecting observations, skips nothing | [`docs/adaptive-ci/shadow-selection.md`](adaptive-ci/shadow-selection.md) |
+| 5 | Merge-group docs classifier loaded from trusted `main` (found while building lane 3) | merged 2026-11-09 17:41Z ([#2441](https://github.com/escoffier-labs/brigade/pull/2441)) | [`docs/adaptive-ci/docs-classifier-trust.md`](adaptive-ci/docs-classifier-trust.md) |
+
+The baseline and `scripts/ci_timing_report.py` merged 2026-11-09 19:14Z
+([#2439](https://github.com/escoffier-labs/brigade/pull/2439)).
 
 <!-- adaptive-ci: add a workstream row above this line -->
+
+## Early observations
+
+These are single runs read from the Actions API, not windowed results. They
+show the mechanism working. The Results log holds the measured comparison once
+an after window exists.
+
+### Merge-queue hub selection, first day
+
+Merge-group runs of `ci.yml` after #2436 merged. Minutes are `created_at` to
+`updated_at` of the run, not the report's wall metric, and each is one run.
+
+| run | queue entry | `hub` | selector reason | minutes |
+|---|---|---|---|---|
+| 42663340698 | #2433 | skipped | `no-hub-path-changed` | 11.4 |
+| 42664944828 | #2442 | ran | `hub-selection-source-changed` from #2441 ahead of it in the queue | 13.2 |
+| 42685668967 | #2454 | skipped | `no-hub-path-changed` | 10.4 |
+| 42687967106 | #2448 | skipped | `no-hub-path-changed` | 11.5 |
+| 42679381170 | #2439 | ran | `hub-path-changed` (cumulative range) | 12.5 |
+| 42679427735 | #2444 | ran | `hub-path-changed` (cumulative range) | 16.2 |
+| 42693841937 | #2446 | ran, failed | `hub-path-changed` (cumulative range; #2446 touches no hub path) | 10.8 |
+
+The #2442 row is the case the cumulative range exists for: #2442 changed no hub
+path, but the entry ahead of it changed the selector, so the hub suite ran.
+Runs between #2436 and #2441 landing also logged
+`trusted-hub-selector-unavailable`, the fail-closed fallback while the selector
+was not yet on `main`.
+
+Two of the runs where the hub suite ran failed on hub tests unrelated to this
+campaign:
+`read_counts_tests::the_sweep_stays_within_its_row_budget_and_finishes_over_several_ticks`
+(run 42693841937, the default 20 ms sweep time budget stopped the first tick at
+1,024 rows) and
+`push_withheld_tests::push_card_404_latency_does_not_separate_absent_and_withheld_ids`
+(run 42679377812, latency ratio 1.562 against a 1.5 bound). A failed queue entry
+is re-queued and pays the run again, so these flakes show up in the after
+window's `reruns` and `runner_minutes_all_attempts`.
+
+### Review gates and account identity
+
+Agents in this repository open pull requests and push from the maintainer's
+own GitHub account, and that stays so. GitHub does not let an author approve
+their own pull request, and an admin bypass would apply to the agents too, so
+a required CODEOWNERS review cannot gate changes to the workflows or the
+selectors. The guards for CI selection therefore live inside CI:
+
+- selectors and classifiers for merge groups are loaded from trusted `main`
+  and diff the cumulative range, so a queue entry cannot choose its own tests;
+- a repository invariant test requires every `ci.yml` job to run under
+  `!cancelled()` so `ci-gate` sees it;
+- the nightly `hub-nightly.yml` runs the full hub suite on `main` and opens
+  or updates one tracking issue on failure, so a wrongly skipped hub change
+  surfaces within a day.
 
 ## Method
 
@@ -381,6 +438,7 @@ for wall and runner time, seconds for a job family.
 | date | change | PR | metric | before | after | n |
 |---|---|---|---|---|---|---|
 <!-- adaptive-ci: append result rows directly below this line -->
+| 2026-11-09 | Test-audit pilot, grokbot tests | [#2438](https://github.com/escoffier-labs/brigade/pull/2438) | grokbot test LOC; grokbot line coverage | 33,044; 78.618% | 32,600 (-1.3%); 78.618% | 53 files |
 
 ## Prior art
 
