@@ -215,6 +215,74 @@ def test_dot_and_duet_without_a_memory_hub_answer_local_only_and_send_nothing(hu
     assert hubs.seen == [] and tools.commands.argv == []
 
 
+def _sync_environment_pair(monkeypatch, tmp_path: Path) -> None:
+    """The pair the sync and mirror units carry, on another hub with another credential."""
+    monkeypatch.setenv(hubc.ENV_HUB_URL, ENV_HUB)
+    monkeypatch.setenv(hubc.ENV_HUB_TOKEN_FILE, str(token_file(tmp_path, ENV_CREDENTIAL, name="env-token")))
+
+
+def _otter_on_every_hub(hubs: Router) -> None:
+    for fake, token in ((hubs.memory, OTHER_CREDENTIAL), (hubs.other, OTHER_CREDENTIAL), (hubs.fleet, NODE_CREDENTIAL)):
+        put(fake, "repo:test/app", "otter", "otter notes", token=token)
+        fake.cards[("repo:test/app", "otter")]["trust"] = "reviewed"
+
+
+@POSIX_DOT
+@pytest.mark.parametrize("profile", [DOT, DUET], ids=["dot", "duet"])
+def test_dot_and_duet_ignore_the_sync_environment_pair(hubs, tmp_path, monkeypatch, profile):
+    # A listener that inherits the sync units' pair stays on `[memory_hub]` with its read credential.
+    target = _fleet_and_memory_hub(hubs, tmp_path, monkeypatch, memory_hub=True)
+    _sync_environment_pair(monkeypatch, tmp_path)
+    assert hubc.load_settings(target).source == "env"  # sync and mirror keep the pair
+    _otter_on_every_hub(hubs)
+    hubs.seen.clear()
+    tools = _dot_tools(target, profile)
+    assert [m["card_id"] for m in tools.memory_search("otter")["matches"]] == ["otter"]
+    assert tools.memory_card("otter", scope="repo:test/app")["content"] == "otter notes\n"
+    assert tools.push_search("otter", 3)["matches"][0]["card_id"] == "otter"
+    assert set(hubs.seen) == {(MEMORY_HUB, OTHER_CREDENTIAL)}
+
+
+@POSIX_DOT
+@pytest.mark.parametrize("profile", [DOT, DUET], ids=["dot", "duet"])
+def test_dot_and_duet_with_only_the_sync_environment_pair_have_no_memory_hub(hubs, tmp_path, monkeypatch, profile):
+    target = _fleet_and_memory_hub(hubs, tmp_path, monkeypatch, memory_hub=False)
+    _sync_environment_pair(monkeypatch, tmp_path)
+    _otter_on_every_hub(hubs)
+    hubs.seen.clear()
+    tools = _dot_tools(target, profile)
+    found = tools.memory_search("otter")
+    assert found["matches"] == [] and found["retrieval"]["reason"] == "no-memory-hub"
+    assert tools.memory_card("otter", scope="repo:test/app") == {"error": "card_not_found", "name": "otter"}
+    with pytest.raises(hubc.HubUnavailable, match="no-memory-hub"):
+        tools.push_search("otter", 3)
+    assert hubs.seen == []
+
+
+@POSIX_DOT
+@pytest.mark.parametrize("profile", [DOT, DUET], ids=["dot", "duet"])
+def test_a_relative_brigade_home_never_reads_a_workspace_fleet_toml(hubs, tmp_path, monkeypatch, profile):
+    # BRIGADE_HOME=.brigade resolves against the working directory. A workspace that holds its own
+    # .brigade/fleet.toml must not choose the connector's hub or credential (#2423).
+    for name in ("BRIGADE_FLEET_HUB_URL", "BRIGADE_FLEET_NODE_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    target = workspace(tmp_path / "ws", mode="read", **{"local-otter": "# Local otter\notter local notes\n"})
+    hostile = {"hub_url": ENV_HUB, "node_token_file": token_file(tmp_path, ENV_CREDENTIAL, name="hostile-token")}
+    user_config(target / ".brigade", hostile)
+    _otter_on_every_hub(hubs)
+    hubs.seen.clear()
+    monkeypatch.chdir(target)
+    monkeypatch.setenv("BRIGADE_HOME", ".brigade")
+    tools = _dot_tools(target, profile)
+    found = tools.memory_search("otter")
+    assert found["matches"] == [] and found["retrieval"]["reason"] == "no-memory-hub"
+    assert [m["card_id"] for m in found["local_matches"]] == ["local-otter"]
+    assert tools.memory_card("otter", scope="repo:test/app") == {"error": "card_not_found", "name": "otter"}
+    with pytest.raises(hubc.HubUnavailable, match="no-memory-hub"):
+        tools.push_search("otter", 3)
+    assert hubs.seen == []
+
+
 def test_the_dot_child_environment_carries_brigade_home_and_no_hub_variables(hubs, monkeypatch, tmp_path):
     monkeypatch.setenv(hubc.ENV_HUB_URL, ENV_HUB)
     monkeypatch.setenv(hubc.ENV_HUB_TOKEN_FILE, str(tmp_path / "token"))

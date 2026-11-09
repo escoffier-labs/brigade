@@ -38,6 +38,11 @@ keyed by hub identity, so pointing memory at another hub discards the old
 replica and rebuilds it. `HubSettings.source` says which of the three won
 (`env`, `[memory_hub]` or `fleet`), and `memory hub status` reports it.
 
+Dot and Duet read hub memory through `connector_settings` instead: an explicit
+`[memory_hub]` table in the user-level file only, never the environment pair
+(it belongs to the sync and mirror units), never the fleet values, and nothing
+at all when `BRIGADE_HOME` is relative.
+
 The client never reads the shared admin token (`BRIGADE_FLEET_TOKEN`): without a
 node token the hub client is unavailable. The node-token slot can still hold
 the admin token by mistake, and the hub then answers as its admin. `status`,
@@ -64,7 +69,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -238,11 +243,12 @@ def display_url(url: str) -> str:
     return urllib.parse.urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
 
 
-def _user_config() -> dict[str, Any]:
-    """`~/.brigade/fleet.toml` (under `BRIGADE_HOME` when set), or {} when absent."""
+def _user_config(path: Path | None = None) -> dict[str, Any]:
+    """`~/.brigade/fleet.toml` (under `BRIGADE_HOME` when set), or `path`, or {} when absent."""
     from . import fleet_client
 
-    path = fleet_client.brigade_home() / fleet_client.FLEET_CONFIG_REL_PATH.name
+    if path is None:
+        path = fleet_client.brigade_home() / fleet_client.FLEET_CONFIG_REL_PATH.name
     try:
         if not path.is_file():
             return {}
@@ -338,9 +344,6 @@ def _memory_hub_override(
     The environment pair outranks `[memory_hub]`. Each pair is all or nothing,
     and an empty environment value counts as unset, as for the fleet variables.
     """
-    from . import fleet_client
-    from .fleet_client_message_credentials import FleetMessageHubError, read_message_token_file
-
     config = _user_config()
     env_url = os.environ.get(ENV_HUB_URL, "").strip()
     env_file = os.environ.get(ENV_HUB_TOKEN_FILE, "").strip()
@@ -362,6 +365,17 @@ def _memory_hub_override(
         url, path = pair[0], Path(pair[1]).expanduser()
         source = SOURCE_TABLE
         url_name, file_name = f"[{MEMORY_HUB_TABLE}] hub_url", f"[{MEMORY_HUB_TABLE}] node_token_file"
+    url, token = _checked_override(url, path, url_name, file_name, config, fleet)
+    return url, token, source
+
+
+def _checked_override(
+    url: str, path: Path, url_name: str, file_name: str, config: dict[str, Any], fleet: dict[str, str] | None
+) -> tuple[str, str]:
+    """`(hub_url, token)` for one memory hub override, after the URL, token file and fleet credential checks."""
+    from . import fleet_client
+    from .fleet_client_message_credentials import FleetMessageHubError, read_message_token_file
+
     try:
         fleet_client._require_encrypted_or_loopback_hub(url)
     except fleet_client.FleetClientError as exc:
@@ -378,7 +392,52 @@ def _memory_hub_override(
     except FleetMessageHubError as exc:
         raise HubConfigError(f"{file_name} {path}: {exc}") from exc
     _refuse_fleet_credential(token, path, file_name, config, fleet)
-    return url.rstrip("/"), token, source
+    return url.rstrip("/"), token
+
+
+def _absolute_user_config_path() -> Path | None:
+    """The user-level fleet.toml, or None when `BRIGADE_HOME` is set to a relative path.
+
+    A relative `BRIGADE_HOME` resolves against the working directory, which can be a workspace that
+    holds its own `.brigade/fleet.toml` (#2423), so a caller that must not take its hub from there
+    reads nothing instead.
+    """
+    from . import fleet_client
+
+    override = os.environ.get("BRIGADE_HOME")
+    home = Path(override).expanduser() if override else Path.home() / ".brigade"
+    return home / fleet_client.FLEET_CONFIG_REL_PATH.name if home.is_absolute() else None
+
+
+def connector_settings(target: Path) -> HubSettings | None:
+    """Hub memory settings for the Dot and Duet connectors, or None when they have no memory hub.
+
+    Only an explicit `[memory_hub]` table in the user-level fleet.toml names the hub and the read
+    credential. The environment pair is ignored: it belongs to the sync and mirror units, and a
+    listener that inherits it must not move to their write-capable principal or another hub. The
+    fleet values are never a fallback. None when hub memory is off, when the table is absent, or when
+    `BRIGADE_HOME` is relative, and then nothing is read from the user-level file. A table that is
+    present but invalid raises `HubConfigError`, as for `load_settings`.
+    """
+    base = _hub_table_settings(target)
+    if not base.enabled:
+        return None
+    path = _absolute_user_config_path()
+    if path is None:
+        return None
+    config = _user_config(path)
+    pair = _table_override(config)
+    if pair is None:
+        return None
+    hub_url, token = _checked_override(
+        pair[0],
+        Path(pair[1]).expanduser(),
+        f"[{MEMORY_HUB_TABLE}] hub_url",
+        f"[{MEMORY_HUB_TABLE}] node_token_file",
+        config,
+        None,
+    )
+    return replace(base, hub_url=hub_url, token=token, source=SOURCE_TABLE)
 
 
 def load_settings(
@@ -389,6 +448,33 @@ def load_settings(
     A memory override (see the module docstring) replaces the fleet values. In
     `off` mode neither the environment pair nor the user-level file is read.
     """
+    base = _hub_table_settings(target)
+    if not base.enabled:
+        return base
+    override = (
+        _memory_hub_override(fleet, credential_pair=credential_pair)
+        if credential_pair is not None
+        else _memory_hub_override(fleet)
+    )
+    if override is not None:
+        hub_url, token, source = override
+    else:
+        if fleet is None:
+            from . import fleet_client
+
+            # The node token only: memory never falls back to the shared admin token,
+            # which can read every scope.
+            fleet = dict(fleet_client.load_fleet_settings())
+        hub_url, token, source = (
+            str(fleet.get("hub_url") or "").rstrip("/"),
+            str(fleet.get("node_token") or ""),
+            SOURCE_FLEET,
+        )
+    return replace(base, hub_url=hub_url, token=token, source=source)
+
+
+def _hub_table_settings(target: Path) -> HubSettings:
+    """The workspace `[hub]` table as settings, validated, with no hub URL or credential."""
     table = read_hub_table(target)
     moved = [key for key in _OVERRIDE_KEYS if key in table]
     if moved:
@@ -411,36 +497,7 @@ def load_settings(
     max_mb = table.get("replica_max_mb", DEFAULT_REPLICA_MAX_MB)
     if not isinstance(max_mb, int) or isinstance(max_mb, bool) or max_mb < 1:
         raise HubConfigError("[hub] replica_max_mb must be a positive integer")
-    if mode == "off":
-        return HubSettings(mode=mode, scope=scope, read_scopes=read_scopes, replica_max_bytes=max_mb * 1024 * 1024)
-    override = (
-        _memory_hub_override(fleet, credential_pair=credential_pair)
-        if credential_pair is not None
-        else _memory_hub_override(fleet)
-    )
-    if override is not None:
-        hub_url, token, source = override
-    else:
-        if fleet is None:
-            from . import fleet_client
-
-            # The node token only: memory never falls back to the shared admin token,
-            # which can read every scope.
-            fleet = dict(fleet_client.load_fleet_settings())
-        hub_url, token, source = (
-            str(fleet.get("hub_url") or "").rstrip("/"),
-            str(fleet.get("node_token") or ""),
-            SOURCE_FLEET,
-        )
-    return HubSettings(
-        mode=mode,
-        scope=scope,
-        read_scopes=read_scopes,
-        replica_max_bytes=max_mb * 1024 * 1024,
-        hub_url=hub_url,
-        token=token,
-        source=source,
-    )
+    return HubSettings(mode=mode, scope=scope, read_scopes=read_scopes, replica_max_bytes=max_mb * 1024 * 1024)
 
 
 def hub_identity(hub_url: str) -> str:

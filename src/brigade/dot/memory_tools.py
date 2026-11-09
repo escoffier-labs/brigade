@@ -405,21 +405,22 @@ class MemoryTools:
         return client.call("search", timeout=SEARCH_BUDGET_SECONDS, query=query, limit=limit, query_source=source)
 
     def _memory_hub_client(self) -> MemoryHubClient:
-        """The memory hub Dot and Duet search and read: `[memory_hub]` (or its environment pair) only.
+        """The memory hub Dot and Duet search and read: an explicit user-level `[memory_hub]` only.
 
         The listener's message authority names the fleet hub, which serves no memory, so hub memory
-        reads use the memory hub and its own read credential, the one `brigade memory` uses on this
-        host. A host whose memory settings fall back to the fleet values has no memory hub here: this
-        raises `HubUnavailable("no-memory-hub")` and the fleet hub and the node token are never used.
-        A `[memory_hub]` that cannot be read raises `HubConfigError`.
+        reads use the memory hub and the read credential its `[memory_hub]` table names
+        (`connector_settings`). The `BRIGADE_MEMORY_HUB_*` pair, which belongs to the sync and mirror
+        units, the fleet values and a relative `BRIGADE_HOME` never choose it. With no such table this
+        raises `HubUnavailable("no-memory-hub")`, and nothing is sent to any hub. A `[memory_hub]`
+        that cannot be read raises `HubConfigError`.
         """
-        from ..memory_hub_client import SOURCE_FLEET, HubConfigError, HubUnavailable, MemoryHubClient, load_settings
+        from ..memory_hub_client import HubConfigError, HubUnavailable, MemoryHubClient, connector_settings
 
         try:
-            settings = load_settings(self.workspace)
+            settings = connector_settings(self.workspace)
         except (ValueError, OSError) as exc:
             raise HubConfigError("memory hub settings could not be read") from exc
-        if not settings.enabled or settings.source == SOURCE_FLEET:
+        if settings is None:
             raise HubUnavailable(NO_MEMORY_HUB)
         return MemoryHubClient(settings.hub_url, settings.token)
 
