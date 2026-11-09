@@ -1686,3 +1686,22 @@ def test_a_held_script_is_refused_without_running(tmp_path):
     assert result.code == 126
     assert "command launch failed: held-script (not a native binary" in result.stderr
     assert not marker.exists()
+
+
+@posix
+def test_the_held_launcher_reports_an_unreadable_environment_as_a_launch_failure(tmp_path):
+    # procfs can be masked (hidepid, a sandbox profile). The launcher must fail through its
+    # launch-failure path, never with a traceback, and must not exec anything.
+    launcher = proc._HELD_LAUNCHER.replace("/proc/self/environ", str(tmp_path / "missing-environ"))
+    assert launcher != proc._HELD_LAUNCHER
+    marker = tmp_path / "ran"
+    done = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", launcher, "0", "seat", str(marker)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert done.returncode == 126, done.stderr
+    assert done.stderr.startswith("command launch failed: seat ("), done.stderr
+    assert "Traceback" not in done.stderr
+    assert not marker.exists()

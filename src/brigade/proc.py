@@ -1490,14 +1490,14 @@ HELD_FD_MIN = 3
 # reset before the exec.
 _HELD_LAUNCHER = r"""
 import errno, os, signal, sys
-for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
+for name in ("SIGPIPE", "SIGXFSZ"):
     if hasattr(signal, name):
         signal.signal(getattr(signal, name), signal.SIG_DFL)
 fd, argv = int(sys.argv[1]), sys.argv[2:]
-with open("/proc/self/environ", "rb") as handle:
-    env = dict(entry.partition(b"=")[::2] for entry in handle.read().split(b"\0") if entry.find(b"=") > 0)
-os.set_inheritable(fd, False)
 try:
+    with open("/proc/self/environ", "rb") as handle:
+        env = dict(entry.partition(b"=")[::2] for entry in handle.read().split(b"\0") if entry.find(b"=") > 0)
+    os.set_inheritable(fd, False)
     os.execve(fd, argv, env)
 except OSError as exc:
     reason = "not a native binary this system runs" if exc.errno == errno.ENOENT else exc.strerror
