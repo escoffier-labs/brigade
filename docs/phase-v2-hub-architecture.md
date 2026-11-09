@@ -2714,8 +2714,10 @@ Invariant tests, in S19a to S19e:
   `card_id` fields, and later recalls skip them. Prompt text never adds an
   exclusion, so a pasted id cannot hide a card. Trusted dispatch envelopes can
   add theirs in S25, and until then a T3 child may see a card its brief also
-  carried. "Opened" means a `memory/cards/` file read through the Read tool,
-  recorded under its front matter id as recall names it, else its file stem.
+  carried. "Opened" means a card file read through the Read tool: any `.md`
+  at any depth under a memory-care card root that card search would list,
+  never a symlink or a path that leaves the root. It is recorded under the id
+  card search's own loader gives it.
   The Stop hook sends one `capture` per batch of keys not yet captured, at
   most 50 of each list, so a long session can produce several events under one
   `session_ref`. A batch the hub did not take is retried at the next Stop with

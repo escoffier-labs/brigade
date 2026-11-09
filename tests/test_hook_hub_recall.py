@@ -404,13 +404,48 @@ def test_capture_against_a_hung_hub_is_killed_within_its_cap(wired, monkeypatch,
     assert hub_recall.load(hub_recall.ledger_path(target, SESSION))["pending"] is not None
 
 
-def test_only_memory_card_reads_count_as_opened(wired):
-    target, _memory = wired
-    other = target / "docs" / "cards" / "comet.md"
-    assert not hub_recall.observe_read(target, _payload(target, "PostToolUse", tool_input={"file_path": str(other)}))
-    card = target / "memory" / "cards" / "comet.md"
-    assert hub_recall.observe_read(target, _payload(target, "PostToolUse", tool_input={"file_path": str(card)}))
+def _read(target: Path, path: Path | str) -> bool:
+    return hub_recall.observe_read(target, _payload(target, "PostToolUse", tool_input={"file_path": str(path)}))
+
+
+def test_only_card_root_reads_count_as_opened(wired):
+    target, memory = wired
+    other = memory / "docs" / "cards" / "comet.md"
+    other.parent.mkdir(parents=True)
+    other.write_text("---\ntitle: Not a card\n---\nbody\n", encoding="utf-8")
+    assert not _read(target, other)  # a .md outside every card root
+    assert not _read(target, memory / "memory" / "cards" / ".." / ".." / "docs" / "cards" / "comet.md")
+    assert not _read(target, memory / "memory" / "cards" / "missing.md")
+    assert _read(target, memory / "memory" / "cards" / "comet.md")
     assert hub_recall.load(hub_recall.ledger_path(target, SESSION))["opened"] == ["comet"]
+
+
+def test_a_nested_card_is_opened_under_the_id_search_pushed(wired):
+    target, memory = wired
+    nested = memory / "memory" / "cards" / "runbooks" / "deep"
+    nested.mkdir(parents=True)
+    (nested / "orbit.md").write_text(
+        f"---\nid: {NESTED_ID}\ntitle: Orbit insertion runbook\ntags: [orbit]\n---\norbit steps\n", encoding="utf-8"
+    )
+    hub_recall.recall_text(target, _payload(target, "UserPromptSubmit"), prompt="orbit insertion runbook")
+    ledger = hub_recall.load(hub_recall.ledger_path(target, SESSION))
+    assert NESTED_ID in ledger["pushed"]  # search walks card roots at any depth
+    assert _read(target, nested / "orbit.md")
+    assert hub_recall.load(hub_recall.ledger_path(target, SESSION))["opened"] == [NESTED_ID]
+
+
+@posix_only
+def test_a_symlink_that_escapes_the_card_root_is_ignored(wired, tmp_path):
+    target, memory = wired
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("---\nid: card-escape\ntitle: Outside\n---\nbody\n", encoding="utf-8")
+    cards = memory / "memory" / "cards"
+    (cards / "linked.md").symlink_to(outside / "secret.md")
+    (cards / "linked-dir").symlink_to(outside, target_is_directory=True)
+    assert not _read(target, cards / "linked.md")
+    assert not _read(target, cards / "linked-dir" / "secret.md")
+    assert hub_recall.load(hub_recall.ledger_path(target, SESSION))["opened"] == []
 
 
 def test_capture_is_off_without_hub_memory(wired):
@@ -595,6 +630,7 @@ def test_without_the_marker_private_text_is_withheld_from_hooks(wired):
 # --- opened cards resolve to their canonical id ---
 
 CANONICAL_ID = "card-0b5e7a52-3c1d-4e8f-9a2b-6d4c8e1f3a57"
+NESTED_ID = "card-7c2d9e14-5a3b-4f61-8b0c-2e9d4f7a1b36"
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])

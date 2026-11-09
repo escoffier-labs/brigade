@@ -50,7 +50,6 @@ _CARD_ID = r"[a-z0-9][a-z0-9._-]{0,127}"
 # `cards/<id>.md` paths and `card_id: <id>` fields, as the work brief writes them.
 _BRIEF_CARD_PATH = re.compile(rf"(?<![A-Za-z0-9._-])cards/({_CARD_ID})\.md(?![A-Za-z0-9_-])")
 _BRIEF_CARD_FIELD = re.compile(rf"\bcard_id[\"']?\s*[:=]\s*[\"']?({_CARD_ID})")
-_READ_CARD_PATH = re.compile(r"(?:^|[/\\])memory[/\\]cards[/\\]([A-Za-z0-9][A-Za-z0-9._-]{0,127})\.md$")
 
 
 __all__ = ["AUDIENCE_ENV", "REMOTE_ENV", "audience", "brief_card_ids", "capture", "recall_text"]
@@ -318,38 +317,75 @@ def capture(target: Path, session_id: str, *, budget: float | None = None) -> st
         return "error"
 
 
-def opened_card_id(card: Path, name: str) -> str | None:
-    """The canonical id recall gives this card: the id card search computes for the same file.
+def card_under_roots(memory_root: Path, raw: Path) -> tuple[Path, Path] | None:
+    """``(card, root)`` when ``raw`` is a card search would list, else None.
 
-    Calls card search's own loader (``memory_cmd._card_search_fields``) with the
-    memory root above ``memory/cards/``, so the read, the front matter parse,
-    its limits and the file stem fallback are the ones search uses.
+    Mirrors ``memory_cmd._iter_cards``: any ``.md`` file at any depth under one
+    of the memory-care ``card_roots`` that passes its include and exclude
+    paths. A symlinked file, a raw ``..`` part and a path whose real location
+    leaves the card root are refused.
     """
+    from ..memory_cmd import MemoryCareConfig, _path_matches, load_config
+
+    if raw.suffix != ".md" or ".." in raw.parts:
+        return None
+    try:
+        root = memory_root.expanduser().resolve()
+        if raw.is_symlink() or not raw.is_file():
+            return None
+        real = raw.resolve()
+        config = load_config(root) or MemoryCareConfig()
+    except (OSError, ValueError):
+        return None
+    for root_text in config.card_roots:
+        try:
+            card_root = (root / root_text).resolve()
+        except OSError:
+            continue
+        if not real.is_relative_to(card_root):
+            continue
+        rel = real.relative_to(root).as_posix()
+        if config.include_paths and not _path_matches(rel, config.include_paths):
+            return None
+        if config.exclude_paths and _path_matches(rel, config.exclude_paths):
+            return None
+        return real, root
+    return None
+
+
+def opened_card_id(card: Path, memory_root: Path) -> str | None:
+    """The id card search gives this card, through search's own loader and parser.
+
+    ``card`` is a real path under ``memory_root`` (from ``card_under_roots``),
+    so the front matter parse, its limits and the fallback match search.
+    """
+    from ..card_identity import card_identity
     from ..memory_cmd import _card_search_fields
 
-    root = card.parent.parent.parent
-    try:
-        fields = _card_search_fields(card, root)
-    except (OSError, ValueError):
-        fields = {}
-    card_id = fields.get("card_id") or name
+    fields = _card_search_fields(card, memory_root)
+    card_id = fields.get("card_id") or card_identity({}, card.relative_to(memory_root).as_posix()).card_id
     return card_id if _keys([card_id]) else None
 
 
 def observe_read(target: Path, payload: dict[str, Any]) -> bool:
     """Record a card opened through the Read tool, under its canonical id. Ids only."""
+    from .. import memory_hooks
+
     tool_input = payload.get("tool_input")
     file_path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
     session_id = _session(payload)
-    if not isinstance(file_path, str) or session_id is None:
+    if not isinstance(file_path, str) or not file_path.endswith(".md") or session_id is None:
         return False
-    match = _READ_CARD_PATH.search(file_path)
-    if match is None:
+    memory_root, status = memory_hooks.resolve_memory_recall_target(target)
+    if status != "active" or memory_root is None:
         return False
-    card = Path(file_path)
-    if not card.is_absolute():
-        card = (_cwd(payload) or target) / card
-    card_id = opened_card_id(card, match.group(1))
+    raw = Path(file_path)
+    if not raw.is_absolute():
+        raw = (_cwd(payload) or target) / raw
+    found = card_under_roots(memory_root, raw)
+    if found is None:
+        return False
+    card_id = opened_card_id(*found)
     if card_id is None:
         return False
     update(ledger_path(target, session_id), lambda ledger: _append(ledger, "opened", [card_id]))
@@ -368,7 +404,7 @@ def after_event(
         if event == "PostToolUse" and payload.get("tool_name") == "Read":
             tool_input = payload.get("tool_input")
             file_path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
-            if not isinstance(file_path, str) or _READ_CARD_PATH.search(file_path) is None:
+            if not isinstance(file_path, str) or not file_path.endswith(".md"):
                 return
             wired = target()
             if wired is not None:

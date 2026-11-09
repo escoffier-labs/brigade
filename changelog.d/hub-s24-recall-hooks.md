@@ -18,8 +18,8 @@
 - Recall skips cards the SessionStart work brief already named, so a card is not shown twice. Ids
   pasted into a prompt never hide a card.
 - The Stop hook sends hub memory a `recall.capture` event with a hashed session reference and the
-  card keys recall showed and the session opened with the Read tool, under each card's front
-  matter id. It holds ids only. A batch the hub does not take stays pending and is retried with
+  card keys recall showed and the session opened with the Read tool (any card search lists, at any
+  depth under a card root), under the id card search gives it. It holds ids only. A batch the hub does not take stays pending and is retried with
   the same event id at the next Stop.
 - At session start the work brief runs first under its own deadline, and memory recall gets only
   the hook time the brief left. On a slow host recall is skipped instead of costing the brief its
