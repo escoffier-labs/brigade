@@ -172,11 +172,17 @@ jobs:
                   if oid(event["merge_group"]["head_sha"]) != head:
                       raise ValueError("merge group mismatch")
                   # The fixed-refspec main commit, which must be the one the
-                  # trusted selector validated the range start against.
+                  # trusted selector validated the range start against. Nothing
+                  # refetches the ref between the steps, so this is a
+                  # consistency check between the selector's output and the ref.
                   source = oid(git("rev-parse", "--verify", "refs/ci-trusted/main^{commit}").decode().strip())
                   if oid(os.environ["CI_TRUSTED_MAIN"]) != source:
-                      raise ValueError("trusted main moved")
-                  extra = {"CI_MERGE_GROUP_START": oid(os.environ["CI_MERGE_GROUP_START"])}
+                      raise ValueError("selector target disagrees with the trusted ref")
+                  # The classifier re-checks that the start is in main's history.
+                  extra = {
+                      "CI_TRUSTED_MAIN": source,
+                      "CI_MERGE_GROUP_START": oid(os.environ["CI_MERGE_GROUP_START"]),
+                  }
               elif name == "push":
                   source = oid(event["before"])
                   if oid(event["after"]) != head:
@@ -196,7 +202,10 @@ jobs:
                   trusted = Path(directory) / "classifier.py"
                   trusted.write_bytes(classifier)
                   output = Path(directory) / "output"
-                  environment = {key: value for key, value in os.environ.items() if key != "CI_MERGE_GROUP_START"}
+                  environment = {
+                      key: value for key, value in os.environ.items()
+                      if key not in {"CI_TRUSTED_MAIN", "CI_MERGE_GROUP_START"}
+                  }
                   subprocess.run(
                       [sys.executable, "-I", "-S", str(trusted)], check=True, timeout=300,
                       env=dict(environment, GITHUB_OUTPUT=str(output), **extra),

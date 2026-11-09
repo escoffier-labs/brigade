@@ -10,6 +10,8 @@ tests run both literal ci.yml steps, in order, against a local origin.
 
 import os
 import re
+import subprocess
+import sys
 
 import pytest
 
@@ -76,6 +78,9 @@ def test_the_docs_step_runs_after_and_reads_the_trusted_selector_outputs():
     assert "if:" not in docs.split("        run: |\n", 1)[0]
     # The classifier source in a merge group is the fixed-refspec ref, never base_sha.
     assert '"rev-parse", "--verify", "refs/ci-trusted/main^{commit}"' in body
+    # The classifier gets that main commit and the start only in a merge group.
+    assert '"CI_TRUSTED_MAIN": source,' in body
+    assert 'if key not in {"CI_TRUSTED_MAIN", "CI_MERGE_GROUP_START"}' in body
     assert 'base_sha"' not in body
     assert '[sys.executable, "-I", "-S", str(trusted)]' in body
 
@@ -250,12 +255,16 @@ def test_the_classifier_refuses_another_target_branch(queue, base_ref):
     }
 
 
-@pytest.mark.parametrize("start", ["", "head", "unrelated", "0" * 40])
+@pytest.mark.parametrize("start", ["", "head", "base_sha", "unrelated", "0" * 40])
 def test_the_classifier_refuses_a_missing_or_wrong_range_start(queue, start):
     entry_a, entry_b = _enqueue(queue, ["docs/one.md"], ["docs/two.md"])
     hub = _valid_hub(queue, entry_b, entry_a)
     if start == "head":
         start = entry_b
+    elif start == "base_sha":
+        # The original non-cumulative range: below base_sha, but A is not on
+        # main yet, so base_sha..head would skip A's change.
+        start = entry_a
     elif start == "unrelated":
         _run(queue.seed, "switch", "-qc", "side", "main")
         start = _commit(queue.seed, "docs/side.md", message="side")
@@ -272,7 +281,55 @@ def test_the_classifier_refuses_a_missing_or_wrong_range_start(queue, start):
     assert result["reason"] == expected
 
 
-def test_a_main_that_moved_after_selection_requires_full_ci(queue):
+def _refusal(reason):
+    return {"docs_only": "false", "uncertain": "true", "reason": reason}
+
+
+@pytest.mark.parametrize(
+    ("trusted_main", "start", "expected"),
+    [
+        (None, "selector", _refusal("missing-trusted-main")),
+        ("", "selector", _refusal("missing-trusted-main")),
+        ("0" * 40, "selector", _refusal("missing-or-invalid-commit")),
+        ("selector", None, _refusal("missing-cumulative-range")),
+        ("selector", "", _refusal("missing-cumulative-range")),
+        ("selector", "selector", DOCS),
+    ],
+)
+def test_the_classifier_refuses_a_merge_group_without_its_trusted_inputs(queue, trusted_main, start, expected):
+    # The bootstrap always passes both values in a merge group; only an older
+    # bootstrap could omit one. Run the classifier directly to show it refuses.
+    entry_a, entry_b = _enqueue(queue, ["docs/one.md"], ["docs/two.md"])
+    hub = _valid_hub(queue, entry_b, entry_a)
+    output = queue.tmp / "direct-output.txt"
+    environment = dict(
+        os.environ,
+        GITHUB_EVENT_NAME="merge_group",
+        GITHUB_EVENT_PATH=str(queue.tmp / "event.json"),
+        GITHUB_SHA=entry_b,
+        GITHUB_OUTPUT=str(output),
+    )
+    for name, value, selected in (
+        ("CI_TRUSTED_MAIN", trusted_main, hub["target"]),
+        ("CI_MERGE_GROUP_START", start, hub["start"]),
+    ):
+        environment.pop(name, None)
+        if value is not None:
+            environment[name] = selected if value == "selector" else value
+    subprocess.run(
+        [sys.executable, "-I", "-S", str(CLASSIFIER)],
+        cwd=queue.tmp / "work",
+        env=environment,
+        check=True,
+        capture_output=True,
+    )
+    values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+    assert values == expected
+
+
+def test_a_selector_target_that_disagrees_with_the_trusted_ref_requires_full_ci(queue):
+    # Nothing refetches refs/ci-trusted/main between the two steps, so this is
+    # a consistency check between the selector's output and the ref.
     (head,) = _enqueue(queue, ["docs/guide.md"])
     hub = _valid_hub(queue, head, queue.main)
     hub["target"] = "1" * 40

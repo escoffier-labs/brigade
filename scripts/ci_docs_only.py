@@ -2,11 +2,13 @@
 """Conservatively classify the complete GitHub CI event diff, without dependencies.
 
 In a merge group, ci.yml loads this file from the tip of main and passes
-CI_MERGE_GROUP_START: the merge base of main and the group head, which the
-trusted hub selector (scripts/ci_hub_select.py) validated. `merge_group.base_sha`
-is the previous queue entry's head, so `base_sha..head_sha` would miss every
-entry queued ahead of this one. Pull requests and pushes diff from their own
-base as before.
+CI_TRUSTED_MAIN (that main commit) and CI_MERGE_GROUP_START: the merge base of
+main and the group head, which the trusted hub selector (scripts/ci_hub_select.py)
+validated. `merge_group.base_sha` is the previous queue entry's head, so
+`base_sha..head_sha` would miss every entry queued ahead of this one. This file
+re-checks the start itself: it must be in main's history and below `base_sha`,
+so the range holds every unmerged entry. Pull requests and pushes diff from
+their own base as before.
 """
 
 import json
@@ -106,14 +108,24 @@ def classify() -> tuple[bool, bool, str]:
             if commit_sha(group["head_sha"]) != head:
                 raise ValueError("merge-group-head-mismatch")
             group_base = commit_sha(group["base_sha"])
+            trusted_main = os.environ.get("CI_TRUSTED_MAIN", "")
+            if not SHA.fullmatch(trusted_main):
+                raise ValueError("missing-trusted-main")
+            trusted_main = commit_sha(trusted_main)
             start = os.environ.get("CI_MERGE_GROUP_START", "")
             if not SHA.fullmatch(start):
                 raise ValueError("missing-cumulative-range")
             base = commit_sha(start)
+            ensure_commit(trusted_main)
             ensure_commit(group_base)
             ensure_commit(base)
-            # The range must contain base_sha..head_sha and every entry ahead of it.
-            if not (is_ancestor(base, group_base) and is_ancestor(group_base, head)):
+            # A start in main's history leaves every unmerged entry ahead of this
+            # one inside start..head; a start at or below base_sha keeps this
+            # entry's own change in it. `start == base_sha` with base_sha not yet
+            # on main (the original non-cumulative range) fails the first check.
+            if not (
+                is_ancestor(base, trusted_main) and is_ancestor(base, group_base) and is_ancestor(group_base, head)
+            ):
                 raise ValueError("cumulative-range-not-below-group-base")
         elif event_name == "push":
             base = commit_sha(event["before"])
@@ -166,6 +178,7 @@ def classify() -> tuple[bool, bool, str]:
                 "not-the-pull-request-test-merge",
                 "merge-group-head-mismatch",
                 "unexpected-target-branch",
+                "missing-trusted-main",
                 "missing-cumulative-range",
                 "cumulative-range-not-below-group-base",
                 "push-head-mismatch",
