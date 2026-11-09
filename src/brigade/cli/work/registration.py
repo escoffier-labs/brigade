@@ -117,8 +117,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     mode_sub.required = True
     p_mode_show = mode_sub.add_parser("show", help="Print the work mode and safety-rails state.")
     p_mode_set = mode_sub.add_parser("set", help="Persist the work mode and reconcile managed Claude hooks.")
-    # "enforced" is the earlier name for engineer and stays accepted; the metavar hides it.
-    p_mode_set.add_argument("mode", choices=("engineer", "yolo", "enforced"), metavar="{engineer,yolo}")
+    # No argparse choices: set_mode validates and also accepts "enforced", the earlier
+    # name for engineer, without listing it in help or invalid-choice errors.
+    p_mode_set.add_argument("mode", metavar="{engineer,yolo}")
     p_work_rails = work_sub.add_parser(
         "rails", help="Show or switch safety rails (content guard and pre-push scanning); independent of the mode."
     )
