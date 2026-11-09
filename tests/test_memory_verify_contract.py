@@ -35,7 +35,7 @@ BLOCK = "c-abcdef"
 SECOND = "c-123456"
 HEAD_SHA = "06e6191920948a5a6545822516abf00c528e3877"
 BASE_SHA = "1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c"
-ABBREV = HEAD_SHA[:7]
+ABBREV = HEAD_SHA[:12]
 CLAIM = f"The Zanzibar fix landed in commit {ABBREV} on the main branch."
 FIXED = f"The Zanzibar fix landed in commit {HEAD_SHA} on the main branch."
 EARLIER = f"The Zanzibar fix landed in commit {BASE_SHA} on the main branch."
@@ -210,12 +210,17 @@ class FakeSeat:
         return json.dumps({"schema": vc.SCHEMA, "card_id": self.card_id, "blocks": blocks})
 
 
+# A test fake for the slice 9 git resolver: the fixture abbreviation names the fixture commit.
+RESOLVER = {ABBREV: HEAD_SHA}
+
+
 def run(card=None, assembled=None, propose=None, confirm=None, **kwargs):
     card = card or make_card()
     assembled = assembled or standard()
     propose = propose or FakeSeat(block_entry())
     confirm = confirm or FakeSeat(block_entry())
     kwargs.setdefault("rng", random.Random(7))
+    kwargs.setdefault("resolve_commit", RESOLVER.get)
     return vc.verify_card(card, assembled, propose=propose, confirm=confirm, **kwargs), propose, confirm
 
 
@@ -424,6 +429,26 @@ def test_append_evidence_needs_corroborated_support():
     assert result.proposal is None and reason(result) == vc.VERIFIED
 
 
+def test_append_evidence_refs_that_differ_between_seats_disagree():
+    card, assembled, _entry, uncited = supported_case()
+    other = handoff_item(
+        f"Rechecked on 2026-11-04: the build is at {HEAD_SHA} again.\n", path="memory/handoff-inbox/other.md"
+    )
+    assembled.items.append(other)
+    refs = {uncited.source: "ref-uncited", other.source: "ref-other"}
+    mine = block_entry(verdict="supported", quotes=(AUTH_QUOTE, UNCITED_QUOTE))
+    theirs = block_entry(verdict="supported", quotes=(AUTH_QUOTE, f"the build is at {HEAD_SHA} again"))
+    result, _, _ = run(
+        card=card,
+        assembled=assembled,
+        propose=FakeSeat(mine),
+        confirm=FakeSeat(theirs),
+        propose_confirmations=True,
+        uncited_refs=refs,
+    )
+    assert result.proposal is None and reason(result) == vc.DISAGREEMENT
+
+
 def test_append_evidence_refuses_a_ref_that_also_represents_command_output():
     """Daybreak P2: a receipt's fields and its context-only output share one source and one ref."""
     card, assembled, entry, uncited = supported_case(AUTH_QUOTE, UNCITED_QUOTE)
@@ -590,7 +615,8 @@ def test_an_unauthenticated_receipt_or_an_excerpt_cannot_anchor_corroboration():
     fields, output = receipt_items(rank=ev.MEDIUM)
     assert not vc.claim_corroborated({HEAD_SHA}, [(fields, AUTH_QUOTE), (handoff_item(), QUOTE_HANDOFF)])
     result, _, _ = run(assembled=assembly(fields, output, handoff_item()))
-    assert reason(result) == vc.UNCORROBORATED
+    # No authenticated commit field names a candidate, so commit identity fails first.
+    assert reason(result) == vc.COMMIT_AMBIGUOUS and result.proposal is None
     fields, _ = receipt_items()
     excerpt = excerpt_item(f"Session: moved the Zanzibar fix to commit {HEAD_SHA} on 2026-11-02 today.")
     assert not vc.claim_corroborated({HEAD_SHA}, [(fields, AUTH_QUOTE), (excerpt, QUOTE_HANDOFF)])
@@ -651,7 +677,7 @@ def test_only_a_full_commit_id_in_a_commit_field_anchors():
     short = HEAD_SHA[:13]
     holder = handoff_item(f"Moved the Zanzibar fix to commit {short} on 2026-11-02 today.\n")
     assert not vc.claim_corroborated({short}, [(fields, AUTH_QUOTE), (holder, f"to commit {short} on 2026-11-02")])
-    assert vc.commit_expansions(FIXED.replace(HEAD_SHA, HEAD_SHA[:12]), CLAIM) == (set(), vc.NOT_ABBREVIATION)
+    assert vc.commit_expansions(FIXED.replace(HEAD_SHA, HEAD_SHA[:20]), CLAIM) == ({}, vc.NOT_ABBREVIATION)
     # A commit field that does not hold a commit id anchors nothing.
     payload = receipt_payload()
     payload["baseline_commit"] = "release-2-final"
@@ -661,13 +687,13 @@ def test_only_a_full_commit_id_in_a_commit_field_anchors():
 
 
 def test_commit_expansions_returns_the_expanded_ids_only():
-    assert vc.commit_expansions(FIXED, CLAIM) == ({HEAD_SHA}, None)
+    assert vc.commit_expansions(FIXED, CLAIM) == ({ABBREV: HEAD_SHA}, None)
     spaced = f"The  Zanzibar fix\tlanded in commit {HEAD_SHA} on the main branch. "
-    assert vc.commit_expansions(spaced, CLAIM) == ({HEAD_SHA}, None)
-    assert vc.commit_expansions(CLAIM, CLAIM) == (set(), vc.EDIT_OUT_OF_SCOPE)
+    assert vc.commit_expansions(spaced, CLAIM) == ({ABBREV: HEAD_SHA}, None)
+    assert vc.commit_expansions(CLAIM, CLAIM) == ({}, vc.EDIT_OUT_OF_SCOPE)
     # A full-length old token never changes, not even into a longer id that starts with it.
     full = FIXED.replace(HEAD_SHA, HEAD_SHA + "a" * 24)
-    assert vc.commit_expansions(full, FIXED) == (set(), vc.NOT_ABBREVIATION)
+    assert vc.commit_expansions(full, FIXED) == ({}, vc.NOT_ABBREVIATION)
 
 
 @pytest.mark.parametrize(
@@ -690,9 +716,9 @@ def test_a_commit_reference_is_marked_only_by_the_word_commit_and_one_space(clai
     replacement = claim.replace(ABBREV, HEAD_SHA)
     expanded, code = vc.commit_expansions(replacement, claim)
     if marked:
-        assert (expanded, code) == ({HEAD_SHA}, None)
+        assert (expanded, code) == ({ABBREV: HEAD_SHA}, None)
     else:
-        assert expanded == set() and code in (vc.NOT_COMMIT_REFERENCE, vc.EDIT_OUT_OF_SCOPE)
+        assert expanded == {} and code in (vc.NOT_COMMIT_REFERENCE, vc.EDIT_OUT_OF_SCOPE)
 
 
 NOT_LANDED = f"The Zanzibar fix has not landed in commit {ABBREV} on the main branch."
@@ -795,7 +821,106 @@ def test_a_marked_abbreviation_expanded_to_its_authenticated_full_id_opens_repla
     assert op["type"] == vc.REPLACE and op["text"] == claim.replace(ABBREV, HEAD_SHA)
 
 
-# --- Check 4# --- Check 4: replacement bounds ----------------------------------------------------------
+# --- Round 4: commit identity (Daybreak P1-a, P1-b) -------------------------------------
+
+TWIN_SHA = ABBREV + "aaaabbbbccccddddeeeeffff0000"
+
+
+def test_a_short_abbreviation_never_expands():
+    """Daybreak P1-a: a 7-character prefix (28 bits) can be ground to an authentic receipt's commit."""
+    claim = f"Do not commit {HEAD_SHA[:7]} to the release index."
+    card = make_card((BLOCK, claim))
+    entry = block_entry(replacement=claim.replace(HEAD_SHA[:7], HEAD_SHA))
+    result, _, confirm = run(card=card, propose=FakeSeat(entry), confirm=FakeSeat(entry))
+    assert result.proposal is None and confirm.prompts == []
+    assert reason(result) == vc.ABBREVIATION_TOO_SHORT
+
+
+def twin_assembly(*, quote_twin):
+    """Two authenticated commit fields that both start with the fixture abbreviation."""
+    assert len(TWIN_SHA) == 40 and TWIN_SHA != HEAD_SHA and TWIN_SHA.startswith(ABBREV)
+    fields, output = receipt_items()
+    twin_payload = receipt_payload(run="20261103-080000-work-verify-fed987")
+    twin_payload["git"] = {"head": TWIN_SHA, "branch": "main"}
+    twin, _ = receipt_items(run="20261103-080000-work-verify-fed987", payload=twin_payload)
+    items = (fields, output, handoff_item(), twin) if quote_twin else (twin, fields, output, handoff_item())
+    return assembly(*items)
+
+
+@pytest.mark.parametrize("quote_twin", [True, False])
+def test_two_authenticated_candidates_abstain_even_when_both_seats_pick_one(quote_twin):
+    """Daybreak P1-b: both seats expand to the same one of two authenticated ids sharing the prefix."""
+    assembled = twin_assembly(quote_twin=quote_twin)
+    result, _, confirm = run(assembled=assembled, propose=FakeSeat(block_entry()), confirm=FakeSeat(block_entry()))
+    assert result.proposal is None and confirm.prompts == []
+    assert reason(result) == vc.COMMIT_AMBIGUOUS
+    assert vc.commit_candidates([*assembled.items], ABBREV) == {HEAD_SHA, TWIN_SHA}
+
+
+def _raises(_abbreviation):
+    raise RuntimeError("resolver failed")
+
+
+@pytest.mark.parametrize(
+    "resolver",
+    [
+        {ABBREV: TWIN_SHA}.get,  # a different full id
+        {}.get,  # None
+        _raises,  # a failing resolver
+        {ABBREV: HEAD_SHA.upper()}.get,  # not the candidate's exact spelling
+    ],
+)
+def test_a_resolver_that_does_not_name_the_candidate_abstains(resolver):
+    result, _, confirm = run(resolve_commit=resolver)
+    assert result.proposal is None and confirm.prompts == []
+    assert reason(result) == vc.COMMIT_UNRESOLVED
+
+
+def test_one_abbreviation_expanded_two_ways_is_refused():
+    claim = f"Landed in commit {ABBREV}, then commit {ABBREV} again."
+    replacement = f"Landed in commit {HEAD_SHA}, then commit {TWIN_SHA} again."
+    assert vc.commit_expansions(replacement, claim) == ({}, vc.NOT_ABBREVIATION)
+
+
+def test_a_unique_candidate_other_than_the_seats_id_is_uncorroborated():
+    twin_payload = receipt_payload(run="20261103-080000-work-verify-fed987")
+    twin_payload["git"] = {"head": TWIN_SHA, "branch": "main"}
+    twin, output = receipt_items(run="20261103-080000-work-verify-fed987", payload=twin_payload)
+    twin_quote = f'"commit": "{TWIN_SHA}"'
+    second = handoff_item(
+        f"Confirmed the fix sits on commit {HEAD_SHA} today.\n", path="memory/handoff-inbox/second.md"
+    )
+    entry = block_entry(quotes=(twin_quote, QUOTE_HANDOFF, f"sits on commit {HEAD_SHA} today"))
+    assembled = assembly(twin, output, handoff_item(), second)
+    result, _, _ = run(assembled=assembled, propose=FakeSeat(entry))
+    assert result.proposal is None and reason(result) == vc.UNCORROBORATED
+
+
+def test_no_resolver_means_no_expansion():
+    card = make_card()
+    result = vc.verify_card(
+        card, standard(), propose=FakeSeat(block_entry()), confirm=FakeSeat(block_entry()), rng=random.Random(7)
+    )
+    assert result.proposal is None
+    assert reason(result) == vc.COMMIT_UNRESOLVED
+
+
+def test_a_unique_twelve_character_abbreviation_with_a_matching_resolver_opens_replace_block():
+    assert len(ABBREV) == vc.MIN_ABBREVIATION and vc.commit_candidates([*standard().items], ABBREV) == {HEAD_SHA}
+    calls = []
+
+    def resolver(abbreviation):
+        calls.append(abbreviation)
+        return HEAD_SHA if abbreviation == ABBREV else None
+
+    result, _, _ = run(resolve_commit=resolver)
+    assert result.proposal is not None
+    (op,) = result.proposal.payload_ops()
+    assert op["type"] == vc.REPLACE and op["text"] == FIXED
+    assert calls and set(calls) == {ABBREV}
+
+
+# --- Check 4: replacement bounds ----------------------------------------------------------
 
 
 @pytest.mark.parametrize("verdict", ["contradicted", "changed"])
@@ -1021,21 +1146,6 @@ def test_contradicted_replacements_that_differ_in_wording_case_or_punctuation_ne
     # Under the commit-only edit scope the confirm reply fails check 2 on its own, before agreement.
     result, _, _ = run(confirm=FakeSeat(block_entry(replacement=other)))
     assert reason(result) == vc.UNCONFIRMED and result.proposal is None
-
-
-TWIN_SHA = ABBREV + "aaaabbbbccccddddeeeeffff000011112"
-
-
-def test_seats_expanding_an_abbreviation_to_different_commits_disagree():
-    assert len(TWIN_SHA) == 40 and TWIN_SHA != HEAD_SHA
-    payload = receipt_payload()
-    payload["baseline_commit"] = TWIN_SHA
-    fields, output = receipt_items(payload=payload)
-    handoff = handoff_item(HANDOFF_TEXT + f"The branch also carried commit {TWIN_SHA} for a day.\n")
-    twin_quotes = (f'"baseline_commit": "{TWIN_SHA}"', f"carried commit {TWIN_SHA} for a day")
-    theirs = block_entry(replacement=FIXED.replace(HEAD_SHA, TWIN_SHA), quotes=twin_quotes)
-    result, _, _ = run(assembled=assembly(fields, output, handoff), confirm=FakeSeat(theirs))
-    assert reason(result) == vc.DISAGREEMENT and result.proposal is None
 
 
 def test_replacements_differing_only_in_anchors_or_ascii_space_runs_agree_with_the_proposers_bytes():

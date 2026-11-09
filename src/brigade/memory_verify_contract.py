@@ -33,9 +33,15 @@ reason code:
    that marked abbreviations become full ids (40 or 64 hex) that start with
    them. Any other text change abstains with `verify_edit_out_of_scope`, a
    changed token that is not a marked reference with
-   `verify_not_commit_reference`, and a full-length token or a full id that
-   does not start with the old token with `verify_not_abbreviation`. Each
-   full id must then sit in quotes from two independently produced countable
+   `verify_not_commit_reference`, a full-length token or a full id that does
+   not start with the old token with `verify_not_abbreviation`, and an
+   abbreviation under 12 hex characters with `verify_abbreviation_too_short`.
+   Every authenticated `commit` and `baseline_commit` value in the assembled
+   evidence that starts with the abbreviation must name one full id
+   (`verify_commit_ambiguous`), and the caller's `resolve_commit` must
+   return that same id (`verify_commit_unresolved`, also when no resolver
+   is supplied). Each full id must then sit in quotes from two independently
+   produced countable
    items, one an authenticated receipt quote covering a whole `commit` or
    `baseline_commit` field with exactly that id (`verify_uncorroborated`).
    The independence test is slice 6's `independent`, over its compare
@@ -73,6 +79,15 @@ reason code:
    and give the same verdict and the same op: type, refs, and text
    equal after `normalize` (`seat_disagreement`). The proposal carries the
    proposing seat's text.
+
+Resolver contract. `resolve_commit(abbreviation)` returns the full commit id
+the abbreviation names, or None. The caller resolves it in the repository
+bound to the card's scope, requires git to report it unambiguous, and
+requires the commit to be reachable from an allowed ref such as the default
+branch. Reachability is the identity binding: an attacker who grinds a
+commit with a matching prefix and gets a receipt for it still cannot land it
+on the allowed ref. This module ships no git code. Slice 9 implements the
+resolver.
 
 Results carry codes, verdicts, block ids and digests. The only free text that
 leaves this module is the op text, which goes to the hub as the proposal.
@@ -138,6 +153,9 @@ EDIT_OUT_OF_SCOPE = "verify_edit_out_of_scope"
 NOT_COMMIT_REFERENCE = "verify_not_commit_reference"
 NOT_ABBREVIATION = "verify_not_abbreviation"
 HISTORY_DEFERRED = "verify_history_deferred"
+ABBREVIATION_TOO_SHORT = "verify_abbreviation_too_short"
+COMMIT_AMBIGUOUS = "verify_commit_ambiguous"
+COMMIT_UNRESOLVED = "verify_commit_unresolved"
 SCAN_FLAGGED = "verify_scan_flagged"
 LOW_CONFIDENCE = "verify_low_confidence"
 INSUFFICIENT = "verify_insufficient"
@@ -179,6 +197,10 @@ Use only the keys shown. A block you cannot judge may be left out.
 PROMPT_SHA256 = io.sha256(INSTRUCTIONS.encode())
 
 Seat = Callable[[str], "str | None"]
+# Maps a marked abbreviation to the full commit id it names, or None. See the resolver contract above.
+Resolver = Callable[[str], "str | None"]
+# Shorter marked abbreviations never expand: a 7-character prefix is 28 bits, cheap to grind.
+MIN_ABBREVIATION = 12
 
 
 class Abstain(Exception):
@@ -751,34 +773,72 @@ def _marked(text: str, start: int, end: int) -> bool:
     return closing == "`" if mark[1] else closing != "`"
 
 
-def commit_expansions(text: str, claim: str) -> tuple[set[str], str | None]:
-    """The full commit ids that `text` expands in `claim`, and None, or an empty set and a reason code.
+def commit_expansions(text: str, claim: str) -> tuple[dict[str, str], str | None]:
+    """Each abbreviation `text` expands in `claim` mapped to its full id, and None, or an empty map and a code.
 
     Both sides are normalized for agreement and split at hex tokens. Every
     other segment must match byte for byte (`verify_edit_out_of_scope`). Each
     changed token must be a marked commit reference in the claim
     (`verify_not_commit_reference`) shorter than a full id that the new full
-    id (`COMMIT_ID`) starts with (`verify_not_abbreviation`). At least one
-    token must change.
+    id (`COMMIT_ID`) starts with (`verify_not_abbreviation`), at least
+    `MIN_ABBREVIATION` characters long (`verify_abbreviation_too_short`). At
+    least one token must change.
     """
     mine, theirs = normalize(text), normalize(claim)
     new_parts, old_parts = HEX_TOKEN.split(mine), HEX_TOKEN.split(theirs)
     if len(new_parts) != len(old_parts) or any(
         new != old for new, old in zip(new_parts[::2], old_parts[::2], strict=True)
     ):
-        return set(), EDIT_OUT_OF_SCOPE
-    expanded = set()
+        return {}, EDIT_OUT_OF_SCOPE
+    expanded: dict[str, str] = {}
     for (new, old), match in zip(
         zip(new_parts[1::2], old_parts[1::2], strict=True), HEX_TOKEN.finditer(theirs), strict=True
     ):
         if new == old:
             continue
         if not _marked(theirs, match.start(), match.end()):
-            return set(), NOT_COMMIT_REFERENCE
+            return {}, NOT_COMMIT_REFERENCE
         if COMMIT_ID.fullmatch(old) or not COMMIT_ID.fullmatch(new) or not new.startswith(old):
-            return set(), NOT_ABBREVIATION
-        expanded.add(new)
-    return (expanded, None) if expanded else (set(), EDIT_OUT_OF_SCOPE)
+            return {}, NOT_ABBREVIATION
+        if len(old) < MIN_ABBREVIATION:
+            return {}, ABBREVIATION_TOO_SHORT
+        if expanded.get(old, new) != new:
+            return {}, NOT_ABBREVIATION
+        expanded[old] = new
+    return (expanded, None) if expanded else ({}, EDIT_OUT_OF_SCOPE)
+
+
+def commit_candidates(items: Sequence[ev.Item], abbreviation: str) -> set[str]:
+    """Every authenticated `commit` and `baseline_commit` value among `items` that starts with `abbreviation`.
+
+    The caller passes every assembled item, quoted or not, so a seat cannot
+    hide a second candidate by leaving it unquoted.
+    """
+    return {
+        value for item in items if _anchor(item) for _pair, value in _facts(item.text) if value.startswith(abbreviation)
+    }
+
+
+def resolution_problem(
+    expanded: Mapping[str, str], items: Sequence[ev.Item], resolve_commit: Resolver | None
+) -> str | None:
+    """Commit identity: one authenticated candidate per abbreviation, and the resolver names that candidate."""
+    for abbreviation, full in expanded.items():
+        candidates = commit_candidates(items, abbreviation)
+        if len(candidates) != 1:
+            return COMMIT_AMBIGUOUS
+        (candidate,) = candidates
+        if candidate != full:
+            return UNCORROBORATED
+        if resolve_commit is None:
+            return COMMIT_UNRESOLVED
+        try:
+            resolved = resolve_commit(abbreviation)
+        except Exception:  # noqa: BLE001 - any resolver failure abstains, it never reaches the hub
+            return COMMIT_UNRESOLVED
+        if not isinstance(resolved, str) or resolved != candidate:
+            return COMMIT_UNRESOLVED
+    return None
 
 
 def claim_material(text: str, baseline: str = "") -> set[str]:
@@ -887,6 +947,7 @@ def check_block(
     *,
     propose_confirmations: bool = False,
     uncited_refs: Mapping[str, str] | None = None,
+    resolve_commit: Resolver | None = None,
 ) -> Checked:
     """Checks 1 to 8 for one block, then the op its verdict maps to.
 
@@ -922,9 +983,13 @@ def check_block(
         return Checked(reply.verdict, reason=NOVEL_TOKEN)
     if scan_problem(text):
         return Checked(reply.verdict, reason=SCAN_FLAGGED)
-    material, out_of_scope = commit_expansions(text, block.claim)
+    expanded, out_of_scope = commit_expansions(text, block.claim)
     if out_of_scope is not None:
         return Checked(reply.verdict, reason=out_of_scope)
+    unbound = resolution_problem(expanded, items, resolve_commit)
+    if unbound is not None:
+        return Checked(reply.verdict, reason=unbound)
+    material = set(expanded.values())
     if not claim_corroborated(material, quoted):
         return Checked(reply.verdict, reason=UNCORROBORATED)
     if reply.verdict == "changed" and not claim_corroborated(material, _newer(card, quoted)):
@@ -1040,6 +1105,9 @@ def verify_card(
     rng: random.Random | None = None,
     propose_confirmations: bool = False,
     uncited_refs: Mapping[str, str] | None = None,
+    # TODO(verify slice 9): pass the git-backed resolver (scope repository, unambiguous, reachable from an
+    # allowed ref). Without one, every commit expansion abstains with `verify_commit_unresolved`.
+    resolve_commit: Resolver | None = None,
 ) -> CardResult:
     """Propose, check, confirm and map one card. At most two seat calls.
 
@@ -1054,7 +1122,14 @@ def verify_card(
     items = [*assembly.items, *assembly.excerpts]
 
     def checked_block(reply: BlockReply, shown: Sequence[ev.Item]) -> Checked:
-        return check_block(card, reply, shown, propose_confirmations=propose_confirmations, uncited_refs=uncited_refs)
+        return check_block(
+            card,
+            reply,
+            shown,
+            propose_confirmations=propose_confirmations,
+            uncited_refs=uncited_refs,
+            resolve_commit=resolve_commit,
+        )
 
     try:
         first = compose(card, items, nonce=nonce())

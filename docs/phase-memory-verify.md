@@ -400,6 +400,30 @@ the reviewer decides whether it is true:
    token, abstains with `verify_not_abbreviation`. One id is never swapped
    for another, so "not in commit X" cannot be retargeted.
 
+   An abbreviation shorter than 12 hex characters abstains with
+   `verify_abbreviation_too_short`. A 7-character prefix is 28 bits, so an
+   attacker can grind a commit that starts with it, get an authentic receipt
+   for that commit, and point a claim such as "Do not commit X to the
+   release index" at it. The cost is real: in the same card sample, 1 of
+   the 61 accepted marked abbreviations is 12 characters or longer, and 52
+   are exactly 7. v1 therefore expands almost none of today's cards.
+
+   Commit identity is bound in two steps before corroboration. Every
+   authenticated `commit` and `baseline_commit` value in the card's assembled
+   evidence, quoted or not, that starts with the abbreviation must name
+   exactly one full id. None or several abstain with
+   `verify_commit_ambiguous`, even when both seats pick the same one. Then
+   the caller's resolver must return that same id, or the block abstains
+   with `verify_commit_unresolved`. Without a resolver every expansion
+   abstains. The resolver resolves the abbreviation in the repository bound
+   to the card's scope, requires git to report it unambiguous, and requires
+   the commit to be reachable from an allowed ref such as the default
+   branch. Reachability from an allowed ref is the identity binding.
+   Grinding a commit with a matching prefix and getting a receipt for it is
+   not enough unless the attacker can also land that commit on the allowed
+   ref. The contract module stays pure and ships only a test fake. Slice 9
+   implements the git resolver.
+
    Each expanded id must appear in quotes from two independently produced
    countable items. One of them must be an authenticated receipt quote that
    covers a whole `commit` or `baseline_commit` field holding exactly that
