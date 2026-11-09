@@ -320,12 +320,103 @@ log. Add the PR link and move the status when a lane lands or stops.
 
 | # | workstream | status | lane file |
 |---|---|---|---|
-| 1 | Test-audit pruning pilot on the grokbot subsystem | in progress | `docs/adaptive-ci/test-audit-grokbot.md` (to be added) |
-| 2 | Windows affected-tests tail | in progress | `docs/adaptive-ci/windows-affected-tests-tail.md` (to be added) |
-| 3 | `hub-rust` path filtering in the merge queue | in progress | `docs/adaptive-ci/hub-rust-merge-queue.md` (to be added) |
-| 4 | Linux pull request test selection in shadow mode | in progress | `docs/adaptive-ci/linux-selection-shadow.md` (to be added) |
+| 1 | Test-audit pruning pilot on the grokbot subsystem | merged 2026-11-09 16:30Z ([#2438](https://github.com/escoffier-labs/brigade/pull/2438)) | [`docs/adaptive-ci/test-audit-grokbot.md`](adaptive-ci/test-audit-grokbot.md) |
+| 2 | Windows affected-tests tail | merged 2026-11-09 17:07Z ([#2440](https://github.com/escoffier-labs/brigade/pull/2440)), awaiting an after window | [`docs/adaptive-ci/windows-tail.md`](adaptive-ci/windows-tail.md) |
+| 3 | `hub-rust` path filtering in the merge queue | merged 2026-11-09 16:55Z ([#2436](https://github.com/escoffier-labs/brigade/pull/2436)), live, awaiting an after window | [`docs/adaptive-ci/hub-merge-queue.md`](adaptive-ci/hub-merge-queue.md) |
+| 4 | Linux pull request test selection in shadow mode | merged 2026-11-09 17:47Z ([#2435](https://github.com/escoffier-labs/brigade/pull/2435)), collecting observations, skips nothing | [`docs/adaptive-ci/shadow-selection.md`](adaptive-ci/shadow-selection.md) |
+| 5 | Merge-group docs classifier loaded from trusted `main` (found while building lane 3) | merged 2026-11-09 17:41Z ([#2441](https://github.com/escoffier-labs/brigade/pull/2441)) | [`docs/adaptive-ci/docs-classifier-trust.md`](adaptive-ci/docs-classifier-trust.md) |
+
+The baseline and `scripts/ci_timing_report.py` merged 2026-11-09 19:14Z
+([#2439](https://github.com/escoffier-labs/brigade/pull/2439)).
 
 <!-- adaptive-ci: add a workstream row above this line -->
+
+## Early observations
+
+These are single runs read from the Actions API, not windowed results. They
+show the mechanism working. The Results log holds the measured comparison once
+an after window exists.
+
+### Merge-queue hub selection, first day
+
+Merge-group runs of `ci.yml` after #2436 merged. Minutes are `created_at` to
+`updated_at` of the run, not the report's wall metric, and each is one run.
+
+| run | queue entry | `hub` | published reason | why | minutes |
+|---|---|---|---|---|---|
+| 42663340698 | #2433 | skipped | `no-hub-path-changed` | no hub path in the range | 11.4 |
+| 42664944828 | #2442 | ran | `trusted-hub-selector-unavailable` | fail-closed fallback, see below; #2442 also changed `engines/hub/**` itself | 13.2 |
+| 42685668967 | #2454 | skipped | `no-hub-path-changed` | no hub path in the range | 10.4 |
+| 42687967106 | #2448 | skipped | `no-hub-path-changed` | no hub path in the range | 11.5 |
+| 42679377812 | #2437 | ran, failed | `hub-path-changed` | own diff (`src/brigade/fleet_client*.py`, `cli/fleet*.py` and others) | 12.9 |
+| 42679381170 | #2439 | ran | `hub-path-changed` | only from #2437 ahead of it in the queue | 12.5 |
+| 42679427735 | #2444 | ran | `hub-path-changed` | own diff (`src/brigade/fleet_client_message_credentials.py`) | 16.2 |
+| 42693841937 | #2446 | ran, failed | `hub-path-changed` | own diff (`src/brigade/memory_hub_client.py`, matched by `src/brigade/memory_hub_*.py`) | 10.8 |
+
+The #2439 row is the case the cumulative range exists for. #2439's own diff
+touches no hub path (`.gitignore`, the baseline files, this document and
+`scripts/ci_timing_report.py` with its test). It was queued behind #2437, whose
+fleet client changes are hub paths, so the range from `main` to #2439's head
+held them and the hub suite ran. A selector that diffed only
+`base_sha..head_sha` would have skipped it.
+
+The #2442 row shows the fail-closed default. `main` was at #2440 and held the
+selector from #2436, which wrote `hub` and `reason`. #2441, ahead of #2442 in
+the queue, changed the `ci.yml` step to also require `start`. #2442's group ran
+#2441's `ci.yml` against `main`'s older selector, the parse failed, and the step
+published `hub=true` with `trusted-hub-selector-unavailable`. The selector's own
+log line for that run said `hub-selection-source-changed`, which is not what the
+step published. No other run in this table published the fallback; the
+`trusted-hub-selector-unavailable` text in other logs is the step's source,
+which Actions echoes at the top of the step log.
+
+Two of the runs where the hub suite ran failed on hub tests, each passing in
+the other run:
+`read_counts_tests::the_sweep_stays_within_its_row_budget_and_finishes_over_several_ticks`
+(run 42693841937, `left: (1024, true) right: (2000, true)`) and
+`push_withheld_tests::push_card_404_latency_does_not_separate_absent_and_withheld_ids`
+(run 42679377812, `withheld 13.694945ms vs absent 8.768908ms: ratio 1.562`). The
+quoted values come from the job logs. The causes come from source: the first
+test runs under the default 20 ms sweep time budget
+(`engines/hub/src/memory/read_counts.rs`), which stopped the first tick at a
+chunk boundary, and the second asserts a ratio within 1.5
+(`push_withheld_tests.rs`). Neither failure comes from this campaign's changes.
+
+The two failures cost different amounts. #2437's group failed, but #2439's
+group, built on top of it, passed, and with `HEADGREEN` that green group merged
+#2437 and #2439 together at 19:14:39Z. The flake cost no extra run. #2446's
+failed group had no green group behind it, so #2446 left the queue and needs
+another run. A failed queue entry that is re-queued starts a new workflow run
+with its own run id, not another attempt of the failed run. Its cost therefore shows up as extra `merge_group`
+runs in the window (the failed one in the `all` view, the retry in either
+view), not in `reruns` or `runner_minutes_all_attempts`, which count Actions
+re-runs of the same run id only.
+
+### Review gates and account identity
+
+Agents in this repository open pull requests and push from the maintainer's
+own GitHub account, and that stays so. GitHub does not let an author approve
+their own pull request, and an admin bypass would apply to the agents too, so
+a required CODEOWNERS review cannot gate changes to the workflows or the
+selectors. The guards for CI selection therefore live inside CI, with one
+limit that no CI check can close:
+
+- selectors and classifiers for merge groups are loaded from trusted `main`
+  and diff the cumulative range, so a queue entry cannot choose its own tests
+  by editing a selector, a classifier or a path list;
+- this does not cover an entry that edits `.github/workflows/ci.yml` itself. A
+  merge group runs the head's `ci.yml`, so such an entry can bypass the
+  trusted bootstrap or set gate outputs directly, for its own group and every
+  group queued behind it (see "Trust and its limit" in
+  [`hub-merge-queue.md`](adaptive-ci/hub-merge-queue.md#trust-and-its-limit)
+  and [`docs-classifier-trust.md`](adaptive-ci/docs-classifier-trust.md#trust-and-its-limit)).
+  Workflow edits are covered only by review before they are queued;
+- `tests/test_ci_workflow.py` checks that no runtime job is admitted when the
+  run is cancelled and that the `ci-gate` job covers every required job and
+  its dependencies;
+- the nightly `hub-nightly.yml` runs the full hub suite on `main` and opens
+  or updates one tracking issue on failure, so a wrongly skipped hub change
+  surfaces within a day.
 
 ## Method
 
@@ -381,6 +472,7 @@ for wall and runner time, seconds for a job family.
 | date | change | PR | metric | before | after | n |
 |---|---|---|---|---|---|---|
 <!-- adaptive-ci: append result rows directly below this line -->
+| 2026-11-09 | Test-audit pilot, grokbot tests | [#2438](https://github.com/escoffier-labs/brigade/pull/2438) | grokbot test LOC at the merge commit `7bc63865`; grokbot line coverage at `4940187b` | 33,044; 78.618% | 32,595 (-1.4%); 78.618% | 53 files |
 
 ## Prior art
 
