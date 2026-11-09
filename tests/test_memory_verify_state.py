@@ -190,3 +190,59 @@ def test_status_summary_holds_counts_only(tmp_path):
         "never_read": {"repo:example": 2},
         "tracked_cards": 1,
     }
+
+
+@pytest.mark.parametrize("field", ["reads", "verified", "revision", "evidence", "verdict", "pending"])
+def test_an_explicit_null_in_an_optional_card_field_fails_closed(tmp_path, field):
+    state = valid_state()
+    state["scopes"]["repo:example"]["cards"][KEY][field] = None
+    write_raw(tmp_path, json.dumps(state).encode())
+    with pytest.raises(vstate.VerifyStateError) as exc_info:
+        vstate.load(tmp_path)
+    assert_fixed(exc_info)
+
+
+@pytest.mark.parametrize("field", ["last_status", "binding", "scopes"])
+def test_an_explicit_null_in_a_top_level_field_fails_closed(tmp_path, field):
+    write_raw(tmp_path, json.dumps({**valid_state(), field: None}).encode())
+    with pytest.raises(vstate.VerifyStateError) as exc_info:
+        vstate.load(tmp_path)
+    assert_fixed(exc_info)
+
+
+def test_a_null_cards_table_fails_closed(tmp_path):
+    state = valid_state()
+    state["scopes"]["repo:example"]["cards"] = None
+    write_raw(tmp_path, json.dumps(state).encode())
+    with pytest.raises(vstate.VerifyStateError) as exc_info:
+        vstate.load(tmp_path)
+    assert_fixed(exc_info)
+
+
+def test_nullable_scope_fields_stay_valid(tmp_path):
+    state = valid_state()
+    state["scopes"]["repo:example"].update(since_day=None, never_read=None)
+    write_raw(tmp_path, json.dumps(state).encode())
+    assert vstate.load(tmp_path) == state
+
+
+def test_null_reads_with_a_rate_limited_hub_gives_the_fixed_reason(tmp_path, capsys, monkeypatch):
+    from tests import test_memory_verify_select as select_tests
+    from tests.test_memory_hub_client import HUB_URL, NODE_CREDENTIAL
+    from tests.test_memory_reflect_hub import ReflectHub
+
+    target = tmp_path / "workspace"
+    (target / ".brigade").mkdir(parents=True)
+    select_tests.configure(target, tmp_path / "bound")
+    hub = ReflectHub()
+    hub.read_stats_reply = (429, {"error": SECRET, "code": hubc.READ_STATS_RATE_LIMITED})
+    monkeypatch.setattr(hubc, "_memory_hub_override", lambda fleet: (HUB_URL, NODE_CREDENTIAL, "env"))
+    monkeypatch.setattr(hubc, "urllib_transport", hub)
+    state = vstate.fresh()
+    state["scopes"] = {"fleet": {"cards": {KEY: {"seen": 1, "proposed": 0, "reads": None}}}}
+    write_raw(target, json.dumps(state).encode())
+    code = cli.main(["memory", "verify", "run", "--dry-run", "--no-model", "--target", str(target), "--json"])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert json.loads(captured.out) == {"status": "failed", "code": "verify_state", "reason": vstate.STATE_ERROR}
+    assert "Traceback" not in captured.err and SECRET not in captured.out + captured.err

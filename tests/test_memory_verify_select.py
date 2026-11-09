@@ -22,6 +22,7 @@ from tests.test_memory_reflect_hub import pytestmark as pytestmark, setup as set
 
 SCOPE = "repo:verify"
 SECRET = "Zanzibarquill"
+KEY = "0" * 32
 DAY = pick.DAY_MS
 NOW = 20_400 * DAY + 3_600_000
 TODAY = NOW // DAY
@@ -352,10 +353,32 @@ def verify(target, capsys, *args):
     return code, json.loads(out)
 
 
+class Clock:
+    """A fake monotonic clock. Sleeping advances it, so tests never wait."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.slept = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
 @pytest.fixture
-def verify_setup(setup, monkeypatch, tmp_path):
+def clock(monkeypatch):
+    fake = Clock()
+    monkeypatch.setattr(verify_cmd, "MONOTONIC", fake.monotonic)
+    monkeypatch.setattr(verify_cmd, "SLEEP", fake.sleep)
+    return fake
+
+
+@pytest.fixture
+def verify_setup(setup, clock, tmp_path):
     target, hub, home = setup
-    monkeypatch.setattr(verify_cmd, "PAGE_PAUSE_SECONDS", 0)
     configure(target, tmp_path / "bound")
     return target, hub
 
@@ -441,3 +464,54 @@ def test_status_reports_configuration_counts(verify_setup, capsys):
         "state": {"consecutive_failures": 0, "paused": False, "never_read": {}, "tracked_cards": 0},
     }
     assert hub.calls == []
+
+
+def test_read_stats_pacing_spans_scopes(setup, clock, tmp_path, capsys):
+    """The hub's one-second gap is per principal, so the next scope's first page waits too."""
+    target, hub, _ = setup
+    scopes = ["fleet", "repo:second", "repo:third"]
+    workspaces = "".join(
+        f'[[verify.workspace]]\nscope="{scope}"\npath="{tmp_path / str(index)}"\narchive_projects=[]\n'
+        for index, scope in enumerate(scopes)
+    )
+    (target / ".brigade/memory-care.toml").write_text(
+        f'[hub]\nmode="read"\nread_scopes={json.dumps(scopes)}\n[verify]\n{workspaces}'
+    )
+    admitted = []
+    original = hub.do_read_stats
+
+    def paced(body):
+        # Refuse any request less than one second after the previous admitted one, as the hub does.
+        if admitted and clock.now - admitted[-1] < 1.0:
+            return 429, {"error": "slow down", "code": hubc.READ_STATS_RATE_LIMITED}
+        admitted.append(clock.now)
+        # Two pages per scope, so pacing within a scope and across scopes are both exercised.
+        status, reply = original({**body, "limit": 1})
+        return status, {**reply, "rows": reply["rows"][:1]}
+
+    hub.do_read_stats = paced
+    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
+    assert code == 0 and report["status"] == "completed"
+    assert report["read_stats"] == {scope: "fresh" for scope in scopes}
+    assert "read_stats_limited" not in report["skipped"]
+    assert len(admitted) == 2 * len(scopes)
+    assert all(later - earlier >= 1.0 for earlier, later in zip(admitted, admitted[1:], strict=False))
+
+
+def test_cached_counts_never_raise_on_malformed_entries():
+    good = {"seen": 1, "proposed": 0, "reads": [1, 2, 3]}
+    assert verify_cmd._cached({"scopes": {SCOPE: {"since_day": 5, "cards": {KEY: good}}}}, SCOPE) == (
+        {KEY: pick.Reads(1, 2, 3)},
+        5,
+    )
+    for broken in (
+        {"scopes": {SCOPE: {"cards": {KEY: {**good, "reads": None}}}}},
+        {"scopes": {SCOPE: {"cards": {KEY: {**good, "reads": [1, 2]}}}}},
+        {"scopes": {SCOPE: {"cards": {KEY: {**good, "reads": [1, -2, 3]}}}}},
+        {"scopes": {SCOPE: {"cards": {KEY: {**good, "reads": ["1", 2, 3]}}}}},
+        {"scopes": {SCOPE: {"cards": None}}},
+        {"scopes": {SCOPE: {"since_day": "x", "cards": {}}}},
+        {"scopes": {SCOPE: None}},
+        {"scopes": None},
+    ):
+        assert verify_cmd._cached(broken, SCOPE) == ({}, None)

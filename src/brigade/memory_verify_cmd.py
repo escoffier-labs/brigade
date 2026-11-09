@@ -31,8 +31,11 @@ MAX_SCOPE_CARDS = vstate.MAX_SCOPE_CARDS
 MAX_REPLICA_BYTES = 64 * 1024 * 1024
 REPLICA_FILE_SLACK = 1024 * 1024
 READ_STATS_PAGES = MAX_SCOPE_CARDS // hubc.READ_STATS_PAGE_MAX
-# The hub allows one read_stats request per second per principal.
+# The hub allows one read_stats request per second per principal, across every scope.
 PAGE_PAUSE_SECONDS = 1.05
+# Injectable for tests. The pacer reads only this monotonic clock and sleeps only through SLEEP.
+MONOTONIC = time.monotonic
+SLEEP = time.sleep
 SCORE_DIGITS = 4
 HUB_CODE = re.compile(r"[a-z][a-z0-9_]{0,127}")
 
@@ -127,15 +130,34 @@ def _heads(target: Path, settings: hubc.HubSettings, client: hubc.MemoryHubClien
     return heads
 
 
-def _counts(client: hubc.MemoryHubClient, scope: str) -> tuple[dict[str, pick.Reads], int | None]:
+class Pacer:
+    """One clock for every read_stats request in a run, so a new scope waits like a new page.
+
+    The gap is measured from the end of the previous request, which is never
+    earlier than the hub's admission of it.
+    """
+
+    def __init__(self) -> None:
+        self.last: float | None = None
+
+    def call(self, client: hubc.MemoryHubClient, scope: str, after: str | None) -> dict[str, Any]:
+        if self.last is not None:
+            remaining = PAGE_PAUSE_SECONDS - (MONOTONIC() - self.last)
+            if remaining > 0:
+                SLEEP(remaining)
+        try:
+            return hubc.read_stats(client, scope, after=after)
+        finally:
+            self.last = MONOTONIC()
+
+
+def _counts(client: hubc.MemoryHubClient, scope: str, pacer: Pacer) -> tuple[dict[str, pick.Reads], int | None]:
     """Every read_stats page for `scope`, keyed by fairness key. Raises HubRefusal on a refusal."""
     rows: dict[str, pick.Reads] = {}
     after = None
     since = None
-    for page in range(READ_STATS_PAGES + 1):
-        if page:
-            time.sleep(PAGE_PAUSE_SECONDS)
-        reply = hubc.read_stats(client, scope, after=after)
+    for _ in range(READ_STATS_PAGES + 1):
+        reply = pacer.call(client, scope, after)
         since = reply["read_counts_since_day"]
         for row in reply["rows"]:
             key = fairness.key_digest(scope, [row["card_id"]])
@@ -147,9 +169,25 @@ def _counts(client: hubc.MemoryHubClient, scope: str) -> tuple[dict[str, pick.Re
 
 
 def _cached(state: dict[str, Any], scope: str) -> tuple[dict[str, pick.Reads], int | None]:
-    table = state["scopes"].get(scope, {})
-    rows = {key: pick.Reads(*entry["reads"]) for key, entry in table.get("cards", {}).items() if "reads" in entry}
-    return rows, table.get("since_day")
+    """Counts cached in the state file. Anything malformed makes the whole scope's cache unavailable."""
+    unavailable: tuple[dict[str, pick.Reads], int | None] = ({}, None)
+    scopes = state.get("scopes") if isinstance(state, dict) else None
+    table = scopes.get(scope, {}) if isinstance(scopes, dict) else None
+    cards = table.get("cards", {}) if isinstance(table, dict) else None
+    if not isinstance(cards, dict):
+        return unavailable
+    since = table.get("since_day") if isinstance(table, dict) else None
+    if since is not None and (type(since) is not int or since < 0):
+        return unavailable
+    rows: dict[str, pick.Reads] = {}
+    for key, entry in cards.items():
+        if not isinstance(entry, dict) or "reads" not in entry:
+            continue
+        reads = entry["reads"]
+        if not isinstance(reads, list) or len(reads) != 3 or not all(type(v) is int and v >= 0 for v in reads):
+            return unavailable
+        rows[key] = pick.Reads(*reads)
+    return rows, since
 
 
 def run_payload(*, target: Path, dry_run: bool, no_model: bool, list_ids: bool, now_ms: int | None = None) -> dict:
@@ -190,9 +228,10 @@ def run_payload(*, target: Path, dry_run: bool, no_model: bool, list_ids: bool, 
         never: dict[str, int | None] = {}
         listed: list[dict[str, str]] = []
         per_scope_since: dict[str, int | None] = {}
+        pacer = Pacer()
         for scope in scopes:
             try:
-                rows, since = _counts(client, scope)
+                rows, since = _counts(client, scope, pacer)
                 sources[scope] = "fresh"
             except hubc.HubRefusal as exc:
                 if exc.status != 429 or exc.code != hubc.READ_STATS_RATE_LIMITED:
@@ -277,7 +316,7 @@ def dispatch(args: argparse.Namespace) -> int:
         payload = _failure("verify_hub_config", "invalid hub memory configuration or replica metadata")
     except OSError:
         payload = _failure("verify_io", "verify could not safely read local state")
-    except (ValueError, UnicodeError, RecursionError):
+    except (ValueError, UnicodeError, RecursionError, TypeError, KeyError):
         payload = _failure("verify_invalid", "verify received invalid state or data")
     if args.json:
         print(json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2))

@@ -75,8 +75,11 @@ def _card(entry: object) -> bool:
         return False
     if "pending" in entry and not (isinstance(entry["pending"], str) and hubc.event_id_ms(entry["pending"])):
         return False
-    reads = entry.get("reads")
-    return reads is None or (isinstance(reads, list) and len(reads) == 3 and all(_count(value) for value in reads))
+    # A present key must hold a value: an explicit null is as invalid as a wrong type.
+    if "reads" not in entry:
+        return True
+    reads = entry["reads"]
+    return isinstance(reads, list) and len(reads) == 3 and all(_count(value) for value in reads)
 
 
 def validate(state: object) -> dict[str, Any]:
@@ -96,6 +99,7 @@ def validate(state: object) -> dict[str, Any]:
     for name, table in scopes.items():
         if not hubc.valid_scope(name) or not isinstance(table, dict) or set(table) - SCOPE_KEYS:
             raise VerifyStateError()
+        # since_day and never_read are documented as nullable: null means not counted yet or unknown.
         for field in ("since_day", "never_read"):
             if table.get(field) is not None and not _count(table[field]):
                 raise VerifyStateError()

@@ -2184,7 +2184,10 @@ selected card ids, their scores and lanes, and counted skip reasons. It calls
 no seat, submits and attaches nothing, and writes no state, so the pause
 counter does not move. Output never holds card text, titles or evidence.
 `--list-ids` adds the never-read card ids, still without titles or text.
-Failures print a fixed code and reason only.
+Failures print a fixed code and reason only. The hub allows one `read_stats`
+request per second per principal, so the run keeps one pacing clock across
+every page of every scope, and the first page of the next scope waits like
+any other page.
 
 | Skip reason | Meaning |
 |---|---|
@@ -2242,4 +2245,6 @@ A state file that is oversized, malformed, linked or readable by others makes
 every verify command fail closed with `verify_state` and the fixed reason
 `invalid verify state. Inspect and remove .brigade/memory/verify/state.json to
 recover`. No byte of the file is printed. `status` shows such a file as
-paused with the same reason.
+paused with the same reason. A card field that is present must hold a value of
+its type, so an explicit `null` is malformed. Only a scope's `since_day` and
+`never_read` may be `null`, meaning not counted yet and unknown.
