@@ -384,9 +384,9 @@ the reviewer decides whether it is true:
    `commit` or `commits` in any case, exactly one space, then 7 to 39
    lowercase hex characters with a digit, bare or as a single-backtick code
    span. That rule comes from the cards themselves. In a sample of about
-   2,000 operator cards, all 61 explicitly marked abbreviated ids used one
-   of those two forms, two used a colon with an unbalanced backtick, and no
-   card carried a `commit` front-matter key. Hex tokens with no such marker
+   2,000 operator cards, 61 of the 63 explicitly marked abbreviated ids used
+   one of those two forms. The other two used a colon with an unbalanced
+   backtick, and no card carried a `commit` front-matter key. Hex tokens with no such marker
    (artifact digests, fingerprints, ids in paths or URLs, and bare
    abbreviations) are far more common and are never corrected.
 
