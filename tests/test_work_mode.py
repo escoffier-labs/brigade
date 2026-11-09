@@ -102,7 +102,7 @@ def test_yolo_session_runs_raw_checks_and_finishes_without_block(tmp_path: Path,
     _set_mode(target, "yolo", capsys)
     monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "work brief: yolo")
     monkeypatch.setattr(
-        "brigade.memory_hooks.recall_text_for_hook", lambda **_kwargs: "recall: astro notes card", raising=True
+        "brigade.memory_hooks.recall_for_hook", lambda **_kwargs: ("recall: astro notes card", []), raising=True
     )
     delivered: list[str] = []
 

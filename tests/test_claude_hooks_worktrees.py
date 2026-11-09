@@ -28,7 +28,7 @@ def worktrees(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setattr(runtime.heartbeat, "on_event", lambda *args: None)
     monkeypatch.setattr(runtime.presence, "emit_presence", lambda *args: None)
-    monkeypatch.setattr(runtime, "_run_recall", lambda *args: "")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *args, **kwargs: "")
     monkeypatch.setattr(runtime, "_run_brief", lambda *args: "work brief")
     first, second = tmp_path / "first", tmp_path / "second tree"
     first.mkdir()

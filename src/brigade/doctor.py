@@ -92,6 +92,13 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
         check = _check_claude_work_loop(ctx.target)
         if check is not None:
             checks.append(check)
+            from .claude_hooks import recall_audience
+
+            from .memory_hooks import resolve_memory_recall_target
+
+            active = resolve_memory_recall_target(ctx.target)[1] == "active"
+            status, name, detail = recall_audience.doctor_check(active)
+            checks.append(({"ok": OK, "info": INFO}.get(status, WARN), name, detail))
     if ctx.selection is not None:
         from .work_mode import doctor_checks
 

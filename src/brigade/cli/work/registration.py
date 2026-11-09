@@ -98,6 +98,17 @@ def register(sub: argparse._SubParsersAction) -> None:
         )
         if action == "status":
             parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+        if action in {"install", "update"}:
+            parser.add_argument(
+                "--recall-audience",
+                choices=("local", "connector"),
+                default=None,
+                help=(
+                    "Memory recall audience on this host. local opts in to private-class recall text in "
+                    "local sessions (writes a host-bound marker under the Brigade home); connector removes "
+                    "it. Without the flag the current setting is kept, and the default is connector."
+                ),
+            )
     p_work_mode = work_sub.add_parser(
         "mode", help="Show or set the work-loop mode: enforced (default) or yolo (no verification enforcement)."
     )

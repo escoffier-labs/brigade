@@ -2699,6 +2699,54 @@ Invariant tests, in S19a to S19e:
 - A T3 child in a Brigade-wired worktree also runs the recall hooks. The
   prompt hook skips cards whose ids already appear in the brief's
   `memory_context` block.
+- S24 as built (Claude hooks): the hub search, the fallback and the
+  prompt-load scan all run in the existing recall child, so its 5 s deadline
+  covers a stopped or hung hub. At session start the brief runs first under
+  its own 10 s deadline. Recall gets only what the hook budget has left after
+  it, less a 1.5 s reserve, and is skipped below 1 s, so a slow brief keeps
+  its injection. The prompt-load scan checks each rendered field (title,
+  each tag, path, card id and scope) on its own and then the whole line, so a
+  rule anchored at the start of text still sees a title or tag. Hub and replica hits pass the push trust rule
+  on the client (`reviewed`, `policy-promoted` or `imported`, and a hit with
+  no trust is dropped), because the hub's push query source also withholds
+  private-class cards that local sessions may see. Session start records the
+  card ids its work brief named, read from `cards/<id>.md` paths and
+  `card_id` fields, and later recalls skip them. Prompt text never adds an
+  exclusion, so a pasted id cannot hide a card. Trusted dispatch envelopes can
+  add theirs in S25, and until then a T3 child may see a card its brief also
+  carried. "Opened" means a card file read through the Read tool: any `.md`
+  at any depth under a memory-care card root that card search would list,
+  never a symlink or a path that leaves the root. It is recorded under the id
+  card search's identity scan gives it (scalar `id`, `card_id` and `topic`
+  only, never evaluated, which search now uses for its primary id too), from
+  a read bound to the validated file
+  (O_NOFOLLOW, the same device and inode) and capped at the hub's 512 KiB
+  card limit. With under 0.5 s of hook budget left the read is not observed.
+  The Stop hook sends one `capture` per batch of keys not yet captured, at
+  most 50 of each list, so a long session can produce several events under one
+  `session_ref`. A batch the hub did not take is retried at the next Stop with
+  the same `client_event_id`. The hook audience is `connector` by default. It
+  is `local` only after the operator opts the host in with
+  `brigade work hooks install --recall-audience local`, which writes a marker
+  under the Brigade user home, outside any repository. Nothing writes it by
+  default. The marker records the host name, the machine id (required except on
+  macOS) and the device and inode of the Brigade home, and all must match. The
+  marker and its two directories must not be symlinks, foreign owned or group
+  or world writable, and the home's parent may be writable by others only with
+  the sticky bit. The checks, the read, the write and the inode binding go
+  through the same directory descriptors. Opting out writes a connector marker
+  and removes it through those descriptors. If the removal fails, the marker is
+  read again and the opt-out succeeds only when it reads as connector. Windows
+  ACLs are not read: local recall there needs the Brigade home's real path
+  inside the user's profile, whose default ACL grants only the user, so a
+  custom `BRIGADE_HOME` outside the profile cannot opt in.
+  The marker prevents accidental local trust on a copied, synced or cloud home.
+  A process running as the same user is out of scope, because it can read the
+  hub token and the cards directly, and the principal's hub grants are the
+  boundary against it. `brigade doctor` warns "local recall not enabled" with
+  the command when a recall target is active. `CLAUDE_CODE_REMOTE` or any
+  `BRIGADE_RECALL_AUDIENCE` value other than `local` narrows a session to
+  `connector` and refuses the opt-in, and no value widens one.
 - New fields in tool responses are additive. Connector tool snapshots are
   updated in the same PR.
 

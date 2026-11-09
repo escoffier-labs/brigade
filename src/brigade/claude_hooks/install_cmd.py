@@ -25,6 +25,7 @@ from .package import (
     managed_user_groups,
 )
 from .paths import is_operator_home, resolve_claude_home
+from . import recall_audience
 
 HooksScope = Literal["project", "user"]
 
@@ -312,7 +313,35 @@ def _write_package(
     return {"action": action, "target": str(layout.root), **sidecar}, None
 
 
-def hooks_install(*, target: Path, scope: HooksScope = "project", quiet: bool = False) -> int:
+def _apply_recall_audience(choice: str | None, *, quiet: bool) -> int:
+    """S24 opt-in: ``local`` writes this host's local-recall marker, ``connector`` removes it.
+
+    Without a choice the marker is left as it is. Nothing writes it by default.
+    """
+    if choice is None:
+        return 0
+    if choice == recall_audience.CONNECTOR:
+        refusal = recall_audience.opt_out()
+        if refusal is not None:
+            if not quiet:
+                print(f"error: {refusal}", file=sys.stderr)
+            return 2
+        if not quiet:
+            print("claude hooks: recall audience -> connector (local recall disabled on this host)")
+        return 0
+    refusal = recall_audience.write_marker()
+    if refusal is not None:
+        if not quiet:
+            print(f"error: local recall not enabled: {refusal}", file=sys.stderr)
+        return 2
+    if not quiet:
+        print(f"claude hooks: recall audience -> local ({recall_audience.marker_path()})")
+    return 0
+
+
+def hooks_install(
+    *, target: Path, scope: HooksScope = "project", quiet: bool = False, recall_audience_choice: str | None = None
+) -> int:
     payload, error = _write_package(target, action="install", scope=scope)
     if payload is None:
         if not quiet:
@@ -323,10 +352,12 @@ def hooks_install(*, target: Path, scope: HooksScope = "project", quiet: bool = 
         pin = payload.get("pinned_target")
         suffix = f" pin={pin}" if pin else ""
         print(f"claude hooks: installed {PACKAGE_ID}@{PACKAGE_VERSION} -> {location}{suffix}")
-    return 0
+    return _apply_recall_audience(recall_audience_choice, quiet=quiet)
 
 
-def hooks_update(*, target: Path, scope: HooksScope = "project", quiet: bool = False) -> int:
+def hooks_update(
+    *, target: Path, scope: HooksScope = "project", quiet: bool = False, recall_audience_choice: str | None = None
+) -> int:
     payload, error = _write_package(target, action="update", scope=scope)
     if payload is None:
         if not quiet:
@@ -335,7 +366,7 @@ def hooks_update(*, target: Path, scope: HooksScope = "project", quiet: bool = F
     if not quiet:
         location = payload["target"] if scope == "project" else f"{payload['target']} ({scope})"
         print(f"claude hooks: updated {PACKAGE_ID}@{PACKAGE_VERSION} -> {location}")
-    return 0
+    return _apply_recall_audience(recall_audience_choice, quiet=quiet)
 
 
 def _managed_signature(group: dict[str, Any], handler: dict[str, Any]) -> str:
