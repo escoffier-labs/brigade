@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import importlib
 import os
+import shutil
 import stat
 import sys
 from pathlib import Path
@@ -385,6 +386,26 @@ def rmdir_child(parent: int, name: str) -> None:
         _nt_dirfd().unlink_child(parent, name, directory=True)
         return
     raise unavailable("directory removal")
+
+
+def tree_removal_available() -> bool:
+    """Whether :func:`remove_tree_child` can remove a tree without following links."""
+    return posix_available() and bool(getattr(shutil.rmtree, "avoids_symlink_attacks", False))
+
+
+def remove_tree_child(parent: int, name: str) -> None:
+    """Remove a child directory and everything under it, relative to its held parent.
+
+    POSIX uses the descriptor-based ``shutil.rmtree``, which never follows a
+    link it meets. There is no reparse-safe recursive removal on Windows, so
+    it fails closed with :func:`unavailable` there, as on any platform whose
+    ``rmtree`` cannot avoid symlink attacks.
+    """
+    _validate_child_component(name)
+    if tree_removal_available():
+        shutil.rmtree(name, dir_fd=parent)
+        return
+    raise unavailable("tree removal")
 
 
 def rename_child(source_parent: int, source: str, destination_parent: int, destination: str) -> None:

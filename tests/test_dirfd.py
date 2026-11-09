@@ -610,3 +610,31 @@ def test_fsync_directory_accepts_native_windows_directory_handles(tmp_path, writ
         dirfd.fsync_directory(descriptor)
     finally:
         os.close(descriptor)
+
+
+@pytest.mark.skipif(not dirfd.tree_removal_available(), reason="requires descriptor-based tree removal")
+def test_remove_tree_child_removes_the_tree_and_never_follows_a_link(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+    tree = tmp_path / "held" / "tree"
+    (tree / "nested").mkdir(parents=True)
+    (tree / "nested" / "file.txt").write_text("gone", encoding="utf-8")
+    (tree / "link").symlink_to(outside, target_is_directory=True)
+    parent = dirfd.open_directory_nofollow(tmp_path / "held", writable=False)
+    try:
+        dirfd.remove_tree_child(parent, "tree")
+    finally:
+        os.close(parent)
+    assert not tree.exists()
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_remove_tree_child_fails_closed_without_safe_tree_removal(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(dirfd, "posix_available", lambda: False)
+    (tmp_path / "tree").mkdir()
+    with pytest.raises(OSError, match="tree removal"):
+        dirfd.remove_tree_child(-1, "tree")
+    assert (tmp_path / "tree").exists()
+    with pytest.raises(OSError):
+        dirfd.remove_tree_child(-1, "..")

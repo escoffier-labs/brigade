@@ -56,7 +56,6 @@ import ipaddress
 import os
 import re
 import secrets
-import shutil
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -64,7 +63,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import agents, proc
+from . import agents, dirfd, proc
 from . import dispatch_memory as audiences
 from . import memory_proposal_io as io
 from . import memory_verify_state as vstate
@@ -80,6 +79,8 @@ MIN_TIMEOUT = 1.0
 MAX_TIMEOUT = 600.0
 PROBE_TIMEOUT = 120.0
 CALL_DIR = re.compile(r"call-[0-9a-f]{32}")
+# The work root only ever holds call directories, and callers hold the state lock.
+MAX_LEFTOVERS = 1024
 DIGEST = re.compile(r"[0-9a-f]{64}")
 CLAUDE_MODEL = re.compile(r"claude-[a-z0-9][a-z0-9.-]{0,95}(?:\[[a-z0-9]{1,16}\])?")
 OLLAMA_MODEL = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}(?::[a-z0-9][a-z0-9._-]{0,63})?")
@@ -369,23 +370,17 @@ def ready(target: Path, propose: str | None, confirm: str | None) -> tuple[Seat,
 
 
 def _safe_dirs() -> bool:
-    return (
-        os.name == "posix"
-        and hasattr(os, "O_NOFOLLOW")
-        and os.open in os.supports_dir_fd
-        and os.mkdir in os.supports_dir_fd
-        and os.unlink in os.supports_dir_fd
-        and bool(getattr(shutil.rmtree, "avoids_symlink_attacks", False))
-    )
+    """The work area and probe file need the POSIX descriptor facade, as the verify state file does."""
+    return dirfd.posix_available() and dirfd.tree_removal_available()
 
 
 def _remove(name: str, parent: int) -> None:
-    shutil.rmtree(name, dir_fd=parent)
+    dirfd.remove_tree_child(parent, name)
 
 
 def _sweep(work_fd: int) -> None:
     """Remove call directories a killed run left behind. Callers hold the verify state lock."""
-    for name in os.listdir(work_fd):
+    for name in dirfd.child_names(work_fd, MAX_LEFTOVERS):
         if CALL_DIR.fullmatch(name):
             _remove(name, work_fd)
 
@@ -406,13 +401,13 @@ def work_area(target: Path) -> Iterator[Area]:
         with io.directory(root, create=True, private=True) as work_fd:
             _sweep(work_fd)
             name = f"call-{secrets.token_hex(16)}"
-            os.mkdir(name, 0o700, dir_fd=work_fd)
+            dirfd.mkdir_child(work_fd, name)
             primary = False
             try:
                 with io.directory(root / name, private=True) as call_fd:
-                    os.mkdir("cwd", 0o700, dir_fd=call_fd)
-                    os.mkdir("tmp", 0o700, dir_fd=call_fd)
-                    cwd_fd = os.open("cwd", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=call_fd)
+                    dirfd.mkdir_child(call_fd, "cwd")
+                    dirfd.mkdir_child(call_fd, "tmp")
+                    cwd_fd = dirfd.open_child_directory(call_fd, "cwd", writable=False)
                     try:
                         caller = True
                         yield Area(path=root / name, fd=call_fd, cwd_fd=cwd_fd)
@@ -434,7 +429,7 @@ def work_area(target: Path) -> Iterator[Area]:
 
 
 def _write(parent: int, name: str, data: bytes) -> None:
-    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+    fd = dirfd.open_child_file(parent, name, dirfd.file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL), 0o600)
     try:
         view = memoryview(data)
         while view:
@@ -479,7 +474,7 @@ def call(area: Area, seat: Seat, prompt: str, *, timeout: float) -> Reply:
         _write(area.fd, f"{stem}.prompt", data)
         result = LAUNCH(list(seat.argv), timeout=timeout, env=_env(area), cwd=area.cwd, stdin=data)
         _write(area.fd, f"{stem}.reply", result.stdout.encode("utf-8", errors="replace"))
-        breached = bool(os.listdir(area.cwd_fd))
+        breached = bool(dirfd.child_names(area.cwd_fd, 1))
     except OSError:
         raise SeatRefused("verify_workdir", "verify could not use its private work area") from None
     if breached:
@@ -536,11 +531,11 @@ def _save_probes(target: Path, seats: dict[str, dict[str, Any]]) -> None:
     io.write_exclusive(temporary, data)
     with io.directory(path.parent, private=True) as parent:
         try:
-            os.replace(temporary.name, path.name, src_dir_fd=parent, dst_dir_fd=parent)
-            os.fsync(parent)
+            dirfd.replace_children(parent, temporary.name, path.name)
+            dirfd.fsync_directory(parent)
         finally:
             with contextlib.suppress(FileNotFoundError):
-                os.unlink(temporary.name, dir_fd=parent)
+                dirfd.unlink_child(parent, temporary.name)
 
 
 def doctor_payload(target: Path, propose: str | None, confirm: str | None, *, timeout: float) -> dict[str, Any]:
