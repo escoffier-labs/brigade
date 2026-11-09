@@ -1486,12 +1486,20 @@ def high_fd(fd: int) -> int:
     """
     if fd >= HELD_FD_MIN:
         return fd
-    import fcntl
-
+    moved = -1
     try:
-        return fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, HELD_FD_MIN)
+        import fcntl
+
+        moved = fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, HELD_FD_MIN)
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            # The copy is unreachable if the original cannot be closed, so drop it too.
+            if moved >= 0:
+                os.close(moved)
+            raise
+    return moved
 
 
 def held_exec_supported() -> bool:
