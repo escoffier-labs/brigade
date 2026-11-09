@@ -212,10 +212,12 @@ def with_memory_context(evidence: EvidenceBrief, cwd: Path | None, task: str) ->
     The block has its own 4 KiB bound, so it rides outside the brief budget and
     every planner, worker and synthesis prompt that carries the evidence brief
     carries it too. No block (recall off, empty or failed) leaves ``evidence`` as is.
+    These prompts go to model providers and may go to cloud seats, so they are
+    always a connector audience, even on the operator's own host.
     """
     from .. import dispatch_memory
 
-    block = dispatch_memory.block_text(cwd, task)
+    block = dispatch_memory.block_text(cwd, task, audience=dispatch_memory.CONNECTOR)
     if not block:
         return evidence
     text = f"{block}\n{evidence.text}" if evidence.attached and evidence.text else block

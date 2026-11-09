@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import dispatch_audience, dispatch_memory, fleet_client_grokbot, grokbot_jobs
+from brigade import dispatch_memory, fleet_client_grokbot, grokbot_jobs
 from brigade import memory_hub_client as hubc
 from brigade.aboyeur import briefs
 from brigade.grokbot_t3.tools import DISPATCH_HEADER
@@ -25,14 +25,19 @@ HASH_A = "a" * 64
 HASH_B = "b" * 64
 
 
+def _recall_threads() -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if t.name == dispatch_memory.THREAD_NAME and t.is_alive()]
+
+
 @pytest.fixture(autouse=True)
-def _connector_host(monkeypatch, tmp_path_factory):
-    """No local marker and no narrowing environment: the host default is the connector audience."""
+def _isolated(monkeypatch, tmp_path_factory):
+    """A private Brigade home, empty twins, and no recall thread left over for the next test."""
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path_factory.mktemp("brigade-home")))
-    monkeypatch.delenv(dispatch_audience.AUDIENCE_ENV, raising=False)
-    monkeypatch.delenv(dispatch_audience.REMOTE_ENV, raising=False)
     with dispatch_memory._TWINS_LOCK:
         dispatch_memory._TWINS.clear()
+    yield
+    for thread in _recall_threads():
+        thread.join(15)
 
 
 def _workspace(tmp_path: Path) -> Path:
@@ -204,39 +209,52 @@ def _private_placeholder(items: list[dict[str, object]]) -> dict[str, object]:
     return found[0]
 
 
-def test_private_card_reaches_an_explicit_local_audience_only(tmp_path):
+def test_build_keeps_an_audience_parameter_for_later_local_wiring(tmp_path):
     target = _private_workspace(tmp_path)
 
-    local = dispatch_memory.build(target, "hub deploy", audience=dispatch_audience.LOCAL)
+    local = dispatch_memory.build(target, "hub deploy", audience=dispatch_memory.LOCAL)
 
-    assert local is not None
+    assert local is not None and local.audience == dispatch_memory.LOCAL
     assert _private_placeholder(local.context["items"])["summary"] == PRIVATE_SUMMARY
 
 
-@pytest.mark.parametrize("route", ["explicit", "host-default", "remote-env", "adapter", "remote-twin"])
-def test_private_card_withheld_for_every_connector_audience(tmp_path, monkeypatch, route):
+def _assert_private_withheld(text: str) -> None:
+    assert PRIVATE_SUMMARY not in text and "ops@example.org" not in text
+    assert "audience: connector |" in text and "audience: local |" not in text
+    assert "- card_id: escalation | blocked: " in text
+    assert "code: memory_content_private" in text
+
+
+@pytest.mark.parametrize("route", ["explicit", "default", "marked-host", "adapter", "aboyeur", "native-t3-child"])
+def test_private_card_withheld_for_every_connector_audience(tmp_path, route):
     target = _private_workspace(tmp_path)
     if route == "explicit":
-        text = dispatch_memory.build(target, "hub deploy", audience=dispatch_audience.CONNECTOR).block
-    elif route == "host-default":
+        text = dispatch_memory.build(target, "hub deploy", audience=dispatch_memory.CONNECTOR).block
+    elif route == "default":
         text = dispatch_memory.block_text(target, "hub deploy")
-    elif route == "remote-env":
-        _write_local_marker()
-        monkeypatch.setenv(dispatch_audience.REMOTE_ENV, "1")
+    elif route == "marked-host":
+        _write_valid_looking_marker()
         text = dispatch_memory.block_text(target, "hub deploy")
     elif route == "adapter":
         text = dispatch_memory.connector_text(target, "hub deploy")
+    elif route == "aboyeur":
+        _write_valid_looking_marker()
+        text = briefs.with_memory_context(briefs.EvidenceBrief(attached=False), target, "hub deploy").text
     else:
-        _write_local_marker()
-        local = dispatch_memory.block_text(target, "hub deploy")
-        assert PRIVATE_SUMMARY in local and "audience: local |" in local
-        text = dispatch_memory.for_remote(f"Sub-task header\n{local}\nDo the work.")
+        _write_valid_looking_marker()
+        built = dispatch_memory.block_text(target, "hub deploy")
+        text = dispatch_memory.for_remote(f"Sub-task header\n{built}\nDo the work.")
         assert "Sub-task header" in text and "Do the work." in text
 
-    assert PRIVATE_SUMMARY not in text and "ops@example.org" not in text
-    assert "audience: connector |" in text
-    assert "- card_id: escalation | blocked: " in text
-    assert "code: memory_content_private" in text
+    _assert_private_withheld(text)
+
+
+def test_a_local_block_sent_to_another_machine_becomes_its_connector_twin(tmp_path):
+    target = _private_workspace(tmp_path)
+    local = dispatch_memory.block_text(target, "hub deploy", audience=dispatch_memory.LOCAL)
+    assert PRIVATE_SUMMARY in local
+
+    _assert_private_withheld(dispatch_memory.for_remote(f"Header\n{local}\nDo the work."))
 
 
 def test_private_card_never_becomes_a_grokbot_reference(tmp_path):
@@ -247,23 +265,27 @@ def test_private_card_never_becomes_a_grokbot_reference(tmp_path):
     assert [ref["card_id"] for ref in refs] == ["deploy-notes"]
 
 
-def test_local_marker_grants_local_and_a_copied_marker_does_not(tmp_path):
-    assert dispatch_audience.host_audience() == dispatch_audience.CONNECTOR
-    _write_local_marker()
-    assert dispatch_audience.host_audience() == dispatch_audience.LOCAL
-    for change in ({"host": "another-host"}, {"home": [0, 0]}, {"v": 1}):
-        _write_local_marker(**change)
-        assert dispatch_audience.host_audience() == dispatch_audience.CONNECTOR
+def test_a_host_with_a_valid_looking_marker_still_gets_connector(tmp_path):
+    target = _private_workspace(tmp_path)
+    _write_valid_looking_marker()
+
+    packet = dispatch_memory.build(target, "hub deploy")
+
+    assert packet is not None and packet.audience == dispatch_memory.CONNECTOR
+    assert packet.context["audience"] == dispatch_memory.CONNECTOR
+    _assert_private_withheld(packet.block)
 
 
-def _write_local_marker(**change: object) -> None:
-    """The version 2 marker S24's opt-in writes, bound to this host and Brigade home."""
+def _write_valid_looking_marker() -> None:
+    """The local recall marker S24's opt-in writes. This PR must not read it."""
     import os
+    import socket
 
-    path = dispatch_audience.marker_path()
-    os.chmod(path.parent.parent, 0o700)
-    path.parent.mkdir(mode=0o700, exist_ok=True)
-    body = {"v": 2, "audience": "local", **dispatch_audience.binding(), **change}
+    home = Path(os.environ["BRIGADE_HOME"])
+    path = home / "claude-hooks" / "recall-audience.json"
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = os.stat(home)
+    body = {"v": 2, "audience": "local", "host": socket.gethostname(), "home": [info.st_dev, info.st_ino]}
     path.write_text(json.dumps(body), encoding="utf-8")
     os.chmod(path, 0o600)
 
@@ -454,7 +476,61 @@ def test_a_hung_hub_costs_at_most_the_budget(tmp_path):
         release.set()
 
     assert packet is None
-    assert elapsed < dispatch_memory.BUDGET_SECONDS + 0.75
+    assert elapsed < dispatch_memory.BUDGET_SECONDS + 0.25
+
+
+def test_twenty_dispatches_against_a_hung_hub_leave_one_recall_thread(tmp_path):
+    target = _workspace(tmp_path)
+    _card(target, "deploy-notes", "Hub deploy notes", summary="Plain notes")
+    release = threading.Event()
+    hung = FakeHub([], {}, hang=release)
+    try:
+        for _ in range(20):
+            started = time.monotonic()
+            packet = dispatch_memory.build(target, "hub deploy", settings=SETTINGS, transport=hung)
+            elapsed = time.monotonic() - started
+            assert packet is None
+            assert elapsed < dispatch_memory.BUDGET_SECONDS + 0.25
+            assert len(_recall_threads()) <= 1
+        assert hung.actions == ["search"]  # every later dispatch found the slot busy
+    finally:
+        release.set()
+
+
+def test_a_deadline_reaches_the_hub_transport(tmp_path):
+    target = _workspace(tmp_path)
+    timeouts: list[float] = []
+
+    def transport(url, token, body, timeout):
+        timeouts.append(timeout)
+        raise TimeoutError("slow hub")
+
+    before = time.monotonic()
+    assert dispatch_memory.build(target, "hub deploy", settings=SETTINGS, transport=transport) is None
+    assert timeouts and all(0 < t <= dispatch_memory.BUDGET_SECONDS for t in timeouts)
+    assert time.monotonic() - before < 0.5
+
+
+def test_a_worker_that_finishes_late_publishes_nothing(tmp_path, monkeypatch):
+    target = _private_workspace(tmp_path)
+    entries = dispatch_memory.select(target, "hub deploy")
+    assert entries
+    release = threading.Event()
+
+    def slow_select(*args, **kwargs):
+        release.wait(10)
+        return entries
+
+    monkeypatch.setattr(dispatch_memory, "select", slow_select)
+    monkeypatch.setattr(dispatch_memory, "BUDGET_SECONDS", 0.2)
+
+    assert dispatch_memory.build(target, "hub deploy", audience=dispatch_memory.LOCAL) is None
+    release.set()
+    for thread in _recall_threads():
+        thread.join(5)
+    assert not _recall_threads()
+    with dispatch_memory._TWINS_LOCK:
+        assert not dispatch_memory._TWINS
 
 
 def test_no_block_leaves_every_dispatch_packet_unchanged(tmp_path, monkeypatch, make_tools):
@@ -500,21 +576,28 @@ def test_grokbot_t3_adapter_appends_a_connector_block(tmp_path, make_tools):
     assert PRIVATE_SUMMARY not in prompt and BODY_MARKER not in prompt
 
 
-def test_aboyeur_worker_prompt_carries_the_block(tmp_path):
-    from brigade.aboyeur import planning
-    from brigade.roster import Agent
-    from brigade.run_transport import Assignment
+def test_aboyeur_prompts_carry_a_connector_block_even_on_a_local_capable_host(tmp_path, monkeypatch):
+    from brigade.aboyeur import planning, prompts
+    from brigade.roster import Agent, Roster
+    from brigade.run_transport import Assignment, WorkerResult
 
-    target = _workspace(tmp_path)
-    _card(target, "deploy-notes", "Hub deploy notes", summary="Plain notes")
+    # A host where a later local wiring would pick the local audience by default.
+    monkeypatch.setattr(dispatch_memory, "DEFAULT_AUDIENCE", dispatch_memory.LOCAL)
+    target = _private_workspace(tmp_path)
     evidence = briefs.with_memory_context(briefs.EvidenceBrief(attached=False), target, "fix the hub deploy")
     agent = Agent(name="coder", cli="claude", role="Write code.")
-    assignment = Assignment(stage=1, worker="coder", task="fix the hub deploy")
+    orchestrator = Agent(name="chef", cli="claude", role="Plan.")
+    roster = Roster(orchestrator="chef", agents={"chef": orchestrator, "coder": agent}, max_workers=2)
+    result = WorkerResult(worker="coder", task="fix the hub deploy", text="done", ok=True)
 
-    prompt = planning._worker_prompt(agent, assignment, evidence=evidence)
+    planner = briefs.build_plan_prompt("fix the hub deploy", roster, evidence=evidence)
+    worker = planning._worker_prompt(agent, Assignment(worker="coder", task="fix the hub deploy"), evidence=evidence)
+    synthesis = prompts.build_synth_prompt("fix the hub deploy", [result], evidence=evidence)
 
-    assert evidence.attached and dispatch_memory.HEADING in prompt
-    assert "card_id: deploy-notes" in prompt and BODY_MARKER not in prompt
+    for prompt in (planner, worker, synthesis):
+        assert dispatch_memory.HEADING in prompt and BODY_MARKER not in prompt
+        assert "card_id: deploy-notes" in prompt
+        _assert_private_withheld(prompt)
 
 
 def test_worklore_prepared_handoff_gains_memory_context_on_the_consumer_side(tmp_path, monkeypatch, capsys, hub):  # noqa: F811

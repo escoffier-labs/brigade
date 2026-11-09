@@ -6,7 +6,8 @@
 - Selection uses the `memory search` ranking, keeps only reviewed, policy-promoted and imported hub
   cards, re-reads each hub card's head and drops stale ones, and scans every field on its own and
   then the rendered block. A hub that is stopped, slow or refusing adds no block and never delays
-  dispatch past a 2 s budget. Private-class cards reach only a host the operator marked local.
+  dispatch past a 2 s budget, and at most one recall runs at a time. Every packet is built for a
+  connector audience, so private-class cards never appear in one.
 - Grok Bot feed jobs carry up to 5 card references (`memory_refs`: scope, card id and short hash)
   in the private job envelope, returned with the claim's execution context. Hub job payloads are
   unchanged and hold no task text.

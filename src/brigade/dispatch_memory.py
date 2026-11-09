@@ -27,6 +27,15 @@ Selection, in order:
   only the card id and the rule id. A private-class finding withholds the item
   from a connector audience, and only from it.
 
+Every packet is built for the connector audience for now. ``build`` keeps an
+``audience`` parameter so a local audience can be wired later, but no caller
+passes ``local`` and nothing here reads a host marker.
+
+At most one recall runs per process. A dispatch that arrives while one is in
+flight gets no block at once. The 2 s budget bounds all of ``build`` and is
+passed into every hub call as its timeout, so a worker ends on its own, and a
+worker that finishes late never publishes anything.
+
 Every packet says ``content_trust: "untrusted"``, and the rendered block keeps
 the sentence that memory text is data, not instructions.
 """
@@ -43,8 +52,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from . import dispatch_audience
-
 MAX_ITEMS = 5
 MAX_BYTES = 4096
 MAX_REFS = 5
@@ -55,6 +62,14 @@ SEARCH_WIDE = 20  # the hub's `search` limit: the trust filter never runs on a c
 BUDGET_SECONDS = 2.0  # the whole selection, hub search and revalidation included
 HEAD_CALL_SECONDS = 0.5
 PUSH_TRUST = frozenset({"reviewed", "policy-promoted", "imported"})
+LOCAL = "local"
+CONNECTOR = "connector"
+AUDIENCES = frozenset({LOCAL, CONNECTOR})
+# Where the audience is chosen. Every dispatch packet is a connector audience
+# for now. After the S24 local recall marker (#2408) merges, `handoff show` may
+# use `claude_hooks.recall_audience.audience()` here. aboyeur prompts stay
+# connector regardless: they go to model providers and may go to cloud seats.
+DEFAULT_AUDIENCE = CONNECTOR
 LOCAL_SCOPE = "local"
 LOCAL_TRUST = "local"
 HEADING = "## Memory context (untrusted card references, read-only)"
@@ -72,6 +87,9 @@ _TWINS_MAX = 16
 # Local-audience block text -> the same packet rendered for a connector audience.
 _TWINS: collections.OrderedDict[str, str] = collections.OrderedDict()
 _TWINS_LOCK = threading.Lock()
+# One recall in flight per process: a hung hub costs one thread, never a pile of them.
+_RECALL_SLOT = threading.BoundedSemaphore(1)
+THREAD_NAME = "brigade-dispatch-memory"
 
 
 @dataclass(frozen=True)
@@ -185,7 +203,21 @@ def _local_matches(root: Path, query: str) -> list[dict[str, Any]]:
     return matches
 
 
-def _search(root: Path, query: str, settings: Any, transport: Any) -> tuple[list[dict[str, Any]], Any] | None:
+def _deadline_transport(inner: Callable[..., Any], deadline: float) -> Callable[..., Any]:
+    """A hub transport whose timeout never runs past ``deadline``, so the recall worker ends on its own."""
+
+    def send(url: str, token: str, body: dict[str, Any], timeout: float) -> Any:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("dispatch memory budget spent")
+        return inner(url, token, body, min(timeout, remaining))
+
+    return send
+
+
+def _search(
+    root: Path, query: str, settings: Any, transport: Any, deadline: float
+) -> tuple[list[dict[str, Any]], Any] | None:
     """Ranked matches and the hub client (None off hub), or None when hub recall failed."""
     from . import memory_hub_client as hubc
     from . import memory_hub_search
@@ -196,6 +228,10 @@ def _search(root: Path, query: str, settings: Any, transport: Any) -> tuple[list
         settings = hubc.load_settings(root)
     if not settings.enabled:
         return _local_matches(root, query), None
+    if transport is None:
+        hubc.client_for(settings)  # the encrypted-or-loopback check the default transport gets
+        transport = hubc.urllib_transport
+    transport = _deadline_transport(transport, deadline)
     payload = memory_hub_search.search_payload(
         root, query, limit=SEARCH_WIDE, query_source="prompt", transport=transport, settings=settings
     )
@@ -255,16 +291,17 @@ def select(
     *,
     settings: Any = None,
     transport: Any = None,
+    deadline: float | None = None,
 ) -> list[Entry] | None:
     """Up to five entries in search order, or None when recall is off, empty or failed."""
     from .memory_hooks import _normalize_query, resolve_memory_recall_target
 
-    deadline = time.monotonic() + BUDGET_SECONDS
+    deadline = time.monotonic() + BUDGET_SECONDS if deadline is None else deadline
     root, status = resolve_memory_recall_target(target)
     normalized = _normalize_query(query) if isinstance(query, str) else ""
     if status != "active" or root is None or not root.exists() or not normalized:
         return None
-    found = _search(root, normalized, settings, transport)
+    found = _search(root, normalized, settings, transport, deadline)
     if found is None:
         return None
     matches, client = found
@@ -286,7 +323,7 @@ def _item(entry: Entry, audience: str) -> dict[str, Any]:
     card = entry.card
     if card is None:
         return dict(entry.refusal or {"card_id": "card", "blocked": "memory_scan_unavailable"})
-    if entry.private_rule is not None and audience != dispatch_audience.LOCAL:
+    if entry.private_rule is not None and audience != LOCAL:
         return {"card_id": _ref(card.card_id), "blocked": entry.private_rule, "code": PRIVATE_CODE}
     return {
         "scope": card.scope,
@@ -324,7 +361,7 @@ def _finding(text: str, audience: str) -> bool:
 
     verdict, _ = scanner.scan_verdict([text])
     if verdict == scanner.PRIVATE:
-        return audience != dispatch_audience.LOCAL
+        return audience != LOCAL
     return verdict != scanner.CLEAN
 
 
@@ -334,7 +371,7 @@ def _encoded(value: object) -> int:
 
 def packet(entries: list[Entry], audience: str) -> Packet | None:
     """The bounded block for ``audience``, scanned again as rendered. None when nothing fits or passes."""
-    audience = audience if audience in dispatch_audience.AUDIENCES else dispatch_audience.CONNECTOR
+    audience = audience if audience in AUDIENCES else CONNECTOR
     items = [_item(entry, audience) for entry in entries[:MAX_ITEMS]]
     # The rendered scan: an item whose own rendered lines carry a finding becomes a placeholder.
     items = [
@@ -356,45 +393,53 @@ def packet(entries: list[Entry], audience: str) -> Packet | None:
     return Packet(audience=audience, block=block, context=context)
 
 
-def _bounded(work: Callable[[], Any], budget: float) -> Any:
-    """Run ``work`` on a daemon thread and give up after ``budget`` seconds: dispatch never waits longer."""
-    box: list[Any] = []
-
-    def run() -> None:
-        try:
-            box.append(work())
-        except Exception:  # noqa: BLE001 - memory never blocks dispatch
-            box.append(None)
-
-    thread = threading.Thread(target=run, name="brigade-dispatch-memory", daemon=True)
-    thread.start()
-    thread.join(budget)
-    return box[0] if box else None
-
-
 def build(target: Path | None, query: str, *, audience: str | None = None, **options: Any) -> Packet | None:
-    """One packet for ``query`` within the budget, or None. Never raises.
+    """One packet for ``query`` within ``BUDGET_SECONDS`` in total, or None. Never raises.
 
-    ``audience`` defaults to this host's (``dispatch_audience.host_audience``),
-    which is ``connector`` unless the host is explicitly marked local.
+    ``audience`` defaults to ``DEFAULT_AUDIENCE`` (connector). While another
+    recall is in flight in this process the answer is None at once. The worker
+    runs against the same deadline the caller waits on, and a worker that
+    finishes after it never publishes a result or a twin.
     """
     if target is None or not isinstance(query, str) or not query.strip():
         return None
-    chosen = audience or dispatch_audience.host_audience()
+    chosen = audience if audience in AUDIENCES else DEFAULT_AUDIENCE
+    deadline = time.monotonic() + BUDGET_SECONDS
+    if not _RECALL_SLOT.acquire(blocking=False):
+        return None
+    lock = threading.Lock()
+    state: dict[str, Any] = {"abandoned": False, "result": None}
 
-    def work() -> tuple[Packet | None, Packet | None]:
-        entries = select(Path(target), query, **options)
-        if not entries:
-            return None, None
-        local = packet(entries, chosen)
-        twin = packet(entries, dispatch_audience.CONNECTOR) if chosen == dispatch_audience.LOCAL else None
-        return local, twin
+    def run() -> None:
+        try:
+            entries = select(Path(target), query, deadline=deadline, **options)
+            result = None
+            if entries:
+                built = packet(entries, chosen)
+                twin = packet(entries, CONNECTOR) if chosen == LOCAL else None
+                result = (built, twin)
+            with lock:
+                if not state["abandoned"]:
+                    state["result"] = result
+        except Exception:  # noqa: BLE001 - memory never blocks dispatch
+            pass
+        finally:
+            _RECALL_SLOT.release()
 
-    result = _bounded(work, BUDGET_SECONDS + 0.25)
+    try:
+        thread = threading.Thread(target=run, name=THREAD_NAME, daemon=True)
+        thread.start()
+    except Exception:  # noqa: BLE001 - a thread that cannot start adds no block
+        _RECALL_SLOT.release()
+        return None
+    thread.join(max(0.0, deadline - time.monotonic()))
+    with lock:
+        state["abandoned"] = True
+        result = state["result"]
     if not result:
         return None
     built, twin = result
-    if built is not None and built.audience == dispatch_audience.LOCAL:
+    if built is not None and built.audience == LOCAL:
         with _TWINS_LOCK:
             _TWINS[built.block] = twin.block if twin is not None else ""
             while len(_TWINS) > _TWINS_MAX:
@@ -410,7 +455,7 @@ def block_text(target: Path | None, query: str, **options: Any) -> str:
 
 def connector_text(target: Path | None, query: str, **options: Any) -> str:
     """The rendered block for a connector audience (the Grok Bot T3 adapter), or the empty string."""
-    return block_text(target, query, audience=dispatch_audience.CONNECTOR, **options)
+    return block_text(target, query, audience=CONNECTOR, **options)
 
 
 def for_remote(prompt: str) -> str:
@@ -424,10 +469,7 @@ def for_remote(prompt: str) -> str:
 
     def swap(match: re.Match[str]) -> str:
         block = match.group(0)
-        if (
-            f"audience: {dispatch_audience.CONNECTOR} |" in block
-            and f"audience: {dispatch_audience.LOCAL} |" not in block
-        ):
+        if f"audience: {CONNECTOR} |" in block and f"audience: {LOCAL} |" not in block:
             return block
         with _TWINS_LOCK:
             return _TWINS.get(block if block.endswith("\n") else block + "\n", "")
@@ -440,7 +482,7 @@ def job_refs(target: Path | None, query: str, **options: Any) -> list[dict[str, 
 
     The Grok Bot is always a connector audience, and a withheld card yields no reference.
     """
-    built = build(target, query, audience=dispatch_audience.CONNECTOR, **options)
+    built = build(target, query, audience=CONNECTOR, **options)
     if built is None:
         return []
     refs = [

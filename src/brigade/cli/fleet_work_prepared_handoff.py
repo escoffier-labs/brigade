@@ -105,6 +105,8 @@ def _memory_context(view: Mapping[str, Any]) -> Any:
     item = view["item"]
     query = " ".join([str(item["title"]), *(str(text) for text in item["effective_acceptance"])])
     try:
-        return dispatch_memory.build(Path.cwd(), query)
+        # Connector audience for now: after #2408 merges, this read may use
+        # claude_hooks.recall_audience.audience() to allow a local audience.
+        return dispatch_memory.build(Path.cwd(), query, audience=dispatch_memory.CONNECTOR)
     except Exception:  # noqa: BLE001 - memory never blocks a handoff read
         return None

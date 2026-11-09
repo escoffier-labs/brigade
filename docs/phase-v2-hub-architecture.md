@@ -2760,8 +2760,10 @@ S25 as built (dispatch packets, `src/brigade/dispatch_memory.py`):
   already holds. The search is the one `memory search` runs: hub fused with
   local cards in `read` and `sync` modes, local BM25 otherwise. A degraded hub
   answer adds no block, so a stopped or refusing hub never falls back to the
-  replica. The whole selection runs on a daemon thread with a 2 s budget, so
-  dispatch never waits longer than that.
+  replica. One recall runs per process at a time, and a dispatch that finds
+  one in flight gets no block at once. The 2 s budget bounds the whole build
+  and is the timeout on every hub call, so the recall thread ends on its own.
+  A recall that finishes late publishes nothing.
 - Hub hits pass only as `reviewed`, `policy-promoted` or `imported`. Every
   `agent-unreviewed` hit is dropped, the writer's own included, because the
   search answer does not say who wrote it. Each hub hit is then revalidated
@@ -2772,13 +2774,16 @@ S25 as built (dispatch packets, `src/brigade/dispatch_memory.py`):
   alone, then on each item's rendered lines and on the whole block. A finding
   replaces the item with `{card_id, blocked}`. A finding only the whole block
   shows drops the block. Tags are scanned and never rendered.
-- The audience is `connector` unless the host carries the S24 local recall
-  marker. The Grok Bot T3 adapter always asks for `connector`. A native T3
-  child on another machine gets the connector rendering of the same packet,
-  or no block, never the local one.
+- Every packet is built for the `connector` audience, so private-class cards
+  never appear in one. Nothing reads the S24 local recall marker yet. `build`
+  keeps an `audience` parameter, and after #2408 merges `handoff show` may use
+  the S24 audience. A native T3 child on another machine gets the connector
+  rendering of a packet or no block, never a local one.
 - `aboyeur` carries the block in front of the evidence brief, outside the
   6,000-byte brief budget, so planner, worker and synthesis prompts all see
-  it. The Worklore handoff consumer (`brigade fleet work handoff show`) adds
+  it. Those prompts go to model providers and may go to cloud seats, so
+  `aboyeur` asks for `connector` explicitly and a later local wiring cannot
+  reach it. The Worklore handoff consumer (`brigade fleet work handoff show`) adds
   `memory_context` after it validates the wire view, so the hub route and
   `brigade.prepared_handoff.v1` are unchanged.
 - Grok Bot references ride in the private job envelope as `memory_refs` and
