@@ -89,12 +89,14 @@ hostile settings slice 9 tests must plant. Slice 9's resolver implementation req
 The resolver MUST:
 
 1. Run every git command through one wrapper with a fixed timeout, no stdin,
-   `--no-pager` and no prompt.
-2. Remove every inherited `GIT_*` variable, then set exactly
-   `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
-   `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`. Also remove the
-   curl proxy and TLS variables (`*_proxy` in either case, `CURL_CA_BUNDLE`,
-   `SSL_CERT_FILE`, `SSL_CERT_DIR`).
+   `--no-pager` and no prompt, killing git's whole process tree on a timeout.
+2. Run a trusted absolute git (configured, or from fixed system directories,
+   never the caller's `PATH`) with an environment built from scratch: only
+   `PATH` (git's exec directory and the system directories), a private empty
+   `HOME`, `LC_ALL=C`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+   `GIT_NO_REPLACE_OBJECTS=1`, `GIT_TERMINAL_PROMPT=0`, and on Windows
+   `SYSTEMROOT`, `WINDIR`, `TEMP` and `TMP`. No loader, OpenSSL, curl, proxy,
+   TLS, XDG or inherited `GIT_*` variable reaches git.
 3. Pass `--no-replace-objects` and `-c` overrides on every call:
    `core.fsmonitor=false`, `core.hooksPath` at a missing directory,
    `credential.helper=`, `core.askPass=`, `core.alternateRefsCommand=`,

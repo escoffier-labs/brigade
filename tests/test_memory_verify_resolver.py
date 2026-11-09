@@ -17,8 +17,11 @@ import os
 import shutil
 import socket
 import ssl
+import stat
 import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -28,10 +31,13 @@ from brigade import memory_verify_contract as vc
 from brigade import memory_verify_resolver as resolver
 
 posix = pytest.mark.skipif(os.name != "posix", reason="scratch HTTPS remotes and marker scripts need POSIX")
-pytestmark = [
-    posix,
-    pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed"),
-]
+windows = pytest.mark.skipif(os.name != "nt", reason="Windows-only environment shape")
+pytestmark = [pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")]
+# Variables the test's own setup git calls must not inherit from the developer's shell.
+SETUP_DROPPED = frozenset(
+    {"http_proxy", "https_proxy", "all_proxy", "no_proxy", "curl_ca_bundle", "ssl_cert_file", "ssl_cert_dir"}
+)
+REAL_GIT_ENVIRONMENT = resolver.git_environment
 
 SCOPE = "repo:example"
 IDENTITY = {
@@ -169,7 +175,7 @@ class Listener:
 
 def setup_env(ca: Path | None = None) -> dict[str, str]:
     """Environment for the test's own setup git calls. Never used by the resolver."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k.lower() not in resolver.CURL_VARIABLES}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k.lower() not in SETUP_DROPPED}
     env.update(IDENTITY, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
     if ca is not None:
         env["GIT_SSL_CAINFO"] = str(ca)
@@ -242,13 +248,24 @@ class World:
         return resolver.commit_resolver(self.bound(**extra), run)(abbreviation)
 
 
+def trust_scratch_ca(monkeypatch, ca: Path) -> None:
+    """Test-only: give the resolver's git the scratch CA. Production code has no way to add one."""
+
+    def with_ca(*args, **kwargs):
+        return {**REAL_GIT_ENVIRONMENT(*args, **kwargs), "GIT_SSL_CAINFO": str(ca)}
+
+    monkeypatch.setattr(resolver, "git_environment", with_ca)
+
+
 @pytest.fixture
 def world(tmp_path, monkeypatch):
+    if os.name != "posix":
+        pytest.skip("scratch HTTPS remotes and marker scripts need POSIX")
     for name in list(os.environ):
-        if name.startswith("GIT_") or name.lower() in resolver.CURL_VARIABLES:
+        if name.startswith("GIT_") or name.lower() in SETUP_DROPPED:
             monkeypatch.delenv(name)
     built = World(tmp_path)
-    monkeypatch.setattr(resolver, "_TEST_CA_FILE", str(built.ca))
+    trust_scratch_ca(monkeypatch, built.ca)
     yield built
     built.server.stop()
 
@@ -410,12 +427,19 @@ def test_a_fetch_that_times_out_is_refused(world, monkeypatch):
     try:
         git(world.workspace, "remote", "set-url", "origin", f"https://localhost:{stalled.port}/remote.git")
         monkeypatch.setattr(resolver, "TIMEOUT_SECONDS", 2.0)
-        killed = []
-        real_kill = resolver._kill
-        monkeypatch.setattr(resolver, "_kill", lambda process: (killed.append(process.pid), real_kill(process)))
+        codes = []
+        real_run = resolver.proc.run
+
+        def spy(*args, **kwargs):
+            result = real_run(*args, **kwargs)
+            codes.append(result.code)
+            return result
+
+        monkeypatch.setattr(resolver.proc, "run", spy)
         assert world.resolve(short(target)) is None
         assert stalled.connections >= 1
-        assert killed  # the resolver's own timeout ended the fetch, not curl's much longer connect timeout
+        # The resolver's own timeout ended the fetch, not curl's much longer connect timeout.
+        assert codes[-1] == resolver.PROC_TIMEOUT_CODE
     finally:
         stalled.stop()
 
@@ -459,6 +483,22 @@ def test_ambiguity_from_an_object_on_another_ref_is_refused(world):
     # One more character separates them, and the commit on the allowed ref then resolves.
     longer = on_main[: next(i for i in range(8, 40) if on_main[:i] != on_other[:i])]
     assert world.resolve(longer) == on_main
+
+
+def test_ambiguity_between_two_reachable_commits_is_refused(world):
+    """Both twins sit on allowed refs, so whichever one a resolver picked would pass every later check."""
+    tree = git(world.author, "rev-parse", "HEAD^{tree}")
+    head = git(world.author, "rev-parse", "HEAD")
+    first, second, prefix = grind_twins(tree, head)
+    on_main = write_object(world.author, "commit", first)
+    on_release = write_object(world.author, "commit", second)
+    git(world.author, "update-ref", "refs/heads/main", on_main)
+    git(world.author, "update-ref", "refs/heads/release", on_release)
+    world.push("main", "release")
+    refs = ["refs/remotes/origin/main", "refs/remotes/origin/release"]
+    assert world.resolve(prefix, commit_refs=refs) is None
+    longer = on_release[: next(i for i in range(8, 40) if on_main[:i] != on_release[:i])]
+    assert world.resolve(longer, commit_refs=refs) == on_release
 
 
 def test_ambiguity_with_a_blob_is_refused(world):
@@ -511,11 +551,11 @@ def test_a_branch_or_tag_named_like_the_abbreviation_never_answers(world):
     assert world.resolve("0123456789abc") is None
 
 
-def test_git_missing_from_path_is_refused(world, monkeypatch):
+def test_no_git_in_the_system_directories_is_refused(world, monkeypatch):
     target = world.commit("target")
     empty = world.root / "empty-bin"
     empty.mkdir()
-    monkeypatch.setenv("PATH", str(empty))
+    monkeypatch.setattr(resolver, "POSIX_SYSTEM_DIRS", (str(empty),))
     assert world.resolve(short(target)) is None
 
 
@@ -524,9 +564,9 @@ def test_ls_remote_proves_freshness_before_git_2_41(world, monkeypatch):
     calls = []
     real = resolver._git
 
-    def spy(cwd, *args):
+    def spy(tool, cwd, *args):
         calls.append(args[0])
-        return real(cwd, *args)
+        return real(tool, cwd, *args)
 
     monkeypatch.setattr(resolver, "_git", spy)
     target = world.commit("target")
@@ -539,8 +579,8 @@ def test_ls_remote_mismatch_is_refused_before_git_2_41(world, monkeypatch):
     target = world.commit("target")
     real = resolver._git
 
-    def moved(cwd, *args):
-        result = real(cwd, *args)
+    def moved(tool, cwd, *args):
+        result = real(tool, cwd, *args)
         if args[0] == "ls-remote" and result is not None:
             return resolver._Result(result.code, result.out.replace(target, world.base))
         return result
@@ -553,8 +593,8 @@ def test_a_fetch_whose_porcelain_does_not_prove_the_ref_is_refused(world, monkey
     target = world.commit("target")
     real = resolver._git
 
-    def silent(cwd, *args):
-        result = real(cwd, *args)
+    def silent(tool, cwd, *args):
+        result = real(tool, cwd, *args)
         if args[0] == "fetch" and result is not None:
             return resolver._Result(result.code, "")
         return result
@@ -812,48 +852,79 @@ def test_an_inherited_proxy_is_never_contacted(world, monkeypatch):
 
 def test_inherited_tls_variables_are_removed(world, monkeypatch):
     target = world.commit("target")
-    monkeypatch.setattr(resolver, "_TEST_CA_FILE", None)
+    monkeypatch.setattr(resolver, "git_environment", REAL_GIT_ENVIRONMENT)
     for name in ("SSL_CERT_FILE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO"):
         monkeypatch.setenv(name, str(world.ca))
-    # Without the test hook the scratch CA is not trusted, so a variable that leaked through would make this pass.
+    # Without the test-only CA the scratch server is not trusted, so a variable that leaked through would make this pass.
     assert world.resolve(short(target)) is None
 
 
 # --- The wrapper itself ------------------------------------------------------------------
 
 
-def test_the_environment_is_rebuilt_without_git_or_curl_variables():
-    inherited = {
-        "PATH": "/usr/bin",
-        "GIT_DIR": "x",
-        "GIT_CONFIG_PARAMETERS": "x",
-        "GIT_CONFIG_COUNT": "1",
-        "git_trace": "1",
-        "HTTPS_PROXY": "x",
-        "http_proxy": "x",
-        "All_Proxy": "x",
-        "NO_PROXY": "x",
-        "CURL_CA_BUNDLE": "x",
-        "SSL_CERT_FILE": "x",
-        "SSL_CERT_DIR": "x",
-    }
-    env = resolver.git_environment(inherited)
+HOSTILE_INHERITED = {
+    "PATH": "/attacker/bin",
+    "HOME": "/attacker/home",
+    "XDG_CONFIG_HOME": "/attacker/xdg",
+    "GIT_DIR": "x",
+    "GIT_CONFIG_PARAMETERS": "x",
+    "GIT_CONFIG_COUNT": "1",
+    "git_trace": "1",
+    "LD_PRELOAD": "/attacker/lib.so",
+    "LD_LIBRARY_PATH": "/attacker/lib",
+    "DYLD_INSERT_LIBRARIES": "/attacker/lib.dylib",
+    "OPENSSL_CONF": "/attacker/openssl.cnf",
+    "OPENSSL_MODULES": "/attacker/modules",
+    "SSLKEYLOGFILE": "/attacker/keys",
+    "HTTPS_PROXY": "x",
+    "http_proxy": "x",
+    "All_Proxy": "x",
+    "NO_PROXY": "x",
+    "CURL_CA_BUNDLE": "x",
+    "CURL_HOME": "x",
+    "SSL_CERT_FILE": "x",
+    "SSL_CERT_DIR": "x",
+    "TMPDIR": "/attacker/tmp",
+    "SYSTEMROOT": r"C:\Windows",
+    "WINDIR": r"C:\Windows",
+    "TEMP": r"C:\Temp",
+    "TMP": r"C:\Temp",
+}
+
+
+@posix
+def test_the_environment_is_built_from_scratch_on_posix():
+    env = resolver.git_environment("/private/home", "/usr/lib/git-core", HOSTILE_INHERITED)
     assert env == {
-        "PATH": "/usr/bin",
+        "PATH": os.pathsep.join(("/usr/lib/git-core", *resolver.POSIX_SYSTEM_DIRS)),
+        "HOME": "/private/home",
+        "LC_ALL": "C",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_NO_REPLACE_OBJECTS": "1",
         "GIT_TERMINAL_PROMPT": "0",
     }
+    assert set(env) == resolver.ENV_ALLOWLIST
 
 
-def test_every_call_carries_the_overrides(monkeypatch):
-    monkeypatch.setattr(resolver, "_TEST_CA_FILE", None)
-    argv = resolver.git_argv(["status"])
-    assert argv[:3] == ["git", "--no-pager", "--no-replace-objects"]
+@windows
+def test_the_environment_is_built_from_scratch_on_windows():
+    env = resolver.git_environment(r"C:\home", r"C:\git\libexec", HOSTILE_INHERITED)
+    assert set(env) == resolver.ENV_ALLOWLIST
+    assert env["HOME"] == r"C:\home" and "/attacker/bin" not in env["PATH"]
+    assert {name: env[name] for name in resolver.WINDOWS_KEPT} == {
+        name: HOSTILE_INHERITED[name] for name in resolver.WINDOWS_KEPT
+    }
+
+
+def test_every_call_carries_the_overrides():
+    tool = resolver.GitTool("/usr/bin/git", {})
+    argv = tool.argv(["status"])
+    assert argv[:3] == ["/usr/bin/git", "--no-pager", "--no-replace-objects"]
     assert argv[-1] == "status"
     overrides = [argv[index + 1] for index, value in enumerate(argv) if value == "-c"]
     assert overrides == list(resolver.OVERRIDES)
+    assert not any("sslcainfo" in value.lower() for value in argv)  # production never adds a CA
     hooks = next(value for value in overrides if value.startswith("core.hooksPath="))
     assert not os.path.exists(hooks.partition("=")[2])
     for required in (
@@ -868,6 +939,12 @@ def test_every_call_carries_the_overrides(monkeypatch):
         "http.cookieFile=",
     ):
         assert required in overrides
+
+
+def test_the_module_has_no_ca_hook():
+    assert not hasattr(resolver, "_TEST_CA_FILE")
+    source = Path(resolver.__file__).read_text()
+    assert "sslCAInfo" not in source and "GIT_SSL_CAINFO" not in source
 
 
 def test_https_url_accepts_only_plain_https():
@@ -932,3 +1009,270 @@ def test_a_resolver_error_returns_none(world, monkeypatch):
 
     monkeypatch.setattr(resolver, "_git", boom)
     assert world.resolve(short(world.base)) is None
+
+
+# --- Fix round 1: trusted git, from-scratch environment, process tree -------------------
+
+
+def real_git() -> str:
+    found = shutil.which("git")
+    assert found is not None
+    return os.path.realpath(found)
+
+
+def recording_git(directory: Path, body: str) -> Path:
+    """A trusted wrapper that runs `body` (POSIX sh) and then execs the real git."""
+    directory.mkdir(mode=0o700, exist_ok=True)
+    script = directory / "git"
+    script.write_text(f'#!/bin/sh\n{body}\nexec "{real_git()}" "$@"\n')
+    script.chmod(0o755)
+    return script
+
+
+def test_a_git_earlier_on_the_callers_path_never_runs(world, monkeypatch):
+    target = world.commit("target")
+    fake = world.root / "fake-bin"
+    recording_git(fake, f"echo ran >> '{world.marker('path-git')}'")
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
+    assert world.resolve(short(target)) == target
+    assert world.ran() == []
+
+
+def test_ld_preload_never_reaches_git(world, monkeypatch):
+    compiler = shutil.which("cc") or shutil.which("gcc")
+    if compiler is None or sys.platform != "linux":
+        pytest.skip("needs a C compiler and the Linux dynamic loader")
+    target = world.commit("target")
+    source = world.root / "mark.c"
+    marker = world.marker("ld-preload")
+    source.write_text(
+        "#include <stdio.h>\n"
+        "__attribute__((constructor)) static void mark(void) {\n"
+        f'  FILE *f = fopen("{marker}", "a"); if (f) {{ fputs("ran\\n", f); fclose(f); }}\n'
+        "}\n"
+    )
+    library = world.root / "libmark.so"
+    built = subprocess.run([compiler, "-shared", "-fPIC", "-o", str(library), str(source)], capture_output=True)
+    if built.returncode != 0:
+        pytest.skip("the marker library did not compile")
+    monkeypatch.setenv("LD_PRELOAD", str(library))
+    monkeypatch.setenv("DYLD_INSERT_LIBRARIES", str(library))
+    assert world.resolve(short(target)) == target
+    assert world.ran() == []
+
+
+def test_openssl_conf_and_other_loader_variables_never_reach_git(world, monkeypatch):
+    target = world.commit("target")
+    conf = world.root / "openssl.cnf"
+    conf.write_text("openssl_conf = planted\n")
+    marker = world.marker("loader-variables")
+    wrapper = recording_git(
+        world.root / "recording-bin",
+        "\n".join(
+            f'[ -n "${name}" ] && echo "{name}" >> \'{marker}\''
+            for name in (
+                "OPENSSL_CONF",
+                "OPENSSL_MODULES",
+                "LD_PRELOAD",
+                "SSLKEYLOGFILE",
+                "XDG_CONFIG_HOME",
+                "CURL_HOME",
+            )
+        )
+        + f'\n[ -n "$OPENSSL_CONF" ] && cat "$OPENSSL_CONF" >> \'{marker}\'\ntrue',
+    )
+    for name, value in (
+        ("OPENSSL_CONF", str(conf)),
+        ("OPENSSL_MODULES", str(world.root)),
+        ("SSLKEYLOGFILE", str(world.root / "keys.log")),
+        ("XDG_CONFIG_HOME", str(world.root)),
+        ("CURL_HOME", str(world.root)),
+    ):
+        monkeypatch.setenv(name, value)
+    run = resolver.Run(git_executable=str(wrapper))
+    assert resolver.commit_resolver(world.bound(), run)(short(target)) == target
+    assert world.ran() == []
+    assert not (world.root / "keys.log").exists()
+
+
+def test_git_receives_exactly_the_allowlisted_environment(world, monkeypatch):
+    target = world.commit("target")
+    monkeypatch.setattr(resolver, "git_environment", REAL_GIT_ENVIRONMENT)
+    for name, value in (
+        ("LD_PRELOAD", str(world.root / "absent.so")),
+        ("OPENSSL_CONF", str(world.root / "absent.cnf")),
+        ("HOME", str(world.root)),
+        ("XDG_CONFIG_HOME", str(world.root)),
+        ("PATH", f"{world.root}{os.pathsep}{os.environ['PATH']}"),
+        ("https_proxy", "http://localhost:9"),
+        ("SSL_CERT_FILE", str(world.ca)),
+    ):
+        monkeypatch.setenv(name, value)
+    seen = []
+    real_run = resolver.proc.run
+
+    def spy(argv, *args, env=None, **kwargs):
+        home = env["HOME"]
+        seen.append((argv, dict(env), sorted(os.listdir(home)), stat.S_IMODE(os.stat(home).st_mode)))
+        return real_run(argv, *args, env=env, **kwargs)
+
+    monkeypatch.setattr(resolver.proc, "run", spy)
+    world.resolve(short(target))  # the scratch CA is untrusted here, so only the calls matter
+    commands = [argv[argv.index("--no-replace-objects") + 1 + 2 * len(resolver.OVERRIDES)] for argv, *_ in seen]
+    assert "fetch" in commands
+    for argv, env, listing, mode in seen:
+        assert set(env) == resolver.ENV_ALLOWLIST
+        assert os.path.isabs(argv[0]) and not argv[0].startswith(str(world.root))
+        assert str(world.root) not in env["PATH"] and env["HOME"] != str(world.root)
+        assert listing == [] and mode == 0o700
+
+
+def test_an_untrusted_git_is_refused(world, tmp_path):
+    target = world.commit("target")
+    loose = recording_git(world.root / "loose-bin", "true")
+    loose.chmod(0o777)
+    run = resolver.Run(git_executable=str(loose))
+    assert resolver.commit_resolver(world.bound(), run)(short(target)) is None
+    shared_dir = world.root / "shared-bin"
+    wrapper = recording_git(shared_dir, "true")
+    shared_dir.chmod(0o777)
+    try:
+        run = resolver.Run(git_executable=str(wrapper))
+        assert resolver.commit_resolver(world.bound(), run)(short(target)) is None
+    finally:
+        shared_dir.chmod(0o700)
+    assert (
+        resolver.commit_resolver(world.bound(), resolver.Run(git_executable=str(world.root / "absent")))(short(target))
+        is None
+    )
+
+
+@posix
+def test_a_git_owned_by_another_user_is_not_trusted(tmp_path, monkeypatch):
+    if os.getuid() == 0:
+        pytest.skip("root owns every file it creates")
+    wrapper = recording_git(tmp_path / "bin", "true")
+    assert resolver.trusted_file(str(wrapper))
+    monkeypatch.setattr(resolver.os, "getuid", lambda: os.stat(wrapper).st_uid + 1)
+    assert not resolver.trusted_file(str(wrapper))
+
+
+HEARTBEAT = """
+import sys, time
+while True:
+    with open(sys.argv[1], "a") as beat:
+        beat.write(".")
+    time.sleep(0.05)
+"""
+PARENT = """
+import subprocess, sys, time
+subprocess.Popen(
+    [sys.executable, "-c", sys.argv[2], sys.argv[1]],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+time.sleep(120)
+"""
+
+
+def test_a_timeout_kills_the_whole_process_tree(tmp_path, monkeypatch):
+    """A grandchild that outlives its parent must be gone after a timeout, on POSIX and on Windows."""
+    beat = tmp_path / "beat.txt"
+    parent = tmp_path / "parent.py"
+    parent.write_text(PARENT)
+    monkeypatch.setattr(resolver, "TIMEOUT_SECONDS", 3.0)
+    monkeypatch.setattr(
+        resolver.GitTool, "argv", lambda self, args: [sys.executable, str(parent), str(beat), HEARTBEAT]
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    tool = resolver.GitTool(sys.executable, REAL_GIT_ENVIRONMENT(str(home), inherited=os.environ))
+    assert resolver._git(tool, str(tmp_path), "fetch") is None
+    assert beat.exists()
+    before = beat.stat().st_size
+    time.sleep(1.0)
+    assert beat.stat().st_size == before
+
+
+def test_a_failed_fetch_with_proving_porcelain_is_refused(world, monkeypatch):
+    target = world.commit("target")
+    real = resolver._git
+
+    def failed(tool, cwd, *args):
+        result = real(tool, cwd, *args)
+        if args[0] == "fetch" and result is not None:
+            assert result.code == 0 and result.out  # the porcelain line would prove the ref
+            return resolver._Result(1, result.out)
+        return result
+
+    monkeypatch.setattr(resolver, "_git", failed)
+    assert world.resolve(short(target)) is None
+
+
+@pytest.mark.parametrize("porcelain", [True, False])
+def test_the_fetch_argv_pins_tags_prune_and_the_refspec(world, monkeypatch, porcelain):
+    if not porcelain:
+        monkeypatch.setattr(resolver, "PORCELAIN_VERSION", (99, 0))
+    target = world.commit("target")
+    fetches = []
+    real = resolver._git
+
+    def spy(tool, cwd, *args):
+        if args[0] == "fetch":
+            fetches.append(args)
+        return real(tool, cwd, *args)
+
+    monkeypatch.setattr(resolver, "_git", spy)
+    assert world.resolve(short(target)) == target
+    (args,) = fetches
+    assert args[-2:] == ("origin", "+refs/heads/main:refs/remotes/origin/main")
+    for flag in ("--no-tags", "--no-prune-tags", "--prune", "--no-recurse-submodules", "--no-write-fetch-head"):
+        assert flag in args
+    assert ("--porcelain" in args and "--verbose" in args) is porcelain
+
+
+def test_an_untrusted_exec_directory_is_refused(world):
+    target = world.commit("target")
+    loose = world.root / "loose-exec"
+    loose.mkdir()
+    loose.chmod(0o777)
+    try:
+        wrapper = recording_git(
+            world.root / "exec-bin",
+            f'for arg; do last="$arg"; done\n[ "$last" = "--exec-path" ] && {{ echo "{loose}"; exit 0; }}\ntrue',
+        )
+        run = resolver.Run(git_executable=str(wrapper))
+        assert resolver.commit_resolver(world.bound(), run)(short(target)) is None
+    finally:
+        loose.chmod(0o700)
+
+
+LINGERING_PARENT = """
+import os, subprocess, sys, time
+subprocess.Popen(
+    [sys.executable, "-c", sys.argv[2], sys.argv[1]],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+for _ in range(200):
+    if os.path.exists(sys.argv[1]):
+        break
+    time.sleep(0.05)
+"""
+
+
+def test_a_helper_left_running_after_git_exits_is_reaped(tmp_path, monkeypatch):
+    """git exits 0 but leaves a detached child with no pipes. It must not outlive the call."""
+    beat = tmp_path / "beat.txt"
+    parent = tmp_path / "parent.py"
+    parent.write_text(LINGERING_PARENT)
+    monkeypatch.setattr(
+        resolver.GitTool, "argv", lambda self, args: [sys.executable, str(parent), str(beat), HEARTBEAT]
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    tool = resolver.GitTool(sys.executable, REAL_GIT_ENVIRONMENT(str(home), inherited=os.environ))
+    result = resolver._git(tool, str(tmp_path), "version")
+    assert result is not None and result.code == 0
+    assert beat.exists()
+    before = beat.stat().st_size
+    time.sleep(1.0)
+    assert beat.stat().st_size == before

@@ -47,6 +47,7 @@ VERIFY_KEYS = frozenset(
         "cards_per_run",
         "min_interval_days",
         "never_read_days",
+        "git_executable",
         "workspace",
     }
 )
@@ -97,6 +98,8 @@ class VerifyConfig:
     cards_per_run: int = DEFAULT_CARDS_PER_RUN
     min_interval_days: int = DEFAULT_MIN_INTERVAL_DAYS
     never_read_days: int = DEFAULT_NEVER_READ_DAYS
+    # The git the commit resolver runs. None means the first git in the fixed system directories.
+    git_executable: str | None = None
     workspaces: tuple[Workspace, ...] = ()
 
     def scopes(self) -> tuple[str, ...]:
@@ -131,6 +134,22 @@ def _root(value: object) -> str:
         or value == "/"
     ):
         raise VerifyConfigError("[[verify.workspace]] path must be an absolute, normalized directory other than /")
+    return value
+
+
+def _git_executable(table: dict[str, Any]) -> str | None:
+    """An absolute, normalized path to git, never resolved through PATH."""
+    value = table.get("git_executable")
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not os.path.isabs(value)
+        or len(value.encode()) > 4096
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        or os.path.normpath(value) != value
+    ):
+        raise VerifyConfigError("[verify] git_executable must be an absolute, normalized path")
     return value
 
 
@@ -309,6 +328,7 @@ def parse(data: dict[str, Any]) -> VerifyConfig:
         cards_per_run=_integer(table, "cards_per_run", DEFAULT_CARDS_PER_RUN, 1, MAX_CARDS_PER_RUN),
         min_interval_days=_integer(table, "min_interval_days", DEFAULT_MIN_INTERVAL_DAYS, 1, MAX_MIN_INTERVAL_DAYS),
         never_read_days=_integer(table, "never_read_days", DEFAULT_NEVER_READ_DAYS, 1, MAX_NEVER_READ_DAYS),
+        git_executable=_git_executable(table),
         workspaces=_workspaces(table.get("workspace")),
     )
 

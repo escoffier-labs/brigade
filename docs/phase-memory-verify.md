@@ -517,17 +517,37 @@ Slice 9's resolver implementation requires its own security review. This contrac
 
 1. Run every git command through one wrapper that applies rules 2 to 4 to
    each call, with a fixed timeout, no stdin, `--no-pager`, and no prompt.
-   No git command bypasses it.
-2. Build the environment from scratch. Every inherited `GIT_*` variable is
-   removed, including `GIT_DIR`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`
-   and `GIT_GRAFT_FILE`. The wrapper then sets exactly these:
-   `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` (`NUL` on
-   Windows), `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`. System
-   and global config, including the XDG location, are never read. The proxy
-   and TLS variables curl reads are removed as well: `http_proxy`,
-   `https_proxy`, `all_proxy` and `no_proxy` in either case,
-   `CURL_CA_BUNDLE`, `SSL_CERT_FILE` and `SSL_CERT_DIR`, so the fetch uses
-   the system trust store and connects directly.
+   No git command bypasses it. A timeout kills the whole process tree, not
+   only git: a process group on POSIX and a kill-on-close job object on
+   Windows, which `proc.run` already provides. Helpers that outlive git
+   after a normal exit are reaped too.
+2. Build the environment from scratch. Nothing is copied from the caller's
+   environment except the Windows names listed below. The wrapper runs a
+   trusted absolute git, resolved once per run. It is the
+   `[verify] git_executable` value when one is set. Otherwise it is the
+   first `git` in the fixed system directories (`/usr/bin`, `/bin`,
+   `/usr/local/bin`, or the standard Git for Windows install directories),
+   never one found on the caller's `PATH`. On POSIX the executable and its
+   directory must be owned by root or the current user and writable by
+   neither group nor others, and so must git's exec directory. The
+   environment then holds exactly:
+   - `PATH`: git's own exec directory plus the fixed system directories
+   - `HOME`: an empty directory private to the run, so no `.netrc`, XDG or
+     other per-user file is found
+   - `LC_ALL=C`
+   - `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` (`NUL` on
+     Windows), `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`
+   - on Windows only, `SYSTEMROOT` (Winsock and the crypto provider need
+     it), `WINDIR` (system DLL lookups and the msys runtime) and `TEMP` and
+     `TMP` (temporary files), copied from the caller
+
+   So every `GIT_*` variable from the caller (`GIT_DIR`,
+   `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, `GIT_GRAFT_FILE` and the
+   rest) never reaches git. Neither do the loader variables (`LD_*`,
+   `DYLD_*`), `OPENSSL_*`, `SSLKEYLOGFILE`, every `*_proxy`, `CURL_*`,
+   `SSL_CERT_*` and `XDG_*`. System and global config are never read, the
+   fetch uses the system trust store and it connects directly. No
+   production code path adds a CA or any other TLS setting.
 3. Pass `--no-replace-objects` and these `-c` overrides on every call:
    `core.fsmonitor=false`, `core.hooksPath` set to a directory that does not
    exist, `credential.helper=` (empty, which clears every helper),

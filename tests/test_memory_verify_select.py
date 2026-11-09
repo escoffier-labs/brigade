@@ -384,6 +384,14 @@ def test_invalid_commit_refs_fail(tmp_path, refs):
     assert "commit_refs" in message
 
 
+def test_git_executable_is_optional_and_must_be_an_absolute_normalized_path(tmp_path):
+    assert parse(workspace("repo:one", tmp_path / "w")).git_executable is None
+    absolute = os.path.join(os.path.abspath(os.sep), "opt", "git", "bin", "git")
+    assert parse(workspace("repo:one", tmp_path / "w2"), git_executable=absolute).git_executable == absolute
+    for value in ("git", "bin/git", absolute + os.sep + ".." + os.sep + "git", absolute + "\n", 7, ""):
+        assert "git_executable" in refused(workspace("repo:one", tmp_path / "w3"), git_executable=value)
+
+
 # -- commands -----------------------------------------------------------------
 
 
