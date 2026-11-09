@@ -120,6 +120,9 @@ def _validated_rows(raw: bytes) -> list[BdRow]:
             other = dep["depends_on_id"]
             edge_type = dep["type"]
             if edge_type in _NON_GATING_LINK_TYPES:
+                # Links may point outside the export, so the graph check never sees them.
+                if not _ID.fullmatch(other):
+                    raise _invalid("bd link target must be a valid bd issue id", line=line)
                 link = {"type": edge_type, "other": other}
                 if link not in links:
                     links.append(link)

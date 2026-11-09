@@ -60,6 +60,7 @@ def test_bd_1_3_4_mixed_link_types(tmp_path, capsys):
     rc, payload = sync(tmp_path, capsys, fixture(version), version)
     assert rc == 0
     assert payload["links_preserved"] == 5
+    assert payload["links_changed"] == []  # creations are reported under created, not as link changes
     ids = by_title(version)
     tasks = mirror(tmp_path)
     release, crash = tasks[ids["Release gate"]], tasks[ids["Crash found"]]

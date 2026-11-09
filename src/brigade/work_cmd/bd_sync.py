@@ -300,6 +300,7 @@ def _apply_mirror(
                 stamp(task, spec, bd_id, content_applied=True)
 
     # Non-gating bd links are not graph edges; mirror them as metadata so a link change is visible.
+    created_ids = {item["bd_id"] for item in summary["created"]}
     for bd_id, spec in desired.items():
         task_bd = _bd_meta(mirrors[bd_id])
         if (task_bd.get("links") or []) != spec["links"]:
@@ -309,7 +310,8 @@ def _apply_mirror(
                 task_bd.pop("links", None)
             mirrors[bd_id]["updated_at"] = now
             touched.add(bd_id)
-            summary["links_changed"].append(bd_id)
+            if bd_id not in created_ids:
+                summary["links_changed"].append(bd_id)
 
     def task_edge(edge: dict[str, str]) -> tuple[str, str, str]:
         return (edge["type"], str(mirrors[edge["source"]]["id"]), str(mirrors[edge["target"]]["id"]))

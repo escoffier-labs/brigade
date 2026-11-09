@@ -313,3 +313,12 @@ def test_bd_rows_without_links_keep_the_pre_link_fingerprint():
             }
         )
         assert record["metadata"]["source_fingerprint"] == expected
+
+
+def test_bd_link_target_must_be_a_valid_id(tmp_path, capsys):
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    assert not inbox.exists()
+    rc, payload = run_import(tmp_path, _with_dependency(tmp_path, "related", other="not an id\n"), capsys)
+    assert rc == 2
+    assert payload["reason"] == "invalid_bd_row"
+    assert not inbox.exists()
