@@ -409,18 +409,40 @@ def encodable(value: object) -> bool:
     """
     try:
         json.dumps(value, ensure_ascii=False).encode("utf-8")
-    except (UnicodeError, ValueError, TypeError):
+    except (UnicodeError, ValueError, TypeError, RecursionError):
         return False
     return True
 
 
+MAX_JSON_DEPTH = 64  # evidence JSON is shallow, and later walks recurse once per level
+
+
+def _shallow(value: object) -> bool:
+    """Whether no list or object in ``value`` nests deeper than ``MAX_JSON_DEPTH``, checked without recursion."""
+    stack: list[tuple[object, int]] = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, dict):
+            children: Any = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            continue
+        if depth > MAX_JSON_DEPTH:
+            return False
+        stack.extend((child, depth + 1) for child in children)
+    return True
+
+
 def _json(text: str | None) -> Any:
+    """Parsed JSON, or None for anything unparsable or nested past ``MAX_JSON_DEPTH``."""
     if not text:
         return None
     try:
-        return json.loads(text)
-    except ValueError:
+        value = json.loads(text)
+    except (ValueError, RecursionError):
         return None
+    return value if _shallow(value) else None
 
 
 class EngineArchive:

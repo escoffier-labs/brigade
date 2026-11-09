@@ -1714,3 +1714,27 @@ def test_an_epoch_completion_time_is_kept_and_never_replaced_by_the_file_mtime(t
     [result] = run(card(RECEIPT, HANDOFF), parsed, archive, now_ms=NOW_MS)
     receipt_times = [i.observed_ms for i in result.items if i.kind in (ev.RECEIPT_FIELDS, ev.RECEIPT_OUTPUT)]
     assert receipt_times and all(moment == 0 for moment in receipt_times)
+
+
+@pytest.mark.parametrize("depth", [ev.MAX_JSON_DEPTH + 1, 100_000])
+def test_deeply_nested_json_is_unparsed_and_never_raises(depth):
+    text = "[" * depth + "]" * depth
+    assert ev._json(text) is None
+    assert ev._json("[" * ev.MAX_JSON_DEPTH + "]" * ev.MAX_JSON_DEPTH) is not None
+
+
+def test_encodable_refuses_a_value_too_deep_to_render():
+    value: list = []
+    for _ in range(100_000):
+        value = [value]
+    assert ev.encodable(value) is False
+
+
+def test_a_deeply_nested_json_evidence_file_never_stops_the_run(tmp_path):
+    root, parsed = setup(tmp_path)
+    archive = corroborating(root)
+    deep = "memory/evidence/deep.json"
+    write(root, deep, "[" * 100_000 + "]" * 100_000)
+    first, second = run([card(deep), card(RECEIPT, HANDOFF)], parsed, archive)
+    assert first.abstain is not None
+    assert second.abstain is None
