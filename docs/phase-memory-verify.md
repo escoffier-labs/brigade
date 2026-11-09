@@ -517,29 +517,38 @@ Slice 9's resolver implementation requires its own security review. This contrac
 
 1. Run every git command through one wrapper that applies rules 2 to 4 to
    each call, with a fixed timeout, no stdin, `--no-pager`, and no prompt.
-   No git command bypasses it. A timeout kills the whole process tree, not
-   only git: a process group on POSIX and a kill-on-close job object on
-   Windows, which `proc.run` already provides. Helpers that outlive git
-   after a normal exit are reaped too.
-2. Build the environment from scratch. Nothing is copied from the caller's
-   environment except the Windows names listed below. The wrapper runs a
-   trusted absolute git, resolved once per run. It is the
-   `[verify] git_executable` value when one is set. Otherwise it is the
-   first `git` in the fixed system directories (`/usr/bin`, `/bin`,
-   `/usr/local/bin`, or the standard Git for Windows install directories),
-   never one found on the caller's `PATH`. On POSIX the executable and its
-   directory must be owned by root or the current user and writable by
-   neither group nor others, and so must git's exec directory. The
-   environment then holds exactly:
-   - `PATH`: git's own exec directory plus the fixed system directories
-   - `HOME`: an empty directory private to the run, so no `.netrc`, XDG or
-     other per-user file is found
+   No git command bypasses it. A timeout kills git's whole process group,
+   and helpers that outlive git after a normal exit are reaped too.
+   Commit expansion is POSIX-only in v1. The resolver runs git only where
+   `proc.run_held` can execute a held descriptor (Linux `fexecve`). On
+   Windows, and on any other platform, it returns None for every
+   abbreviation with the fixed reason `verify_resolver_unsupported_platform`
+   and never starts a process. Enabling Windows needs install roots whose
+   ACLs are validated first.
+2. Run only a root-owned git, and build its environment from scratch. git is
+   the first of `/usr/bin/git`, `/bin/git` and `/usr/local/bin/git` that
+   exists, resolved with `realpath`. The real file and every directory from
+   it up to `/` must be owned by root and writable by neither group nor
+   others. A git owned by the current user is refused, and so is one reached
+   through a link whose target fails the rule. git's exec directory must
+   meet the same rule. No setting or environment variable can name another
+   git. The verified file is opened once per run, the descriptor is checked
+   against the path (device and inode), and every call executes that
+   descriptor with `fexecve`. Replacing the path after the check changes
+   nothing, and a script is never run this way. Nothing is copied from the
+   caller's environment, which holds exactly:
+   - `PATH`: git's exec directory plus `/usr/bin`, `/bin` and
+     `/usr/local/bin`
+   - `HOME`: an empty 0700 directory made with `mkdtemp` inside a 0700
+     parent the resolver made with `mkdtemp` under the fixed `/tmp`. When
+     the run ends, both are removed only while they are still the
+     directories the resolver made: the parent is reached without following
+     any link, both device and inode pairs and the owner must match, and the
+     HOME is removed relative to the held parent by a removal that never
+     follows a link. Any mismatch leaves them in place and logs it.
    - `LC_ALL=C`
-   - `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` (`NUL` on
-     Windows), `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`
-   - on Windows only, `SYSTEMROOT` (Winsock and the crypto provider need
-     it), `WINDIR` (system DLL lookups and the msys runtime) and `TEMP` and
-     `TMP` (temporary files), copied from the caller
+   - `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+     `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`
 
    So every `GIT_*` variable from the caller (`GIT_DIR`,
    `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, `GIT_GRAFT_FILE` and the

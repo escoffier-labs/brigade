@@ -1444,6 +1444,7 @@ def run_held(
     cwd: Optional[Path] = None,
     stdin: bytes | None = None,
     process_registry: ProcessRegistry | None = None,
+    supervise_group: bool = False,
 ) -> Result:
     """Run the native executable open behind ``held_fd``, never whatever a path names at spawn time.
 
@@ -1463,7 +1464,8 @@ def run_held(
     and restores the signal dispositions Python ignores at startup.
 
     ``held_fd`` must be 3 or above (see :func:`high_fd`), so it is never the
-    child's stdin, stdout or stderr.
+    child's stdin, stdout or stderr. ``supervise_group`` reaps the child's
+    group after it exits, as for :func:`run`.
     """
     if held_fd < HELD_FD_MIN:
         raise OSError("a held executable descriptor must be 3 or above")
@@ -1477,6 +1479,7 @@ def run_held(
         cwd=cwd,
         stdin=stdin,
         process_registry=process_registry,
+        supervise_group=supervise_group,
         pass_fds=(held_fd,),
     )
 

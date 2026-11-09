@@ -4,18 +4,21 @@
 `memory_verify_contract.verify_card(resolve_commit=...)` takes. It follows D3's
 "Commit resolver contract" rule by rule. The numbers below are D3's.
 
-1. Every git call goes through `_git`, which launches through `proc.run`: a
-   fixed timeout, no stdin, `--no-pager`, no prompt, and the whole process
-   tree killed on a timeout (a process group on POSIX, a kill-on-close job
-   object on Windows). Supervised runs also reap helpers left after git exits.
-2. The environment is built from scratch, never copied from the caller. git
-   itself is a trusted absolute path, resolved once per run from
-   `[verify] git_executable` or from fixed system directories, and refused
-   when it is group- or world-writable or owned by another user. The
-   environment then holds only `ENV_ALLOWLIST`: `PATH` (git's exec directory
-   and the fixed system directories), `HOME` (an empty private directory),
-   `LC_ALL=C`, the four `GIT_*` settings D3 names, and on Windows the system
-   variables listed in `WINDOWS_KEPT`.
+1. Every git call goes through `_git`, which launches through
+   `proc.run_held`: a fixed timeout, no stdin, `--no-pager`, no prompt, and
+   the whole process group killed on a timeout. Supervised runs also reap
+   helpers left after git exits.
+2. git is the first of `GIT_CANDIDATES` that exists, resolved with
+   `realpath`. The real file and every directory from it up to `/` must be
+   owned by root and writable by neither group nor others, and so must git's
+   exec directory. The verified file is opened once per run and executed
+   through that held descriptor (`fexecve`), so swapping the path after the
+   check changes nothing. The environment is built from scratch and holds
+   only `ENV_ALLOWLIST`: `PATH` (git's exec directory and the fixed system
+   directories), `HOME` (an empty directory inside a resolver-owned 0700
+   parent), `LC_ALL=C` and the four `GIT_*` settings D3 names. Platforms
+   without held execution (Windows, and POSIX systems without `fexecve`)
+   fail closed: the resolver returns None and never runs git.
 3. `--no-replace-objects` and the `OVERRIDES` list ride on every call.
 4. The repository is the workspace root itself: `rev-parse --show-toplevel`
    must name the same directory (device and inode) the config bound.
@@ -44,9 +47,9 @@ fetches again.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
-import shutil
 import stat
 import tempfile
 import weakref
@@ -55,8 +58,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from . import dirfd, proc
 from . import memory_verify_config as config
-from . import proc
 from .memory_verify_contract import MIN_ABBREVIATION, Resolver
 
 TIMEOUT_SECONDS = 60.0
@@ -67,23 +70,19 @@ ABBREVIATION = re.compile(r"[0-9a-f]+")
 VERSION = re.compile(r"git version (\d+)\.(\d+)")
 # A directory that cannot exist: no path can sit below the null device.
 NO_HOOKS = os.path.join(os.devnull, "brigade-no-hooks")
-# Where git is looked up when `[verify] git_executable` is unset. The caller's PATH is never consulted.
-POSIX_SYSTEM_DIRS = ("/usr/bin", "/bin", "/usr/local/bin")
-WINDOWS_GIT_DIRS = (r"C:\Program Files\Git\cmd", r"C:\Program Files\Git\bin")
+# The only git executables the resolver runs, in order. The first one that exists decides.
+GIT_CANDIDATES = ("/usr/bin/git", "/bin/git", "/usr/local/bin/git")
+SYSTEM_DIRS = ("/usr/bin", "/bin", "/usr/local/bin")
+# The fixed parent of the resolver's private directories. Never taken from config or the environment.
+SYSTEM_TEMP = "/tmp"
 GIT_SETTINGS = {
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_CONFIG_GLOBAL": os.devnull,
     "GIT_NO_REPLACE_OBJECTS": "1",
     "GIT_TERMINAL_PROMPT": "0",
 }
-# Windows variables copied from the caller, and why git for Windows needs each one:
-# SYSTEMROOT: Winsock and the system crypto provider fail to initialize without it.
-# WINDIR: system DLL lookups and the msys runtime read it.
-# TEMP and TMP: git for Windows and its msys runtime put temporary files there.
-WINDOWS_KEPT = ("SYSTEMROOT", "WINDIR", "TEMP", "TMP")
-ENV_ALLOWLIST = frozenset({"PATH", "HOME", "LC_ALL", *GIT_SETTINGS}) | (
-    frozenset(WINDOWS_KEPT) if os.name == "nt" else frozenset()
-)
+ENV_ALLOWLIST = frozenset({"PATH", "HOME", "LC_ALL", *GIT_SETTINGS})
+UNSUPPORTED_PLATFORM = "verify_resolver_unsupported_platform"
 # `proc.run` reports a timeout as exit 124, which git itself never uses.
 PROC_TIMEOUT_CODE = 124
 OVERRIDES = (
@@ -127,16 +126,23 @@ PROVEN_FLAGS = frozenset(" +*=")
 DEFAULT_HEAD = "refs/remotes/origin/HEAD"
 
 
+LOG = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True)
 class GitTool:
-    """A trusted git executable and the from-scratch environment every call gets."""
+    """The verified git, held open, and the from-scratch environment every call gets.
 
-    executable: str
+    `path` is the verified real path. It is only argv[0]: the image that runs is the one behind `fd`.
+    """
+
+    path: str
+    fd: int
     env: Mapping[str, str]
 
     def argv(self, args: Sequence[str]) -> list[str]:
         """The full argv for one git call (D3 rules 1 and 3)."""
-        argv = [self.executable, "--no-pager", "--no-replace-objects"]
+        argv = [self.path, "--no-pager", "--no-replace-objects"]
         for override in OVERRIDES:
             argv += ["-c", override]
         return argv + list(args)
@@ -144,16 +150,20 @@ class GitTool:
 
 @dataclass
 class Run:
-    """One verification run: the trusted git, its private HOME, the git version and this run's fetch proofs.
+    """One verification run: the held git, its private HOME, the git version and this run's fetch proofs.
 
-    `git_executable` is the `[verify] git_executable` value, when one is configured.
+    Call `close()` when the run ends. Collecting the object does the same.
     """
 
-    git_executable: str | None = None
     proofs: dict[tuple[config.Identity, tuple[str, ...]], bool] = field(default_factory=dict)
     version: tuple[int, int] | None = None
     tool: GitTool | None = None
     tool_failed: bool = False
+    cleanups: list[weakref.finalize] = field(default_factory=list, repr=False)
+
+    def close(self) -> None:
+        for cleanup in self.cleanups:
+            cleanup()
 
 
 @dataclass(frozen=True)
@@ -162,94 +172,205 @@ class _Result:
     out: str
 
 
-def trusted_file(path: str, *, directory: bool = False) -> bool:
-    """True for an existing file (or directory) that no other user can replace.
+@dataclass(frozen=True)
+class _Home:
+    """A private HOME and the identities recorded when the resolver created it and its parent."""
 
-    On POSIX the target and its parent directory must be owned by root or the
-    current user and be writable by neither group nor others. Windows has no
-    portable owner check here, so it trusts the fixed install locations and
-    the configured path as given.
-    """
-    if os.name != "posix":
-        return os.path.isdir(path) if directory else os.path.isfile(path)
-    real = os.path.realpath(path)
-    owners = {0, os.getuid()}
-    for candidate, want_dir in ((real, directory), (os.path.dirname(real), True)):
+    parent: str
+    parent_id: config.Identity
+    name: str
+    home_id: config.Identity
+
+    @property
+    def path(self) -> str:
+        return os.path.join(self.parent, self.name)
+
+
+def platform_supported() -> bool:
+    """Whether the resolver may run git here: POSIX with held-descriptor execution."""
+    return os.name == "posix" and proc.held_exec_supported()
+
+
+def unavailable_reason() -> str | None:
+    """The fixed reason every expansion abstains on this platform, or None where the resolver runs."""
+    return None if platform_supported() else UNSUPPORTED_PLATFORM
+
+
+def _trusted_node(path: str, metadata: os.stat_result) -> bool:
+    """Owned by root and writable by neither group nor others. `path` is for tests that fake a root."""
+    return metadata.st_uid == 0 and not metadata.st_mode & 0o022
+
+
+def root_chain(path: str) -> bool:
+    """True when `path` (already real) and every directory above it up to `/` is a trusted, non-link node."""
+    current = path
+    while True:
         try:
-            metadata = os.stat(candidate)
+            metadata = os.lstat(current)
         except (OSError, ValueError):
             return False
-        kind = stat.S_ISDIR if want_dir else stat.S_ISREG
-        if not kind(metadata.st_mode) or metadata.st_mode & 0o022 or metadata.st_uid not in owners:
+        if stat.S_ISLNK(metadata.st_mode) or not _trusted_node(current, metadata):
             return False
-    return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return True
+        current = parent
 
 
-def find_git(explicit: str | None = None) -> str | None:
-    """An absolute, trusted git executable: the configured one, else the first in the fixed system directories."""
-    if explicit is not None:
-        candidates: Sequence[str] = (explicit,)
-    elif os.name == "nt":
-        candidates = tuple(os.path.join(directory, "git.exe") for directory in WINDOWS_GIT_DIRS)
-    else:
-        candidates = tuple(os.path.join(directory, "git") for directory in POSIX_SYSTEM_DIRS)
-    for candidate in candidates:
-        if os.path.isabs(candidate) and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate if trusted_file(candidate) else None
+def find_git() -> str | None:
+    """The real path of the first existing candidate, when it is a root-owned regular file in a root-owned chain."""
+    for candidate in GIT_CANDIDATES:
+        if not os.path.lexists(candidate):
+            continue
+        real = os.path.realpath(candidate)
+        try:
+            regular = stat.S_ISREG(os.lstat(real).st_mode)
+        except (OSError, ValueError):
+            return None
+        return real if regular and root_chain(real) else None
     return None
 
 
-def _system_dirs() -> tuple[str, ...]:
-    if os.name != "nt":
-        return POSIX_SYSTEM_DIRS
-    root = os.environ.get("SYSTEMROOT", r"C:\Windows")
-    return (*WINDOWS_GIT_DIRS, os.path.join(root, "System32"), root)
+def _hold(real: str) -> int | None:
+    """Open the verified file and prove the descriptor is that file, still in a trusted chain."""
+    try:
+        fd = proc.high_fd(os.open(real, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW))
+    except (OSError, ValueError):
+        return None
+    try:
+        held = os.fstat(fd)
+        named = os.lstat(real)
+        if (
+            stat.S_ISREG(held.st_mode)
+            and _trusted_node(real, held)
+            and (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino)
+            and root_chain(real)
+        ):
+            return fd
+    except (OSError, ValueError):
+        pass
+    os.close(fd)
+    return None
 
 
-def git_environment(
-    home: str, exec_dir: str | None = None, inherited: Mapping[str, str] | None = None
-) -> dict[str, str]:
+def git_environment(home: str, exec_dir: str | None = None) -> dict[str, str]:
     """The from-scratch environment every git call runs with (D3 rule 2). Only `ENV_ALLOWLIST` keys appear."""
-    source = os.environ if inherited is None else inherited
-    env = {
-        "PATH": os.pathsep.join(((exec_dir,) if exec_dir else ()) + _system_dirs()),
+    return {
+        "PATH": os.pathsep.join(((exec_dir,) if exec_dir else ()) + SYSTEM_DIRS),
         "HOME": home,
         "LC_ALL": "C",
         **GIT_SETTINGS,
     }
-    if os.name == "nt":
-        upper = {name.upper(): value for name, value in source.items()}
-        env.update({name: upper[name] for name in WINDOWS_KEPT if name in upper})
-    return env
+
+
+def _make_home() -> _Home:
+    """A 0700 parent made with mkdtemp under `SYSTEM_TEMP`, and an empty 0700 HOME made inside it."""
+    parent = tempfile.mkdtemp(prefix="brigade-verify-git-", dir=SYSTEM_TEMP)
+    parent_meta = os.lstat(parent)
+    path = tempfile.mkdtemp(prefix="home-", dir=parent)
+    home_meta = os.lstat(path)
+    return _Home(
+        parent=parent,
+        parent_id=(parent_meta.st_dev, parent_meta.st_ino),
+        name=os.path.basename(path),
+        home_id=(home_meta.st_dev, home_meta.st_ino),
+    )
+
+
+def _matches(metadata: os.stat_result, identity: config.Identity) -> bool:
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and (metadata.st_dev, metadata.st_ino) == identity
+    )
+
+
+def remove_home(home: _Home) -> bool:
+    """Remove the HOME and its parent only while both are still the directories the resolver made.
+
+    The parent is opened by walking from `/` without following any link, both
+    identities are compared (device, inode, owner, directory type), and the
+    HOME is removed relative to the held parent by the descriptor-based
+    rmtree, which never follows a link. Any mismatch leaves everything in
+    place and logs it. Nothing raises.
+    """
+    try:
+        if not dirfd.tree_removal_available():
+            LOG.warning("verify resolver left its private HOME in place: no link-safe tree removal here")
+            return False
+        parent_fd = dirfd.open_directory_chain(Path(home.parent), writable=False)
+        try:
+            if not _matches(os.fstat(parent_fd), home.parent_id):
+                LOG.warning("verify resolver left its private HOME in place: its parent was replaced")
+                return False
+            if not _matches(dirfd.stat_child(parent_fd, home.name), home.home_id):
+                LOG.warning("verify resolver left its private HOME in place: it was replaced")
+                return False
+            dirfd.remove_tree_child(parent_fd, home.name)
+        finally:
+            os.close(parent_fd)
+        top_fd = dirfd.open_directory_chain(Path(os.path.dirname(home.parent)), writable=False)
+        try:
+            name = os.path.basename(home.parent)
+            if _matches(dirfd.stat_child(top_fd, name), home.parent_id):
+                dirfd.rmdir_child(top_fd, name)
+        finally:
+            os.close(top_fd)
+        return True
+    except Exception as exc:  # noqa: BLE001 - cleanup never raises past the run
+        LOG.warning("verify resolver left its private HOME in place: %s", type(exc).__name__)
+        return False
+
+
+def _close_quietly(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
 
 
 def _private_home(run: Run) -> str:
-    """An empty directory only this user can read, removed when the run is collected or the process exits."""
-    home = tempfile.mkdtemp(prefix="brigade-git-home-")
-    weakref.finalize(run, shutil.rmtree, home, True)
-    return home
+    """Make the run's private HOME and register its checked removal."""
+    home = _make_home()
+    run.cleanups.append(weakref.finalize(run, remove_home, home))
+    return home.path
 
 
 def _tool(run: Run) -> GitTool | None:
-    """Resolve the trusted git once per run, then its exec directory for the helpers it launches."""
+    """Verify and hold git once per run, then check its exec directory for the helpers it launches."""
     if run.tool is not None or run.tool_failed:
         return run.tool
     run.tool_failed = True
-    executable = find_git(run.git_executable)
-    if executable is None:
+    real = find_git()
+    fd = None if real is None else _hold(real)
+    if real is None or fd is None:
         return None
+    run.cleanups.append(weakref.finalize(run, _close_quietly, fd))
     home = _private_home(run)
-    bootstrap = GitTool(executable, git_environment(home))
+    bootstrap = GitTool(real, fd, git_environment(home))
     exec_dir = _output(bootstrap, home, "--exec-path")
-    if exec_dir is None or not os.path.isabs(exec_dir) or not trusted_file(exec_dir, directory=True):
+    if exec_dir is None or not os.path.isabs(exec_dir):
         return None
-    run.tool, run.tool_failed = GitTool(executable, git_environment(home, exec_dir)), False
+    exec_real = os.path.realpath(exec_dir)
+    if not os.path.isdir(exec_real) or not root_chain(exec_real):
+        return None
+    run.tool, run.tool_failed = GitTool(real, fd, git_environment(home, exec_real)), False
     return run.tool
 
 
 def _git(tool: GitTool, cwd: str, *args: str) -> _Result | None:
-    """Run one hardened git call. None on a launch failure, a timeout, truncated or non-UTF-8 output."""
-    result = proc.run(tool.argv(args), timeout=TIMEOUT_SECONDS, env=dict(tool.env), cwd=Path(cwd), supervise_group=True)
+    """Run one hardened git call from the held descriptor. None on a launch failure, a timeout or bad output."""
+    try:
+        result = proc.run_held(
+            tool.argv(args),
+            tool.fd,
+            timeout=TIMEOUT_SECONDS,
+            env=dict(tool.env),
+            cwd=Path(cwd),
+            supervise_group=True,
+        )
+    except OSError:
+        return None
     if (
         result.code == PROC_TIMEOUT_CODE
         or result.decode_failed
@@ -456,8 +577,11 @@ def _resolve(workspace: config.Workspace, run: Run, abbreviation: str) -> str | 
 def commit_resolver(workspace: config.Workspace, run: Run | None = None) -> Resolver:
     """The resolver for one `[[verify.workspace]]` entry. Pass the same `run` for every card of one run.
 
-    A run made for a configuration is `Run(git_executable=verify_config.git_executable)`.
+    Where `platform_supported()` is false the resolver returns None for every abbreviation and never runs
+    git. `unavailable_reason()` gives the fixed reason to report.
     """
+    if not platform_supported():
+        return lambda abbreviation: None
     current = Run() if run is None else run
 
     def resolve(abbreviation: str) -> str | None:
@@ -469,4 +593,17 @@ def commit_resolver(workspace: config.Workspace, run: Run | None = None) -> Reso
     return resolve
 
 
-__all__ = ["GitTool", "Run", "commit_resolver", "find_git", "git_environment", "https_url", "refused_key"]
+__all__ = [
+    "UNSUPPORTED_PLATFORM",
+    "GitTool",
+    "Run",
+    "commit_resolver",
+    "find_git",
+    "git_environment",
+    "https_url",
+    "platform_supported",
+    "refused_key",
+    "remove_home",
+    "root_chain",
+    "unavailable_reason",
+]

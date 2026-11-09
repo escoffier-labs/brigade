@@ -2146,7 +2146,6 @@ confirm_seat = "verify-confirm"
 cards_per_run = 12        # 1 to 64
 min_interval_days = 7     # 1 to 365
 never_read_days = 90      # 1 to 3650
-git_executable = "/usr/bin/git"  # optional, absolute path
 
 [[verify.workspace]]
 scope = "repo:example"
@@ -2155,12 +2154,12 @@ archive_projects = ["example"]
 commit_refs = ["refs/remotes/origin/main"]  # optional, 1 to 8 refs
 ```
 
-`git_executable` names the git the commit resolver runs. Without it, the
-resolver uses the first `git` in `/usr/bin`, `/bin` or `/usr/local/bin`
-(the standard Git for Windows directories on Windows), never one found on
-`PATH`. On POSIX the file and its directory must be owned by root or the
-current user and writable by neither group nor others. If they are not,
-no abbreviation expands.
+The commit resolver runs only a root-owned git: the first of
+`/usr/bin/git`, `/bin/git` and `/usr/local/bin/git`, whose real file and
+every directory above it must be owned by root and not writable by group or
+others. No setting names another git. Commit expansion is POSIX-only in v1:
+on Windows every abbreviation abstains with
+`verify_resolver_unsupported_platform`.
 
 `commit_refs` lists the remote-tracking refs a commit id must be reachable
 from before a verification may expand its abbreviation. Each entry is a fully
@@ -2182,7 +2181,6 @@ Configuration fails, naming the rule but never the configured value, when:
   `~/.brigade/fleet.toml` or the `BRIGADE_MEMORY_HUB_URL` and
   `BRIGADE_MEMORY_HUB_TOKEN_FILE` pair, which the folder must use
 - `propose_seat` and `confirm_seat` name the same seat
-- `git_executable` is not an absolute, normalized path
 - `commit_refs` is empty, longer than 8 entries, repeats a ref, or names
   anything other than `refs/remotes/<remote>/<branch>`
 

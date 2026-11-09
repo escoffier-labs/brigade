@@ -11,8 +11,10 @@ and every test that plants one asserts the marker never appears.
 from __future__ import annotations
 
 import datetime
+import gc
 import hashlib
 import http.server
+import logging
 import os
 import shutil
 import socket
@@ -20,6 +22,7 @@ import ssl
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -29,9 +32,12 @@ import pytest
 from brigade import memory_verify_config as config
 from brigade import memory_verify_contract as vc
 from brigade import memory_verify_resolver as resolver
+from brigade import proc
 
 posix = pytest.mark.skipif(os.name != "posix", reason="scratch HTTPS remotes and marker scripts need POSIX")
-windows = pytest.mark.skipif(os.name != "nt", reason="Windows-only environment shape")
+held = pytest.mark.skipif(
+    os.name != "posix" or not proc.held_exec_supported(), reason="the resolver runs git only with held execution"
+)
 pytestmark = [pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")]
 # Variables the test's own setup git calls must not inherit from the developer's shell.
 SETUP_DROPPED = frozenset(
@@ -257,10 +263,20 @@ def trust_scratch_ca(monkeypatch, ca: Path) -> None:
     monkeypatch.setattr(resolver, "git_environment", with_ca)
 
 
+def confine_temp(monkeypatch, tmp_path: Path) -> Path:
+    """Point the resolver's private directories, and any tempfile use, under this test's own tmp_path."""
+    system_temp = tmp_path / "system-temp"
+    system_temp.mkdir(mode=0o700, exist_ok=True)
+    monkeypatch.setattr(resolver, "SYSTEM_TEMP", str(system_temp), raising=False)
+    monkeypatch.setattr(tempfile, "tempdir", str(system_temp))
+    return system_temp
+
+
 @pytest.fixture
 def world(tmp_path, monkeypatch):
-    if os.name != "posix":
-        pytest.skip("scratch HTTPS remotes and marker scripts need POSIX")
+    if not resolver.platform_supported():
+        pytest.skip("the resolver runs git only with held execution (Linux)")
+    confine_temp(monkeypatch, tmp_path)
     for name in list(os.environ):
         if name.startswith("GIT_") or name.lower() in SETUP_DROPPED:
             monkeypatch.delenv(name)
@@ -428,14 +444,14 @@ def test_a_fetch_that_times_out_is_refused(world, monkeypatch):
         git(world.workspace, "remote", "set-url", "origin", f"https://localhost:{stalled.port}/remote.git")
         monkeypatch.setattr(resolver, "TIMEOUT_SECONDS", 2.0)
         codes = []
-        real_run = resolver.proc.run
+        real_run = resolver.proc.run_held
 
         def spy(*args, **kwargs):
             result = real_run(*args, **kwargs)
             codes.append(result.code)
             return result
 
-        monkeypatch.setattr(resolver.proc, "run", spy)
+        monkeypatch.setattr(resolver.proc, "run_held", spy)
         assert world.resolve(short(target)) is None
         assert stalled.connections >= 1
         # The resolver's own timeout ended the fetch, not curl's much longer connect timeout.
@@ -555,7 +571,7 @@ def test_no_git_in_the_system_directories_is_refused(world, monkeypatch):
     target = world.commit("target")
     empty = world.root / "empty-bin"
     empty.mkdir()
-    monkeypatch.setattr(resolver, "POSIX_SYSTEM_DIRS", (str(empty),))
+    monkeypatch.setattr(resolver, "GIT_CANDIDATES", (str(empty / "git"),))
     assert world.resolve(short(target)) is None
 
 
@@ -885,18 +901,15 @@ HOSTILE_INHERITED = {
     "SSL_CERT_FILE": "x",
     "SSL_CERT_DIR": "x",
     "TMPDIR": "/attacker/tmp",
-    "SYSTEMROOT": r"C:\Windows",
-    "WINDIR": r"C:\Windows",
-    "TEMP": r"C:\Temp",
-    "TMP": r"C:\Temp",
 }
 
 
-@posix
-def test_the_environment_is_built_from_scratch_on_posix():
-    env = resolver.git_environment("/private/home", "/usr/lib/git-core", HOSTILE_INHERITED)
+def test_the_environment_is_built_from_scratch(monkeypatch):
+    for name, value in HOSTILE_INHERITED.items():
+        monkeypatch.setenv(name, value)
+    env = resolver.git_environment("/private/home", "/usr/lib/git-core")
     assert env == {
-        "PATH": os.pathsep.join(("/usr/lib/git-core", *resolver.POSIX_SYSTEM_DIRS)),
+        "PATH": os.pathsep.join(("/usr/lib/git-core", *resolver.SYSTEM_DIRS)),
         "HOME": "/private/home",
         "LC_ALL": "C",
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -907,18 +920,8 @@ def test_the_environment_is_built_from_scratch_on_posix():
     assert set(env) == resolver.ENV_ALLOWLIST
 
 
-@windows
-def test_the_environment_is_built_from_scratch_on_windows():
-    env = resolver.git_environment(r"C:\home", r"C:\git\libexec", HOSTILE_INHERITED)
-    assert set(env) == resolver.ENV_ALLOWLIST
-    assert env["HOME"] == r"C:\home" and "/attacker/bin" not in env["PATH"]
-    assert {name: env[name] for name in resolver.WINDOWS_KEPT} == {
-        name: HOSTILE_INHERITED[name] for name in resolver.WINDOWS_KEPT
-    }
-
-
 def test_every_call_carries_the_overrides():
-    tool = resolver.GitTool("/usr/bin/git", {})
+    tool = resolver.GitTool("/usr/bin/git", 3, {})
     argv = tool.argv(["status"])
     assert argv[:3] == ["/usr/bin/git", "--no-pager", "--no-replace-objects"]
     assert argv[-1] == "status"
@@ -1020,19 +1023,28 @@ def real_git() -> str:
     return os.path.realpath(found)
 
 
-def recording_git(directory: Path, body: str) -> Path:
-    """A trusted wrapper that runs `body` (POSIX sh) and then execs the real git."""
-    directory.mkdir(mode=0o700, exist_ok=True)
-    script = directory / "git"
-    script.write_text(f'#!/bin/sh\n{body}\nexec "{real_git()}" "$@"\n')
-    script.chmod(0o755)
-    return script
+def collect(run_holder: list) -> None:
+    """Drop the only reference to a Run and collect it, so its cleanup finalizers run."""
+    run_holder.clear()
+    gc.collect()
+
+
+def held_python(tmp_path: Path) -> resolver.GitTool:
+    """A GitTool whose held image is this Python, for process-tree tests that need a script."""
+    real = os.path.realpath(sys.executable)
+    fd = proc.high_fd(os.open(real, os.O_RDONLY | os.O_CLOEXEC))
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700, exist_ok=True)
+    return resolver.GitTool(real, fd, REAL_GIT_ENVIRONMENT(str(home)))
 
 
 def test_a_git_earlier_on_the_callers_path_never_runs(world, monkeypatch):
     target = world.commit("target")
     fake = world.root / "fake-bin"
-    recording_git(fake, f"echo ran >> '{world.marker('path-git')}'")
+    fake.mkdir()
+    script = fake / "git"
+    script.write_text(f"#!/bin/sh\necho ran >> '{world.marker('path-git')}'\nexec '{real_git()}' \"$@\"\n")
+    script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
     assert world.resolve(short(target)) == target
     assert world.ran() == []
@@ -1040,8 +1052,8 @@ def test_a_git_earlier_on_the_callers_path_never_runs(world, monkeypatch):
 
 def test_ld_preload_never_reaches_git(world, monkeypatch):
     compiler = shutil.which("cc") or shutil.which("gcc")
-    if compiler is None or sys.platform != "linux":
-        pytest.skip("needs a C compiler and the Linux dynamic loader")
+    if compiler is None:
+        pytest.skip("needs a C compiler")
     target = world.commit("target")
     source = world.root / "mark.c"
     marker = world.marker("ld-preload")
@@ -1056,105 +1068,53 @@ def test_ld_preload_never_reaches_git(world, monkeypatch):
     if built.returncode != 0:
         pytest.skip("the marker library did not compile")
     monkeypatch.setenv("LD_PRELOAD", str(library))
-    monkeypatch.setenv("DYLD_INSERT_LIBRARIES", str(library))
     assert world.resolve(short(target)) == target
     assert world.ran() == []
-
-
-def test_openssl_conf_and_other_loader_variables_never_reach_git(world, monkeypatch):
-    target = world.commit("target")
-    conf = world.root / "openssl.cnf"
-    conf.write_text("openssl_conf = planted\n")
-    marker = world.marker("loader-variables")
-    wrapper = recording_git(
-        world.root / "recording-bin",
-        "\n".join(
-            f'[ -n "${name}" ] && echo "{name}" >> \'{marker}\''
-            for name in (
-                "OPENSSL_CONF",
-                "OPENSSL_MODULES",
-                "LD_PRELOAD",
-                "SSLKEYLOGFILE",
-                "XDG_CONFIG_HOME",
-                "CURL_HOME",
-            )
-        )
-        + f'\n[ -n "$OPENSSL_CONF" ] && cat "$OPENSSL_CONF" >> \'{marker}\'\ntrue',
-    )
-    for name, value in (
-        ("OPENSSL_CONF", str(conf)),
-        ("OPENSSL_MODULES", str(world.root)),
-        ("SSLKEYLOGFILE", str(world.root / "keys.log")),
-        ("XDG_CONFIG_HOME", str(world.root)),
-        ("CURL_HOME", str(world.root)),
-    ):
-        monkeypatch.setenv(name, value)
-    run = resolver.Run(git_executable=str(wrapper))
-    assert resolver.commit_resolver(world.bound(), run)(short(target)) == target
-    assert world.ran() == []
-    assert not (world.root / "keys.log").exists()
 
 
 def test_git_receives_exactly_the_allowlisted_environment(world, monkeypatch):
     target = world.commit("target")
     monkeypatch.setattr(resolver, "git_environment", REAL_GIT_ENVIRONMENT)
-    for name, value in (
-        ("LD_PRELOAD", str(world.root / "absent.so")),
-        ("OPENSSL_CONF", str(world.root / "absent.cnf")),
-        ("HOME", str(world.root)),
-        ("XDG_CONFIG_HOME", str(world.root)),
-        ("PATH", f"{world.root}{os.pathsep}{os.environ['PATH']}"),
-        ("https_proxy", "http://localhost:9"),
-        ("SSL_CERT_FILE", str(world.ca)),
-    ):
+    for name, value in {**HOSTILE_INHERITED, "PATH": f"{world.root}{os.pathsep}{os.environ['PATH']}"}.items():
         monkeypatch.setenv(name, value)
+    monkeypatch.setenv("OPENSSL_CONF", str(world.root / "openssl.cnf"))
     seen = []
-    real_run = resolver.proc.run
+    real_run = resolver.proc.run_held
 
-    def spy(argv, *args, env=None, **kwargs):
+    def spy(argv, fd, *args, env=None, **kwargs):
         home = env["HOME"]
-        seen.append((argv, dict(env), sorted(os.listdir(home)), stat.S_IMODE(os.stat(home).st_mode)))
-        return real_run(argv, *args, env=env, **kwargs)
+        seen.append((argv, os.fstat(fd), dict(env), sorted(os.listdir(home)), stat.S_IMODE(os.stat(home).st_mode)))
+        return real_run(argv, fd, *args, env=env, **kwargs)
 
-    monkeypatch.setattr(resolver.proc, "run", spy)
+    monkeypatch.setattr(resolver.proc, "run_held", spy)
     world.resolve(short(target))  # the scratch CA is untrusted here, so only the calls matter
     commands = [argv[argv.index("--no-replace-objects") + 1 + 2 * len(resolver.OVERRIDES)] for argv, *_ in seen]
     assert "fetch" in commands
-    for argv, env, listing, mode in seen:
+    for argv, held_image, env, listing, mode in seen:
         assert set(env) == resolver.ENV_ALLOWLIST
-        assert os.path.isabs(argv[0]) and not argv[0].startswith(str(world.root))
-        assert str(world.root) not in env["PATH"] and env["HOME"] != str(world.root)
+        assert argv[0] == real_git() and os.path.samestat(held_image, os.stat(real_git()))
+        assert str(world.root) not in env["PATH"] and not env["HOME"].startswith("/attacker")
         assert listing == [] and mode == 0o700
+        assert Path(env["HOME"]).parent.parent == Path(resolver.SYSTEM_TEMP)
 
 
-def test_an_untrusted_git_is_refused(world, tmp_path):
+def test_an_untrusted_exec_directory_is_refused(world, monkeypatch):
     target = world.commit("target")
-    loose = recording_git(world.root / "loose-bin", "true")
+    loose = world.root / "loose-exec"
+    loose.mkdir()
     loose.chmod(0o777)
-    run = resolver.Run(git_executable=str(loose))
-    assert resolver.commit_resolver(world.bound(), run)(short(target)) is None
-    shared_dir = world.root / "shared-bin"
-    wrapper = recording_git(shared_dir, "true")
-    shared_dir.chmod(0o777)
+    real = resolver._git
+
+    def reported(tool, cwd, *args):
+        if args == ("--exec-path",):
+            return resolver._Result(0, f"{loose}\n")
+        return real(tool, cwd, *args)
+
+    monkeypatch.setattr(resolver, "_git", reported)
     try:
-        run = resolver.Run(git_executable=str(wrapper))
-        assert resolver.commit_resolver(world.bound(), run)(short(target)) is None
+        assert world.resolve(short(target)) is None
     finally:
-        shared_dir.chmod(0o700)
-    assert (
-        resolver.commit_resolver(world.bound(), resolver.Run(git_executable=str(world.root / "absent")))(short(target))
-        is None
-    )
-
-
-@posix
-def test_a_git_owned_by_another_user_is_not_trusted(tmp_path, monkeypatch):
-    if os.getuid() == 0:
-        pytest.skip("root owns every file it creates")
-    wrapper = recording_git(tmp_path / "bin", "true")
-    assert resolver.trusted_file(str(wrapper))
-    monkeypatch.setattr(resolver.os, "getuid", lambda: os.stat(wrapper).st_uid + 1)
-    assert not resolver.trusted_file(str(wrapper))
+        loose.chmod(0o700)
 
 
 HEARTBEAT = """
@@ -1172,25 +1132,42 @@ subprocess.Popen(
 )
 time.sleep(120)
 """
+LINGERING_PARENT = """
+import os, subprocess, sys, time
+subprocess.Popen(
+    [sys.executable, "-c", sys.argv[2], sys.argv[1]],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+for _ in range(200):
+    if os.path.exists(sys.argv[1]):
+        break
+    time.sleep(0.05)
+"""
 
 
-def test_a_timeout_kills_the_whole_process_tree(tmp_path, monkeypatch):
-    """A grandchild that outlives its parent must be gone after a timeout, on POSIX and on Windows."""
-    beat = tmp_path / "beat.txt"
-    parent = tmp_path / "parent.py"
-    parent.write_text(PARENT)
-    monkeypatch.setattr(resolver, "TIMEOUT_SECONDS", 3.0)
-    monkeypatch.setattr(
-        resolver.GitTool, "argv", lambda self, args: [sys.executable, str(parent), str(beat), HEARTBEAT]
-    )
-    home = tmp_path / "home"
-    home.mkdir()
-    tool = resolver.GitTool(sys.executable, REAL_GIT_ENVIRONMENT(str(home), inherited=os.environ))
-    assert resolver._git(tool, str(tmp_path), "fetch") is None
+def assert_heartbeat_stopped(beat: Path) -> None:
     assert beat.exists()
     before = beat.stat().st_size
     time.sleep(1.0)
     assert beat.stat().st_size == before
+
+
+@held
+@pytest.mark.parametrize("script, timeout", [(PARENT, 3.0), (LINGERING_PARENT, 60.0)])
+def test_no_child_of_git_outlives_the_call(tmp_path, monkeypatch, script, timeout):
+    """A grandchild left by a timed-out call, or by a call that exited normally, is gone afterwards."""
+    beat = tmp_path / "beat.txt"
+    parent = tmp_path / "parent.py"
+    parent.write_text(script)
+    monkeypatch.setattr(resolver, "TIMEOUT_SECONDS", timeout)
+    monkeypatch.setattr(resolver.GitTool, "argv", lambda self, args: [self.path, str(parent), str(beat), HEARTBEAT])
+    tool = held_python(tmp_path)
+    try:
+        result = resolver._git(tool, str(tmp_path), "fetch")
+    finally:
+        os.close(tool.fd)
+    assert (result is None) if script is PARENT else (result is not None and result.code == 0)
+    assert_heartbeat_stopped(beat)
 
 
 def test_a_failed_fetch_with_proving_porcelain_is_refused(world, monkeypatch):
@@ -1230,49 +1207,292 @@ def test_the_fetch_argv_pins_tags_prune_and_the_refspec(world, monkeypatch, porc
     assert ("--porcelain" in args and "--verbose" in args) is porcelain
 
 
-def test_an_untrusted_exec_directory_is_refused(world):
-    target = world.commit("target")
-    loose = world.root / "loose-exec"
-    loose.mkdir()
-    loose.chmod(0o777)
-    try:
-        wrapper = recording_git(
-            world.root / "exec-bin",
-            f'for arg; do last="$arg"; done\n[ "$last" = "--exec-path" ] && {{ echo "{loose}"; exit 0; }}\ntrue',
-        )
-        run = resolver.Run(git_executable=str(wrapper))
-        assert resolver.commit_resolver(world.bound(), run)(short(target)) is None
-    finally:
-        loose.chmod(0o700)
+# --- Fix round 2: private HOME cleanup ---------------------------------------------------
 
 
-LINGERING_PARENT = """
-import os, subprocess, sys, time
-subprocess.Popen(
-    [sys.executable, "-c", sys.argv[2], sys.argv[1]],
-    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-)
-for _ in range(200):
-    if os.path.exists(sys.argv[1]):
-        break
-    time.sleep(0.05)
-"""
+@pytest.fixture
+def made_home(tmp_path, monkeypatch, caplog):
+    """A Run with its private HOME made under this test's tmp_path, plus the sentinel directory to protect."""
+    if os.name != "posix":
+        pytest.skip("the private HOME exists only where the resolver runs")
+    system_temp = confine_temp(monkeypatch, tmp_path)
+    caplog.set_level(logging.WARNING, logger=resolver.__name__)
+    holder = [resolver.Run()]
+    home = Path(resolver._private_home(holder[0]))
+    sentinel = tmp_path / "sentinel"
+    sentinel.mkdir()
+    (sentinel / "keep.txt").write_text("keep\n")
+    return holder, home, system_temp, sentinel
 
 
-def test_a_helper_left_running_after_git_exits_is_reaped(tmp_path, monkeypatch):
-    """git exits 0 but leaves a detached child with no pipes. It must not outlive the call."""
-    beat = tmp_path / "beat.txt"
-    parent = tmp_path / "parent.py"
-    parent.write_text(LINGERING_PARENT)
-    monkeypatch.setattr(
-        resolver.GitTool, "argv", lambda self, args: [sys.executable, str(parent), str(beat), HEARTBEAT]
-    )
-    home = tmp_path / "home"
+def left_in_place(caplog) -> bool:
+    return any("left its private HOME in place" in record.getMessage() for record in caplog.records)
+
+
+def test_the_private_home_and_its_parent_are_removed_after_the_run(made_home, caplog):
+    holder, home, system_temp, _ = made_home
+    assert home.is_dir() and home.parent.parent == system_temp
+    assert stat.S_IMODE(home.stat().st_mode) == stat.S_IMODE(home.parent.stat().st_mode) == 0o700
+    (home / "scratch").write_text("x")
+    collect(holder)
+    assert list(system_temp.iterdir()) == []
+    assert not left_in_place(caplog)
+
+
+def test_a_home_replaced_by_another_directory_is_left_in_place(made_home, caplog):
+    holder, home, _, _ = made_home
+    os.rename(home, home.with_name(home.name + "-original"))
     home.mkdir()
-    tool = resolver.GitTool(sys.executable, REAL_GIT_ENVIRONMENT(str(home), inherited=os.environ))
-    result = resolver._git(tool, str(tmp_path), "version")
-    assert result is not None and result.code == 0
-    assert beat.exists()
-    before = beat.stat().st_size
-    time.sleep(1.0)
-    assert beat.stat().st_size == before
+    (home / "keep.txt").write_text("keep\n")
+    collect(holder)
+    assert (home / "keep.txt").read_text() == "keep\n"
+    assert left_in_place(caplog)
+
+
+def test_a_home_replaced_by_a_symlink_is_left_in_place(made_home, caplog):
+    holder, home, _, sentinel = made_home
+    os.rename(home, home.with_name(home.name + "-original"))
+    os.symlink(sentinel, home)
+    collect(holder)
+    assert (sentinel / "keep.txt").read_text() == "keep\n"
+    assert home.is_symlink()
+    assert left_in_place(caplog)
+
+
+def test_a_home_moved_outside_its_parent_is_left_in_place(made_home, caplog):
+    """The parent becomes a link to another directory that holds a same-named child."""
+    holder, home, _, sentinel = made_home
+    parent = home.parent
+    lookalike = sentinel / home.name
+    lookalike.mkdir()
+    (lookalike / "keep.txt").write_text("keep\n")
+    os.rename(parent, parent.with_name(parent.name + "-moved"))
+    os.symlink(sentinel, parent)
+    collect(holder)
+    assert (lookalike / "keep.txt").read_text() == "keep\n"
+    assert (sentinel / "keep.txt").read_text() == "keep\n"
+    assert left_in_place(caplog)
+
+
+def test_a_home_moved_into_a_replacement_parent_is_left_in_place(made_home, caplog):
+    """The HOME keeps its inode but now sits in a different directory at the parent's path."""
+    holder, home, _, _ = made_home
+    parent = home.parent
+    moved = parent.with_name(parent.name + "-moved")
+    os.rename(parent, moved)
+    parent.mkdir(mode=0o700)
+    os.rename(moved / home.name, home)
+    (home / "keep.txt").write_text("keep\n")
+    collect(holder)
+    assert (home / "keep.txt").read_text() == "keep\n"
+    assert left_in_place(caplog)
+
+
+def test_a_parent_reached_through_a_link_is_left_in_place(made_home, caplog):
+    """The parent path becomes a link to the original parent: same identities, but reached through a link."""
+    holder, home, _, _ = made_home
+    parent = home.parent
+    real_parent = parent.with_name(parent.name + "-real")
+    os.rename(parent, real_parent)
+    os.symlink(real_parent, parent)
+    (real_parent / home.name / "keep.txt").write_text("keep\n")
+    collect(holder)
+    assert (real_parent / home.name / "keep.txt").read_text() == "keep\n"
+    assert left_in_place(caplog)
+
+
+def test_removal_after_the_checks_never_follows_a_swapped_parent(made_home, monkeypatch):
+    """The parent is swapped for a link right after the identity checks pass. Removal stays on the held parent."""
+    holder, home, _, sentinel = made_home
+    parent = home.parent
+    lookalike = sentinel / home.name
+    lookalike.mkdir()
+    (lookalike / "keep.txt").write_text("keep\n")
+    real_stat_child = resolver.dirfd.stat_child
+    swapped = []
+
+    def stat_then_swap(parent_fd, name, **kwargs):
+        result = real_stat_child(parent_fd, name, **kwargs)
+        if name == home.name and not swapped:
+            os.rename(parent, parent.with_name(parent.name + "-moved"))
+            os.symlink(sentinel, parent)
+            swapped.append(True)
+        return result
+
+    monkeypatch.setattr(resolver.dirfd, "stat_child", stat_then_swap)
+    collect(holder)
+    assert swapped
+    assert (lookalike / "keep.txt").read_text() == "keep\n"
+    assert not (parent.with_name(parent.name + "-moved") / home.name).exists()  # the real HOME was removed
+
+
+# --- Fix round 2: only a root-owned git, run from a held descriptor ----------------------
+
+
+def fake_root(monkeypatch, *trusted: Path) -> None:
+    """Treat everything under `trusted`, and the directories above it, as root-owned and not writable by others."""
+    real_node = resolver._trusted_node
+    roots = [str(path) for path in trusted]
+
+    def node(path, metadata):
+        if any(
+            path == root or path.startswith(root + os.sep) or root.startswith(path.rstrip(os.sep) + os.sep)
+            for root in roots
+        ):
+            return True
+        return real_node(path, metadata)
+
+    monkeypatch.setattr(resolver, "_trusted_node", node)
+
+
+@posix
+def test_a_user_owned_git_is_refused(tmp_path, monkeypatch):
+    if os.getuid() == 0:
+        pytest.skip("root owns every file it creates")
+    directory = tmp_path / "bin"
+    directory.mkdir()
+    shutil.copy2(real_git(), directory / "git")
+    monkeypatch.setattr(resolver, "GIT_CANDIDATES", (str(directory / "git"),))
+    assert resolver.find_git() is None
+    metadata = os.stat(directory / "git")
+    assert not resolver._trusted_node(str(directory / "git"), metadata)
+
+
+@posix
+def test_a_symlinked_git_whose_target_is_not_root_owned_is_refused(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    (root / "usr" / "local" / "bin").mkdir(parents=True)
+    (root / "usr" / "lib").mkdir(parents=True)
+    user = tmp_path / "home" / "user"
+    user.mkdir(parents=True)
+    shutil.copy2(real_git(), user / "git")
+    shutil.copy2(real_git(), root / "usr" / "lib" / "git")
+    link = root / "usr" / "local" / "bin" / "git"
+    os.symlink(user / "git", link)
+    fake_root(monkeypatch, root)
+    monkeypatch.setattr(resolver, "GIT_CANDIDATES", (str(link),))
+    assert resolver.find_git() is None
+    link.unlink()
+    os.symlink(root / "usr" / "lib" / "git", link)  # the control: a target inside the trusted root passes
+    assert resolver.find_git() == os.path.realpath(root / "usr" / "lib" / "git")
+
+
+@pytest.mark.parametrize(
+    "uid, mode, trusted",
+    [
+        (0, 0o100755, True),
+        (0, 0o040755, True),
+        (0, 0o100775, False),
+        (0, 0o100757, False),
+        (0, 0o040777, False),
+        (1000, 0o100755, False),
+    ],
+)
+def test_only_root_owned_nodes_without_group_or_world_write_are_trusted(uid, mode, trusted):
+    metadata = os.stat_result((mode, 1, 1, 1, uid, 0, 0, 0, 0, 0))
+    assert resolver._trusted_node("/usr/bin/git", metadata) is trusted
+
+
+@posix
+def test_a_root_owned_git_in_an_untrusted_directory_is_refused(tmp_path, monkeypatch):
+    directory = tmp_path / "bin"
+    directory.mkdir()
+    git_path = directory / "git"
+    shutil.copy2(real_git(), git_path)
+    real_node = resolver._trusted_node
+    monkeypatch.setattr(resolver, "_trusted_node", lambda path, md: path == str(git_path) or real_node(path, md))
+    monkeypatch.setattr(resolver, "GIT_CANDIDATES", (str(git_path),))
+    assert resolver.find_git() is None  # the file passes, but the directories above it do not
+
+
+def test_a_git_swapped_after_the_check_never_runs(world, monkeypatch):
+    target = world.commit("target")
+    root = world.root / "root"
+    (root / "usr" / "bin").mkdir(parents=True)
+    git_path = root / "usr" / "bin" / "git"
+    shutil.copy2(real_git(), git_path)
+    fake_root(monkeypatch, root)
+    monkeypatch.setattr(resolver, "GIT_CANDIDATES", (str(git_path),))
+    swap = root / "usr" / "bin" / "swap"
+    swap.write_text(f"#!/bin/sh\necho ran >> '{world.marker('swapped-git')}'\nexec '{real_git()}' \"$@\"\n")
+    swap.chmod(0o755)
+    real_run = resolver.proc.run_held
+    swapped = []
+
+    def swap_then_run(argv, fd, *args, **kwargs):
+        if not swapped:
+            os.replace(swap, git_path)  # after the check and the hold, before the first exec
+            swapped.append(True)
+        return real_run(argv, fd, *args, **kwargs)
+
+    monkeypatch.setattr(resolver.proc, "run_held", swap_then_run)
+    assert world.resolve(short(target)) == target
+    assert world.ran() == []
+    # A new run verifies and holds the swapped script, which held execution refuses to run at all.
+    assert world.resolve(short(target), run=resolver.Run()) is None
+    assert world.ran() == []
+
+
+# --- Fix round 2: unsupported platforms fail closed --------------------------------------
+
+
+def spawn_spies(monkeypatch) -> list:
+    spawned = []
+
+    def refuse(*args, **kwargs):
+        spawned.append(args)
+        raise AssertionError("the resolver must not start a process here")
+
+    monkeypatch.setattr(resolver.proc, "run_held", refuse)
+    monkeypatch.setattr(resolver.proc, "run", refuse)
+    monkeypatch.setattr(subprocess, "Popen", refuse)
+    return spawned
+
+
+def bound_workspace(tmp_path: Path) -> config.Workspace:
+    path = tmp_path / "workspace"
+    path.mkdir()
+    entry = {"scope": SCOPE, "path": str(path), "archive_projects": []}
+    return config.parse({"verify": {"workspace": [entry]}}).workspaces[0]
+
+
+def test_an_unsupported_platform_fails_closed_without_spawning(tmp_path, monkeypatch):
+    workspace = bound_workspace(tmp_path)
+    monkeypatch.setattr(resolver, "platform_supported", lambda: False)
+    spawned = spawn_spies(monkeypatch)
+    assert resolver.commit_resolver(workspace)("0123456789abc") is None
+    assert resolver.unavailable_reason() == resolver.UNSUPPORTED_PLATFORM == "verify_resolver_unsupported_platform"
+    assert spawned == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="checks the real Windows fail-closed path")
+def test_windows_fails_closed_without_spawning(tmp_path, monkeypatch):
+    assert not resolver.platform_supported()
+    workspace = bound_workspace(tmp_path)
+    spawned = spawn_spies(monkeypatch)
+    assert resolver.commit_resolver(workspace)("0123456789abc") is None
+    assert resolver.unavailable_reason() == resolver.UNSUPPORTED_PLATFORM
+    assert spawned == []
+
+
+@posix
+def test_a_git_replaced_between_open_and_check_is_not_held(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    (root / "usr" / "bin").mkdir(parents=True)
+    git_path = root / "usr" / "bin" / "git"
+    shutil.copy2(real_git(), git_path)
+    replacement = root / "usr" / "bin" / "replacement"
+    shutil.copy2(real_git(), replacement)
+    fake_root(monkeypatch, root)
+    real_lstat = os.lstat
+    replaced = []
+
+    def lstat(path, *args, **kwargs):
+        if str(path) == str(git_path) and not replaced:
+            os.replace(replacement, git_path)  # the descriptor is already open on the original
+            replaced.append(True)
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(resolver.os, "lstat", lstat)
+    assert resolver._hold(str(git_path)) is None
+    assert replaced

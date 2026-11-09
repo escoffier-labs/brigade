@@ -89,14 +89,17 @@ hostile settings slice 9 tests must plant. Slice 9's resolver implementation req
 The resolver MUST:
 
 1. Run every git command through one wrapper with a fixed timeout, no stdin,
-   `--no-pager` and no prompt, killing git's whole process tree on a timeout.
-2. Run a trusted absolute git (configured, or from fixed system directories,
-   never the caller's `PATH`) with an environment built from scratch: only
-   `PATH` (git's exec directory and the system directories), a private empty
-   `HOME`, `LC_ALL=C`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
-   `GIT_NO_REPLACE_OBJECTS=1`, `GIT_TERMINAL_PROMPT=0`, and on Windows
-   `SYSTEMROOT`, `WINDIR`, `TEMP` and `TMP`. No loader, OpenSSL, curl, proxy,
-   TLS, XDG or inherited `GIT_*` variable reaches git.
+   `--no-pager` and no prompt, killing git's whole process group on a
+   timeout. POSIX-only in v1: without held-descriptor execution (Windows
+   included) every expansion abstains and no process starts.
+2. Run only a root-owned git (`/usr/bin/git`, `/bin/git` or
+   `/usr/local/bin/git`, its real file and every directory above it owned by
+   root and not group- or world-writable), executed from a held descriptor,
+   with an environment built from scratch: only `PATH` (git's exec directory
+   and the system directories), a private empty `HOME` that is removed only
+   while it is still the directory the resolver made, `LC_ALL=C`,
+   `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+   `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`.
 3. Pass `--no-replace-objects` and `-c` overrides on every call:
    `core.fsmonitor=false`, `core.hooksPath` at a missing directory,
    `credential.helper=`, `core.askPass=`, `core.alternateRefsCommand=`,
