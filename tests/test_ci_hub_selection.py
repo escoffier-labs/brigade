@@ -293,7 +293,12 @@ def _enqueue(queue, *entries):
 
 
 def _run_step(queue, step_name, head, base, *, base_ref="refs/heads/main", origin=None, **environment):
-    """Run one literal ci.yml `changes` step for a merge group; return its outputs."""
+    """Run one literal ci.yml `changes` step for a merge group; return its outputs.
+
+    The step text always comes from this checkout's ci.yml: the workflow is
+    held fixed. On GitHub a head that rewrites ci.yml runs its own bootstrap,
+    the documented trust limit, which no test here can model.
+    """
     work = queue.tmp / "work"
     if not work.exists():
         _run(queue.tmp, "init", "-q", str(work))
@@ -381,12 +386,13 @@ def test_a_head_that_rewrites_the_filter_and_selector_cannot_skip_the_hub_suite(
         "import os\nfrom pathlib import Path\n"
         "Path(os.environ['GITHUB_OUTPUT']).write_text('hub=false\\nreason=forged\\n')\n"
     )
+    # The head leaves ci.yml alone: this runs main's bootstrap, and a head that
+    # rewrote ci.yml would run its own instead (the trust limit).
     (head,) = _enqueue(
         queue,
         [
             ("scripts/ci_hub_paths.yml", forged_list),
             ("scripts/ci_hub_select.py", forged_selector),
-            ".github/workflows/ci.yml",
             "engines/hub/src/lib.rs",
         ],
     )
