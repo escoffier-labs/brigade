@@ -2125,3 +2125,176 @@ caller with `review` on every proposal target and on the scope of every bound
 record. The list is present and possibly empty for that caller. For anyone
 else the key is absent, so the reply looks the same whether the proposal binds
 zero, one or several manifests.
+
+## Verify folder and candidate selection
+
+The verification pass (D2, D3 and D6 of phase-memory-verify) runs in its own
+folder, like the [dedicated reflect folder](#dedicated-reflect-folder). Its
+`.brigade/memory-care.toml` sets `[hub] mode = "read"` and the scope to
+verify, and a `[verify]` table binds each scope to the workspace and evidence
+archive projects that own it:
+
+```toml
+[hub]
+mode = "read"
+read_scopes = ["repo:example"]
+
+[verify]
+enabled = false
+propose_seat = "verify-propose"
+confirm_seat = "verify-confirm"
+cards_per_run = 12        # 1 to 64
+min_interval_days = 7     # 1 to 365
+never_read_days = 90      # 1 to 3650
+
+[[verify.workspace]]
+scope = "repo:example"
+path = "/absolute/path/to/workspace"
+archive_projects = ["example"]
+```
+
+Configuration fails, naming the rule but never the configured value, when:
+
+- a workspace root does not exist or is not a directory
+- a workspace root is bound to two scopes, or listed twice
+- a workspace root sits inside another bound root, in any scope
+- an entry leaves out `archive_projects`. An empty list is allowed and means
+  the scope gets no excerpts and no evidence bundles
+- a path is relative, not normalized, or `/`
+- any key is unknown. `hub_url`, `node_token_file` and other hub or
+  credential keys are refused with a pointer to `[memory_hub]` in
+  `~/.brigade/fleet.toml` or the `BRIGADE_MEMORY_HUB_URL` and
+  `BRIGADE_MEMORY_HUB_TOKEN_FILE` pair, which the folder must use
+- `propose_seat` and `confirm_seat` name the same seat
+
+Roots are compared by directory identity (device and inode), never by
+spelling. A root, or any of its parents, on a filesystem that reports no
+stable inode (0, or a zero file index on Windows) is refused with
+`verify_root_identity_unavailable`, because equal identities would then prove
+nothing. A case-only variant on a case-insensitive filesystem, a symbolic
+link and a parent reached through a link all count as the same directory.
+Each parsed root keeps its identity, and the pass checks it again before it
+reads evidence under that root. A root that became a different directory
+after the configuration was read is refused with `verify_root_changed`.
+
+A scope with no `[[verify.workspace]]` entry is never verified.
+
+### Commands
+
+```bash
+brigade memory verify status --target <verify-folder>
+brigade memory verify run --dry-run --no-model --target <verify-folder> [--list-ids]
+```
+
+`status` reports whether verification is configured, the number of bound
+scopes and workspaces, the pause state and the never-read count from the last
+recorded run. It makes no hub call.
+
+`run` requires both `--dry-run` and `--no-model` until the model-backed pass
+lands. Anything else is refused with `verify_live_unavailable` (exit 2)
+before any hub call. The dry run pulls the replica, reads per-card counts
+with `read_stats`, scores every card in the bound scopes and prints the
+selected card ids, their scores and lanes, and counted skip reasons. It calls
+no seat, submits and attaches nothing, and writes no state, so the pause
+counter does not move. Output never holds card text, titles or evidence.
+`--list-ids` adds the never-read card ids, still without titles or text.
+Failures print a fixed code and reason only.
+
+Verify keeps its own hub replica under `.brigade/memory/verify/hub/`, with its
+own building directory and locks. It never reads, locks or writes the shared
+replica under `.brigade/memory/hub/` that `memory search`, the hooks and the
+other hub commands use, so running verify in an ordinary workspace leaves
+that replica byte for byte as it was. A dry run writes only verify's replica
+and no state.
+
+The run pulls only the bound scopes into its replica, so cards of a scope
+that is no longer bound are dropped from it, and an unbound scope never
+counts against verification. Each bound scope may hold
+50,000 cards, checked per scope (`verify_scope_limit`), and the replica as a
+whole is bounded by its 64 MiB byte ceiling.
+
+Card history in the state file (verification day, revision, verdict, pending
+proposal, evidence digest and counts) belongs to the hub, the principal the
+hub names for the credential, and the hub's log epoch. When any of them
+differs from the binding stored with the state, as after pointing the folder
+at another hub or restoring the hub with a new epoch, the run ignores all
+card history for selection and reports a `verify_binding_changed` note with
+the number of entries ignored. A dry run still writes nothing.
+
+The hub allows one `read_stats`
+request per second per principal, so the run keeps one pacing clock across
+every page of every scope, and the first page of the next scope waits like
+any other page.
+
+| Skip reason | Meaning |
+|---|---|
+| `retired`, `superseded` | The card is retired or carries `status: superseded` |
+| `non_clean`, `flagged_trust` | The scan state is not clean, or the trust class is not a known one |
+| `card_too_large` | Card text over 16 KiB |
+| `no_anchor` | No anchored claim block |
+| `pending_proposal` | This job remembers a pending proposal for the card |
+| `recently_verified` | Inside the minimum interval, or the 30-day interval below |
+| `pending_ceiling` | The job already has 8 pending proposals, so nothing is selected |
+| `verify_deferred_slots` | Eligible, but the run's slots were full |
+| `read_stats_limited` | `read_stats` answered 429 for the scope |
+| `read_stats_unavailable` | The scope has no counts this run, so nothing in it is scored or selected |
+| `scope_unbound`, `scope_unreadable` | A hub read scope with no workspace entry, or a bound scope the hub settings do not read |
+
+### Score and lanes
+
+```text
+access     = log2(1 + 4 * min(reads_7d, 7000) + min(reads_30d, 30000))
+volatility = 2 if the head changed at most 14 days ago, 1 if 15 to 60 days ago
+           + 2 if a cited evidence item is newer than the last verification
+staleness  = min(days_since_verified, 180) / 30
+score      = access + volatility + staleness
+```
+
+A never-verified card counts as 180 days. A card is eligible again after
+`min_interval_days`, or after 30 days when its last verdict was `supported`
+and neither its head revision nor its evidence digest changed. Evidence that
+has not been assembled never counts as unchanged.
+
+One quarter of the slots, rounded up, goes to the eligible cards with the
+oldest verification, never-verified first, whatever their reads. The other
+slots go to the highest scores. Ties in both lanes follow the shared fairness
+order of the reflect lanes (`brigade.memory_fairness`): least recently
+proposed, then oldest first seen, then a 128-bit digest of the scope and card
+id.
+
+### Never-read report
+
+`never_read.count` counts live cards this job first saw at least
+`never_read_days` ago with no read recorded. It stays null until the hub's
+`read_counts_since_day` is also at least that old, and while counts are
+unavailable. With several scopes the total is null when any scope's count is.
+
+### When `read_stats` is rate limited
+
+When `read_stats` answers `429 memory_read_stats_rate_limited` for a scope,
+the run counts `read_stats_limited` and `read_stats_unavailable` and skips the
+scope: none of its cards are scored or selected, and its never-read count is
+null. Other scopes are unaffected. The scope's card history still loads, so
+its pending proposals count toward the job-wide pending ceiling. Counts cached in the state file are never
+used in place of a reply, because nothing writes a trusted snapshot of them
+yet. The state format already holds per-card `reads` and a per-scope
+`counts_ms`, so the later run that stores complete snapshots needs no format
+change.
+
+### State file
+
+`.brigade/memory/verify/state.json` follows the rules of the reflect
+`schedule.json`: owner-only, read without following links, written through an
+exclusive temporary file and an atomic rename, and held under its own
+`state.lock`. It is limited to 8 MiB. It holds key digests, days, revisions,
+verdict codes, proposal ids and cached read counts, never card ids or text.
+Three consecutive failed runs pause the scheduled job, separately from the
+reflect job's pause.
+
+A state file that is oversized, malformed, linked or readable by others makes
+every verify command fail closed with `verify_state` and the fixed reason
+`invalid verify state. Inspect and remove .brigade/memory/verify/state.json to
+recover`. No byte of the file is printed. `status` shows such a file as
+paused with the same reason. A card field that is present must hold a value of
+its type, so an explicit `null` is malformed. Only a scope's `since_day` and
+`never_read` may be `null`, meaning not counted yet and unknown.

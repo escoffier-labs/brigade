@@ -17,6 +17,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .. import memory_reflect
 
     memory_reflect.register(memory_sub)
+    from .. import memory_verify_cmd
+
+    memory_verify_cmd.register(memory_sub)
     from .. import memory_hub_cmd
 
     memory_hub_cmd.register(memory_sub)
@@ -435,6 +438,10 @@ def dispatch(args) -> int:
         from .. import memory_reflect
 
         return memory_reflect.dispatch(args)
+    if args.memory_command == "verify":
+        from .. import memory_verify_cmd
+
+        return memory_verify_cmd.dispatch(args)
     if args.memory_command == "hub":
         from .. import memory_hub_cmd
 
