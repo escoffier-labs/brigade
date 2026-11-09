@@ -551,32 +551,15 @@ def test_status_does_not_overwrite_a_newer_state(make, monkeypatch):
     assert ledger.get("r1")["last_state"] == "needs_attention"
 
 
-def test_status_during_followup_cannot_clobber_the_reopen(make, monkeypatch):
+@pytest.mark.parametrize("prior_state", ["succeeded", "running"])
+def test_status_during_followup_cannot_clobber_the_reopen_or_the_new_turn(make, monkeypatch, prior_state):
     tools, runner, ledger = make()
     _submit(tools)
-    ledger.update_state("r1", "succeeded", NOW)
+    ledger.update_state("r1", prior_state, NOW)
 
     def racing_followup(request_id, prompt, interaction_mode="default"):
-        # A direct status call lands while t3-fleet is accepting the follow-up and still reports the old turn.
-        monkeypatch.setattr(runner, "status", lambda rid: {"request_id": rid, "state": "succeeded"})
-        tools.call_tool("t3_status", {"request_id": request_id})
-        assert ledger.get(request_id)["last_state"] == "reopening"
-        return {"request_id": request_id, "state": "running"}
-
-    monkeypatch.setattr(runner, "followup", racing_followup)
-    out = tools.call_tool("t3_followup", {"request_id": "r1", "message": "again"})
-    assert out["state"] == "running"
-    assert ledger.get("r1")["last_state"] == "running"
-    assert ledger.open_count(NOW) == 1
-
-
-def test_status_during_running_followup_cannot_clobber_the_new_turn(make, monkeypatch):
-    tools, runner, ledger = make()
-    _submit(tools)
-    ledger.update_state("r1", "running", NOW)
-
-    def racing_followup(request_id, prompt, interaction_mode="default"):
-        # The previous turn finishes and a status call records it while t3-fleet is accepting the follow-up.
+        # A direct status call lands while t3-fleet is accepting the follow-up and still reports the old turn
+        # (for a request that was already running, the previous turn finishes and the call records it).
         monkeypatch.setattr(runner, "status", lambda rid: {"request_id": rid, "state": "succeeded"})
         tools.call_tool("t3_status", {"request_id": request_id})
         assert ledger.get(request_id)["last_state"] == "reopening"

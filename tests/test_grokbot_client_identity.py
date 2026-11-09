@@ -195,8 +195,21 @@ def test_distinct_clients_cannot_use_each_others_local_leases(tmp_path):
             adapter.call_tool("grokbot_queue_list", {"client_id": "beta"})
 
 
-@pytest.mark.parametrize("authenticated_id", [None, "beta", "alpha"])
-def test_hub_client_identity_must_match_authenticated_credential(tmp_path, monkeypatch, authenticated_id):
+@pytest.mark.parametrize(
+    ("configured_id", "authenticated_id"),
+    [
+        ("alpha", None),
+        ("alpha", "beta"),
+        ("alpha", "alpha"),
+        (ALPHA_UUID, None),
+        (ALPHA_UUID, BETA_UUID),
+        (ALPHA_UUID, ALPHA_UUID),
+    ],
+    ids=["name-none", "name-other", "name-match", "uuid-none", "uuid-other", "uuid-match"],
+)
+def test_hub_client_identity_must_match_authenticated_credential(
+    tmp_path, monkeypatch, configured_id, authenticated_id
+):
     monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda target: True)
 
     def whoami(**options):
@@ -205,38 +218,10 @@ def test_hub_client_identity_must_match_authenticated_credential(tmp_path, monke
             True, "ok", job={"actor_kind": ROLE, "role": ROLE, "node_id": authenticated_id}
         )
 
-    monkeypatch.setattr(
-        fleet_client_grokbot,
-        "whoami",
-        whoami,
-    )
-    config = replace(_adapter(tmp_path, hub_token="fake-alpha-token").config, client_id="alpha")
+    monkeypatch.setattr(fleet_client_grokbot, "whoami", whoami)
+    config = replace(_adapter(tmp_path, hub_token="fake-alpha-token").config, client_id=configured_id)
     adapter = grokbot_mcp.GrokbotAdapter(config)
-    if authenticated_id == "alpha":
-        adapter.ensure_hub_actor()
-    else:
-        with pytest.raises(grokbot_mcp.ConfigurationError):
-            adapter.ensure_hub_actor()
-
-
-@pytest.mark.parametrize("authenticated_id", [None, BETA_UUID, ALPHA_UUID])
-def test_uuid_client_identity_must_match_authenticated_credential(tmp_path, monkeypatch, authenticated_id):
-    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda target: True)
-
-    def whoami(**options):
-        assert options == {"include_node_id": True}
-        return fleet_client_grokbot.GrokbotHubDecision(
-            True, "ok", job={"actor_kind": ROLE, "role": ROLE, "node_id": authenticated_id}
-        )
-
-    monkeypatch.setattr(
-        fleet_client_grokbot,
-        "whoami",
-        whoami,
-    )
-    config = replace(_adapter(tmp_path, hub_token="fake-alpha-token").config, client_id=ALPHA_UUID)
-    adapter = grokbot_mcp.GrokbotAdapter(config)
-    if authenticated_id == ALPHA_UUID:
+    if authenticated_id == configured_id:
         adapter.ensure_hub_actor()
     else:
         with pytest.raises(grokbot_mcp.ConfigurationError):

@@ -344,13 +344,15 @@ def test_missing_legacy_snapshot_does_not_block_a_retrievable_report(tmp_path: P
     assert not (_queue_root(queue) / "reconcile" / f"{legacy}.json").exists()
 
 
-def test_malformed_marker_beside_missing_snapshot_still_fails_closed(tmp_path: Path):
+@pytest.mark.parametrize("snapshot_missing", [False, True], ids=["snapshot-present", "legacy-snapshot-missing"])
+def test_corrupt_marker_fails_closed(tmp_path: Path, snapshot_missing: bool):
     queue = tmp_path / "queue"
     owner = tmp_path / "owner"
     queue.mkdir()
     owner.mkdir()
-    job_id = _complete_report(queue, key="legacy-with-bad-marker")
-    (_queue_root(queue) / "artifacts" / f"{job_id}.md").unlink()
+    job_id = _complete_report(queue)
+    if snapshot_missing:
+        (_queue_root(queue) / "artifacts" / f"{job_id}.md").unlink()
     marker_dir = _queue_root(queue) / "reconcile"
     marker_dir.mkdir(parents=True)
     (marker_dir / f"{job_id}.json").write_text("{not-json", encoding="utf-8")
@@ -407,7 +409,8 @@ def test_corrupt_snapshot_fails_closed_without_writing(tmp_path: Path):
     assert not (_queue_root(queue) / "reconcile" / f"{job_id}.json").exists()
 
 
-def test_conflicting_marker_fails_closed(tmp_path: Path):
+@pytest.mark.parametrize("conflict", ["sha256", "task_hash"])
+def test_a_marker_that_disagrees_with_the_job_fails_closed(tmp_path: Path, conflict: str):
     queue = tmp_path / "queue"
     owner = tmp_path / "owner"
     queue.mkdir()
@@ -415,62 +418,16 @@ def test_conflicting_marker_fails_closed(tmp_path: Path):
     job_id = _complete_report(queue)
     marker_dir = _queue_root(queue) / "reconcile"
     marker_dir.mkdir(parents=True)
-    marker = marker_dir / f"{job_id}.json"
-    marker.write_text(
-        json.dumps(
-            {
-                "schema": "brigade.grokbot.reconcile.v1",
-                "job_id": job_id,
-                "sha256": "0" * 64,
-                "task_hash": grokbot_jobs.get_job(queue, job_id)["task_hash"],
-            }
-        ),
-        encoding="utf-8",
-    )
+    marker = {
+        "schema": "brigade.grokbot.reconcile.v1",
+        "job_id": job_id,
+        "sha256": _report_digest(),
+        "task_hash": grokbot_jobs.get_job(queue, job_id)["task_hash"],
+    }
+    marker[conflict] = "0" * 64 if conflict == "sha256" else "sha256:" + "0" * 64
+    (marker_dir / f"{job_id}.json").write_text(json.dumps(marker), encoding="utf-8")
 
     with pytest.raises(grokbot_reconcile.ReconcileError, match="^marker-conflict$"):
-        grokbot_reconcile.apply(queue, owner)
-
-    assert not _review_inbox(owner).exists()
-
-
-def test_marker_with_wrong_task_hash_fails_closed(tmp_path: Path):
-    queue = tmp_path / "queue"
-    owner = tmp_path / "owner"
-    queue.mkdir()
-    owner.mkdir()
-    job_id = _complete_report(queue)
-    marker_dir = _queue_root(queue) / "reconcile"
-    marker_dir.mkdir(parents=True)
-    (marker_dir / f"{job_id}.json").write_text(
-        json.dumps(
-            {
-                "schema": "brigade.grokbot.reconcile.v1",
-                "job_id": job_id,
-                "sha256": _report_digest(),
-                "task_hash": "sha256:" + "0" * 64,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(grokbot_reconcile.ReconcileError, match="^marker-conflict$"):
-        grokbot_reconcile.apply(queue, owner)
-
-    assert not _review_inbox(owner).exists()
-
-
-def test_corrupt_marker_fails_closed(tmp_path: Path):
-    queue = tmp_path / "queue"
-    owner = tmp_path / "owner"
-    queue.mkdir()
-    owner.mkdir()
-    job_id = _complete_report(queue)
-    marker_dir = _queue_root(queue) / "reconcile"
-    marker_dir.mkdir(parents=True)
-    (marker_dir / f"{job_id}.json").write_text("{not-json", encoding="utf-8")
-
-    with pytest.raises(grokbot_reconcile.ReconcileError, match="^corrupt-storage$"):
         grokbot_reconcile.apply(queue, owner)
 
     assert not _review_inbox(owner).exists()
