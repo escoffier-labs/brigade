@@ -497,22 +497,35 @@ def test_a_binary_swapped_after_verification_never_receives_the_prompt(target, t
     echo = _native_echo()
     if echo is None:
         pytest.skip("needs a native echo binary")
-    # The verified seat binary is a real native program that prints its arguments.
-    shutil.copyfile(echo, target.executable)
-    target.executable.chmod(0o700)
+    # The verified seat binary is a real native program that prints its arguments. Some runners
+    # ship echo as a single-utility build that requires argv[0] and its own file name (from
+    # /proc/self/exe) to both be "echo", so the seat binary is named echo.
+    seat_bin = tmp_path / "seat-bin" / "echo"
+    seat_bin.parent.mkdir()
+    shutil.copyfile(echo, seat_bin)
+    seat_bin.chmod(0o700)
+    monkeypatch.setattr(
+        seats,
+        "RESOLVE",
+        lambda ref: proc.ExecutableIdentity(command=ref, path=str(seat_bin), kind="native", runnable=True, detail=""),
+    )
     marker = tmp_path / "swapped-binary-ran"
     seat = seats.resolve(target, "verify-propose", "propose")
+    assert os.path.basename(seat.executable) == "echo"
     seen = {}
 
     def swap_then_spawn(argv, held_fd, **kwargs):
-        # After verification, before the spawn: put a different program at the canonical path.
-        replacement = tmp_path / "replacement"
-        replacement.write_text(f"#!/bin/sh\ncat > /dev/null\ntouch {marker}\n", encoding="utf-8")
-        replacement.chmod(0o700)
-        os.replace(replacement, target.executable)
+        # After verification, before the spawn: the canonical path now names a different program.
+        # The verified file moves aside under its own name instead of being unlinked, because an
+        # unlinked file reads as "echo (deleted)" in /proc/self/exe and the name check would fail.
+        kept = tmp_path / "kept" / "echo"
+        kept.parent.mkdir()
+        os.rename(seat_bin, kept)
+        seat_bin.write_text(f"#!/bin/sh\ncat > /dev/null\ntouch {marker}\n", encoding="utf-8")
+        seat_bin.chmod(0o700)
+        assert os.path.realpath(seat.executable) == str(seat_bin)
         seen["fds"] = (held_fd,)
-        # argv[0] is only a display name. Some distributions ship echo as a single-utility
-        # build that refuses any other argv[0], so name it after the copied program.
+        # argv[0] is only a display name, set to the program's own name for the same reason.
         seen["result"] = proc.run_held(["echo", *argv[1:]], held_fd, **kwargs)
         return seen["result"]
 
@@ -524,7 +537,7 @@ def test_a_binary_swapped_after_verification_never_receives_the_prompt(target, t
                 os.fstat(fd)
     assert not marker.exists()
     # The held image ran: echo printed the profile flags. That is not stream-json, so the call fails.
-    assert seen["result"].code == 0 and "--safe-mode" in seen["result"].stdout
+    assert seen["result"].code == 0 and "--safe-mode" in seen["result"].stdout, seen["result"].stderr[-500:]
     assert reply.status == "seat_failed"
     assert leftovers(target) == []
 
