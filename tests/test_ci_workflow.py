@@ -2294,14 +2294,75 @@ def test_hub_nightly_closes_the_tracking_issue_on_the_next_passing_run():
     assert "    permissions:\n      issues: write\n    steps:\n" in recovery
     assert "uses:" not in recovery
     script = recovery.split("        run: |\n", 1)[1]
-    # Only the open labelled tracker, and only when there is one.
-    assert 'gh issue list --state open --label "$label" --limit 1' in script
-    assert 'if [ -n "$number" ]; then' in script
+    # Every open labelled tracker, not only the first one.
+    assert "gh issue list --state open --label \"$label\" --limit 500 --json number --jq '.[].number'" in script
+    assert "--limit 1 " not in script
+    assert "for number in $numbers; do" in script
     assert script.index('gh issue comment "$number" --body "hub-nightly recovered') < script.index(
         'gh issue close "$number" --reason completed'
     )
     assert "gh issue create" not in script
     assert "gh label" not in script
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake gh is a POSIX shell script")
+@pytest.mark.parametrize("open_issues", [[], [7], [3, 7, 12]])
+def test_hub_nightly_recovery_comments_on_and_closes_every_open_tracking_issue(tmp_path, open_issues):
+    text = (ROOT / ".github/workflows/hub-nightly.yml").read_text(encoding="utf-8")
+    recovery = _workflow_job_section(text, "report-recovery")
+    script = textwrap.dedent(recovery.split("        run: |\n", 1)[1])
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_gh = bin_dir / "gh"
+    # Record each call's argv (unit separator between args, record separator
+    # between calls) and answer `gh issue list` the way --jq '.[].number' does.
+    fake_gh.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\037" "$@" >> "$GH_LOG"\n'
+        'printf "\\036" >> "$GH_LOG"\n'
+        'if [ "$1 $2" = "issue list" ]; then printf "%s" "$OPEN_ISSUES"; fi\n',
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    log = tmp_path / "gh.log"
+    log.write_text("", encoding="utf-8")
+    subprocess.run(
+        _workflow_bash_command(script, "-eo", "pipefail"),
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            GH_LOG=str(log),
+            OPEN_ISSUES="".join(f"{number}\n" for number in open_issues),
+            RUN_URL="https://github.com/example/project/actions/runs/123",
+            SHA="abc123",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    calls = [record.split("\x1f")[:-1] for record in log.read_text(encoding="utf-8").split("\x1e")[:-1]]
+    body = "hub-nightly recovered\nRun: https://github.com/example/project/actions/runs/123\nCommit: abc123"
+    expected = [
+        [
+            "issue",
+            "list",
+            "--state",
+            "open",
+            "--label",
+            "hub-nightly",
+            "--limit",
+            "500",
+            "--json",
+            "number",
+            "--jq",
+            ".[].number",
+        ]
+    ]
+    for number in open_issues:
+        expected.append(["issue", "comment", str(number), "--body", body])
+        expected.append(["issue", "close", str(number), "--reason", "completed"])
+    assert calls == expected
 
 
 def test_mesh_actions_are_pinned_to_full_commits():

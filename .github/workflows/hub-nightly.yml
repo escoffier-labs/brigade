@@ -56,8 +56,8 @@ jobs:
           fi
 
   report-recovery:
-    # The next passing nightly says so on the open tracking issue and closes
-    # it, so an open issue always means the latest nightly failed.
+    # The next passing nightly says so on every open tracking issue and closes
+    # them all, so an open issue always means the latest nightly failed.
     needs: hub-rust
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.hub-rust.result == 'success' }}
     runs-on: ubuntu-latest
@@ -73,10 +73,11 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           label=hub-nightly
-          number=$(gh issue list --state open --label "$label" --limit 1 --json number --jq '.[0].number // empty')
-          if [ -n "$number" ]; then
+          # Every open tracker, including duplicates opened by hand.
+          numbers=$(gh issue list --state open --label "$label" --limit 500 --json number --jq '.[].number')
+          for number in $numbers; do
             gh issue comment "$number" --body "hub-nightly recovered
           Run: $RUN_URL
           Commit: $SHA"
             gh issue close "$number" --reason completed
-          fi
+          done

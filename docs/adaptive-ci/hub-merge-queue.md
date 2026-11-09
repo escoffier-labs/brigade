@@ -122,7 +122,7 @@ commits that passed the queue, since the ruleset has no bypass actors.
    `report-failure` job opens a `hub nightly failing` issue labelled
    `hub-nightly`, or comments on the open one. A later passing nightly runs
    `report-recovery`, which comments "hub-nightly recovered" with the run link
-   on the open issue and closes it. Only those two jobs have `issues: write`. `hub.yml` now sets `timeout-minutes` on both jobs (45 for
+   on every open `hub-nightly` issue and closes each one. Only those two jobs have `issues: write`. `hub.yml` now sets `timeout-minutes` on both jobs (45 for
    the x86 toolchains against a measured max of 15.2 min, 30 for arm64), because a job
    that calls a reusable workflow cannot set its own limit.
 
