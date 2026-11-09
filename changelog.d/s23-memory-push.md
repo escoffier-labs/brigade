@@ -17,3 +17,9 @@
   `card` `push: true` mode, never with the host node's credential or the replica. The hub serves
   only a live head with a current clean scan receipt and push trust, so a card id an agent is
   given or guesses opens no more than `memory_hits` could send.
+- With hub memory on, Dot and Duet `memory_search` search the hub with `query_source: "push"` as
+  the connector principal, never with the host node credential, an admin token in its slot or the
+  replica, so a search returns no card text `memory_hits` could not send. Local workspace cards
+  come back apart as `local_matches`. The Grok Bot memory profile stays grant-scoped.
+- A push `card` read without a scope considers only push-eligible copies, so withheld copies
+  never cause `memory_card_ambiguous` or appear in its scope list.

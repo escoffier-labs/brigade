@@ -186,10 +186,17 @@ With hub memory on (`mode = "read"` or `"sync"`), hits come from the hub only:
   head and current clean scan receipt before answering, so a retired, lowered
   or superseded card in a stale index snapshot is dropped. Flagged, pending and
   private-class text never leaves on this path.
-- `memory_card` opens a hub card under the same rules: it reads as the
-  connector principal with `push: true`, so it serves only what `memory_hits`
-  could send, never another writer's unreviewed card, a pending or flagged
-  version or a retired head, and never from the replica.
+- `memory_search` and `memory_card` follow the same rules. `memory_search`
+  calls hub `search` with `query_source: "push"` and `memory_card` calls `card`
+  with `push: true`, both as the connector principal, in process. Neither ever
+  returns another writer's unreviewed card, a pending, flagged or private
+  version or a retired head, never uses the host node credential (or an admin
+  token in its slot) and never answers from the replica. Local workspace cards
+  come back apart, in `local_matches`, labelled `source: "local"`. An
+  unavailable or refusing hub leaves `matches` empty with a
+  `hub_search_unavailable` or `hub_search_refused` warning.
+- The Grok Bot memory profile is deliberately different: grant-scoped, not
+  push-restricted. See [grokbot-memory-connector.md](grokbot-memory-connector.md).
 - A local card is never pushed in these modes. An unavailable hub, a refusal
   (for example `memory_grant_missing` before the grant) or an unreadable `[hub]`
   table leaves the field out, with no local or replica fallback.

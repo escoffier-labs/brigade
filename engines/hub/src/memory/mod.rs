@@ -1854,6 +1854,19 @@ fn nullable(v: &Value) -> Json {
     }
 }
 
+/// The head, revision and scan receipt a push card read joins (S23).
+const PUSH_HEAD_FROM: &str = "memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_scans s ON s.content_hash=c.content_hash";
+
+/// A live head with a clean receipt under the rule set in parameter
+/// `ruleset` and push trust for the writer in parameters `writer` and
+/// `writer + 1`. Discovery and the read itself share it.
+fn push_head_where(ruleset: usize, writer: usize) -> String {
+    format!(
+        "c.state='live' AND {} AND r.scan_state='clean' AND s.ruleset_version=?{ruleset} AND s.state='clean'",
+        search::push_trust_sql(writer)
+    )
+}
+
 fn reads<T: ReadTx + ?Sized>(
     tx: &T,
     credential: &Credential,
@@ -2099,10 +2112,27 @@ fn reads<T: ReadTx + ?Sized>(
                 }
                 None => {
                     let mut scopes = Vec::new();
-                    for r in tx.query(
-                        "SELECT scope FROM memory_cards WHERE card_id=?1 ORDER BY scope",
-                        &[Value::Text(card_id.into())],
-                    )? {
+                    // A push read discovers only push-eligible heads, so a
+                    // withheld copy never shows up as a scope or an ambiguity.
+                    let candidates = match &ruleset {
+                        Some(ruleset) => tx.query(
+                            &format!(
+                                "SELECT c.scope FROM {PUSH_HEAD_FROM} WHERE c.card_id=?1 AND {} ORDER BY c.scope",
+                                push_head_where(2, 3)
+                            ),
+                            &[
+                                Value::Text(card_id.into()),
+                                Value::Text(ruleset.clone()),
+                                Value::Text(credential.principal().into()),
+                                Value::Text(credential.class().into()),
+                            ],
+                        )?,
+                        None => tx.query(
+                            "SELECT scope FROM memory_cards WHERE card_id=?1 ORDER BY scope",
+                            &[Value::Text(card_id.into())],
+                        )?,
+                    };
+                    for r in candidates {
                         let s = text(&r[0]);
                         if readable.scope(&s)? {
                             scopes.push(s);
@@ -2126,7 +2156,10 @@ fn reads<T: ReadTx + ?Sized>(
             let params = [Value::Text(scope.clone()), Value::Text(card_id.into())];
             let row = match (revision, ruleset) {
                 (_, Some(ruleset)) => tx.query(
-                    &format!("SELECT c.revision,c.content_hash,c.trust,c.state,b.bytes,r.scan_state,r.writer,r.created_at FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_blobs b ON b.content_hash=c.content_hash JOIN memory_scans s ON s.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.state='live' AND {} AND r.scan_state='clean' AND s.ruleset_version=?3 AND s.state='clean'", search::push_trust_sql(4)),
+                    &format!(
+                        "SELECT c.revision,c.content_hash,c.trust,c.state,b.bytes,r.scan_state,r.writer,r.created_at FROM {PUSH_HEAD_FROM} JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND {}",
+                        push_head_where(3, 4)
+                    ),
                     &[
                         params[0].clone(),
                         params[1].clone(),

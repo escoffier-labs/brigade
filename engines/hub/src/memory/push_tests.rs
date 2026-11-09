@@ -368,3 +368,46 @@ async fn push_card_reads_need_the_scanner() {
         .await;
     assert_eq!((r.status, code(&r)), (503, "memory_scan_unavailable"));
 }
+
+/// Without a scope, a push read discovers only push-eligible copies, so a
+/// withheld copy is never named in a 409 or picked over an eligible one.
+#[cfg(feature = "memory-scan")]
+#[tokio::test]
+async fn push_card_scope_discovery_sees_only_eligible_copies() {
+    let h = Hub::with(scan::bundled(), None);
+    let put = |scope: &str, card_id: &str, action: &str| json!({"action":action,"scope":scope,"card_id":card_id,"text":card("Release checklist", scope),"client_event_id":h.id()});
+    // Both copies withheld from the agent: one unreviewed by the node, one private.
+    for (token, body) in [
+        (NODE_TOKEN, put("fleet", "hidden", "put")),
+        (
+            ADMIN_TOKEN,
+            json!({"action":"import","scope":"repo:example/one","card_id":"hidden","text":private_text(),"client_event_id":h.id()}),
+        ),
+        // One eligible copy beside one withheld copy.
+        (ADMIN_TOKEN, put("fleet", "mixed", "import")),
+        (NODE_TOKEN, put("repo:example/one", "mixed", "put")),
+    ] {
+        let r = h.call(token, body).await;
+        assert_eq!(r.status, 201, "{:?}", r.body);
+    }
+    for scope in ["fleet", "repo:example/one"] {
+        let grant = json!({"action":"grant","principal":"agent:dot","scope":scope,"rights":["read"],"client_event_id":h.id()});
+        assert_eq!(h.call(ADMIN_TOKEN, grant).await.status, 200);
+    }
+    let read = |card_id: &str, push: bool| json!({"action":"card","card_id":card_id,"push":push});
+    // A plain read sees both copies of each id.
+    for id in ["hidden", "mixed"] {
+        let plain = h.call(AGENT_TOKEN, read(id, false)).await;
+        assert_eq!((plain.status, code(&plain)), (409, "memory_card_ambiguous"));
+    }
+    let hidden = h.call(AGENT_TOKEN, read("hidden", true)).await;
+    assert_eq!(
+        (hidden.status, code(&hidden)),
+        (404, "memory_card_not_found")
+    );
+    assert!(hidden.body.get("scopes").is_none(), "{:?}", hidden.body);
+    let mixed = h.call(AGENT_TOKEN, read("mixed", true)).await;
+    assert_eq!(mixed.status, 200, "{:?}", mixed.body);
+    assert_eq!(mixed.body["card"]["scope"], "fleet");
+    assert_eq!(mixed.body["card"]["trust"], "imported");
+}

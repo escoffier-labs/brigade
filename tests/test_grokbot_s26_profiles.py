@@ -504,17 +504,21 @@ class PrincipalReads(ReadHelpers):
         assert "BRIGADE_FLEET_NODE_TOKEN" not in call["env"]
 
     @requires_local_state
-    def test_dot_and_duet_keep_the_node_credential_path(self):
+    def test_dot_and_duet_search_the_hub_as_their_principal_never_through_the_cli(self):
+        # S23: the Grok memory profile above keeps the CLI path, grant-scoped under its pinned principal.
+        # Dot and Duet search push-restricted, in process, so the node credential is never in play.
         from brigade.dot.profile import DOT, DUET
-        from brigade.memory_hub_client import ENV_HUB_TOKEN_FILE, ENV_HUB_URL, ENV_REPLICA_PRINCIPAL
 
         self.hub_on()
         self.reply()
         for profile in (DOT, DUET):
             self.runner.calls.clear()
-            MemoryTools(self.runtime, commands=self.runner, profile=profile).memory_search("fleet")
-            env = self.runner.calls[0]["env"]
-            assert not {ENV_HUB_URL, ENV_HUB_TOKEN_FILE, ENV_REPLICA_PRINCIPAL} & set(env)
+            memory = MemoryTools(self.runtime, commands=self.runner, profile=profile)
+            asked: list[tuple[str, int]] = []
+            memory.push_search = lambda query, limit, asked=asked: asked.append((query, limit)) or {"matches": []}
+            found = memory.memory_search("fleet")
+            assert asked == [("fleet", 10)] and self.runner.calls == []
+            assert found["matches"] == [] and "local_matches" in found
 
     @requires_local_state
     def test_a_swapped_token_file_is_refused_before_the_child_runs(self):
@@ -673,16 +677,24 @@ class OfflineAnswers(ReadHelpers):
         assert "local" not in json.dumps(found["retrieval"])
 
     @requires_local_state
-    def test_dot_and_duet_keep_reporting_a_local_fallback(self):
+    def test_dot_and_duet_report_an_unavailable_hub_without_a_fallback(self):
+        # Hub matches never come from the replica or the node, so an unavailable hub has no fallback.
+        # Local workspace cards stay in their own local_matches list.
         from brigade.dot.profile import DOT, DUET
+        from brigade.memory_hub_client import HubUnavailable
 
         self.hub_on()
-        retrieval = {"hub": "unavailable", "degraded": True, "fallback": ["local"]}
-        body = {"match_count": 0, "matches": [], "retrieval": retrieval, "warning": "x"}
-        self.runner.handler = lambda argv, stdin: CommandResult(0, json.dumps(body).encode())
+
+        def unavailable(query, limit):
+            raise HubUnavailable("timeout")
+
         for profile in (DOT, DUET):
-            found = MemoryTools(self.runtime, commands=self.runner, profile=profile).memory_search("fleet")
-            assert found["retrieval"]["fallback"] == ["local"]
+            memory = MemoryTools(self.runtime, commands=self.runner, profile=profile)
+            memory.push_search = unavailable
+            found = memory.memory_search("fleet")
+            assert found["matches"] == [] and found["warning"] == "hub_search_unavailable"
+            assert found["retrieval"] == {"hub": "unavailable", "degraded": True, "reason": "timeout"}
+            assert isinstance(found["local_matches"], list)
 
 
 # Listener isolation across the Dot family

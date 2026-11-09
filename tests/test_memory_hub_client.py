@@ -114,6 +114,13 @@ class FakeHub:
         wildcard = "*" in grants and (self.who == "hub:admin" or not scope.startswith("collection:"))
         return wildcard or scope in grants
 
+    def pushable(self, head: dict) -> bool:
+        """What push could send this caller: a live head, a clean scan (a head's "scan", default clean),
+        and push trust, an unreviewed head only to its writer."""
+        own = head["trust"] == "agent-unreviewed" and head.get("writer") == self.who
+        clean = head.get("scan", "clean") == "clean"
+        return head["state"] == "live" and clean and (head["trust"] in PUSH_TRUST or own)
+
     def reads_anything(self) -> bool:
         grants = self.grants.get(self.who)
         return grants is None or bool(grants)
@@ -253,11 +260,8 @@ class FakeHub:
             head = self.revisions.get((scope, body["card_id"], body["revision"]))
         else:
             head = self.cards.get((scope, body["card_id"]))
-        if head is not None and body.get("push"):
-            # Only what push could send: a live head with push trust (scan receipts are not modeled).
-            own = head["trust"] == "agent-unreviewed" and head.get("writer") == self.who
-            if head["state"] != "live" or not (head["trust"] in PUSH_TRUST or own):
-                head = None
+        if head is not None and body.get("push") and not self.pushable(head):
+            head = None
         if head is None:
             return 404, {"error": "card not found", "code": "memory_card_not_found"}
         offset = body.get("offset", 0)
@@ -293,6 +297,8 @@ class FakeHub:
         for (scope, card_id), head in sorted(self.cards.items()):
             hits = head["text"].lower().count(word)
             wanted = scope in requested if requested is not None else self.readable(scope)
+            if body.get("query_source") == "push" and not self.pushable(head):
+                continue
             if head["state"] == "live" and hits and wanted:
                 matches.append(
                     {
@@ -942,20 +948,22 @@ def _card_ids(replica: store.Replica) -> set[str]:
     return {head["card_id"] for head in replica.heads.values()}
 
 
-def test_dot_reads_only_the_configured_scope(hub, tmp_path):
-    # This credential can read as much as an admin, private scopes included.
+def test_dot_reads_only_what_the_connector_principal_may_read(hub, tmp_path):
+    # The node credential can read as much as an admin, private scopes included. Dot never uses it.
     hub.grants["node-1"] = {"*", "principal:alice"}
     target = workspace(tmp_path, mode="read", scope="repo:me/app", read_scopes=None)
     for scope, card_id in (("principal:alice", "alice-notes"), ("repo:me/app", "app-pay"), ("fleet", "fleet-pay")):
         _put(hub, scope, card_id, f"salary {card_id}")
+    for key in hub.cards:
+        hub.cards[key]["trust"] = "reviewed"
+    # Search and card reads go out as the connector principal, so its grants decide, not the node's.
+    hub.grants["agent:dot"] = {"repo:me/app"}
     tools = _dot_cli(target)
     found = tools.memory_search("salary")
     assert [(m["card_id"], m["scope"], m["source"]) for m in found["matches"]] == [("app-pay", "repo:me/app", "hub")]
-    assert [c["scopes"] for c in hub.calls if c["action"] == "search"] == [["repo:me/app"]]
-    # Card reads go out as the connector principal, so its grants decide, not the node's.
-    hub.grants["agent:dot"] = {"repo:me/app"}
-    for key in hub.cards:
-        hub.cards[key]["trust"] = "reviewed"
+    [search] = [c for c in hub.calls if c["action"] == "search"]
+    assert search["query_source"] == "push" and "scopes" not in search
+    assert tools.commands.argv == []
     hub.calls.clear()
     for name, scope in (("alice-notes", "principal:alice"), ("fleet-pay", "fleet")):
         assert tools.memory_card(name, scope=scope) == {"error": "card_not_found", "name": name}
@@ -1528,16 +1536,16 @@ def test_card_reads_fall_back_to_the_replica_only_when_the_hub_is_unavailable(hu
     assert code == 1 and json.loads(out)["code"] == "memory_grant_missing"
 
 
-def test_dot_memory_card_opens_a_replica_match_while_the_hub_is_down(hub, tmp_path):
+def test_dot_never_answers_from_the_replica_while_the_hub_is_down(hub, tmp_path):
     target = workspace(tmp_path, mode="read")
     _put(hub, "fleet", "theirs", "otter replicated")
     sync.pull(target, client(hub), settings(target))
     hub.mode = "down"
     tools = _dot_cli(target)
-    [match] = tools.memory_search("otter")["matches"]
-    assert (match["card_id"], match["source"]) == ("theirs", "replica")
-    # A replica cannot revalidate a head, so Dot and Duet card reads never fall back to it.
-    assert tools.memory_card("theirs", scope=match["scope"]) == {"error": "card_not_found", "name": "theirs"}
+    # A replica cannot revalidate a head or apply push trust, so Dot and Duet never answer from it.
+    found = tools.memory_search("otter")
+    assert found["matches"] == [] and found["warning"] == "hub_search_unavailable"
+    assert tools.memory_card("theirs", scope="fleet") == {"error": "card_not_found", "name": "theirs"}
     hub.mode = "up"
     hub.cards[("fleet", "theirs")]["trust"] = "reviewed"
     got = tools.memory_card("theirs", scope="fleet")
@@ -2940,3 +2948,43 @@ def test_read_stats_refuses_a_reply_of_any_other_shape(reply):
     client = hubc.MemoryHubClient(HUB_URL, NODE_CREDENTIAL, transport=fake)
     with pytest.raises(hubc.HubUnavailable, match="malformed-read-stats"):
         hubc.read_stats(client, "fleet")
+
+
+# --- S23 fix round 2: Dot and Duet search as the connector principal --------------------------------
+
+
+@pytest.mark.parametrize("node_slot", [NODE_CREDENTIAL, ADMIN_CREDENTIAL], ids=["node", "admin"])
+def test_dot_memory_search_holds_only_what_push_could_send(hub, tmp_path, monkeypatch, node_slot):
+    """Another writer's unreviewed card, a private card, a pending card and a retired one never appear.
+
+    Whatever sits in the node slot, the hub sees only the connector credential, and the search CLI and
+    the replica never run. A local workspace card comes back apart, in `local_matches`.
+    """
+    target = workspace(tmp_path, mode="read", local="---\ntitle: Local otter\n---\notter local text\n")
+    for card_id in ("reviewed", "node-draft", "private", "pending", "gone"):
+        _put(hub, "fleet", card_id, f"otter {card_id}")
+    for card_id in ("reviewed", "private", "pending", "gone"):
+        hub.cards[("fleet", card_id)]["trust"] = "reviewed"
+    hub.cards[("fleet", "private")]["scan"] = "private"
+    hub.cards[("fleet", "pending")]["scan"] = "pending"
+    hub.cards[("fleet", "gone")]["state"] = "retired"
+    sync.pull(target, client(hub), settings(target))
+    monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", node_slot)
+    tools = _dot_cli(target)
+    hub.calls.clear()
+    hub.tokens.clear()
+    found = tools.memory_search("otter")
+    assert [(m["card_id"], m["source"], m["trust"]) for m in found["matches"]] == [("reviewed", "hub", "reviewed")]
+    assert found["match_count"] == 1
+    assert [(m["card_id"], m["source"]) for m in found["local_matches"]] == [("local", "local")]
+    assert hub.tokens == {CONNECTOR_CREDENTIAL} and tools.commands.argv == []
+    assert [c["query_source"] for c in hub.calls] == ["push"]
+    encoded = json.dumps(found)
+    for hidden in ("node-draft", "private", "pending", "gone"):
+        assert f"otter {hidden}" not in encoded and f'"{hidden}"' not in encoded
+    # The hub down: no hub matches and no replica, though one was pulled.
+    hub.mode = "down"
+    down = tools.memory_search("otter")
+    assert down["matches"] == [] and down["warning"] == "hub_search_unavailable"
+    assert down["retrieval"]["hub"] == "unavailable" and "fallback" not in down["retrieval"]
+    assert [m["card_id"] for m in down["local_matches"]] == ["local"]

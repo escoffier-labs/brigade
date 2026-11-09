@@ -145,18 +145,17 @@ def test_memory_uses_the_override_while_fleet_settings_stay_on_fleet(hubs, tmp_p
 
 
 @POSIX_DOT
-def test_dot_and_duet_memory_tools_use_the_user_level_override(hubs, tmp_path):
-    put(hubs.memory, "repo:test/app", "otter", "otter notes")
-    tools = _dot_cli(overridden(hubs, tmp_path))
-    found = tools.memory_search("otter")
-    assert [(m["card_id"], m["source"]) for m in found["matches"]] == [("otter", "hub")]
-    assert hubs.hubs_used() == {MEMORY_HUB}
-    # Card reads are push-safe and go out as the connector principal, so they use the hub that
-    # enrolled it, never the override: its credential never reaches another hub (S23).
+def test_dot_and_duet_memory_tools_use_the_enrolling_hub_not_the_override(hubs, tmp_path):
+    # Dot and Duet search and read hub cards as the connector principal, so they use the hub that
+    # enrolled it, never the `[memory_hub]` override: its credential never reaches another hub (S23).
+    put(hubs.memory, "repo:test/app", "otter", "otter decoy")
     put(hubs.fleet, "repo:test/app", "otter", "otter notes")
     hubs.fleet.cards[("repo:test/app", "otter")]["trust"] = "reviewed"
+    tools = _dot_cli(overridden(hubs, tmp_path))
     tools._authority = lambda: SimpleNamespace(hub=FLEET_HUB, token=CONNECTOR_CREDENTIAL)
     hubs.seen.clear()
+    found = tools.memory_search("otter")
+    assert [(m["card_id"], m["source"]) for m in found["matches"]] == [("otter", "hub")]
     assert tools.memory_card("otter", scope="repo:test/app")["content"] == "otter notes\n"
     assert set(hubs.seen) == {(FLEET_HUB, CONNECTOR_CREDENTIAL)}
 

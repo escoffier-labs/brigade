@@ -43,6 +43,10 @@ HANDOFF_REFUSAL_CODES = frozenset(
     }
 )
 POLICY_PATHS = (Path(".codex/AGENTS.md"), Path("AGENTS.md"), Path("ai-tools/AGENTS.md"))
+# The hub's `search` limit. A larger request is capped there and says so.
+HUB_SEARCH_LIMIT = 20
+_LOCAL_KEYS: tuple[str, ...] = ("card_id", "title", "path", "score", "summary", "tags", "card_aliases")
+_HUB_KEYS: tuple[str, ...] = _LOCAL_KEYS + ("source", "scope", "revision", "trust")
 
 
 class MemoryTools:
@@ -172,19 +176,32 @@ class MemoryTools:
         return self._run_brigade(tail, timeout=timeout, max_output=max_output)
 
     def memory_search(self, query: str, limit: int = 10) -> dict[str, Any]:
-        """`brigade memory search`. With hub memory on, it makes no hub `status` call, so an admin
-        token in the node slot is not refused here: matches stay inside the `[hub]` read scopes
-        but skip this node's grants within them. `memory_card` refuses that token."""
+        """Search memory cards. With hub memory on, Dot and Duet search the hub as their own principal.
+
+        Hub matches come from `_principal_search`, never the host node's credential or the replica. A
+        principal memory profile (Grok Bot memory) runs `brigade memory search` with its own pinned
+        credential, grant-scoped rather than push-restricted. With hub memory off, the search CLI
+        reads local cards only.
+        """
+        if not self.profile.principal_memory:
+            from ..memory_hub_client import HubConfigError, hub_mode
+
+            try:
+                hub_on = hub_mode(self.workspace) != "off"
+            except (HubConfigError, ValueError, OSError):
+                return {"error": "memory_unavailable"}
+            if hub_on:
+                return self._principal_search(query, limit)
         value, error = self._brigade_json(
             ["memory", "search", "--target", str(self.workspace), "--limit", str(limit), "--json", "--", query],
             timeout=30,
         )
         if error or not isinstance(value, dict) or not isinstance(value.get("matches"), list):
             return {"error": error or "memory_unavailable"}
-        keys: tuple[str, ...] = ("card_id", "title", "path", "score", "summary", "tags", "card_aliases")
+        keys: tuple[str, ...] = _LOCAL_KEYS
         if "retrieval" in value:
             # Hub memory is on for this workspace (S14): keep where each match came from.
-            keys += ("source", "scope", "revision", "trust")
+            keys = _HUB_KEYS
         matches = []
         dropped_local = False
         for match in value["matches"][:limit]:
@@ -194,33 +211,7 @@ class MemoryTools:
                 # Only what this principal's own grants opened: a local workspace card is never served.
                 dropped_local = True
                 continue
-            item = {key: match.get(key) for key in keys}
-            if self.profile.prompt_load_scan:
-                # A field the scan cannot read as text (a hub match passes its JSON through) is refused.
-                if not _well_formed(item):
-                    matches.append(_refused_match(item, {"blocked": MALFORMED_MATCH}))
-                    continue
-                source = item.get("source")
-                if source is not None and source != "local":
-                    # A hub or replica match: the hub's own path is free text, so it is rebuilt from the card id.
-                    item["path"] = _hub_card_path(item.get("card_id"))
-                else:
-                    # A path that cannot be shown as a workspace-relative one is refused the same way.
-                    relative = _relative_path(item.get("path"), self.workspace)
-                    if relative is None and item.get("path") is not None:
-                        matches.append(_refused_match(item, {"blocked": MALFORMED_MATCH}))
-                        continue
-                    item["path"] = relative
-                # The returned path and hub scope are scanned too: a file name or scope can carry the text.
-                refusal = egress_refusal([*_card_texts(item), *_location_texts(item)])
-                if refusal:
-                    matches.append(_refused_match(item, refusal))
-                    continue
-                _keep_known_hub_labels(item)
-                if not _is_number(item.get("score")):
-                    item["score"] = None
-            item["content_trust"] = "untrusted"
-            matches.append(item)
+            matches.append(self._shown(match, keys))
         match_count = value.get("match_count")
         payload = dict(
             query=query,
@@ -230,14 +221,9 @@ class MemoryTools:
                 else None
             ),
             matches=matches,
-            workspace=str(self.workspace),
+            workspace=self._workspace_label(),
             next="Read a card with memory_card(name=<path basename without .md>).",
         )
-        if self.profile.prompt_load_scan:
-            # The directory name only: the absolute path is local configuration, and a home path is private text.
-            # A workspace that is the home directory is named by the user, so it gets no name.
-            name = self.workspace.name
-            payload["workspace"] = None if _is_home(self.workspace) or egress_refusal([name]) else name
         if isinstance(value.get("retrieval"), dict):
             payload["next"] = (
                 "Read a card with memory_card(name=<path basename without .md>); "
@@ -258,6 +244,119 @@ class MemoryTools:
                 if isinstance(value.get("warning"), str):
                     payload["warning"] = value["warning"]
         return payload
+
+    def _principal_search(self, query: str, limit: int) -> dict[str, Any]:
+        """Dot and Duet search with hub memory on (S23).
+
+        Hub matches come from hub `search` with `query_source: "push"` as the listener-pinned connector
+        principal, so they hold only what `memory_hits` could send it: no other writer's unreviewed card
+        and no pending, flagged, private or retired version. The host node credential, an admin token in
+        its slot and the replica play no part, and an unavailable or refusing hub answers no hub matches.
+        Local workspace cards are searched in process and returned apart, as `local_matches`.
+        """
+        from .. import memory_cmd
+        from ..memory_hub_client import HubConfigError, HubRefusal, HubUnavailable, valid_card_id, valid_scope
+        from .memory_push import PUSHED_TRUST, RULE_RE, hub_query
+        from .prompt_scan import PRIVATE_CODE
+
+        retrieval: dict[str, Any] = {"hub": "ok", "degraded": False}
+        warning = None
+        hub_matches: list[dict[str, Any]] = []
+        match_count = None
+        try:
+            body = self.push_search(hub_query(query), min(limit, HUB_SEARCH_LIMIT))
+        except HubUnavailable as exc:
+            retrieval.update(hub="unavailable", degraded=True, reason=exc.reason)
+            warning = WARNING_HUB_UNAVAILABLE
+        except HubRefusal as exc:
+            retrieval.update(hub="refused", degraded=True, reason=exc.code or f"http-{exc.status}", status=exc.status)
+            warning = WARNING_HUB_REFUSED
+        except HubConfigError:
+            retrieval.update(hub="unavailable", degraded=True, reason="hub-config-invalid")
+            warning = WARNING_HUB_UNAVAILABLE
+        else:
+            for match in (body.get("matches") if isinstance(body.get("matches"), list) else [])[:limit]:
+                if not isinstance(match, dict):
+                    continue
+                if "blocked" in match:
+                    # The hub withheld this card's text: list it by id and rule only, as for a local refusal.
+                    rule = match.get("blocked")
+                    refusal = {
+                        "blocked": rule if isinstance(rule, str) and RULE_RE.fullmatch(rule) else MALFORMED_MATCH
+                    }
+                    if match.get("code") == PRIVATE_CODE:
+                        refusal["code"] = PRIVATE_CODE
+                    hub_matches.append(_refused_match({"card_id": match.get("card_id")}, refusal))
+                    continue
+                if match.get("trust") not in PUSHED_TRUST:
+                    continue
+                if not (valid_scope(match.get("scope")) and valid_card_id(match.get("card_id"))):
+                    continue
+                hub_matches.append(self._shown({**match, "source": "hub"}, _HUB_KEYS))
+            if _is_count(body.get("match_count")):
+                match_count = body["match_count"]
+            if limit > HUB_SEARCH_LIMIT:
+                retrieval["hub_limit"] = HUB_SEARCH_LIMIT
+                warning = warning or WARNING_HUB_LIMIT
+        try:
+            local = memory_cmd.search_cards_payload(self.workspace, query, limit=limit)["matches"]
+        except (OSError, ValueError):
+            local = []
+        local_matches = [
+            self._shown({**match, "source": "local"}, _LOCAL_KEYS + ("source",))
+            for match in local[:limit]
+            if isinstance(match, dict)
+        ]
+        payload: dict[str, Any] = dict(
+            query=query,
+            match_count=match_count,
+            matches=hub_matches,
+            local_matches=local_matches,
+            workspace=self._workspace_label(),
+            next=(
+                "Read a hub match with memory_card(name=<card_id>, scope=<its scope>), and a local match "
+                "with memory_card(name=<path basename without .md>)."
+            ),
+            retrieval=_known_retrieval(retrieval) if self.profile.prompt_load_scan else retrieval,
+        )
+        if warning:
+            payload["warning"] = warning
+        return payload
+
+    def _workspace_label(self) -> str | None:
+        if not self.profile.prompt_load_scan:
+            return str(self.workspace)
+        # The directory name only: the absolute path is local configuration, and a home path is private text.
+        # A workspace that is the home directory is named by the user, so it gets no name.
+        name = self.workspace.name
+        return None if _is_home(self.workspace) or egress_refusal([name]) else name
+
+    def _shown(self, match: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+        """One search match as it may leave: the known keys, scanned, or a placeholder with no text."""
+        item = {key: match.get(key) for key in keys}
+        if self.profile.prompt_load_scan:
+            # A field the scan cannot read as text (a hub match passes its JSON through) is refused.
+            if not _well_formed(item):
+                return _refused_match(item, {"blocked": MALFORMED_MATCH})
+            source = item.get("source")
+            if source is not None and source != "local":
+                # A hub or replica match: the hub's own path is free text, so it is rebuilt from the card id.
+                item["path"] = _hub_card_path(item.get("card_id"))
+            else:
+                # A path that cannot be shown as a workspace-relative one is refused the same way.
+                relative = _relative_path(item.get("path"), self.workspace)
+                if relative is None and item.get("path") is not None:
+                    return _refused_match(item, {"blocked": MALFORMED_MATCH})
+                item["path"] = relative
+            # The returned path and hub scope are scanned too: a file name or scope can carry the text.
+            refusal = egress_refusal([*_card_texts(item), *_location_texts(item)])
+            if refusal:
+                return _refused_match(item, refusal)
+            _keep_known_hub_labels(item)
+            if not _is_number(item.get("score")):
+                item["score"] = None
+        item["content_trust"] = "untrusted"
+        return item
 
     def push_search(self, query: str, limit: int) -> dict[str, Any]:
         """Hub `search` with `query_source: "push"`, as this connector's own principal (S23).
