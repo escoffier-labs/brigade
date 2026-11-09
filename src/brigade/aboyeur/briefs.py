@@ -206,6 +206,22 @@ def arbitrate_briefs(
     )
 
 
+def with_memory_context(evidence: EvidenceBrief, cwd: Path | None, task: str) -> EvidenceBrief:
+    """Put the S25 ``memory_context`` block in front of the evidence brief, after arbitration.
+
+    The block has its own 4 KiB bound, so it rides outside the brief budget and
+    every planner, worker and synthesis prompt that carries the evidence brief
+    carries it too. No block (recall off, empty or failed) leaves ``evidence`` as is.
+    """
+    from .. import dispatch_memory
+
+    block = dispatch_memory.block_text(cwd, task)
+    if not block:
+        return evidence
+    text = f"{block}\n{evidence.text}" if evidence.attached and evidence.text else block
+    return EvidenceBrief(attached=True, text=text, bytes=_brief_bytes(text))
+
+
 def _prepend_brief(prompt: str, *, heading: str, text: str) -> str:
     if not text:
         return prompt

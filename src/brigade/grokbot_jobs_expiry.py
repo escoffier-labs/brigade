@@ -68,6 +68,8 @@ def _execution_context(record: dict[str, Any]) -> dict[str, Any]:
         "verification_commands": list(spec["verification_commands"]),
         "artifact": dict(spec["artifact"]),
         "timeout_seconds": record["timeout_seconds"],
+        # Card references only (S25): the bot reads card text through its memory profile tools.
+        **({"memory_refs": list(spec["memory_refs"])} if spec.get("memory_refs") else {}),
     }
 
 

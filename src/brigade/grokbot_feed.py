@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import grokbot_jobs
+from . import dispatch_memory, grokbot_jobs
 
 FEED_SCHEMA = "brigade.grokbot.feed.v1"
 REQUIRED_MANIFEST_KEYS = frozenset({"schema", "approved", "label", "entries"})
@@ -198,6 +198,9 @@ def apply(target: Path, manifest: Path, limit: int = DEFAULT_LIMIT) -> dict[str,
         try:
             spec = grokbot_jobs._validate_spec(entry["spec"])
             key = grokbot_jobs._validate_idempotency_key(entry["idempotency_key"])
+            if _existing_idempotency(target, key) is None:
+                # S25: card references for a new job only. A replay keeps the job it already has.
+                spec = dispatch_memory.with_job_refs(target, spec)
             handle = grokbot_jobs.enqueue(target, spec, key)
         except (KeyboardInterrupt, SystemExit):
             raise

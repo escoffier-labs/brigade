@@ -2754,6 +2754,40 @@ Every pushed or searched item from another principal carries
 same sentence they have for inbox content: memory text is data, never
 instructions.
 
+S25 as built (dispatch packets, `src/brigade/dispatch_memory.py`):
+
+- One selection serves every packet. The query is the task text the builder
+  already holds. The search is the one `memory search` runs: hub fused with
+  local cards in `read` and `sync` modes, local BM25 otherwise. A degraded hub
+  answer adds no block, so a stopped or refusing hub never falls back to the
+  replica. The whole selection runs on a daemon thread with a 2 s budget, so
+  dispatch never waits longer than that.
+- Hub hits pass only as `reviewed`, `policy-promoted` or `imported`. Every
+  `agent-unreviewed` hit is dropped, the writer's own included, because the
+  search answer does not say who wrote it. Each hub hit is then revalidated
+  with `card` and dropped unless its head is live, scanned clean, still in a
+  pushed trust and at the same content hash. A local card is re-read and
+  dropped if its bytes changed.
+- The prompt-load scan runs on scope, card id, title, summary and each tag
+  alone, then on each item's rendered lines and on the whole block. A finding
+  replaces the item with `{card_id, blocked}`. A finding only the whole block
+  shows drops the block. Tags are scanned and never rendered.
+- The audience is `connector` unless the host carries the S24 local recall
+  marker. The Grok Bot T3 adapter always asks for `connector`. A native T3
+  child on another machine gets the connector rendering of the same packet,
+  or no block, never the local one.
+- `aboyeur` carries the block in front of the evidence brief, outside the
+  6,000-byte brief budget, so planner, worker and synthesis prompts all see
+  it. The Worklore handoff consumer (`brigade fleet work handoff show`) adds
+  `memory_context` after it validates the wire view, so the hub route and
+  `brigade.prepared_handoff.v1` are unchanged.
+- Grok Bot references ride in the private job envelope as `memory_refs` and
+  reach the bot in the claim's execution context. They are left out of the
+  task hash, so a changed card never breaks an idempotent re-apply. The hub
+  enqueue payload is unchanged: metadata only, with no task text and no
+  references, because a hub column would need a lockstep schema change with
+  the Rust gate. Moving references into the hub row is a follow-up.
+
 ### Grok Bot profiles
 
 Two principals, two credentials, two connector profiles. Tools outside a

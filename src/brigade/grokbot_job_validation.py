@@ -186,3 +186,13 @@ def validate_repo_relative_path(value: object) -> str:
     ):
         raise GrokbotJobError("invalid-artifact")
     return path
+
+
+def validate_memory_refs(value: object) -> list[dict[str, str]]:
+    """The optional ``memory_refs`` envelope key (S25): at most five ``{scope, card_id, hash}`` references."""
+    from .dispatch_memory import validate_refs
+
+    try:
+        return validate_refs(value)
+    except ValueError:
+        raise GrokbotJobError("invalid-memory-refs") from None

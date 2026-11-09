@@ -80,8 +80,31 @@ def _show(args: argparse.Namespace) -> int:
         view = prepared.validate_prepared_handoff(envelope["prepared_handoff"], work_id)
     except (ValueError, TypeError, KeyError, RecursionError, WorkloreValidationError):
         return _refuse(args, "invalid-response")
+    memory = _memory_context(view)
     if args.json:
+        if memory is not None:
+            view = {**view, "memory_context": memory.context}
         print(json.dumps(view, sort_keys=True, ensure_ascii=True))
     else:
         _human(view)
+        if memory is not None:
+            print(memory.block, end="")
     return 0
+
+
+def _memory_context(view: Mapping[str, Any]) -> Any:
+    """S25: bounded card references for this item, added by the consumer and never sent on the wire.
+
+    The query is the item's own title and effective acceptance. Recall that is
+    off, empty or failed adds nothing and never fails the command.
+    """
+    from pathlib import Path
+
+    from .. import dispatch_memory
+
+    item = view["item"]
+    query = " ".join([str(item["title"]), *(str(text) for text in item["effective_acceptance"])])
+    try:
+        return dispatch_memory.build(Path.cwd(), query)
+    except Exception:  # noqa: BLE001 - memory never blocks a handoff read
+        return None

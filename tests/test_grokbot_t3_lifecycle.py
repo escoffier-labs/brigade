@@ -277,7 +277,7 @@ def test_intake_once_wires_bounded_gh_runner(tmp_path, monkeypatch, failure, exp
     runtime = write_runtime(tmp_path, intake=intake_payload())
     monkeypatch.setattr(lifecycle, "_load_validated_instance", lambda target: {"runtime_path": str(runtime)})
     tools = object()
-    monkeypatch.setattr(lifecycle, "_tools_for", lambda runtime: tools)
+    monkeypatch.setattr(lifecycle, "_tools_for", lambda runtime, target=None: tools)
     calls = []
 
     def fake_process(argv, **kwargs):
