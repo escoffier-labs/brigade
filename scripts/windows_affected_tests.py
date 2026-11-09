@@ -30,6 +30,7 @@ SHARED_PATHS = {
     "scripts/windows_pytest.py",
     "scripts/windows_pytest_diagnostics.py",
     "scripts/windows_affected_tests.py",
+    "scripts/ci_selection_core.py",
     "tests/windows_pytest_allowlist.json",
     "src/brigade/__init__.py",
     ".github/workflows/ci.yml",
