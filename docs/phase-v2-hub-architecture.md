@@ -2774,6 +2774,11 @@ S25 as built (dispatch packets, `src/brigade/dispatch_memory.py`):
   alone, then on each item's rendered lines and on the whole block. A finding
   replaces the item with `{card_id, blocked}`. A finding only the whole block
   shows drops the block. Tags are scanned and never rendered.
+- Each item's `read` field names an interface that exists for its source. A
+  hub card gets `memory_card(name, scope)` with its real hub scope and
+  `brigade memory hub card <card_id> --scope <scope>`. A local card gets its
+  path in the memory workspace, which only a same-host recipient can open, so
+  a connector packet never includes one, placeholders included.
 - Every packet is built for the `connector` audience, so private-class cards
   never appear in one. Nothing reads the S24 local recall marker yet. `build`
   keeps an `audience` parameter, and after #2408 merges `handoff show` may use
@@ -2787,7 +2792,8 @@ S25 as built (dispatch packets, `src/brigade/dispatch_memory.py`):
   `memory_context` after it validates the wire view, so the hub route and
   `brigade.prepared_handoff.v1` are unchanged.
 - Grok Bot references ride in the private job envelope as `memory_refs` and
-  reach the bot in the claim's execution context. They are left out of the
+  reach the bot in the claim's execution context. They name hub cards only,
+  the ones its memory profile can read with `memory_card`. They are left out of the
   task hash, so a changed card never breaks an idempotent re-apply. The hub
   enqueue payload is unchanged: metadata only, with no task text and no
   references, because a hub column would need a lockstep schema change with
