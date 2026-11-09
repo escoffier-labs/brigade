@@ -11,11 +11,18 @@ imports and transitive dependencies remain the nightly's responsibility.
 from __future__ import annotations
 
 import argparse
-import ast
 import hashlib
 import subprocess
+import sys
 from pathlib import Path, PurePosixPath
 from typing import Sequence
+
+# The workflow runs this file directly, while tests import it as a module.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# Re-exported: scripts/pr_tier_selection.py and the tests import these names from here.
+from scripts.ci_selection_core import discover_tests, imports_changed, module_name  # noqa: F401
 
 BROAD_SAMPLE_SIZE = 24
 SHARED_PATHS = {
@@ -29,41 +36,8 @@ SHARED_PATHS = {
 }
 
 
-def module_name(path: str) -> str | None:
-    if path == "src/brigade/__init__.py" or not path.startswith("src/brigade/") or not path.endswith(".py"):
-        return None
-    parts = list(PurePosixPath(path).with_suffix("").parts[1:])
-    if parts[-1] == "__init__":
-        parts.pop()
-    return ".".join(parts)
-
-
-def imports_changed(source: str, modules: set[str]) -> bool:
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        # Let pytest expose broken test syntax rather than silently omit it.
-        return True
-    imports: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imports.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            # A named root import depends on that name, not all root siblings.
-            # Explicit `import brigade` and root wildcard imports still match parents.
-            if node.module != "brigade" or any(alias.name == "*" for alias in node.names):
-                imports.add(node.module)
-            imports.update(f"{node.module}.{alias.name}" for alias in node.names)
-    return any(
-        imported == module or module.startswith(imported + ".") or imported.startswith(module + ".")
-        for imported in imports
-        for module in modules
-    )
-
-
 def select_tests(repo: Path, changed: Sequence[str]) -> list[str]:
-    tests = repo / "tests"
-    files = {path.relative_to(tests).as_posix(): path for path in tests.rglob("test_*.py") if path.is_file()}
+    files = discover_tests(repo)
     changed_set = set(changed)
     selected = {name for name in files if f"tests/{name}" in changed_set}
     modules = {module for path in changed if (module := module_name(path)) is not None}

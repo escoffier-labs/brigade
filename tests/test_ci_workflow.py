@@ -122,8 +122,9 @@ def test_docs_classification_gates_every_runtime_job_without_implicit_success():
                 continue
             assert not _job_admitted(text, name, docs="true", event=event), name
             # All event-eligible runtime work remains enabled for code/unknown.
-            eligible = name not in {"windows-affected-tests", "pr-tier-shadow", "trusted-runner-canary"}
-            eligible |= name in {"windows-affected-tests", "pr-tier-shadow"} and event == "pull_request"
+            pr_only = {"windows-affected-tests", "pr-tier-shadow", "shadow-plan", "shadow-selection"}
+            eligible = name not in pr_only | {"trusted-runner-canary"}
+            eligible |= name in pr_only and event == "pull_request"
             eligible |= name == "trusted-runner-canary" and event == "push"
             assert _job_admitted(text, name, event=event) is eligible, name
             assert _job_admitted(text, name, docs="", event=event) is eligible, name
@@ -1748,6 +1749,8 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
         "ci-gate",
         "windows-affected-tests",
         "pr-tier-shadow",
+        "shadow-plan",
+        "shadow-selection",
         "hub-rust",
         "mesh-compatibility",
         "mesh-cross-version",
@@ -1765,6 +1768,9 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
             runner = "ubuntu-latest"
         assert re.findall(r"^    runs-on: (.+)$", section, re.MULTILINE) == [runner], job
         assert "self-hosted" not in section
+        if job == "test-shards":
+            # The one non-blocking step: a shadow-junit upload outage must not fail a required shard.
+            section = section.replace(_workflow_step_section(text, job, "Upload shadow junit"), "")
         assert "continue-on-error" not in section
 
 
@@ -2815,3 +2821,37 @@ def test_s18_round2_hub_filter_tracks_scan_inputs(path):
     assert "on:\n  workflow_call:\n" in workflow
     assert "Memory scan bundle" in workflow
     assert "Missing memory scanner fails closed" in workflow
+
+
+def test_shadow_selection_jobs_are_pull_request_only_and_outside_the_required_gate():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    gate_needs = set(re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE))
+    shadow_jobs = {"shadow-plan", "shadow-selection"}
+    assert not gate_needs & shadow_jobs
+    for job in shadow_jobs:
+        section = _workflow_job_section(text, job)
+        assert "continue-on-error: true" in section
+        assert "github.event_name == 'pull_request'" in section
+        assert "needs.changes.outputs.docs_only != 'true'" in section
+        assert "contents: read" in section
+        assert "persist-credentials: false" in section
+    # No other job may wait on a shadow job, or a shadow failure could block required work.
+    for name in re.findall(r"^  ([a-z][a-z0-9-]*):$", text.split("jobs:\n", 1)[1], re.MULTILINE):
+        if name not in shadow_jobs and name != "shadow-selection":
+            needs = re.search(r"^    needs: (.+)$", _workflow_job_section(text, name), re.MULTILINE)
+            assert not needs or not any(job in needs[1] for job in shadow_jobs), name
+
+
+def test_shadow_junit_is_requested_only_on_pull_request_python312_shards():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    step = _workflow_step_section(text, "test-shards", "Pytest shard with coverage")
+    assert "SHADOW_JUNIT: ${{ github.event_name == 'pull_request' && format(" in step
+    assert "--dist=worksteal $SHADOW_JUNIT --cov=" in step
+    # The plain (non-coverage) shard step and the grokbot assertion never write junit.
+    assert "junit" not in _workflow_step_section(text, "test-shards", "Pytest shard")
+    assert "junit" not in _workflow_step_section(text, "test-shards", "Assert grokbot MCP tests run without skips")
+    upload = _workflow_step_section(text, "test-shards", "Upload shadow junit")
+    assert "continue-on-error: true" in upload
+    assert "github.event_name == 'pull_request'" in upload
