@@ -261,6 +261,11 @@ def run_payload(*, target: Path, dry_run: bool, no_model: bool, list_ids: bool, 
         pacer = Pacer()
         unavailable: set[str] = set()
         for scope in scopes:
+            # History loads for every bound scope under a matching binding, read stats or not,
+            # so a rate-limited scope's pending proposals still count toward the job-wide ceiling.
+            # Only scoring and selection skip a scope without counts.
+            if same_binding:
+                entries.update(state["scopes"].get(scope, {}).get("cards", {}))
             try:
                 rows, since = _counts(client, scope, pacer)
             except hubc.HubRefusal as exc:
@@ -277,8 +282,6 @@ def run_payload(*, target: Path, dry_run: bool, no_model: bool, list_ids: bool, 
             sources[scope] = "fresh"
             reads.update(rows)
             per_scope_since[scope] = since
-            if same_binding:
-                entries.update(state["scopes"].get(scope, {}).get("cards", {}))
         selection = pick.select(
             [head for head in valid if head["scope"] not in unavailable],
             entries=entries,

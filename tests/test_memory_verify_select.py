@@ -839,3 +839,37 @@ def test_the_store_root_moves_only_below_brigade_memory(tmp_path):
     with store.relocated(vstate.REPLICA_ROOT):
         assert store.root(tmp_path) == tmp_path / ".brigade/memory/verify/hub"
     assert store.root(tmp_path) == tmp_path / ".brigade/memory/hub"
+
+
+def test_a_rate_limited_scope_at_the_pending_ceiling_still_blocks_selection(setup, clock, tmp_path, capsys):
+    """Pending proposals count job-wide, even in a scope whose read stats are unavailable this run."""
+    target, hub, _ = setup
+    put_cards(hub, "repo:second", 2)
+    for name in ("one", "two"):
+        (tmp_path / name).mkdir()
+    (target / ".brigade/memory-care.toml").write_text(
+        '[hub]\nmode="read"\nread_scopes=["fleet", "repo:second"]\n[verify]\n'
+        f'[[verify.workspace]]\nscope="fleet"\npath="{tmp_path / "one"}"\narchive_projects=[]\n'
+        f'[[verify.workspace]]\nscope="repo:second"\npath="{tmp_path / "two"}"\narchive_projects=[]\n'
+    )
+    # A first run creates verify's replica, which the state binding names.
+    assert verify(target, capsys, "run", "--dry-run", "--no-model")[0] == 0
+    meta = verify_replica(target).meta
+    state = vstate.fresh()
+    state["binding"] = verify_cmd._binding(meta["hub"], meta["principal"], meta["log_epoch"])
+    pending = {f"{index:032x}": {"seen": 1, "proposed": 1, "pending": hubc.event_id()} for index in range(8)}
+    state["scopes"] = {"fleet": {"cards": pending}}
+    vstate.save(target, state)
+    original = hub.do_read_stats
+
+    def refuse_fleet(body):
+        if body["scope"] == "fleet":
+            return 429, {"error": SECRET, "code": hubc.READ_STATS_RATE_LIMITED}
+        return original(body)
+
+    hub.do_read_stats = refuse_fleet
+    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
+    assert code == 0 and report["read_stats"] == {"fleet": "unavailable", "repo:second": "fresh"}
+    assert report["selected"] == []
+    assert report["skipped"]["pending_ceiling"] == 1
+    assert "notes" not in report

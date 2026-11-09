@@ -2270,7 +2270,8 @@ unavailable. With several scopes the total is null when any scope's count is.
 When `read_stats` answers `429 memory_read_stats_rate_limited` for a scope,
 the run counts `read_stats_limited` and `read_stats_unavailable` and skips the
 scope: none of its cards are scored or selected, and its never-read count is
-null. Other scopes are unaffected. Counts cached in the state file are never
+null. Other scopes are unaffected. The scope's card history still loads, so
+its pending proposals count toward the job-wide pending ceiling. Counts cached in the state file are never
 used in place of a reply, because nothing writes a trusted snapshot of them
 yet. The state format already holds per-card `reads` and a per-scope
 `counts_ms`, so the later run that stores complete snapshots needs no format
