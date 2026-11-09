@@ -105,8 +105,26 @@ def _memory_context(view: Mapping[str, Any]) -> Any:
     item = view["item"]
     query = " ".join([str(item["title"]), *(str(text) for text in item["effective_acceptance"])])
     try:
-        # Connector audience for now: after #2408 merges, this read may use
-        # claude_hooks.recall_audience.audience() to allow a local audience.
-        return dispatch_memory.build(Path.cwd(), query, audience=dispatch_memory.CONNECTOR)
+        return dispatch_memory.build(Path.cwd(), query, audience=_audience())
     except Exception:  # noqa: BLE001 - memory never blocks a handoff read
         return None
+
+
+def _audience() -> str:
+    """Who this read prints for: ``local`` only on a host the operator opted in to local recall.
+
+    ``handoff show`` prints to the terminal of the operator who ran it, so it is
+    the one dispatch packet that may use the S24 local recall marker. Every
+    other packet (aboyeur briefs, native T3 children, cloud seats, Grok Bot
+    jobs) stays connector. Anything but an exact ``local`` from the marker
+    reader, an error included, is a connector audience.
+    """
+    from .. import dispatch_memory
+
+    try:
+        from ..claude_hooks import recall_audience
+
+        chosen = recall_audience.audience()
+    except Exception:  # noqa: BLE001 - any doubt is a connector audience
+        return dispatch_memory.CONNECTOR
+    return dispatch_memory.LOCAL if chosen == recall_audience.LOCAL else dispatch_memory.CONNECTOR
