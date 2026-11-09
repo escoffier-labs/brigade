@@ -430,16 +430,59 @@ jobs:
         if: ${{ needs.changes.outputs.notify == 'true' }}
         run: go test -race ./...
 
-  # Stable check name. Maintainers may require it without changing this workflow.
-  # Pull requests only: a merge group reports this job as skipped, which satisfies
-  # a required check, so the queue does not wait on Windows. The 45-minute driver
-  # budget covers the largest selection from the last 200 main commits (257 files).
-  windows-affected-tests:
+  # Pull requests only: a merge group reports these jobs as skipped, which satisfies
+  # a required check, so the queue does not wait on Windows. Selection runs once on
+  # Linux and splits a large selection across up to three hosted Windows runners
+  # (scripts/windows_affected_tests.py). Every selected file still runs once. The
+  # 45-minute driver budget per shard covers the largest selection from the last
+  # 200 main commits (257 files), which now spreads over three runners.
+  windows-affected-plan:
     needs: changes
-    name: windows-affected-tests
+    name: windows-affected-plan
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      base: ${{ steps.plan.outputs.base }}
+      count: ${{ steps.plan.outputs.count }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The test merge's two parents are all selection needs.
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Select and plan affected Windows tests
+        id: plan
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # GitHub tests the pull request merged into the current base tip. Diff from
+          # that merge's first parent. pull_request.base.sha can trail the base branch,
+          # which would count other merged pull requests as this one's changes.
+          merge_head=$(git rev-parse HEAD^2)
+          if [ "$merge_head" != "$PR_HEAD_SHA" ]; then
+            echo "::error::HEAD is not the pull request test merge"
+            exit 1
+          fi
+          base=$(git rev-parse HEAD^1)
+          python3 scripts/windows_affected_tests.py --base "$base" --head HEAD \
+            --output "$RUNNER_TEMP/windows-affected-files.txt" --plan "$RUNNER_TEMP/windows-affected-plan.json"
+          {
+            echo "base=$base"
+            python3 -c 'import json, sys; plan = json.load(open(sys.argv[1])); print("count=%d" % plan["count"]); print("matrix=" + json.dumps(plan["matrix"], separators=(",", ":")))' "$RUNNER_TEMP/windows-affected-plan.json"
+          } >> "$GITHUB_OUTPUT"
+
+  windows-affected-shard:
+    needs: [changes, windows-affected-plan]
+    name: windows-affected-shard (${{ matrix.shard }}/${{ matrix.total }})
+    if: ${{ !cancelled() && needs.windows-affected-plan.result == 'success' && needs.windows-affected-plan.outputs.count != '0' && needs.changes.outputs.docs_only != 'true' && github.event_name == 'pull_request' }}
     runs-on: windows-latest
     timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.windows-affected-plan.outputs.matrix) }}
     defaults:
       run:
         shell: pwsh
@@ -451,52 +494,23 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Select affected Windows tests
-        id: selection
+      - name: Write shard file list
         env:
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SHARD_FILES: ${{ matrix.files }}
         run: |
-          # GitHub tests the pull request merged into the current base tip. Diff from
-          # that merge's first parent. pull_request.base.sha can trail the base branch,
-          # which would count other merged pull requests as this one's changes.
-          $mergeHead = git rev-parse HEAD^2
-          if ($LASTEXITCODE -ne 0 -or $mergeHead -ne $env:PR_HEAD_SHA) { throw "HEAD is not the pull request test merge" }
-          $base = git rev-parse HEAD^1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "base=$base" >> $env:GITHUB_OUTPUT
-          # Hosted Windows includes Python. Selection uses only its standard library.
-          python scripts/windows_affected_tests.py --base $base --head HEAD --output "$env:RUNNER_TEMP/windows-affected-results/files.txt"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # Driver changes exercise the hub files affected by slow FULL flushes.
-          $driverChanged = git diff --name-only $base HEAD -- scripts/windows_pytest.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ($driverChanged) {
-            $flushTests = @(
-              "test_fleet_policy_page.py", "test_fleet_roster_page.py",
-              "test_fleet_message_grants.py", "test_fleet_model_roster.py",
-              "test_fleet_enrollment.py", "test_fleet_dashboard.py",
-              "test_fleet_claim_generations.py", "test_fleet_client_message_credentials.py"
-            )
-            @(Get-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt") + $flushTests |
-              Sort-Object -Unique | Set-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt"
-          }
-          $count = @(Get-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt").Count
-          "count=$count" >> $env:GITHUB_OUTPUT
-      - name: Skip empty selection
-        if: ${{ steps.selection.outputs.count == '0' }}
-        run: Write-Output "No affected Windows tests."
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/windows-affected-results" | Out-Null
+          [IO.File]::WriteAllText("$env:RUNNER_TEMP/windows-affected-results/files.txt", $env:SHARD_FILES, [Text.UTF8Encoding]::new($false))
+          Write-Output "shard ${{ matrix.shard }}/${{ matrix.total }}: $(@(Get-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt").Count) files"
       - name: Set up supported Node for npm launcher tests
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "22.15.0"
       - uses: actions/setup-python@v7
-        if: ${{ steps.selection.outputs.count != '0' }}
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install
-        if: ${{ steps.selection.outputs.count != '0' }}
         run: |
           python -m pip install --upgrade pip
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -508,13 +522,13 @@ jobs:
         timeout-minutes: 5
         run: python scripts/windows_sqlite_flush_probe.py --samples 20 --output "$env:RUNNER_TEMP/windows-affected-results/sqlite-flush.json"
       - name: Run affected Windows tests
-        if: ${{ steps.selection.outputs.count != '0' }}
         timeout-minutes: 45
         env:
-          BASE_SHA: ${{ steps.selection.outputs.base }}
+          BASE_SHA: ${{ needs.windows-affected-plan.outputs.base }}
         run: >-
           python scripts/windows_pytest.py
           --files-from "$env:RUNNER_TEMP/windows-affected-results/files.txt"
+          --keep-order
           --record "$env:RUNNER_TEMP/windows-affected-results/summary.json"
           --base-ref $env:BASE_SHA
           --job-started-at $env:WINDOWS_PYTEST_JOB_STARTED_AT
@@ -524,10 +538,41 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: windows-affected-results
+          name: windows-affected-results-${{ matrix.shard }}of${{ matrix.total }}
           path: ${{ runner.temp }}/windows-affected-results
           if-no-files-found: warn
           retention-days: 7
+
+  # Stable check name. Maintainers may require it without changing this workflow.
+  windows-affected-tests:
+    needs: [changes, windows-affected-plan, windows-affected-shard]
+    name: windows-affected-tests
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every Windows shard
+        env:
+          PLAN_RESULT: ${{ needs.windows-affected-plan.result }}
+          PLAN_COUNT: ${{ needs.windows-affected-plan.outputs.count }}
+          SHARD_RESULT: ${{ needs.windows-affected-shard.result }}
+        run: |
+          if [ "$PLAN_RESULT" != success ]; then
+            echo "::error::windows-affected-plan: $PLAN_RESULT"
+            exit 1
+          fi
+          if [ "$PLAN_COUNT" = 0 ]; then
+            if [ "$SHARD_RESULT" != skipped ]; then
+              echo "::error::windows-affected-shard ran for an empty selection: $SHARD_RESULT"
+              exit 1
+            fi
+            echo "No affected Windows tests."
+            exit 0
+          fi
+          if [ "$SHARD_RESULT" != success ]; then
+            echo "::error::windows-affected-shard: $SHARD_RESULT"
+            exit 1
+          fi
 
   lint:
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}

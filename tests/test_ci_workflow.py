@@ -122,8 +122,9 @@ def test_docs_classification_gates_every_runtime_job_without_implicit_success():
                 continue
             assert not _job_admitted(text, name, docs="true", event=event), name
             # All event-eligible runtime work remains enabled for code/unknown.
-            eligible = name not in {"windows-affected-tests", "pr-tier-shadow", "trusted-runner-canary"}
-            eligible |= name in {"windows-affected-tests", "pr-tier-shadow"} and event == "pull_request"
+            pr_only = {"windows-affected-plan", "windows-affected-shard", "windows-affected-tests", "pr-tier-shadow"}
+            eligible = name not in pr_only | {"trusted-runner-canary"}
+            eligible |= name in pr_only and event == "pull_request"
             eligible |= name == "trusted-runner-canary" and event == "push"
             assert _job_admitted(text, name, event=event) is eligible, name
             assert _job_admitted(text, name, docs="", event=event) is eligible, name
@@ -1746,6 +1747,8 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
         "trusted-runner-canary",
         "engine-rename-installer",
         "ci-gate",
+        "windows-affected-plan",
+        "windows-affected-shard",
         "windows-affected-tests",
         "pr-tier-shadow",
         "hub-rust",
@@ -1865,33 +1868,49 @@ def test_ci_canary_smoke_executes_from_outside_checkout(tmp_path):
     assert "0 failed" in result.stdout
 
 
-def test_windows_affected_job_selects_before_install_and_preserves_driver_policy():
+def test_windows_affected_plan_selects_once_on_linux_from_the_test_merge():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
-    job = _workflow_job_section(text, "windows-affected-tests")
-    assert "name: windows-affected-tests" in job
+    job = _workflow_job_section(text, "windows-affected-plan")
     assert "github.event_name == 'pull_request'" in job
     assert "needs.changes.outputs.docs_only != 'true'" in job
-    assert "runs-on: windows-latest" in job
-    assert "timeout-minutes: 50" in job
-    assert "timeout-minutes: 45" in job
-    assert "fetch-depth: 0" in job
+    assert "runs-on: ubuntu-latest" in job
     assert "persist-credentials: false" in job
     # Diff from the test merge's first parent. pull_request.base.sha can trail
     # the base branch and would count other merged pull requests' changes.
     assert "pull_request.base.sha }}" not in job
     assert "merge_group.base_sha" not in job
     assert "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in job
-    assert "$mergeHead = git rev-parse HEAD^2" in job
-    assert '$mergeHead -ne $env:PR_HEAD_SHA) { throw "HEAD is not the pull request test merge" }' in job
-    assert "$base = git rev-parse HEAD^1" in job
-    assert '"base=$base" >> $env:GITHUB_OUTPUT' in job
-    assert "--base $base --head HEAD" in job
-    assert "BASE_SHA: ${{ steps.selection.outputs.base }}" in job
-    assert job.index("scripts/windows_affected_tests.py") < job.index("actions/setup-python")
-    assert job.count("if: ${{ steps.selection.outputs.count != '0' }}") == 3
-    assert "Skip empty selection" in job
+    assert "merge_head=$(git rev-parse HEAD^2)" in job
+    assert '"$merge_head" != "$PR_HEAD_SHA"' in job
+    assert "base=$(git rev-parse HEAD^1)" in job
+    assert '--base "$base" --head HEAD' in job
+    assert "--plan" in job
+    for output in ("base", "count", "matrix"):
+        assert f"{output}: ${{{{ steps.plan.outputs.{output} }}}}" in job
+    assert "issues: write" not in text
+
+
+def test_windows_affected_shard_runs_its_slice_and_preserves_driver_policy():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    job = _workflow_job_section(text, "windows-affected-shard")
+    assert "needs.windows-affected-plan.outputs.count != '0'" in job
+    assert "needs.windows-affected-plan.result == 'success'" in job
+    assert "github.event_name == 'pull_request'" in job
+    assert "needs.changes.outputs.docs_only != 'true'" in job
+    assert "runs-on: windows-latest" in job
+    assert "timeout-minutes: 50" in job
+    assert "timeout-minutes: 45" in job
+    assert "fail-fast: false" in job
+    assert "matrix: ${{ fromJSON(needs.windows-affected-plan.outputs.matrix) }}" in job
+    assert "fetch-depth: 0" in job
+    assert "persist-credentials: false" in job
+    assert "SHARD_FILES: ${{ matrix.files }}" in job
+    assert "BASE_SHA: ${{ needs.windows-affected-plan.outputs.base }}" in job
+    # No selection happens on the runner: it only runs the planned slice.
+    assert "windows_affected_tests.py" not in job
     for option in (
         "--files-from",
+        "--keep-order",
         "--record",
         "--base-ref",
         "--job-started-at",
@@ -1905,7 +1924,46 @@ def test_windows_affected_job_selects_before_install_and_preserves_driver_policy
         assert option in job
     assert "if: ${{ always() }}" in job
     assert "actions/upload-artifact@v7" in job
-    assert "issues: write" not in text
+    assert "name: windows-affected-results-${{ matrix.shard }}of${{ matrix.total }}" in job
+
+
+@pytest.mark.parametrize(
+    "plan,shard,expected",
+    [
+        ("success", "success", 0),
+        ("success", "failure", 1),
+        ("success", "cancelled", 1),
+        ("success", "skipped", 1),
+        ("failure", "skipped", 1),
+    ],
+)
+def test_windows_affected_aggregate_requires_every_shard(plan, shard, expected):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    job = _workflow_job_section(text, "windows-affected-tests")
+    assert "name: windows-affected-tests" in job
+    assert "github.event_name == 'pull_request'" in job
+    assert "needs.changes.outputs.docs_only != 'true'" in job
+    script = textwrap.dedent(job.split("        run: |\n", 1)[1])
+    result = subprocess.run(
+        _workflow_bash_command(script),
+        env=dict(os.environ, PLAN_RESULT=plan, PLAN_COUNT="12", SHARD_RESULT=shard),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == expected, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("shard,expected", [("skipped", 0), ("success", 1)])
+def test_windows_affected_aggregate_accepts_an_empty_selection_only_when_shards_skip(shard, expected):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    script = textwrap.dedent(_workflow_job_section(text, "windows-affected-tests").split("        run: |\n", 1)[1])
+    result = subprocess.run(
+        _workflow_bash_command(script),
+        env=dict(os.environ, PLAN_RESULT="success", PLAN_COUNT="0", SHARD_RESULT=shard),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == expected, result.stdout + result.stderr
 
 
 def test_windows_nightly_issue_write_permission_is_isolated():
