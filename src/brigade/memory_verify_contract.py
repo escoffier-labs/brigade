@@ -25,18 +25,23 @@ reason code:
 
 1. Quotes are exact substrings of the item they name, 20 to 400 UTF-8 bytes,
    not blank (`verify_quote_invalid`).
-2. Edit scope and corroboration. v1 corrects commit identifiers only. After
-   agreement normalization, a replacement or `previously` text must equal the
-   block except that one or more commit-id tokens are swapped for full commit
-   ids (40 or 64 lowercase hex). Any other added, removed or reordered word or
-   punctuation, a negation included, abstains with `verify_edit_out_of_scope`.
-   Each swapped-in id must then sit in quotes from two independently produced
-   countable items, one an authenticated receipt quote covering a whole
-   `commit` or `baseline_commit` field with exactly that id
-   (`verify_uncorroborated`). The independence test is slice 6's
-   `independent`, over its compare material, which already holds the decoded
-   strings of every rendered receipt. Command output, excerpts, argv,
-   status, exit codes and times never corroborate.
+2. Edit scope and corroboration. The only v1 correction is expanding an
+   abbreviated commit id that the card marks as one. A marked reference is
+   the word `commit` or `commits` (any case, whole word), one space, then 7
+   to 39 lowercase hex characters with a digit, bare or as a code span.
+   After agreement normalization the replacement must equal the block except
+   that marked abbreviations become full ids (40 or 64 hex) that start with
+   them. Any other text change abstains with `verify_edit_out_of_scope`, a
+   changed token that is not a marked reference with
+   `verify_not_commit_reference`, and a full-length token or a full id that
+   does not start with the old token with `verify_not_abbreviation`. Each
+   full id must then sit in quotes from two independently produced countable
+   items, one an authenticated receipt quote covering a whole `commit` or
+   `baseline_commit` field with exactly that id (`verify_uncorroborated`).
+   The independence test is slice 6's `independent`, over its compare
+   material, which already holds the decoded strings of every rendered
+   receipt. Command output, excerpts, argv, status, exit codes and times
+   never corroborate.
 3. `changed` meets check 2 with items observed after the head revision's log
    time (`verify_not_newer`).
 4. Replacement and `previously` text: one claim block, different from the
@@ -53,7 +58,8 @@ reason code:
    case. A word with no canonical reading, or with an unlisted non-ASCII
    separator between letters, fails closed.
 6. `superseded` abstains in v1 with `verify_supersede_deferred` and never
-   opens `supersede_card`.
+   opens `supersede_card`. `history` abstains with `verify_history_deferred`,
+   since an expansion names the same commit and so states no earlier value.
 7. The text passes the local memory scan and the untrusted-text scan
    (`verify_scan_flagged`).
 8. Only `high` confidence makes an op (`verify_low_confidence`), and
@@ -119,7 +125,7 @@ VERDICT_FIELD = {
     "superseded": "superseded_by",
 }
 
-REPLACE, PREVIOUSLY, APPEND = "replace_block", "add_previously", "append_evidence"
+REPLACE, APPEND = "replace_block", "append_evidence"
 
 OUTPUT_INVALID = "verify_output_invalid"
 QUOTE_INVALID = "verify_quote_invalid"
@@ -129,6 +135,9 @@ TEXT_INVALID = "verify_replacement_invalid"
 NOVEL_TOKEN = "verify_novel_token"
 SUPERSEDE_DEFERRED = "verify_supersede_deferred"
 EDIT_OUT_OF_SCOPE = "verify_edit_out_of_scope"
+NOT_COMMIT_REFERENCE = "verify_not_commit_reference"
+NOT_ABBREVIATION = "verify_not_abbreviation"
+HISTORY_DEFERRED = "verify_history_deferred"
 SCAN_FLAGGED = "verify_scan_flagged"
 LOW_CONFIDENCE = "verify_low_confidence"
 INSUFFICIENT = "verify_insufficient"
@@ -160,7 +169,7 @@ For each claim block, decide one verdict:
 Rules:
 - Quote evidence exactly. Each quote is a substring of the item it names, copied byte for byte, 20 to 400 bytes long.
 - Any verdict other than supported or insufficient needs quotes from at least two different evidence items, one of them a receipt_fields item ranked authenticated.
-- A replacement or previously text repeats the block word for word on one line and changes only commit ids, each to a full commit id from your quotes. Do not add, remove or reorder any other word or punctuation.
+- A replacement repeats the block word for word on one line. Its only change expands an abbreviated commit id written right after the word "commit" to the full id from your quotes that starts with it. Do not add, remove or reorder any other word or punctuation.
 - Confidence is high, medium or low. Say high only when the quotes settle it.
 
 Reply with exactly one JSON object and nothing else, at most 16 KiB:
@@ -638,7 +647,9 @@ def novel_tokens(text: str, block: str, quoted: Sequence[tuple[ev.Item, str]]) -
     if words is None:
         return ["%"]
     block_keys = _source_keys(block)
-    tokens = [("span", text[start:end]) for start, end in spans] + [("word", word) for word in words]
+    # A span that is exactly one full commit id carries nothing beyond the id, which the word check governs.
+    tokens = [("span", text[start:end]) for start, end in spans if not COMMIT_ID.fullmatch(text[start:end].strip("`"))]
+    tokens += [("word", word) for word in words]
     for kind, token in tokens:
         if _whole_span(token, block) if kind == "span" else token in block_keys:
             continue
@@ -722,32 +733,52 @@ def _material_keys(text: str) -> set[str]:
     return keys
 
 
-# A commit-id token in a block: 7 to 64 hex characters with a digit, standing alone. Swapped-in ids must be full.
-COMMIT_TOKEN = re.compile(r"(?<![0-9A-Za-z])((?=[0-9a-f]*[0-9])[0-9a-f]{7,64})(?![0-9A-Za-z])")
+# A hex token: 7 to 64 lowercase hex characters with a digit, standing alone. Texts are split at these.
+HEX_TOKEN = re.compile(r"(?<![0-9A-Za-z])((?=[0-9a-f]*[0-9])[0-9a-f]{7,64})(?![0-9A-Za-z])")
+# What precedes a marked commit reference: the whole word `commit` or `commits` in any case, one space, and
+# an optional opening backtick. In about 2,000 operator cards, 61 of the 63 explicitly marked abbreviated ids
+# used one of these two forms. The other two used a colon with an unbalanced backtick, and none used a
+# front-matter key.
+COMMIT_MARK = re.compile(r"(?<![0-9A-Za-z_])(?i:commits?) (`?)\Z")
 
 
-def commit_swaps(text: str, claim: str) -> set[str] | None:
-    """The full commit ids `text` swaps into `claim`, or None when it edits anything else.
+def _marked(text: str, start: int, end: int) -> bool:
+    """Whether the hex token at `text[start:end]` is a marked commit reference."""
+    mark = COMMIT_MARK.search(text, 0, start)
+    if mark is None:
+        return False
+    closing = text[end : end + 1]
+    return closing == "`" if mark[1] else closing != "`"
 
-    Both sides are normalized for agreement and split at commit-id tokens.
-    Every other segment must match byte for byte, the token count must
-    match, and each changed token must become a full id (`COMMIT_ID`). At
-    least one token must change.
+
+def commit_expansions(text: str, claim: str) -> tuple[set[str], str | None]:
+    """The full commit ids that `text` expands in `claim`, and None, or an empty set and a reason code.
+
+    Both sides are normalized for agreement and split at hex tokens. Every
+    other segment must match byte for byte (`verify_edit_out_of_scope`). Each
+    changed token must be a marked commit reference in the claim
+    (`verify_not_commit_reference`) shorter than a full id that the new full
+    id (`COMMIT_ID`) starts with (`verify_not_abbreviation`). At least one
+    token must change.
     """
-    mine = COMMIT_TOKEN.split(normalize(text))
-    theirs = COMMIT_TOKEN.split(normalize(claim))
-    if len(mine) != len(theirs):
-        return None
-    swapped = set()
-    for index, (new, old) in enumerate(zip(mine, theirs, strict=True)):
-        if index % 2 == 0:
-            if new != old:
-                return None
-        elif new != old:
-            if not COMMIT_ID.fullmatch(new):
-                return None
-            swapped.add(new)
-    return swapped or None
+    mine, theirs = normalize(text), normalize(claim)
+    new_parts, old_parts = HEX_TOKEN.split(mine), HEX_TOKEN.split(theirs)
+    if len(new_parts) != len(old_parts) or any(
+        new != old for new, old in zip(new_parts[::2], old_parts[::2], strict=True)
+    ):
+        return set(), EDIT_OUT_OF_SCOPE
+    expanded = set()
+    for (new, old), match in zip(
+        zip(new_parts[1::2], old_parts[1::2], strict=True), HEX_TOKEN.finditer(theirs), strict=True
+    ):
+        if new == old:
+            continue
+        if not _marked(theirs, match.start(), match.end()):
+            return set(), NOT_COMMIT_REFERENCE
+        if COMMIT_ID.fullmatch(old) or not COMMIT_ID.fullmatch(new) or not new.startswith(old):
+            return set(), NOT_ABBREVIATION
+        expanded.add(new)
+    return (expanded, None) if expanded else (set(), EDIT_OUT_OF_SCOPE)
 
 
 def claim_material(text: str, baseline: str = "") -> set[str]:
@@ -801,7 +832,7 @@ class Op:
             "block_id": self.block_id,
             "expected_block_hash": self.expected_block_hash,
         }
-        if self.type in (REPLACE, PREVIOUSLY):
+        if self.type == REPLACE:
             op["text"] = self.text
         elif self.type == APPEND:
             op["evidence_ids"] = list(self.evidence_ids)
@@ -871,6 +902,9 @@ def check_block(
     if reply.verdict == "superseded":
         # Deferred in v1: binding a source claim to a target needs the target's own claim text and evidence.
         return Checked(reply.verdict, reason=SUPERSEDE_DEFERRED)
+    if reply.verdict == "history":
+        # Deferred in v1: the only correction is an expansion, which names the same commit, not an earlier one.
+        return Checked(reply.verdict, reason=HISTORY_DEFERRED)
     if reply.confidence != "high":
         return Checked(reply.verdict, reason=LOW_CONFIDENCE)
     if not _quotes_valid(reply, items):
@@ -878,7 +912,7 @@ def check_block(
     quoted = [(items[q.evidence], q.text) for q in reply.quotes]
     if reply.verdict == "supported":
         return _supported(block, reply, quoted, items, propose_confirmations, uncited_refs or {})
-    raw = reply.previously if reply.verdict == "history" else reply.replacement
+    raw = reply.replacement
     if raw is None:
         return Checked(reply.verdict, reason=OUTPUT_INVALID)
     text = strip_own_anchor(raw, block.block_id)
@@ -888,15 +922,14 @@ def check_block(
         return Checked(reply.verdict, reason=NOVEL_TOKEN)
     if scan_problem(text):
         return Checked(reply.verdict, reason=SCAN_FLAGGED)
-    material = commit_swaps(text, block.claim)
-    if material is None:
-        return Checked(reply.verdict, reason=EDIT_OUT_OF_SCOPE)
+    material, out_of_scope = commit_expansions(text, block.claim)
+    if out_of_scope is not None:
+        return Checked(reply.verdict, reason=out_of_scope)
     if not claim_corroborated(material, quoted):
         return Checked(reply.verdict, reason=UNCORROBORATED)
     if reply.verdict == "changed" and not claim_corroborated(material, _newer(card, quoted)):
         return Checked(reply.verdict, reason=NOT_NEWER)
-    kind = PREVIOUSLY if reply.verdict == "history" else REPLACE
-    return Checked(reply.verdict, op=Op(kind, block.block_id, block.sha256, text=text))
+    return Checked(reply.verdict, op=Op(REPLACE, block.block_id, block.sha256, text=text))
 
 
 def _supported(

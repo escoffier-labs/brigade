@@ -379,37 +379,49 @@ the reviewer decides whether it is true:
 
 1. Every quote must be an exact substring, 20 to 400 bytes long, of the
    evidence item it names.
-2. v1 corrects commit identifiers only, and corroboration is about the
-   claim. After the normalization of rule 9, a replacement (`contradicted`,
-   `changed`) or `previously` text (`history`) must equal the block except
-   that one or more commit-id tokens are swapped for full commit ids, 40 or
-   64 lowercase hex characters. A commit-id token in the block is a
-   standalone run of 7 to 64 hex characters with a digit. Any other added,
-   removed or reordered word or punctuation, a negation included, abstains
-   with `verify_edit_out_of_scope`. Abbreviated ids are never swapped in.
+2. The only v1 correction is expanding an abbreviated commit id that the
+   card marks as a commit reference. A marked reference is the whole word
+   `commit` or `commits` in any case, exactly one space, then 7 to 39
+   lowercase hex characters with a digit, bare or as a single-backtick code
+   span. That rule comes from the cards themselves. In a sample of about
+   2,000 operator cards, all 61 explicitly marked abbreviated ids used one
+   of those two forms, two used a colon with an unbalanced backtick, and no
+   card carried a `commit` front-matter key. Hex tokens with no such marker
+   (artifact digests, fingerprints, ids in paths or URLs, and bare
+   abbreviations) are far more common and are never corrected.
 
-   Each swapped-in id must appear in quotes from two independently produced
+   After the normalization of rule 9, the replacement must equal the block
+   except that marked abbreviations become full commit ids (40 or 64
+   lowercase hex) that start with the exact old token. Any other added,
+   removed or reordered word or punctuation, a negation included, abstains
+   with `verify_edit_out_of_scope`. A changed hex token that is not a marked
+   reference abstains with `verify_not_commit_reference`. An old token that
+   is already full length, or a new id that does not start with the old
+   token, abstains with `verify_not_abbreviation`. One id is never swapped
+   for another, so "not in commit X" cannot be retargeted.
+
+   Each expanded id must appear in quotes from two independently produced
    countable items. One of them must be an authenticated receipt quote that
    covers a whole `commit` or `baseline_commit` field holding exactly that
-   id. Those two fields are the whole allowlist. They name the code state
-   Brigade read from git, and their values are typed: a full commit id
-   cannot be mistaken for another kind of value. Every other authenticated
-   field is excluded. `argv` is text the caller chose, so `echo "the color
-   is red"` would otherwise authenticate any sentence. `status` and the
-   times read the same on almost every receipt. `run_id`, `manifest_id` and
-   `tree_fingerprint` are Brigade's own bookkeeping. Untyped value fields
-   such as `exit_code` are excluded too, because a bare value cannot say
-   which claim it belongs to. An exit code of 1 would otherwise corroborate
-   any claim that some count is 1. Quotes from command output or low-rank
-   excerpts never hold an id.
+   id. Those two fields are the whole allowlist, because their values are
+   typed full commit ids. Every other authenticated field is excluded.
+   `argv` is text the caller chose, so `echo "the color is red"` would
+   otherwise authenticate any sentence. `status` and the times read the same
+   on almost every receipt. `run_id`, `manifest_id` and `tree_fingerprint`
+   are Brigade's own bookkeeping. Untyped value fields such as `exit_code`
+   are excluded too, because a bare value cannot say which claim it belongs
+   to. Quotes from command output or low-rank excerpts never hold an id.
 
-   Typed claim predicates are deferred past v1. An example is an exit status
-   bound to the command it names, matched against a claim that names the
-   same command. They need the reply schema to say which predicate a
-   correction asserts, and the client to check that the predicate's subject
-   in the claim is the receipt's subject. Neither exists yet. Until then,
-   every correction that is not a commit-id swap abstains, and the D7
-   metrics measure that cost.
+   A receipt proves that its worktree used a commit. It does not prove that
+   a hex token in a card was a commit, or that the receipt concerns the
+   card's subject. The marker answers the first question and the prefix
+   rule keeps the referent fixed, which is why expansion is the only edit.
+   Broader corrections need typed claim predicates that bind the claim's
+   subject and relation to receipt metadata, for example an exit status
+   bound to the command a claim names. The reply schema cannot express them
+   and the client cannot check them yet, so they are deferred past v1.
+   Until then every other correction abstains, and the D7 metrics measure
+   that cost.
 3. `changed` needs rule 2 to hold using only evidence newer than the head
    revision's log time.
 4. A replacement or `previously` text must differ from the block, stay a
@@ -432,7 +444,9 @@ the reviewer decides whether it is true:
    excerpts never count. One planted handoff therefore cannot introduce a
    token. A reply that adds one is rejected with `verify_novel_token`.
 6. `superseded` abstains in v1 with `verify_supersede_deferred` and never
-   opens `supersede_card`. `supersede_card` retires the whole card, and
+   opens `supersede_card`. `history` abstains with `verify_history_deferred`,
+   because an expansion names the same commit and so states no earlier
+   value. `supersede_card` retires the whole card, and
    nothing in the reply binds the source card's claim to the target card.
    Ids and titles of related cards cannot show that the target holds the
    corrected claim, and evidence quoted for the source does not mention the
@@ -448,7 +462,7 @@ the reviewer decides whether it is true:
    fresh nonce, and its reply must pass checks 1 to 8 on its own. The two
    seats must then agree on the resulting operation, not only the verdict:
    the same op type, the same refs for `append_evidence`, and for
-   `replace_block` or `add_previously` the same text after normalization.
+   `replace_block` the same text after normalization.
    Check 4 already holds both texts to one newline-free paragraph.
    Normalization then only strips claim anchors (` ^c-xxxxxx`) and leading
    and trailing ASCII spaces and tabs, and collapses each internal run of ASCII
@@ -468,9 +482,9 @@ prove the evidence right, so every op still waits for a reviewer.
 
 | Verdict | Op | Notes |
 |---|---|---|
-| `contradicted` | `replace_block` with the replacement | The hub appends `previously X, now Y`, so the old wording stays in history. |
+| `contradicted` | `replace_block` with the replacement | v1: a marked abbreviated commit id expanded to its full id (check 2). The hub appends `previously X, now Y`, so the old wording stays in history. |
 | `changed` | `replace_block` with the replacement | Same op. The verdict is kept in the manifest so reviewers can tell a wrong claim from a stale one. |
-| `history` | `add_previously` with the `previously` text | The claim is current, but cited older evidence records a different earlier value a reader may meet. |
+| `history` | None in v1 | Abstains with `verify_history_deferred` (check 6). `add_previously` returns with typed claim predicates. |
 | `superseded` | None in v1 | Abstains with `verify_supersede_deferred` (check 6). |
 | `supported` with uncited support | `append_evidence` | Only with `[verify] propose_confirmations = true`, default false. Every content word of the claim must meet the rule 2 corroboration rule. Eligibility is per evidence item: a ref is cited only when every assembled item whose source maps to it is a quoted countable item holding claim material. A receipt yields a fields item and a context-only output item with one source, so its ref is never cited through the fields item. Command output and excerpts never become citations. |
 | `supported` otherwise | None | Recorded in local state as verified. |
