@@ -95,10 +95,11 @@ the cumulative range that group would have run the full suite.
    `base_ref == refs/heads/main`, a valid `CI_TRUSTED_MAIN` and a valid
    `CI_MERGE_GROUP_START`. It checks that the start is an ancestor of `main`
    and of `base_sha`, and that `base_sha` is an ancestor of the head, and then
-   diffs `start..head` instead of `base_sha..head`. The `main` check is what
-   makes the range cumulative: `start == base_sha` passes the other two
-   checks, and while entry A is not on `main` it would hide A's change. The diff rules (raw, NUL-delimited, renames off, modes
-   `100644` only, documentation allowlist) are unchanged.
+   diffs `start..head` instead of `base_sha..head`. Without the `main` check
+   the range need not be cumulative: `start == base_sha` passes the other two
+   checks and, while entry A is not on `main`, hides A's change. The diff
+   rules (raw, NUL-delimited, renames off, modes `100644` only, documentation
+   allowlist) are unchanged.
 4. **Pull requests and pushes** keep their source and range. The bootstrap
    removes `CI_TRUSTED_MAIN` and `CI_MERGE_GROUP_START` from the classifier's
    environment for them.
