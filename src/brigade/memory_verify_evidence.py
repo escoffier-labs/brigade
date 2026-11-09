@@ -57,7 +57,7 @@ from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeGuard
 
 from . import dirfd
 from . import localio
@@ -347,6 +347,8 @@ class Bundle:
     texts: tuple[str, ...]
     observed_ms: int | None = None
     dropped: tuple[str, ...] = ()
+    # The lineage keys of every source kept, so independence sees through the bundle.
+    lineage: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -416,8 +418,20 @@ class EngineArchive:
             if not isinstance(row, dict) or row.get("integrity_mismatch") is not False:
                 continue
             excerpt_id, snippet = row.get("id"), row.get("snippet")
-            if isinstance(excerpt_id, str) and RUN_ID.fullmatch(excerpt_id) and isinstance(snippet, str):
-                found.append(Excerpt(excerpt_id, snippet, _moment_ms(row.get("created_at"))))
+            if not (isinstance(excerpt_id, str) and RUN_ID.fullmatch(excerpt_id) and isinstance(snippet, str)):
+                continue
+            # The engine's project filter matches by substring, so `example` also returns
+            # `example-two`. Each hit is read again and must name this project exactly,
+            # be live and clean, and carry an eligible label, or it is dropped.
+            shown = self._run("show", [excerpt_id, "--json"])
+            if not _shown_live(shown, excerpt_id):
+                continue
+            meta = shown.get("metadata")
+            if not isinstance(meta, dict) or meta.get("project") != project:
+                continue
+            if _shown_refusal(shown, row.get("trust_label", shown.get("trust_label"))):
+                continue
+            found.append(Excerpt(excerpt_id, snippet, _moment_ms(row.get("created_at"))))
         return found
 
     def bundle(self, bundle_id: str, projects: tuple[str, ...]) -> Bundle | None:
@@ -446,6 +460,7 @@ class EngineArchive:
             return None
         texts: list[str] = []
         dropped: list[str] = []
+        keys: set[str] = set()
         for row in results:
             if not isinstance(row, dict):
                 return None
@@ -466,13 +481,7 @@ class EngineArchive:
                 dropped.append(refused)
                 continue
             shown = self._run("show", [item_id, "--json"])
-            if not (
-                isinstance(shown, dict)
-                and shown.get("id") == item_id
-                and shown.get("live") is True
-                and shown.get("tombstoned") is False
-                and shown.get("integrity_mismatch") is False
-            ):
+            if not _shown_live(shown, item_id):
                 dropped.append("source_unverified")
                 continue
             # The label and injection state now, from the same reply as the text used.
@@ -485,8 +494,9 @@ class EngineArchive:
                 dropped.append("source_unowned")
                 continue
             texts.append(shown["text"])
+            keys |= lineage(meta.get("path"), meta.get("run_id"), shown.get("external_id"))
         observed = _moment_ms(payload.get("regenerated_at")) or _moment_ms(payload.get("generated_at"))
-        return Bundle(tuple(texts), observed, tuple(dropped))
+        return Bundle(tuple(texts), observed, tuple(dropped), frozenset(keys))
 
     def receipt_records(self, project: str, run_id: str, path: str) -> list[ReceiptRecord] | None:
         """Archive records of one verify receipt, or None when any reply is malformed or ambiguous.
@@ -555,6 +565,17 @@ INELIGIBLE = frozenset(
 # The evidence engine's closed set of trust labels, and the ones whose content it treats as eligible.
 TRUST_LABELS = frozenset({"unknown", "untrusted", "reviewed", "verified", "quarantined"})
 ELIGIBLE_LABELS = frozenset({"untrusted", "reviewed", "verified"})
+
+
+def _shown_live(shown: object, item_id: str) -> TypeGuard[dict[str, Any]]:
+    """A `show` reply for exactly this item, live, not tombstoned, with a literal false integrity flag."""
+    return (
+        isinstance(shown, dict)
+        and shown.get("id") == item_id
+        and shown.get("live") is True
+        and shown.get("tombstoned") is False
+        and shown.get("integrity_mismatch") is False
+    )
 
 
 def _label_refusal(label: object) -> str | None:
@@ -668,6 +689,12 @@ class Item:
     run_id: str | None
     observed_ms: int | None
     compare: bytes = field(default=b"", repr=False)
+    # Every constituent source's path, run id and archive external id (`path:`, `run:`,
+    # `external:` keys). Two items sharing any key are not independent.
+    lineage: frozenset[str] = frozenset()
+    # Decoded string values scanned beside the rendered text, so escaping and changed
+    # line boundaries in the rendering cannot hide a finding.
+    values: tuple[str, ...] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True)
@@ -697,7 +724,18 @@ def _rendered(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=1)
 
 
-def _item(kind: str, rank: str, text: str, source: str, run_id: str | None, observed: int | None, raw: bytes) -> Item:
+def _item(
+    kind: str,
+    rank: str,
+    text: str,
+    source: str,
+    run_id: str | None,
+    observed: int | None,
+    raw: bytes,
+    *,
+    lineage: frozenset[str] = frozenset(),
+    values: tuple[str, ...] = (),
+) -> Item:
     return Item(
         kind=kind,
         rank=rank,
@@ -707,7 +745,46 @@ def _item(kind: str, rank: str, text: str, source: str, run_id: str | None, obse
         run_id=run_id,
         observed_ms=observed,
         compare=raw + b"\n" + text.encode(),
+        lineage=lineage | (frozenset({f"run:{run_id}"}) if run_id else frozenset()),
+        values=values,
     )
+
+
+RUN_EXTERNAL_PREFIXES = ("brigade:work-verify:", "brigade:run:")
+
+
+def lineage(path: object = None, run_id: object = None, external_id: object = None) -> frozenset[str]:
+    """Identity keys of one source: its path, its run id, and its archive external id.
+
+    A run id is also read from a verify-run path and from a receipt external id,
+    so a receipt file and its imported archive record share the same keys.
+    """
+    keys: set[str] = set()
+    runs: set[str] = set()
+    if isinstance(path, str) and path:
+        keys.add(f"path:{path}")
+        match = RUN_DIR.fullmatch(path)
+        if match:
+            runs.add(match[1])
+    if isinstance(external_id, str) and external_id:
+        keys.add(f"external:{external_id}")
+        for prefix in RUN_EXTERNAL_PREFIXES:
+            if external_id.startswith(prefix):
+                runs.add(external_id.removeprefix(prefix))
+    if isinstance(run_id, str) and run_id:
+        runs.add(run_id)
+    return frozenset(keys | {f"run:{run}" for run in runs})
+
+
+def _strings(value: object) -> tuple[str, ...]:
+    """Every string leaf of a decoded JSON value, in document order."""
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, dict):
+        return tuple(text for item in value.values() for text in _strings(item))
+    if isinstance(value, list):
+        return tuple(text for item in value for text in _strings(item))
+    return ()
 
 
 AUTH_TOP = ("run_id", "status", "started_at", "completed_at", "tree_fingerprint", "baseline_commit", "manifest_id")
@@ -874,10 +951,17 @@ def shares_span(a: bytes, b: bytes, span: int = COPY_SPAN) -> bool:
 
 
 def independent(first: Item, second: Item) -> bool:
-    """Different files, different run ids, and no copied span of COPY_SPAN bytes either way."""
+    """Different files, runs and archive records, and no copied span of COPY_SPAN bytes either way.
+
+    A bundle's lineage holds every constituent source, so a bundle that only
+    repeats a receipt's imported record shares that receipt's path, run and
+    external id and is not independent of it.
+    """
     if first.source == second.source:
         return False
     if first.run_id is not None and first.run_id == second.run_id:
+        return False
+    if first.lineage & second.lineage:
         return False
     return not shares_span(first.compare, second.compare)
 
@@ -988,18 +1072,44 @@ def _file_items(
             rank = AUTHENTICATED if receipt_authenticated(raw, payload, record) else MEDIUM
             fields, output = split_receipt(payload)
             observed = _moment_ms(payload.get("completed_at")) or observed
-            items = [_item(RECEIPT_FIELDS, rank, _rendered(fields), source, run_id, observed, raw)]
+            keys = lineage(rel, run_id, f"brigade:work-verify:{run_id}")
+            fields_text = _rendered(fields)
+            items = [
+                _item(
+                    RECEIPT_FIELDS,
+                    rank,
+                    fields_text,
+                    source,
+                    run_id,
+                    observed,
+                    raw,
+                    lineage=keys,
+                    values=_strings(fields),
+                )
+            ]
             if output:
-                items.append(_item(RECEIPT_OUTPUT, MEDIUM, _rendered(output), source, run_id, observed, raw))
+                items.append(
+                    _item(
+                        RECEIPT_OUTPUT,
+                        MEDIUM,
+                        _rendered(output),
+                        source,
+                        run_id,
+                        observed,
+                        raw,
+                        lineage=keys,
+                        values=_strings(output),
+                    )
+                )
             return items
     if run:
-        return [_item(RECEIPT_OUTPUT, MEDIUM, text, source, run[1], observed, raw)]
+        return [_item(RECEIPT_OUTPUT, MEDIUM, text, source, run[1], observed, raw, lineage=lineage(rel, run[1]))]
     kind = HANDOFF if root in HANDOFF_ROOTS else EVIDENCE_FILE
     run_id = None
     payload = _json(text) if rel.endswith(".json") else None
     if isinstance(payload, dict) and isinstance(payload.get("run_id"), str) and RUN_ID.fullmatch(payload["run_id"]):
         run_id = payload["run_id"]
-    return [_item(kind, MEDIUM, text, source, run_id, observed, raw)]
+    return [_item(kind, MEDIUM, text, source, run_id, observed, raw, lineage=lineage(rel, run_id))]
 
 
 # Bundle locators: the full `<engine>://evidence/<id>` form and the short `<engine>:<id>` form, as
@@ -1045,7 +1155,10 @@ def _cited(
             return None, False
         text = "\n".join(bundle.texts)
         raw = text.encode()
-        return [_item(EVIDENCE_BUNDLE, MEDIUM, text, f"bundle:{bundle_id}", None, bundle.observed_ms, raw)], False
+        item = _item(
+            EVIDENCE_BUNDLE, MEDIUM, text, f"bundle:{bundle_id}", None, bundle.observed_ms, raw, lineage=bundle.lineage
+        )
+        return [item], False
     try:
         rel = io.relative(ref)
     except ValueError:
@@ -1062,9 +1175,13 @@ def _cited(
         return None, False
 
 
-def _scan(full: str, final: str) -> tuple[str, ...] | None:
-    """Rule ids when the item must be dropped, else None. Private text may reach a local prompt."""
-    verdict, rules = scan.scan_verdict([full, final])
+def _scan(full: str, final: str, values: Sequence[str] = ()) -> tuple[str, ...] | None:
+    """Rule ids when the item must be dropped, else None. Private text may reach a local prompt.
+
+    The scan covers the full item text, the exact text that would reach the
+    prompt, and each decoded string value the item was rendered from.
+    """
+    verdict, rules = scan.scan_verdict([full, final, *values])
     return rules if verdict in (scan.BLOCKED, scan.FLAGGED) else None
 
 
@@ -1187,7 +1304,7 @@ def assemble(
                 assembly.count("evidence_over_budget")
                 continue
             final = cut(cut(item.text, ITEM_BYTES), budget)
-            rules = _scan(item.text, final)
+            rules = _scan(item.text, final, item.values)
             if rules is not None:
                 assembly.flagged.append(Flag("cited", index, item.kind, rules))
                 assembly.count(FLAGGED)

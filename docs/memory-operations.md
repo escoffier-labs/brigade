@@ -2211,7 +2211,10 @@ time it is read again, and one whose injection status is no longer clean. The
 text used comes from that same read. A bundle with no
 source left is `evidence_unreachable`. Each reachable item is cut on a UTF-8
 boundary (8 KiB per item, 32 KiB per card, 8 items, 3 excerpts of 4 KiB) and
-scanned with the memory rule bundle. A blocked or flagged item is dropped,
+scanned with the memory rule bundle, both as rendered and, for receipts, as
+each decoded field value. Related excerpts count only when the engine's record
+for each hit names one of the scope's projects exactly, because the engine's
+project filter also matches longer names that contain it. A blocked or flagged item is dropped,
 counted as `evidence_flagged`, and recorded with its rule ids only.
 
 Only a verify receipt whose bytes match the digest the local evidence archive
@@ -2221,7 +2224,8 @@ codes, run status, times, tree fingerprint, commit and manifest id. Its stdout
 and stderr summaries form a separate medium item. A card gets no model call
 (`no_evidence`, `evidence_unreachable`, `evidence_flagged` or
 `uncorroborated`) unless an authenticated receipt and a second independently
-produced item remain, from a different file and run id, sharing no run of 200
+produced item remain, from a different file, run id and archive record (a
+bundle carries those of every source in it), sharing no run of 200
 or more bytes anywhere in either source (a source too repetitive to fingerprint
 fully counts as copied), and drawn from neither command output
 nor related excerpts. The archive record must repeat the receipt's source,
