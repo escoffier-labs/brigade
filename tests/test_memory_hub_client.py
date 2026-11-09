@@ -297,7 +297,7 @@ class FakeHub:
         for (scope, card_id), head in sorted(self.cards.items()):
             hits = head["text"].lower().count(word)
             wanted = scope in requested if requested is not None else self.readable(scope)
-            if body.get("query_source") == "push" and not self.pushable(head):
+            if body.get("query_source") in {"push", "connector"} and not self.pushable(head):
                 continue
             if head["state"] == "live" and hits and wanted:
                 matches.append(
@@ -962,7 +962,7 @@ def test_dot_reads_only_what_the_connector_principal_may_read(hub, tmp_path):
     found = tools.memory_search("salary")
     assert [(m["card_id"], m["scope"], m["source"]) for m in found["matches"]] == [("app-pay", "repo:me/app", "hub")]
     [search] = [c for c in hub.calls if c["action"] == "search"]
-    assert search["query_source"] == "push" and "scopes" not in search
+    assert search["query_source"] == "connector" and "scopes" not in search
     assert tools.commands.argv == []
     hub.calls.clear()
     for name, scope in (("alice-notes", "principal:alice"), ("fleet-pay", "fleet")):
@@ -2978,7 +2978,7 @@ def test_dot_memory_search_holds_only_what_push_could_send(hub, tmp_path, monkey
     assert found["match_count"] == 1
     assert [(m["card_id"], m["source"]) for m in found["local_matches"]] == [("local", "local")]
     assert hub.tokens == {CONNECTOR_CREDENTIAL} and tools.commands.argv == []
-    assert [c["query_source"] for c in hub.calls] == ["push"]
+    assert [c["query_source"] for c in hub.calls] == ["connector"]
     encoded = json.dumps(found)
     for hidden in ("node-draft", "private", "pending", "gone"):
         assert f"otter {hidden}" not in encoded and f'"{hidden}"' not in encoded

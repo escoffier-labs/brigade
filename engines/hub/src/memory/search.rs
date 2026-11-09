@@ -115,15 +115,23 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
     // With no embedder configured every mode is answered by BM25 (D30).
     one_of("ranking", &["default", "raw"])?;
     one_of("mode", &["auto", "lexical", "hybrid"])?;
-    one_of("query_source", &["prompt", "cwd", "explicit", "push"])?;
-    // S23: `push` asks for hits a connector shows unasked, so it keeps the
-    // one default ranking and has no evaluation form.
-    let push = map.get("query_source").and_then(Json::as_str) == Some("push");
+    one_of(
+        "query_source",
+        &["prompt", "cwd", "explicit", "push", "connector"],
+    )?;
+    // S23: `push` asks for hits a connector shows unasked and `connector` is a
+    // connector's own explicit search. Both get the push filter and egress
+    // scan, keep the one default ranking and have no evaluation form. Only
+    // `connector` counts as a read (`Store::search_for`).
+    let source = map.get("query_source").and_then(Json::as_str);
+    let push = matches!(source, Some("push" | "connector"));
     if push && map.get("eval").and_then(Json::as_bool) == Some(true) {
-        return Err(invalid("query_source push takes no eval"));
+        return Err(invalid("query_source push or connector takes no eval"));
     }
     if push && map.get("ranking").and_then(Json::as_str) == Some("raw") {
-        return Err(invalid("query_source push takes the default ranking"));
+        return Err(invalid(
+            "query_source push or connector takes the default ranking",
+        ));
     }
     match map.get("sources") {
         None | Some(Json::Null) => {}
@@ -172,10 +180,7 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
         limit,
         scopes,
         min_seq,
-        prompt: matches!(
-            map.get("query_source").and_then(Json::as_str),
-            Some("prompt")
-        ),
+        prompt: push || source == Some("prompt"),
         push,
         eval: map.get("eval").and_then(Json::as_bool).unwrap_or(false),
         raw: map.get("ranking").and_then(Json::as_str) == Some("raw"),

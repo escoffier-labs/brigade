@@ -248,7 +248,7 @@ class MemoryTools:
     def _principal_search(self, query: str, limit: int) -> dict[str, Any]:
         """Dot and Duet search with hub memory on (S23).
 
-        Hub matches come from hub `search` with `query_source: "push"` as the listener-pinned connector
+        Hub matches come from hub `search` with `query_source: "connector"` as the listener-pinned connector
         principal, so they hold only what `memory_hits` could send it: no other writer's unreviewed card
         and no pending, flagged, private or retired version. The host node credential, an admin token in
         its slot and the replica play no part, and an unavailable or refusing hub answers no hub matches.
@@ -264,7 +264,7 @@ class MemoryTools:
         hub_matches: list[dict[str, Any]] = []
         match_count = None
         try:
-            body = self.push_search(hub_query(query), min(limit, HUB_SEARCH_LIMIT))
+            body = self.connector_search(hub_query(query), min(limit, HUB_SEARCH_LIMIT))
         except HubUnavailable as exc:
             retrieval.update(hub="unavailable", degraded=True, reason=exc.reason)
             warning = WARNING_HUB_UNAVAILABLE
@@ -364,13 +364,25 @@ class MemoryTools:
 
         The connector principal's grants decide what it reads, never the host node's, so the runbook
         grants Dot and Duet read on `fleet`. One call inside the search budget: the push is fail-open,
-        and the caller omits `memory_hits` on any error.
+        and the caller omits `memory_hits` on any error. The hub does not count these unsolicited
+        hits as reads.
         """
+        return self._principal_hub_search(query, limit, "push")
+
+    def connector_search(self, query: str, limit: int) -> dict[str, Any]:
+        """Hub `search` with `query_source: "connector"`: the agent's own `memory_search`.
+
+        The hub applies the same push filter as `push_search` and counts the matches as reads, so
+        read statistics and never-read reports see explicit connector searches.
+        """
+        return self._principal_hub_search(query, limit, "connector")
+
+    def _principal_hub_search(self, query: str, limit: int, source: str) -> dict[str, Any]:
         from ..memory_hub_client import SEARCH_BUDGET_SECONDS, MemoryHubClient
 
         authority = self._principal_authority()
         client = MemoryHubClient(authority.hub, authority.token)
-        return client.call("search", timeout=SEARCH_BUDGET_SECONDS, query=query, limit=limit, query_source="push")
+        return client.call("search", timeout=SEARCH_BUDGET_SECONDS, query=query, limit=limit, query_source=source)
 
     def _hub_card(self, name: str, offset: int, scope: str | None = None) -> dict[str, Any] | None:
         """A card only hub memory holds, or None. Dot and Duet read it push-safe as their own principal."""

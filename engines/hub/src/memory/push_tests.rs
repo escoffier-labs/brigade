@@ -33,7 +33,13 @@ async fn write(h: &Hub, token: &str, action: &str, card_id: &str, text: &str) ->
 }
 
 fn push(seq: i64) -> Json {
-    json!({"action":"search","query":"release checklist","query_source":"push","limit":20,"min_seq":seq})
+    search_as("push", seq)
+}
+
+/// `push` is an unsolicited hit list, `connector` a connector's own search.
+/// Both take the same filter.
+fn search_as(source: &str, seq: i64) -> Json {
+    json!({"action":"search","query":"release checklist","query_source":source,"limit":20,"min_seq":seq})
 }
 
 fn private_text() -> String {
@@ -82,7 +88,22 @@ async fn push_keeps_unreviewed_cards_with_their_writer_and_private_text_home() {
         &card("Release checklist notes", "dot"),
     )
     .await;
-    let seq = write(&h, ADMIN_TOKEN, "import", "private", &private_text()).await;
+    write(&h, ADMIN_TOKEN, "import", "private", &private_text()).await;
+    let seq = write(
+        &h,
+        ADMIN_TOKEN,
+        "import",
+        "pending",
+        &card("Release checklist", "p"),
+    )
+    .await;
+    Connection::open(h.memory())
+        .unwrap()
+        .execute(
+            "UPDATE memory_card_revisions SET scan_state='pending' WHERE card_id='pending'",
+            [],
+        )
+        .unwrap();
 
     // Plain search still lists every live card the grant opens.
     let searched = h
@@ -93,16 +114,21 @@ async fn push_keeps_unreviewed_cards_with_their_writer_and_private_text_home() {
         .await;
     assert_eq!(
         ids(&searched),
-        ["dot-draft", "imported", "node-draft", "private"]
+        ["dot-draft", "imported", "node-draft", "pending", "private"]
     );
-    // Push: reviewed trust for everyone, unreviewed only for its writer,
-    // and the private class for no one, not even as a placeholder.
-    let agent = h.call(AGENT_TOKEN, push(seq)).await;
-    assert_eq!(agent.status, 200, "{:?}", agent.body);
-    assert_eq!(ids(&agent), ["dot-draft", "imported"]);
-    let node = h.call(NODE_TOKEN, push(seq)).await;
-    assert_eq!(ids(&node), ["imported", "node-draft"]);
-    for reply in [&agent, &node] {
+    // Push and a connector's own search: reviewed trust for everyone,
+    // unreviewed only for its writer, and pending or private versions for no
+    // one, not even as a placeholder.
+    let mut replies = Vec::new();
+    for source in ["push", "connector"] {
+        let agent = h.call(AGENT_TOKEN, search_as(source, seq)).await;
+        assert_eq!(agent.status, 200, "{source}: {:?}", agent.body);
+        assert_eq!(ids(&agent), ["dot-draft", "imported"], "{source}");
+        let node = h.call(NODE_TOKEN, search_as(source, seq)).await;
+        assert_eq!(ids(&node), ["imported", "node-draft"], "{source}");
+        replies.extend([agent, node]);
+    }
+    for reply in &replies {
         let text = reply.body.to_string();
         assert!(!text.contains("example/notes.md"), "{text}");
         assert!(!text.contains("\"private\""), "{text}");

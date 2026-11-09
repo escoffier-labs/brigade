@@ -187,8 +187,10 @@ With hub memory on (`mode = "read"` or `"sync"`), hits come from the hub only:
   or superseded card in a stale index snapshot is dropped. Flagged, pending and
   private-class text never leaves on this path.
 - `memory_search` and `memory_card` follow the same rules. `memory_search`
-  calls hub `search` with `query_source: "push"` and `memory_card` calls `card`
-  with `push: true`, both as the connector principal, in process. Neither ever
+  calls hub `search` with `query_source: "connector"` (the push filter, counted
+  as a read) and `memory_card` calls `card` with `push: true`, both as the
+  connector principal, in process. The unsolicited `memory_hits` searches use
+  `query_source: "push"` and are not counted as reads. Neither ever
   returns another writer's unreviewed card, a pending, flagged or private
   version or a retired head, never uses the host node credential (or an admin
   token in its slot) and never answers from the replica. Local workspace cards

@@ -515,7 +515,7 @@ class PrincipalReads(ReadHelpers):
             self.runner.calls.clear()
             memory = MemoryTools(self.runtime, commands=self.runner, profile=profile)
             asked: list[tuple[str, int]] = []
-            memory.push_search = lambda query, limit, asked=asked: asked.append((query, limit)) or {"matches": []}
+            memory.connector_search = lambda query, limit, asked=asked: asked.append((query, limit)) or {"matches": []}
             found = memory.memory_search("fleet")
             assert asked == [("fleet", 10)] and self.runner.calls == []
             assert found["matches"] == [] and "local_matches" in found
@@ -690,7 +690,7 @@ class OfflineAnswers(ReadHelpers):
 
         for profile in (DOT, DUET):
             memory = MemoryTools(self.runtime, commands=self.runner, profile=profile)
-            memory.push_search = unavailable
+            memory.connector_search = unavailable
             found = memory.memory_search("fleet")
             assert found["matches"] == [] and found["warning"] == "hub_search_unavailable"
             assert found["retrieval"] == {"hub": "unavailable", "degraded": True, "reason": "timeout"}

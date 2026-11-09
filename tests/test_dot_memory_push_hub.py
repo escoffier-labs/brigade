@@ -293,6 +293,10 @@ def test_push_search_uses_the_connector_principal_and_the_push_source(monkeypatc
     assert url == "https://hub.example.test:3774/memory" and token == authority.token
     assert body == {"action": "search", "query": "release", "limit": 5, "query_source": "push"}
     assert timeout == memory_hub_client.SEARCH_BUDGET_SECONDS
+    # The agent's own memory_search is a read on the hub, so it names the connector source instead.
+    assert tools.connector_search("release", 5) == {"matches": []}
+    assert sent[1][2] == {"action": "search", "query": "release", "limit": 5, "query_source": "connector"}
+    assert sent[1][1] == authority.token
 
 
 # Through the adapter

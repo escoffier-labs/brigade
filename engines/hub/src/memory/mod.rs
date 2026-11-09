@@ -990,8 +990,9 @@ impl Store {
             "card" | "log" | "status" | "proposal_list" | "proposal_show" | "read_stats" => {
                 self.read(credential, action, map).await
             }
-            // S23: connectors ask for push hits through `search`, so they
-            // get the trust filter, head revalidation and egress scan.
+            // S23: unsolicited connector push hits are not reads. A
+            // connector's explicit search (`query_source: "connector"`) gets
+            // the same filter from `search::parse` and is counted below.
             "search" if map.get("query_source").and_then(Json::as_str) == Some("push") => {
                 self.search_for(credential, map, true).await
             }
@@ -1554,7 +1555,8 @@ impl Store {
     ) -> Reply {
         let mut reply = self.search_ranked(credential, map, push).await;
         let eval = map.get("eval").and_then(Json::as_bool) == Some(true);
-        // Evaluation searches and the hub's own searches are not reads.
+        // Evaluation searches and unsolicited push hits are not reads. A
+        // connector's explicit search is one, though it is push-filtered.
         if reply.status == 200 && !eval && !push {
             let now_ms = self.clock.now_ms();
             let principal = credential.principal();
