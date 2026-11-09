@@ -2844,9 +2844,11 @@ S25 as built (dispatch packets, `src/brigade/dispatch_memory.py`):
   rendering of a packet or no block, never a local one.
 - `aboyeur` carries the block in front of the evidence brief, outside the
   6,000-byte brief budget, so planner, worker and synthesis prompts all see
-  it. Those prompts go to model providers and may go to cloud seats, so
-  `aboyeur` asks for `connector` explicitly and a later local wiring cannot
-  reach it. The Worklore handoff consumer (`brigade fleet work handoff show`) adds
+  it. A run may dispatch those prompts to cloud seats and to seats on other
+  fleet nodes, so `aboyeur` asks for `connector` explicitly and a later local
+  wiring cannot reach it. The model providers behind the operator's own local
+  harnesses are not the reason: they sit inside the private boundary, as for
+  S24 local recall. The Worklore handoff consumer (`brigade fleet work handoff show`) adds
   `memory_context` after it validates the wire view, so the hub route and
   `brigade.prepared_handoff.v1` are unchanged.
 - Grok Bot references ride in the private job envelope as `memory_refs` and

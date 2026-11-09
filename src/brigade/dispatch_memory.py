@@ -90,7 +90,9 @@ AUDIENCES = frozenset({LOCAL, CONNECTOR})
 # Where the audience is chosen. Every dispatch packet is a connector audience
 # for now. After the S24 local recall marker (#2408) merges, `handoff show` may
 # use `claude_hooks.recall_audience.audience()` here. aboyeur prompts stay
-# connector regardless: they go to model providers and may go to cloud seats.
+# connector regardless, because a run may dispatch them to cloud seats and to
+# seats on other fleet nodes. The model providers behind the operator's own
+# local harnesses are inside the private boundary (phase-memory-verify D4).
 DEFAULT_AUDIENCE = CONNECTOR
 LOCAL_SCOPE = "local"
 LOCAL_TRUST = "local"
