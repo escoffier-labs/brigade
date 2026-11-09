@@ -408,14 +408,18 @@ def read_card_bounded(card: Path, identity: tuple[int, int]) -> str | None:
 
 
 def opened_card_id(card: Path, memory_root: Path, identity: tuple[int, int]) -> str | None:
-    """The id card search gives this card, from a bounded read through search's own parser."""
-    from ..memory_cmd import card_fields_from_text
+    """The id card search gives this card: a bounded read, then search's own identity scan.
+
+    ``card_identity_from_text`` reads only the scalar identity fields and never
+    evaluates a value, so a card with a huge bracketed field costs a line scan.
+    """
+    from ..memory_cmd import card_identity_from_text
 
     _between_validate_and_read()
     text = read_card_bounded(card, identity)
     if text is None:
         return None
-    card_id = card_fields_from_text(text, card.relative_to(memory_root).as_posix(), stem=card.stem)["card_id"]
+    card_id = card_identity_from_text(text, card.relative_to(memory_root).as_posix())
     return card_id if _keys([card_id]) else None
 
 

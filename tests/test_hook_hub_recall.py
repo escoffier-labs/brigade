@@ -588,6 +588,7 @@ def test_a_marker_copied_to_another_home_is_connector(wired, monkeypatch, tmp_pa
     copy.write_bytes(marker.read_bytes())
     copy.chmod(0o600)
     monkeypatch.setenv("BRIGADE_HOME", str(other))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # inside the profile, so on Windows only the inode differs
     # Same host name and machine id, different home inode.
     assert recall_audience.marker_problem() == "marker written on another host"
     assert recall_audience.audience() == "connector"
@@ -990,6 +991,7 @@ def test_the_windows_opt_in_creates_a_fresh_home_before_binding_it(wired, monkey
     """Runs the Windows code path everywhere (and natively on Windows)."""
     monkeypatch.setattr(recall_audience, "_POSIX", False)
     home = tmp_path / "fresh-user" / ".brigade"
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "fresh-user"))
     monkeypatch.setenv("BRIGADE_HOME", str(home))
     assert not home.exists()
     assert recall_audience.write_marker() is None
@@ -997,3 +999,78 @@ def test_the_windows_opt_in_creates_a_fresh_home_before_binding_it(wired, monkey
     assert stored["audience"] == "local" and stored["home"] is not None
     assert recall_audience.marker_problem() is None
     assert recall_audience.audience() == "local"
+
+
+# --- round 5: Windows profile rule, bounded identity scan ---
+
+
+def test_windows_allows_a_home_inside_the_profile(wired, monkeypatch, tmp_path):
+    monkeypatch.setattr(recall_audience, "_POSIX", False)
+    profile = tmp_path / "profile"
+    monkeypatch.setenv("USERPROFILE", str(profile))
+    monkeypatch.setenv("BRIGADE_HOME", str(profile / "AppData" / "brigade"))
+    assert recall_audience.write_marker() is None
+    assert recall_audience.audience() == "local"
+
+
+def test_windows_refuses_a_home_outside_the_profile(wired, monkeypatch, tmp_path, capsys):
+    target, _memory = wired
+    monkeypatch.setattr(recall_audience, "_POSIX", False)
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    monkeypatch.setenv("USERPROFILE", str(profile))
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "shared" / ".brigade"))
+    assert recall_audience.write_marker() == recall_audience.OUTSIDE_PROFILE
+    assert install_cmd.hooks_update(target=target, recall_audience_choice="local") == 2
+    err = capsys.readouterr().err
+    assert recall_audience.OUTSIDE_PROFILE in err and "Traceback" not in err
+    # A marker written while inside reads as connector once the home is outside.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert recall_audience.write_marker() is None
+    assert recall_audience.audience() == "local"
+    monkeypatch.setenv("USERPROFILE", str(profile))
+    assert recall_audience.marker_problem() == recall_audience.OUTSIDE_PROFILE
+    assert recall_audience.audience() == "connector"
+
+
+def test_a_huge_bracketed_front_matter_value_records_the_right_id_fast(wired):
+    target, memory = wired
+    cards = memory / "memory" / "cards"
+    value = "[" + ", ".join(["'x'"] * 100_000) + "]"  # about 500 KiB, under the read ceiling
+    text = f"---\nid: {CANONICAL_ID}\ntitle: Comet bulk\nnotes: {value}\n---\nbody\n"
+    assert len(text.encode("utf-8")) < hub_recall.CARD_READ_MAX_BYTES
+    card = cards / "bulk.md"
+    card.write_text(text, encoding="utf-8")
+    found = hub_recall.card_under_roots(memory, card)
+    assert found is not None
+    started = time.monotonic()
+    card_id = hub_recall.opened_card_id(*found)
+    elapsed = time.monotonic() - started
+    assert card_id == CANONICAL_ID
+    assert elapsed < 0.1
+    assert _read(target, card)
+    assert hub_recall.load(hub_recall.ledger_path(target, SESSION))["opened"] == [CANONICAL_ID]
+
+
+@pytest.mark.parametrize("kind", ["plain", "explicit-id", "topic", "quoted", "long-front-matter", "bracketed-id"])
+def test_the_hook_identity_equals_search_identity(wired, kind):
+    from brigade import memory_cmd
+
+    _target, memory = wired
+    cards = memory / "memory" / "cards"
+    front = {
+        "plain": "title: Saturn plain",
+        "explicit-id": f"id: {CANONICAL_ID}\ntitle: Saturn explicit",
+        "topic": "topic: saturn-topic\ntitle: Saturn topic",
+        "quoted": f'card_id: "{NESTED_ID}"\ntitle: Saturn quoted',
+        "long-front-matter": f"id: {CANONICAL_ID}\ntitle: Saturn long\nnotes: {'y' * (70 * 1024)}",
+        "bracketed-id": "id: ['not', 'scalar']\ntopic: saturn-fallback\ntitle: Saturn bracketed",
+    }[kind]
+    card = cards / "saturn" / f"{kind}.md"
+    card.parent.mkdir(exist_ok=True)
+    card.write_text(f"---\n{front}\n---\nsaturn body\n", encoding="utf-8")
+    payload = memory_cmd.search_cards_payload(memory, "saturn", limit=20)
+    (searched,) = [m for m in payload["matches"] if m["path"].endswith(f"{kind}.md")]
+    found = hub_recall.card_under_roots(memory, card)
+    assert found is not None
+    assert hub_recall.opened_card_id(*found) == searched["card_id"]

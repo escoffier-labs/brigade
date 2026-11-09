@@ -16,7 +16,10 @@ in: on POSIX the home's parent may be group or world writable only with the
 sticky bit and must be owned by this user or root, the home and
 ``claude-hooks/`` must not be symlinks, foreign owned or group or world
 writable, and the checks, the marker read and write and the inode binding all
-go through the same directory descriptors. A process running as the same user
+go through the same directory descriptors. Windows does not read ACLs: local
+recall needs the Brigade home's real path inside the user's profile, whose
+default ACL grants only the user, so a custom ``BRIGADE_HOME`` outside the
+profile cannot opt in to local recall on Windows. A process running as the same user
 is out of scope: it can read the hub token and the local cards directly, so
 the boundary against it is the principal's hub grants, not this file.
 
@@ -56,6 +59,7 @@ _POSIX = sys.platform != "win32"
 _MACHINE_ID_OPTIONAL = sys.platform == "darwin"
 NO_MACHINE_ID = "this host has no readable machine id"
 OPT_OUT_FAILED = "local recall may still be on: could not replace or remove the marker"
+OUTSIDE_PROFILE = "the Brigade home is outside the user profile, so local recall is not available on Windows"
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 
@@ -267,7 +271,24 @@ def _read_posix() -> str | None:
         return _refusal_text(refused)
 
 
+def _windows_home_in_profile() -> bool:
+    """Windows: the Brigade home's real path sits inside the user's profile.
+
+    Brigade does not read ACLs. The default profile ACL grants only the user,
+    so a home inside it is as private as the POSIX checks require elsewhere.
+    """
+    try:
+        profile = os.environ.get("USERPROFILE") or str(Path.home())
+        profile_real = Path(os.path.realpath(profile))
+        home_real = Path(os.path.realpath(_brigade_home()))
+    except (OSError, RuntimeError):
+        return False
+    return home_real.is_relative_to(profile_real)
+
+
 def _read_windows() -> str | None:
+    if not _windows_home_in_profile():
+        return OUTSIDE_PROFILE
     path = marker_path()
     try:
         info = os.lstat(path)
@@ -349,6 +370,8 @@ def _write(audience_value: str) -> str | None:
     """
     if audience_value == LOCAL and _machine_id() is None and not _MACHINE_ID_OPTIONAL:
         return NO_MACHINE_ID
+    if audience_value == LOCAL and not _POSIX and not _windows_home_in_profile():
+        return OUTSIDE_PROFILE
 
     def make_body(identity: list[int] | None) -> str:
         if audience_value != LOCAL:

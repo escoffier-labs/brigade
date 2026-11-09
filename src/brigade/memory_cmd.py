@@ -377,6 +377,47 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, Any], bool]:
     return data, True
 
 
+# Bounds for the identity-only front matter scan: front matter lines looked at,
+# and the longest line parsed. No identity value is anywhere near either.
+IDENTITY_SCAN_MAX_LINES = 4096
+IDENTITY_LINE_MAX_CHARS = 4096
+_IDENTITY_KEYS = ("id", "card_id", "topic")
+
+
+def card_identity_from_text(text: str, rel: str) -> str:
+    """A card's primary id from its text: the scalar ``id``, ``card_id`` and ``topic`` fields only.
+
+    Card search and the recall hooks both call this, so they cannot disagree.
+    It follows ``_parse_frontmatter``'s line rules (a leading ``---`` line, the
+    first ``---`` line closes, the last value of a key wins, quotes stripped)
+    but never evaluates a value: a bracketed or boolean value is not a scalar
+    and is skipped. It looks at no more than ``IDENTITY_SCAN_MAX_LINES``
+    front matter lines and skips any line longer than
+    ``IDENTITY_LINE_MAX_CHARS``, so a huge value costs a scan, not a parse.
+    """
+    scalars: dict[str, Any] = {}
+    if text.startswith("---\n"):
+        lines = text.splitlines()
+        closed = False
+        for raw in lines[1 : IDENTITY_SCAN_MAX_LINES + 1]:
+            if raw.strip() == "---":
+                closed = True
+                break
+            if len(raw) > IDENTITY_LINE_MAX_CHARS or ":" not in raw:
+                continue
+            key, value = raw.split(":", 1)
+            key, value = key.strip(), value.strip()
+            if key not in _IDENTITY_KEYS:
+                continue
+            if (value.startswith("[") and value.endswith("]")) or value.lower() in {"true", "false"}:
+                scalars.pop(key, None)
+                continue
+            scalars[key] = value.strip("'\"")
+        if not closed:
+            scalars = {}
+    return card_identity(scalars, rel).card_id
+
+
 def _parse_date(value: object) -> date | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -1782,12 +1823,15 @@ def card_fields_from_text(text: str, rel: str, *, stem: str) -> dict[str, Any]:
     """
     frontmatter, _ = _parse_frontmatter(text)
     identity = card_identity(frontmatter, rel)
+    # The primary id comes from the bounded scalar scan the recall hooks share.
+    card_id = card_identity_from_text(text, rel)
+    aliases = [alias for alias in dict.fromkeys([*identity.aliases, identity.card_id]) if alias != card_id]
     tags = frontmatter.get("tags")
     tags_list = [str(t) for t in tags] if isinstance(tags, list) else ([str(tags)] if tags else [])
     return {
         "rel": rel,
-        "card_id": identity.card_id,
-        "card_aliases": list(identity.aliases),
+        "card_id": card_id,
+        "card_aliases": aliases,
         "title": str(frontmatter.get("title") or stem),
         "tags": tags_list,
         "summary": str(frontmatter.get("description") or frontmatter.get("summary") or ""),

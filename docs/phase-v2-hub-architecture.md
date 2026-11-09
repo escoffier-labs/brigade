@@ -2717,7 +2717,9 @@ Invariant tests, in S19a to S19e:
   carried. "Opened" means a card file read through the Read tool: any `.md`
   at any depth under a memory-care card root that card search would list,
   never a symlink or a path that leaves the root. It is recorded under the id
-  card search's parser gives it, from a read bound to the validated file
+  card search's identity scan gives it (scalar `id`, `card_id` and `topic`
+  only, never evaluated, which search now uses for its primary id too), from
+  a read bound to the validated file
   (O_NOFOLLOW, the same device and inode) and capped at the hub's 512 KiB
   card limit. With under 0.5 s of hook budget left the read is not observed.
   The Stop hook sends one `capture` per batch of keys not yet captured, at
@@ -2734,7 +2736,10 @@ Invariant tests, in S19a to S19e:
   the sticky bit. The checks, the read, the write and the inode binding go
   through the same directory descriptors. Opting out writes a connector marker
   and removes it through those descriptors. If the removal fails, the marker is
-  read again and the opt-out succeeds only when it reads as connector.
+  read again and the opt-out succeeds only when it reads as connector. Windows
+  ACLs are not read: local recall there needs the Brigade home's real path
+  inside the user's profile, whose default ACL grants only the user, so a
+  custom `BRIGADE_HOME` outside the profile cannot opt in.
   The marker prevents accidental local trust on a copied, synced or cloud home.
   A process running as the same user is out of scope, because it can read the
   hub token and the cards directly, and the principal's hub grants are the
