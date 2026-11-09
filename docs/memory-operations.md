@@ -2566,6 +2566,7 @@ card, evidence or model text, and it is scanned before attachment
 | `verify_scope_unbound` | A stage's scope is no longer bound in `[[verify.workspace]]` or readable. Nothing is sent to it, and its request follows the shared rule |
 | `verify_stage_expired` | A stage without a result reached its 7-day limit. It is deleted. Its request id is kept as a tombstone only when the request is unsettled, and is forgotten otherwise |
 | `verify_manifest_expired` | A replay's manifest was attached 23 hours ago or more, or the hub answered `memory_manifest_binding_invalid`. The hub binds a verifier manifest only within 24 hours of attaching it, so the stage is discarded and the card stays eligible for a fresh check. A request the hub definitely refused is forgotten, and one whose reply may have been lost becomes a tombstone |
+| `verify_unsettled_recovered` | An unsettled request had no stage, so it became a tombstone that holds its card |
 | `request_id_reused` | A submission's ops matched a tombstone, so it was sent under the expired request's id |
 | `verify_unresolved_request` | The card has a live tombstone, so it is not selected and no new correction is proposed for it |
 | `verify_deferred_tombstones` | 512 tombstones are live, so no new proposal opens until one ages out. The card stays out of its cooldown |
@@ -2634,6 +2635,17 @@ A stage whose submission still has no result 7 days after it was created is
 deleted and the card's verdict becomes `verify_stage_expired`, which makes the
 card eligible again. Packets of settled proposals expire 14 days after
 settling, as above.
+
+State changes reach the state file before the files they replace are
+removed. Retiring a stage saves the tombstone or the forgotten request first
+and deletes the stage second, so a crash between the two leaves a stage that
+the next run retires again. A proposal id is saved in the same write as its
+provenance: `created` when this request opened the proposal, `duplicate` when
+the hub named another one. A recovered stage is published directly only
+under `created`. Any other id, including one whose provenance was never
+saved, goes through the binding check first. As a backstop, every run starts
+by turning an `unsettled` request that has no stage into a tombstone
+(`verify_unsettled_recovered`), so its card stays held.
 
 Every path that discards a stage without sending it (stage expiry, manifest
 expiry, an unbound scope and an ops mismatch) follows one rule for its

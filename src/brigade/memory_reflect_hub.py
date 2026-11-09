@@ -78,6 +78,7 @@ LEDGER_FIELDS = {
     "expired": lambda value: value is True,
     "card": lambda value: isinstance(value, str) and CLUSTER_KEY.fullmatch(value) is not None,
     "unsettled": lambda value: value is True,
+    "created": lambda value: value is True,
 }
 
 
@@ -336,6 +337,7 @@ def submit(
     base_epoch: str,
     save: Callable[[], None],
     fields: dict[str, Any] | None = None,
+    provenance: bool = False,
 ) -> Submitted:
     """Open one proposal through the S19d request id ledger.
 
@@ -343,7 +345,9 @@ def submit(
     call so a lost response replays the same request, then the proposal id or
     the final refusal code. An expired or conflicting id is re-minted once.
     Quota refusals and hub unavailability are outcomes, not exceptions, and a
-    duplicate pending proposal records the existing id. Raises ReflectError when
+    duplicate pending proposal records the existing id. With `provenance`, the
+    same save that records a proposal id also records whether this request
+    opened it (`created`) or the hub named another one (`duplicate`). Raises ReflectError when
     the hub answers with no open proposal.
     """
     refusals: list[str] = []
@@ -361,6 +365,8 @@ def submit(
                 existing = exc.body.get("proposal_id")
                 if _event_id(existing):
                     pending["proposal_id"] = existing
+                    if provenance:
+                        pending["duplicate"] = True  # Saved with the id: another request opened it.
                 else:
                     pending["refused"] = code
                 save()
@@ -382,6 +388,8 @@ def submit(
         if not _event_id(opened.get("proposal_id")) or opened.get("state") not in ("pending", "held"):
             raise ReflectError("hub_reflect_proposal_invalid", "hub returned no open reflect proposal")
         pending["proposal_id"] = opened["proposal_id"]
+        if provenance:
+            pending["created"] = True  # Saved with the id: this request opened it.
         save()
         return Submitted(OPENED, proposal_id=pending["proposal_id"], refusals=tuple(refusals))
     raise AssertionError("unreachable")  # pragma: no cover

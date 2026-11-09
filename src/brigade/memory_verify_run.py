@@ -336,8 +336,45 @@ def _live_tombstones(state: dict[str, Any]) -> int:
     return sum(1 for pending in state.get("submissions", {}).values() if pending.get("expired"))
 
 
+def _stranded(digest: str, pending: Mapping[str, Any], staged: set[str]) -> bool:
+    """An unsettled request without a stage: it may have opened a proposal, and nothing will replay it."""
+    return (
+        digest not in staged
+        and not pending.get("expired")
+        and bool(pending.get("unsettled"))
+        and not pending.get("proposal_id")
+        and not pending.get("refused")
+    )
+
+
+def backstop(submissions: dict[str, dict[str, Any]], staged: set[str]) -> int:
+    """Turn every stranded request into a tombstone, so its card stays held. Returns how many.
+
+    Only a crash between steps of code older than `retire`'s save-first order
+    can strand a request. One without a card key, which only code older than
+    this slice writes, stays in the ledger as it is and is never forgotten.
+    """
+    changed = 0
+    for digest, pending in list(submissions.items()):
+        ops, card = pending.get("ops_sha256"), pending.get("card")
+        if _stranded(digest, pending, staged) and isinstance(ops, str) and isinstance(card, str):
+            del submissions[digest]
+            submissions[ops] = {
+                "client_event_id": pending["client_event_id"],
+                "ops_sha256": ops,
+                "expired": True,
+                "card": card,
+            }
+            changed += 1
+    return changed
+
+
 def _held_cards(state: dict[str, Any]) -> frozenset[str]:
-    """Cards with a live tombstone: a request that may have opened a proposal under an unknown id."""
+    """Cards whose request may have opened a proposal under an id this job does not know.
+
+    Each has a live tombstone. A stranded unsettled request counts too, because
+    `backstop` turns it into a tombstone before selection reads this.
+    """
     return frozenset(
         pending["card"]
         for pending in state.get("submissions", {}).values()
@@ -605,6 +642,7 @@ DEFERRED_QUOTA = "verify_deferred_quota"
 DEFERRED_TOMBSTONES = "verify_deferred_tombstones"
 DEFERRED_PACKET_CAP = "verify_deferred_packet_cap"
 MANIFEST_EXPIRED = "verify_manifest_expired"
+UNSETTLED_RECOVERED = "verify_unsettled_recovered"
 BINDING_INVALID = "memory_manifest_binding_invalid"
 MANIFEST_REFUSED = "verify_manifest_refused"
 MANIFEST_TRANSIENT = "manifest_transient"
@@ -711,8 +749,8 @@ class Sender:
             if FINALIZE(self.target, staged, proposal_id) is not None:
                 self.tally.skip(packets.MISMATCH)
             return DUPLICATE
-        packets.drop(self.target, staged)
         self.record(staged, PACKET_UNBOUND, eligible=False)
+        packets.drop(self.target, staged)
         return DUPLICATE
 
     def bury(self, staged: packets.Stage, current: dict[str, Any]) -> None:
@@ -736,13 +774,15 @@ class Sender:
         hold. Any other request is forgotten and the card stays eligible. A
         request with a known proposal id is left in the ledger as it is.
         """
-        packets.drop(self.target, staged)
         if current is not None and not current.get("proposal_id") and self.ledger.get(staged.digest) is current:
             if current.get("unsettled"):
                 self.bury(staged, current)
             else:
                 del self.ledger[staged.digest]
+        # Save the tombstone or the forgotten request first. A crash before the stage goes leaves
+        # the stage for the next run, never an unsettled request without a hold.
         self.record(staged, code, eligible=True)
+        packets.drop(self.target, staged)
         return DROPPED
 
     def send(self, staged: packets.Stage, *, replay: bool) -> str:
@@ -763,7 +803,9 @@ class Sender:
             # no id is minted from it. The request itself follows the shared retirement rule.
             return self.retire(staged, remembered, OPS_MISMATCH)
         if remembered.get("proposal_id"):
-            if remembered.get("duplicate"):
+            if not remembered.get("created"):
+                # Only `created`, saved with the id, proves this request opened the proposal. A
+                # duplicate, or an id whose provenance was never saved, publishes only once bound.
                 return self.bind_duplicate(staged, remembered["proposal_id"])
             self.open(staged, remembered["proposal_id"])
             tally.skip("packets_recovered")
@@ -819,7 +861,12 @@ class Sender:
             list(staged.ops),
             base_epoch=self.epoch,
             save=self.save,
-            fields={"ops_sha256": staged.ops_sha256, "unsettled": True},
+            fields={
+                "ops_sha256": staged.ops_sha256,
+                "unsettled": True,
+                "card": fairness.key_digest(staged.scope, [staged.card_id]),
+            },
+            provenance=True,
         )
         current = self.ledger.get(staged.digest)
         if current is not None and sent.outcome != ledger.UNAVAILABLE:
@@ -851,8 +898,6 @@ class Sender:
             tally.skip("duplicate_pending")
             return REFUSED
         if sent.outcome == ledger.DUPLICATE:
-            self.ledger[staged.digest]["duplicate"] = True
-            self.save()
             return self.bind_duplicate(staged, sent.proposal_id)
         self.open(staged, sent.proposal_id)
         tally.proposals.append({"scope": staged.scope, "card_id": staged.card_id, "proposal_id": sent.proposal_id})
@@ -870,6 +915,9 @@ class Sender:
         """
         found, invalid = packets.staged(self.target, ledger._submission_digest)
         self.tally.skip("packets_stage_invalid", invalid)
+        # Removing an invalid stage can leave its request without one. Hold its card all the same.
+        self.tally.skip(UNSETTLED_RECOVERED, backstop(self.ledger, {staged.digest for staged in found}))
+        self.save()
         unresolved = set()
         for staged in found:
             current = self.ledger.get(staged.digest)
@@ -894,12 +942,21 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
     pair = READY(target, settings.propose_seat, settings.confirm_seat)
     early = cmd._binding(client.identity, status["principal"], status["log_epoch"])
     updates, unread = _refresh(client, state) if state.get("binding") == early else ({}, 0)
-    blocked = _held_cards(state) if state.get("binding") == early else frozenset()
+    blocked: frozenset[str] = frozenset()
+    if state.get("binding") == early:
+        staged_now = packets.staged_digests(target)
+        recovered = backstop(state.setdefault("submissions", {}), staged_now)
+        if recovered and not dry_run:
+            vstate.save(target, state)
+        blocked = _held_cards(state)
+    else:
+        recovered = 0
     picked = cmd.select_cards(target, state, settings, hub_settings, client, now, pending=updates, blocked=blocked)
     if not picked.same_binding:
         updates = {}
     tally = Tally(skipped=picked.skipped)
     tally.skip("proposal_show_failed", unread)
+    tally.skip(UNSETTLED_RECOVERED, recovered)
     tables: dict[str, dict[str, dict[str, Any]]] = {}
     unresolved: set[tuple[str, str]] = set()
     if not dry_run:
@@ -1108,7 +1165,11 @@ def _propose(
             # hub dedupes only identical proposals, so different ops would open a second one.
             tally.skip(UNRESOLVED_REQUEST)
             return None
-        sender.ledger[digest] = {"client_event_id": request, "ops_sha256": staged.ops_sha256}
+        sender.ledger[digest] = {
+            "client_event_id": request,
+            "ops_sha256": staged.ops_sha256,
+            "card": fairness.key_digest(card.scope, [card.card_id]),
+        }
         sender.save()
     packets.stage(sender.target, staged)
     return sender.send(staged, replay=False)

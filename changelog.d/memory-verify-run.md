@@ -34,3 +34,7 @@
 - Only a verify request that may have opened a proposal keeps a tombstone and
   its card's hold. A request the hub refused or quota-stopped is forgotten
   when its stage is discarded, so the card is checked again.
+- Verify saves a tombstone before deleting its stage, saves a proposal id
+  together with whether this request opened it, and holds the card of any
+  unsettled request found without a stage, so a crash between steps cannot
+  reopen a card or publish an unbound packet.

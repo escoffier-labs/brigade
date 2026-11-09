@@ -1157,6 +1157,95 @@ def test_an_expired_request_whose_reply_was_lost_keeps_the_hold(verify_hub, reso
     assert sum(1 for call in hub.calls if call["action"] == "propose") == proposes
 
 
+def lost_reply(target, hub, now):
+    """A propose whose reply is lost: an unsettled request and its stage."""
+    hub.propose_reply = (503, {})
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    assert report["code"] == "hub_unavailable"
+    hub.propose_reply = None
+    ((digest, pending),) = state_of(target)["submissions"].items()
+    assert pending["unsettled"] is True and pending["card"] == fairness.key_digest(SCOPE, [CARD_ID])
+    return digest, pending
+
+
+def test_an_unsettled_request_whose_stage_vanished_still_holds_its_card(verify_hub, resolver):
+    target, hub, _, _ = verify_hub
+    now = int(time.time() * 1000) - DAY
+    digest, pending = lost_reply(target, hub, now)
+    # A crash under the old order: the stage was deleted, and the tombstone was never saved.
+    (target / pk.PACKETS / f"staged-{digest}.json").unlink()
+    proposes = sum(1 for call in hub.calls if call["action"] == "propose")
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now + 3600_000)
+    assert report["skipped"][run_mod.UNSETTLED_RECOVERED] == 1
+    assert report["skipped"][run_mod.UNRESOLVED_REQUEST] == 1 and report["proposals"] == []
+    assert sum(1 for call in hub.calls if call["action"] == "propose") == proposes
+    ((_, tombstone),) = state_of(target)["submissions"].items()
+    assert tombstone["expired"] is True and tombstone["client_event_id"] == pending["client_event_id"]
+
+
+def test_retire_saves_the_tombstone_before_deleting_the_stage(verify_hub, resolver, monkeypatch):
+    target, hub, _, _ = verify_hub
+    now = int(time.time() * 1000) - 10 * DAY
+    digest, pending = lost_reply(target, hub, now)
+
+    class ProcessDied(BaseException):
+        """Stands in for the process ending here: no handler runs and nothing else is saved."""
+
+    def crash(target, staged):
+        raise ProcessDied()
+
+    monkeypatch.setattr(pk, "drop", crash)
+    with pytest.raises(ProcessDied):
+        run_mod.run_payload(
+            target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now + pk.STAGE_DAYS * DAY
+        )
+    # The tombstone reached the state file before the stage was touched.
+    ((_, tombstone),) = state_of(target)["submissions"].items()
+    assert tombstone["expired"] is True and tombstone["client_event_id"] == pending["client_event_id"]
+    assert f"staged-{digest}.json" in packets(target)
+
+
+def test_a_proposal_id_and_its_provenance_are_saved_in_one_write(verify_hub, capsys, resolver, monkeypatch):
+    target, hub, _, _ = verify_hub
+    hub._commit("card.put", SCOPE, SECOND_ID, card_text((BLOCK, CLAIM)), "live", hubc.event_id())
+    answers = [(409, {"code": "memory_proposal_duplicate_pending", "proposal_id": hubc.event_id()})]
+    original = hub.do_propose
+    hub.do_propose = lambda body: answers.pop() if answers else original(body)
+    saved = []
+    real = vstate.save
+
+    def recording(target, state):
+        saved.append(json.loads(json.dumps(state.get("submissions", {}))))
+        real(target, state)
+
+    monkeypatch.setattr(vstate, "save", recording)
+    status, report = verify(target, capsys)
+    assert len(report["proposals"]) == 1 and report["skipped"]["duplicate_pending"] == 1
+    entries = [entry for ledger in saved for entry in ledger.values() if entry.get("proposal_id")]
+    assert entries and all(entry.get("created") or entry.get("duplicate") for entry in entries)
+    assert {bool(entry.get("created")) for entry in entries} == {True, False}
+
+
+def test_a_recovered_id_without_provenance_is_published_only_once_bound(verify_hub, resolver):
+    target, hub, _, _ = verify_hub
+    hub.propose_reply = (429, {"code": "memory_proposal_scope_quota", "error": "quota"})
+    now = int(time.time() * 1000) - DAY
+    run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    hub.propose_reply = None
+    # A crash between the two old saves: the duplicate's id was saved, its provenance was not.
+    existing = hubc.event_id()
+    state = state_of(target)
+    ((digest, pending),) = state["submissions"].items()
+    pending.pop("unsettled", None)
+    pending["proposal_id"] = existing
+    vstate.save(target, state)
+    hub.bound = "other"
+    hub.calls.clear()
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now + 3600_000)
+    assert existing in [call["proposal_id"] for call in hub.calls if call["action"] == "proposal_show"]
+    assert f"{existing}.json" not in packets(target) and report["skipped"][run_mod.PACKET_UNBOUND] == 1
+
+
 def test_a_stage_with_an_altered_append_evidence_op_is_refused(verify_hub, capsys, resolver):
     target, hub, _, _ = verify_hub
     hub.propose_reply = (429, {"code": "memory_proposal_scope_quota", "error": "quota"})

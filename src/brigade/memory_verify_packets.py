@@ -280,6 +280,15 @@ def drop(target: Path, record: Stage) -> None:
         os.fsync(fd)
 
 
+def staged_digests(target: Path) -> set[str]:
+    """The ledger digests that have a stage file, read without creating the directory."""
+    try:
+        with io.directory(target / PACKETS) as fd:
+            return {matched[1] for name, _size in listing(fd) if (matched := STAGED.fullmatch(name))}
+    except FileNotFoundError:
+        return set()
+
+
 def staged(target: Path, submission_digest: Any) -> tuple[list[Stage], int]:
     """Every valid stage, and the number of invalid ones removed."""
     found, invalid = [], 0
