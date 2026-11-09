@@ -65,18 +65,33 @@ class FleetMessageHubError(fleet_client.FleetClientError):
         self.code = code if isinstance(code, str) and code in MESSAGE_CODES else None
 
 
+def _open_token_fd(path: str) -> int:
+    """Open the final path component itself, never the target of a link swapped in after a check."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        # NONBLOCK prevents a hostile FIFO from blocking before fstat rejects it.
+        return os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0))
+    if sys.platform == "win32":
+        # O_NOFOLLOW is 0 on Windows, so open with FILE_FLAG_OPEN_REPARSE_POINT and refuse a
+        # handle that is a reparse point or a directory, then read from that same handle (#2422).
+        try:
+            from .work_cmd import nt_dirfd
+        except ImportError:  # no ctypes on this build: fail closed as a credential error
+            raise ValueError from None
+        return nt_dirfd.open_path_file(os.path.abspath(path), os.O_RDONLY)
+    raise ValueError  # No way to open without following a link: fail closed.
+
+
 def read_message_token_file(path: str, *, label: str = "message") -> str:
-    """Read a bounded private regular file without following its final symlink.
+    """Read a bounded private regular file without following its final symlink or reparse point.
 
     `label` names the credential in the refusal; the checks do not change.
     """
     fd = None
     try:
-        # NONBLOCK prevents a hostile FIFO from blocking before fstat rejects it.
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         if stat.S_ISLNK(os.lstat(path).st_mode):
             raise ValueError
-        fd = os.open(path, flags)
+        fd = _open_token_fd(path)
         info = os.fstat(fd)
         # Windows synthesizes POSIX mode bits (0666 for a writable file) that chmod
         # cannot clear, and has no euid; keep only the platform-neutral checks there.
