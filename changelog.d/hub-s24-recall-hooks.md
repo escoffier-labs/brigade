@@ -9,8 +9,9 @@
   shows only `- <card_id> | blocked: <rule id>`. Private-class text is withheld with
   `code: memory_content_private` unless the operator opted the host in with
   `brigade work hooks install --recall-audience local` (or `update`), which writes a marker bound to
-  the host name, the machine id and the Brigade home's inode. Nothing writes it by default, and
-  `--recall-audience connector` removes it. `CLAUDE_CODE_REMOTE` or a `BRIGADE_RECALL_AUDIENCE`
+  the host name, the machine id (required except on macOS) and the Brigade home's inode. Nothing
+  writes it by default. `--recall-audience connector` turns it off even when the file cannot be
+  removed, and exits 2 with the marker path if local recall may still be on. `CLAUDE_CODE_REMOTE` or a `BRIGADE_RECALL_AUDIENCE`
   value other than `local` always means connector. `brigade doctor` warns "local recall not
   enabled" with the command when a recall target is active. A scanner that cannot run injects no
   recall.

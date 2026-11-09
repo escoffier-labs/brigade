@@ -51,7 +51,6 @@ _CARD_ID = r"[a-z0-9][a-z0-9._-]{0,127}"
 _BRIEF_CARD_PATH = re.compile(rf"(?<![A-Za-z0-9._-])cards/({_CARD_ID})\.md(?![A-Za-z0-9_-])")
 _BRIEF_CARD_FIELD = re.compile(rf"\bcard_id[\"']?\s*[:=]\s*[\"']?({_CARD_ID})")
 _READ_CARD_PATH = re.compile(r"(?:^|[/\\])memory[/\\]cards[/\\]([A-Za-z0-9][A-Za-z0-9._-]{0,127})\.md$")
-_FRONTMATTER_READ_CHARS = 64 * 1024
 
 
 __all__ = ["AUDIENCE_ENV", "REMOTE_ENV", "audience", "brief_card_ids", "capture", "recall_text"]
@@ -320,23 +319,20 @@ def capture(target: Path, session_id: str, *, budget: float | None = None) -> st
 
 
 def opened_card_id(card: Path, name: str) -> str | None:
-    """The canonical id recall gives this card: its front matter id, else the file stem.
+    """The canonical id recall gives this card: the id card search computes for the same file.
 
-    Uses the same front matter parser and ``card_identity`` as card search, so a
-    renamed file with ``id: card-<uuid>`` is recorded under that id.
+    Calls card search's own loader (``memory_cmd._card_search_fields``) with the
+    memory root above ``memory/cards/``, so the read, the front matter parse,
+    its limits and the file stem fallback are the ones search uses.
     """
-    from ..card_identity import card_identity
-    from ..memory_cmd import _parse_frontmatter
+    from ..memory_cmd import _card_search_fields
 
+    root = card.parent.parent.parent
     try:
-        # Text mode, as card search's read_text: universal newlines turn a CRLF
-        # card (any Windows checkout) into the "---\n" the parser expects.
-        with card.open("r", encoding="utf-8", errors="replace") as handle:
-            text = handle.read(_FRONTMATTER_READ_CHARS)
-        frontmatter, _ = _parse_frontmatter(text)
+        fields = _card_search_fields(card, root)
     except (OSError, ValueError):
-        frontmatter = {}
-    card_id = card_identity(frontmatter, f"memory/cards/{name}.md").card_id
+        fields = {}
+    card_id = fields.get("card_id") or name
     return card_id if _keys([card_id]) else None
 
 

@@ -2723,9 +2723,13 @@ Invariant tests, in S19a to S19e:
   is `local` only after the operator opts the host in with
   `brigade work hooks install --recall-audience local`, which writes a marker
   under the Brigade user home, outside any repository. Nothing writes it by
-  default. The marker records the host name, the machine id and the device and
-  inode of the Brigade home, and all must match. The marker and its two
-  directories must not be symlinks, foreign owned or group or world writable.
+  default. The marker records the host name, the machine id (required except on
+  macOS) and the device and inode of the Brigade home, and all must match. The
+  marker and its two directories must not be symlinks, foreign owned or group
+  or world writable, and the home's parent may be writable by others only with
+  the sticky bit. The checks, the read, the write and the inode binding go
+  through the same directory descriptors. Opting out writes a connector marker
+  before removing it, so a failed removal still leaves recall on connector.
   The marker prevents accidental local trust on a copied, synced or cloud home.
   A process running as the same user is out of scope, because it can read the
   hub token and the cards directly, and the principal's hub grants are the

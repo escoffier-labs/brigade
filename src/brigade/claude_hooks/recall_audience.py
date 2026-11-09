@@ -7,15 +7,21 @@ writes a marker under the Brigade user home (``BRIGADE_HOME``, else
 ``~/.brigade``), outside any repository. Nothing writes it by default.
 
 Threat model: the marker prevents accidental local trust on a copied, synced
-or cloud home. It records the host name, the machine id (``/etc/machine-id``,
-the Windows ``MachineGuid``, none on macOS) and the device and inode of the
-Brigade home, and every one must match, so a copied home, a home mounted on
-another machine or a container with a cloned host name falls back to
-``connector``. The marker and its two directories must not be symlinks, must
-be owned by this user and must not be group or world writable (POSIX). A
-process running as the same user is out of scope: it can read the hub token
-and the local cards directly, so the boundary against it is the principal's
-hub grants, not this file.
+or cloud home. It records the host name, the machine id (``/etc/machine-id``
+or the Windows ``MachineGuid``, required there, and none on macOS) and the
+device and inode of the Brigade home, and every one must match, so a copied
+home, a home mounted on another machine or a container with a cloned host name
+falls back to ``connector``. Another user must not be able to swap the files
+in: on POSIX the home's parent may be group or world writable only with the
+sticky bit and must be owned by this user or root, the home and
+``claude-hooks/`` must not be symlinks, foreign owned or group or world
+writable, and the checks, the marker read and write and the inode binding all
+go through the same directory descriptors. A process running as the same user
+is out of scope: it can read the hub token and the local cards directly, so
+the boundary against it is the principal's hub grants, not this file.
+
+Opting out writes a marker with audience ``connector`` first, atomically, and
+then removes it, so a removal that fails still leaves recall on connector.
 
 The environment can only narrow. ``CLAUDE_CODE_REMOTE`` set to anything but
 an explicit false value, or ``BRIGADE_RECALL_AUDIENCE`` set to anything but
@@ -32,6 +38,7 @@ import socket
 import stat
 import sys
 from pathlib import Path
+from typing import Callable
 
 LOCAL = "local"
 CONNECTOR = "connector"
@@ -45,6 +52,12 @@ NOT_ENABLED = "local recall not enabled"
 _FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
 _MARKER_MAX_BYTES = 4096
 _POSIX = sys.platform != "win32"
+# macOS has no machine id Brigade reads. Everywhere else the binding needs one.
+_MACHINE_ID_OPTIONAL = sys.platform == "darwin"
+NO_MACHINE_ID = "this host has no readable machine id"
+OPT_OUT_FAILED = "local recall may still be on: could not replace or remove the marker"
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 
 
 def _brigade_home() -> Path:
@@ -92,48 +105,158 @@ def _machine_id() -> str | None:
     return None
 
 
-def _home_identity(home: Path) -> list[int] | None:
-    """Device and inode of the Brigade home's real path."""
+class _Refused(Exception):
+    """A check refused the marker; the message names why, never the content."""
+
+
+def _between_check_and_read() -> None:
+    """No-op seam between the directory checks and the marker read. Tests swap paths here."""
+
+
+def _check_dir_fd(fd: int, label: str) -> None:
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode):
+        raise _Refused(f"{label} is not a directory")
+    if info.st_uid != os.geteuid():
+        raise _Refused(f"{label} is owned by another user")
+    if info.st_mode & 0o022:
+        raise _Refused(f"{label} is group or world writable")
+
+
+def _open_child_dir(parent_fd: int, name: str, label: str) -> int:
     try:
-        info = os.stat(os.path.realpath(home))
+        return os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        raise _Refused(f"{label} missing") from None
+    except OSError:
+        try:
+            info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            raise _Refused(f"{label} unreadable") from None
+        if stat.S_ISLNK(info.st_mode):
+            raise _Refused(f"{label} is a symlink") from None
+        raise _Refused(f"{label} is not a directory") from None
+
+
+class _Dirs:
+    """The Brigade home and its claude-hooks directory, held open after their checks (POSIX).
+
+    The parent of the home must not let another user swap the home: it may be
+    group or world writable only with the sticky bit, and must be owned by this
+    user or root. Every later read, write and the inode binding go through these
+    descriptors, so the checks and the use stay bound to the same directories.
+    """
+
+    def __init__(self, *, create: bool) -> None:
+        self.fds: list[int] = []
+        home = Path(os.path.abspath(_brigade_home()))
+        if create:
+            try:
+                home.mkdir(parents=True, exist_ok=True, mode=0o700)
+            except OSError as exc:
+                raise _Refused(f"cannot create the Brigade home: {exc.strerror or exc}") from None
+        try:
+            parent = self._keep(os.open(home.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)))
+            info = os.fstat(parent)
+            if info.st_uid not in {os.geteuid(), 0}:
+                raise _Refused("the Brigade home's parent is owned by another user")
+            if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
+                raise _Refused("the Brigade home's parent is writable by others without the sticky bit")
+            self.home = self._keep(_open_child_dir(parent, home.name, "the Brigade home"))
+            _check_dir_fd(self.home, "the Brigade home")
+            if create:
+                try:
+                    os.mkdir(MARKER_DIR, 0o700, dir_fd=self.home)
+                except FileExistsError:
+                    pass
+            self.hooks = self._keep(_open_child_dir(self.home, MARKER_DIR, f"{MARKER_DIR}/"))
+            _check_dir_fd(self.hooks, f"{MARKER_DIR}/")
+        except BaseException:
+            self.close()
+            raise
+
+    def _keep(self, fd: int) -> int:
+        self.fds.append(fd)
+        return fd
+
+    def home_identity(self) -> list[int]:
+        info = os.fstat(self.home)
+        return [int(info.st_dev), int(info.st_ino)]
+
+    def close(self) -> None:
+        for fd in reversed(self.fds):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self.fds.clear()
+
+    def __enter__(self) -> _Dirs:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+
+def _windows_home_identity() -> list[int] | None:
+    try:
+        info = os.stat(os.path.realpath(_brigade_home()))
     except OSError:
         return None
     return [int(info.st_dev), int(info.st_ino)]
 
 
-def _dir_problem(path: Path, label: str) -> str | None:
-    """Why ``path`` cannot hold the marker: a symlink, foreign owner or loose mode (POSIX)."""
-    if not _POSIX:
-        return None
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        return f"{label} missing"
-    except OSError:
-        return f"{label} unreadable"
-    if stat.S_ISLNK(info.st_mode):
-        return f"{label} is a symlink"
-    if not stat.S_ISDIR(info.st_mode):
-        return f"{label} is not a directory"
-    geteuid = getattr(os, "geteuid", None)
-    if geteuid is not None and info.st_uid != geteuid():
-        return f"{label} is owned by another user"
-    if info.st_mode & 0o022:
-        return f"{label} is group or world writable"
+def _binding(home_identity: list[int] | None) -> dict[str, object]:
+    return {"host": _host(), "machine_id": _machine_id(), "home": home_identity}
+
+
+def _validate(raw: object, home_identity: list[int] | None) -> str | None:
+    if not isinstance(raw, dict) or raw.get("v") != MARKER_VERSION:
+        return "marker malformed or from an older Brigade"
+    if raw.get("audience") != LOCAL:
+        return NOT_ENABLED  # an opt-out writes audience connector
+    binding = _binding(home_identity)
+    if binding["machine_id"] is None and not _MACHINE_ID_OPTIONAL:
+        return NO_MACHINE_ID
+    if home_identity is None or any(raw.get(key) != value for key, value in binding.items()):
+        return "marker written on another host"
     return None
 
 
-def _paths_problem() -> str | None:
-    home = _brigade_home()
-    return _dir_problem(home, "the Brigade home") or _dir_problem(home / MARKER_DIR, f"{MARKER_DIR}/")
+def _read_posix() -> str | None:
+    try:
+        with _Dirs(create=False) as dirs:
+            _between_check_and_read()
+            try:
+                fd = os.open(MARKER_NAME, _FILE_FLAGS, dir_fd=dirs.hooks)
+            except FileNotFoundError:
+                return NOT_ENABLED
+            except OSError:
+                return "marker unreadable"
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    return "marker is not a regular file"
+                if info.st_uid != os.geteuid():
+                    return "marker owned by another user"
+                if info.st_mode & 0o077:
+                    return "marker readable or writable by others"
+                if info.st_size > _MARKER_MAX_BYTES:
+                    return "marker too large"
+                data = os.read(fd, _MARKER_MAX_BYTES + 1)
+            finally:
+                os.close(fd)
+            try:
+                raw = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                return "marker unreadable"
+            return _validate(raw, dirs.home_identity())
+    except _Refused as refused:
+        missing = str(refused).endswith(" missing")
+        return NOT_ENABLED if missing else str(refused)
 
 
-def _binding() -> dict[str, object]:
-    return {"host": _host(), "machine_id": _machine_id(), "home": _home_identity(_brigade_home())}
-
-
-def marker_problem() -> str | None:
-    """Why the marker does not grant ``local`` here, or None when it does."""
+def _read_windows() -> str | None:
     path = marker_path()
     try:
         info = os.lstat(path)
@@ -141,28 +264,23 @@ def marker_problem() -> str | None:
         return NOT_ENABLED
     except OSError:
         return "marker unreadable"
-    problem = _paths_problem()
-    if problem is not None:
-        return problem
     if not stat.S_ISREG(info.st_mode):
         return "marker is not a regular file"
-    geteuid = getattr(os, "geteuid", None) if _POSIX else None
-    if geteuid is not None and info.st_uid != geteuid():
-        return "marker owned by another user"
-    if _POSIX and info.st_mode & 0o077:
-        return "marker readable or writable by others"
     if info.st_size > _MARKER_MAX_BYTES:
         return "marker too large"
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return "marker unreadable"
-    if not isinstance(raw, dict) or raw.get("v") != MARKER_VERSION or raw.get("audience") != LOCAL:
-        return "marker malformed or from an older Brigade"
-    binding = _binding()
-    if binding["home"] is None or any(raw.get(key) != value for key, value in binding.items()):
-        return "marker written on another host"
-    return None
+    return _validate(raw, _windows_home_identity())
+
+
+def marker_problem() -> str | None:
+    """Why the marker does not grant ``local`` here, or None when it does. Never raises."""
+    try:
+        return _read_posix() if _POSIX else _read_windows()
+    except Exception:  # noqa: BLE001 - any failure is a refusal
+        return "marker unreadable"
 
 
 def audience() -> str:
@@ -175,39 +293,95 @@ def audience() -> str:
         return CONNECTOR
 
 
+def _write_posix(make_body: Callable[[list[int] | None], str]) -> None:
+    with _Dirs(create=True) as dirs:
+        body = make_body(dirs.home_identity())
+        tmp = f".{MARKER_NAME}.{os.getpid()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600, dir_fd=dirs.hooks)
+        try:
+            try:
+                os.fchmod(fd, 0o600)
+                os.write(fd, body.encode("utf-8"))
+            finally:
+                os.close(fd)
+            os.replace(tmp, MARKER_NAME, src_dir_fd=dirs.hooks, dst_dir_fd=dirs.hooks)
+        finally:
+            try:
+                os.unlink(tmp, dir_fd=dirs.hooks)
+            except OSError:
+                pass
+
+
+def _write_windows(make_body: Callable[[list[int] | None], str]) -> None:
+    body = make_body(_windows_home_identity())
+    path = marker_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _write(audience_value: str) -> str | None:
+    """Write a marker for ``audience_value``. Returns why it failed, or None.
+
+    A local marker binds the home it is written into: the identity comes from
+    the same open directory the file is created in.
+    """
+    if audience_value == LOCAL and _machine_id() is None and not _MACHINE_ID_OPTIONAL:
+        return NO_MACHINE_ID
+
+    def make_body(identity: list[int] | None) -> str:
+        if audience_value != LOCAL:
+            return json.dumps({"v": MARKER_VERSION, "audience": CONNECTOR}, sort_keys=True) + "\n"
+        if identity is None:
+            raise _Refused("the Brigade home has no device and inode")
+        payload = {"v": MARKER_VERSION, "audience": LOCAL, **_binding(identity)}
+        return json.dumps(payload, sort_keys=True) + "\n"
+
+    try:
+        (_write_posix if _POSIX else _write_windows)(make_body)
+    except _Refused as refused:
+        return str(refused)
+    except OSError as exc:
+        return f"cannot write {marker_path()}: {exc.strerror or exc}"
+    return None
+
+
 def write_marker() -> str | None:
     """Opt this host in to local recall. Returns why it refused, or None once the marker is valid."""
     if env_narrows():
         return "this environment marks the session as remote"
-    home = _brigade_home()
     try:
-        home.mkdir(parents=True, exist_ok=True, mode=0o700)
-        (home / MARKER_DIR).mkdir(exist_ok=True, mode=0o700)
-    except OSError as exc:
-        return f"cannot create {home / MARKER_DIR}: {exc.strerror or exc}"
-    problem = _paths_problem()
-    if problem is not None:
-        return problem
-    path = marker_path()
-    body = json.dumps({"v": MARKER_VERSION, "audience": LOCAL, **_binding()}, sort_keys=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(body + "\n")
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, path)
-        finally:
-            tmp.unlink(missing_ok=True)
-    except OSError as exc:
-        return f"cannot write {path}: {exc.strerror or exc}"
-    return marker_problem()
+        return _write(LOCAL) or marker_problem()
+    except Exception as exc:  # noqa: BLE001 - an opt-in reports, never raises
+        return f"cannot write {marker_path()}: {type(exc).__name__}"
 
 
-def clear_marker() -> None:
-    """Opt this host out: recall returns to the connector audience."""
+def _unlink_marker() -> None:
     marker_path().unlink(missing_ok=True)
+
+
+def opt_out() -> str | None:
+    """Opt this host out. Returns a fixed refusal only when local recall may still be on.
+
+    A connector marker goes in first, atomically, then the file is removed as a
+    best effort, so a removal that fails still leaves the audience connector.
+    """
+    try:
+        wrote = marker_path().exists() is False or _write(CONNECTOR) is None
+    except Exception:  # noqa: BLE001 - fall through to the removal
+        wrote = False
+    try:
+        _unlink_marker()
+        removed = True
+    except Exception:  # noqa: BLE001 - a failed removal is reported below, never raised
+        removed = False
+    if wrote or removed or marker_problem() is not None:
+        return None
+    return f"{OPT_OUT_FAILED} ({marker_path()})"
 
 
 def doctor_check(recall_active: bool = True) -> tuple[str, str, str]:

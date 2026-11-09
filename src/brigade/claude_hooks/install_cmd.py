@@ -321,7 +321,11 @@ def _apply_recall_audience(choice: str | None, *, quiet: bool) -> int:
     if choice is None:
         return 0
     if choice == recall_audience.CONNECTOR:
-        recall_audience.clear_marker()
+        refusal = recall_audience.opt_out()
+        if refusal is not None:
+            if not quiet:
+                print(f"error: {refusal}", file=sys.stderr)
+            return 2
         if not quiet:
             print("claude hooks: recall audience -> connector (local recall disabled on this host)")
         return 0

@@ -546,6 +546,7 @@ def test_a_marker_copied_to_another_home_is_connector(wired, monkeypatch, tmp_pa
     marker = recall_audience.marker_path()
     other = tmp_path / "copied-home" / ".brigade"
     (other / recall_audience.MARKER_DIR).mkdir(parents=True, mode=0o700)
+    other.parent.chmod(0o700)  # a private parent, so only the inode differs
     other.chmod(0o700)
     copy = other / recall_audience.MARKER_DIR / recall_audience.MARKER_NAME
     copy.write_bytes(marker.read_bytes())
@@ -711,3 +712,150 @@ def test_an_anchored_directive_in_a_tag_is_withheld(audience):
     assert placeholder == {"card_id": "fleet/comet-notes", "blocked": "assistant-directive"}
     clean = {**match, "tags": ["comet"]}
     assert memory_hook_hub.scan_matches([clean], audience) == [clean]
+
+
+# --- round 3: machine id required off macOS, parent and swap checks, safe opt-out, long front matter ---
+
+
+def _no_machine_id(monkeypatch: pytest.MonkeyPatch, *, optional: bool) -> None:
+    monkeypatch.setattr(recall_audience, "_MACHINE_ID_OPTIONAL", optional)
+    monkeypatch.setattr(recall_audience, "_machine_id", lambda: None)
+
+
+def test_a_missing_machine_id_refuses_the_opt_in_off_macos(wired, monkeypatch, capsys):
+    target, _memory = wired
+    recall_audience.marker_path().unlink()
+    _no_machine_id(monkeypatch, optional=False)
+    assert install_cmd.hooks_update(target=target, recall_audience_choice="local") == 2
+    err = capsys.readouterr().err
+    assert recall_audience.NO_MACHINE_ID in err and "Traceback" not in err
+    assert not recall_audience.marker_path().exists()
+    assert recall_audience.audience() == "connector"
+
+
+def test_a_stored_null_machine_id_is_connector_off_macos(wired, monkeypatch):
+    recall_audience.marker_path().unlink()
+    _no_machine_id(monkeypatch, optional=True)  # macOS: no id, and a null is fine
+    assert recall_audience.write_marker() is None
+    assert json.loads(recall_audience.marker_path().read_text(encoding="utf-8"))["machine_id"] is None
+    assert recall_audience.audience() == "local"
+    monkeypatch.setattr(recall_audience, "_MACHINE_ID_OPTIONAL", False)  # the same null on Linux or Windows
+    assert recall_audience.marker_problem() == recall_audience.NO_MACHINE_ID
+    assert recall_audience.audience() == "connector"
+
+
+def _home_under(parent: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    parent.mkdir(mode=0o700)
+    home = parent / ".brigade"
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
+    assert recall_audience.write_marker() is None
+    assert recall_audience.audience() == "local"
+    return home
+
+
+@posix_only
+def test_a_parent_writable_by_others_without_the_sticky_bit_is_connector(wired, monkeypatch, tmp_path):
+    parent = tmp_path / "shared"
+    _home_under(parent, monkeypatch)
+    parent.chmod(0o777)
+    try:
+        assert (
+            recall_audience.marker_problem() == "the Brigade home's parent is writable by others without the sticky bit"
+        )
+        assert recall_audience.audience() == "connector"
+        assert recall_audience.write_marker() is not None
+    finally:
+        parent.chmod(0o700)
+
+
+@posix_only
+def test_a_sticky_world_writable_parent_is_allowed(wired, monkeypatch, tmp_path):
+    parent = tmp_path / "tmp-like"
+    _home_under(parent, monkeypatch)
+    parent.chmod(0o1777)
+    try:
+        assert recall_audience.marker_problem() is None
+        assert recall_audience.audience() == "local"
+    finally:
+        parent.chmod(0o700)
+
+
+@posix_only
+def test_a_home_swapped_after_the_checks_cannot_produce_local(wired, monkeypatch, tmp_path):
+    """The read goes through the checked directory descriptors, not the path."""
+    home = recall_audience.marker_path().parent.parent
+    recall_audience.marker_path().unlink()  # this host is not opted in
+    forged = home.parent / "forged-home"
+    (forged / recall_audience.MARKER_DIR).mkdir(parents=True, mode=0o700)
+    forged.chmod(0o700)
+    info = forged.stat()
+    marker = {
+        "v": recall_audience.MARKER_VERSION,
+        "audience": "local",
+        "host": recall_audience._host(),
+        "machine_id": recall_audience._machine_id(),
+        "home": [info.st_dev, info.st_ino],  # valid for the forged directory itself
+    }
+    forged_marker = forged / recall_audience.MARKER_DIR / recall_audience.MARKER_NAME
+    forged_marker.write_text(json.dumps(marker), encoding="utf-8")
+    forged_marker.chmod(0o600)
+    original = home.parent / "original-home"
+    swapped: list[bool] = []
+
+    def swap() -> None:
+        home.rename(original)
+        forged.rename(home)
+        swapped.append(True)
+
+    monkeypatch.setattr(recall_audience, "_between_check_and_read", swap)
+    try:
+        assert recall_audience.audience() == "connector"
+        assert swapped == [True]
+        # Read by path now, the forged marker would grant local: the descriptors are what stop it.
+        monkeypatch.setattr(recall_audience, "_between_check_and_read", lambda: None)
+        assert recall_audience.marker_problem() is None
+    finally:
+        home.rename(forged)
+        original.rename(home)
+
+
+@posix_only
+def test_an_opt_out_in_a_read_only_directory_exits_2_without_a_traceback(wired, capsys):
+    target, _memory = wired
+    hooks = recall_audience.marker_path().parent
+    hooks.chmod(0o500)
+    try:
+        assert install_cmd.hooks_update(target=target, recall_audience_choice="connector") == 2
+        err = capsys.readouterr().err
+        assert recall_audience.OPT_OUT_FAILED in err and str(recall_audience.marker_path()) in err
+        assert "Traceback" not in err
+    finally:
+        hooks.chmod(0o700)
+
+
+def test_an_opt_out_whose_delete_fails_still_leaves_connector(wired, monkeypatch):
+    target, _memory = wired
+
+    def refuse() -> None:
+        raise PermissionError("delete refused")
+
+    monkeypatch.setattr(recall_audience, "_unlink_marker", refuse)
+    assert install_cmd.hooks_update(target=target, quiet=True, recall_audience_choice="connector") == 0
+    stored = json.loads(recall_audience.marker_path().read_text(encoding="utf-8"))
+    assert stored["audience"] == "connector"
+    assert recall_audience.audience() == "connector"
+    assert recall_audience.marker_problem() == recall_audience.NOT_ENABLED
+
+
+def test_long_front_matter_gives_one_id_to_opened_and_pushed(wired):
+    target, memory = wired
+    cards = memory / "memory" / "cards"
+    padding = "x" * (70 * 1024)  # the closing delimiter lands past 64 Ki characters
+    text = f"---\nid: {CANONICAL_ID}\ntitle: Comet runbook\ntags: [comet]\nnotes: {padding}\n---\nrunbook body\n"
+    (cards / "runbook.md").write_text(text, encoding="utf-8")
+    hub_recall.recall_text(target, _payload(target, "UserPromptSubmit"), prompt="comet runbook")
+    read = _payload(target, "PostToolUse", tool_name="Read", tool_input={"file_path": str(cards / "runbook.md")})
+    assert hub_recall.observe_read(target, read)
+    ledger = hub_recall.load(hub_recall.ledger_path(target, SESSION))
+    assert CANONICAL_ID in ledger["pushed"]
+    assert ledger["opened"] == [CANONICAL_ID]
