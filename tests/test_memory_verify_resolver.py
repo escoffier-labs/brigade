@@ -2057,3 +2057,20 @@ def test_a_default_ref_chained_to_another_remote_ref_is_refused(world):
         git(world.workspace, "symbolic-ref", "--no-recurse", "refs/remotes/origin/HEAD") == "refs/remotes/origin/main"
     )
     assert world.resolve(short(target)) is None
+
+
+@pytest.mark.parametrize("url", ["file://{bare}", "http://localhost:9/remote.git", "https:///remote.git"])
+def test_a_non_https_remote_is_refused_before_any_fetch(world, monkeypatch, url):
+    """The https rule refuses up front. protocol.allow=never would only stop the transport later, mid-fetch."""
+    target = world.commit("target")
+    git(world.workspace, "remote", "set-url", "origin", url.format(bare=world.bare))
+    calls = []
+    real = resolver._git
+
+    def spy(tool, cwd, *args):
+        calls.append(args[0])
+        return real(tool, cwd, *args)
+
+    monkeypatch.setattr(resolver, "_git", spy)
+    assert world.resolve(short(target)) is None
+    assert "fetch" not in calls and "ls-remote" not in calls
