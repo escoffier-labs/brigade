@@ -7,9 +7,9 @@ callable that takes the composed prompt and returns the reply text, or None
 when the call failed.
 
 Prompt. Fixed, versioned instructions (their sha256 is `PROMPT_SHA256`), then
-one data region per input: the card's claim blocks labeled by block id, the
-related cards that may be supersede targets, and the evidence items labeled
-with index, kind, trust rank, observation time and sha256. Every region header
+one data region per input: the card's claim blocks labeled by block id and
+the evidence items labeled with index, kind, trust rank, observation time and
+sha256. Every region header
 and the closing marker carry a random 128-bit nonce drawn for that call. A
 nonce that appears anywhere in the data makes the card abstain with
 `verify_nonce_collision`, so data can never forge or close a region.
@@ -25,18 +25,18 @@ reason code:
 
 1. Quotes are exact substrings of the item they name, 20 to 400 UTF-8 bytes,
    not blank (`verify_quote_invalid`).
-2. Corroboration is about the claim (`verify_uncorroborated`). The claim
-   material is every content word and value the replacement or `previously`
-   text adds to the block, after agreement normalization and canonical
-   folding. Each material word must sit in quotes from two independently
-   produced countable items, and one of them must be an authenticated
-   receipt whose quote covers a whole factual field (`commit`,
-   `baseline_commit` or a command's `exit_code`) with that value. The
-   independence test is slice 6's `independent`, over its compare material,
-   which already holds the decoded strings of every rendered receipt.
-   Command output, excerpts, argv, status and times never corroborate.
-   `superseded` has no claim text, so it needs the source-level form: a
-   factual-field quote and one independent countable item.
+2. Edit scope and corroboration. v1 corrects commit identifiers only. After
+   agreement normalization, a replacement or `previously` text must equal the
+   block except that one or more commit-id tokens are swapped for full commit
+   ids (40 or 64 lowercase hex). Any other added, removed or reordered word or
+   punctuation, a negation included, abstains with `verify_edit_out_of_scope`.
+   Each swapped-in id must then sit in quotes from two independently produced
+   countable items, one an authenticated receipt quote covering a whole
+   `commit` or `baseline_commit` field with exactly that id
+   (`verify_uncorroborated`). The independence test is slice 6's
+   `independent`, over its compare material, which already holds the decoded
+   strings of every rendered receipt. Command output, excerpts, argv,
+   status, exit codes and times never corroborate.
 3. `changed` meets check 2 with items observed after the head revision's log
    time (`verify_not_newer`).
 4. Replacement and `previously` text: one claim block, different from the
@@ -52,19 +52,19 @@ reason code:
    percent and HTML-reference decoding. Hosts and emails compare without
    case. A word with no canonical reading, or with an unlisted non-ASCII
    separator between letters, fails closed.
-6. `superseded_by` names a related card supplied for the call, live, in the
-   same scope and changed after this card (`verify_supersede_target`). A card
-   with more than one claim block abstains with `supersede_partial`.
+6. `superseded` abstains in v1 with `verify_supersede_deferred` and never
+   opens `supersede_card`.
 7. The text passes the local memory scan and the untrusted-text scan
    (`verify_scan_flagged`).
 8. Only `high` confidence makes an op (`verify_low_confidence`), and
    `insufficient` never does.
-8a. `supported` opens `append_evidence` only with confirmations on, when the
-   whole claim passes check 2, and only for refs whose every mapped source
-   is a countable item holding claim material. Excerpts never become refs.
+8a. `supported` opens `append_evidence` only with confirmations on, when
+   every content word of the claim passes the check 2 corroboration rule, and
+   only for a ref whose every represented evidence item is a quoted countable
+   item holding claim material. Excerpts and command output never become refs.
 9. The confirm seat repeats the call with the evidence shuffled and a fresh
    nonce. Its block must pass checks 1 to 8 on its own (`verify_unconfirmed`)
-   and give the same verdict and the same op: type, `other_card`, and text
+   and give the same verdict and the same op: type, refs, and text
    equal after `normalize` (`seat_disagreement`). The proposal carries the
    proposing seat's text.
 
@@ -119,7 +119,7 @@ VERDICT_FIELD = {
     "superseded": "superseded_by",
 }
 
-REPLACE, PREVIOUSLY, SUPERSEDE, APPEND = "replace_block", "add_previously", "supersede_card", "append_evidence"
+REPLACE, PREVIOUSLY, APPEND = "replace_block", "add_previously", "append_evidence"
 
 OUTPUT_INVALID = "verify_output_invalid"
 QUOTE_INVALID = "verify_quote_invalid"
@@ -127,8 +127,8 @@ UNCORROBORATED = "verify_uncorroborated"
 NOT_NEWER = "verify_not_newer"
 TEXT_INVALID = "verify_replacement_invalid"
 NOVEL_TOKEN = "verify_novel_token"
-SUPERSEDE_TARGET = "verify_supersede_target"
-SUPERSEDE_PARTIAL = "supersede_partial"
+SUPERSEDE_DEFERRED = "verify_supersede_deferred"
+EDIT_OUT_OF_SCOPE = "verify_edit_out_of_scope"
 SCAN_FLAGGED = "verify_scan_flagged"
 LOW_CONFIDENCE = "verify_low_confidence"
 INSUFFICIENT = "verify_insufficient"
@@ -154,13 +154,13 @@ For each claim block, decide one verdict:
 - contradicted: the evidence shows the claim is wrong. Give a corrected claim in "replacement".
 - changed: the claim was true but newer evidence shows a different value now. Give the current claim in "replacement".
 - history: the claim is current, but older evidence records a different earlier value a reader may meet. Give that earlier claim in "previously".
-- superseded: a related card already holds the corrected claim. Give its card id in "superseded_by".
+- superseded: another card now holds this claim. Give that card's id in "superseded_by".
 - insufficient: the evidence does not settle the claim.
 
 Rules:
 - Quote evidence exactly. Each quote is a substring of the item it names, copied byte for byte, 20 to 400 bytes long.
 - Any verdict other than supported or insufficient needs quotes from at least two different evidence items, one of them a receipt_fields item ranked authenticated.
-- A replacement or previously text is one sentence or bullet on one line. Use only facts from the block or your quotes. Do not add any URL, path, host, address, command, flag, code span or number that is not in them.
+- A replacement or previously text repeats the block word for word on one line and changes only commit ids, each to a full commit id from your quotes. Do not add, remove or reorder any other word or punctuation.
 - Confidence is high, medium or low. Say high only when the quotes settle it.
 
 Reply with exactly one JSON object and nothing else, at most 16 KiB:
@@ -197,28 +197,13 @@ class ClaimBlock:
 
 
 @dataclass(frozen=True)
-class Related:
-    """A same-scope card the client found for this call. Only these may be supersede targets."""
-
-    scope: str
-    card_id: str
-    revision: int
-    updated_ms: int | None
-    live: bool
-    title: str = ""
-
-
-@dataclass(frozen=True)
 class CardInput:
     scope: str
     card_id: str
     revision: int
-    # Log time of the head revision, for check 3 and supersede targets. None fails both closed.
+    # Log time of the head revision, for check 3. None fails it closed.
     updated_ms: int | None
     blocks: tuple[ClaimBlock, ...]
-    # Every claim block, anchored or not. `supersede_card` needs exactly one.
-    claim_blocks: int
-    related: tuple[Related, ...] = ()
 
     @classmethod
     def from_text(
@@ -229,7 +214,6 @@ class CardInput:
         revision: int,
         text: str,
         updated_ms: int | None,
-        related: Sequence[Related] = (),
     ) -> CardInput:
         """The anchored claim blocks of a replica head's text, or `Abstain(verify_card_invalid)`."""
         if not isinstance(text, str) or len(text.encode()) > MAX_CARD_TEXT_BYTES:
@@ -241,7 +225,7 @@ class CardInput:
         anchored = tuple(ClaimBlock(b.block_id, b.text, b.sha256) for b in found if b.block_id)
         if not anchored or len(anchored) > MAX_BLOCKS or type(revision) is not int or revision <= 0:
             raise Abstain(CARD_INVALID)
-        return cls(scope, card_id, revision, updated_ms, anchored, len(found), tuple(related))
+        return cls(scope, card_id, revision, updated_ms, anchored)
 
     def block(self, block_id: str) -> ClaimBlock | None:
         return next((block for block in self.blocks if block.block_id == block_id), None)
@@ -273,15 +257,12 @@ def compose(card: CardInput, items: Sequence[ev.Item], *, nonce: str) -> Prompt:
     if not re.fullmatch(r"[0-9a-f]{32}", nonce):
         raise ValueError("a verify nonce is 32 lowercase hex characters")
     data = [card.card_id, *(b.text for b in card.blocks)]
-    data += [text for r in card.related for text in (r.card_id, r.title)]
     data += [item.text for item in items]
     if any(nonce in value for value in data):
         raise Abstain(NONCE_COLLISION)
     parts = [INSTRUCTIONS, f"<<{nonce} card>>\ncard_id: {_single_line(card.card_id)}\n"]
     for block in card.blocks:
         parts.append(f"<<{nonce} block {_single_line(block.block_id)}>>\n{block.claim}\n")
-    for index, related in enumerate(card.related):
-        parts.append(f"<<{nonce} related {index} card_id={_single_line(related.card_id)}>>\n{related.title}\n")
     for index, item in enumerate(items):
         header = (
             f"evidence {index} kind={item.kind} rank={item.rank} observed_ms={_observed(item)} sha256={item.sha256}"
@@ -533,6 +514,8 @@ LOOKALIKES = str.maketrans(
 )
 PERCENT = re.compile(r"%[0-9A-Fa-f]{2}")
 ENTITY = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
+# A numeric reference a browser would still decode without its semicolon. Left over after decoding, it fails closed.
+LOOSE_REFERENCE = re.compile(r"&#(?:[0-9]|[xX][0-9A-Fa-f])")
 DECODE_PASSES = 3
 # Non-ASCII characters of these classes between two letters or digits make a word governed.
 SEPARATOR_CATEGORIES = frozenset({"Po", "Pd", "Pc", "Ps", "Pe", "Sm", "So", "Sk"})
@@ -558,19 +541,20 @@ def canonical(text: str) -> str | None:
 
     NFKC, then the lookalike table, then up to `DECODE_PASSES` rounds of strict
     percent decoding (UTF-8 only) and HTML character references, folding again
-    after each round. Text that still holds an escape after the last round, or
-    that decodes to invalid UTF-8, has no classifiable reading.
+    after each round. Text that still holds an escape after the last round, a
+    numeric reference without its semicolon, or invalid UTF-8 has no
+    classifiable reading.
     """
     value = _fold(text)
     for _ in range(DECODE_PASSES):
         if not (PERCENT.search(value) or ENTITY.search(value)):
-            return value
+            return None if LOOSE_REFERENCE.search(value) else value
         try:
             decoded = urllib.parse.unquote(value, errors="strict")
         except UnicodeDecodeError:
             return None
         value = _fold(ENTITY.sub(lambda match: html.unescape(match[0]), decoded))
-    return None if PERCENT.search(value) or ENTITY.search(value) else value
+    return None if PERCENT.search(value) or ENTITY.search(value) or LOOSE_REFERENCE.search(value) else value
 
 
 def _trim(word: str) -> str:
@@ -681,12 +665,13 @@ def _whole_span(span: str, source: str) -> bool:
 
 # --- Corroboration ------------------------------------------------------------------------
 
-# Receipt fields whose values state a fact a claim can rest on (D3, check 2). `commit` and `baseline_commit`
-# name the code state Brigade read from git, and `exit_code` is the observed outcome of a command. Every other
-# authenticated field is excluded: `argv` is text the caller chose, `status` and the times are the same on
-# almost every receipt, and `run_id`, `manifest_id` and `tree_fingerprint` are Brigade's own bookkeeping.
+# Receipt fields whose values a correction may rest on (D3, check 2): the commit ids Brigade read from git.
+# Untyped value fields are excluded, because a bare value cannot say which claim it belongs to. An exit code
+# of 1 would otherwise corroborate any claim that a number is 1. `argv` is text the caller chose, `status` and
+# the times read the same on almost every receipt, and `run_id`, `manifest_id` and `tree_fingerprint` are
+# Brigade's own bookkeeping.
 FACT_TOP = ("commit", "baseline_commit")
-FACT_COMMAND = ("exit_code",)
+COMMIT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 # Words a claim change may add or drop without new evidence. Negations are not here, so adding one needs support.
 MATERIAL_STOP = ev.STOP | frozenset(
     "a an the is are was be been at in on of to for by as it its this that now still then and or with from".split()
@@ -702,16 +687,14 @@ def _countable(item: ev.Item) -> bool:
 
 
 def _pair(key: str, value: object) -> tuple[str, str] | None:
-    if isinstance(value, str) and value:
-        return f'"{key}": {json.dumps(value, ensure_ascii=False)}', value.casefold()
-    if type(value) is int:
-        return f'"{key}": {value}', str(value)
+    if isinstance(value, str) and COMMIT_ID.fullmatch(value):
+        return f'"{key}": {json.dumps(value)}', value
     return None
 
 
 @functools.lru_cache(maxsize=64)
 def _facts(text: str) -> tuple[tuple[str, str], ...]:
-    """The factual field pairs of rendered receipt fields, exactly as slice 6 renders them, with value keys."""
+    """The commit-id field pairs of rendered receipt fields, exactly as slice 6 renders them, with their ids."""
     try:
         fields = json.loads(text)
     except (ValueError, RecursionError):
@@ -719,10 +702,6 @@ def _facts(text: str) -> tuple[tuple[str, str], ...]:
     if not isinstance(fields, dict) or not ev._shallow(fields):
         return ()
     pairs = [_pair(key, fields.get(key)) for key in FACT_TOP]
-    commands = fields.get("commands")
-    for command in commands if isinstance(commands, list) else []:
-        if isinstance(command, dict):
-            pairs.extend(_pair(key, command.get(key)) for key in FACT_COMMAND)
     return tuple(pair for pair in pairs if pair is not None)
 
 
@@ -730,14 +709,7 @@ def factual_keys(item: ev.Item, quote: str) -> set[str]:
     """Value keys of the factual pairs a quote of an authenticated receipt covers whole. Empty for any other item."""
     if not _anchor(item):
         return set()
-    return {value for pair, value in _facts(item.text) if _covers(quote, pair)}
-
-
-def _covers(quote: str, pair: str) -> bool:
-    """A string pair ends at its closing quote. A number pair must be followed by its separator, so 1 is not 12."""
-    if pair.endswith('"'):
-        return pair in quote
-    return pair + "," in quote or pair + "\n" in quote
+    return {value for pair, value in _facts(item.text) if pair in quote}
 
 
 def _material_keys(text: str) -> set[str]:
@@ -748,6 +720,34 @@ def _material_keys(text: str) -> set[str]:
         if any(ch.isalnum() for ch in word) and word not in MATERIAL_STOP:
             keys.add(word)
     return keys
+
+
+# A commit-id token in a block: 7 to 64 hex characters with a digit, standing alone. Swapped-in ids must be full.
+COMMIT_TOKEN = re.compile(r"(?<![0-9A-Za-z])((?=[0-9a-f]*[0-9])[0-9a-f]{7,64})(?![0-9A-Za-z])")
+
+
+def commit_swaps(text: str, claim: str) -> set[str] | None:
+    """The full commit ids `text` swaps into `claim`, or None when it edits anything else.
+
+    Both sides are normalized for agreement and split at commit-id tokens.
+    Every other segment must match byte for byte, the token count must
+    match, and each changed token must become a full id (`COMMIT_ID`). At
+    least one token must change.
+    """
+    mine = COMMIT_TOKEN.split(normalize(text))
+    theirs = COMMIT_TOKEN.split(normalize(claim))
+    if len(mine) != len(theirs):
+        return None
+    swapped = set()
+    for index, (new, old) in enumerate(zip(mine, theirs, strict=True)):
+        if index % 2 == 0:
+            if new != old:
+                return None
+        elif new != old:
+            if not COMMIT_ID.fullmatch(new):
+                return None
+            swapped.add(new)
+    return swapped or None
 
 
 def claim_material(text: str, baseline: str = "") -> set[str]:
@@ -764,10 +764,11 @@ def _holds_material(item: ev.Item, quote: str, word: str) -> bool:
 def claim_corroborated(material: set[str], quoted: Sequence[tuple[ev.Item, str]]) -> bool:
     """Check 2 for a claim: every material word sits in quotes from two independent countable items.
 
-    One of the two must be an authenticated receipt whose quote covers a
-    factual field (`FACT_TOP`, `FACT_COMMAND`) with that exact value. An
+    One of the two must be an authenticated receipt whose quote covers a whole
+    `commit` or `baseline_commit` field holding exactly that full id. An
     authenticated receipt holds a word only through those fields, never
-    through its argv, status or times. Empty material never corroborates.
+    through its argv, status, exit codes or times. Empty material never
+    corroborates.
     """
     if not material:
         return False
@@ -779,19 +780,6 @@ def claim_corroborated(material: set[str], quoted: Sequence[tuple[ev.Item, str]]
     return True
 
 
-def corroborated(quoted: Sequence[tuple[ev.Item, str]]) -> bool:
-    """Source-level check 2, used for `superseded`, which carries no claim text to bind.
-
-    The anchor is an authenticated receipt quoted across a whole factual
-    field. It needs one independent countable item, by slice 6's
-    `independent`, which compares sources, runs, lineage and copied spans
-    over the decoded strings.
-    """
-    anchors = [item for item, quote in quoted if factual_keys(item, quote)]
-    others = [item for item, _quote in quoted if _countable(item)]
-    return any(ev.independent(anchor, other) for anchor in anchors for other in others if other is not anchor)
-
-
 # --- Ops ----------------------------------------------------------------------------------
 
 
@@ -801,7 +789,6 @@ class Op:
     block_id: str
     expected_block_hash: str
     text: str | None = field(default=None, repr=False)
-    other_card: Related | None = None
     evidence_ids: tuple[str, ...] = ()
 
     def payload(self, card: CardInput) -> dict[str, Any]:
@@ -816,9 +803,6 @@ class Op:
         }
         if self.type in (REPLACE, PREVIOUSLY):
             op["text"] = self.text
-        elif self.type == SUPERSEDE and self.other_card is not None:
-            other = self.other_card
-            op["other_card"] = {"scope": other.scope, "card_id": other.card_id, "base_revision": other.revision}
         elif self.type == APPEND:
             op["evidence_ids"] = list(self.evidence_ids)
         return op
@@ -831,11 +815,6 @@ class Op:
             other.expected_block_hash,
         ):
             return False
-        if self.type == SUPERSEDE:
-            mine, theirs = self.other_card, other.other_card
-            return (
-                mine is not None and theirs is not None and (mine.scope, mine.card_id) == (theirs.scope, theirs.card_id)
-            )
         if self.type == APPEND:
             return sorted(self.evidence_ids) == sorted(other.evidence_ids)
         return self.text is not None and other.text is not None and normalize(self.text) == normalize(other.text)
@@ -859,20 +838,6 @@ def _quotes_valid(reply: BlockReply, items: Sequence[ev.Item]) -> bool:
         if quote.text not in items[quote.evidence].text:
             return False
     return True
-
-
-def _target(card: CardInput, name: str) -> Related | None:
-    found = [r for r in card.related if r.card_id == name]
-    if len(found) != 1:
-        return None
-    target = found[0]
-    if target.scope != card.scope or target.card_id == card.card_id or not target.live:
-        return None
-    if target.updated_ms is None or card.updated_ms is None or target.updated_ms <= card.updated_ms:
-        return None
-    if type(target.revision) is not int or target.revision <= 0:
-        return None
-    return target
 
 
 def _newer(card: CardInput, quoted: Sequence[tuple[ev.Item, str]]) -> list[tuple[ev.Item, str]]:
@@ -903,22 +868,16 @@ def check_block(
         return Checked(reply.verdict, reason=OUTPUT_INVALID)
     if reply.verdict == "insufficient":
         return Checked(reply.verdict, reason=INSUFFICIENT)
+    if reply.verdict == "superseded":
+        # Deferred in v1: binding a source claim to a target needs the target's own claim text and evidence.
+        return Checked(reply.verdict, reason=SUPERSEDE_DEFERRED)
     if reply.confidence != "high":
         return Checked(reply.verdict, reason=LOW_CONFIDENCE)
     if not _quotes_valid(reply, items):
         return Checked(reply.verdict, reason=QUOTE_INVALID)
     quoted = [(items[q.evidence], q.text) for q in reply.quotes]
     if reply.verdict == "supported":
-        return _supported(block, reply, quoted, propose_confirmations, uncited_refs or {})
-    if reply.verdict == "superseded":
-        if not corroborated(quoted):
-            return Checked(reply.verdict, reason=UNCORROBORATED)
-        if card.claim_blocks != 1:
-            return Checked(reply.verdict, reason=SUPERSEDE_PARTIAL)
-        target = _target(card, reply.superseded_by or "")
-        if target is None:
-            return Checked(reply.verdict, reason=SUPERSEDE_TARGET)
-        return Checked(reply.verdict, op=Op(SUPERSEDE, block.block_id, block.sha256, other_card=target))
+        return _supported(block, reply, quoted, items, propose_confirmations, uncited_refs or {})
     raw = reply.previously if reply.verdict == "history" else reply.replacement
     if raw is None:
         return Checked(reply.verdict, reason=OUTPUT_INVALID)
@@ -929,7 +888,9 @@ def check_block(
         return Checked(reply.verdict, reason=NOVEL_TOKEN)
     if scan_problem(text):
         return Checked(reply.verdict, reason=SCAN_FLAGGED)
-    material = claim_material(text, block.claim)
+    material = commit_swaps(text, block.claim)
+    if material is None:
+        return Checked(reply.verdict, reason=EDIT_OUT_OF_SCOPE)
     if not claim_corroborated(material, quoted):
         return Checked(reply.verdict, reason=UNCORROBORATED)
     if reply.verdict == "changed" and not claim_corroborated(material, _newer(card, quoted)):
@@ -942,16 +903,18 @@ def _supported(
     block: ClaimBlock,
     reply: BlockReply,
     quoted: Sequence[tuple[ev.Item, str]],
+    items: Sequence[ev.Item],
     propose_confirmations: bool,
     uncited_refs: Mapping[str, str],
 ) -> Checked:
     """`supported` opens `append_evidence` only for corroborated, uncited, countable support.
 
-    Confirmations must be on. The claim itself must pass `claim_corroborated`
-    with the block's whole content as its material. A ref is cited only for a
-    countable quoted item that holds some of that material, and only when
-    every source mapped to that ref is such an item, so command output and
-    excerpts never become a citation.
+    Confirmations must be on. Every content word of the claim must pass
+    `claim_corroborated`. Eligibility is per evidence item, not per source:
+    a ref is cited only when every item this call holds whose source maps to
+    that ref is a quoted countable item holding claim material. One receipt
+    yields a fields item and a context-only output item with the same
+    source, so its ref is never cited through the fields item alone.
     """
     if not propose_confirmations:
         return Checked(reply.verdict, reason=VERIFIED)
@@ -959,18 +922,20 @@ def _supported(
     if not claim_corroborated(material, quoted):
         return Checked(reply.verdict, reason=VERIFIED)
     eligible = {
-        item.source
+        id(item)
         for item, quote in quoted
-        if _countable(item)
-        and item.source in uncited_refs
-        and any(_holds_material(item, quote, word) for word in material)
+        if _countable(item) and any(_holds_material(item, quote, word) for word in material)
     }
-    refs = set()
-    for source in eligible:
-        ref = uncited_refs[source]
-        mapped = {other for other, value in uncited_refs.items() if value == ref}
-        if isinstance(ref, str) and ref and mapped <= eligible:
-            refs.add(ref)
+    represented: dict[str, list[ev.Item]] = {}
+    for item in items:
+        ref = uncited_refs.get(item.source)
+        if ref is not None:
+            represented.setdefault(ref, []).append(item)
+    refs = {
+        ref
+        for ref, members in represented.items()
+        if isinstance(ref, str) and ref and all(id(member) in eligible for member in members)
+    }
     if not refs:
         return Checked(reply.verdict, reason=VERIFIED)
     return Checked(reply.verdict, op=Op(APPEND, block.block_id, block.sha256, evidence_ids=tuple(sorted(refs))))

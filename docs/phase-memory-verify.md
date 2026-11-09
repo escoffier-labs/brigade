@@ -239,7 +239,7 @@ calls, so it does not inflate the counts it ranks by.
 | Card | Replica head: card id, scope, revision, trust, scan state and anchored blocks with their ids and hashes | 16 KiB of card text and 16 verified blocks per card |
 | Cited evidence | The card's `evidence` front matter, resolved only inside the roots bound to the card's scope | 8 KiB per item, 32 KiB per card, 8 items per card |
 | Related excerpts | `brigade evidence search`, limited to the archive projects listed for the scope, with a query built from the card title and its rarest block terms | 3 excerpts of at most 4 KiB each |
-| Related cards | A lexical search of the local replica in the same scope | 3 card ids with titles, used only as `supersede_card` targets |
+| Related cards | Not passed in v1 | `superseded` is deferred (check 6), so no related card ids or titles reach the prompt |
 
 ### Per-scope evidence isolation
 
@@ -379,35 +379,37 @@ the reviewer decides whether it is true:
 
 1. Every quote must be an exact substring, 20 to 400 bytes long, of the
    evidence item it names.
-2. Corroboration is about the claim, not only about two sources. For
-   `contradicted`, `changed` and `history`, the claim material is every
-   content word and value that the replacement or `previously` text adds to
-   the block. Both texts are compared after the normalization of rule 9 and
-   the canonical reading of rule 5, ignoring case and a short list of
-   function words. Negations are not on that list. Every material word must
-   appear in quotes from two independently produced items, and one of those
-   quotes must be an authenticated receipt quote that covers a whole factual
-   field holding that exact value. Empty material never corroborates.
+2. v1 corrects commit identifiers only, and corroboration is about the
+   claim. After the normalization of rule 9, a replacement (`contradicted`,
+   `changed`) or `previously` text (`history`) must equal the block except
+   that one or more commit-id tokens are swapped for full commit ids, 40 or
+   64 lowercase hex characters. A commit-id token in the block is a
+   standalone run of 7 to 64 hex characters with a digit. Any other added,
+   removed or reordered word or punctuation, a negation included, abstains
+   with `verify_edit_out_of_scope`. Abbreviated ids are never swapped in.
 
-   The factual fields are an explicit allowlist: `commit` and
-   `baseline_commit`, which name the code state Brigade read from git, and
-   each command's `exit_code`, the observed outcome. Every other
-   authenticated field is excluded. `argv` is text the caller chose, so a
-   command such as `echo "the color is red"` would otherwise authenticate
-   any sentence. `status` and the start and end times read the same on
-   almost every receipt. `run_id`, `manifest_id` and `tree_fingerprint` are
-   Brigade's own bookkeeping and state nothing about a card's subject. Quotes
-   from command output or low-rank excerpts can add context but never hold
-   material. In v1 a correction can therefore change only values a receipt
-   authenticates, such as a commit id. Other corrections abstain with
-   `verify_uncorroborated` until a richer authenticated source exists, and
-   the D7 metrics measure that cost.
+   Each swapped-in id must appear in quotes from two independently produced
+   countable items. One of them must be an authenticated receipt quote that
+   covers a whole `commit` or `baseline_commit` field holding exactly that
+   id. Those two fields are the whole allowlist. They name the code state
+   Brigade read from git, and their values are typed: a full commit id
+   cannot be mistaken for another kind of value. Every other authenticated
+   field is excluded. `argv` is text the caller chose, so `echo "the color
+   is red"` would otherwise authenticate any sentence. `status` and the
+   times read the same on almost every receipt. `run_id`, `manifest_id` and
+   `tree_fingerprint` are Brigade's own bookkeeping. Untyped value fields
+   such as `exit_code` are excluded too, because a bare value cannot say
+   which claim it belongs to. An exit code of 1 would otherwise corroborate
+   any claim that some count is 1. Quotes from command output or low-rank
+   excerpts never hold an id.
 
-   `superseded` has no claim text to bind, so it uses the source-level form:
-   an authenticated quote covering a whole factual field and one
-   independently produced countable item. The residual is that this form
-   cannot show the evidence concerns this card. The same-scope, live, newer
-   target rule (6), the single-block rule and the reviewer bound it.
+   Typed claim predicates are deferred past v1. An example is an exit status
+   bound to the command it names, matched against a claim that names the
+   same command. They need the reply schema to say which predicate a
+   correction asserts, and the client to check that the predicate's subject
+   in the claim is the receipt's subject. Neither exists yet. Until then,
+   every correction that is not a commit-id swap abstains, and the D7
+   metrics measure that cost.
 3. `changed` needs rule 2 to hold using only evidence newer than the head
    revision's log time.
 4. A replacement or `previously` text must differ from the block, stay a
@@ -429,15 +431,15 @@ the reviewer decides whether it is true:
    whole word or a whole code span, and quotes from command output or
    excerpts never count. One planted handoff therefore cannot introduce a
    token. A reply that adds one is rejected with `verify_novel_token`.
-6. `superseded_by` must be one of the related card ids supplied for that call,
-   live, in the same scope and with a newer head revision. `superseded` may
-   produce an op only for a card with exactly one claim block.
-   `supersede_card` retires the whole card and the mirror then drops it, so
-   on a card with several claim blocks it would remove claims the verdict
-   never covered. The related-card input of ids and titles also cannot show
-   that the successor holds those other claims. A `superseded` verdict on a
-   multi-block card therefore abstains with `supersede_partial`, which the run
-   report counts.
+6. `superseded` abstains in v1 with `verify_supersede_deferred` and never
+   opens `supersede_card`. `supersede_card` retires the whole card, and
+   nothing in the reply binds the source card's claim to the target card.
+   Ids and titles of related cards cannot show that the target holds the
+   corrected claim, and evidence quoted for the source does not mention the
+   target. Re-enabling it needs the target card's claim text in the prompt
+   and evidence that binds the source claim to that target. It also needs
+   the single-claim-block rule, because retiring a card with several claim
+   blocks would remove claims the verdict never covered.
 7. The replacement and history text are scanned locally with the hub's bundle
    before submission, and the hub scans them again on `propose`.
 8. Only `high` confidence produces an op. `medium`, `low` and `insufficient`
@@ -445,7 +447,7 @@ the reviewer decides whether it is true:
 9. The confirm seat repeats the call with the evidence order shuffled and a
    fresh nonce, and its reply must pass checks 1 to 8 on its own. The two
    seats must then agree on the resulting operation, not only the verdict:
-   the same op type, the same `other_card` for `supersede_card`, and for
+   the same op type, the same refs for `append_evidence`, and for
    `replace_block` or `add_previously` the same text after normalization.
    Check 4 already holds both texts to one newline-free paragraph.
    Normalization then only strips claim anchors (` ^c-xxxxxx`) and leading
@@ -469,8 +471,8 @@ prove the evidence right, so every op still waits for a reviewer.
 | `contradicted` | `replace_block` with the replacement | The hub appends `previously X, now Y`, so the old wording stays in history. |
 | `changed` | `replace_block` with the replacement | Same op. The verdict is kept in the manifest so reviewers can tell a wrong claim from a stale one. |
 | `history` | `add_previously` with the `previously` text | The claim is current, but cited older evidence records a different earlier value a reader may meet. |
-| `superseded` | `supersede_card` with the related card as `other_card` | Single-claim-block cards only (check 6). The newer card already holds the corrected claim. A multi-block card abstains with `supersede_partial`. |
-| `supported` with uncited support | `append_evidence` | Only with `[verify] propose_confirmations = true`, default false. The whole claim must meet rule 2 as its material. A ref is cited only for an uncited countable item whose quote holds that material, and only when every source mapped to the ref is such an item, so command output and excerpts never become citations. |
+| `superseded` | None in v1 | Abstains with `verify_supersede_deferred` (check 6). |
+| `supported` with uncited support | `append_evidence` | Only with `[verify] propose_confirmations = true`, default false. Every content word of the claim must meet the rule 2 corroboration rule. Eligibility is per evidence item: a ref is cited only when every assembled item whose source maps to it is a quoted countable item holding claim material. A receipt yields a fields item and a context-only output item with one source, so its ref is never cited through the fields item. Command output and excerpts never become citations. |
 | `supported` otherwise | None | Recorded in local state as verified. |
 
 Each proposal names one card. Every correction proposal also carries an
@@ -623,8 +625,8 @@ into another.
 | Wrong correction | High confidence only, exact quotes, two independent items with one authenticated, the same op and text from a separately pinned model, and a reviewer who sees the trust labels. |
 | Planted command, URL, path or host | The novelty check rejects any such token that is not in the block or a quote. Command output cannot satisfy the authenticated-evidence rule. The hub scan rejects blocked content. |
 | Queue flooding | At most 4 new proposals per run and 8 pending for the principal. A rejected correction is not proposed again until the card revision or cited evidence changes. |
-| Chosen supersede target | Targets come only from the client's related-card list for that call, in the same scope, live and newer. |
-| Cross-card or cross-scope leakage | One card per call, evidence only from the scope's own roots and projects, and only the titles of three related cards from the same scope. |
+| Chosen supersede target | `superseded` opens no op in v1 (check 6). |
+| Cross-card or cross-scope leakage | One card per call and evidence only from the scope's own roots and projects. No other card's text or title reaches the prompt in v1. |
 | Flagged input | Cards with non-clean scans are not eligible. Flagged excerpts are dropped before the call and listed in the packet. |
 | Automatic-apply holds | None before review. A manifest's `contrary` stance activates only when a reviewer accepts its proposal (D5). |
 
