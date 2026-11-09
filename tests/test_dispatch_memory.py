@@ -201,7 +201,11 @@ def _hub_ids(target: Path, fake: FakeHub) -> list[str]:
 # Size bounds
 
 
-def test_two_thousand_cards_stay_inside_the_bounds(tmp_path):
+def test_two_thousand_cards_stay_inside_the_bounds(tmp_path, monkeypatch):
+    # This test checks the packet bounds, not the time budget. A slow shared
+    # runner can spend more than 2 s selecting from 2,000 cards, which made
+    # build() answer None. The budget has its own tests below.
+    monkeypatch.setattr(dispatch_memory, "BUDGET_SECONDS", 60.0)
     target = _workspace(tmp_path)
     for index in range(2000):
         _card(
