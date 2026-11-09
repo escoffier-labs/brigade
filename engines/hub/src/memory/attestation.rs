@@ -2,7 +2,7 @@
 use super::{
     Reply,
     auth::Credential,
-    ids,
+    ids, manifest_binding as binding,
     ops::{self, Authority, NewEvent, Prepared},
     proposals::{self, string},
     scan::{Scan, Scanner},
@@ -157,6 +157,15 @@ pub fn attach(
     if ops::head(tx, scope, string(r, "card_id"))?.is_none() {
         return Ok(ops::error(404, "memory_card_not_found", "card not found"));
     }
+    // D5: a verifier's record is a manifest for exactly this card.
+    let manifest = if super::verifier::flagged(tx, p.credential.principal())? {
+        match binding::manifest_card(r, &checked.bytes) {
+            Ok(revision) => Some(revision),
+            Err(reply) => return Ok(reply),
+        }
+    } else {
+        None
+    };
     if !tx
         .query(
             "SELECT 1 FROM memory_evidence WHERE evidence_id=?1",
@@ -189,7 +198,10 @@ pub fn attach(
         ops::t(string(r, "workspace_id")),
     ];
     if count(
-        "SELECT count(*) FROM memory_evidence WHERE scope=?1 AND card_id=?2 AND workspace_id=?3 AND tombstoned=0",
+        &format!(
+            "SELECT count(*) FROM memory_evidence WHERE scope=?1 AND card_id=?2 AND workspace_id=?3 AND tombstoned=0{}",
+            binding::OCCUPIES
+        ),
         &target,
     )? >= WORKSPACE_CAP
     {
@@ -205,7 +217,10 @@ pub fn attach(
         ops::t(p.credential.principal()),
     ];
     if count(
-        "SELECT count(*) FROM memory_evidence WHERE scope=?1 AND card_id=?2 AND principal=?3 AND tombstoned=0",
+        &format!(
+            "SELECT count(*) FROM memory_evidence WHERE scope=?1 AND card_id=?2 AND principal=?3 AND tombstoned=0{}",
+            binding::OCCUPIES
+        ),
         &principal,
     )? >= PRINCIPAL_CAP
     {
@@ -214,6 +229,13 @@ pub fn attach(
             "memory_evidence_principal_cap",
             "principal evidence capacity reached",
         ));
+    }
+    if manifest.is_some() {
+        let size = checked.bytes.len() as i64;
+        let principal = p.credential.principal();
+        if let Some(r) = binding::retained_refusal(tx, principal, scope, size, &binding::BUDGET)? {
+            return Ok(r);
+        }
     }
     let text = std::str::from_utf8(&checked.bytes).unwrap();
     let scan = scanner.scan(text);
@@ -249,7 +271,16 @@ pub fn attach(
             Value::Integer(p.now_ms),
         ],
     )?;
-    let payload = json!({"evidence_id":r["evidence_id"],"workspace_id":r["workspace_id"],"artifact_kind":r["artifact_kind"],"artifact_sha256":r["artifact_sha256"],"observed_at":r["observed_at"],"credential_id":key,"stance":stance,"scan_state":scan.state()});
+    if let Some(revision) = manifest {
+        let size = checked.bytes.len() as i64;
+        let id = string(r, "evidence_id");
+        let principal = p.credential.principal();
+        binding::record(tx, id, principal, scope, revision, size, p.now_ms)?;
+    }
+    let mut payload = json!({"evidence_id":r["evidence_id"],"workspace_id":r["workspace_id"],"artifact_kind":r["artifact_kind"],"artifact_sha256":r["artifact_sha256"],"observed_at":r["observed_at"],"credential_id":key,"stance":stance,"scan_state":scan.state()});
+    if manifest.is_some() {
+        payload["state"] = json!("pending_review");
+    }
     ops::append(
         tx,
         p,
@@ -373,7 +404,7 @@ pub fn resolve<T: ReadTx + ?Sized>(
         let scope = string(card, "scope");
         let card_id = string(card, "card_id");
         // Read metadata only. Contrary facts are card-wide across workspaces.
-        let contrary=tx.query("SELECT evidence_id,principal,credential_id,artifact_sha256,observed_ms,stance,scan_state,credential_class FROM memory_evidence WHERE scope=?1 AND card_id=?2 AND tombstoned=0 AND stance IN ('contrary','negative') LIMIT 65",&[ops::t(scope),ops::t(card_id)])?;
+        let contrary=tx.query(&format!("SELECT evidence_id,principal,credential_id,artifact_sha256,observed_ms,stance,scan_state,credential_class FROM memory_evidence WHERE scope=?1 AND card_id=?2 AND tombstoned=0 AND stance IN ('contrary','negative'){} LIMIT 65", binding::COUNTS),&[ops::t(scope),ops::t(card_id)])?;
         if contrary.len() > 64 {
             proof.complete = false;
         }
@@ -401,7 +432,7 @@ pub fn resolve<T: ReadTx + ?Sized>(
         if refs.is_empty() {
             continue;
         }
-        let rows=tx.query("SELECT evidence_id,principal,credential_id,artifact_sha256,observed_ms,stance,scan_state,credential_class FROM memory_evidence WHERE scope=?1 AND card_id=?2 AND workspace_id=?3 AND tombstoned=0 AND stance='support' LIMIT 65",&[ops::t(scope),ops::t(card_id),ops::t(workspace)])?;
+        let rows=tx.query(&format!("SELECT evidence_id,principal,credential_id,artifact_sha256,observed_ms,stance,scan_state,credential_class FROM memory_evidence WHERE scope=?1 AND card_id=?2 AND workspace_id=?3 AND tombstoned=0 AND stance='support'{} LIMIT 65", binding::COUNTS),&[ops::t(scope),ops::t(card_id),ops::t(workspace)])?;
         if rows.len() > 64 {
             proof.complete = false;
             continue;

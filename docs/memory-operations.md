@@ -2056,3 +2056,68 @@ principals. Any admin `verifier` action, setting or clearing a flag, repairs
 it the same way. Review the replied principals against the policy before
 listing reflect principals again: a restored memory file holds the flags it
 had when it was copied.
+
+## Verifier manifests and the reviewer hash read
+
+Memory schema 12 gives records attached by a verifier principal a
+proposal-bound life cycle (D5 of phase-memory-verify). Records from any other
+principal behave as before. Status advertises the `verifier_manifests`
+capability.
+
+A verifier's `evidence.attach` must carry `artifact_kind`
+`memory-verify-manifest` and bytes that parse as a
+`brigade.memory-verify-manifest.v1` manifest whose `card` names a scope, card
+id and positive base revision. Anything else is refused with
+`422 memory_evidence_invalid`. A manifest whose `card` scope or card id
+differs from the attachment's is refused with
+`422 memory_manifest_card_mismatch`. Nothing is stored on either refusal.
+
+An attached manifest moves through these states once each:
+
+| State | Entered when | Holds automatic apply | Uses a quota slot |
+|---|---|---|---|
+| `pending_review` | Attached, then bound to the first proposal that passes the check below | No | Yes |
+| `active` | The bound proposal is applied | Yes, for `contrary` and `negative` | Yes |
+| `inert` | The bound proposal is rejected, goes stale or is compacted, or no proposal cites the record within 24 hours | No | No |
+
+Records in `pending_review` and `inert` never count as proof. A proposal that
+goes stale because the policy changed can still be decided, so its records
+stay in `pending_review` until a reviewer decides it again or compaction
+settles them. The idle sweep moves records left unbound for 24 hours to
+`inert`, and a record past 24 hours cannot bind even before the sweep reaches
+it. No state moves backward. The `memory_evidence_bindings` table enforces
+that with a trigger.
+
+Freed slots alone would let a verifier attach, let records go inert and
+attach again forever, so retained storage has its own budget. A principal may
+retain 16 MiB and 1,024 verifier records that are pending or inert and not
+yet purged, and a scope may retain 64 MiB and 4,096 across principals. An
+attach over either budget is refused with
+`429 memory_evidence_retained_principal_quota` or
+`429 memory_evidence_retained_scope_quota`. The verify pass opens at most 4
+proposals per run with one manifest each, so 35 days of daily runs retain
+about 140 records, at most 8.75 MiB at the 64 KiB artifact limit. Active
+records are not counted, since a reviewer accepted them and the per-card slot
+caps bound them.
+
+The idle sweep purges a record 35 days after it went inert, at most 8 records
+per sweep transaction. The purge is the tombstone the admin `evidence.purge`
+action writes: the artifact bytes are cleared, the id, hash and other fields
+stay, and an `evidence.purge` event with `"reason": "verifier_retention"`
+records it. The binding row keeps its metadata and gains `purged_ms`. A purged
+record frees its budget, never holds automatic apply and never counts as
+proof. An admin purge also stops a record counting at once.
+
+`propose` checks every verifier record an `append_evidence` op cites. The
+record binds only when the proposal comes from the principal that attached
+it, every op addresses the record's scope and card id at the manifest's base
+revision, any `other_card` is in the same scope, and the record is still
+unbound in `pending_review`. Otherwise the whole proposal is refused with
+`422 memory_manifest_binding_invalid`, with a `reason`, and nothing is stored.
+
+`proposal_show` adds a `verifier_manifests` list with each bound record's
+`evidence_id`, `artifact_kind`, `artifact_sha256`, `stance` and `state` for a
+caller with `review` on every proposal target and on the scope of every bound
+record. The list is present and possibly empty for that caller. For anyone
+else the key is absent, so the reply looks the same whether the proposal binds
+zero, one or several manifests.

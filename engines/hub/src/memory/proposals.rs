@@ -471,9 +471,11 @@ pub(super) fn stale_reason<T: ReadTx + ?Sized>(
     }
     Ok(None)
 }
+/// A compacted audit body keeps no pins, diff or states. Its pins read as an
+/// empty list, so `proposal_show` answers instead of panicking.
 fn metadata(body: &Json) -> Json {
     json!({"proposal_id":body["proposal_id"],"decision_mode":body["decision_mode"],"auto_apply_gates":body["auto_apply_gates"],"rollback_of":body["rollback_of"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"state":body["state"],"decision":body["decision"],"reason":body["reason"],"rules":body["rules"],
-        "cards":cards(body).iter().map(|c|json!({"scope":c["scope"],"card_id":c["card_id"],"base_revision":c["base_revision"],"before_hash":c["before_hash"],"after_hash":c["after_hash"],"before_state":c["before_state"],"after_state":c["after_state"],"pins":c["pins"].as_array().unwrap().iter().map(|p|json!({"block_id":p["block_id"],"hash":p["hash"]})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+        "cards":cards(body).iter().map(|c|json!({"scope":c["scope"],"card_id":c["card_id"],"base_revision":c["base_revision"],"before_hash":c["before_hash"],"after_hash":c["after_hash"],"before_state":c["before_state"],"after_state":c["after_state"],"pins":c["pins"].as_array().map(Vec::as_slice).unwrap_or_default().iter().map(|p|json!({"block_id":p["block_id"],"hash":p["hash"]})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
 }
 fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::Result<()> {
     for card in cards(body) {
@@ -549,6 +551,7 @@ fn update(
             Value::Integer(p.now_ms),
         ],
     )?;
+    super::manifest_binding::settle(tx, body, p.now_ms)?;
     Ok(None)
 }
 fn open(
@@ -878,7 +881,18 @@ pub fn run(
                 return Ok(r);
             }
         }
-        return open(tx, p, body, authority, "proposal.open", scanner);
+        // D5: a cited verifier manifest binds or the proposal is refused whole.
+        let bound =
+            match super::manifest_binding::check(tx, &body, p.credential.principal(), p.now_ms)? {
+                Ok(ids) => ids,
+                Err(r) => return Ok(r),
+            };
+        let opened = open(tx, p, body, authority, "proposal.open", scanner)?;
+        if opened.status == 201 {
+            let id = string(&opened.body, "proposal_id");
+            super::manifest_binding::bind(tx, &bound, id, p.now_ms)?;
+        }
+        return Ok(opened);
     }
     body = match load(tx, string(&cmd.request, "proposal_id"))? {
         Some(b) => b,

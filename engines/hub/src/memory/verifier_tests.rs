@@ -315,7 +315,10 @@ async fn status_reports_verifier_and_reflect_principal_for_the_caller() {
     let dot = status(&h, AGENT_TOKEN).await;
     assert_eq!(dot.status, 200, "{dot:?}");
     assert_eq!(both(&dot), (json!(false), json!(false)));
-    assert_eq!(dot.body["capabilities"], json!(["verifier_floor"]));
+    assert_eq!(
+        dot.body["capabilities"],
+        json!(["verifier_floor", "verifier_manifests"])
+    );
     let node = status(&h, NODE_TOKEN).await;
     assert_eq!(both(&node), (json!(false), json!(true)));
     assert_eq!(flag(&h, "agent:dot", true).await.status, 200);
@@ -602,7 +605,7 @@ fn version_ten_migrates_to_eleven_with_no_principal_flagged() {
     let db = Connection::open(&path).unwrap();
     schema::migrate(&db, 1_800_000_000_000).unwrap();
     db.execute_batch(
-        "DROP TABLE memory_verifiers; DROP TABLE memory_verifier_credentials; PRAGMA user_version=10;",
+        "DROP TABLE memory_evidence_bindings; DROP TABLE memory_verifiers; DROP TABLE memory_verifier_credentials; PRAGMA user_version=10;",
     )
     .unwrap();
     let epoch = schema::log_epoch(&db).unwrap();
@@ -611,7 +614,7 @@ fn version_ten_migrates_to_eleven_with_no_principal_flagged() {
         db.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap()
     };
-    assert_eq!(version(&db), 11);
+    assert_eq!(version(&db), schema::USER_VERSION);
     assert_eq!(schema::log_epoch(&db).unwrap(), epoch);
     let rows: i64 = db
         .query_row(
@@ -622,7 +625,7 @@ fn version_ten_migrates_to_eleven_with_no_principal_flagged() {
         .unwrap();
     assert_eq!(rows, 0);
     schema::migrate(&db, 1_800_000_000_000).unwrap();
-    assert_eq!(version(&db), 11);
+    assert_eq!(version(&db), schema::USER_VERSION);
     drop(db);
     let _ = std::fs::remove_dir_all(dir);
 }

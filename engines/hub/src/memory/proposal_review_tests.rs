@@ -575,3 +575,40 @@ async fn grantless_listing_has_no_hidden_population_oracle() {
     assert_eq!(operator.body["proposals"].as_array().unwrap().len(), 1);
     assert!(operator.body["next_after"].is_string());
 }
+
+#[tokio::test]
+async fn proposal_show_answers_for_a_compacted_proposal_to_reviewers_and_readers() {
+    let h = Hub::with(clean(), None);
+    grant(&h, "fleet", &["read"]).await;
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    let id = &opened.body["proposal_id"];
+    let rejected = h.call(ADMIN_TOKEN, json!({"action":"decide","proposal_id":id,"decision":"reject","base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
+    assert_eq!(rejected.body["state"], "rejected", "{rejected:?}");
+    let db = Connection::open(h.memory()).unwrap();
+    let compacted = hardening::compact(
+        &db,
+        h.now() + 8 * 86_400_000,
+        &hardening::Limits::default(),
+        256,
+    )
+    .unwrap();
+    assert_eq!(compacted, 1);
+    assert_eq!(stored(&h, id)["compacted"], true);
+    // The admin reviews every scope. `agent:dot` holds only `read`.
+    for (token, reviewer) in [(ADMIN_TOKEN, true), (AGENT_TOKEN, false)] {
+        let r = h
+            .call(token, json!({"action":"proposal_show","proposal_id":id}))
+            .await;
+        assert_eq!(r.status, 200, "{r:?}");
+        assert_eq!(r.body["state"], "rejected");
+        assert_eq!(r.body["targets"][0]["card_id"], "a");
+        assert_eq!(r.body["targets"][0]["pins"], json!([]));
+        assert_eq!(
+            r.body.get("verifier_manifests").is_some(),
+            reviewer,
+            "{r:?}"
+        );
+    }
+}

@@ -395,7 +395,9 @@ fn sweep_with(
         // Keep the newest log rows. A matrix further behind reloads in full.
         let log = db.execute("DELETE FROM memory_vector_log WHERE seq IN (SELECT seq FROM memory_vector_log WHERE seq <= (SELECT max(seq) FROM memory_vector_log) - ?1 ORDER BY seq LIMIT ?2)", rusqlite::params![super::dense::LOG_KEEP, (SWEEP_BATCH - n - jobs) as i64])?;
         let compacted=super::hardening::compact(db,now_ms,limits,SWEEP_BATCH-n-jobs-log)?;
-        Ok(n + jobs + log + compacted)
+        let unbound = super::manifest_binding::sweep(db, now_ms, SWEEP_BATCH - n - jobs - log - compacted)?;
+        let expired = super::manifest_binding::expire(db, now_ms, SWEEP_BATCH - n - jobs - log - compacted - unbound)?;
+        Ok(n + jobs + log + compacted + unbound + expired)
     });
     let _ = db.progress_handler(0, None::<fn() -> bool>);
     match deleted {
