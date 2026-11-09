@@ -1701,3 +1701,16 @@ def test_receipt_records_returns_nothing_for_a_malformed_digest_source_without_r
     replies = engine_replies(digest)
     _shown(replies)["metadata"]["digest_source"] = digest_source
     assert engine(replies).receipt_records("example", RUN, RECEIPT) is None
+
+
+def test_an_epoch_completion_time_is_kept_and_never_replaced_by_the_file_mtime(tmp_path):
+    root, parsed = setup(tmp_path)
+    payload, digest = receipt(completed_at="1970-01-01T00:00:00+00:00")
+    write(root, RECEIPT, json.dumps(payload))
+    write(root, HANDOFF, "# Port check\n\nThe listener moved during the November rollout.\n")
+    recent = (NOW_MS - MINUTE) / 1000
+    os.utime(root / RECEIPT, (recent, recent))
+    archive = Archive(records={("example", RUN): [record(digest)]})
+    [result] = run(card(RECEIPT, HANDOFF), parsed, archive, now_ms=NOW_MS)
+    receipt_times = [i.observed_ms for i in result.items if i.kind in (ev.RECEIPT_FIELDS, ev.RECEIPT_OUTPUT)]
+    assert receipt_times and all(moment == 0 for moment in receipt_times)

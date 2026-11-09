@@ -1252,7 +1252,9 @@ def _file_items(
             record = _record(archive, projects, run_id, rel)
             rank = AUTHENTICATED if receipt_authenticated(raw, payload, record) else MEDIUM
             fields, output = split_receipt(payload)
-            observed = fresh(_moment_ms(payload.get("completed_at")), now_ms) or observed
+            completed = fresh(_moment_ms(payload.get("completed_at")), now_ms)
+            # 0 is a valid time (the epoch), so test for None. The file mtime is only a fallback.
+            observed = completed if completed is not None else observed
             keys = lineage(rel, run_id, f"brigade:work-verify:{run_id}")
             fields_text = _rendered(fields)
             items = [
