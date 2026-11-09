@@ -35,7 +35,8 @@ reason code:
    changed token that is not a marked reference with
    `verify_not_commit_reference`, a full-length token or a full id that does
    not start with the old token with `verify_not_abbreviation`, and an
-   abbreviation under 12 hex characters with `verify_abbreviation_too_short`.
+   abbreviation under `MIN_ABBREVIATION` (7) hex characters with
+   `verify_abbreviation_too_short`.
    Every authenticated `commit` and `baseline_commit` value in the assembled
    evidence that starts with the abbreviation must name one full id
    (`verify_commit_ambiguous`), and the caller's `resolve_commit` must
@@ -127,7 +128,7 @@ The resolver MUST:
     there is no default and the resolver returns None. Local branches and
     tags are never allowed refs.
 11. Prove each allowed ref fresh in the current run with
-    `git fetch --porcelain --no-tags --prune <remote>
+    `git fetch --porcelain --verbose --no-tags --prune <remote>
     +refs/heads/<branch>:refs/remotes/<remote>/<branch>`. The explicit refspec
     replaces the configured ones. The porcelain output must list the
     destination ref as updated or up to date, or, before git 2.41, the ref
@@ -156,7 +157,7 @@ freshness or reachability.
 Reachability from an allowed ref after a proven fetch is the identity
 binding. An attacker who grinds a commit with a matching prefix and gets a
 receipt for it still has to land that commit on an allowed ref. This module
-ships no git code.
+ships no git code. `memory_verify_resolver` is the git implementation.
 
 Results carry codes, verdicts, block ids and digests. The only free text that
 leaves this module is the op text, which goes to the hub as the proposal.
@@ -269,9 +270,11 @@ Seat = Callable[[str], "str | None"]
 # Maps a marked abbreviation to the full commit id it names, or None. The module docstring's resolver
 # contract lists the MUST rules a slice 9 implementation follows.
 Resolver = Callable[[str], "str | None"]
-# Shorter marked abbreviations never expand: a 7-character prefix is 28 bits, cheap to grind. Slice 9 lowers
-# this to 7 once its resolver enforces the contract above with tests for every None case (D3).
-MIN_ABBREVIATION = 12
+# Shorter marked abbreviations never expand. Slice 9a lowered this from 12 to 7 once its resolver
+# (`memory_verify_resolver`) enforced the contract above with a test for every None case (D3). A 7-character
+# prefix is cheap to grind, but exact equality with the unique authenticated candidate plus reachability from a
+# freshly fetched allowed ref means a ground commit must also land on that ref.
+MIN_ABBREVIATION = 7
 
 
 class Abstain(Exception):

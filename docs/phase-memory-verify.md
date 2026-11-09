@@ -257,6 +257,9 @@ confirm_seat = "verify-confirm"
 scope = "repo:example"
 path = "/absolute/path/to/workspace"
 archive_projects = ["example"]
+# Optional. Remote-tracking refs the commit resolver may prove reachability
+# from. Without it, the single ref refs/remotes/origin/HEAD names.
+commit_refs = ["refs/remotes/origin/main"]
 ```
 
 The rules:
@@ -400,15 +403,19 @@ the reviewer decides whether it is true:
    token, abstains with `verify_not_abbreviation`. One id is never swapped
    for another, so "not in commit X" cannot be retargeted.
 
-   An abbreviation shorter than 12 hex characters abstains with
-   `verify_abbreviation_too_short`. A 7-character prefix is 28 bits, so an
-   attacker can grind a commit that starts with it, get an authentic receipt
-   for that commit, and point a claim such as "Do not commit X to the
-   release index" at it. The cost is real: in the same card sample, 1 of
-   the 61 accepted marked abbreviations is 12 characters or longer, and 52
-   are exactly 7. Until slice 9 lands its resolver, v1 expands almost none of
-   today's cards. "Commit resolver contract" below says when the minimum
-   drops to 7.
+   An abbreviation shorter than 7 hex characters abstains. A token that
+   short is not a marked reference at all, so it abstains with
+   `verify_edit_out_of_scope`, and `verify_abbreviation_too_short` stays as
+   a second guard. A 7-character prefix is 28 bits, so an attacker can grind
+   a commit that starts with it, get an authentic receipt for that commit,
+   and point a claim such as "Do not commit X to the release index" at it.
+   Prefix length alone is therefore not the defense. The slice 8 minimum was
+   12, and in the same card sample only 1 of the 61 accepted marked
+   abbreviations is 12 characters or longer, while 52 are exactly 7. Slice 9a
+   lowered the minimum to 7 when it shipped the resolver below, because
+   exact equality with the unique authenticated candidate plus reachability
+   from a freshly fetched allowed ref means a ground commit must also land
+   on an allowed ref.
 
    Commit identity is bound in two steps before corroboration. Every
    authenticated `commit` and `baseline_commit` value in the card's assembled
@@ -557,7 +564,7 @@ Slice 9's resolver implementation requires its own security review. This contrac
    exists returns None, and `GIT_GRAFT_FILE` is already removed by rule 2.
 8. Return None for an abbreviation shorter than the contract minimum
    without calling git. git itself refuses `--disambiguate` below 4 hex
-   digits, and the contract minimum (12, then 7) is always above that
+   digits, and the contract minimum (7, lowered from 12 by slice 9a) is always above that
    floor.
 9. Return None for a shallow or incomplete repository.
    `git rev-parse --is-shallow-repository` must print exactly `false`, and
@@ -578,7 +585,10 @@ Slice 9's resolver implementation requires its own security review. This contrac
     `git fetch --porcelain --no-tags --prune <remote> +refs/heads/<branch>:refs/remotes/<remote>/<branch>`.
     A refspec on the command line replaces the configured ones, so no tag or
     other refspec from config applies. The porcelain output must list that
-    destination ref with an updated or up-to-date flag. With a git older than
+    destination ref with an updated or up-to-date flag. git prints
+    up-to-date refs in porcelain output only with `--verbose`, so the fetch
+    passes it too, along with `--no-prune-tags`, because a configured
+    `pruneTags` would otherwise add a tag refspec. With a git older than
     2.41, which has no `--porcelain`, the resolver instead compares the
     destination ref after the fetch with `git ls-remote <remote>
     refs/heads/<branch>` from the same run, and they must match. A failed,
@@ -624,10 +634,11 @@ binding. A receipt proves only that some worktree used a commit. Grinding a
 commit with a matching prefix and getting a receipt for it is not enough
 unless the attacker can also land that commit on an allowed ref.
 
-The minimum abbreviation stays at 12 hex characters until slice 9 ships this
-resolver with a test for every None case above, including an abbreviation
-that is ambiguous only because of an object on another ref and a shallow
-clone. Slice 9 then lowers the minimum to 7. Exact equality with the unique
+The minimum abbreviation stayed at 12 hex characters until slice 9a shipped
+this resolver (`src/brigade/memory_verify_resolver.py`) with a test for every
+None case above, including an abbreviation that is ambiguous only because of
+an object on another ref and a shallow clone. Slice 9a then lowered the
+minimum to 7. Exact equality with the unique
 authenticated candidate plus allowed-ref reachability means a ground commit
 must land on an allowed ref, so prefix length stops being the defense. In
 the card sample, 1 of the 61 accepted marked abbreviations qualifies at 12

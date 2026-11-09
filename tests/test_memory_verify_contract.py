@@ -826,14 +826,45 @@ def test_a_marked_abbreviation_expanded_to_its_authenticated_full_id_opens_repla
 TWIN_SHA = ABBREV + "aaaabbbbccccddddeeeeffff0000"
 
 
-def test_a_short_abbreviation_never_expands():
-    """Daybreak P1-a: a 7-character prefix (28 bits) can be ground to an authentic receipt's commit."""
-    claim = f"Do not commit {HEAD_SHA[:7]} to the release index."
+def test_a_six_character_abbreviation_never_expands():
+    """Below the minimum of 7 a hex token is not a marked reference, so the edit is out of scope."""
+    assert vc.MIN_ABBREVIATION == 7
+    claim = f"Do not commit {HEAD_SHA[:6]} to the release index."
     card = make_card((BLOCK, claim))
-    entry = block_entry(replacement=claim.replace(HEAD_SHA[:7], HEAD_SHA))
-    result, _, confirm = run(card=card, propose=FakeSeat(entry), confirm=FakeSeat(entry))
-    assert result.proposal is None and confirm.prompts == []
-    assert reason(result) == vc.ABBREVIATION_TOO_SHORT
+    entry = block_entry(replacement=claim.replace(HEAD_SHA[:6], HEAD_SHA))
+    calls = []
+    result, _, confirm = run(
+        card=card, propose=FakeSeat(entry), confirm=FakeSeat(entry), resolve_commit=lambda a: calls.append(a)
+    )
+    assert result.proposal is None and confirm.prompts == [] and calls == []
+    assert reason(result) == vc.EDIT_OUT_OF_SCOPE
+
+
+def test_the_too_short_guard_still_refuses_below_the_minimum(monkeypatch):
+    """`verify_abbreviation_too_short` stays as a second guard if the minimum ever rises above the token floor."""
+    monkeypatch.setattr(vc, "MIN_ABBREVIATION", 8)
+    claim = f"Do not commit {HEAD_SHA[:7]} to the release index."
+    expanded, code = vc.commit_expansions(claim.replace(HEAD_SHA[:7], HEAD_SHA), claim)
+    assert expanded == {} and code == vc.ABBREVIATION_TOO_SHORT
+
+
+def test_a_seven_character_abbreviation_expands_with_a_matching_resolver():
+    """Daybreak P1-a moved the defense from prefix length to the resolver's reachability binding (slice 9a)."""
+    short = HEAD_SHA[:7]
+    claim = f"Do not commit {short} to the release index."
+    card = make_card((BLOCK, claim))
+    entry = block_entry(replacement=claim.replace(short, HEAD_SHA))
+    calls = []
+
+    def resolver(abbreviation):
+        calls.append(abbreviation)
+        return HEAD_SHA if abbreviation == short else None
+
+    result, _, _ = run(card=card, propose=FakeSeat(entry), confirm=FakeSeat(entry), resolve_commit=resolver)
+    assert result.proposal is not None, reason(result)
+    (op,) = result.proposal.payload_ops()
+    assert op["type"] == vc.REPLACE and op["text"] == claim.replace(short, HEAD_SHA)
+    assert set(calls) == {short}
 
 
 def twin_assembly(*, quote_twin):
@@ -906,7 +937,7 @@ def test_no_resolver_means_no_expansion():
 
 
 def test_a_unique_twelve_character_abbreviation_with_a_matching_resolver_opens_replace_block():
-    assert len(ABBREV) == vc.MIN_ABBREVIATION and vc.commit_candidates([*standard().items], ABBREV) == {HEAD_SHA}
+    assert len(ABBREV) == 12 >= vc.MIN_ABBREVIATION and vc.commit_candidates([*standard().items], ABBREV) == {HEAD_SHA}
     calls = []
 
     def resolver(abbreviation):
