@@ -40,15 +40,13 @@ CLI reports, never on what the model says:
   list loaded memory files, so the working directory sits under a temporary
   root whose whole ancestor chain is checked free of instruction files
   (`memory_verify_seat_area`).
-- `ollama:<model>` runs `ollama run` against the loopback daemon only:
-  `OLLAMA_HOST` is never passed. Without `--experimental` the command has no
-  agent loop and no tools, and it reads no hooks, instruction files or
-  memory, so it has no tool or recall channel. The daemon's `/api/tags` and
-  `/api/show` must show local weights (a gguf or safetensors model with a
-  manifest digest and size) and no remote host or model, or the seat is
-  refused. The manifest digest is bound into the seat fingerprint.
+- `ollama:<model>` seats are refused in v1 with `verify_seat_not_isolated`.
+  Ollama names a model only by a mutable `model:tag`, and neither `ollama run`
+  nor its API accepts an immutable digest, so an outside `ollama pull`, `cp`
+  or `rm` could retag the model between any check and the launch. Future work:
+  admit Ollama seats once a model can be launched by its manifest digest.
 
-Neither profile runs the seat in an OS or network sandbox. That is a residual
+The profile does not run the seat in an OS or network sandbox. That is a residual
 risk accepted for v1: a CLI that ignored its own switches could still reach
 the network or the filesystem. The switches above, verified per call, are the
 enforcement.
@@ -61,7 +59,12 @@ child execs that open file (`proc.run_held`, Linux `/proc/self/fd`), so
 a rename or replacement after the check cannot put another binary in front
 of the prompt. Platforms without that mechanism (other POSIX systems) refuse
 every seat with `verify_seat_not_isolated`. Windows already refuses the work
-area.
+area. The held descriptor is moved to 3 or above before the launch, so it can
+never be the child's stdin, stdout or stderr. It survives the exec: the seat
+process and its children inherit one read-only descriptor to the seat
+executable. That residual is accepted for v1, because Python has no
+`execveat` and a `preexec_fn` is unsafe with threads, and Claude seats run
+with tools disabled.
 
 `memory verify doctor` probes each seat once. A pass needs a successful call
 whose observable evidence holds (above), an unchanged empty working directory,
@@ -69,7 +72,7 @@ and a reply that starts with the probe nonce and holds neither canary planted
 next to the working directory (a canary file and instruction files). The
 canaries add a negative signal only. A pass is recorded as a fingerprint of
 the seat name, adapter, pinned model, profile argv, executable path, identity
-and sha256, and the Ollama manifest digest. `ready()` refuses a seat whose
+and sha256. `ready()` refuses a seat whose
 current fingerprint has no recorded pass.
 
 Prompts and replies live only in owner-only files in the call's work area,
@@ -88,7 +91,6 @@ import re
 import secrets
 import stat
 import time
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -105,7 +107,7 @@ from . import roster as roster_mod
 PROBES = f"{vstate.ROOT}/probes.json"
 PROBES_SCHEMA = "brigade.memory-verify-probes.v1"
 # Bumped whenever a profile's argv or the probe changes, so every recorded pass expires.
-PROFILE_VERSION = 2
+PROFILE_VERSION = 3
 MAX_PROMPT_BYTES = 64 * 1024
 MAX_EXECUTABLE_BYTES = 1024 * 1024 * 1024
 MIN_TIMEOUT = 1.0
@@ -113,12 +115,9 @@ MAX_TIMEOUT = 600.0
 PROBE_TIMEOUT = 120.0
 DIGEST = re.compile(r"[0-9a-f]{64}")
 CLAUDE_MODEL = re.compile(r"claude-[a-z0-9][a-z0-9.-]{0,95}(?:\[[a-z0-9]{1,16}\])?")
-OLLAMA_MODEL = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}(?::[a-z0-9][a-z0-9._-]{0,63})?")
-# An Ollama tag or name ending in "cloud" runs on the provider's servers. Aliases are caught by /api/show.
+# An Ollama tag or name ending in "cloud" runs on the provider's servers, so its audience is connector.
 OLLAMA_CLOUD = re.compile(r"(?:^|[:/._-])cloud$")
-OLLAMA_URL = "http://127.0.0.1:11434"
-OLLAMA_REPLY_MAX = 4 * 1024 * 1024
-OLLAMA_FORMATS = frozenset({"gguf", "safetensors"})
+OLLAMA_REFUSAL = "ollama tags are mutable, and v1 has no immutable launch"
 # Native executable signatures: ELF, Mach-O (both byte orders, 32 and 64 bit) and universal binaries.
 NATIVE_MAGIC = (
     b"\x7fELF",
@@ -203,30 +202,9 @@ Area = area_mod.Area
 work_area = area_mod.open_area
 
 
-def _ollama_api(path: str, body: dict[str, Any] | None) -> dict[str, Any]:
-    """One request to the loopback Ollama daemon, never through a proxy."""
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    data = None if body is None else json.dumps(body).encode()
-    request = urllib.request.Request(
-        OLLAMA_URL + path,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="GET" if data is None else "POST",
-    )
-    with opener.open(request, timeout=5) as response:
-        raw = response.read(OLLAMA_REPLY_MAX + 1)
-    if len(raw) > OLLAMA_REPLY_MAX:
-        raise ValueError("ollama reply too large")
-    value = json.loads(raw)
-    if not isinstance(value, dict):
-        raise ValueError("ollama reply is not an object")
-    return value
-
-
-# Injectable for tests: scripted fake seats replace the launcher, the executable lookup and the daemon.
+# Injectable for tests: scripted fake seats replace the launcher and the executable lookup.
 LAUNCH: Callable[..., proc.Result] = proc.run_held
 RESOLVE: Callable[[str], proc.ExecutableIdentity] = agents.resolve_agent_executable
-OLLAMA_API: Callable[[str, dict[str, Any] | None], dict[str, Any]] = _ollama_api
 CLOCK: Callable[[], float] = time.time
 
 
@@ -242,7 +220,6 @@ class Seat:
     argv: tuple[str, ...]
     executable: str
     identity: tuple[Any, ...]
-    ollama_digest: str | None
     fingerprint: str
 
 
@@ -318,10 +295,6 @@ def _claude_profile(executable: str, model: str) -> list[str]:
     return agents._with_model("claude", argv, model)
 
 
-def _ollama_profile(executable: str, model: str) -> list[str]:
-    return [executable, "run", "--nowordwrap", "--hidethinking", model]
-
-
 # Flags each profile must carry, and the exact value of each valued flag. The built argv is checked
 # against them, so a profile edit that drops one fails closed instead of handing back tools or recall.
 PROFILES: dict[str, tuple[Callable[[str, str], list[str]], tuple[str, ...], dict[str, str]]] = {
@@ -343,23 +316,25 @@ PROFILES: dict[str, tuple[Callable[[str, str], list[str]], tuple[str, ...], dict
             "--mcp-config": EMPTY_MCP,
         },
     ),
-    "ollama": (_ollama_profile, ("run",), {}),
 }
+# Flags that would reopen a channel the profile closes. None may appear in a built argv.
 FORBIDDEN_FLAGS = frozenset(
-    {"--experimental", "--experimental-websearch", "--experimental-yolo", "--dangerously-skip-permissions"}
+    {
+        "--dangerously-skip-permissions",
+        "--allow-dangerously-skip-permissions",
+        "--add-dir",
+        "--agents",
+        "--plugin-dir",
+        "--plugin-url",
+        "--chrome",
+        "--cloud",
+        "--resume",
+        "--continue",
+    }
 )
 
 
-def _adapter(cli: str) -> str:
-    return "ollama" if cli.startswith("ollama:") else cli
-
-
-def _pinned(cli: str, agent: roster_mod.Agent) -> tuple[str, tuple[str, str]]:
-    if cli.startswith("ollama:"):
-        model = cli[len("ollama:") :].lower()
-        if agent.model is not None or OLLAMA_MODEL.fullmatch(model) is None:
-            raise SeatRefused("verify_seat_unpinned", "verify seats must pin one exact model")
-        return model, ("ollama", model if ":" in model else f"{model}:latest")
+def _pinned(agent: roster_mod.Agent) -> tuple[str, tuple[str, str]]:
     model = (agent.model or "").strip().lower()
     if CLAUDE_MODEL.fullmatch(model) is None:
         raise SeatRefused("verify_seat_unpinned", "verify seats must pin one exact model id, not an alias")
@@ -388,7 +363,8 @@ def open_executable(path: str) -> tuple[int, str, tuple[Any, ...]]:
     because what it runs is another file.
     """
     canonical = os.path.realpath(path)
-    fd = dirfd.open_file_nofollow(Path(canonical), os.O_RDONLY)
+    # Never 0 to 2, so the held file cannot become the child's stdin, stdout or stderr.
+    fd = proc.high_fd(dirfd.open_file_nofollow(Path(canonical), os.O_RDONLY))
     try:
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_EXECUTABLE_BYTES:
@@ -418,42 +394,6 @@ def bind_executable(path: str) -> tuple[str, tuple[Any, ...]]:
     return canonical, identity
 
 
-def ollama_digest(model: str) -> str:
-    """The manifest digest of a locally held model. Remote or unprovable models are refused."""
-    name = model if ":" in model else f"{model}:latest"
-    try:
-        tags = OLLAMA_API("/api/tags", None)
-        show = OLLAMA_API("/api/show", {"model": name})
-    except (OSError, ValueError):
-        raise SeatRefused("verify_seat_unavailable", "the local ollama daemon could not describe the model") from None
-    models = tags.get("models")
-    entries = [
-        entry
-        for entry in (models if isinstance(models, list) else [])
-        if isinstance(entry, dict) and name in (entry.get("name"), entry.get("model"))
-    ]
-    if len(entries) != 1:
-        raise SeatRefused("verify_seat_unavailable", "the model is not held by the local ollama daemon")
-    entry = entries[0]
-    if any(str(key).startswith("remote") and entry[key] for key in entry) or any(
-        str(key).startswith("remote") and show[key] for key in show
-    ):
-        raise SeatRefused("verify_seat_connector", "the model runs on a remote host")
-    digest, size, details = entry.get("digest"), entry.get("size"), show.get("details")
-    if not (
-        isinstance(digest, str)
-        and DIGEST.fullmatch(digest)
-        and type(size) is int
-        and size > 0
-        and isinstance(details, dict)
-        and details.get("format") in OLLAMA_FORMATS
-        and isinstance(show.get("model_info"), dict)
-        and show["model_info"]
-    ):
-        raise SeatRefused("verify_seat_not_isolated", "local weights for the model could not be proven")
-    return digest
-
-
 def resolve(target: Path, name: str, role: str, *, loaded: roster_mod.Roster | None = None) -> Seat:
     """One verify seat from the local roster, refused with a fixed code before any prompt exists."""
     if loaded is None:
@@ -465,7 +405,9 @@ def resolve(target: Path, name: str, role: str, *, loaded: roster_mod.Roster | N
     if reason is not None:
         raise SeatRefused("verify_seat_connector", f"{role}_seat refused: {reason}")
     cli = agent.cli
-    if cli is None or _adapter(cli) not in PROFILES:
+    if cli is not None and cli.startswith("ollama:"):
+        raise SeatRefused("verify_seat_not_isolated", f"{role}_seat refused: {OLLAMA_REFUSAL}")
+    if cli is None or cli not in PROFILES:
         raise SeatRefused("verify_seat_not_isolated", f"{role}_seat has no isolation profile for its adapter")
     if agent.command is not None or agent.env or agent.transport != "direct" or agent.reasoning is not None:
         raise SeatRefused(
@@ -474,22 +416,21 @@ def resolve(target: Path, name: str, role: str, *, loaded: roster_mod.Roster | N
         )
     if not roster_mod.is_cli_allowed(cli, loaded):
         raise SeatRefused("verify_seat_disallowed", f"{role}_seat is not allowed by limits.allow_models")
-    model, key = _pinned(cli, agent)
-    adapter = _adapter(cli)
+    model, key = _pinned(agent)
+    adapter = cli
     if not proc.held_exec_supported():
         raise SeatRefused(
             "verify_seat_not_isolated",
             f"{role}_seat refused: this platform cannot launch a verified executable from a held descriptor",
         )
     canonical, identity = _bind(cli)
-    digest = ollama_digest(model) if adapter == "ollama" else None
     builder, _, _ = PROFILES[adapter]
     argv = builder(canonical, model)
     problem = profile_problem(argv, adapter)
     if problem is not None:
         raise SeatRefused("verify_seat_not_isolated", f"{role}_seat refused: {problem}")
-    fingerprint = io.sha256(io.json_bytes([PROFILE_VERSION, name, cli, model, argv, list(identity), digest]))
-    return Seat(role, name, cli, adapter, model, key, tuple(argv), canonical, identity, digest, fingerprint)
+    fingerprint = io.sha256(io.json_bytes([PROFILE_VERSION, name, cli, model, argv, list(identity)]))
+    return Seat(role, name, cli, adapter, model, key, tuple(argv), canonical, identity, fingerprint)
 
 
 def _open_bound(cli: str) -> tuple[int, str, tuple[Any, ...]]:
@@ -522,11 +463,7 @@ def resolve_pair(target: Path, propose: str | None, confirm: str | None) -> tupl
     loaded = _roster(target)
     first = resolve(target, propose, "propose", loaded=loaded)
     second = resolve(target, confirm, "confirm", loaded=loaded)
-    # Two Ollama names can tag one manifest (`llama3:latest` and `llama3:8b`), so the digest counts too.
-    # Each seat's digest is checked again against its own before every launch (`_rebind`), so a
-    # retag after this point cannot make the two seats one model without refusing the call.
-    same_digest = first.ollama_digest is not None and first.ollama_digest == second.ollama_digest
-    if first.model_key == second.model_key or same_digest:
+    if first.model_key == second.model_key:
         raise SeatRefused("verify_seat_same_model", "propose_seat and confirm_seat must pin different models")
     return first, second
 
@@ -547,15 +484,13 @@ def ready(target: Path, propose: str | None, confirm: str | None) -> tuple[Seat,
 def _rebind(seat: Seat) -> int:
     """A held descriptor of the seat's executable, verified against the resolved seat.
 
-    Refused when the executable or the Ollama model no longer matches. The
-    caller launches through the descriptor and closes it.
+    Refused when the executable no longer matches. The caller launches
+    through the descriptor and closes it.
     """
     fd, canonical, identity = _open_bound(seat.cli)
     try:
         if (canonical, identity) != (seat.executable, seat.identity):
             raise SeatRefused("verify_seat_not_isolated", "the seat CLI changed after the seat was resolved")
-        if seat.adapter == "ollama" and ollama_digest(seat.model) != seat.ollama_digest:
-            raise SeatRefused("verify_seat_not_isolated", "the ollama model changed after the seat was resolved")
     except BaseException:
         os.close(fd)
         raise
@@ -583,17 +518,6 @@ def _error_reply(text: str, errors: set[str]) -> Reply:
     if errors & AUTH_ERRORS or AUTH.search(text):
         return Reply("seat_auth", fatal=True)
     return Reply("seat_failed")
-
-
-def _classify(result: proc.Result) -> Reply:
-    """A plain-text reply (ollama)."""
-    failed = _failed_call(result)
-    if failed is not None:
-        return failed
-    if result.code == 0:
-        return Reply("ok", result.stdout)
-    # Only a failed call is read for quota and login wording: a reply may mention either.
-    return _error_reply(f"{result.stdout[:4096]}\n{result.stderr[:4096]}", set())
 
 
 def _base_model(value: object) -> str | None:
@@ -689,9 +613,7 @@ def call(area: Area, seat: Seat, prompt: str, *, timeout: float) -> Reply:
     if not intact:
         # A tool-free seat cannot write. Something in its working directory means it could.
         return Reply("verify_seat_not_isolated", fatal=True)
-    if seat.adapter == "claude":
-        return _claude_reply(result, seat, area.cwd)
-    return _classify(result)
+    return _claude_reply(result, seat, area.cwd)
 
 
 def probe(target: Path, seat: Seat, *, timeout: float = PROBE_TIMEOUT) -> str | None:

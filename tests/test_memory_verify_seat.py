@@ -1,8 +1,8 @@
 """Verify seats: connector refusal, evidence-based isolation, executable binding and cleanup.
 
 Every seat here is scripted. No test calls a real model: LAUNCH is replaced by
-a fake that writes the CLI's stream-json events, the Ollama daemon is a fake
-reply, and the one real child process is a local script that never answers.
+a fake that writes the CLI's stream-json events, and the real child processes
+are local programs (a script that never answers, and copies of echo).
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -34,7 +35,6 @@ POSIX = pytest.mark.skipif(
 PROMPT_SECRET = "Quillbramble-prompt-7731"
 REPLY_SECRET = "Marrowfen-reply-4402"
 ELF = b"\x7fELF" + b"\x00" * 60
-DIGEST_A = "a" * 64
 BASE_ROSTER = """
 orchestrator = "chef"
 
@@ -70,20 +70,6 @@ def write_care(target: Path, propose: str = "verify-propose", confirm: str = "ve
     path.write_text(f'[verify]\npropose_seat = "{propose}"\nconfirm_seat = "{confirm}"\n', encoding="utf-8")
 
 
-def ollama_daemon(*, remote: bool = False, digest: str = DIGEST_A, fmt: str = "gguf"):
-    def api(path, body):
-        entry = {"name": "llama3:latest", "model": "llama3:latest", "digest": digest, "size": 4_000_000}
-        if path == "/api/tags":
-            return {"models": [entry]}
-        show = {"details": {"format": fmt}, "model_info": {"general.architecture": "llama"}}
-        if remote:
-            show["remote_host"] = "https://ollama.example"
-            show["remote_model"] = "example-cloud"
-        return show
-
-    return api
-
-
 class Workspace(type(Path())):  # type: ignore[misc]
     """The verify folder, carrying the fake executable and the temporary root the test uses."""
 
@@ -108,7 +94,6 @@ def target(tmp_path, monkeypatch):
 
     monkeypatch.setattr(seats, "RESOLVE", resolve)
     monkeypatch.setattr(seats, "LAUNCH", forbidden_launch)
-    monkeypatch.setattr(seats, "OLLAMA_API", ollama_daemon())
     monkeypatch.setattr(area_mod, "TEMP_ROOTS", lambda: [str(temp_root)])
     workspace.executable = executable
     workspace.temp_root = temp_root
@@ -350,65 +335,21 @@ def test_seats_the_profile_cannot_vouch_for_are_not_isolated(target):
 # --- ollama ---------------------------------------------------------------------
 
 
-@POSIX
-def test_local_ollama_binds_the_manifest_digest(target, monkeypatch):
-    seat = seats.resolve(target, "local", "propose")
-    assert seat.model_key == ("ollama", "llama3:latest")
-    assert list(seat.argv[1:]) == ["run", "--nowordwrap", "--hidethinking", "llama3"]
-    assert seat.ollama_digest == DIGEST_A
-    monkeypatch.setattr(seats, "OLLAMA_API", ollama_daemon(digest="b" * 64))
-    assert seats.resolve(target, "local", "propose").fingerprint != seat.fingerprint
-
-
-@POSIX
-def test_an_ollama_alias_of_a_cloud_model_is_a_connector(target, monkeypatch):
-    monkeypatch.setattr(seats, "OLLAMA_API", ollama_daemon(remote=True))
+@pytest.mark.parametrize("name", ["local", "llama-8b"])
+def test_ollama_seats_are_refused_because_their_tags_are_mutable(target, name):
+    write_roster(
+        target,
+        """
+        [agents.llama-8b]
+        cli = "ollama:llama3:8b"
+        role = "reviewer"
+        """,
+    )
     with pytest.raises(seats.SeatRefused) as caught:
-        seats.resolve(target, "local", "propose")
-    assert caught.value.code == "verify_seat_connector"
-
-
-@POSIX
-def test_ollama_without_provable_local_weights_is_refused(target, monkeypatch):
-    monkeypatch.setattr(seats, "OLLAMA_API", ollama_daemon(fmt=""))
-    with pytest.raises(seats.SeatRefused) as caught:
-        seats.resolve(target, "local", "propose")
+        seats.resolve(target, name, "propose")
     assert caught.value.code == "verify_seat_not_isolated"
-
-    def down(path, body):
-        raise OSError("connection refused")
-
-    monkeypatch.setattr(seats, "OLLAMA_API", down)
-    with pytest.raises(seats.SeatRefused) as caught:
-        seats.resolve(target, "local", "propose")
-    assert caught.value.code == "verify_seat_unavailable"
-
-
-@SAFE
-def test_an_ollama_model_swapped_after_resolution_is_refused_before_launch(target, monkeypatch):
-    seat = seats.resolve(target, "local", "propose")
-    monkeypatch.setattr(seats, "OLLAMA_API", ollama_daemon(digest="c" * 64))
-    with seats.work_area(target) as area:
-        with pytest.raises(seats.SeatRefused) as caught:
-            seats.call(area, seat, PROMPT_SECRET, timeout=30)
-    assert caught.value.code == "verify_seat_not_isolated"
-
-
-@SAFE
-@pytest.mark.parametrize(
-    ("stdout", "stderr", "status", "fatal"),
-    [
-        ("", "Error: 429 Too Many Requests", "seat_quota", False),
-        ("", "Error: 401 unauthorized", "seat_auth", True),
-        ("", "something else broke", "seat_failed", False),
-    ],
-)
-def test_plain_text_failures_map_to_fixed_codes(target, monkeypatch, stdout, stderr, status, fatal):
-    seat = seats.resolve(target, "local", "propose")
-    monkeypatch.setattr(seats, "LAUNCH", lambda *a, **k: result(stdout=stdout, stderr=stderr, code=1))
-    with seats.work_area(target) as area:
-        reply = seats.call(area, seat, PROMPT_SECRET, timeout=30)
-    assert (reply.status, reply.fatal) == (status, fatal)
+    assert "ollama tags are mutable" in str(caught.value)
+    assert not (target / area_mod.WORK_ROOT).exists()
 
 
 # --- evidence from the init event -------------------------------------------------
@@ -537,10 +478,9 @@ def test_a_probe_record_binds_the_executable_content(target, monkeypatch, capsys
 
 def test_platforms_without_held_descriptor_exec_refuse_every_seat(target, monkeypatch):
     monkeypatch.setattr(seats.proc, "held_exec_supported", lambda: False)
-    for name in ("verify-propose", "local"):
-        with pytest.raises(seats.SeatRefused) as caught:
-            seats.resolve(target, name, "propose")
-        assert caught.value.code == "verify_seat_not_isolated"
+    with pytest.raises(seats.SeatRefused) as caught:
+        seats.resolve(target, "verify-propose", "propose")
+    assert caught.value.code == "verify_seat_not_isolated"
 
 
 def _native_echo() -> str | None:
@@ -585,6 +525,47 @@ def test_a_binary_swapped_after_verification_never_receives_the_prompt(target, t
     assert seen["result"].code == 0 and "--safe-mode" in seen["result"].stdout
     assert reply.status == "seat_failed"
     assert leftovers(target) == []
+
+
+def test_run_held_refuses_a_descriptor_that_could_be_a_standard_stream():
+    for fd in (0, 1, 2):
+        with pytest.raises(OSError):
+            proc.run_held(["seat"], fd)
+
+
+@SAFE
+def test_a_held_executable_opened_while_stdin_is_closed_still_runs_the_held_image(tmp_path):
+    echo = _native_echo()
+    if echo is None:
+        pytest.skip("needs a native echo binary")
+    held = tmp_path / "held-echo"
+    shutil.copyfile(echo, held)
+    held.chmod(0o700)
+    # A child with fd 0 closed: the open lands in slot 0 unless it is moved up.
+    script = textwrap.dedent(
+        f"""
+        import json, os
+        from brigade import memory_verify_seat as seats, proc
+        os.close(0)
+        fd, canonical, identity = seats.open_executable({str(held)!r})
+        result = proc.run_held([canonical, "held-image-ran"], fd, timeout=30, stdin=b"")
+        os.close(fd)
+        print(json.dumps({{"fd": fd, "code": result.code, "stdout": result.stdout}}))
+        """
+    )
+    source = Path(seats.__file__).resolve().parents[1]
+    done = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": str(source)},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    payload = json.loads(done.stdout)
+    assert payload["fd"] >= 3
+    assert payload["code"] == 0 and "held-image-ran" in payload["stdout"]
 
 
 # --- the work area ------------------------------------------------------------------
@@ -906,51 +887,3 @@ def test_a_failed_probe_is_invalidated_on_disk_before_the_next_seat_runs(target,
         seats.ready(target, "verify-propose", "verify-confirm")
     assert caught.value.code == "verify_seat_not_isolated" and "propose_seat" in str(caught.value)
     assert leftovers(target) == []
-
-
-def ollama_tags(digests: dict[str, str]):
-    """A loopback daemon holding several local models, keyed by name, with the given manifest digests."""
-
-    def api(path, body):
-        if path == "/api/tags":
-            return {
-                "models": [
-                    {"name": name, "model": name, "digest": digest, "size": 4_000_000}
-                    for name, digest in digests.items()
-                ]
-            }
-        return {"details": {"format": "gguf"}, "model_info": {"general.architecture": "llama"}}
-
-    return api
-
-
-OLLAMA_PAIR = """
-[agents.llama-8b]
-cli = "ollama:llama3:8b"
-role = "reviewer"
-"""
-
-
-@POSIX
-def test_two_ollama_names_on_one_manifest_digest_are_one_model(target, monkeypatch):
-    write_roster(target, OLLAMA_PAIR)
-    monkeypatch.setattr(seats, "OLLAMA_API", ollama_tags({"llama3:latest": DIGEST_A, "llama3:8b": DIGEST_A}))
-    with pytest.raises(seats.SeatRefused) as caught:
-        seats.resolve_pair(target, "local", "llama-8b")
-    assert caught.value.code == "verify_seat_same_model"
-    monkeypatch.setattr(seats, "OLLAMA_API", ollama_tags({"llama3:latest": DIGEST_A, "llama3:8b": "d" * 64}))
-    first, second = seats.resolve_pair(target, "local", "llama-8b")
-    assert (first.ollama_digest, second.ollama_digest) == (DIGEST_A, "d" * 64)
-
-
-@SAFE
-def test_an_ollama_retag_onto_the_other_seats_manifest_is_refused_before_launch(target, monkeypatch):
-    write_roster(target, OLLAMA_PAIR)
-    monkeypatch.setattr(seats, "OLLAMA_API", ollama_tags({"llama3:latest": DIGEST_A, "llama3:8b": "d" * 64}))
-    _, second = seats.resolve_pair(target, "local", "llama-8b")
-    monkeypatch.setattr(seats, "OLLAMA_API", ollama_tags({"llama3:latest": DIGEST_A, "llama3:8b": DIGEST_A}))
-    with seats.work_area(target) as area:
-        with pytest.raises(seats.SeatRefused) as caught:
-            seats.call(area, second, PROMPT_SECRET, timeout=30)
-        assert dirfd.child_names(area.files_fd, 8) == []
-    assert caught.value.code == "verify_seat_not_isolated"

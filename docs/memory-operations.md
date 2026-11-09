@@ -2264,15 +2264,15 @@ A seat is refused before any prompt is written when:
 |---|---|
 | `verify_seat_unconfigured` | `[verify]` is missing either seat |
 | `verify_seat_unknown` | The seat is not in the local roster. Seats the hub synthesizes for other fleet nodes are never used in v1 |
-| `verify_seat_connector` | The seat's audience is `connector`: a `codex-cloud:` seat, a hosted chat session (`oracle`), an endpoint outside loopback, or an Ollama model the local daemon reports as remote, aliases included |
-| `verify_seat_not_isolated` | The adapter has no isolation profile, the seat sets a custom `command`, `env`, a non-direct transport or a reasoning pin, its CLI is a script or launcher rather than a native binary, an Ollama model has no provable local weights, or the seat has no passing probe for its current fingerprint |
+| `verify_seat_connector` | The seat's audience is `connector`: a `codex-cloud:` seat, a hosted chat session (`oracle`), an endpoint outside loopback, or an Ollama cloud model |
+| `verify_seat_not_isolated` | The adapter has no isolation profile, the seat sets a custom `command`, `env`, a non-direct transport or a reasoning pin, its CLI is a script or launcher rather than a native binary, it is an `ollama:` seat (below), or it has no passing probe for its current fingerprint |
 | `verify_seat_disallowed` | `limits.allow_models` does not allow the seat |
 | `verify_seat_unpinned` | The seat pins no exact model id. A Claude seat needs a full `claude-...` id, not an alias such as `opus` |
-| `verify_seat_same_model` | Both seats resolve to one model, ignoring a bracketed context suffix and Ollama's default `:latest` tag |
-| `verify_seat_unavailable` | The seat's CLI is not installed or cannot be opened and hashed, or the local Ollama daemon cannot describe the model |
+| `verify_seat_same_model` | Both seats resolve to one model, ignoring a bracketed context suffix such as `[1m]` |
+| `verify_seat_unavailable` | The seat's CLI is not installed or cannot be opened and hashed |
 
 Isolation is enforced by the CLI's own switches and checked on what the CLI
-reports, never on what the model says. Two adapters have profiles in v1:
+reports, never on what the model says. One adapter has a profile in v1:
 
 - `claude` runs with `--safe-mode` (no hooks, so no memory recall, and no
   CLAUDE.md discovery, plugins, skills or MCP servers), `--setting-sources ""`
@@ -2288,15 +2288,15 @@ reports, never on what the model says. Two adapters have profiles in v1:
   event later in the stream refuses the call too. The init event does not list
   loaded instruction files, so the working directory is placed where no
   parent holds any (below).
-- `ollama:<model>` runs `ollama run` without its experimental agent loop, so
-  it has no tools, and it reads no hooks, instruction files or memory, so it
-  has no recall channel. `OLLAMA_HOST` is never passed, so it reaches only
-  the loopback daemon. The daemon's `/api/tags` and `/api/show` must show the
-  model's weights held locally (a gguf or safetensors model with a manifest
-  digest and size) and no remote host or remote model. The manifest digest is
-  part of the seat fingerprint and is checked again before every call.
 
-Neither profile runs the seat in an OS or network sandbox. That residual risk
+`ollama:<model>` seats are refused with `verify_seat_not_isolated` ("ollama
+tags are mutable, and v1 has no immutable launch"). Ollama names a model only
+by `model:tag`, and neither `ollama run` nor its API accepts a manifest
+digest, so an outside `ollama pull`, `cp` or `rm` could retag the model
+between any check and the launch. Admitting Ollama seats once a model can be
+launched by its digest is future work.
+
+The profile does not run the seat in an OS or network sandbox. That residual risk
 is accepted for v1: a CLI that ignored its own switches could still reach the
 network or the filesystem. The switches, verified on every call, are the
 enforcement.
@@ -2310,7 +2310,11 @@ process exists, and the seat execs that open file through `/proc/self/fd`
 rather than its path, so a file renamed or replaced after the check never
 receives the prompt. This needs Linux. On other POSIX systems every seat is
 refused with `verify_seat_not_isolated`, and Windows already refuses the work
-area.
+area. The descriptor is moved to 3 or above before the launch, so it is never
+the seat's stdin, stdout or stderr. It does survive the exec: the seat
+process and its children inherit one read-only descriptor to the seat
+executable. That residual is accepted for v1, because Python has no way to
+close it after the exec, and Claude seats run with tools disabled.
 
 `doctor` probes each seat once. A seat passes when the call succeeds with the
 evidence above, its working directory stays empty, and its reply starts with
@@ -2319,9 +2323,8 @@ and CLAUDE.md and AGENTS.md files with a second canary next to the working
 directory, and a reply holding either canary fails. A pass is recorded in
 `.brigade/memory/verify/probes.json` (owner-only) as a fingerprint of the seat
 name, adapter, pinned model, profile argv, the executable's path, identity and
-sha256, and the Ollama manifest digest. The pass refuses a seat whose current
-fingerprint has no recorded pass, so editing the seat, upgrading its CLI or
-pulling a new model needs another `doctor` run. The probe makes one model
+sha256. The pass refuses a seat whose current fingerprint has no recorded
+pass, so editing the seat or upgrading its CLI needs another `doctor` run. The probe makes one model
 call per seat with the fixed probe prompt and no card text.
 
 Each call gets two owner-only directories with one random name:

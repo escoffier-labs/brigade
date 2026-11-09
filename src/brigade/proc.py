@@ -1451,7 +1451,16 @@ def run_held(
     nothing else (``run`` itself passes no descriptors), and execs it through
     :func:`held_exec_path`. Timeout, tree termination and output bounds match
     :func:`run`. Platforms without the mechanism raise ``OSError``.
+
+    ``held_fd`` must be 3 or above (see :func:`high_fd`), so it is never the
+    child's stdin, stdout or stderr. Residual: the descriptor survives the
+    exec, so the launched program and its children inherit one read-only
+    descriptor to the executable. Python has no ``execveat``, and a
+    ``preexec_fn`` that closed it after exec is impossible and unsafe with
+    threads before it, so this is accepted.
     """
+    if held_fd < HELD_FD_MIN:
+        raise OSError("a held executable descriptor must be 3 or above")
     return _launch_and_collect(
         args,
         subprocess.PIPE,
@@ -1463,6 +1472,26 @@ def run_held(
         executable=held_exec_path(held_fd),
         pass_fds=(held_fd,),
     )
+
+
+HELD_FD_MIN = 3
+
+
+def high_fd(fd: int) -> int:
+    """The same open file at descriptor 3 or above, closing ``fd`` when it had to move.
+
+    A descriptor opened while 0, 1 or 2 was closed lands in that slot, and a
+    child would then receive it as a standard stream. ``F_DUPFD_CLOEXEC``
+    copies it to the lowest free slot from 3 up, close-on-exec.
+    """
+    if fd >= HELD_FD_MIN:
+        return fd
+    import fcntl
+
+    try:
+        return fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, HELD_FD_MIN)
+    finally:
+        os.close(fd)
 
 
 def held_exec_supported() -> bool:
