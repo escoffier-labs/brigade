@@ -1,21 +1,21 @@
 # CI timing: ci.yml
 
-- Window (run created_at, UTC): 2026-11-08T22:00:00Z to 2026-11-09T12:00:00Z
-- Runs: 122 completed
+- Window (run created_at, UTC, half-open): 2026-11-08T22:00:00Z up to but not including 2026-11-09T12:00:00Z
+- Runs: 123 completed
 - Label: strict baseline
-- Generated: 2026-11-09T15:48:29Z
+- Generated: 2026-11-09T16:24:38Z
 
 ## merge_group
 
 Conclusions: failure 9, success 20
-Runs with a re-run attempt: 0
+Runs with a re-run (metrics are first attempts): 0
 
 | runs | n | wall min median | p75 | p90 | max | runner min median | p90 | Windows runner min median | p90 |
 |---|---|---|---|---|---|---|---|---|---|
 | successful | 20 | 14.9 | 15.2 | 15.4 | 15.8 | 123.6 | 130.3 | 12.2 | 13.5 |
 | all | 29 | 14.9 | 15.2 | 15.4 | 15.8 | 126.7 | 133.9 | 12.4 | 13.6 |
 
-Job families in successful runs, top 12 by p90 seconds:
+Job families in successful runs, top 12 by p90 seconds (over job instances, not per run):
 
 | family | runner | ran in | median s | p90 s | max s |
 |---|---|---|---|---|---|
@@ -34,42 +34,42 @@ Job families in successful runs, top 12 by p90 seconds:
 
 ## pull_request
 
-Conclusions: cancelled 43, failure 7, success 24
-Runs with a re-run attempt: 5
+Conclusions: cancelled 43, failure 12, success 19
+Runs with a re-run (metrics are first attempts): 5
 
 | runs | n | wall min median | p75 | p90 | max | runner min median | p90 | Windows runner min median | p90 |
 |---|---|---|---|---|---|---|---|---|---|
-| successful | 24 | 14.6 | 15.4 | 26.5 | 33.9 | 76.1 | 84.7 | 9.8 | 32.3 |
-| all | 74 | 10.1 | 14.4 | 16.2 | 33.9 | 55.6 | 78.9 | 10.8 | 22.3 |
+| successful | 19 | 14.7 | 17.2 | 26.6 | 33.9 | 75.7 | 83.8 | 9.8 | 31.9 |
+| all | 74 | 10.4 | 14.6 | 18.0 | 33.9 | 55.1 | 78.9 | 10.8 | 22.3 |
 
-Job families in successful runs, top 12 by p90 seconds:
+Job families in successful runs, top 12 by p90 seconds (over job instances, not per run):
 
 | family | runner | ran in | median s | p90 s | max s |
 |---|---|---|---|---|---|
-| windows-affected-tests | windows-latest | 24/24 | 196.0 | 1560.6 | 1986 |
-| hub-rust / hub (Rust 1.85.0) | ubuntu-latest | 12/24 | 867.0 | 895.8 | 896 |
-| hub-rust / hub (Rust stable) | ubuntu-latest | 12/24 | 752.0 | 837.6 | 845 |
-| test shard 3.12 | ubuntu-latest | 24/24 | 473.5 | 590.5 | 620 |
-| windows-native-acceptance | windows-latest | 24/24 | 307.5 | 338.1 | 368 |
-| engine-rename-installer | ubuntu-latest | 24/24 | 97.0 | 108.1 | 138 |
-| content-guard | ubuntu-latest | 24/24 | 66.5 | 81.0 | 82 |
-| mesh core without extra | ubuntu-latest | 3/24 | 59.0 | 79.0 | 84 |
-| hub-rust / hub (linux-arm64) | ubuntu-24.04-arm | 12/24 | 62.0 | 66.8 | 68 |
-| mesh (windows-latest, floor) | windows-latest | 3/24 | 63.0 | 65.4 | 66 |
-| mesh (ubuntu-latest, newest) | ubuntu-latest | 3/24 | 61.0 | 63.4 | 64 |
-| mesh (windows-latest, newest) | windows-latest | 3/24 | 50.0 | 62.0 | 65 |
+| windows-affected-tests | windows-latest | 19/19 | 143.0 | 1566.8 | 1986 |
+| hub-rust / hub (Rust 1.85.0) | ubuntu-latest | 9/19 | 856.0 | 894.4 | 896 |
+| hub-rust / hub (Rust stable) | ubuntu-latest | 9/19 | 761.0 | 836.2 | 845 |
+| test shard 3.12 | ubuntu-latest | 19/19 | 472.5 | 580.5 | 617 |
+| windows-native-acceptance | windows-latest | 19/19 | 307.0 | 335.8 | 355 |
+| engine-rename-installer | ubuntu-latest | 19/19 | 95.0 | 107.4 | 138 |
+| content-guard | ubuntu-latest | 19/19 | 68.0 | 81.0 | 82 |
+| mesh core without extra | ubuntu-latest | 3/19 | 59.0 | 79.0 | 84 |
+| hub-rust / hub (linux-arm64) | ubuntu-24.04-arm | 9/19 | 62.0 | 67.2 | 68 |
+| mesh (windows-latest, floor) | windows-latest | 3/19 | 63.0 | 65.4 | 66 |
+| mesh (ubuntu-latest, newest) | ubuntu-latest | 3/19 | 61.0 | 63.4 | 64 |
+| mesh (windows-latest, newest) | windows-latest | 3/19 | 50.0 | 62.0 | 65 |
 
 ## push
 
-Conclusions: cancelled 19
-Runs with a re-run attempt: 0
+Conclusions: cancelled 20
+Runs with a re-run (metrics are first attempts): 0
 
 | runs | n | wall min median | p75 | p90 | max | runner min median | p90 | Windows runner min median | p90 |
 |---|---|---|---|---|---|---|---|---|---|
 | successful | 0 | - | - | - | - | - | - | - | - |
-| all | 19 | 9.0 | 25.5 | 110.5 | 135.7 | 91.3 | 199.3 | 7.7 | 8.9 |
+| all | 20 | 11.0 | 32.3 | 134.3 | 509.5 | 92.6 | 222.6 | 7.7 | 8.9 |
 
-Job families in successful runs, top 0 by p90 seconds:
+Job families in successful runs, top 0 by p90 seconds (over job instances, not per run):
 
 | family | runner | ran in | median s | p90 s | max s |
 |---|---|---|---|---|---|
