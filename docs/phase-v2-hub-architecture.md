@@ -2857,8 +2857,9 @@ S25 as built (dispatch packets, `src/brigade/dispatch_memory.py`):
   feeds compute no references. A workspace file must not choose where a
   credential is read from, so the only source is `[grokbot_memory] token_file`
   in the user-level `~/.brigade/fleet.toml` (#2416), read with the private-file
-  checks of the other message credentials. `brigade run cloud grokbot doctor`
-  reports it as `memory-refs`. They are left out of the
+  checks of the other message credentials, only under an absolute Brigade
+  home and only after the hub's `identity` answer names `agent:grokbot-memory`.
+  `brigade run cloud grokbot doctor` reports it as `memory-refs`. They are left out of the
   task hash, so a changed card never breaks an idempotent re-apply. The hub
   enqueue payload is unchanged: metadata only, with no task text and no
   references, because a hub column would need a lockstep schema change with

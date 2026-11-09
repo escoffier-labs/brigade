@@ -14,7 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, dispatch_memory, fleet_client, grokbot_memory_credential as cred, grokbot_ops
+from brigade import cli, dispatch_memory, fleet_client, fleet_client_messages, grokbot_ops
+from brigade.fleet_client_message_credentials import FleetMessageHubError
+from brigade import grokbot_memory_credential as cred
 from tests import test_dispatch_memory as dm
 from tests.test_dispatch_memory import _isolated, _workspace, token_hub  # noqa: F401 - fixtures
 from tests.test_grokbot_jobs import _spec
@@ -22,8 +24,10 @@ from tests.test_grokbot_jobs import _spec
 HUB_URL = "https://hub.invalid"
 BOT = "fixture-grokbot-memory-principal-token-0001"
 NODE = "fixture-host-node-credential-token-000000002"
+OTHER_AGENT = "fixture-other-agent-principal-token-00000004"
 POSIX = sys.platform != "win32"
 posix_only = pytest.mark.skipif(not POSIX, reason="POSIX owner and mode bits")
+REAL_ON_WINDOWS = cred._on_windows
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +40,33 @@ def _clean_env(monkeypatch):
     )
     for name in names:
         monkeypatch.delenv(name, raising=False)
+
+
+class IdentityHub:
+    """The hub's message ``identity`` action: each token authenticates as its own principal."""
+
+    def __init__(self) -> None:
+        self.principals = {BOT: cred.PRINCIPAL, OTHER_AGENT: "agent:duet"}
+        self.calls: list[tuple[str, str]] = []
+        self.down = False
+
+    def __call__(self, hub, token, body, timeout=None):
+        self.calls.append((hub, body["action"]))
+        if self.down:
+            raise FleetMessageHubError("fleet hub request failed", code="hub_unavailable")
+        principal = self.principals.get(token)
+        if body["action"] != "identity" or principal is None:
+            return 401, {"error": "unauthorized"}
+        return 200, {"principal": principal}
+
+
+@pytest.fixture(autouse=True)
+def identity_hub(monkeypatch) -> IdentityHub:
+    fake = IdentityHub()
+    monkeypatch.setattr(fleet_client_messages, "_request", fake)
+    # Platform-neutral logic runs everywhere. The Windows gate has its own test.
+    monkeypatch.setattr(cred, "_on_windows", lambda: False)
+    return fake
 
 
 def _home() -> Path:
@@ -297,3 +328,105 @@ def test_fleet_settings_for_other_principals_are_unchanged(tmp_path, monkeypatch
     _ok(messages.message_settings(None) == message_before, "message settings changed")
     _ok(messages.message_settings(None)[1] == NODE, "message operations left the node credential")
     assert cred.resolve().on
+
+
+# Round 1 review: relative home, principal identity, Windows
+
+
+def test_a_relative_brigade_home_reads_and_sends_nothing(tmp_path, monkeypatch, token_hub, identity_hub):  # noqa: F811
+    target = _workspace(tmp_path)
+    token = _token_file(tmp_path)
+    hostile = target / ".brigade"
+    hostile.mkdir(exist_ok=True)
+    (hostile / "fleet.toml").write_text(
+        f'[fleet]\nhub_url = "https://attacker.invalid"\n\n[grokbot_memory]\ntoken_file = {json.dumps(str(token))}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(target)
+    monkeypatch.setenv("BRIGADE_HOME", ".brigade")
+
+    assert cred.config_path() is None
+    _assert_off(cred.OFF_RELATIVE_HOME, refused=True)
+    assert cred.doctor_check() == {"check": "memory-refs", "status": "fail", "detail": cred.OFF_RELATIVE_HOME}
+    assert dispatch_memory.job_refs(target, "hub deploy") == []
+    assert dispatch_memory.with_job_refs(target, {**_spec(), "instructions": "hub deploy"}).get("memory_refs") is None
+    _ok(not identity_hub.calls, "an identity request was sent")
+    _ok(not token_hub.tokens, "a memory hub request was sent")
+
+
+def test_an_absolute_brigade_home_is_still_read(tmp_path, monkeypatch):
+    home = tmp_path / "abs-home"
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
+    _fleet_toml(str(_token_file(tmp_path)))
+
+    assert cred.config_path() == home / "fleet.toml"
+    assert cred.resolve().on
+
+
+def test_another_agents_token_with_memory_grants_leaves_refs_off(tmp_path, token_hub, identity_hub, monkeypatch):  # noqa: F811
+    # The other agent's token would read cards on the memory hub.
+    monkeypatch.setattr(dm, "BOT_TOKEN", OTHER_AGENT)
+    _fleet_toml(str(_token_file(tmp_path, OTHER_AGENT)))
+
+    _assert_off(cred.OFF_IDENTITY, refused=True)
+    assert dispatch_memory.job_refs(_workspace(tmp_path), "hub deploy") == []
+    assert identity_hub.calls and {action for _hub, action in identity_hub.calls} == {"identity"}
+    _ok(not token_hub.tokens, "a memory search ran under another agent's token")
+
+
+@pytest.mark.parametrize("failure", ["down", "unknown-token"])
+def test_an_identity_that_cannot_be_established_leaves_refs_off(tmp_path, identity_hub, failure):
+    if failure == "down":
+        identity_hub.down = True
+    else:
+        identity_hub.principals.clear()
+    _fleet_toml(str(_token_file(tmp_path)))
+
+    _assert_off(cred.OFF_IDENTITY, refused=True)
+
+
+def test_the_identity_request_goes_to_the_user_level_hub(tmp_path, identity_hub):
+    _fleet_toml(str(_token_file(tmp_path)))
+
+    assert cred.resolve().on
+    assert identity_hub.calls == [(HUB_URL, "identity")]
+
+
+def test_windows_keeps_refs_off_without_opening_the_token_file(tmp_path, monkeypatch, identity_hub):
+    import builtins
+    import io
+
+    from brigade import fleet_client_message_credentials as messages
+
+    token = _token_file(tmp_path)
+    _fleet_toml(str(token))
+    monkeypatch.setattr(cred, "_on_windows", lambda: True)
+    opened: list[str] = []
+
+    def refuse_reader(*_args, **_kwargs):
+        opened.append("reader")
+        raise AssertionError("the token reader ran")
+
+    def watch(real):
+        def wrapper(file, *args, **kwargs):
+            if os.fspath(file) == str(token):
+                opened.append("open")
+            return real(file, *args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(messages, "read_message_token_file", refuse_reader)
+    monkeypatch.setattr(os, "open", watch(os.open))
+    monkeypatch.setattr(io, "open", watch(io.open))
+    monkeypatch.setattr(builtins, "open", watch(builtins.open))
+
+    status = cred.resolve()
+    check = cred.doctor_check()
+
+    assert status.reason == cred.OFF_WINDOWS and not status.on and status.refused
+    assert check == {"check": "memory-refs", "status": "fail", "detail": cred.OFF_WINDOWS}
+    assert opened == [] and identity_hub.calls == []
+
+
+def test_the_platform_gate_matches_the_real_platform():
+    assert REAL_ON_WINDOWS() is (sys.platform == "win32")
