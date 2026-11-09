@@ -37,6 +37,7 @@ PAGE_PAUSE_SECONDS = 1.05
 MONOTONIC = time.monotonic
 SLEEP = time.sleep
 SCORE_DIGITS = 4
+SCOPE_LIMIT = f"verify per-scope bound exceeded ({MAX_SCOPE_CARDS} cards)"
 HUB_CODE = re.compile(r"[a-z][a-z0-9_]{0,127}")
 
 
@@ -100,8 +101,25 @@ def _hub(target: Path) -> tuple[hubc.HubSettings, hubc.MemoryHubClient]:
     return settings, hubc.client_for(settings)
 
 
-def _heads(target: Path, settings: hubc.HubSettings, client: hubc.MemoryHubClient, scopes: list[str]) -> list[dict]:
-    """Pull the replica, as reflect does, and return the live heads of the bound scopes."""
+def _binding(identity: str, principal: object, log_epoch: object) -> str:
+    """What verify history belongs to: the hub, the principal it names for this credential, and its log epoch.
+
+    The same parts reflect binds its schedule to. Another hub, principal or a
+    restored hub with a new epoch never inherits history keyed by the same
+    scope and card id.
+    """
+    return io.sha256(io.json_bytes([identity, principal, log_epoch]))
+
+
+def _heads(
+    target: Path, settings: hubc.HubSettings, client: hubc.MemoryHubClient, scopes: list[str]
+) -> tuple[list[dict], str]:
+    """Pull only the bound scopes, as reflect does with --scope, and return their live heads and the binding.
+
+    Unbound read scopes are left out of the pull, so a large unbound scope
+    never counts against verification. Cards already replicated in them are
+    dropped from this dedicated folder's replica by the narrowed pull.
+    """
     try:
         with store.locked(target):
             _check_replica_files(target, scope=None, dry_run=True)
@@ -109,25 +127,34 @@ def _heads(target: Path, settings: hubc.HubSettings, client: hubc.MemoryHubClien
         raise VerifyRunError(
             "verify_replica_limit", "verify replica exceeds its bound. Snapshot was not parsed"
         ) from None
-    settings = replace(settings, replica_max_bytes=min(settings.replica_max_bytes, MAX_REPLICA_BYTES))
-    report = sync.pull(target, client, settings)
-    if report.get("bytes", 0) > settings.replica_max_bytes or report["warnings"] or report.get("seq") is None:
+    narrowed = replace(
+        settings, read_scopes=tuple(scopes), replica_max_bytes=min(settings.replica_max_bytes, MAX_REPLICA_BYTES)
+    )
+    report = sync.pull(target, client, narrowed)
+    warnings = list(report["warnings"])
+    if report.get("dropped"):
+        # The narrowed pull drops unbound scopes on purpose. Any other warning still fails the run.
+        dropped = f"dropped {report['dropped']} replicated card(s) in scopes this credential can no longer read"
+        warnings = [warning for warning in warnings if warning != dropped]
+    if report.get("bytes", 0) > narrowed.replica_max_bytes or warnings or report.get("seq") is None:
         raise VerifyRunError("verify_replica_incomplete", "verify requires a complete fresh replica")
     with store.locked(target):
         replica = store.replica(target)
         if not replica.belongs_to(client.identity, report["principal"]) or replica.meta.get("seq") != report["seq"]:
             raise VerifyRunError("verify_replica_changed", "verify replica changed during the run")
+        if not set(scopes) <= set(replica.meta.get("read_scopes") or []):
+            raise VerifyRunError("verify_scope_unreadable", "verify cannot read every bound scope")
         heads = list(replica.readable_heads(scopes).values())
     if any("scan_state" not in head for head in heads):
-        sync.refresh_scan_metadata(target, client, settings)
+        sync.refresh_scan_metadata(target, client, narrowed)
         with store.locked(target):
             heads = list(store.replica(target).readable_heads(scopes).values())
     counts: dict[str, int] = {}
     for head in heads:
         counts[head["scope"]] = counts.get(head["scope"], 0) + 1
         if counts[head["scope"]] > MAX_SCOPE_CARDS:
-            raise VerifyRunError("verify_scope_limit", f"verify per-scope bound exceeded ({MAX_SCOPE_CARDS} cards)")
-    return heads
+            raise VerifyRunError("verify_scope_limit", SCOPE_LIMIT)
+    return heads, _binding(client.identity, report["principal"], report["log_epoch"])
 
 
 class Pacer:
@@ -192,8 +219,21 @@ def run_payload(*, target: Path, dry_run: bool, no_model: bool, list_ids: bool, 
             skipped["scope_unreadable"] = unread
         if unbound:
             skipped["scope_unbound"] = unbound
-        with store.limits.bounded(max_cards=MAX_SCOPE_CARDS, max_bytes=MAX_REPLICA_BYTES + REPLICA_FILE_SLACK):
-            heads = _heads(target, hub_settings, client, scopes)
+        # The replica may hold every read scope a folder can configure until the narrowed
+        # pull trims it, so the card bound is what an ordinary pull allows: the per-scope
+        # bound for each of up to READ_SCOPES_MAX scopes. The byte ceiling is what binds
+        # memory, and _heads checks the per-scope bound on bound scopes only.
+        max_cards = MAX_SCOPE_CARDS * hubc.READ_SCOPES_MAX
+        try:
+            with store.limits.bounded(max_cards=max_cards, max_bytes=MAX_REPLICA_BYTES + REPLICA_FILE_SLACK):
+                heads, binding = _heads(target, hub_settings, client, scopes)
+        except store.limits.ReplicaLimitError as exc:
+            if exc.kind == "cards":
+                raise VerifyRunError("verify_scope_limit", SCOPE_LIMIT) from None
+            raise
+        # History from another hub, principal or log epoch is ignored for selection.
+        same_binding = state.get("binding") == binding
+        ignored = 0 if same_binding else sum(len(t.get("cards", {})) for t in state["scopes"].values())
         valid = []
         for head in heads:
             if hubc.valid_card_id(head.get("card_id")) and hubc.valid_scope(head.get("scope")):
@@ -225,7 +265,8 @@ def run_payload(*, target: Path, dry_run: bool, no_model: bool, list_ids: bool, 
             sources[scope] = "fresh"
             reads.update(rows)
             per_scope_since[scope] = since
-            entries.update(state["scopes"].get(scope, {}).get("cards", {}))
+            if same_binding:
+                entries.update(state["scopes"].get(scope, {}).get("cards", {}))
         selection = pick.select(
             [head for head in valid if head["scope"] not in unavailable],
             entries=entries,
@@ -270,6 +311,8 @@ def run_payload(*, target: Path, dry_run: bool, no_model: bool, list_ids: bool, 
             },
             "state": vstate.summary(target),
         }
+        if not same_binding and (ignored or "binding" in state):
+            payload["notes"] = [{"code": "verify_binding_changed", "ignored_card_entries": ignored}]
         if list_ids:
             payload["never_read"]["card_ids"] = listed
         return payload
@@ -321,6 +364,8 @@ def dispatch(args: argparse.Namespace) -> int:
             print(f"selected {item['scope']} {item['card_id']} {item['score']:.{SCORE_DIGITS}f} {item['lane']}")
         for reason, count in payload.get("skipped", {}).items():
             print(f"skipped {reason} {count}")
+        for note in payload.get("notes", []):
+            print(f"note {note['code']} {note['ignored_card_entries']}")
         if "never_read" in payload:
             count = payload["never_read"]["count"]
             print(f"never_read {'unknown' if count is None else count}")

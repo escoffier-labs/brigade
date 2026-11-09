@@ -13,6 +13,7 @@ import pytest
 from brigade import cli
 from brigade import memory_fairness as fairness
 from brigade import memory_hub_client as hubc
+from brigade import memory_hub_store as store
 from brigade import memory_proposal_io as io
 from brigade import memory_reflect_hub as reflect_hub
 from brigade import memory_verify_cmd as verify_cmd
@@ -651,3 +652,115 @@ def test_revalidate_refuses_a_root_that_lost_its_identity(tmp_path, monkeypatch)
     [bound] = parse(workspace("repo:one", tmp_path / "root", create=False)).workspaces
     zero_inode(monkeypatch, tmp_path / "root")
     assert config.revalidate(bound) == config.ROOT_CHANGED
+
+
+# -- state binding --------------------------------------------------------------
+
+
+def replica_binding(target):
+    meta = store.replica(target).meta
+    return verify_cmd._binding(meta["hub"], meta["principal"], meta["log_epoch"])
+
+
+def history(target, binding):
+    """Card `a` was verified yesterday, which makes it ineligible under a matching binding."""
+    state = vstate.fresh()
+    if binding is not None:
+        state["binding"] = binding
+    yesterday = int(time.time() * 1000) // DAY - 1
+    entry = {"seen": 1, "proposed": 0, "verified": yesterday, "revision": 1, "verdict": "supported"}
+    state["scopes"] = {"fleet": {"cards": {key("a", "fleet"): entry}}}
+    vstate.save(target, state)
+
+
+def test_a_matching_binding_keeps_card_history(verify_setup, capsys):
+    target, _ = verify_setup
+    assert verify(target, capsys, "run", "--dry-run", "--no-model")[0] == 0
+    history(target, replica_binding(target))
+    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
+    assert code == 0 and [item["card_id"] for item in report["selected"]] == ["b"]
+    assert report["skipped"]["recently_verified"] == 1
+    assert "notes" not in report
+
+
+@pytest.mark.parametrize("other", ["hub", "principal", "epoch", "unbound"])
+def test_history_from_another_hub_principal_or_epoch_is_ignored(verify_setup, capsys, other):
+    target, _ = verify_setup
+    assert verify(target, capsys, "run", "--dry-run", "--no-model")[0] == 0
+    meta = store.replica(target).meta
+    parts = {"hub": meta["hub"], "principal": meta["principal"], "epoch": meta["log_epoch"]}
+    if other == "hub":
+        parts["hub"] = "http://192.0.2.20:3774"
+    elif other == "principal":
+        parts["principal"] = "node-2"
+    elif other == "epoch":
+        parts["epoch"] = hubc.event_id()
+    binding = None if other == "unbound" else verify_cmd._binding(parts["hub"], parts["principal"], parts["epoch"])
+    history(target, binding)
+    before = (target / vstate.STATE).read_bytes()
+    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
+    assert code == 0
+    # The card verified yesterday under another binding is selectable here.
+    assert {item["card_id"] for item in report["selected"]} == {"a", "b"}
+    assert "recently_verified" not in report["skipped"]
+    assert report["notes"] == [{"code": "verify_binding_changed", "ignored_card_entries": 1}]
+    # A dry run still writes nothing.
+    assert (target / vstate.STATE).read_bytes() == before
+
+
+# -- per-scope replica bound ----------------------------------------------------
+
+
+def put_cards(hub, scope, count, prefix="c"):
+    for index in range(count):
+        text = f"---\nevidence: []\n---\nClaim {scope} {index}. ^c-{index:06x}\n"
+        hub._commit("card.put", scope, f"{prefix}{index}", text, "live", hubc.event_id())
+
+
+def bind(target, tmp_path, read_scopes, bound):
+    entries = ""
+    for scope in bound:
+        root = tmp_path / scope.replace(":", "-")
+        root.mkdir()
+        entries += f'[[verify.workspace]]\nscope="{scope}"\npath="{root}"\narchive_projects=[]\n'
+    (target / ".brigade/memory-care.toml").write_text(
+        f'[hub]\nmode="read"\nread_scopes={json.dumps(read_scopes)}\n[verify]\ncards_per_run=64\n{entries}'
+    )
+
+
+@pytest.fixture
+def small_scopes(setup, clock, monkeypatch):
+    monkeypatch.setattr(verify_cmd, "MAX_SCOPE_CARDS", 3)
+    return setup
+
+
+def test_bound_scopes_under_the_per_scope_bound_pass_together(small_scopes, tmp_path, capsys):
+    target, hub, _ = small_scopes
+    put_cards(hub, "repo:one", 3)
+    put_cards(hub, "repo:two", 3)
+    bind(target, tmp_path, ["repo:one", "repo:two"], ["repo:one", "repo:two"])
+    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
+    assert code == 0 and report["cards_seen"] == 6 and len(report["selected"]) == 6
+
+
+def test_a_huge_unbound_scope_never_fails_a_small_bound_one(small_scopes, tmp_path, capsys):
+    target, hub, _ = small_scopes
+    put_cards(hub, "repo:big", 12)
+    put_cards(hub, "repo:small", 1)
+    # Replicate the big scope first, as an ordinary pull in this folder would.
+    (target / ".brigade/memory-care.toml").write_text('[hub]\nmode="read"\nread_scopes=["repo:big","repo:small"]\n')
+    assert cli.main(["memory", "hub", "pull", "--target", str(target), "--json"]) == 0
+    capsys.readouterr()
+    bind(target, tmp_path, ["repo:big", "repo:small"], ["repo:small"])
+    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
+    assert code == 0, report
+    assert [(item["scope"], item["card_id"]) for item in report["selected"]] == [("repo:small", "c0")]
+    assert report["skipped"]["scope_unbound"] == 1
+
+
+def test_one_bound_scope_over_the_per_scope_bound_fails(small_scopes, tmp_path, capsys):
+    target, hub, _ = small_scopes
+    put_cards(hub, "repo:one", 4)
+    bind(target, tmp_path, ["repo:one"], ["repo:one"])
+    code, report = verify(target, capsys, "run", "--dry-run", "--no-model")
+    assert code == 1 and report == {"status": "failed", "code": "verify_scope_limit", "reason": verify_cmd.SCOPE_LIMIT}

@@ -2194,7 +2194,23 @@ selected card ids, their scores and lanes, and counted skip reasons. It calls
 no seat, submits and attaches nothing, and writes no state, so the pause
 counter does not move. Output never holds card text, titles or evidence.
 `--list-ids` adds the never-read card ids, still without titles or text.
-Failures print a fixed code and reason only. The hub allows one `read_stats`
+Failures print a fixed code and reason only.
+
+The run pulls only the bound scopes into the folder's replica, so cards
+already replicated in an unbound read scope are dropped from it, and an
+unbound scope never counts against verification. Each bound scope may hold
+50,000 cards, checked per scope (`verify_scope_limit`), and the replica as a
+whole is bounded by its 64 MiB byte ceiling.
+
+Card history in the state file (verification day, revision, verdict, pending
+proposal, evidence digest and counts) belongs to the hub, the principal the
+hub names for the credential, and the hub's log epoch. When any of them
+differs from the binding stored with the state, as after pointing the folder
+at another hub or restoring the hub with a new epoch, the run ignores all
+card history for selection and reports a `verify_binding_changed` note with
+the number of entries ignored. A dry run still writes nothing.
+
+The hub allows one `read_stats`
 request per second per principal, so the run keeps one pacing clock across
 every page of every scope, and the first page of the next scope waits like
 any other page.
