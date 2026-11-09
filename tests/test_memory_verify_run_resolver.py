@@ -9,6 +9,7 @@ returns a resolver that never starts a process.
 
 from __future__ import annotations
 
+import contextlib
 import time
 
 import pytest
@@ -86,6 +87,51 @@ def test_every_card_of_one_run_shares_one_resolver_run(verify_hub, capsys, commi
     run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=later)
     assert len(commits.runs) == 2 and commits.runs[1] is not commits.runs[0]
     assert [run.closed for run in commits.runs] == [1, 1]
+
+
+def test_the_state_lock_is_held_before_the_run_opens_and_after_it_closes(verify_hub, capsys, commits, monkeypatch):
+    target, _, _, _ = verify_hub
+    events: list[str] = []
+    real_locked = vstate.locked
+
+    @contextlib.contextmanager
+    def recording_locked(where, **kwargs):
+        with real_locked(where, **kwargs):
+            events.append("lock")
+            yield
+            events.append("unlock")
+
+    def make_run():
+        events.append("open")
+        run = commits.make_run()
+        real_close = run.close
+
+        def close():
+            events.append("close")
+            real_close()
+
+        run.close = close
+        return run
+
+    monkeypatch.setattr(vstate, "locked", recording_locked)
+    monkeypatch.setattr(vr, "Run", make_run)
+    status, report = verify(target, capsys)
+    assert status == 0 and report["status"] == "completed"
+    assert events == ["lock", "open", "close", "unlock"]
+
+
+def test_a_run_refused_the_state_lock_opens_no_resolver_run(verify_hub, commits, monkeypatch):
+    target, _, _, _ = verify_hub
+
+    @contextlib.contextmanager
+    def held_elsewhere(where, **kwargs):
+        raise vstate.VerifyStateError(vstate.LOCK_ERROR)
+        yield  # pragma: no cover - makes this a generator context manager
+
+    monkeypatch.setattr(vstate, "locked", held_elsewhere)
+    with pytest.raises(vstate.VerifyStateError):
+        run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False)
+    assert commits.runs == [] and commits.calls == []
 
 
 def test_the_run_is_closed_once_when_a_card_raises_mid_run(verify_hub, commits, monkeypatch):

@@ -1255,7 +1255,9 @@ def run_payload(
     if not cmd.configured(target).enabled:
         raise VerifyRunError(DISABLED, DISABLED_REASON)
     now = int(time.time() * 1000) if now_ms is None else now_ms
-    with _commit_run(dry_run=dry_run) as commits, vstate.locked(target):
+    # The lock comes first, so a run refused by another holder never opens a resolver `Run`, and the
+    # `Run` is closed before the lock is released.
+    with vstate.locked(target), _commit_run(dry_run=dry_run) as commits:
         state = vstate.load(target)
         schedule = {key: state[key] for key in ("consecutive_failures", "paused")}
         if scheduled and not dry_run and state["paused"]:
