@@ -441,6 +441,16 @@ Changes:
 - The `memory-verify` care entry in `src/brigade/care_schedules.py` and
   `src/brigade/care_launchers.py`, at 11:00 by default, refusing admin
   credentials and the reflect job's folder.
+- The git commit resolver passed to `verify_card(resolve_commit=...)`,
+  following the "Commit resolver contract" in D3 rule by rule, with every git
+  call going through one hardened wrapper, and the `commit_refs` key on
+  `[[verify.workspace]]` with its default of the remote-tracking default
+  branch. Slice 9's resolver implementation requires its own security review. This contract is the minimum it must meet.
+- After the resolver tests below pass, lower `MIN_ABBREVIATION` in
+  `src/brigade/memory_verify_contract.py` from 12 to 7. Exact equality with
+  the unique authenticated candidate plus allowed-ref reachability means a
+  ground commit must land on an allowed ref. In the card sample, 1 of the 61
+  accepted marked abbreviations qualifies at 12 and 52 at 7.
 
 Tests (`tests/test_memory_verify_run.py`, with a `FakeHub` subclass in the style
 of `tests/test_memory_reflect_hub.py`):
@@ -451,6 +461,25 @@ of `tests/test_memory_reflect_hub.py`):
 - A real run submits pinned proposals with one card each and a manifest
   `append_evidence` op.
 - Three failures pause scheduled calls, and a manual success clears them.
+- The commit resolver returns None for each case in D3's contract: an
+  abbreviation under the minimum, a repository outside the bound workspace, a
+  shallow clone, a partial clone, a missing or unset allowed ref, a failed
+  fetch, a fetch from an earlier run, no matching object, an abbreviation
+  ambiguous only because of an object on another ref, a match that is not a
+  commit, a commit not reachable from any allowed ref, and any git error or
+  timeout. A branch or tag named like the abbreviation never answers. It
+  returns the full id for a unique, fresh, reachable commit.
+- Each hostile setting from D3's contract, planted in a scratch repository,
+  returns None with no side effect: an include, an fsmonitor command, a hooks
+  path and a `reference-transaction` hook that would write a marker file, a
+  credential helper, an alias, an `insteadOf` rewrite, `ext::` and `file://`
+  remote URLs, an alternate refs command, a remote helper, a grafts file, a
+  tag refspec in config, an inherited `GIT_DIR`, local `http.sslVerify=false`,
+  a per-URL `http.<url>.proxy`, `remote.<name>.proxy`, `http.extraHeader`,
+  `http.followRedirects=true`, an inherited `https_proxy` pointing at a local
+  listener that records any connection, and a fetch whose porcelain output
+  does not prove the destination ref. A planted replacement ref leaves the
+  result unchanged.
 - Principal and scope quota replies stop proposing without a failure.
 - A duplicate pending reply records the existing id.
 - The pending ceiling stops new proposals.
