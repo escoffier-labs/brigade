@@ -28,7 +28,7 @@ def _selector_module():
 
 
 ci_hub_select = _selector_module()
-HUB_PATTERNS = ci_hub_select.parse_patterns(PATHS.read_text())
+HUB_PATTERNS = ci_hub_select.parse_patterns(PATHS.read_text(encoding="utf-8"))
 
 
 # --- Path list and matcher -------------------------------------------------
@@ -97,7 +97,7 @@ def test_path_list_parser_refuses_every_other_shape(text):
 
 def _hub_workflow_steps():
     """Yield (working directory, run text) for every step in hub.yml."""
-    text = (ROOT / ".github/workflows/hub.yml").read_text()
+    text = (ROOT / ".github/workflows/hub.yml").read_text(encoding="utf-8")
     jobs = text.split("jobs:\n", 1)[1]
     for job in re.split(r"^  (?=[a-z0-9-]+:$)", jobs, flags=re.MULTILINE)[1:]:
         default = re.search(r"^      run:\n        working-directory: (\S+)$", job, re.MULTILINE)
@@ -146,7 +146,7 @@ def _direct_brigade_modules(path: Path) -> set[str]:
         parts = module.split(".")
         modules.update(".".join(parts[:index]) for index in range(1, len(parts) + 1))
 
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -163,7 +163,7 @@ def _direct_brigade_modules(path: Path) -> set[str]:
             # importlib.import_module("brigade.x") and `python -m brigade`.
             if re.fullmatch(r"brigade(\.[a-z_]+)+", node.value) and _brigade_module_file(node.value):
                 add(node.value)
-            elif node.value == "brigade" and "-m" in path.read_text():
+            elif node.value == "brigade" and "-m" in path.read_text(encoding="utf-8"):
                 add("brigade.__main__")
                 add("brigade.cli")
     return modules
@@ -238,8 +238,8 @@ def queue(tmp_path):
     main = _commit(
         seed,
         ("README.md", "base\n"),
-        ("scripts/ci_hub_select.py", SELECTOR.read_text()),
-        ("scripts/ci_hub_paths.yml", PATHS.read_text()),
+        ("scripts/ci_hub_select.py", SELECTOR.read_text(encoding="utf-8")),
+        ("scripts/ci_hub_paths.yml", PATHS.read_text(encoding="utf-8")),
         ("engines/hub/src/lib.rs", "pub fn hub() {}\n"),
         ("src/brigade/other.py", "VALUE = 1\n"),
         message="base",
@@ -273,7 +273,7 @@ def _select(queue, head, base, *, base_ref="refs/heads/main", origin=None, **env
     output.write_text("")
     runner_temp = queue.tmp / "runner-temp"
     runner_temp.mkdir(exist_ok=True)
-    step = _workflow_step_section((ROOT / ".github/workflows/ci.yml").read_text(), "changes", STEP)
+    step = _workflow_step_section((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"), "changes", STEP)
     script = textwrap.dedent(step.split("        run: |\n", 1)[1])
     result = subprocess.run(
         _workflow_bash_command(script),
@@ -291,7 +291,7 @@ def _select(queue, head, base, *, base_ref="refs/heads/main", origin=None, **env
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
     assert set(values) == {"hub", "reason"}
     return values
 
@@ -393,7 +393,7 @@ def test_an_unusable_trusted_selector_or_path_list_selects_the_hub_suite(queue, 
         _replace_main(queue, remove=["scripts/ci_hub_paths.yml"])
     elif problem == "paths-oversize":
         padding = "#" * 79 + "\n"
-        _replace_main(queue, ("scripts/ci_hub_paths.yml", padding * 205 + PATHS.read_text()))
+        _replace_main(queue, ("scripts/ci_hub_paths.yml", padding * 205 + PATHS.read_text(encoding="utf-8")))
     elif problem == "paths-empty":
         _replace_main(queue, ("scripts/ci_hub_paths.yml", ""))
     else:
@@ -424,8 +424,8 @@ def test_a_main_with_no_merge_base_selects_the_hub_suite(queue):
     _run(queue.seed, "switch", "-q", "--orphan", "unrelated")
     _commit(
         queue.seed,
-        ("scripts/ci_hub_select.py", SELECTOR.read_text()),
-        ("scripts/ci_hub_paths.yml", PATHS.read_text()),
+        ("scripts/ci_hub_select.py", SELECTOR.read_text(encoding="utf-8")),
+        ("scripts/ci_hub_paths.yml", PATHS.read_text(encoding="utf-8")),
         message="unrelated main",
     )
     _run(queue.seed, "push", "-qf", "origin", "HEAD:refs/heads/main")

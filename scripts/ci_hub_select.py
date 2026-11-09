@@ -173,7 +173,7 @@ def changed_paths(start: str, head: str) -> set[str]:
 def select() -> tuple[bool, str]:
     if os.environ["GITHUB_EVENT_NAME"] != "merge_group":
         raise Fail("unsupported-event")
-    group = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())["merge_group"]
+    group = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))["merge_group"]
     if group["base_ref"] != TARGET_REF:
         raise Fail("unexpected-target-branch")
     head = commit_sha(os.environ["GITHUB_SHA"])
@@ -218,7 +218,7 @@ def main() -> None:
         hub, reason = True, "trusted-hub-selection-failed"
     output = f"hub={str(hub).lower()}\nreason={reason}\n"
     print(output, end="")
-    with Path(os.environ["GITHUB_OUTPUT"]).open("a") as stream:
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
         stream.write(output)
 
 
