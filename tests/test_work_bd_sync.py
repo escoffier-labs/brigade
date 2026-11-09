@@ -1,5 +1,6 @@
 """The bd mirror reads bd only, keys tasks by bd id, and lets readiness honor bd edges."""
 
+import hashlib
 import json
 import os
 import subprocess
@@ -84,6 +85,8 @@ def test_bd_1_3_4_mixed_link_types(tmp_path, capsys):
     items[0]["dependencies"] = [d for d in items[0]["dependencies"] if d["type"] != "tracks"]
     rc, changed = sync(tmp_path, capsys, write_rows(tmp_path / "x.jsonl", items), version)
     assert changed["links_changed"] == [ids["Release gate"]]
+    expected_digest = hashlib.sha256(json.dumps(items[0]).encode()).hexdigest()
+    assert mirror(tmp_path)[ids["Release gate"]]["metadata"]["bd"]["row_digest"] == expected_digest
     assert "links" not in mirror(tmp_path)[ids["Release gate"]]["metadata"]["bd"]
 
 

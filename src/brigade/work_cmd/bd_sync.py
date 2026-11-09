@@ -308,8 +308,7 @@ def _apply_mirror(
                 task_bd["links"] = spec["links"]
             else:
                 task_bd.pop("links", None)
-            mirrors[bd_id]["updated_at"] = now
-            touched.add(bd_id)
+            stamp(mirrors[bd_id], spec, bd_id)
             if bd_id not in created_ids:
                 summary["links_changed"].append(bd_id)
 
