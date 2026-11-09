@@ -34,14 +34,18 @@ Each item's ``read`` field says how to open the card body through an interface
 that exists for its source: ``memory_card(name, scope)`` and ``brigade memory
 hub card <card_id> --scope <scope>`` for a hub card, the path in the memory
 workspace for a local card. A connector cannot open a local card, so a
-connector packet and a Grok Bot reference never name one.
+connector packet and a Grok Bot reference never name one. Grok Bot references
+are searched with the Grok Bot memory principal's own credential, so they name
+only cards that principal may read. Without that credential there are none.
 
 Every packet is built for the connector audience for now. ``build`` keeps an
 ``audience`` parameter so a local audience can be wired later, but no caller
 passes ``local`` and nothing here reads a host marker.
 
 At most one recall runs per process. A dispatch that arrives while one is in
-flight gets no block at once. The 2 s budget bounds all of ``build`` and is
+flight gets no block at once. A worker that runs past ten budgets is abandoned
+and one new worker may start, with at most three abandoned workers alive. Past
+that, recall stays off for the process and one fixed line is logged. The 2 s budget bounds all of ``build`` and is
 passed into every hub call as its timeout, so a worker ends on its own, and a
 worker that finishes late never publishes anything.
 
@@ -52,9 +56,12 @@ the sentence that memory text is data, not instructions.
 from __future__ import annotations
 
 import collections
+import dataclasses
 import json
+import logging
 import math
 import re
+import shlex
 import threading
 import time
 from dataclasses import dataclass
@@ -104,9 +111,18 @@ _TWINS_MAX = 16
 # Local-audience block text -> the same packet rendered for a connector audience.
 _TWINS: collections.OrderedDict[str, str] = collections.OrderedDict()
 _TWINS_LOCK = threading.Lock()
-# One recall in flight per process: a hung hub costs one thread, never a pile of them.
-_RECALL_SLOT = threading.BoundedSemaphore(1)
 THREAD_NAME = "brigade-dispatch-memory"
+# One recall in flight per process. A holder that runs past STALE_FACTOR budgets
+# (a DNS stall or a transport that ignores its timeout) is abandoned and one new
+# worker may start. At most ABANDONED_MAX abandoned workers may be alive at once.
+# Past that, recall stays off for the life of the process.
+STALE_FACTOR = 10
+ABANDONED_MAX = 3
+RECALL_OFF_LINE = "dispatch memory recall is off for this process: recall workers stopped returning"
+_SLOT_LOCK = threading.Lock()
+_SLOT: dict[str, Any] = {"holder": None, "since": 0.0, "abandoned": 0, "off": False}
+_slot_clock = time.monotonic
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -337,7 +353,8 @@ def read_instruction(card: Card) -> dict[str, Any]:
 def _read_line(read: dict[str, Any]) -> str:
     if "path" in read:
         return f"file {read['path']} in the memory workspace"
-    return f"memory_card(name={read['name']}, scope={read['scope']}) or {' '.join(read['cli'])}"
+    # A valid hub scope may hold shell metacharacters, so the command is quoted for a POSIX shell.
+    return f"memory_card(name={read['name']}, scope={read['scope']}) or {shlex.join(read['cli'])}"
 
 
 def select(
@@ -458,6 +475,35 @@ def packet(entries: list[Entry], audience: str) -> Packet | None:
     return Packet(audience=audience, block=block, context=context)
 
 
+def _take_slot() -> dict[str, bool] | None:
+    """The recall slot for one worker, or None while another holds it or recall is off."""
+    now = _slot_clock()
+    with _SLOT_LOCK:
+        if _SLOT["off"]:
+            return None
+        holder = _SLOT["holder"]
+        if holder is not None:
+            if now - _SLOT["since"] < STALE_FACTOR * BUDGET_SECONDS:
+                return None
+            if _SLOT["abandoned"] >= ABANDONED_MAX:
+                _SLOT["off"] = True
+                _LOG.warning(RECALL_OFF_LINE)
+                return None
+            holder["stale"] = True
+            _SLOT["abandoned"] += 1
+        token = {"stale": False}
+        _SLOT["holder"], _SLOT["since"] = token, now
+        return token
+
+
+def _free_slot(token: dict[str, bool]) -> None:
+    with _SLOT_LOCK:
+        if _SLOT["holder"] is token:
+            _SLOT["holder"] = None
+        elif token["stale"]:
+            _SLOT["abandoned"] -= 1  # an abandoned worker came back: one fewer alive
+
+
 def build(target: Path | None, query: str, *, audience: str | None = None, **options: Any) -> Packet | None:
     """One packet for ``query`` within ``BUDGET_SECONDS`` in total, or None. Never raises.
 
@@ -470,7 +516,8 @@ def build(target: Path | None, query: str, *, audience: str | None = None, **opt
         return None
     chosen = audience if audience in AUDIENCES else DEFAULT_AUDIENCE
     deadline = time.monotonic() + BUDGET_SECONDS
-    if not _RECALL_SLOT.acquire(blocking=False):
+    slot = _take_slot()
+    if slot is None:
         return None
     lock = threading.Lock()
     state: dict[str, Any] = {"abandoned": False, "result": None}
@@ -489,13 +536,13 @@ def build(target: Path | None, query: str, *, audience: str | None = None, **opt
         except Exception:  # noqa: BLE001 - memory never blocks dispatch
             pass
         finally:
-            _RECALL_SLOT.release()
+            _free_slot(slot)
 
     try:
         thread = threading.Thread(target=run, name=THREAD_NAME, daemon=True)
         thread.start()
     except Exception:  # noqa: BLE001 - a thread that cannot start adds no block
-        _RECALL_SLOT.release()
+        _free_slot(slot)
         return None
     thread.join(max(0.0, deadline - time.monotonic()))
     with lock:
@@ -542,14 +589,51 @@ def for_remote(prompt: str) -> str:
     return _BLOCK_RE.sub(swap, prompt)
 
 
-def job_refs(target: Path | None, query: str, **options: Any) -> list[dict[str, str]]:
+Authority = Callable[[], "tuple[str, str] | None"]
+
+
+def grokbot_memory_authority() -> tuple[str, str] | None:
+    """The hub URL and token of the Grok Bot memory principal (``agent:grokbot-memory``), or None.
+
+    None for now: the grokbot-memory unit finds its token through the workspace
+    pack instance file (``.brigade/grokbot/packs/grokbot-memory.json``), and a
+    workspace file must not choose where a credential is read from. Until a
+    user-level location exists, the feeds compute no references.
+    """
+    return None
+
+
+def job_refs(
+    target: Path | None, query: str, *, authority: Authority | None = None, **options: Any
+) -> list[dict[str, str]]:
     """Card references for a Grok Bot job: scope, card id and short hash only, at most five.
 
-    The Grok Bot is always a connector audience, so every reference is a hub card
-    its memory profile (``memory_search``, ``memory_card``) can retrieve. A local
-    card or a withheld card yields no reference.
+    The search runs as the Grok Bot memory principal, with ``query_source:
+    "push"``, so the hub applies that principal's own grants: every reference is
+    a hub card its memory profile (``memory_search``, ``memory_card``) can
+    retrieve. Without that credential there are no references. A local card or
+    a withheld card yields none either.
     """
-    built = build(target, query, audience=CONNECTOR, **options)
+    from . import memory_hub_client as hubc
+    from .memory_hooks import resolve_memory_recall_target
+
+    bot = (authority or grokbot_memory_authority)()
+    if bot is None or target is None:
+        return []
+    try:
+        root, status = resolve_memory_recall_target(Path(target))
+        if status != "active" or root is None:
+            return []
+        workspace = options.pop("settings", None) or hubc.load_settings(root)
+    except Exception:  # noqa: BLE001 - references never block an enqueue
+        return []
+    if not workspace.enabled:
+        return []
+    hub_url, token = bot
+    # The workspace's read scopes bound the search. The bot's own grants, which the hub
+    # applies to this credential, decide which of them it may see.
+    settings = dataclasses.replace(workspace, hub_url=hub_url, token=token)
+    built = build(target, query, audience=CONNECTOR, settings=settings, **options)
     if built is None:
         return []
     refs = [

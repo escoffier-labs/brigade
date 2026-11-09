@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import shlex
 import threading
 import time
 from pathlib import Path
@@ -36,11 +38,21 @@ def _recall_threads() -> list[threading.Thread]:
 def _isolated(monkeypatch, tmp_path_factory):
     """A private Brigade home, empty twins, and no recall thread left over for the next test."""
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path_factory.mktemp("brigade-home")))
+    monkeypatch.setattr(dispatch_memory, "_SLOT", {"holder": None, "since": 0.0, "abandoned": 0, "off": False})
     with dispatch_memory._TWINS_LOCK:
         dispatch_memory._TWINS.clear()
     yield
     for thread in _recall_threads():
         thread.join(15)
+
+
+BOT_TOKEN = "fixture-bot-token"
+
+
+@pytest.fixture
+def bot(monkeypatch):
+    """This host has the Grok Bot memory principal's credential."""
+    monkeypatch.setattr(dispatch_memory, "grokbot_memory_authority", lambda: ("https://hub.invalid", BOT_TOKEN))
 
 
 def _workspace(tmp_path: Path) -> Path:
@@ -230,7 +242,7 @@ def test_four_kib_cap_drops_trailing_items(tmp_path):
     _assert_bounded(packet)
 
 
-def test_no_card_body_text_in_any_packet(tmp_path, hub_memory):
+def test_no_card_body_text_in_any_packet(tmp_path, hub_memory, bot):
     target = _workspace(tmp_path)
     _card(target, "deploy-notes", "Deploy notes for the hub", summary="How the hub deploy runs")
 
@@ -308,7 +320,7 @@ def test_a_connector_never_sees_a_local_card(tmp_path, hub_memory):
             _assert_hub_read_works(item)
 
 
-def test_grokbot_refs_name_hub_cards_its_memory_profile_can_read(tmp_path, hub_memory):
+def test_grokbot_refs_name_hub_cards_its_memory_profile_can_read(tmp_path, hub_memory, bot):
     target = _workspace(tmp_path)
     _card(target, "queue-notes-local", "Private queue module notes", summary="Queue foundation design")
     assert dispatch_memory.job_refs(target, "queue module") == []  # local cards only: no references
@@ -325,7 +337,7 @@ def test_grokbot_refs_name_hub_cards_its_memory_profile_can_read(tmp_path, hub_m
 # Grok Bot jobs
 
 
-def test_grokbot_payload_has_no_task_text_and_only_references_in_metadata(tmp_path, monkeypatch, hub_memory):
+def test_grokbot_payload_has_no_task_text_and_only_references_in_metadata(tmp_path, monkeypatch, hub_memory, bot):
     target = _workspace(tmp_path)
     _card(target, "queue-local", "Private queue module notes", summary="Queue foundation design")
     hub_memory([_hub_match("queue-notes", summary="Queue foundation design")])
@@ -356,7 +368,7 @@ def test_grokbot_payload_has_no_task_text_and_only_references_in_metadata(tmp_pa
     assert all(set(ref) == {"scope", "card_id", "hash"} for ref in stored["memory_refs"])
 
 
-def test_local_queue_claim_returns_references_only(tmp_path, hub_memory):
+def test_local_queue_claim_returns_references_only(tmp_path, hub_memory, bot):
     target = _workspace(tmp_path)
     fake = hub_memory([_hub_match("queue-notes", summary="Queue foundation design")])
     spec = dispatch_memory.with_job_refs(target, {**_spec(), "instructions": "Build the hub deploy queue."})
@@ -444,7 +456,7 @@ def test_a_local_block_sent_to_another_machine_becomes_its_connector_twin(tmp_pa
     _assert_private_withheld(dispatch_memory.for_remote(f"Header\n{local}\nDo the work."))
 
 
-def test_private_card_never_becomes_a_grokbot_reference(tmp_path, hub_memory):
+def test_private_card_never_becomes_a_grokbot_reference(tmp_path, hub_memory, bot):
     target = _private_hub(tmp_path, hub_memory)
 
     refs = dispatch_memory.job_refs(target, "hub deploy")
@@ -480,7 +492,7 @@ def _write_valid_looking_marker() -> None:
 # Hub memory: trust filter and head revalidation
 
 
-def test_dispatch_searches_as_push_and_counts_no_reads(tmp_path, hub_memory):
+def test_dispatch_searches_as_push_and_counts_no_reads(tmp_path, hub_memory, bot):
     target = _workspace(tmp_path)
     fake = hub_memory([_hub_match("deploy-notes"), _hub_match("runbook", score=0.5)])
 
@@ -497,7 +509,7 @@ def test_dispatch_searches_as_push_and_counts_no_reads(tmp_path, hub_memory):
     assert fake.read_days == {} and fake.read_totals == {}
 
 
-def test_a_node_written_unreviewed_card_the_hub_returns_is_still_dropped(tmp_path):
+def test_a_node_written_unreviewed_card_the_hub_returns_is_still_dropped(tmp_path, bot):
     target = _workspace(tmp_path)
     # The hub's push filter admits an unreviewed head to the credential that wrote it,
     # and dispatch searches under this node's credential.
@@ -798,3 +810,158 @@ def test_worklore_prepared_handoff_gains_memory_context_on_the_consumer_side(
     assert show() == 0
     human = capsys.readouterr().out
     assert dispatch_memory.HEADING in human and dispatch_memory.DATA_RULE in human
+
+
+# Round 3: quoting, stale recall workers, the Grok Bot principal's grants
+
+
+def test_the_cli_read_line_is_shell_quoted(tmp_path):
+    from brigade.memory_hub_client import valid_scope
+
+    # The read line quotes any argument, a space included.
+    argv = ["brigade", "memory", "hub", "card", "deploy-notes", "--scope", "repo:a; b $(touch /tmp/x)"]
+    line = dispatch_memory._read_line({"name": "deploy-notes", "scope": argv[-1], "cli": argv})
+    assert shlex.split(line.split(" or ", 1)[1]) == argv
+    # End to end with a scope the hub accepts: `;`, `$()`, backticks and `&` are valid scope text.
+    weird = "repo:a;b$(touch${IFS}/tmp/x)`id`&"
+    assert valid_scope(weird) and not valid_scope("repo:a b")
+    target = _workspace(tmp_path)
+    match = {**_hub_match("deploy-notes"), "scope": weird}
+    fake = FakeHub([match], {(weird, "deploy-notes"): {**_head("deploy-notes"), "scope": weird}})
+    settings = dataclasses.replace(SETTINGS, read_scopes=(weird,))
+
+    packet = dispatch_memory.build(target, "hub deploy", settings=settings, transport=fake)
+
+    assert packet is not None
+    item = packet.context["items"][0]
+    rendered = next(line for line in packet.block.splitlines() if line.startswith("  read: "))
+    assert shlex.split(rendered.split(" or ", 1)[1]) == item["read"]["cli"]
+    assert item["read"]["cli"][-1] == weird
+
+
+class FirstSearchHangs(FakeHub):
+    """The first search never returns until released. Every later call answers."""
+
+    def __init__(self, matches, heads, release: threading.Event):
+        super().__init__(matches, heads)
+        self.release = release
+        self.searches = 0
+
+    def __call__(self, url, token, body, timeout):
+        if body["action"] == "search":
+            self.searches += 1
+            if self.searches == 1:
+                self.release.wait(10)
+        return super().__call__(url, token, body, timeout)
+
+
+def test_a_stale_recall_worker_is_replaced_and_recall_recovers(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(dispatch_memory, "_slot_clock", lambda: clock[0])
+    monkeypatch.setattr(dispatch_memory, "BUDGET_SECONDS", 0.5)
+    target = _workspace(tmp_path)
+    release = threading.Event()
+    fake = FirstSearchHangs([_hub_match("deploy-notes")], {("fleet", "deploy-notes"): _head("deploy-notes")}, release)
+    try:
+        assert dispatch_memory.build(target, "hub deploy", settings=SETTINGS, transport=fake) is None
+        clock[0] += 2.0  # inside the stale window (10 budgets = 5 s): no block, no new worker
+        started = time.monotonic()
+        assert dispatch_memory.build(target, "hub deploy", settings=SETTINGS, transport=fake) is None
+        assert time.monotonic() - started < 0.1 and fake.searches == 1
+        clock[0] += 4.0  # past the window: one new worker, and recall answers again
+        recovered = dispatch_memory.build(target, "hub deploy", settings=SETTINGS, transport=fake, audience=LOCAL)
+        assert recovered is not None and fake.searches == 2
+        assert len(_recall_threads()) <= dispatch_memory.ABANDONED_MAX + 1
+        with dispatch_memory._TWINS_LOCK:
+            twins = dict(dispatch_memory._TWINS)
+    finally:
+        release.set()
+    for thread in _recall_threads():
+        thread.join(5)
+    with dispatch_memory._TWINS_LOCK:
+        assert dict(dispatch_memory._TWINS) == twins  # the stale worker published nothing
+    assert dispatch_memory._SLOT["abandoned"] == 0 and dispatch_memory._SLOT["off"] is False
+
+
+def test_recall_stays_off_after_the_abandoned_worker_cap(tmp_path, monkeypatch, caplog):
+    clock = [1000.0]
+    monkeypatch.setattr(dispatch_memory, "_slot_clock", lambda: clock[0])
+    monkeypatch.setattr(dispatch_memory, "BUDGET_SECONDS", 0.1)
+    target = _workspace(tmp_path)
+    release = threading.Event()
+    hung = FakeHub([], {}, hang=release)
+    try:
+        for _ in range(8):
+            assert dispatch_memory.build(target, "hub deploy", settings=SETTINGS, transport=hung) is None
+            assert len(_recall_threads()) <= dispatch_memory.ABANDONED_MAX + 1
+            clock[0] += 2.0  # every dispatch lands past the previous worker's stale window
+        assert hung.actions.count("search") == dispatch_memory.ABANDONED_MAX + 1
+        assert dispatch_memory._SLOT["off"] is True
+        assert [r.getMessage() for r in caplog.records if r.name == dispatch_memory.__name__] == [
+            dispatch_memory.RECALL_OFF_LINE
+        ]
+    finally:
+        release.set()
+    for thread in _recall_threads():
+        thread.join(15)
+    clock[0] += 100.0
+    assert dispatch_memory.build(target, "hub deploy", settings=SETTINGS, transport=hung) is None
+    assert hung.actions.count("search") == dispatch_memory.ABANDONED_MAX + 1  # recall stays off
+
+
+class TokenHub(FakeHub):
+    """Answers each credential with what its grants allow: the node reads two scopes, the bot only `fleet`."""
+
+    def __init__(self):
+        private = {**_hub_match("app-secrets", score=5.0), "scope": "repo:private/app"}
+        heads = {
+            ("fleet", "deploy-notes"): _head("deploy-notes"),
+            ("repo:private/app", "app-secrets"): {**_head("app-secrets"), "scope": "repo:private/app"},
+        }
+        super().__init__([private, _hub_match("deploy-notes")], heads)
+        self.tokens: list[str] = []
+
+    def __call__(self, url, token, body, timeout):
+        self.tokens.append(token)
+        if token == BOT_TOKEN:
+            if body["action"] == "search":
+                fleet = [m for m in self.matches if m["scope"] == "fleet"]
+                return 200, {"matches": fleet, "match_count": len(fleet), "retrieval": {"mode": "lexical"}}
+            if body.get("scope") != "fleet":
+                return 403, {"code": "memory_grant_missing"}
+        return super().__call__(url, token, body, timeout)
+
+
+@pytest.fixture
+def token_hub(monkeypatch):
+    from brigade import memory_hub_search
+
+    fake = TokenHub()
+    workspace = dataclasses.replace(SETTINGS, read_scopes=("fleet", "repo:private/app"))
+    monkeypatch.setattr(memory_hub_search, "enabled", lambda _root: True)
+    monkeypatch.setattr(hubc, "load_settings", lambda _root, **_kw: workspace)
+    monkeypatch.setattr(hubc, "urllib_transport", fake)
+    return fake
+
+
+def test_grokbot_refs_follow_the_bot_principal_grants(tmp_path, token_hub, bot):
+    target = _workspace(tmp_path)
+    node_view = dispatch_memory.build(target, "hub deploy")
+    assert node_view is not None and "repo:private/app" in {i.get("scope") for i in node_view.context["items"]}
+    token_hub.tokens.clear()
+
+    refs = dispatch_memory.job_refs(target, "hub deploy")
+
+    assert refs == [{"scope": "fleet", "card_id": "deploy-notes", "hash": "a" * 12}]
+    assert token_hub.tokens and set(token_hub.tokens) == {BOT_TOKEN}
+    searches = [body for body in token_hub.bodies if body["action"] == "search"]
+    assert searches[-1]["query_source"] == "push"
+
+
+def test_no_bot_credential_means_no_refs(tmp_path, token_hub):
+    target = _workspace(tmp_path)
+
+    assert dispatch_memory.grokbot_memory_authority() is None
+    assert dispatch_memory.job_refs(target, "hub deploy") == []
+    assert dispatch_memory.with_job_refs(target, {**_spec(), "instructions": "hub deploy"}).get("memory_refs") is None
+    assert token_hub.tokens == []  # no hub request at all, under any credential

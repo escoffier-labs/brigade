@@ -11,6 +11,8 @@
   then the rendered block. A hub that is stopped, slow or refusing adds no block and never delays
   dispatch past a 2 s budget, and at most one recall runs at a time. Every packet is built for a
   connector audience, so private-class cards never appear in one.
-- Grok Bot feed jobs carry up to 5 hub card references (`memory_refs`: scope, card id and short
-  hash) that its memory profile can read, in the private job envelope, returned with the claim's execution context. Hub job payloads are
+- Grok Bot feed jobs can carry up to 5 hub card references (`memory_refs`: scope, card id and short
+  hash), searched with the Grok Bot memory principal's own credential so they name only cards it
+  may read. No references are computed until that credential has a user-level location. They ride
+  in the private job envelope, returned with the claim's execution context. Hub job payloads are
   unchanged and hold no task text.
