@@ -505,53 +505,101 @@ prove the evidence right, so every op still waits for a reviewer.
 commit id or None. The contract module calls it only for a marked
 abbreviation that has exactly one authenticated candidate, and accepts the
 result only when it equals that candidate. With no resolver every expansion
-abstains. The rules below are normative for the slice 9 implementation. The
-resolver MUST:
+abstains. The rules below are normative for the slice 9 implementation.
+Slice 9's resolver implementation requires its own security review. This contract is the minimum it must meet. The resolver MUST:
 
-1. Work in the git repository at the `[[verify.workspace]]` path bound to the
+1. Run every git command through one wrapper that applies rules 2 to 4 to
+   each call, with a fixed timeout, no stdin, `--no-pager`, and no prompt.
+   No git command bypasses it.
+2. Build the environment from scratch. Every inherited `GIT_*` variable is
+   removed, including `GIT_DIR`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`
+   and `GIT_GRAFT_FILE`. The wrapper then sets exactly these:
+   `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` (`NUL` on
+   Windows), `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`. System
+   and global config, including the XDG location, are never read.
+3. Pass `--no-replace-objects` and these `-c` overrides on every call:
+   `core.fsmonitor=false`, `core.hooksPath` set to a directory that does not
+   exist, `credential.helper=` (empty, which clears every helper),
+   `core.askPass=`, `core.alternateRefsCommand=`, `maintenance.auto=false`,
+   `gc.auto=0`, `fetch.recurseSubmodules=false`, `protocol.allow=never` and
+   `protocol.https.allow=always`. SSH and every other transport are not
+   allowed, so no `core.sshCommand` or `GIT_SSH_COMMAND` is set.
+4. Work in the git repository at the `[[verify.workspace]]` path bound to the
    card's scope, and refuse when `git rev-parse --show-toplevel` names any
-   other directory. Every git command runs with all `GIT_*` environment
-   variables removed, so the environment cannot point git at another object
-   database, and with a fixed timeout and no pager or prompt.
-2. Return None for an abbreviation shorter than the contract minimum without
-   calling git. git itself refuses `--disambiguate` below 4 hex digits, and
-   the contract minimum (12, then 7) is always above that floor.
-3. Return None for a shallow or incomplete repository.
+   other directory.
+5. Read the repository's local config with
+   `git config --local --no-includes --list` and return None when it holds
+   any of: `include.*` or `includeIf.*`, `core.fsmonitor`,
+   `core.hooksPath`, `core.sshCommand`, `core.gitProxy`, `core.askPass`,
+   `core.alternateRefsCommand`, any `credential.*`, any `alias.*`,
+   `url.*.insteadOf` or `url.*.pushInsteadOf`, `remote.*.vcs`,
+   `remote.*.uploadpack`, or `protocol.*`. The `-c` overrides cover what
+   they can. Includes cannot be overridden, so a repository that has one is
+   refused and never read. git never lets an alias shadow a built-in
+   command, and aliases are refused anyway.
+6. Validate the URL of every remote that an allowed ref names. Each
+   `remote.<name>.url` value must use the `https` scheme. `ext::`, `fd::`,
+   `file::`, `file://`, local paths, `ssh`, `git` and any other transport
+   or remote helper return None.
+7. Ignore replacement refs and refuse grafts. `--no-replace-objects` and
+   `GIT_NO_REPLACE_OBJECTS=1` stop every `refs/replace/` entry from
+   applying. A grafts file at `git rev-parse --git-path info/grafts` that
+   exists returns None, and `GIT_GRAFT_FILE` is already removed by rule 2.
+8. Return None for an abbreviation shorter than the contract minimum
+   without calling git. git itself refuses `--disambiguate` below 4 hex
+   digits, and the contract minimum (12, then 7) is always above that
+   floor.
+9. Return None for a shallow or incomplete repository.
    `git rev-parse --is-shallow-repository` must print exactly `false`, and
    `extensions.partialClone` must be unset, because missing history or
    objects could hide a second match.
-4. Take the allowed refs from a new `commit_refs` key on the
-   `[[verify.workspace]]` entry. It lists fully qualified remote-tracking refs
-   such as `refs/remotes/origin/main`. When the key is absent, the default is
-   the single ref that `git symbolic-ref refs/remotes/origin/HEAD` names,
-   which is the remote-tracking default branch. If that symbolic ref is unset
-   there is no default, and the resolver returns None. Local branches and
-   tags are never allowed refs, because a local process can create or move
-   them without a fetch. Same-user tampering with remote-tracking refs stays
-   out of scope, as in the S24 marker ruling.
-5. Fetch every remote named by an allowed ref once per run, before any
-   resolution, with `git fetch --prune --no-tags <remote>`. A failed or timed
-   out fetch returns None. A fetch is fresh only when it completed in the
-   current run. A fetch from an earlier run is stale and never counts. After
-   the fetch, every allowed ref must exist
-   (`git rev-parse --verify --quiet <ref>`), or the resolver returns None.
-6. Evaluate ambiguity across the complete available object database, not
-   only the allowed refs. `git rev-parse --disambiguate=<abbreviation>` lists
-   every object of any type (loose, packed and alternates) whose id starts
-   with the prefix, reachable or not, and never consults ref names. Exactly
-   one line must come back, or the resolver returns None. A second object on
-   another ref, an unreachable object or a blob with the same prefix makes the
-   abbreviation ambiguous.
-7. Check that `git cat-file -t <id>` prints exactly `commit`, or return None.
-8. Check that the id is exactly 40 or 64 lowercase hex characters, and return
-   it in that spelling. The contract then requires it to equal the unique
-   authenticated candidate.
-9. Check reachability separately with
-   `git merge-base --is-ancestor <id> <ref>` against each allowed ref. Exit 0
-   for at least one ref passes. Exit 1 for every ref, or any other exit,
-   returns None.
-10. Return None on any missing object, ambiguity, command error, nonzero exit,
-    timeout or unparsable output.
+10. Take the allowed refs from a new `commit_refs` key on the
+    `[[verify.workspace]]` entry. It lists fully qualified remote-tracking
+    refs such as `refs/remotes/origin/main`. When the key is absent, the
+    default is the single ref that `git symbolic-ref refs/remotes/origin/HEAD`
+    names, which is the remote-tracking default branch. If that symbolic ref
+    is unset there is no default, and the resolver returns None. Local
+    branches and tags are never allowed refs, because a local process can
+    create or move them without a fetch. Same-user tampering with
+    remote-tracking refs stays out of scope, as in the S24 marker ruling.
+11. Prove every allowed ref fresh in the current run without relying on the
+    remote's configured fetch refspec. For each allowed ref
+    `refs/remotes/<remote>/<branch>`, fetch with
+    `git fetch --porcelain --no-tags --prune <remote> +refs/heads/<branch>:refs/remotes/<remote>/<branch>`.
+    A refspec on the command line replaces the configured ones, so no tag or
+    other refspec from config applies. The porcelain output must list that
+    destination ref with an updated or up-to-date flag. With a git older than
+    2.41, which has no `--porcelain`, the resolver instead compares the
+    destination ref after the fetch with `git ls-remote <remote>
+    refs/heads/<branch>` from the same run, and they must match. A failed,
+    timed out or rejected fetch, a missing destination ref, a mismatch, or a
+    ref proven only in an earlier run returns None.
+12. Evaluate ambiguity across the complete available object database, not
+    only the allowed refs. `git rev-parse --disambiguate=<abbreviation>`
+    lists every object of any type (loose, packed and alternates) whose id
+    starts with the prefix, reachable or not, and never consults ref names.
+    Exactly one line must come back, or the resolver returns None. A second
+    object on another ref, an unreachable object or a blob with the same
+    prefix makes the abbreviation ambiguous.
+13. Check that `git cat-file -t <id>` prints exactly `commit`, or return
+    None.
+14. Check that the id is exactly 40 or 64 lowercase hex characters, and
+    return it in that spelling. The contract then requires it to equal the
+    unique authenticated candidate.
+15. Check reachability separately with
+    `git merge-base --is-ancestor <id> <ref>` against each allowed ref. Exit
+    0 for at least one ref passes. Exit 1 for every ref, or any other exit,
+    returns None.
+16. Return None on any missing object, ambiguity, command error, nonzero
+    exit, timeout or unparsable output.
+
+Slice 9 tests plant each hostile setting from rules 2 to 7 in a scratch
+repository: an include, an fsmonitor command, a hooks path and a
+`reference-transaction` hook that would write a marker file, a credential
+helper, an alias, an `insteadOf` rewrite, `ext::` and `file://` remote URLs,
+an alternate refs command, a remote helper, a grafts file, a tag refspec in
+config and an inherited `GIT_DIR`. Each test asserts None and that no marker
+file appeared. A planted replacement ref must leave the result unchanged.
 
 `git rev-parse --verify <abbreviation>^{commit}` alone is insufficient. It
 resolves ref names before object ids, so a local branch or tag named like
@@ -561,7 +609,7 @@ with the same prefix instead of reporting the ambiguity. It also peels an
 annotated tag whose id matches to the commit the tag points at, which is a
 different id. And it says nothing about freshness or reachability.
 
-Reachability from an allowed ref after a fresh fetch is the identity
+Reachability from an allowed ref after a proven fetch is the identity
 binding. A receipt proves only that some worktree used a commit. Grinding a
 commit with a matching prefix and getting a receipt for it is not enough
 unless the attacker can also land that commit on an allowed ref.

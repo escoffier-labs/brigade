@@ -83,39 +83,62 @@ reason code:
 Resolver contract (normative for the slice 9 implementation). The caller passes
 `resolve_commit(abbreviation)`, which returns a full commit id or None. The
 contract then requires that id to equal the unique authenticated candidate.
-D3 ("Commit resolver contract") is the full text. The resolver MUST:
+D3 ("Commit resolver contract") is the full text, with its reasons and the
+hostile settings slice 9 tests must plant. Slice 9's resolver implementation requires its own security review. This contract is the minimum it must meet.
+The resolver MUST:
 
-1. Work in the git repository at the `[[verify.workspace]]` path bound to the
-   card's scope. `git rev-parse --show-toplevel` must equal that path. Every
-   git command runs with all `GIT_*` environment variables removed, a fixed
-   timeout, and no pager or prompt.
-2. Return None for an abbreviation shorter than `MIN_ABBREVIATION` without
+1. Run every git command through one wrapper with a fixed timeout, no stdin,
+   `--no-pager` and no prompt.
+2. Remove every inherited `GIT_*` variable, then set exactly
+   `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+   `GIT_NO_REPLACE_OBJECTS=1` and `GIT_TERMINAL_PROMPT=0`.
+3. Pass `--no-replace-objects` and `-c` overrides on every call:
+   `core.fsmonitor=false`, `core.hooksPath` at a missing directory,
+   `credential.helper=`, `core.askPass=`, `core.alternateRefsCommand=`,
+   `maintenance.auto=false`, `gc.auto=0`, `fetch.recurseSubmodules=false`,
+   `protocol.allow=never` and `protocol.https.allow=always`. No SSH.
+4. Work in the `[[verify.workspace]]` repository bound to the card's scope,
+   with `git rev-parse --show-toplevel` equal to that path.
+5. Read local config with `git config --local --no-includes --list` and
+   return None for any include or includeIf, core.fsmonitor, core.hooksPath,
+   core.sshCommand, core.gitProxy, core.askPass, core.alternateRefsCommand,
+   credential, alias, url insteadOf, remote vcs or uploadpack, or protocol
+   entry.
+6. Accept only `https` URLs for the remotes of allowed refs. `ext::`, `fd::`,
+   `file::`, `file://`, local paths and every other transport return None.
+7. Return None when a grafts file exists at
+   `git rev-parse --git-path info/grafts`. Replacement refs never apply
+   (rules 2 and 3).
+8. Return None for an abbreviation shorter than `MIN_ABBREVIATION` without
    calling git. That also covers git's own floor of 4 hex digits for
    `--disambiguate`.
-3. Return None for a shallow or incomplete repository:
+9. Return None for a shallow or incomplete repository:
    `git rev-parse --is-shallow-repository` must print exactly `false`, and
    `extensions.partialClone` must be unset.
-4. Take the allowed refs from the workspace entry's `commit_refs`, a list of
-   fully qualified remote-tracking refs (`refs/remotes/<remote>/<branch>`).
-   When it is absent, the default is the single ref that
-   `git symbolic-ref refs/remotes/origin/HEAD` names. If that is unset, there
-   is no default and the resolver returns None. Local branches and tags are
-   never allowed refs.
-5. Fetch every remote named by an allowed ref once per run, before any
-   resolution, with `git fetch --prune --no-tags <remote>`. A failed or timed
-   out fetch, or no successful fetch in the current run, returns None. A fetch
-   from an earlier run is stale and never counts. After the fetch, every
-   allowed ref must exist (`git rev-parse --verify --quiet <ref>`), or the
-   resolver returns None.
-6. Run `git rev-parse --disambiguate=<abbreviation>`. It lists every object of
-   any type in the complete object database (loose, packed and alternates)
-   whose id starts with the prefix, reachable or not, and never consults ref
-   names. Exactly one line must come back, otherwise return None.
-7. Check `git cat-file -t <id>` prints exactly `commit`, otherwise return None.
-8. Check that the id is exactly 40 or 64 lowercase hex characters.
-9. Check `git merge-base --is-ancestor <id> <ref>` exits 0 for at least one
-   allowed ref. Exit 1 for every ref, or any other exit, returns None.
-10. Return None on any command error, nonzero exit, timeout or unparsable
+10. Take the allowed refs from the workspace entry's `commit_refs`, a list of
+    fully qualified remote-tracking refs (`refs/remotes/<remote>/<branch>`).
+    When it is absent, the default is the single ref that
+    `git symbolic-ref refs/remotes/origin/HEAD` names. If that is unset,
+    there is no default and the resolver returns None. Local branches and
+    tags are never allowed refs.
+11. Prove each allowed ref fresh in the current run with
+    `git fetch --porcelain --no-tags --prune <remote>
+    +refs/heads/<branch>:refs/remotes/<remote>/<branch>`. The explicit refspec
+    replaces the configured ones. The porcelain output must list the
+    destination ref as updated or up to date, or, before git 2.41, the ref
+    must equal `git ls-remote <remote> refs/heads/<branch>` from the same run.
+    Anything else, or a proof from an earlier run, returns None.
+12. Run `git rev-parse --disambiguate=<abbreviation>`. It lists every object
+    of any type in the complete object database (loose, packed and
+    alternates) whose id starts with the prefix, reachable or not, and never
+    consults ref names. Exactly one line must come back, otherwise return
+    None.
+13. Check `git cat-file -t <id>` prints exactly `commit`, otherwise return
+    None.
+14. Check that the id is exactly 40 or 64 lowercase hex characters.
+15. Check `git merge-base --is-ancestor <id> <ref>` exits 0 for at least one
+    allowed ref. Exit 1 for every ref, or any other exit, returns None.
+16. Return None on any command error, nonzero exit, timeout or unparsable
     output, and never raise to signal success.
 
 `git rev-parse --verify <abbreviation>^{commit}` alone is insufficient. It
@@ -125,7 +148,7 @@ between objects of different types instead of reporting them, and it peels
 an annotated tag to the commit it points at. It also says nothing about
 freshness or reachability.
 
-Reachability from an allowed ref after a fresh fetch is the identity
+Reachability from an allowed ref after a proven fetch is the identity
 binding. An attacker who grinds a commit with a matching prefix and gets a
 receipt for it still has to land that commit on an allowed ref. This module
 ships no git code.
@@ -1149,8 +1172,9 @@ def verify_card(
     propose_confirmations: bool = False,
     uncited_refs: Mapping[str, str] | None = None,
     # TODO(verify slice 9): pass the git resolver that follows the module docstring's resolver contract
-    # (fresh fetch, --disambiguate over every object, commit type, allowed-ref reachability). Without one,
-    # every commit expansion abstains with `verify_commit_unresolved`.
+    # (one hardened git wrapper, hostile-config refusal, proven fetch, --disambiguate over every object,
+    # commit type, allowed-ref reachability). Without one, every commit expansion abstains with
+    # `verify_commit_unresolved`.
     resolve_commit: Resolver | None = None,
 ) -> CardResult:
     """Propose, check, confirm and map one card. At most two seat calls.

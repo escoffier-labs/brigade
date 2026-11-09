@@ -442,9 +442,10 @@ Changes:
   `src/brigade/care_launchers.py`, at 11:00 by default, refusing admin
   credentials and the reflect job's folder.
 - The git commit resolver passed to `verify_card(resolve_commit=...)`,
-  following the "Commit resolver contract" in D3 rule by rule, and the
-  `commit_refs` key on `[[verify.workspace]]` with its default of the
-  remote-tracking default branch.
+  following the "Commit resolver contract" in D3 rule by rule, with every git
+  call going through one hardened wrapper, and the `commit_refs` key on
+  `[[verify.workspace]]` with its default of the remote-tracking default
+  branch. Slice 9's resolver implementation requires its own security review. This contract is the minimum it must meet.
 - After the resolver tests below pass, lower `MIN_ABBREVIATION` in
   `src/brigade/memory_verify_contract.py` from 12 to 7. Exact equality with
   the unique authenticated candidate plus allowed-ref reachability means a
@@ -468,6 +469,14 @@ of `tests/test_memory_reflect_hub.py`):
   commit, a commit not reachable from any allowed ref, and any git error or
   timeout. A branch or tag named like the abbreviation never answers. It
   returns the full id for a unique, fresh, reachable commit.
+- Each hostile setting from D3's contract, planted in a scratch repository,
+  returns None with no side effect: an include, an fsmonitor command, a hooks
+  path and a `reference-transaction` hook that would write a marker file, a
+  credential helper, an alias, an `insteadOf` rewrite, `ext::` and `file://`
+  remote URLs, an alternate refs command, a remote helper, a grafts file, a
+  tag refspec in config, an inherited `GIT_DIR`, and a fetch whose porcelain
+  output does not prove the destination ref. A planted replacement ref leaves
+  the result unchanged.
 - Principal and scope quota replies stop proposing without a failure.
 - A duplicate pending reply records the existing id.
 - The pending ceiling stops new proposals.
