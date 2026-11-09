@@ -72,6 +72,16 @@ Write handoffs with `brigade handoff draft`, not by hand. Before it writes anyth
 
 A refused draft prints one `error: draft refused, nothing written:` line per problem and exits 2. `--workspace` points at the memory workspace when it is not `--target`. `--expected-sha` supplies the SHA when the workspace is not reachable, and `draft` says so by name if it needs one of the two. `brigade handoff lint` applies the same rules to files written another way, and `--workspace` works there too.
 
+### Publish atomically
+
+A handoff inbox is read while it is written: `brigade ingest`, the draft queue and worktree cleanup all list `<inbox>/*.md`, and cleanup may move or remove files. A writer that opens `<inbox>/<name>.md` and writes into it lets a reader see a half-written file, and a descriptor the writer keeps can write to a file a reader has already moved. So every writer publishes in three steps:
+
+1. Write to a private temp name in the same inbox directory that no reader lists. Brigade uses `.handoff-<random>.tmp`: dot-prefixed and not `*.md`.
+2. `fsync` the temp file.
+3. Publish it with a no-replace rename to the final `*.md` name. If the name is taken, fail and leave the existing file alone. Remove the temp file on any failure.
+
+A published `*.md` is complete and is never written again. `brigade handoff draft` is the supported writer and follows these steps on POSIX and Windows. A harness that writes a handoff directly must do the same, or call `brigade handoff draft` instead. Do not write, append to or truncate a file that already carries a `*.md` name.
+
 ## Draft Queue Review
 
 `brigade handoff list` discovers pending drafts from `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, `.antigravity/memory-handoffs/`, `.pi/memory-handoffs/`, `.cursor/memory-handoffs/`, `.aider/memory-handoffs/`, `.goose/memory-handoffs/`, `.continue/memory-handoffs/`, `.copilot/memory-handoffs/`, `.qwen/memory-handoffs/`, `.kimi/memory-handoffs/`, `.adal/memory-handoffs/`, `.openhands/memory-handoffs/`, `.grok/memory-handoffs/`, `.amp/memory-handoffs/`, `.crush/memory-handoffs/`, `.hermes/memory-handoffs/`, and inboxes declared in `.brigade/handoff-sources.json`. Each draft summary includes:
