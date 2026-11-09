@@ -27,30 +27,56 @@ pub fn newer_than_supported<T: crate::writer::ReadTx + ?Sized>(tx: &T) -> rusqli
     };
     Ok(version > supported_version())
 }
-/// Collapse whitespace runs to one space, then, outside quoted text, drop the
-/// space before `,` or `)` and after `(`. SQLite's ADD COLUMN splices `, col`
-/// in front of the closing parenthesis, so a newline there becomes ` ,`.
-/// lockstep.py `normalize` must stay identical (normalize-cases.json).
+/// One pass over the DDL. Quoted text ('..', "..", `..` with doubled-quote
+/// escapes, and [..]) and comments (`--` through its newline, `/* .. */`) are
+/// copied unchanged. Elsewhere a whitespace run becomes one space, dropped at
+/// either end, after `(`, and before `,` or `)`. SQLite's ADD COLUMN splices
+/// `, col` in front of the closing parenthesis, so a newline there becomes
+/// ` ,`. Whitespace is SQLite's ASCII set. lockstep.py `normalize` must stay
+/// identical (normalize-cases.json).
 fn normalize(sql: &str) -> String {
-    let collapsed = sql.split_whitespace().collect::<Vec<_>>().join(" ");
-    let chars: Vec<char> = collapsed.chars().collect();
-    let mut out = String::with_capacity(collapsed.len());
-    let mut quote: Option<char> = None;
-    for (i, &ch) in chars.iter().enumerate() {
-        if let Some(q) = quote {
-            if ch == q {
-                quote = None;
-            }
-        } else if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-        } else if ch == '[' {
-            quote = Some(']');
-        } else if ch == ' ' && (out.ends_with('(') || matches!(chars.get(i + 1), Some(',' | ')'))) {
+    let s: Vec<char> = sql.chars().collect();
+    let n = s.len();
+    let find = |from: usize, needle: &[char]| {
+        (from..n)
+            .find(|&j| s[j..].starts_with(needle))
+            .map_or(n, |j| j + needle.len())
+    };
+    let mut out: Vec<char> = Vec::with_capacity(n);
+    let (mut i, mut pending) = (0, false);
+    while i < n {
+        let c = s[i];
+        if matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c') {
+            pending = true;
+            i += 1;
             continue;
         }
-        out.push(ch);
+        if pending && !out.is_empty() && out.last() != Some(&'(') && !matches!(c, ',' | ')') {
+            out.push(' ');
+        }
+        pending = false;
+        let next = s.get(i + 1).copied();
+        let end = match c {
+            '\'' | '"' | '`' => {
+                let mut j = i + 1;
+                loop {
+                    j = find(j, &[c]);
+                    if j < n && s[j] == c {
+                        j += 1;
+                    } else {
+                        break j;
+                    }
+                }
+            }
+            '[' => find(i + 1, &[']']),
+            '-' if next == Some('-') => find(i + 2, &['\n']),
+            '/' if next == Some('*') => find(i + 2, &['*', '/']),
+            _ => i + 1,
+        };
+        out.extend_from_slice(&s[i..end]);
+        i = end;
     }
-    out
+    out.into_iter().collect()
 }
 fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
@@ -310,6 +336,20 @@ mod upgrade_layout_tests {
                 case["output"].as_str().unwrap(),
                 "{input:?}"
             );
+        }
+    }
+
+    /// Quoted text, comments and identifiers keep their whitespace: a CHECK,
+    /// default or trigger body that accepts other values must not compare equal.
+    #[test]
+    fn normalize_keeps_quoted_and_commented_whitespace_distinct() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../../schema/normalize-cases.json")).unwrap();
+        let distinct = cases["distinct"].as_array().unwrap();
+        assert!(!distinct.is_empty());
+        for pair in distinct {
+            let (a, b) = (pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
+            assert_ne!(normalize(a), normalize(b), "{a:?} vs {b:?}");
         }
     }
 

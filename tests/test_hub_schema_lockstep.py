@@ -120,6 +120,17 @@ def test_normalize_matches_rust_cases() -> None:
         assert normalize(case["input"]) == case["output"], case["input"]
 
 
+def test_normalize_keeps_quoted_and_commented_whitespace_distinct() -> None:
+    """A CHECK, default or trigger body that accepts other values must not compare equal."""
+    import json
+
+    normalize = runpy.run_path(str(LOCKSTEP))["normalize"]
+    distinct = json.loads((SCHEMA_DIR / "normalize-cases.json").read_text(encoding="utf-8"))["distinct"]
+    assert distinct
+    for left, right in distinct:
+        assert normalize(left) != normalize(right), (left, right)
+
+
 def _production_hub(tmp_path: Path, ddl: str) -> sqlite3.Connection:
     path = tmp_path / "production.db"
     with sqlite3.connect(path) as raw:

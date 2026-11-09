@@ -5,13 +5,17 @@ including column order, normalized DDL, nullability, defaults, checks, keys,
 foreign keys, and indexes. It never combines per-column alternatives.
 `required.json` contains the accepted structures. `variant-inventory.json`
 records every differing field with its fresh and upgraded values and sources.
-DDL normalization collapses whitespace runs, then drops the space before `,`
-or `)` and after `(` outside quoted text. SQLite's ADD COLUMN splices `, col`
-in front of the closing parenthesis, so a table created with its `)` on its own
-line keeps a newline before the first appended comma. `lockstep.py` and
+DDL normalization is one pass. Quoted text (`'..'`, `".."` and backticks,
+with doubled-quote escapes, and `[..]`) and comments (`--` through its newline,
+`/* .. */`) are copied unchanged, so a CHECK, default or trigger body that
+accepts other values never compares equal. Elsewhere a whitespace run becomes
+one space, dropped at either end, after `(`, and before `,` or `)`. SQLite's
+ADD COLUMN splices `, col` in front of the closing parenthesis, so a table
+created with its `)` on its own line keeps a newline before the first appended
+comma. Whitespace means SQLite's ASCII set. `lockstep.py` and
 `src/schema/mod.rs` implement the same rule, and both are tested against
-`normalize-cases.json`. Nothing else is normalized. Unknown objects remain
-refused.
+`normalize-cases.json`, including pairs that must stay distinct. Nothing else
+is normalized. Unknown objects remain refused.
 
 The fixtures cover schema versions 1 through 48 present in repository history,
 all published releases containing `fleet_hub.init_db` (v0.27.0 through v0.30.0),

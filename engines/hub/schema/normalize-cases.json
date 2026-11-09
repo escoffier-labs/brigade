@@ -1,5 +1,5 @@
 {
-  "_comment": "Shared by lockstep.py normalize and Rust schema::normalize; both must map each input to its output.",
+  "_comment": "Shared by lockstep.py normalize and Rust schema::normalize. Each case input must normalize to its output, and each distinct pair must normalize to different strings.",
   "cases": [
     {
       "input": "CREATE TABLE claims (\n    target TEXT NOT NULL PRIMARY KEY,\n    expires_at REAL NOT NULL\n, lock_token TEXT, harness TEXT)",
@@ -23,15 +23,47 @@
     },
     {
       "input": "DEFAULT 'it''s (  x' , y",
-      "output": "DEFAULT 'it''s ( x', y"
+      "output": "DEFAULT 'it''s (  x', y"
+    },
+    {
+      "input": "CHECK (x = 'a  b\n\tc')",
+      "output": "CHECK (x = 'a  b\n\tc')"
+    },
+    {
+      "input": "DEFAULT 'it''  s'  ,  ''  ''",
+      "output": "DEFAULT 'it''  s', '' ''"
     },
     {
       "input": "[col , one] , `x ( y` ( z )",
       "output": "[col , one], `x ( y` (z)"
     },
     {
+      "input": "\"a\"\"  b\"  ,  `c``  d`",
+      "output": "\"a\"\"  b\", `c``  d`"
+    },
+    {
       "input": "CREATE INDEX i ON t (a, b) WHERE c = ' )'",
       "output": "CREATE INDEX i ON t (a, b) WHERE c = ' )'"
+    },
+    {
+      "input": "CREATE TRIGGER g AFTER UPDATE ON t BEGIN\n    SELECT RAISE(ABORT, 'no  way');\nEND",
+      "output": "CREATE TRIGGER g AFTER UPDATE ON t BEGIN SELECT RAISE(ABORT, 'no  way'); END"
+    },
+    {
+      "input": "a  -- note  ( kept\n   , b",
+      "output": "a -- note  ( kept\n, b"
+    },
+    {
+      "input": "a /* x  ,  y */  ,  b",
+      "output": "a /* x  ,  y */, b"
+    },
+    {
+      "input": "x\u00a0 ,\u00a0y",
+      "output": "x\u00a0,\u00a0y"
+    },
+    {
+      "input": "'unterminated  (",
+      "output": "'unterminated  ("
     },
     {
       "input": "",
@@ -41,5 +73,35 @@
       "input": "   ",
       "output": ""
     }
+  ],
+  "distinct": [
+    [
+      "CHECK (x = 'a  b')",
+      "CHECK (x = 'a b')"
+    ],
+    [
+      "CREATE TRIGGER g AFTER UPDATE ON t BEGIN SELECT RAISE(ABORT, 'no  way'); END",
+      "CREATE TRIGGER g AFTER UPDATE ON t BEGIN SELECT RAISE(ABORT, 'no way'); END"
+    ],
+    [
+      "DEFAULT 'it''  s'",
+      "DEFAULT 'it'' s'"
+    ],
+    [
+      "DEFAULT 'it''  '",
+      "DEFAULT 'it'' '"
+    ],
+    [
+      "[a  b] TEXT",
+      "[a b] TEXT"
+    ],
+    [
+      "a -- c\nb",
+      "a -- c b"
+    ],
+    [
+      "a /* c  d */ b",
+      "a /* c d */ b"
+    ]
   ]
 }

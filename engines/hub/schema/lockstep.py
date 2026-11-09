@@ -18,27 +18,55 @@ ROOT = Path(__file__).resolve().parents[3]
 REQUIRED = Path(__file__).with_name("required.json")
 
 
-def normalize(sql: str) -> str:
-    """Collapse whitespace, then drop it before `,`/`)` and after `(` outside quotes.
+_SQL_SPACE = " \t\n\r\x0b\x0c"
 
-    SQLite's ADD COLUMN splices `, col` in front of the closing parenthesis, so
-    a newline there becomes ` ,`. Rust `schema::normalize` must stay identical
-    (normalize-cases.json).
+
+def normalize(sql: str) -> str:
+    """One pass over the DDL, identical to Rust `schema::normalize` (normalize-cases.json).
+
+    Quoted text ('..', "..", `..` with doubled-quote escapes, and [..]) and
+    comments (`--` through its newline, `/* .. */`) are copied unchanged.
+    Elsewhere a whitespace run becomes one space, dropped at either end, after
+    `(`, and before `,` or `)`. SQLite's ADD COLUMN splices `, col` in front of
+    the closing parenthesis, so a newline there becomes ` ,`. Whitespace is
+    SQLite's ASCII set.
     """
-    collapsed = " ".join(sql.split())
+    n = len(sql)
+
+    def find(start: int, needle: str) -> int:
+        j = sql.find(needle, start)
+        return n if j < 0 else j + len(needle)
+
     out: list[str] = []
-    quote = ""
-    for i, char in enumerate(collapsed):
-        if quote:
-            if char == quote:
-                quote = ""
-        elif char in "'\"`":
-            quote = char
-        elif char == "[":
-            quote = "]"
-        elif char == " " and ((out and out[-1] == "(") or collapsed[i + 1 : i + 2] in {",", ")"}):
+    i, pending = 0, False
+    while i < n:
+        char = sql[i]
+        if char in _SQL_SPACE:
+            pending = True
+            i += 1
             continue
-        out.append(char)
+        if pending and out and out[-1] != "(" and char not in ",)":
+            out.append(" ")
+        pending = False
+        pair = sql[i : i + 2]
+        if char in "'\"`":
+            end = i + 1
+            while True:
+                end = find(end, char)
+                if end < n and sql[end] == char:
+                    end += 1
+                else:
+                    break
+        elif char == "[":
+            end = find(i + 1, "]")
+        elif pair == "--":
+            end = find(i + 2, "\n")
+        elif pair == "/*":
+            end = find(i + 2, "*/")
+        else:
+            end = i + 1
+        out.append(sql[i:end])
+        i = end
     return "".join(out)
 
 
