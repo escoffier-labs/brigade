@@ -210,15 +210,21 @@ def _hub_ms(status: Mapping[str, Any], fallback: int) -> int:
 # --- Remembered proposals ------------------------------------------------------------------
 
 
-def _refresh(client: hubc.MemoryHubClient, state: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], int]:
+def _refresh(
+    client: hubc.MemoryHubClient, state: dict[str, Any], bound: frozenset[str]
+) -> tuple[dict[str, dict[str, Any]], int]:
     """Entries whose remembered proposal is no longer open, with `pending` cleared, and the reads that failed.
 
-    A read that fails without denying access leaves its proposal counted as open.
+    Only bound scopes are read: nothing is asked of the hub about a scope no
+    longer bound. A read that fails without denying access leaves its proposal
+    counted as open.
     """
     updates: dict[str, dict[str, Any]] = {}
     failed = 0
     shown = 0
-    for table in state["scopes"].values():
+    for scope, table in state["scopes"].items():
+        if scope not in bound:
+            continue
         for key, entry in table.get("cards", {}).items():
             proposal = entry.get("pending")
             if not proposal or shown >= MAX_SHOWS:
@@ -921,7 +927,14 @@ class Sender:
         unresolved = set()
         for staged in found:
             current = self.ledger.get(staged.digest)
-            ours = current is not None and current.get("proposal_id") and not current.get("duplicate")
+            ours = current is not None and bool(current.get("proposal_id")) and bool(current.get("created"))
+            if current is not None and ours and current.get("ops_sha256") == staged.ops_sha256:
+                # This request opened the proposal and the stage holds its only packet. Publishing it
+                # is local (no hub request), so it happens before the scope rule, which would drop it.
+                self.open(staged, current["proposal_id"])
+                self.tally.skip("packets_recovered")
+                self.tally.worked = True
+                continue
             if staged.scope not in self.bound:
                 self.retire(staged, current, SCOPE_UNBOUND)
                 continue
@@ -941,7 +954,8 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
     status = _preflight(client, hub_settings)
     pair = READY(target, settings.propose_seat, settings.confirm_seat)
     early = cmd._binding(client.identity, status["principal"], status["log_epoch"])
-    updates, unread = _refresh(client, state) if state.get("binding") == early else ({}, 0)
+    bound = frozenset(scope for scope in settings.scopes() if scope in hub_settings.read_scopes)
+    updates, unread = _refresh(client, state, bound) if state.get("binding") == early else ({}, 0)
     blocked: frozenset[str] = frozenset()
     if state.get("binding") == early:
         staged_now = packets.staged_digests(target)
@@ -975,7 +989,7 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
         now,
         _pending_count(known),
         status["principal"],
-        frozenset(scope for scope in settings.scopes() if scope in hub_settings.read_scopes),
+        bound,
     )
     if not dry_run:
         unresolved = sender.reconcile()

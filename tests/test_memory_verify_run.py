@@ -1310,6 +1310,43 @@ def test_a_staged_submission_for_a_scope_no_longer_bound_is_never_sent(verify_hu
     )
 
 
+def test_an_opened_proposal_in_a_scope_no_longer_bound_still_gets_its_packet(
+    verify_hub, capsys, resolver, monkeypatch, tmp_path
+):
+    target, hub, _, _ = verify_hub
+
+    def lost(*args):
+        raise OSError("crash after created, before finalize")
+
+    monkeypatch.setattr(run_mod, "FINALIZE", lost)
+    status, report = verify(target, capsys)
+    assert status == 1
+    ((digest, pending),) = state_of(target)["submissions"].items()
+    assert pending["created"] is True
+    proposal_id = pending["proposal_id"]
+    manifest = manifest_of(hub)
+    monkeypatch.setattr(run_mod, "FINALIZE", pk.finalize)
+    other = tmp_path / "other-root"
+    other.mkdir()
+    (target / ".brigade/memory-care.toml").write_text(
+        '[hub]\nmode="read"\nread_scopes=["repo:second"]\n'
+        '[verify]\nenabled = true\npropose_seat = "propose-seat"\nconfirm_seat = "confirm-seat"\n'
+        f'[[verify.workspace]]\nscope="repo:second"\npath="{other}"\narchive_projects=[]\n'
+    )
+    hub.calls.clear()
+    status, report = verify(target, capsys)
+    assert status == 0 and report["skipped"]["packets_recovered"] == 1
+    assert run_mod.SCOPE_UNBOUND not in report["skipped"]
+    # The packet is published from the stage, and the stage is gone.
+    assert packets(target) == [f"{proposal_id}.json"]
+    assert io.sha256((target / pk.PACKETS / f"{proposal_id}.json").read_bytes()) == manifest["packet_sha256"]
+    # Nothing was asked of the hub about the unbound scope or its proposal.
+    assert writes(hub) == []
+    for call in hub.calls:
+        assert call.get("proposal_id") != proposal_id and call.get("scope") != SCOPE
+        assert SCOPE not in (call.get("scopes") or [])
+
+
 def test_an_idle_run_leaves_the_pause_counter_and_a_run_with_work_resets_it(verify_hub, capsys):
     target, hub, fake, _ = verify_hub
     assert verify(target, capsys)[0] == 0  # Every card is now inside its interval.
