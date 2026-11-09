@@ -5,12 +5,15 @@
   `policy-promoted` and `imported` hub versions are shown, so another principal's unreviewed card
   in a shared scope never appears unasked.
 - Every recall line a hook injects, local cards included, now goes through the memory prompt-load
-  scan. A blocking or warning finding shows only `- <card_id> | blocked: <rule id>`. Private-class
-  text loads only into sessions on a host that carries the local-audience marker, which
-  `brigade work hooks install` and `update` write under the Brigade user home. Elsewhere, and in
-  any session with `CLAUDE_CODE_REMOTE` or a `BRIGADE_RECALL_AUDIENCE` value other than `local`,
-  it is withheld with `code: memory_content_private`. `brigade doctor` warns when the marker is
-  missing. A scanner that cannot run injects no recall.
+  scan, each rendered field on its own and then the whole line. A blocking or warning finding
+  shows only `- <card_id> | blocked: <rule id>`. Private-class text is withheld with
+  `code: memory_content_private` unless the operator opted the host in with
+  `brigade work hooks install --recall-audience local` (or `update`), which writes a marker bound to
+  the host name, the machine id and the Brigade home's inode. Nothing writes it by default, and
+  `--recall-audience connector` removes it. `CLAUDE_CODE_REMOTE` or a `BRIGADE_RECALL_AUDIENCE`
+  value other than `local` always means connector. `brigade doctor` warns "local recall not
+  enabled" with the command when a recall target is active. A scanner that cannot run injects no
+  recall.
 - Recall skips cards the SessionStart work brief already named, so a card is not shown twice. Ids
   pasted into a prompt never hide a card.
 - The Stop hook sends hub memory a `recall.capture` event with a hashed session reference and the

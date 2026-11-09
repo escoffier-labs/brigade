@@ -81,9 +81,13 @@ def _dispatch_impl(args) -> int:
         from ...claude_hooks import install_cmd
 
         if args.hooks_command == "install":
-            return install_cmd.hooks_install(target=args.target, scope=args.scope)
+            return install_cmd.hooks_install(
+                target=args.target, scope=args.scope, recall_audience_choice=args.recall_audience
+            )
         if args.hooks_command == "update":
-            return install_cmd.hooks_update(target=args.target, scope=args.scope)
+            return install_cmd.hooks_update(
+                target=args.target, scope=args.scope, recall_audience_choice=args.recall_audience
+            )
         if args.hooks_command == "status":
             return install_cmd.hooks_status(target=args.target, scope=args.scope, json_output=args.json)
         if args.hooks_command == "uninstall":

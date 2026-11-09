@@ -13,8 +13,8 @@ routing and the prompt-load scan enabled for hooks. This module adds:
   with a hashed session reference and the keys not yet captured. With the hub
   stopped or hung the batch stays pending and the hook keeps its cap.
 
-The audience comes from ``recall_audience``: ``connector`` unless this host
-carries the marker the local hook install writes. A connector audience never
+The audience comes from ``recall_audience``: ``connector`` unless the operator
+opted this host in with ``--recall-audience local``. A connector audience never
 gets private-class text (S18).
 """
 

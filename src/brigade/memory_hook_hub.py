@@ -145,18 +145,23 @@ def _placeholder_ref(match: dict[str, Any]) -> str:
 
 
 def scan_matches(matches: list[dict[str, Any]], audience: str) -> list[dict[str, Any]]:
-    """Scan the exact line each match renders to. Raises when the scanner does (fail closed)."""
+    """Scan each rendered field, then the exact line it renders to. Raises when the scanner does (fail closed).
+
+    Fields go first and one at a time: the line's ``- `` and ``| tags:`` prefixes
+    would hide a rule anchored at the start of a title or tag. Any finding in a
+    field or in the line withholds the whole match.
+    """
     from . import memory_content_scan as scanner
-    from .memory_hooks import format_recall_match_line
+    from .memory_hooks import format_recall_match_line, recall_match_fields
 
     out: list[dict[str, Any]] = []
     for match in matches:
-        line = format_recall_match_line(match)
+        texts = [*recall_match_fields(match), format_recall_match_line(match)]
         if audience == LOCAL_AUDIENCE:
-            verdict, rules = scanner.scan_verdict([line])
+            verdict, rules = scanner.scan_verdict(texts)
             refusal = {"blocked": rules[0]} if verdict in {scanner.BLOCKED, scanner.FLAGGED} else None
         else:
-            refusal = scanner.egress_refusal([line])
+            refusal = scanner.egress_refusal(texts)
         if refusal is None:
             out.append(match)
             continue

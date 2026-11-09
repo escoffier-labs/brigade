@@ -2704,7 +2704,9 @@ Invariant tests, in S19a to S19e:
   covers a stopped or hung hub. At session start the brief runs first under
   its own 10 s deadline. Recall gets only what the hook budget has left after
   it, less a 1.5 s reserve, and is skipped below 1 s, so a slow brief keeps
-  its injection. Hub and replica hits pass the push trust rule
+  its injection. The prompt-load scan checks each rendered field (title,
+  each tag, path, card id and scope) on its own and then the whole line, so a
+  rule anchored at the start of text still sees a title or tag. Hub and replica hits pass the push trust rule
   on the client (`reviewed`, `policy-promoted` or `imported`, and a hit with
   no trust is dropped), because the hub's push query source also withholds
   private-class cards that local sessions may see. Session start records the
@@ -2718,11 +2720,19 @@ Invariant tests, in S19a to S19e:
   most 50 of each list, so a long session can produce several events under one
   `session_ref`. A batch the hub did not take is retried at the next Stop with
   the same `client_event_id`. The hook audience is `connector` by default. It
-  is `local` only on a host that carries the marker the local hook install
-  writes under the Brigade user home, outside any repository, owned by the
-  user, mode 0600 and naming that host. `brigade doctor` warns when it is
-  missing. `CLAUDE_CODE_REMOTE` or any `BRIGADE_RECALL_AUDIENCE` value other
-  than `local` narrows a session to `connector`, and no value widens one.
+  is `local` only after the operator opts the host in with
+  `brigade work hooks install --recall-audience local`, which writes a marker
+  under the Brigade user home, outside any repository. Nothing writes it by
+  default. The marker records the host name, the machine id and the device and
+  inode of the Brigade home, and all must match. The marker and its two
+  directories must not be symlinks, foreign owned or group or world writable.
+  The marker prevents accidental local trust on a copied, synced or cloud home.
+  A process running as the same user is out of scope, because it can read the
+  hub token and the cards directly, and the principal's hub grants are the
+  boundary against it. `brigade doctor` warns "local recall not enabled" with
+  the command when a recall target is active. `CLAUDE_CODE_REMOTE` or any
+  `BRIGADE_RECALL_AUDIENCE` value other than `local` narrows a session to
+  `connector` and refuses the opt-in, and no value widens one.
 - New fields in tool responses are additive. Connector tool snapshots are
   updated in the same PR.
 

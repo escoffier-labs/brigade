@@ -201,6 +201,18 @@ def _format_tags(tags: list[str]) -> str:
     return ", ".join(tags) if tags else "-"
 
 
+def recall_match_fields(match: dict[str, Any]) -> list[str]:
+    """Each field a recall line renders, as rendered, plus the ids it carries.
+
+    The prompt-load scan checks these one by one before the line's prefixes
+    join them, so a rule anchored at the start of text still sees a title or tag.
+    """
+    raw_tags = match.get("tags")
+    tags = [_single_line(str(t)) for t in raw_tags] if isinstance(raw_tags, list) else []
+    fields = [_single_line(str(match.get(key) or "")) for key in ("title", "path", "card_id", "scope")]
+    return [field for field in (*fields, *tags) if field]
+
+
 def format_recall_match_line(match: dict[str, Any]) -> str:
     blocked = match.get("blocked")
     if isinstance(blocked, str) and blocked:
