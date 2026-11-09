@@ -2758,17 +2758,22 @@ S25 as built (dispatch packets, `src/brigade/dispatch_memory.py`):
 
 - One selection serves every packet. The query is the task text the builder
   already holds. The search is the one `memory search` runs: hub fused with
-  local cards in `read` and `sync` modes, local BM25 otherwise. A degraded hub
-  answer adds no block, so a stopped or refusing hub never falls back to the
+  local cards in `read` and `sync` modes, local BM25 otherwise. The hub search
+  uses `query_source: "push"` under this host's node credential, because a
+  packet is unsolicited: the hub applies its push filter and counts no read.
+  `connector` would count each pushed card as a read by the node. A degraded
+  hub answer adds no block, so a stopped or refusing hub never falls back to the
   replica. One recall runs per process at a time, and a dispatch that finds
   one in flight gets no block at once. The 2 s budget bounds the whole build
   and is the timeout on every hub call, so the recall thread ends on its own.
   A recall that finishes late publishes nothing.
-- Hub hits pass only as `reviewed`, `policy-promoted` or `imported`. Every
-  `agent-unreviewed` hit is dropped, the writer's own included, because the
-  search answer does not say who wrote it. Each hub hit is then revalidated
-  with `card` and dropped unless its head is live, scanned clean, still in a
-  pushed trust and at the same content hash. A local card is re-read and
+- Hub hits pass only as `reviewed`, `policy-promoted` or `imported`. The
+  hub's push filter admits an `agent-unreviewed` head to the credential that
+  wrote it, and dispatch runs under the node credential, so the client still
+  drops every `agent-unreviewed` hit, the node's own included. Each hub hit is
+  then revalidated with a push `card` read at offset 1, a continuation chunk
+  the hub does not count, and dropped unless its head is live, scanned clean,
+  still in a pushed trust and at the same content hash. A local card is re-read and
   dropped if its bytes changed.
 - The prompt-load scan runs on scope, card id, title, summary and each tag
   alone, then on each item's rendered lines and on the whole block. A finding

@@ -81,20 +81,44 @@ def _assert_bounded(packet: dispatch_memory.Packet) -> None:
 
 
 class FakeHub:
+    """A hub double that counts reads by the hub's documented rule (docs/memory-operations.md).
+
+    `search_hits` is one per returned card unless `query_source` is `push`, and
+    `card_reads` is one per `card` read answered at offset 0. Both land in
+    `read_days` and `read_totals`, which stand for `memory_read_days` and
+    `memory_read_totals`.
+    """
+
     def __init__(self, matches, heads, *, error=None, hang: threading.Event | None = None):
         self.matches, self.heads, self.error, self.hang = matches, heads, error, hang
         self.actions: list[str] = []
+        self.bodies: list[dict[str, object]] = []
+        self.read_days: dict[tuple[str, str], dict[str, int]] = {}
+        self.read_totals: dict[tuple[str, str], int] = {}
+
+    def _count(self, scope: str, card_id: str, kind: str) -> None:
+        day = self.read_days.setdefault((scope, card_id), {"search_hits": 0, "card_reads": 0})
+        day[kind] += 1
+        self.read_totals[(scope, card_id)] = self.read_totals.get((scope, card_id), 0) + 1
 
     def __call__(self, url, token, body, timeout):
         self.actions.append(body["action"])
+        self.bodies.append(dict(body))
         if self.hang is not None:
             self.hang.wait(10)
         if self.error is not None:
             raise self.error
         if body["action"] == "search":
+            if body.get("query_source") != "push":
+                for match in self.matches:
+                    self._count(str(match["scope"]), str(match["card_id"]), "search_hits")
             return 200, {"matches": self.matches, "match_count": len(self.matches), "retrieval": {"mode": "lexical"}}
         head = self.heads.get((body["scope"], body["card_id"]))
-        return (200, {"card": head}) if head else (404, {"code": "memory_card_not_found"})
+        if not head:
+            return 404, {"code": "memory_card_not_found"}
+        if body.get("offset") in (None, 0):
+            self._count(str(body["scope"]), str(body["card_id"]), "card_reads")
+        return 200, {"card": head}
 
 
 SETTINGS = hubc.HubSettings(
@@ -454,6 +478,40 @@ def _write_valid_looking_marker() -> None:
 
 
 # Hub memory: trust filter and head revalidation
+
+
+def test_dispatch_searches_as_push_and_counts_no_reads(tmp_path, hub_memory):
+    target = _workspace(tmp_path)
+    fake = hub_memory([_hub_match("deploy-notes"), _hub_match("runbook", score=0.5)])
+
+    packet = dispatch_memory.build(target, "hub deploy")
+    adapter = dispatch_memory.connector_text(target, "hub deploy")
+    refs = dispatch_memory.job_refs(target, "hub deploy")
+    brief = briefs.with_memory_context(briefs.EvidenceBrief(attached=False), target, "hub deploy")
+
+    assert packet is not None and adapter and refs and brief.attached
+    searches = [body for body in fake.bodies if body["action"] == "search"]
+    cards = [body for body in fake.bodies if body["action"] == "card"]
+    assert len(searches) == 4 and all(body["query_source"] == "push" for body in searches)
+    assert cards and all(body["offset"] == 1 and body["push"] is True for body in cards)
+    assert fake.read_days == {} and fake.read_totals == {}
+
+
+def test_a_node_written_unreviewed_card_the_hub_returns_is_still_dropped(tmp_path):
+    target = _workspace(tmp_path)
+    # The hub's push filter admits an unreviewed head to the credential that wrote it,
+    # and dispatch searches under this node's credential.
+    mine = {**_hub_match("node-unreviewed", trust="agent-unreviewed", score=9.0), "writer": "node-a"}
+    heads = {
+        ("fleet", "node-unreviewed"): {**_head("node-unreviewed", trust="agent-unreviewed"), "writer": "node-a"},
+        ("fleet", "reviewed-card"): _head("reviewed-card"),
+    }
+    fake = FakeHub([mine, _hub_match("reviewed-card")], heads)
+
+    assert _hub_ids(target, fake) == ["reviewed-card"]
+    assert dispatch_memory.job_refs(target, "hub deploy", settings=SETTINGS, transport=fake) == [
+        {"scope": "fleet", "card_id": "reviewed-card", "hash": "a" * 12}
+    ]
 
 
 def test_unreviewed_card_from_another_principal_is_dropped(tmp_path):

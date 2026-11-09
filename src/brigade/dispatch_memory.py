@@ -12,13 +12,16 @@ Selection, in order:
 - The query is the task text the packet builder already holds, normalized the
   way recall hooks normalize a prompt (one line, at most 256 characters).
 - One search with the ranking ``memory search`` uses: hub memory fused with
-  local cards in ``read`` and ``sync`` modes, local BM25 otherwise. A hub that
-  is down, slow or refusing leaves the packet without ``memory_context``. It
-  never falls back to the replica and never delays dispatch past the budget.
-- The trust filter: a hub card passes only as ``reviewed``,
-  ``policy-promoted`` or ``imported``. Any ``agent-unreviewed`` card, which
-  includes every other principal's unreviewed card, is dropped.
-- Head revalidation: each hub hit's current head is re-read with ``card`` and
+  local cards in ``read`` and ``sync`` modes, local BM25 otherwise. The hub
+  search uses ``query_source: "push"``, because a packet is unsolicited: the
+  hub applies its push filter and counts no read. A hub that is down, slow or
+  refusing leaves the packet without ``memory_context``. It never falls back
+  to the replica and never delays dispatch past the budget.
+- The trust filter, kept on the client: a hub card passes only as
+  ``reviewed``, ``policy-promoted`` or ``imported``. Every ``agent-unreviewed``
+  card is dropped, this node's own included (see ``PUSH_TRUST``).
+- Head revalidation: each hub hit's current head is re-read with a push
+  ``card`` read at a continuation offset, which the hub does not count, and
   dropped unless it is still live, scanned clean, in a pushed trust and at the
   same content hash. A local card is re-read and dropped if its bytes changed.
 - The prompt-load scan on each field alone (scope, card id, title, summary and
@@ -67,6 +70,12 @@ SHORT_HASH_CHARS = 12
 SEARCH_WIDE = 20  # the hub's `search` limit: the trust filter never runs on a cut list
 BUDGET_SECONDS = 2.0  # the whole selection, hub search and revalidation included
 HEAD_CALL_SECONDS = 0.5
+# The only trust levels a dispatch packet carries. The hub's push filter also
+# admits an `agent-unreviewed` head to the credential that wrote it. Dispatch
+# searches under this host's node credential, so that exception would let cards
+# this node wrote, unreviewed, reach every connector audience the packet goes
+# to. The client therefore drops every `agent-unreviewed` card, the node's own
+# included, in the search answer and again at head revalidation.
 PUSH_TRUST = frozenset({"reviewed", "policy-promoted", "imported"})
 LOCAL = "local"
 CONNECTOR = "connector"
@@ -243,7 +252,15 @@ def _search(
         transport = hubc.urllib_transport
     transport = _deadline_transport(transport, deadline)
     payload = memory_hub_search.search_payload(
-        root, query, limit=SEARCH_WIDE, query_source="prompt", transport=transport, settings=settings
+        # A dispatch packet is unsolicited, which is the hub's `push` meaning: the
+        # hub applies its push filter (trust, scan, class, head, writer) and counts
+        # no read. `connector` would count every pushed card as a read by this node.
+        root,
+        query,
+        limit=SEARCH_WIDE,
+        query_source="push",
+        transport=transport,
+        settings=settings,
     )
     retrieval = payload.get("retrieval")
     if not isinstance(retrieval, dict) or retrieval.get("degraded") is not False:
@@ -266,8 +283,16 @@ def _current(card: Card, root: Path, client: Any, deadline: float) -> bool:
     if client is None or remaining <= 0:
         return False
     try:
+        # `push: true` serves only a push-eligible head. Offset 1 is a continuation
+        # chunk: the hub counts a card read only at offset 0, so revalidation reads
+        # the head's hash, trust, state and scan state without counting a read.
         body = client.call(
-            "card", timeout=min(HEAD_CALL_SECONDS, remaining), scope=card.scope, card_id=card.card_id, offset=0
+            "card",
+            timeout=min(HEAD_CALL_SECONDS, remaining),
+            scope=card.scope,
+            card_id=card.card_id,
+            offset=1,
+            push=True,
         )
     except Exception:  # noqa: BLE001 - a head that cannot be read is not pushed
         return False
