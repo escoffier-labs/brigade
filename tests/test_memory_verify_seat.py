@@ -67,7 +67,10 @@ def write_roster(target: Path, extra: str = "", base: str = BASE_ROSTER) -> None
 def write_care(target: Path, propose: str = "verify-propose", confirm: str = "verify-confirm") -> None:
     path = target / ".brigade" / "memory-care.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f'[verify]\npropose_seat = "{propose}"\nconfirm_seat = "{confirm}"\n', encoding="utf-8")
+    # Doctor probes seats only while the pass is enabled (it refuses with verify_disabled otherwise).
+    path.write_text(
+        f'[verify]\nenabled = true\npropose_seat = "{propose}"\nconfirm_seat = "{confirm}"\n', encoding="utf-8"
+    )
 
 
 class Workspace(type(Path())):  # type: ignore[misc]

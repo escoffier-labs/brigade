@@ -95,8 +95,9 @@ EVIDENCE_CONFLICT = "memory_evidence_conflict"
 EVIDENCE_CAPS = frozenset({"memory_evidence_principal_cap", "memory_evidence_workspace_cap"})
 COMPONENT = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 REFLECT_REFUSAL = "the verify folder must not be the reflect job's folder. Give memory-verify its own folder"
-DISABLED = "verify_disabled"
-DISABLED_REASON = "[verify] enabled is false, so no verify run calls a seat or the hub. Set enabled = true to run it"
+DISABLED = cmd.DISABLED
+DISABLED_REASON = cmd.DISABLED_REASON
+UNRESOLVED_REQUEST = cmd.UNRESOLVED_REQUEST
 
 # Injectable for tests: the seat layer, evidence assembly, the archive and the clock.
 READY: Callable[..., tuple[seats.Seat, seats.Seat]] = seats.ready
@@ -327,6 +328,15 @@ def evict_tombstones(submissions: dict[str, dict[str, Any]], now: int) -> int:
     for key in keep[: max(0, len(keep) - MAX_TOMBSTONES)]:
         del submissions[key]
     return len(tombstones) - min(len(keep), MAX_TOMBSTONES)
+
+
+def _held_cards(state: dict[str, Any]) -> frozenset[str]:
+    """Cards with a live tombstone: a request that may have opened a proposal under an unknown id."""
+    return frozenset(
+        pending["card"]
+        for pending in state.get("submissions", {}).values()
+        if pending.get("expired") and isinstance(pending.get("card"), str)
+    )
 
 
 def _verdict(result: contract.CardResult) -> str:
@@ -581,6 +591,11 @@ def _attach(client: hubc.MemoryHubClient, staged: packets.Stage, observed: int) 
 
 # Results of sending one staged submission. Only UNRESOLVED keeps the card out of its cooldown.
 OPENED, DUPLICATE, REFUSED, UNRESOLVED, DROPPED = "opened", "duplicate", "refused", "unresolved", "dropped"
+# A correction this run did not submit, because of the per-run cap, the pending ceiling or a quota stop.
+# Nothing is staged, the card stays out of its cooldown and the next run recomputes it.
+DEFERRED = "deferred"
+DEFERRED_CAP = "verify_deferred_cap"
+DEFERRED_QUOTA = "verify_deferred_quota"
 MANIFEST_REFUSED = "verify_manifest_refused"
 MANIFEST_TRANSIENT = "manifest_transient"
 # Durable card reasons, kept as the card's verdict code in the state file.
@@ -817,6 +832,7 @@ class Sender:
                             "client_event_id": current["client_event_id"],
                             "ops_sha256": ops,
                             "expired": True,
+                            "card": fairness.key_digest(staged.scope, [staged.card_id]),
                         }
                 self.record(staged, STAGE_EXPIRED, eligible=True)
                 continue
@@ -834,7 +850,8 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
     pair = READY(target, settings.propose_seat, settings.confirm_seat)
     early = cmd._binding(client.identity, status["principal"], status["log_epoch"])
     updates, unread = _refresh(client, state) if state.get("binding") == early else ({}, 0)
-    picked = cmd.select_cards(target, state, settings, hub_settings, client, now, pending=updates)
+    blocked = _held_cards(state) if state.get("binding") == early else frozenset()
+    picked = cmd.select_cards(target, state, settings, hub_settings, client, now, pending=updates, blocked=blocked)
     if not picked.same_binding:
         updates = {}
     tally = Tally(skipped=picked.skipped)
@@ -929,8 +946,9 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
                 sent = _propose(
                     sender, card=card, result=result, assembly=assembly, calls=calls, pair=pair, dry_run=dry_run
                 )
-            # A card whose submission has no result stays out of its cooldown, so its request is replayed.
-            if failed is None and entry is not None and sent != UNRESOLVED:
+            # A card whose submission has no result, or whose correction was deferred, stays out of its
+            # cooldown: an unresolved request is replayed, and a deferred correction is recomputed.
+            if failed is None and entry is not None and sent not in (UNRESOLVED, DEFERRED):
                 entry.update(verified=today, revision=card.revision, verdict=_verdict(result))
                 found = assembly.evidence()
                 if found is not None:
@@ -995,14 +1013,11 @@ def _propose(
         tally.skip("refused")
         return None
     if tally.stop is not None:
-        tally.skip(tally.stop)
-        return None
-    if len(tally.proposals) >= MAX_NEW_PROPOSALS:
-        tally.skip("verify_deferred_proposals")
-        return None
-    if sender.pending >= PENDING_CEILING:
-        tally.skip("pending_ceiling")
-        return None
+        tally.skip(DEFERRED_QUOTA)
+        return DEFERRED
+    if len(tally.proposals) >= MAX_NEW_PROPOSALS or sender.pending >= PENDING_CEILING:
+        tally.skip(DEFERRED_CAP)
+        return DEFERRED
     shown = review(card, result, assembly, calls, pair)
     if contract.scan_problem(shown.manifest.decode()):
         tally.skip("verify_manifest_unclean")
@@ -1035,10 +1050,15 @@ def _propose(
         tombstone = sender.ledger.get(staged.ops_sha256)
         if tombstone is not None and tombstone.get("expired") and tombstone.get("ops_sha256") == staged.ops_sha256:
             # Identical ops to an expired request: resend under its id, so the hub's idempotency
-            # answers with the original proposal if that request ever landed. Other ops get a new id.
+            # answers with the original proposal if that request ever landed.
             del sender.ledger[staged.ops_sha256]
             request = tombstone["client_event_id"]
             tally.skip("request_id_reused")
+        elif fairness.key_digest(card.scope, [card.card_id]) in _held_cards(sender.state):
+            # An earlier request for this card may hold an open proposal this job cannot name. The
+            # hub dedupes only identical proposals, so different ops would open a second one.
+            tally.skip(UNRESOLVED_REQUEST)
+            return None
         sender.ledger[digest] = {"client_event_id": request, "ops_sha256": staged.ops_sha256}
         sender.save()
     packets.stage(sender.target, staged)

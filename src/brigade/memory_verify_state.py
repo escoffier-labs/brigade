@@ -47,8 +47,9 @@ TOP_KEYS = frozenset({"schema", "consecutive_failures", "paused", "last_status",
 # The S19d request id ledger, shared with reflect: one entry per correction, keyed by its ops digest.
 MAX_SUBMISSIONS = 4096
 # Verify keeps the digest of the full submitted ops, marks an id a duplicate reply named, and
-# keeps the request id of an expired stage as a tombstone keyed by that ops digest.
-LEDGER_EXTRA = frozenset({"ops_sha256", "duplicate", "expired"})
+# keeps the request id of an expired stage as a tombstone keyed by that ops digest, with the
+# card's 32-hex fairness key (never its id) so the card is held while the tombstone lives.
+LEDGER_EXTRA = frozenset({"ops_sha256", "duplicate", "expired", "card"})
 SCOPE_KEYS = frozenset({"since_day", "never_read", "counts_ms", "cards"})
 CARD_KEYS = frozenset({"seen", "proposed", "verified", "revision", "evidence", "verdict", "pending", "reads"})
 

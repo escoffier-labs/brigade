@@ -47,6 +47,10 @@ SCORE_DIGITS = 4
 SNAPSHOT_MAX_AGE_MS = 2 * 86_400_000
 SCOPE_LIMIT = f"verify per-scope bound exceeded ({MAX_SCOPE_CARDS} cards)"
 HUB_CODE = re.compile(r"[a-z][a-z0-9_]{0,127}")
+DISABLED = "verify_disabled"
+DISABLED_REASON = "[verify] enabled is false, so no verify run calls a seat or the hub. Set enabled = true to run it"
+DOCTOR_DISABLED_REASON = "[verify] enabled is false, so doctor checked the configuration and probed no seat"
+UNRESOLVED_REQUEST = "verify_unresolved_request"
 
 
 class VerifyRunError(ValueError):
@@ -263,8 +267,13 @@ def select_cards(
     now: int,
     *,
     pending: dict[str, dict[str, Any]] | None = None,
+    blocked: frozenset[str] = frozenset(),
 ) -> Picked:
     """Pull the bound scopes, page their read counts and pick this run's cards.
+
+    Cards whose fairness key is in `blocked` are never selected and count as
+    `verify_unresolved_request`: an earlier request for them may have opened a
+    proposal whose id this job never learned.
 
     `pending` overrides card history entries, so a caller that refreshed
     remembered proposals selects against their current state.
@@ -338,7 +347,11 @@ def select_cards(
     if pending is not None:
         entries.update(pending)
     selection = pick.select(
-        [head for head in valid if head["scope"] not in unavailable],
+        [
+            head
+            for head in valid
+            if head["scope"] not in unavailable and fairness.key_digest(head["scope"], [head["card_id"]]) not in blocked
+        ],
         entries=entries,
         reads=reads,
         slots=settings.cards_per_run,
@@ -362,6 +375,9 @@ def select_cards(
         listed.extend({"scope": scope, "card_id": card_id} for card_id in ids or ())
     for reason, count in selection.skipped.items():
         skipped[reason] = skipped.get(reason, 0) + count
+    held = sum(1 for head in valid if fairness.key_digest(head["scope"], [head["card_id"]]) in blocked)
+    if held:
+        skipped[UNRESOLVED_REQUEST] = skipped.get(UNRESOLVED_REQUEST, 0) + held
     return Picked(
         heads=valid,
         binding=binding,
@@ -443,6 +459,9 @@ def doctor_payload(target: Path, timeout: int) -> dict[str, Any]:
         settings = config.load(target)
     except config.VerifyConfigError as exc:
         raise VerifyRunError("verify_config", str(exc)) from None
+    if not settings.enabled:
+        # The local and configuration checks above still ran. Probing a seat calls its model.
+        raise VerifyRunError(DISABLED, DOCTOR_DISABLED_REASON)
     try:
         return seats.doctor_payload(target, settings.propose_seat, settings.confirm_seat, timeout=float(timeout))
     except seats.SeatRefused as exc:

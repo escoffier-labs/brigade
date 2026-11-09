@@ -2277,7 +2277,11 @@ With `[verify] enabled = false`, every run that would call a seat (`run`,
 exits 1 before any seat call, hub request or state write, so an installed
 care job does nothing and its log shows why. `run --dry-run --no-model`
 calls no seat and keeps working, so selection can be previewed before the
-pass is enabled. A plain `run`
+pass is enabled. That preview still reads the hub: `status`, the replica
+pull and `read_stats`. `memory verify doctor` with `enabled = false` checks
+the folder and the `[verify]` configuration, then refuses with
+`verify_disabled` (exit 1) without probing either seat, because a probe calls
+the seat's model. A plain `run`
 is the live pass described under "The live run". Output never holds card
 text, titles or evidence. `--list-ids` adds the never-read card ids, still
 without titles or text. Failures print a fixed code and reason only.
@@ -2562,6 +2566,8 @@ card, evidence or model text, and it is scanned before attachment
 | `verify_scope_unbound` | A stage's scope is no longer bound in `[[verify.workspace]]` or readable. Nothing is sent to it and the request is closed |
 | `verify_stage_expired` | A stage without a result reached its 7-day limit. It is deleted, its request id is kept as a tombstone and the card is eligible again |
 | `request_id_reused` | A submission's ops matched a tombstone, so it was sent under the expired request's id |
+| `verify_unresolved_request` | The card has a live tombstone, so it is not selected and no new correction is proposed for it |
+| `verify_deferred_cap`, `verify_deferred_quota` | The card's correction was not submitted because of the per-run cap or the pending ceiling, or after a quota stop. Nothing is staged and the card stays out of its cooldown, so the next run checks it again |
 | `proposal_show_failed` | A remembered proposal could not be read. It still counts as open this run |
 
 A run fails, and counts toward the pause, on a transport, configuration or
@@ -2617,15 +2623,19 @@ card eligible again. Packets of settled proposals expire 14 days after
 settling, as above.
 
 The hub may have stored the expired request even though no reply arrived, so
-its ledger entry is not deleted. It becomes a tombstone holding only the
-request id and the digest of the full ops, keyed by that digest. When a later
-check builds a submission with exactly those ops, it is sent under the
-tombstone's request id (`request_id_reused`), and the hub's idempotency
-answers with the original proposal if it exists. Different ops get a new id.
-Because each check's prompts carry fresh nonces, a regenerated submission
-usually differs, and a pending duplicate is then caught by the
-duplicate-pending reply instead. Tombstones are kept for 90 days from the
-request's creation and at most 512 at a time, oldest evicted first.
+its ledger entry is not deleted. It becomes a tombstone holding the request
+id, the digest of the full ops and the card's 32-hex key digest (never its
+id), keyed by the ops digest. The hub's duplicate-pending rule compares whole
+proposal digests, not cards, and each check's prompts carry fresh nonces, so
+a regenerated correction for the same card would open a second proposal. The
+client prevents that: while a tombstone lives, its card is not selected
+(`verify_unresolved_request`). A card already checked in the run that created
+the tombstone may only resend exactly the tombstone's ops under its request
+id (`request_id_reused`), so the hub's idempotency answers with the original
+proposal if that request landed. Any other correction for the card is held
+with the same reason. Tombstones are kept for 90 days from the request's
+creation and at most 512 at a time, oldest evicted first. When a tombstone
+goes, its card can be selected and proposed again.
 
 When a run finds a packet's proposal no longer open, it renames the packet to
 `<proposal-id>.t<ms>.json` with the time it noticed, and a later run deletes it

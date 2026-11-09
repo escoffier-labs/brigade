@@ -22,3 +22,8 @@
   a new one.
 - `[verify] enabled = false` now stops every verify run that would call a seat,
   scheduled runs included, with `verify_disabled` before any hub request.
+- A verify card whose earlier request may have opened an unnamed proposal is
+  held until that request's tombstone ages out, so it never gets a second
+  proposal. Corrections deferred by the per-run cap, the pending ceiling or a
+  quota stop are checked again next run instead of waiting out a cooldown.
+  `memory verify doctor` probes no seat while `[verify] enabled = false`.

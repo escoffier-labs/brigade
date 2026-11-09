@@ -76,6 +76,7 @@ LEDGER_FIELDS = {
     "ops_sha256": _digest,
     "duplicate": lambda value: value is True,
     "expired": lambda value: value is True,
+    "card": lambda value: isinstance(value, str) and CLUSTER_KEY.fullmatch(value) is not None,
 }
 
 

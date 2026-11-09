@@ -416,11 +416,11 @@ def test_principal_and_scope_quota_replies_stop_proposing_without_a_failure(veri
     hub.propose_reply = (429, {"code": code, "error": "quota"})
     status, report = verify(target, capsys)
     assert status == 0 and report["status"] == "completed"
-    # The first card met the quota. The second is still verified, but not proposed.
-    assert report["skipped"]["proposal_quota"] == 2
+    # The first card met the quota. The second is still checked, then deferred without a cooldown.
+    assert report["skipped"]["proposal_quota"] == 1 and report["skipped"][run_mod.DEFERRED_QUOTA] == 1
     assert [call["action"] for call in writes(hub)] == ["evidence.attach", "propose"]
     assert {card["card_id"] for card in report["cards"]} >= {CARD_ID, SECOND_ID}
-    assert entry_for(target, SECOND_ID)["verdict"] == "correction"
+    assert "verified" not in entry_for(target, SECOND_ID)
     assert report["schedule"] == {"consecutive_failures": 0, "paused": False}
     assert "pending" not in entry_for(target, CARD_ID)
     # The request is in the ledger without a result, so its stage stays for the next run to replay.
@@ -495,7 +495,7 @@ def test_the_ceiling_and_the_per_run_cap_also_bind_within_a_run(verify_hub, caps
     hub.propose_reply = None
     seed_pending(target, run_mod.PENDING_CEILING - 1)
     status, report = verify(target, capsys)
-    assert len(report["proposals"]) == 1 and report["skipped"]["pending_ceiling"] == 1
+    assert len(report["proposals"]) == 1 and report["skipped"][run_mod.DEFERRED_CAP] == 1
     monkeypatch.setattr(run_mod, "MAX_NEW_PROPOSALS", 1)
     state = state_of(target)
     state["scopes"][SCOPE]["cards"] = {
@@ -506,7 +506,50 @@ def test_the_ceiling_and_the_per_run_cap_also_bind_within_a_run(verify_hub, caps
     state["submissions"] = {}
     vstate.save(target, state)
     status, report = verify(target, capsys)
-    assert len(report["proposals"]) == 1 and report["skipped"]["verify_deferred_proposals"] == 1
+    assert len(report["proposals"]) == 1 and report["skipped"][run_mod.DEFERRED_CAP] == 1
+
+
+def test_a_correction_over_the_per_run_cap_is_checked_again_next_run(verify_hub, capsys, resolver):
+    target, hub, fake, _ = verify_hub
+    extra = [f"card-{index}" for index in range(2, 6)]
+    for card_id in extra:
+        hub._commit("card.put", SCOPE, card_id, card_text((BLOCK, CLAIM)), "live", hubc.event_id())
+    status, report = verify(target, capsys)
+    assert status == 0 and len(report["proposals"]) == run_mod.MAX_NEW_PROPOSALS
+    assert report["skipped"][run_mod.DEFERRED_CAP] == 1
+    opened = {item["card_id"] for item in report["proposals"]}
+    (fifth,) = {CARD_ID, *extra} - opened
+    assert "verified" not in entry_for(target, fifth)
+    status, report = verify(target, capsys)
+    assert fifth in {card["card_id"] for card in report["cards"]}
+    assert [item["card_id"] for item in report["proposals"]] == [fifth]
+
+
+def test_a_correction_after_a_quota_stop_is_checked_again_next_run(verify_hub, capsys, resolver):
+    target, hub, fake, _ = verify_hub
+    hub._commit("card.put", SCOPE, SECOND_ID, card_text((BLOCK, CLAIM)), "live", hubc.event_id())
+    hub.propose_reply = (429, {"code": "memory_proposal_principal_quota", "error": "quota"})
+    status, report = verify(target, capsys)
+    assert status == 0 and report["skipped"][run_mod.DEFERRED_QUOTA] == 1
+    (stopped,) = [call["ops"][0]["card_id"] for call in writes(hub) if call["action"] == "propose"]
+    (deferred,) = {CARD_ID, SECOND_ID} - {stopped}
+    hub.propose_reply = None
+    status, report = verify(target, capsys)
+    # The quota-stopped request is replayed, and the deferred card is checked again and proposed.
+    assert deferred in {card["card_id"] for card in report["cards"]}
+    assert sorted(item["card_id"] for item in report["proposals"]) == sorted([CARD_ID, SECOND_ID])
+
+
+def test_a_disabled_doctor_probes_no_seat(verify_hub, capsys, tmp_path, monkeypatch):
+    target, hub, fake, _ = verify_hub
+    configure(target, tmp_path / "bound", extra='propose_seat = "propose-seat"\nconfirm_seat = "confirm-seat"\n')
+    probed = []
+    monkeypatch.setattr(seats, "doctor_payload", lambda *args, **kwargs: probed.append(args) or {"status": "ok"})
+    monkeypatch.setattr(seats, "probe", lambda *args, **kwargs: probed.append(args))
+    code = cli.main(["memory", "verify", "doctor", "--target", str(target), "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 1 and report["code"] == run_mod.DISABLED
+    assert probed == [] and fake.calls == [] and hub.calls == []
 
 
 # --- Failure and pause ---------------------------------------------------------------------
@@ -837,35 +880,42 @@ def test_a_failed_binding_read_keeps_the_stage_until_it_expires(verify_hub, reso
     assert entry_for(target, CARD_ID)["verdict"] == run_mod.STAGE_EXPIRED
 
 
-def test_an_expired_unresolved_stage_is_deleted_and_its_card_checked_again(verify_hub, resolver):
+def test_a_lost_reply_then_expiry_holds_the_card_until_its_tombstone_ages_out(verify_hub, resolver):
     target, hub, fake, _ = verify_hub
-    hub.propose_reply = (429, {"code": "memory_proposal_scope_quota", "error": "quota"})
+    # The reply to this propose is lost: the hub may hold a proposal whose id this job never learns.
+    hub.propose_reply = (503, {})
     now = int(time.time() * 1000)
-    run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
-    (staged,) = packets(target)
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    assert report["code"] == "hub_unavailable"
     (old_request,) = [entry["client_event_id"] for entry in state_of(target)["submissions"].values()]
+    proposes = sum(1 for call in hub.calls if call["action"] == "propose")
     expiry = now + pk.STAGE_DAYS * DAY
-    # Even a card recorded as verified that very day is checked again once its stage expires.
-    state = state_of(target)
-    state["scopes"][SCOPE]["cards"][fairness.key_digest(SCOPE, [CARD_ID])]["verified"] = expiry // DAY
-    vstate.save(target, state)
     report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=expiry)
     assert report["skipped"][run_mod.STAGE_EXPIRED] == 1 and packets(target) == []
-    entry = entry_for(target, CARD_ID)
-    assert entry["verdict"] == run_mod.STAGE_EXPIRED and "verified" not in entry
-    # The request id stays behind as a tombstone keyed by the full ops digest.
+    assert entry_for(target, CARD_ID)["verdict"] == run_mod.STAGE_EXPIRED
+    # The request id stays behind as a tombstone that names the card only by its key digest.
     ((key, tombstone),) = state_of(target)["submissions"].items()
-    assert tombstone == {"client_event_id": old_request, "ops_sha256": key, "expired": True}
-    # The next run checks the card again. Its fresh check has different ops, so it gets a new request.
+    card_key = fairness.key_digest(SCOPE, [CARD_ID])
+    assert tombstone == {"client_event_id": old_request, "ops_sha256": key, "expired": True, "card": card_key}
+    # The card was checked again in that run, but its new correction was not proposed.
+    assert report["skipped"][run_mod.UNRESOLVED_REQUEST] == 1
+    assert sum(1 for call in hub.calls if call["action"] == "propose") == proposes
+    # While the tombstone lives, later runs do not select the card at all.
+    hub.propose_reply = None
     calls = len(fake.calls)
-    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=expiry + 1)
-    assert len(fake.calls) > calls
-    ledger = state_of(target)["submissions"]
-    (request,) = [entry["client_event_id"] for entry in ledger.values() if not entry.get("expired")]
-    assert request != old_request and ledger[key] == tombstone
-    assert "request_id_reused" not in report["skipped"]
-    record = json.loads((target / pk.PACKETS / staged).read_bytes())
-    assert record["created_ms"] == expiry + 1
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=expiry + DAY)
+    assert report["skipped"][run_mod.UNRESOLVED_REQUEST] == 1 and len(fake.calls) == calls
+    assert CARD_ID not in {item["card_id"] for item in report["selected"]}
+    assert sum(1 for call in hub.calls if call["action"] == "propose") == proposes
+    # Once the tombstone ages out, the card is proposed again under a new request.
+    aged = hubc.event_id_ms(old_request) + run_mod.TOMBSTONE_DAYS * DAY
+    run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=aged)
+    assert state_of(target)["submissions"] == {}
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=aged + DAY)
+    (opened,) = report["proposals"]
+    assert opened["card_id"] == CARD_ID
+    last = [call for call in hub.calls if call["action"] == "propose"][-1]
+    assert last["client_event_id"] != old_request
 
 
 def test_identical_ops_after_an_expired_stage_reuse_the_same_request_id(verify_hub, resolver, monkeypatch):
