@@ -11,8 +11,7 @@ import pytest
 from brigade import card_fingerprint, memory_cmd
 from brigade.frontmatter_literal import LITERAL_MAX_CHARS, LITERAL_MAX_DEPTH, bounded_literal_list
 
-SMALL = LITERAL_MAX_CHARS * 2
-LARGE = SMALL * 16
+LARGE = LITERAL_MAX_CHARS * 32
 
 
 def _parsers() -> list[Callable[[str], tuple[dict, bool]]]:
@@ -48,14 +47,19 @@ def _best_of(fn: Callable[[], object], runs: int = 3) -> float:
     return best
 
 
-def _assert_cost_does_not_scale(build: Callable[[int], str]) -> None:
-    """Cost of a hostile value must not grow with its size (an unbounded parse is linear or worse)."""
-    small_card, large_card = _card(build(SMALL)), _card(build(LARGE))
+def _assert_costs_no_more_than_plain_text(build: Callable[[int], str]) -> None:
+    """A hostile bracketed value must cost about what a plain value of the same length costs.
+
+    Splitting the card text is linear in its length for every value, so the
+    comparison is against a same-length value the parser never evaluates. An
+    unbounded ``literal_eval`` of the hostile value costs many times more.
+    """
+    value = build(LARGE)
+    hostile_card, plain_card = _card(value), _card("x" * len(value))
     for parse in _parsers():
-        t_small = max(_best_of(functools.partial(parse, small_card)), 1e-4)
-        t_large = _best_of(functools.partial(parse, large_card))
-        # A 16x larger value: linear work would be ~16x, bounded work stays near 1x.
-        assert t_large / t_small < 6, (parse.__qualname__, t_small, t_large)
+        t_plain = max(_best_of(functools.partial(parse, plain_card)), 1e-4)
+        t_hostile = max(_best_of(functools.partial(parse, hostile_card)), 1e-4)
+        assert t_hostile / t_plain < 4, (parse.__qualname__, t_plain, t_hostile)
 
 
 @pytest.mark.parametrize(
@@ -67,8 +71,8 @@ def _assert_cost_does_not_scale(build: Callable[[int], str]) -> None:
         pytest.param(_unary, id="unary-chain"),
     ],
 )
-def test_hostile_value_cost_does_not_scale_and_stays_text(build: Callable[[int], str]) -> None:
-    _assert_cost_does_not_scale(build)
+def test_hostile_value_costs_like_plain_text_and_stays_text(build: Callable[[int], str]) -> None:
+    _assert_costs_no_more_than_plain_text(build)
     value = build(LARGE)
     for parse in _parsers():
         data, closed = parse(_card(value))
