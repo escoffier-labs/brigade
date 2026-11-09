@@ -3,9 +3,11 @@
 Seats are scripted fakes (the contract tests' `FakeSeat`), evidence assembly
 yields the contract tests' receipt and handoff items, and the hub is a
 `FakeHub` subclass that adds the verifier status fields, `evidence.attach`,
-`propose` and `proposal_show`. The git commit resolver is slice 9a's work:
-tests that need a correction patch the single seam, `commit_resolver`, and one
-test leaves it alone to show no `replace_block` is ever submitted without it.
+`propose` and `proposal_show`. Slice 9a's git resolver never runs here:
+every test starts with a stand-in that resolves nothing, tests that need a
+correction patch the single seam, `commit_resolver`, and one test shows an
+expansion the resolver cannot prove never submits a `replace_block`. The run's
+resolver lifecycle is in `test_memory_verify_run_resolver.py`.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from brigade import memory_verify_cmd as verify_cmd
 from brigade import memory_verify_contract as vc
 from brigade import memory_verify_evidence as ev
 from brigade import memory_verify_packets as pk
+from brigade import memory_verify_resolver as vr
 from brigade import memory_verify_run as run_mod
 from brigade import memory_verify_seat as seats
 from brigade import memory_verify_select as pick
@@ -209,13 +212,15 @@ def verify_hub(tmp_path, monkeypatch):
     monkeypatch.setattr(run_mod, "WORK_AREA", lambda target: contextlib.nullcontext(object()))
     monkeypatch.setattr(run_mod, "ASSEMBLE", assemble)
     monkeypatch.setattr(run_mod, "ARCHIVE", lambda: None)
+    # No test runs slice 9a's git resolver against the fixture workspace: by default nothing resolves.
+    monkeypatch.setattr(vr, "commit_resolver", lambda workspace, run=None: lambda abbreviation: None)
     return target, hub, fake, home
 
 
 @pytest.fixture
 def resolver(monkeypatch):
     """Stands in for slice 9a's resolver at the one seam: the fixture abbreviation names the fixture commit."""
-    monkeypatch.setattr(run_mod, "commit_resolver", lambda workspace: RESOLVER.get)
+    monkeypatch.setattr(run_mod, "commit_resolver", lambda workspace, commits: RESOLVER.get)
 
 
 def verify(target, capsys, *args):
@@ -298,8 +303,11 @@ def test_a_refused_seat_fails_the_run_before_any_hub_write(verify_hub, capsys, m
 # --- Dry run -------------------------------------------------------------------------------
 
 
-def test_a_dry_run_calls_seats_but_makes_no_hub_write_no_packet_and_leaves_the_pause(verify_hub, capsys, resolver):
+def test_a_dry_run_calls_seats_but_makes_no_hub_write_no_packet_and_leaves_the_pause(verify_hub, capsys, monkeypatch):
     target, hub, fake, _ = verify_hub
+    # A dry run never resolves a commit (test_memory_verify_run_resolver). This stands in for a
+    # correction that needs no expansion, so the dry run's proposal path is exercised.
+    monkeypatch.setattr(run_mod, "_resolver", lambda settings, scope, commits: RESOLVER.get)
     state = vstate.fresh()
     state.update(consecutive_failures=2)
     vstate.save(target, state)
@@ -377,9 +385,8 @@ def test_a_real_run_submits_a_pinned_one_card_proposal_with_a_manifest_append_ev
     assert report["skipped"]["pending_proposal"] == 1
 
 
-def test_without_the_slice_9a_resolver_no_replace_block_is_ever_submitted(verify_hub, capsys):
+def test_an_expansion_the_resolver_cannot_prove_never_submits_a_replace_block(verify_hub, capsys):
     target, hub, fake, _ = verify_hub
-    assert all(run_mod.commit_resolver(workspace) is None for workspace in run_mod.config.load(target).workspaces)
     status, report = verify(target, capsys)
     assert status == 0 and report["status"] == "completed"
     card = next(card for card in report["cards"] if card["card_id"] == CARD_ID)

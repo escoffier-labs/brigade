@@ -513,7 +513,20 @@ commit id or None. The contract module calls it only for a marked
 abbreviation that has exactly one authenticated candidate, and accepts the
 result only when it equals that candidate. With no resolver every expansion
 abstains. The rules below are normative for the slice 9 implementation.
-Slice 9's resolver implementation requires its own security review. This contract is the minimum it must meet. The resolver MUST:
+Slice 9's resolver implementation requires its own security review. This contract is the minimum it must meet.
+
+The verify run (slice 9c) opens one resolver `Run` per non-dry run, and every
+card's resolver in that run shares it, so the cards share one fetch per
+repository and no fetch proof outlives the run. The run closes it exactly
+once when it ends: completed, failed, raised or returned early. A scope bound
+to several roots resolves nothing. A dry run opens no `Run`, runs no git and
+resolves nothing, because it writes nothing (D6) and rule 11's fetch writes
+the workspace's remote-tracking refs. Its commit expansions abstain with
+`verify_commit_unresolved`. Where the platform cannot run the resolver
+(rule 1), a non-dry run reports `verify_resolver_unsupported_platform` once
+under `skipped`, with no path or ref name.
+
+The resolver MUST:
 
 1. Run every git command through one wrapper that applies rules 2 to 4 to
    each call, with a fixed timeout, no stdin, `--no-pager`, and no prompt.
@@ -1051,7 +1064,9 @@ per card, the 50,000-card scope bound fits in about 5 MB.
 
 `--dry-run` calls the seats unless `--no-model` is given, then submits,
 attaches and writes nothing, leaves the pause state alone, and prints counts
-and verdict codes only.
+and verdict codes only. It runs no git either: the commit resolver's fetch
+writes remote-tracking refs, so a dry run resolves no commit and its commit
+expansions abstain with `verify_commit_unresolved`.
 
 ## D7. Evaluation and go/no-go
 
