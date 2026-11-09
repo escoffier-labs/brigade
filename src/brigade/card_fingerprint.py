@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .card_identity import mint_card_id, valid_card_id
+from .frontmatter_literal import bounded_literal_list
 
 # Near-match threshold from issue #724 (~0.9 token Jaccard).
 NEAR_MATCH_THRESHOLD = 0.9
@@ -462,13 +463,7 @@ def _parse_frontmatter_lines(text: str) -> tuple[dict[str, Any], bool]:
         if not key:
             continue
         if value.startswith("[") and value.endswith("]"):
-            try:
-                import ast
-
-                parsed = ast.literal_eval(value)
-            except (SyntaxError, ValueError):
-                parsed = value
-            data[key] = parsed
+            data[key] = bounded_literal_list(value)
         elif value.lower() in {"true", "false"}:
             data[key] = value.lower() == "true"
         else:
