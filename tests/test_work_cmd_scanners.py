@@ -792,6 +792,47 @@ def test_scanner_import_output_rejects_target_root_swapped_while_opening(tmp_pat
 
 
 @requires_scanner_descriptors
+@pytest.mark.parametrize("busy_component", ["repo", "imports"])
+def test_scanner_import_output_tolerates_subdirectory_created_while_opening(tmp_path, monkeypatch, busy_component):
+    """A sibling mkdir inside a held directory changes its link count, not its identity (#2417).
+
+    The same thing happens for real when another process creates or removes a
+    directory in an ancestor of the target (a shared temp root, a busy
+    workspace parent) while an import is being opened. That is not a swapped
+    path component, so the import must still load.
+    """
+    from brigade.work_cmd import scanners as scanners_mod
+
+    target = tmp_path / "repo"
+    imports = target / "imports"
+    imports.mkdir(parents=True)
+    (imports / "output.jsonl").write_text('{"text":"Original scanner import"}\n')
+    busy_directory = target if busy_component == "repo" else imports
+    original_open = scanners_mod.os.open
+    touched = False
+
+    def create_subdirectory_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal touched
+        if not touched and dir_fd is not None and path == busy_component:
+            touched = True
+            (busy_directory / "created-while-opening").mkdir()
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(scanners_mod.os, "open", create_subdirectory_then_open)
+    monkeypatch.setattr(
+        scanners_mod.os,
+        "supports_dir_fd",
+        scanners_mod.os.supports_dir_fd | {create_subdirectory_then_open},
+    )
+
+    _path, records, errors = _scanner_import_output(target, "imports/output.jsonl")
+
+    assert touched
+    assert errors == []
+    assert [record["text"] for record in records] == ["Original scanner import"]
+
+
+@requires_scanner_descriptors
 def test_scanner_import_output_loads_ordinary_nested_relative_jsonl(tmp_path):
     imports = tmp_path / "imports" / "nested"
     imports.mkdir(parents=True)
