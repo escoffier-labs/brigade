@@ -2220,8 +2220,8 @@ scanned with the memory rule bundle, both as rendered and, for receipts, as
 each decoded field value. Related excerpts count only when the engine's record
 for each hit names one of the scope's projects exactly, because the engine's
 project filter also matches longer names that contain it. Each hit needs an
-explicit eligible trust label that the engine's record repeats, and the text
-used is the record's body, not the search snippet. A blocked or flagged item is dropped,
+explicit eligible trust label that the engine's record repeats. The text sent
+to the model is that record's body, which is also the text the checks ran on. A blocked or flagged item is dropped,
 counted as `evidence_flagged`, and recorded with its rule ids only.
 
 Only a verify receipt whose bytes match the digest the local evidence archive
