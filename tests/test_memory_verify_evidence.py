@@ -1350,3 +1350,127 @@ def test_a_stale_excerpt_snippet_never_reaches_the_prompt(tmp_path):
     assert [i.text[:12] for i in result.excerpts] == ["current body"]
     assert all("STALE" not in i.text for i in result.excerpts)
     assert all(len(i.text.encode()) <= ev.EXCERPT_BYTES for i in result.excerpts)
+
+
+# --- Codex round 3: empty items, bundle observation time, unencodable text ----------------
+
+
+@pytest.mark.parametrize(
+    "body", ["", "   \n\t \n", "\u00a0\u2028 ", " " * (ev.ITEM_BYTES + 10) + "real text after the cut"]
+)
+@posix
+def test_an_empty_or_whitespace_handoff_does_not_corroborate(tmp_path, body):
+    root, parsed = setup(tmp_path)
+    archive = corroborating(root)
+    write(root, HANDOFF, body)
+    [result] = run(card(RECEIPT, HANDOFF), parsed, archive)
+    assert [i.kind for i in result.items] == [ev.RECEIPT_FIELDS, ev.RECEIPT_OUTPUT]
+    assert result.counts["evidence_empty"] == 1
+    assert result.abstain == ev.UNCORROBORATED
+
+
+@posix
+def test_a_handoff_the_card_budget_cuts_to_nothing_does_not_corroborate(tmp_path):
+    root, parsed = setup(tmp_path)
+    write(root, HANDOFF, "\u00e9" * 200)  # Two bytes per character, so a one-byte remainder cuts it to nothing.
+
+    def receipt_used(stdout):
+        payload, digest = receipt(stdout=stdout)
+        write(root, RECEIPT, json.dumps(payload))
+        archive = Archive(records={("example", RUN): [record(digest)]})
+        [only] = run(card(RECEIPT), parsed, archive, card_bytes=ev.MIN_CARD_BYTES)
+        return archive, sum(len(i.text.encode()) for i in only.items)
+
+    _, used = receipt_used("tests passed")
+    archive, used = receipt_used("tests passed" + "a" * (ev.MIN_CARD_BYTES - 1 - used))
+    assert used == ev.MIN_CARD_BYTES - 1
+    [result] = run(card(RECEIPT, HANDOFF), parsed, archive, card_bytes=ev.MIN_CARD_BYTES)
+    assert result.counts["evidence_empty"] == 1
+    assert result.abstain == ev.UNCORROBORATED
+
+
+def dated_bundle(created_at):
+    replies = bundle_replies("b-old", [bundle_source("o1", "x")], {"o1": "example"})
+    replies[("evidence", ("show", "b-old", "--json"))]["regenerated_at"] = "2026-11-09T05:00:00Z"
+    replies[("evidence", ("show", "b-old", "--json"))]["generated_at"] = "2026-11-09T05:00:00Z"
+    shown = replies[("show", ("o1", "--json"))]
+    if created_at is None:
+        shown.pop("created_at", None)
+    else:
+        shown["created_at"] = created_at
+    return replies
+
+
+@posix
+def test_an_old_bundle_read_today_keeps_its_old_newest_day(tmp_path):
+    _, parsed = setup(tmp_path)
+    [result] = run(card(f"{BUNDLE}b-old"), parsed, engine(dated_bundle("2020-03-01T12:00:00Z")))
+    evidence = result.evidence()
+    assert evidence is not None
+    assert evidence.newest_day == ev._moment_ms("2020-03-01T12:00:00Z") // ev.select.DAY_MS
+    for missing in (None, "not a time", "2020-13-45T00:00:00Z"):
+        [result] = run(card(f"{BUNDLE}b-old"), parsed, engine(dated_bundle(missing)))
+        bundle = [i for i in result.items if i.kind == ev.EVIDENCE_BUNDLE]
+        assert bundle and bundle[0].observed_ms is None, missing
+        assert result.evidence() is not None and result.evidence().newest_day == 0, missing
+
+
+def test_a_bundle_takes_the_newest_time_of_the_sources_it_keeps():
+    replies = bundle_replies(
+        "b2",
+        [bundle_source("a", "x"), bundle_source("b", "y"), bundle_source("c", "z")],
+        {"a": "example", "b": "example", "c": "nobody"},
+    )
+    replies[("show", ("a", "--json"))]["created_at"] = "2021-01-01T00:00:00Z"
+    replies[("show", ("b", "--json"))]["created_at"] = "2022-06-01T00:00:00Z"
+    replies[("show", ("c", "--json"))]["created_at"] = "2026-11-09T00:00:00Z"  # Dropped as unowned.
+    bundle = engine(replies).bundle("b2", ("example",))
+    assert bundle is not None
+    assert bundle.observed_ms == ev._moment_ms("2022-06-01T00:00:00Z")
+
+
+@posix
+def test_a_receipt_with_a_lone_surrogate_is_unreachable_and_the_next_card_still_assembles(tmp_path):
+    root, parsed = setup(tmp_path)
+    archive = corroborating(root)
+    bad_run = "20261101-130000-work-verify-bad000"
+    payload, _ = receipt(run=bad_run, stdout="ok \ud800 tail")
+    bad = f".brigade/work/verify-runs/{bad_run}/receipt.json"
+    write(root, bad, json.dumps(payload))  # ensure_ascii escapes it as \\ud800, which parses back.
+    assert "\\ud800" in (root / bad).read_text()
+    first, second = card(bad, HANDOFF), {**card(RECEIPT, HANDOFF), "card_id": "card-next"}
+    results = run([first, second], parsed, archive)
+    assert results[0].counts[ev.UNREACHABLE] == 1
+    assert results[1].abstain is None
+
+
+@posix
+def test_an_encoding_failure_inside_one_reference_never_stops_the_others(tmp_path, monkeypatch):
+    root, parsed = setup(tmp_path)
+    archive = corroborating(root)
+    real = ev._cited
+
+    def cited(roots, archive, scope, ref, projects, assembly):
+        if ref == "memory/evidence/broken.md":
+            "\ud800".encode()
+        return real(roots, archive, scope, ref, projects, assembly)
+
+    monkeypatch.setattr(ev, "_cited", cited)
+    [result] = run(card("memory/evidence/broken.md", RECEIPT, HANDOFF), parsed, archive)
+    assert result.counts[ev.UNREACHABLE] == 1
+    assert result.abstain is None
+
+
+def test_unencodable_bundle_and_excerpt_texts_are_dropped():
+    assert ev.encodable({"a": ["ok"]}) and not ev.encodable({"a": ["\ud800"]}) and not ev.encodable({"\udfff": 1})
+    replies = bundle_replies(
+        "b1", [bundle_source("s1", "x"), bundle_source("s2", "y")], {"s1": "example", "s2": "example"}
+    )
+    replies[("show", ("s1", "--json"))]["text"] = "fine text"
+    replies[("show", ("s2", "--json"))]["text"] = "bad \ud800 text"
+    bundle = engine(replies).bundle("b1", ("example",))
+    assert bundle is not None
+    assert bundle.texts == ("fine text",)
+    assert bundle.dropped == ("source_text_invalid",)
+    row = {"id": "h1", "snippet": "s", "integrity_mismatch": False, "trust_label": "verified"}
+    assert excerpt_hits(row, source_show("h1", "example", text="bad \udc00")) == []

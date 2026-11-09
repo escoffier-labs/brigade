@@ -382,6 +382,19 @@ def _moment_ms(value: object) -> int | None:
     return int(moment.timestamp() * 1000)
 
 
+def encodable(value: object) -> bool:
+    """Whether every string in a decoded value, keys included, is valid UTF-8 text.
+
+    JSON may escape a lone surrogate such as `\\ud800`. It decodes into a str that
+    cannot be encoded, and would fail later when the item is hashed or cut.
+    """
+    try:
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except (UnicodeError, ValueError, TypeError):
+        return False
+    return True
+
+
 def _json(text: str | None) -> Any:
     if not text:
         return None
@@ -439,6 +452,8 @@ class EngineArchive:
             label = row.get("trust_label")
             if _label_refusal(label) or _shown_refusal(shown, label):
                 continue
+            if not encodable(shown["text"]):
+                continue
             found.append(Excerpt(excerpt_id, shown["text"], _moment_ms(row.get("created_at"))))
         return found
 
@@ -470,6 +485,7 @@ class EngineArchive:
         dropped: list[str] = []
         keys: set[str] = set()
         complete = True
+        times: list[int] = []
         for row in results:
             if not isinstance(row, dict):
                 return None
@@ -502,14 +518,22 @@ class EngineArchive:
             if not isinstance(meta, dict) or meta.get("project") not in projects:
                 dropped.append("source_unowned")
                 continue
+            if not encodable(shown["text"]):
+                dropped.append("source_text_invalid")
+                continue
             texts.append(shown["text"])
+            moment = _moment_ms(shown.get("created_at"))
+            if moment is not None:
+                times.append(moment)
             identity = source_lineage(shown)
             if identity is None:
                 complete = False
                 # Still a key for every identifier present, so a partial match still blocks a pair.
                 identity = lineage(meta.get("path"), meta.get("run_id"), shown.get("external_id"))
             keys |= identity
-        observed = _moment_ms(payload.get("regenerated_at")) or _moment_ms(payload.get("generated_at"))
+        # The engine stamps `regenerated_at` with the time of each read, so it says nothing
+        # about the evidence. The bundle is as new as the newest source it keeps, if any.
+        observed = max(times) if times else None
         return Bundle(tuple(texts), observed, tuple(dropped), frozenset(keys), complete)
 
     def receipt_records(self, project: str, run_id: str, path: str) -> list[ReceiptRecord] | None:
@@ -1143,6 +1167,8 @@ def _file_items(
     if run and run[2] == "receipt.json":
         payload = _json(text)
         if isinstance(payload, dict):
+            if not encodable(payload):
+                return None
             run_id = payload.get("run_id")
             if run_id != run[1]:
                 return None
@@ -1322,7 +1348,12 @@ def _excerpts(assembly: Assembly, archive: Archive, projects: tuple[str, ...], t
         if excerpt.excerpt_id in seen or len(assembly.excerpts) >= limit:
             continue
         seen.add(excerpt.excerpt_id)
-        final = cut(excerpt.text, EXCERPT_BYTES)
+        try:
+            final = cut(excerpt.text, EXCERPT_BYTES)
+        except UnicodeError:
+            continue
+        if not final.strip():
+            continue
         rules = _scan(excerpt.text, final)
         if rules is not None:
             assembly.flagged.append(Flag("excerpt", index, EXCERPT, rules))
@@ -1372,7 +1403,11 @@ def assemble(
         if index >= MAX_ITEMS:
             assembly.count("evidence_over_limit", len(refs) - MAX_ITEMS)
             break
-        found, attested = _cited(roots, archive, scope, ref, projects, assembly)
+        try:
+            found, attested = _cited(roots, archive, scope, ref, projects, assembly)
+        except UnicodeError:
+            # One undecodable or unencodable reference never stops the other references or cards.
+            found, attested = None, False
         if found is None:
             assembly.count(UNREACHABLE)
             if attested:
@@ -1385,7 +1420,15 @@ def assemble(
             if budget <= 0:
                 assembly.count("evidence_over_budget")
                 continue
-            final = cut(cut(item.text, ITEM_BYTES), budget)
+            try:
+                final = cut(cut(item.text, ITEM_BYTES), budget)
+            except UnicodeError:
+                assembly.count(UNREACHABLE)
+                continue
+            if not final.strip():
+                # Nothing to read, so it cannot corroborate anything. Cutting to the budget can empty an item too.
+                assembly.count("evidence_empty")
+                continue
             rules = _scan(item.text, final, item.values)
             if rules is not None:
                 assembly.flagged.append(Flag("cited", index, item.kind, rules))

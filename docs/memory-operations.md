@@ -2213,7 +2213,14 @@ when every source it keeps has the engine's item and collection identifiers,
 and, for material Brigade wrote, a run id that agrees with its external id.
 Otherwise it still reaches the prompt as context and counts
 `lineage_incomplete`. Paths are compared after NFC normalization, with POSIX
-separators, relative to the evidence directory. A bundle with no
+separators, relative to the evidence directory. A bundle's observation time is
+the newest creation time among the sources it keeps. The engine's regeneration
+time is never used, and a bundle whose sources carry no valid time has none.
+
+An item left empty or holding only whitespace, including one the byte bounds
+cut to nothing, is dropped and counted as `evidence_empty`. A receipt or
+engine text holding a string that is not valid UTF-8, such as an escaped lone
+surrogate, makes that reference unreachable without stopping the run. A bundle with no
 source left is `evidence_unreachable`. Each reachable item is cut on a UTF-8
 boundary (8 KiB per item, 32 KiB per card, 8 items, 3 excerpts of 4 KiB) and
 scanned with the memory rule bundle, both as rendered and, for receipts, as
