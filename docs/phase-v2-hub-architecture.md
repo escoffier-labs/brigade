@@ -2701,7 +2701,10 @@ Invariant tests, in S19a to S19e:
   `memory_context` block.
 - S24 as built (Claude hooks): the hub search, the fallback and the
   prompt-load scan all run in the existing recall child, so its 5 s deadline
-  covers a stopped or hung hub. Hub and replica hits pass the push trust rule
+  covers a stopped or hung hub. At session start the brief runs first under
+  its own 10 s deadline. Recall gets only what the hook budget has left after
+  it, less a 1.5 s reserve, and is skipped below 1 s, so a slow brief keeps
+  its injection. Hub and replica hits pass the push trust rule
   on the client (`reviewed`, `policy-promoted` or `imported`, and a hit with
   no trust is dropped), because the hub's push query source also withholds
   private-class cards that local sessions may see. Session start records the

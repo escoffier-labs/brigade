@@ -17,3 +17,6 @@
   card keys recall showed and the session opened with the Read tool, under each card's front
   matter id. It holds ids only. A batch the hub does not take stays pending and is retried with
   the same event id at the next Stop.
+- At session start the work brief runs first under its own deadline, and memory recall gets only
+  the hook time the brief left. On a slow host recall is skipped instead of costing the brief its
+  injection.
