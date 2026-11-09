@@ -2,7 +2,7 @@
 
 The two settings are independent and live in different places:
 
-- ``work.mode`` in ``.brigade/config.json``: ``enforced`` (default) keeps the
+- ``work.mode`` in ``.brigade/config.json``: ``engineer`` (default) keeps the
   verification loop: hooks route raw checks through ``brigade work verify run``
   and the Stop gate wants a receipt. ``yolo`` keeps shared context (brief,
   recall, Fleet Hub messages, handoffs on request) and drops verification
@@ -16,7 +16,7 @@ The two settings are independent and live in different places:
   Guard policies and baselines are never touched.
 
 Every hook adapter reads the settings through this module. Readers fail safe:
-an unreadable or invalid config resolves to ``enforced``, and an unreadable or
+an unreadable or invalid config resolves to ``engineer``, and an unreadable or
 invalid rails record leaves rails ``on``.
 """
 
@@ -43,7 +43,7 @@ from .config import (
     write_config,
 )
 
-MODE_ENFORCED = "enforced"
+MODE_ENGINEER = "engineer"
 MODE_YOLO = "yolo"
 RAILS_STATES = ("on", "off")
 # Exit status of `brigade work rails check` when rails are off for the target.
@@ -73,7 +73,7 @@ def _work_settings_with_source(target: Path) -> tuple[dict[str, Any], Path | Non
         except (OSError, ValueError):
             return {}, path
         # Match load_config: a config with an unsupported version is invalid, so its
-        # settings must not switch anything off (enforced, rails on).
+        # settings must not switch anything off (engineer, rails on).
         if not isinstance(data, dict) or data.get("version") not in SUPPORTED_VERSIONS:
             return {}, path
         work = data.get("work")
@@ -86,11 +86,11 @@ def _work_settings(target: Path) -> dict[str, Any]:
 
 
 def resolve_mode(target: Path) -> str:
-    """Return the persisted work mode, or ``enforced`` when unset or unreadable."""
+    """Return the persisted work mode, or ``engineer`` when unset or unreadable."""
     try:
         return validate_work_mode(_work_settings(target).get("mode", DEFAULT_WORK_MODE))
     except ValueError:
-        return MODE_ENFORCED
+        return MODE_ENGINEER
 
 
 def is_yolo(target: Path) -> bool:
@@ -228,7 +228,9 @@ def _update(target: Path, **changes: Any) -> str | None:
 
 def set_mode(target: Path, mode: str) -> str | None:
     """Persist ``mode``; return an error string or None."""
-    if mode not in WORK_MODES:
+    try:
+        mode = validate_work_mode(mode)
+    except ValueError:
         return f"mode must be one of: {', '.join(WORK_MODES)}"
     return _update(target, work_mode=mode)
 
@@ -304,17 +306,17 @@ def doctor_checks(target: Path) -> list[tuple[str, str, str]]:
         mode_detail = (
             "yolo: shared context stays on (brief, recall, Fleet Hub, handoffs on request); "
             "verification is not enforced and missing receipts are not reported; "
-            "`brigade work mode set enforced` restores the loop"
+            "`brigade work mode set engineer` restores the loop"
         )
     else:
-        mode_detail = "enforced: checks route through `brigade work verify run` and the Stop gate wants a receipt"
+        mode_detail = "engineer: checks route through `brigade work verify run` and the Stop gate wants a receipt"
     checks = [("INFO", "work mode", mode_detail)]
     settings = _work_settings(target)
     if "mode" in settings:
         try:
             validate_work_mode(settings["mode"])
         except ValueError:
-            checks.append(("WARN", "work.mode", "invalid value ignored; using the enforced default"))
+            checks.append(("WARN", "work.mode", "invalid value ignored; using the engineer default"))
     ignored = ignored_repo_rails_note(target)
     if ignored is not None:
         checks.append(("WARN", "work.rails", ignored))

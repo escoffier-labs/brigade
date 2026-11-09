@@ -201,7 +201,7 @@ def test_session_start_uses_portable_bounded_brief_runner(tmp_path: Path):
     assert 'timeout "$brief_timeout_seconds"' not in HOOK.read_text()
 
 
-def test_yolo_mode_allows_raw_verification_and_enforced_still_denies(tmp_path: Path):
+def test_yolo_mode_allows_raw_verification_and_engineer_still_denies(tmp_path: Path):
     target = tmp_path / "repo"
     _write_config(target, ["grok"])
     config_path = target / ".brigade" / "config.json"
@@ -210,10 +210,14 @@ def test_yolo_mode_allows_raw_verification_and_enforced_still_denies(tmp_path: P
 
     yolo = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
     config_path.write_text(json.dumps(config))
-    enforced = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
+    engineer = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
+    # The legacy name for engineer mode keeps the deny too.
+    config_path.write_text(json.dumps({**config, "work": {"mode": "enforced"}}))
+    legacy = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
 
     assert json.loads(yolo.stdout) == {"decision": "allow"}
-    assert json.loads(enforced.stdout)["decision"] == "deny"
+    assert json.loads(engineer.stdout)["decision"] == "deny"
+    assert json.loads(legacy.stdout)["decision"] == "deny"
 
 
 def test_yolo_ignored_for_unsupported_config_version(tmp_path: Path):

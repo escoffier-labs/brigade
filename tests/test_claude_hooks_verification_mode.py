@@ -17,7 +17,7 @@ from tests._home import set_home
 def _wired(path: Path, mode: str, capsys) -> Path:
     selection = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
     assert install_selection(path, selection) == 0
-    if mode != "enforced":
+    if mode != "engineer":
         assert cli.main(["work", "mode", "set", mode, "--target", str(path)]) == 0
     capsys.readouterr()
     return path.resolve()
@@ -32,8 +32,8 @@ def repos(tmp_path: Path, monkeypatch, capsys) -> dict[str, Path]:
     monkeypatch.setattr(runtime, "_run_recall", lambda *args, **kwargs: "")
     monkeypatch.setattr(runtime, "_run_brief", lambda *args: "work brief")
     return {
-        "enforced": _wired(tmp_path / "enforced", "enforced", capsys),
-        "other": _wired(tmp_path / "other", "enforced", capsys),
+        "enforced": _wired(tmp_path / "enforced", "engineer", capsys),
+        "other": _wired(tmp_path / "other", "engineer", capsys),
         "yolo": _wired(tmp_path / "yolo", "yolo", capsys),
         "plain": tmp_path / "plain",
     }
