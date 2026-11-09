@@ -1571,3 +1571,53 @@ def test_terminate_processes_windows_branch_tolerates_taskkill_keyboard_interrup
     proc._terminate_processes((process,), terminate_grace=0.0, kill_grace=0.0)
 
     assert process.kill_calls >= 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="F_DUPFD_CLOEXEC is POSIX only")
+def test_high_fd_closes_the_copy_when_the_original_cannot_be_closed(monkeypatch):
+    import fcntl
+
+    copies: list[int] = []
+    real_fcntl = fcntl.fcntl
+
+    def fake_fcntl(fd, cmd, arg=0):
+        moved = real_fcntl(os.open(os.devnull, os.O_RDONLY), cmd, arg)
+        copies.append(moved)
+        return moved
+
+    real_close = os.close
+    closed: list[int] = []
+
+    def fake_close(fd):
+        if fd == 0:
+            raise OSError(errno.EBADF, "close failed")
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(fcntl, "fcntl", fake_fcntl)
+    monkeypatch.setattr(os, "close", fake_close)
+    with pytest.raises(OSError):
+        proc.high_fd(0)
+    assert copies and copies[0] in closed
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="F_DUPFD_CLOEXEC is POSIX only")
+def test_high_fd_closes_the_original_when_the_copy_fails(monkeypatch):
+    import fcntl
+
+    def failing_fcntl(fd, cmd, arg=0):
+        raise OSError(errno.EMFILE, "no free descriptor")
+
+    closed: list[int] = []
+    real_close = os.close
+
+    def fake_close(fd):
+        closed.append(fd)
+        if fd != 1:
+            real_close(fd)
+
+    monkeypatch.setattr(fcntl, "fcntl", failing_fcntl)
+    monkeypatch.setattr(os, "close", fake_close)
+    with pytest.raises(OSError):
+        proc.high_fd(1)
+    assert closed == [1]

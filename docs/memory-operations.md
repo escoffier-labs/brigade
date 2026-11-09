@@ -2312,6 +2312,124 @@ any other page.
 | `read_stats_unavailable` | The scope has no counts this run, so nothing in it is scored or selected |
 | `scope_unbound`, `scope_unreadable` | A hub read scope with no workspace entry, or a bound scope the hub settings do not read |
 
+### Seats and the isolation probe
+
+```bash
+brigade memory verify doctor --target <verify-folder> [--timeout 120] [--json]
+```
+
+`propose_seat` and `confirm_seat` name seats in the local roster. They are
+resolved with the same roster lookup, model pins and CLI adapters as
+`brigade run --worker`, with no planning, synthesis, fleet claims or
+worktrees.
+
+A verify prompt holds private card and evidence text. Following D4 of
+phase-memory-verify, it may reach the operator's own machine and the model
+provider behind a harness CLI that runs there, the same boundary as local
+recall. That is the `local` audience. Cloud seats, hosted chat sessions,
+endpoints outside loopback, cloud models behind a local CLI and seats on
+other fleet nodes are `connector` audiences and are refused.
+
+A seat is refused before any prompt is written when:
+
+| Code | Cause |
+|---|---|
+| `verify_seat_unconfigured` | `[verify]` is missing either seat |
+| `verify_seat_unknown` | The seat is not in the local roster. Seats the hub synthesizes for other fleet nodes are never used in v1 |
+| `verify_seat_connector` | The seat's audience is `connector`: a `codex-cloud:` seat, a hosted chat session (`oracle`), an endpoint outside loopback, or an Ollama cloud model |
+| `verify_seat_not_isolated` | The adapter has no isolation profile, the seat sets a custom `command`, `env`, a non-direct transport or a reasoning pin, its CLI is a script or launcher rather than a native binary, it is an `ollama:` seat (below), or it has no passing probe for its current fingerprint |
+| `verify_seat_disallowed` | `limits.allow_models` does not allow the seat |
+| `verify_seat_unpinned` | The seat pins no exact model id. A Claude seat needs a full `claude-...` id, not an alias such as `opus` |
+| `verify_seat_same_model` | Both seats resolve to one model, ignoring a bracketed context suffix such as `[1m]` |
+| `verify_seat_unavailable` | The seat's CLI is not installed or cannot be opened and hashed |
+
+Isolation is enforced by the CLI's own switches and checked on what the CLI
+reports, never on what the model says. One adapter has a profile in v1:
+
+- `claude` runs with `--safe-mode` (no hooks, so no memory recall, and no
+  CLAUDE.md discovery, plugins, skills or MCP servers), `--setting-sources ""`
+  (no user, project or local settings), `--settings` that switch off the
+  built-in plugins, `--tools ""`, `--strict-mcp-config` with an empty MCP
+  configuration, `--disable-slash-commands`, `--no-session-persistence` (no
+  transcript of the prompt is kept) and `--output-format stream-json
+  --verbose`. Every call, the probe included, is refused with
+  `verify_seat_not_isolated` unless the CLI's init event reports no tools,
+  MCP servers, plugins, skills or slash commands, no agent beyond the four
+  built-ins (which cannot run without the Agent tool), no extra directories,
+  the call's own working directory and the pinned model. A tool use or hook
+  event later in the stream refuses the call too. The init event does not list
+  loaded instruction files, so the working directory is placed where no
+  parent holds any (below).
+
+`ollama:<model>` seats are refused with `verify_seat_not_isolated` ("ollama
+tags are mutable, and v1 has no immutable launch"). Ollama names a model only
+by `model:tag`, and neither `ollama run` nor its API accepts a manifest
+digest, so an outside `ollama pull`, `cp` or `rm` could retag the model
+between any check and the launch. Admitting Ollama seats once a model can be
+launched by its digest is future work.
+
+The profile does not run the seat in an OS or network sandbox. That residual risk
+is accepted for v1: a CLI that ignored its own switches could still reach the
+network or the filesystem. The switches, verified on every call, are the
+enforcement.
+
+The seat's executable is resolved to its canonical path, opened without
+following links and hashed with sha256. Immediately before every call the
+executable is resolved, opened and hashed again, and the call is refused with
+`verify_seat_not_isolated` when its path, device, inode, size, modification
+time or digest differs. The verified descriptor stays open until the seat
+process exists, and the seat execs that open file through `/proc/self/fd`
+rather than its path, so a file renamed or replaced after the check never
+receives the prompt. This needs Linux. On other POSIX systems every seat is
+refused with `verify_seat_not_isolated`, and Windows already refuses the work
+area. The descriptor is moved to 3 or above before the launch, so it is never
+the seat's stdin, stdout or stderr. It does survive the exec: the seat
+process and its children inherit one read-only descriptor to the seat
+executable. That residual is accepted for v1, because Python has no way to
+close it after the exec, and Claude seats run with tools disabled.
+
+`doctor` probes each seat once. A seat passes when the call succeeds with the
+evidence above, its working directory stays empty, and its reply starts with
+the probe nonce. As an extra negative signal, the probe plants a canary file
+and CLAUDE.md and AGENTS.md files with a second canary next to the working
+directory, and a reply holding either canary fails. A pass is recorded in
+`.brigade/memory/verify/probes.json` (owner-only) as a fingerprint of the seat
+name, adapter, pinned model, profile argv, the executable's path, identity and
+sha256. The pass refuses a seat whose current fingerprint has no recorded
+pass, so editing the seat or upgrading its CLI needs another `doctor` run. The probe makes one model
+call per seat with the fixed probe prompt and no card text.
+
+Each call gets two owner-only directories with one random name:
+
+- `.brigade/memory/verify/work/call-<id>/` in the verify folder holds the
+  prompt and reply files (0600).
+- `<temp>/brigade-verify-<uid>-<folder digest>/call-<id>/` holds the seat's
+  empty working directory and its TMPDIR. `<temp>` is the system temporary
+  directory, `/tmp` or `/var/tmp`, whichever comes first with no CLAUDE.md,
+  CLAUDE.local.md, AGENTS.md or `.claude` entry in any directory from `/` down
+  to it. With none, the call is refused with `verify_seat_not_isolated`.
+
+Both are created, owner-checked, written and removed through held directory
+descriptors. The working directory path given to the seat is compared with
+the held descriptor before and after the call, and a seat that leaves
+anything in it fails the call with `verify_seat_not_isolated`. The seat gets an
+allowlisted environment with no Brigade, hub or provider endpoint variable.
+
+Both directories are removed on success, error, timeout and interrupt. When a
+removal fails after an error in the caller, the original error is kept and a
+`verify_workdir_cleanup_failed` note is added to it. When it fails on a normal
+exit, the call fails with `verify_workdir_cleanup`. Leftover call directories
+are swept in batches when the next area opens, and no new call starts while
+one cannot be removed or more than 256 remain (`verify_workdir_stale`).
+
+A rate limit or quota reply maps to `seat_quota`, a login failure to
+`seat_auth` (a run failure), and a timeout to `seat_timeout`. Prompt and reply
+text never reach the run journal, a receipt, a report or the command output.
+
+The work area needs descriptor-relative, no-follow directory operations, as
+the state file does, so on Windows the pass refuses with
+`verify_workdir_unavailable` before creating anything.
+
 ### Score and lanes
 
 ```text

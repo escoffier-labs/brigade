@@ -2838,15 +2838,18 @@ S25 as built (dispatch packets, `src/brigade/dispatch_memory.py`):
   path in the memory workspace, which only a same-host recipient can open, so
   a connector packet never includes one, placeholders included.
 - Every packet is built for the `connector` audience, so private-class cards
-  never appear in one. Nothing reads the S24 local recall marker yet. `build`
-  keeps an `audience` parameter, and after #2408 merges `handoff show` may use
-  the S24 audience. A native T3 child on another machine gets the connector
+  never appear in one, with one exception: Worklore `handoff show`, which
+  prints to the operator's own terminal, uses the S24 audience. It asks the
+  S24 local recall marker and passes `local` to `build` only when the marker
+  grants it. A native T3 child on another machine gets the connector
   rendering of a packet or no block, never a local one.
 - `aboyeur` carries the block in front of the evidence brief, outside the
   6,000-byte brief budget, so planner, worker and synthesis prompts all see
-  it. Those prompts go to model providers and may go to cloud seats, so
-  `aboyeur` asks for `connector` explicitly and a later local wiring cannot
-  reach it. The Worklore handoff consumer (`brigade fleet work handoff show`) adds
+  it. A run may dispatch those prompts to cloud seats and to seats on other
+  fleet nodes, so `aboyeur` asks for `connector` explicitly and a later local
+  wiring cannot reach it. The model providers behind the operator's own local
+  harnesses are not the reason: they sit inside the private boundary, as for
+  S24 local recall. The Worklore handoff consumer (`brigade fleet work handoff show`) adds
   `memory_context` after it validates the wire view, so the hub route and
   `brigade.prepared_handoff.v1` are unchanged.
 - Grok Bot references ride in the private job envelope as `memory_refs` and
