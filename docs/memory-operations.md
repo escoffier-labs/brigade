@@ -2549,6 +2549,13 @@ card, evidence or model text, and it is scanned before attachment
 | `packets_temporary_removed`, `packets_stage_invalid` | A crashed write's temporary file, or a stage that failed its checks, was removed |
 | `verify_packet_mismatch` | A different packet already holds the proposal's name. It is kept for review, never overwritten |
 | `submission_unresolved`, `submission_unresolved_card` | A request without a result waits for the next run's replay, and its card is not checked again |
+| `manifest_transient` | Attaching the manifest met a 5xx, 408, 429, `retryable` or uncoded refusal. The stage and request id stay for the next run. Only a coded 4xx refusal is final (`manifest_refused`) |
+| `verify_packet_unbound` | The hub answered duplicate pending, and `proposal_show` did not list exactly one bound verifier manifest with this stage's manifest digest. No packet is published under that id, and the stage is discarded |
+| `verify_binding_unchecked` | The `proposal_show` read for a duplicate failed. The stage stays for the next run, until it expires |
+| `verify_stage_ops_mismatch` | A stage's ops no longer hash to the digest the request id ledger keeps. Nothing is sent, the request is closed and no new id is minted |
+| `verify_scope_unbound` | A stage's scope is no longer bound in `[[verify.workspace]]` or readable. Nothing is sent to it and the request is closed |
+| `verify_stage_expired` | A stage without a result reached its 7-day limit. It is deleted, the request is forgotten and the card is eligible again |
+| `proposal_show_failed` | A remembered proposal could not be read. It still counts as open this run |
 
 A run fails, and counts toward the pause, on a transport, configuration or
 authorization error, on a failed pre-run check, on a refused seat, on a seat
@@ -2584,6 +2591,23 @@ leftover temporary files it owns. A submission's stage,
 and removed once the packet is published. A packet already under a
 proposal's name is never replaced: identical bytes are left alone, and
 different bytes are reported as `verify_packet_mismatch` and kept for review.
+
+The request id ledger keeps the digest of every submitted op, the manifest's
+`append_evidence` op included, beside the request id. A stage is sent again
+only when its ops still hash to that digest and its scope is still bound and
+readable. When the hub answers duplicate pending, the packet is published
+under the existing proposal's id only when `proposal_show` lists exactly one
+applicable bound verifier manifest (`pending_review` or `active`) whose
+`artifact_sha256` equals the stage's manifest digest. The hub lists bound
+manifests only to a caller with `review` on every target, so a verifier
+principal holding `read`, `reflect` and `read_stats` always records
+`verify_packet_unbound` instead.
+
+A stage holds card text, evidence, prompts and raw replies, so it expires.
+A stage whose submission still has no result 7 days after it was created is
+deleted, its request is forgotten and the card's verdict becomes
+`verify_stage_expired`, which makes the card eligible again. Packets of
+settled proposals expire 14 days after settling, as above.
 
 When a run finds a packet's proposal no longer open, it renames the packet to
 `<proposal-id>.t<ms>.json` with the time it noticed, and a later run deletes it

@@ -12,3 +12,8 @@
   a transient error is replayed with the same request id by the next run
   instead of waiting out the card's cooldown. A run that only skipped no
   longer clears the pause counter.
+- Verify stages expire 7 days after creation and are never replayed when their
+  ops no longer match the ledger or their scope is no longer bound. A
+  transient attach error is retried instead of treated as final, and a
+  duplicate pending reply publishes a packet only when the hub lists its
+  manifest as bound to that proposal.

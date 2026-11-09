@@ -46,6 +46,8 @@ CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 TOP_KEYS = frozenset({"schema", "consecutive_failures", "paused", "last_status", "binding", "scopes", "submissions"})
 # The S19d request id ledger, shared with reflect: one entry per correction, keyed by its ops digest.
 MAX_SUBMISSIONS = 4096
+# Verify keeps the digest of the full submitted ops, and marks an id a duplicate reply named.
+LEDGER_EXTRA = frozenset({"ops_sha256", "duplicate"})
 SCOPE_KEYS = frozenset({"since_day", "never_read", "counts_ms", "cards"})
 CARD_KEYS = frozenset({"seen", "proposed", "verified", "revision", "evidence", "verdict", "pending", "reads"})
 
@@ -116,7 +118,7 @@ def _validate(state: object) -> dict[str, Any]:
         not isinstance(submissions, dict)
         or len(submissions) > MAX_SUBMISSIONS
         or (submissions and "binding" not in state)
-        or not all(valid_submission(digest, pending) for digest, pending in submissions.items())
+        or not all(valid_submission(digest, pending, LEDGER_EXTRA) for digest, pending in submissions.items())
     ):
         raise VerifyStateError()
     scopes = state.get("scopes")

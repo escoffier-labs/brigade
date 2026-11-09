@@ -10,7 +10,10 @@ removes leftover temporary files it owns.
 Before a submission is sent, its stage record is published as
 `staged-<ledger digest>.json`: the exact ops, the manifest bytes and the
 packet bytes. The manifest's `packet_sha256` is checked against the packet
-whenever a stage is read. Once the proposal is open, `finalize` publishes the
+whenever a stage is read, and the request id ledger holds the digest of the
+full ops, so a stage edited after it was written is never sent. A stage is
+deleted `STAGE_DAYS` after it was created when its submission still has no
+result. Once the proposal is open, `finalize` publishes the
 packet as `<proposal id>.json` and removes the stage. A packet already under
 that name is never replaced: when its bytes differ, finalize reports
 `verify_packet_mismatch` and leaves it for review. A stage whose submission
@@ -47,6 +50,8 @@ from . import memory_verify_state as vstate
 PACKETS = f"{vstate.ROOT}/packets"
 PACKET_CAP = 64 * 1024 * 1024
 PACKET_DAYS = 14
+# A stage whose submission has no result is deleted this long after it was created.
+STAGE_DAYS = 7
 DAY_MS = pick.DAY_MS
 STAGE_SCHEMA = "brigade.memory-verify-stage.v1"
 WORKSPACE_ID = "memory-verify"
@@ -55,7 +60,9 @@ OPEN_PACKET = re.compile(r"([0-9A-HJKMNP-TV-Z]{26})\.json")
 DONE_PACKET = re.compile(r"([0-9A-HJKMNP-TV-Z]{26})\.t([0-9]{1,16})\.json")
 STAGED = re.compile(r"staged-([0-9a-f]{64})\.json")
 TEMPORARY = re.compile(r"\.packet-[0-9a-f]{32}\.tmp")
-STAGE_KEYS = frozenset({"schema", "digest", "scope", "card_id", "evidence_id", "stance", "manifest", "packet", "ops"})
+STAGE_KEYS = frozenset(
+    {"schema", "digest", "scope", "card_id", "evidence_id", "stance", "manifest", "packet", "ops", "created_ms"}
+)
 
 
 @contextlib.contextmanager
@@ -146,10 +153,23 @@ class Stage:
     manifest: bytes = field(repr=False)
     packet: bytes = field(repr=False)
     ops: tuple[dict[str, Any], ...] = field(repr=False)
+    created_ms: int = 0
 
     @property
     def name(self) -> str:
         return f"staged-{self.digest}.json"
+
+    @property
+    def ops_sha256(self) -> str:
+        """The digest of every submitted op, the manifest's `append_evidence` op included.
+
+        The ledger keeps it beside the request id, and a stage whose ops no
+        longer hash to it is never sent.
+        """
+        return ops_sha256(self.ops)
+
+    def expired(self, now: int) -> bool:
+        return now - self.created_ms >= STAGE_DAYS * DAY_MS
 
     def record(self) -> bytes:
         return io.json_bytes(
@@ -163,8 +183,13 @@ class Stage:
                 "manifest": base64.b64encode(self.manifest).decode("ascii"),
                 "packet": base64.b64encode(self.packet).decode("ascii"),
                 "ops": list(self.ops),
+                "created_ms": self.created_ms,
             }
         )
+
+
+def ops_sha256(ops: Any) -> str:
+    return io.sha256(io.json_bytes(list(ops)))
 
 
 def parse(data: bytes, digest: str, submission_digest: Any) -> Stage | None:
@@ -201,9 +226,13 @@ def parse(data: bytes, digest: str, submission_digest: Any) -> Stage | None:
         or ops[-1].get("type") != "append_evidence"
         or ops[-1].get("evidence_ids") != [evidence_id]
         or submission_digest(ops[:-1]) != digest
+        or type(value["created_ms"]) is not int
+        or value["created_ms"] < 0
     ):
         return None
-    return Stage(digest, scope, card_id, evidence_id, value["stance"], manifest, packet, tuple(ops))
+    return Stage(
+        digest, scope, card_id, evidence_id, value["stance"], manifest, packet, tuple(ops), value["created_ms"]
+    )
 
 
 def stage(target: Path, record: Stage) -> None:

@@ -204,9 +204,13 @@ def _hub_ms(status: Mapping[str, Any], fallback: int) -> int:
 # --- Remembered proposals ------------------------------------------------------------------
 
 
-def _refresh(client: hubc.MemoryHubClient, state: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Entries whose remembered proposal is no longer open, with `pending` cleared."""
+def _refresh(client: hubc.MemoryHubClient, state: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], int]:
+    """Entries whose remembered proposal is no longer open, with `pending` cleared, and the reads that failed.
+
+    A read that fails without denying access leaves its proposal counted as open.
+    """
     updates: dict[str, dict[str, Any]] = {}
+    failed = 0
     shown = 0
     for table in state["scopes"].values():
         for key, entry in table.get("cards", {}).items():
@@ -218,9 +222,15 @@ def _refresh(client: hubc.MemoryHubClient, state: dict[str, Any]) -> dict[str, d
                 reply = client.call("proposal_show", proposal_id=proposal)
                 current = reply.get("state")
             except hubc.HubRefusal as exc:
-                if exc.status != 404:
+                if exc.denies_access:
                     raise
+                if exc.status != 404:
+                    failed += 1
+                    continue
                 current = "missing"  # Compacted or gone: no longer open.
+            except hubc.HubUnavailable:
+                failed += 1
+                continue
             if current in OPEN_STATES:
                 continue
             settled = {name: value for name, value in entry.items() if name != "pending"}
@@ -228,7 +238,7 @@ def _refresh(client: hubc.MemoryHubClient, state: dict[str, Any]) -> dict[str, d
                 # Slice 10 refines this into a per-verdict code. Until then the card waits its interval.
                 settled["verdict"] = "rejected"
             updates[key] = settled
-    return updates
+    return updates, failed
 
 
 def _open_proposals(state: dict[str, Any]) -> set[str]:
@@ -536,13 +546,28 @@ def _attach(client: hubc.MemoryHubClient, staged: packets.Stage, observed: int) 
             return "evidence_quota"
         if exc.code in EVIDENCE_CAPS:
             return "evidence_cap"
-        return "manifest_refused"
+        # Final only for an explicit, coded 4xx refusal, as the propose path decides. Anything else retries.
+        final = (
+            400 <= exc.status < 500
+            and exc.status not in (408, 429)
+            and exc.body.get("retryable") is not True
+            and ledger._code(exc.code)
+        )
+        return "manifest_refused" if final else MANIFEST_TRANSIENT
     return None
 
 
 # Results of sending one staged submission. Only UNRESOLVED keeps the card out of its cooldown.
 OPENED, DUPLICATE, REFUSED, UNRESOLVED, DROPPED = "opened", "duplicate", "refused", "unresolved", "dropped"
 MANIFEST_REFUSED = "verify_manifest_refused"
+MANIFEST_TRANSIENT = "manifest_transient"
+# Durable card reasons, kept as the card's verdict code in the state file.
+PACKET_UNBOUND = "verify_packet_unbound"
+STAGE_EXPIRED = "verify_stage_expired"
+OPS_MISMATCH = "verify_stage_ops_mismatch"
+SCOPE_UNBOUND = "verify_scope_unbound"
+BINDING_UNCHECKED = "verify_binding_unchecked"
+APPLICABLE_MANIFESTS = frozenset({"pending_review", "active"})
 
 
 @dataclass
@@ -559,6 +584,9 @@ class Sender:
     now: int
     pending: int
     state_principal: str = ""
+    # Scopes bound in `[[verify.workspace]]` and readable by the hub settings, right now.
+    bound: frozenset[str] = frozenset()
+    reasons: dict[tuple[str, str], str] = field(default_factory=dict)
 
     @property
     def ledger(self) -> dict[str, dict[str, Any]]:
@@ -569,37 +597,106 @@ class Sender:
 
     def entry(self, staged: packets.Stage) -> dict[str, Any] | None:
         key = fairness.key_digest(staged.scope, [staged.card_id])
-        return self.tables.get(staged.scope, {}).get(key)
+        found = self.tables.get(staged.scope, {}).get(key)
+        if found is None:
+            # A scope no longer bound keeps its old table, so its reasons stay with its cards.
+            found = self.state["scopes"].get(staged.scope, {}).get("cards", {}).get(key)
+        return found
 
-    def open(self, staged: packets.Stage, proposal_id: str) -> None:
-        """Remember the open proposal on its card, then publish its packet from the stage."""
+    def record(self, staged: packets.Stage, code: str, *, eligible: bool) -> None:
+        """A durable reason on the card's state entry. `eligible` also ends its cooldown."""
+        self.tally.skip(code)
+        self.reasons[(staged.scope, staged.card_id)] = code
+        entry = self.entry(staged)
+        if entry is not None:
+            entry["verdict"] = code
+            if eligible:
+                entry.pop("verified", None)
+        self.save()
+
+    def remember_open(self, staged: packets.Stage, proposal_id: str) -> None:
         entry = self.entry(staged)
         if entry is not None and entry.get("pending") != proposal_id:
             entry.update(pending=proposal_id, proposed=self.now)
             self.pending += 1
         self.save()
+
+    def open(self, staged: packets.Stage, proposal_id: str) -> None:
+        """Remember the open proposal on its card, then publish its packet from the stage."""
+        self.remember_open(staged, proposal_id)
         if FINALIZE(self.target, staged, proposal_id) is not None:
             self.tally.skip(packets.MISMATCH)
+
+    def bind_duplicate(self, staged: packets.Stage, proposal_id: str) -> str:
+        """Publish the packet under an existing proposal only when that proposal binds this manifest.
+
+        `proposal_show` must list exactly one applicable verifier manifest whose
+        `artifact_sha256` is this stage's manifest digest. The hub lists bound
+        manifests only to a caller with `review` on every target, so a verifier
+        without it never publishes here. Any other answer publishes nothing,
+        records `verify_packet_unbound` and discards the stage. A failed read
+        keeps the stage for the next run, until it expires.
+        """
+        self.remember_open(staged, proposal_id)
+        try:
+            shown = self.client.call("proposal_show", proposal_id=proposal_id)
+        except hubc.HubRefusal as exc:
+            if exc.denies_access:
+                raise
+            self.tally.skip(BINDING_UNCHECKED)
+            return UNRESOLVED
+        except hubc.HubUnavailable:
+            self.tally.skip(BINDING_UNCHECKED)
+            return UNRESOLVED
+        listed = shown.get("verifier_manifests")
+        digest = io.sha256(staged.manifest)
+        matches = [
+            item
+            for item in (listed if isinstance(listed, list) else [])
+            if isinstance(item, dict)
+            and item.get("artifact_kind") == MANIFEST_KIND
+            and item.get("state") in APPLICABLE_MANIFESTS
+            and item.get("artifact_sha256") == digest
+        ]
+        self.tally.skip("duplicate_pending")
+        if len(matches) == 1:
+            if FINALIZE(self.target, staged, proposal_id) is not None:
+                self.tally.skip(packets.MISMATCH)
+            return DUPLICATE
+        packets.drop(self.target, staged)
+        self.record(staged, PACKET_UNBOUND, eligible=False)
+        return DUPLICATE
 
     def send(self, staged: packets.Stage, *, replay: bool) -> str:
         """Attach the staged manifest and submit the staged ops through the request id ledger.
 
         A replay sends the identical request again, so the hub answers it
-        idempotently under the same request id.
+        idempotently under the same request id. A stage whose ops no longer
+        hash to the digest the ledger keeps is never sent, and no new id is
+        minted from it.
         """
         tally, remembered = self.tally, self.ledger.get(staged.digest)
-        if remembered is not None and remembered.get("proposal_id"):
+        if remembered is None:
+            # No request was published for it under this binding, so nothing can be replayed.
+            packets.drop(self.target, staged)
+            return DROPPED
+        if remembered.get("ops_sha256") != staged.ops_sha256:
+            # The request is closed for good: neither the stage nor a fresh check mints a new id for it.
+            if not remembered.get("proposal_id") and not remembered.get("refused"):
+                remembered["refused"] = OPS_MISMATCH
+            packets.drop(self.target, staged)
+            self.record(staged, OPS_MISMATCH, eligible=False)
+            return REFUSED
+        if remembered.get("proposal_id"):
+            if remembered.get("duplicate"):
+                return self.bind_duplicate(staged, remembered["proposal_id"])
             self.open(staged, remembered["proposal_id"])
             tally.skip("packets_recovered")
             tally.worked = True
             return OPENED
-        if remembered is not None and remembered.get("refused"):
+        if remembered.get("refused"):
             packets.drop(self.target, staged)
             return REFUSED
-        if replay and remembered is None:
-            # No request was published for it under this binding, so nothing can be replayed.
-            packets.drop(self.target, staged)
-            return DROPPED
         hold = (
             tally.stop
             if tally.stop is not None
@@ -611,23 +708,29 @@ class Sender:
         )
         if hold is not None:
             tally.skip(hold)
-            return self._unsent(staged)
+            return UNRESOLVED
         blocked = _attach(self.client, staged, self.observed)
         if blocked is not None:
             tally.skip(blocked)
             if blocked == "evidence_quota":
                 tally.stop = blocked  # Back pressure: stop proposing without a failure.
+            if blocked in ("manifest_refused", MANIFEST_TRANSIENT):
+                tally.attempted += 1
+                tally.failed += 1
             if blocked != "manifest_refused":
-                return self._unsent(staged)
-            tally.attempted += 1
-            tally.failed += 1
-            if remembered is not None:
-                remembered["refused"] = MANIFEST_REFUSED
-                self.save()
+                return UNRESOLVED  # The stage and its request id stay, and the next run replays them.
+            remembered["refused"] = MANIFEST_REFUSED
+            self.save()
             packets.drop(self.target, staged)
             return REFUSED
         sent = ledger.submit(
-            self.client, self.ledger, staged.digest, list(staged.ops), base_epoch=self.epoch, save=self.save
+            self.client,
+            self.ledger,
+            staged.digest,
+            list(staged.ops),
+            base_epoch=self.epoch,
+            save=self.save,
+            fields={"ops_sha256": staged.ops_sha256},
         )
         tally.refused.extend({"card_id": staged.card_id, "code": code} for code in sent.refusals)
         if sent.outcome == ledger.QUOTA:
@@ -650,30 +753,42 @@ class Sender:
             packets.drop(self.target, staged)
             tally.skip("duplicate_pending")
             return REFUSED
-        self.open(staged, sent.proposal_id)
         if sent.outcome == ledger.DUPLICATE:
-            tally.skip("duplicate_pending")
-            return DUPLICATE
+            self.ledger[staged.digest]["duplicate"] = True
+            self.save()
+            return self.bind_duplicate(staged, sent.proposal_id)
+        self.open(staged, sent.proposal_id)
         tally.proposals.append({"scope": staged.scope, "card_id": staged.card_id, "proposal_id": sent.proposal_id})
         return OPENED
 
-    def _unsent(self, staged: packets.Stage) -> str:
-        """Keep a stage whose request is already in the ledger, so the next run replays it. Drop any other."""
-        if staged.digest in self.ledger:
-            return UNRESOLVED
-        packets.drop(self.target, staged)
-        return DROPPED
-
     def reconcile(self) -> set[tuple[str, str]]:
-        """At run start: finalize stages of opened proposals and replay unresolved ones.
+        """At run start: check, then finalize or replay every stage.
 
-        Returns the cards whose submission is still unresolved, which this run
-        neither checks again nor puts into their cooldown.
+        A stage whose scope is no longer bound and readable is discarded with
+        `verify_scope_unbound` and its request is marked refused, so nothing is
+        sent to that scope and no new id is minted. A stage of an unresolved
+        submission older than `STAGE_DAYS` is discarded with
+        `verify_stage_expired`, its request is forgotten and its card becomes
+        eligible again. Returns the cards whose submission is still unresolved.
         """
         found, invalid = packets.staged(self.target, ledger._submission_digest)
         self.tally.skip("packets_stage_invalid", invalid)
         unresolved = set()
         for staged in found:
+            current = self.ledger.get(staged.digest)
+            ours = current is not None and current.get("proposal_id") and not current.get("duplicate")
+            if staged.scope not in self.bound:
+                packets.drop(self.target, staged)
+                if current is not None and not current.get("proposal_id") and not current.get("refused"):
+                    current["refused"] = SCOPE_UNBOUND
+                self.record(staged, SCOPE_UNBOUND, eligible=False)
+                continue
+            if not ours and staged.expired(self.now):
+                packets.drop(self.target, staged)
+                if current is not None and not current.get("proposal_id"):
+                    del self.ledger[staged.digest]
+                self.record(staged, STAGE_EXPIRED, eligible=True)
+                continue
             if self.send(staged, replay=True) == UNRESOLVED:
                 unresolved.add((staged.scope, staged.card_id))
         return unresolved
@@ -687,11 +802,12 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
     status = _preflight(client, hub_settings)
     pair = READY(target, settings.propose_seat, settings.confirm_seat)
     early = cmd._binding(client.identity, status["principal"], status["log_epoch"])
-    updates = _refresh(client, state) if state.get("binding") == early else {}
+    updates, unread = _refresh(client, state) if state.get("binding") == early else ({}, 0)
     picked = cmd.select_cards(target, state, settings, hub_settings, client, now, pending=updates)
     if not picked.same_binding:
         updates = {}
     tally = Tally(skipped=picked.skipped)
+    tally.skip("proposal_show_failed", unread)
     tables: dict[str, dict[str, dict[str, Any]]] = {}
     unresolved: set[tuple[str, str]] = set()
     if not dry_run:
@@ -709,6 +825,7 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
         now,
         _pending_count(known),
         status["principal"],
+        frozenset(scope for scope in settings.scopes() if scope in hub_settings.read_scopes),
     )
     if not dry_run:
         unresolved = sender.reconcile()
@@ -789,6 +906,9 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
                     entry["evidence"] = found.digest
                 else:
                     entry.pop("evidence", None)
+            reason = sender.reasons.get((card.scope, card.card_id))
+            if reason is not None and entry is not None:
+                entry["verdict"] = reason  # A recorded submission reason outlasts the verdict summary.
     if tally.made and not tally.ok and tally.stop != "seat_quota":
         raise VerifyRunError("verify_seats_failed", "every model call in the run failed")
     payload: dict[str, Any] = {
@@ -869,12 +989,19 @@ def _propose(
         manifest=shown.manifest,
         packet=shown.packet,
         ops=(*corrections, _manifest_op(card, proposal, evidence_id)),
+        created_ms=sender.now,
     )
     record = staged.record()
     # The stage and, later, the packet it publishes both take room until the stage is removed.
     if not packets.room(sender.target, len(record) + len(shown.packet)):
         tally.skip("verify_packet_cap")
         return None
+    # Publish the request id and the digest of the full ops before anything is sent, so a
+    # transient failure from here on leaves a request the next run can replay exactly.
+    current = sender.ledger.get(digest)
+    if current is None or current.get("ops_sha256") != staged.ops_sha256:
+        sender.ledger[digest] = {"client_event_id": hubc.event_id(), "ops_sha256": staged.ops_sha256}
+        sender.save()
     packets.stage(sender.target, staged)
     return sender.send(staged, replay=False)
 

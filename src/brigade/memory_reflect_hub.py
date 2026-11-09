@@ -71,12 +71,20 @@ def _code(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value) is not None
 
 
-def valid_submission(digest: object, pending: object) -> bool:
-    """One S19d ledger entry: the request id published before `propose`, then its proposal id or refusal."""
+# Optional ledger fields another job may keep beside the request id. Reflect keeps none.
+LEDGER_FIELDS = {"ops_sha256": _digest, "duplicate": lambda value: value is True}
+
+
+def valid_submission(digest: object, pending: object, extra: frozenset[str] = frozenset()) -> bool:
+    """One S19d ledger entry: the request id published before `propose`, then its proposal id or refusal.
+
+    `extra` names optional `LEDGER_FIELDS` the caller's job keeps.
+    """
     return (
         _digest(digest)
         and isinstance(pending, dict)
-        and not set(pending) - {"client_event_id", "proposal_id", "refused"}
+        and not set(pending) - {"client_event_id", "proposal_id", "refused"} - extra
+        and all(LEDGER_FIELDS[name](pending[name]) for name in extra & set(pending))
         and _event_id(pending.get("client_event_id"))
         and not ("proposal_id" in pending and not _event_id(pending["proposal_id"]))
         and not ("refused" in pending and not _code(pending["refused"]))
@@ -321,6 +329,7 @@ def submit(
     *,
     base_epoch: str,
     save: Callable[[], None],
+    fields: dict[str, Any] | None = None,
 ) -> Submitted:
     """Open one proposal through the S19d request id ledger.
 
@@ -333,7 +342,7 @@ def submit(
     """
     refusals: list[str] = []
     for attempt in range(2):
-        pending = dict(ledger.get(digest) or {"client_event_id": hubc.event_id()})
+        pending = dict(ledger.get(digest) or {"client_event_id": hubc.event_id(), **(fields or {})})
         ledger[digest] = pending
         save()
         try:

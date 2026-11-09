@@ -69,6 +69,9 @@ class VerifyHub(ReflectHub):
         self.propose_reply: tuple[int, dict] | None = None
         self.attach_reply: tuple[int, dict] | None = None
         self.shown: dict[str, str] = {}
+        # What proposal_show lists as bound verifier manifests: None omits the key, as for a caller
+        # without review. "latest" binds the last attached manifest, "other" a different one, "fail" errors.
+        self.bound: str | None = None
         setattr(self, "do_evidence.attach", self._attach)
 
     def do_status(self, body):
@@ -102,7 +105,21 @@ class VerifyHub(ReflectHub):
         state = self.shown.get(body["proposal_id"], "pending")
         if state == "missing":
             return 404, {"code": "memory_proposal_not_found", "error": "proposal not found"}
-        return 200, {"proposal_id": body["proposal_id"], "state": state}
+        reply = {"proposal_id": body["proposal_id"], "state": state}
+        if self.bound == "fail":
+            return 503, {"code": "memory_action_unavailable", "error": "busy"}
+        if self.bound is not None:
+            digest = self.attachments[-1]["artifact_sha256"] if self.bound == "latest" else "0" * 64
+            reply["verifier_manifests"] = [
+                {
+                    "evidence_id": "x",
+                    "artifact_kind": run_mod.MANIFEST_KIND,
+                    "artifact_sha256": digest,
+                    "stance": "contrary",
+                    "state": "pending_review",
+                }
+            ]
+        return 200, reply
 
 
 def writes(hub):
@@ -369,11 +386,10 @@ def test_a_duplicate_pending_reply_records_the_existing_id(verify_hub, capsys, r
     assert report["skipped"]["duplicate_pending"] == 1 and report["proposals"] == []
     assert entry_for(target, CARD_ID)["pending"] == existing
     assert [pending["proposal_id"] for pending in state_of(target)["submissions"].values()] == [existing]
-    # The packet for the existing proposal is published, and it is the one the attached manifest binds.
-    assert packets(target) == [f"{existing}.json"]
-    (attach,) = [call for call in writes(hub) if call["action"] == "evidence.attach"]
-    manifest = json.loads(base64.b64decode(attach["artifact_base64"]))
-    assert io.sha256((target / pk.PACKETS / f"{existing}.json").read_bytes()) == manifest["packet_sha256"]
+    # A verifier without review sees no bound manifests, so no packet is published under that id.
+    assert packets(target) == []
+    assert entry_for(target, CARD_ID)["verdict"] == run_mod.PACKET_UNBOUND
+    assert report["skipped"][run_mod.PACKET_UNBOUND] == 1
 
 
 @pytest.mark.parametrize("code", sorted(hubc.QUOTA_REFUSALS))
@@ -627,6 +643,7 @@ def test_a_duplicate_pending_packet_is_written_once_kept_when_matching_and_never
 ):
     target, hub, _, _ = verify_hub
     monkeypatch.setattr(vc, "secrets", FixedSecrets)
+    hub.bound = "latest"
     existing = hubc.event_id()
     hub.propose_reply = (409, {"code": "memory_proposal_duplicate_pending", "proposal_id": existing})
     assert verify(target, capsys)[0] == 0
@@ -652,6 +669,7 @@ def test_a_mismatched_packet_for_a_duplicate_is_never_overwritten(verify_hub, ca
     for name in packets(target):
         (target / pk.PACKETS / name).unlink()
     write_packet(target, f"{existing}.json", b'{"other": "packet"}\n')
+    hub.bound = "latest"
     hub.propose_reply = (409, {"code": "memory_proposal_duplicate_pending", "proposal_id": existing})
     status, report = verify(target, capsys)
     assert status == 0 and report["skipped"][pk.MISMATCH] == 1
@@ -769,6 +787,123 @@ def test_a_tampered_stage_is_removed_and_never_sent(verify_hub, capsys, resolver
     for call in writes(hub):
         if call["action"] == "propose":
             assert call["ops"][-1]["evidence_ids"] != [tampered]
+
+
+def test_a_duplicate_bound_to_a_different_manifest_publishes_nothing_and_records_why(verify_hub, capsys, resolver):
+    target, hub, _, _ = verify_hub
+    hub.bound = "other"
+    existing = hubc.event_id()
+    hub.propose_reply = (409, {"code": "memory_proposal_duplicate_pending", "proposal_id": existing})
+    status, report = verify(target, capsys)
+    assert status == 0 and report["skipped"][run_mod.PACKET_UNBOUND] == 1
+    assert packets(target) == []  # Neither a packet under that id nor the stage remains.
+    entry = entry_for(target, CARD_ID)
+    assert entry["verdict"] == run_mod.PACKET_UNBOUND and entry["pending"] == existing
+
+
+def test_a_failed_binding_read_keeps_the_stage_until_it_expires(verify_hub, resolver):
+    target, hub, fake, _ = verify_hub
+    hub.bound = "fail"
+    existing = hubc.event_id()
+    hub.propose_reply = (409, {"code": "memory_proposal_duplicate_pending", "proposal_id": existing})
+    now = int(time.time() * 1000)
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    assert report["skipped"][run_mod.BINDING_UNCHECKED] == 1
+    (staged,) = packets(target)
+    assert pk.STAGED.fullmatch(staged)
+    # The next run still cannot read the binding, so the stage stays, and nothing is published.
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now + DAY)
+    assert packets(target) == [staged] and report["skipped"][run_mod.BINDING_UNCHECKED] == 1
+    later = now + pk.STAGE_DAYS * DAY
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=later)
+    assert report["skipped"][run_mod.STAGE_EXPIRED] == 1 and packets(target) == []
+    assert entry_for(target, CARD_ID)["verdict"] == run_mod.STAGE_EXPIRED
+
+
+def test_an_expired_unresolved_stage_is_deleted_and_its_card_checked_again(verify_hub, resolver):
+    target, hub, fake, _ = verify_hub
+    hub.propose_reply = (429, {"code": "memory_proposal_scope_quota", "error": "quota"})
+    now = int(time.time() * 1000)
+    run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    (staged,) = packets(target)
+    (old_request,) = [entry["client_event_id"] for entry in state_of(target)["submissions"].values()]
+    expiry = now + pk.STAGE_DAYS * DAY
+    # Even a card recorded as verified that very day is checked again once its stage expires.
+    state = state_of(target)
+    state["scopes"][SCOPE]["cards"][fairness.key_digest(SCOPE, [CARD_ID])]["verified"] = expiry // DAY
+    vstate.save(target, state)
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=expiry)
+    assert report["skipped"][run_mod.STAGE_EXPIRED] == 1 and packets(target) == []
+    entry = entry_for(target, CARD_ID)
+    assert entry["verdict"] == run_mod.STAGE_EXPIRED and "verified" not in entry
+    assert state_of(target)["submissions"] == {}
+    # The next run checks the card again and stages it under a new request.
+    calls = len(fake.calls)
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=expiry + 1)
+    assert len(fake.calls) > calls
+    (request,) = [entry["client_event_id"] for entry in state_of(target)["submissions"].values()]
+    assert request != old_request
+    record = json.loads((target / pk.PACKETS / staged).read_bytes())
+    assert record["created_ms"] == expiry + 1
+
+
+def test_a_stage_with_an_altered_append_evidence_op_is_refused(verify_hub, capsys, resolver):
+    target, hub, _, _ = verify_hub
+    hub.propose_reply = (429, {"code": "memory_proposal_scope_quota", "error": "quota"})
+    assert verify(target, capsys)[0] == 0
+    (name,) = packets(target)
+    path = target / pk.PACKETS / name
+    record = json.loads(path.read_bytes())
+    record["ops"][-1]["base_revision"] = record["ops"][-1]["base_revision"] + 1
+    path.write_bytes(json.dumps(record).encode())
+    (request,) = [entry["client_event_id"] for entry in state_of(target)["submissions"].values()]
+    hub.propose_reply = None
+    hub.calls.clear()
+    status, report = verify(target, capsys)
+    assert status == 0 and report["skipped"][run_mod.OPS_MISMATCH] == 1
+    assert writes(hub) == [] and packets(target) == []
+    # No new request id was minted from the altered stage.
+    assert [entry["client_event_id"] for entry in state_of(target)["submissions"].values()] == [request]
+
+
+def test_a_transient_attach_failure_is_replayed_by_the_next_healthy_run(verify_hub, capsys, resolver):
+    target, hub, _, _ = verify_hub
+    hub.attach_reply = (503, {"code": "memory_writer_busy", "error": "busy", "retryable": True})
+    status, report = verify(target, capsys)
+    assert report["skipped"][run_mod.MANIFEST_TRANSIENT] == 1
+    assert "verified" not in entry_for(target, CARD_ID)
+    (staged,) = packets(target)
+    assert pk.STAGED.fullmatch(staged)
+    hub.attach_reply = None
+    status, report = verify(target, capsys)
+    assert status == 0 and len(report["proposals"]) == 1
+    attaches = [call for call in hub.calls if call["action"] == "evidence.attach"]
+    assert len(attaches) == 2 and attaches[0]["evidence_id"] == attaches[1]["evidence_id"]
+    assert packets(target) == [f"{report['proposals'][0]['proposal_id']}.json"]
+
+
+def test_a_staged_submission_for_a_scope_no_longer_bound_is_never_sent(verify_hub, capsys, resolver, tmp_path):
+    target, hub, _, _ = verify_hub
+    hub.propose_reply = (503, {"code": "memory_writer_busy", "error": "busy", "retryable": True})
+    verify(target, capsys)
+    (staged,) = packets(target)
+    other = tmp_path / "other-root"
+    other.mkdir()
+    (target / ".brigade/memory-care.toml").write_text(
+        '[hub]\nmode="read"\nread_scopes=["fleet", "repo:second"]\n'
+        '[verify]\npropose_seat = "propose-seat"\nconfirm_seat = "confirm-seat"\n'
+        f'[[verify.workspace]]\nscope="repo:second"\npath="{other}"\narchive_projects=[]\n'
+    )
+    hub.propose_reply = None
+    hub.calls.clear()
+    status, report = verify(target, capsys)
+    assert status == 0 and report["skipped"][run_mod.SCOPE_UNBOUND] == 1
+    assert writes(hub) == [] and packets(target) == []
+    (pending,) = state_of(target)["submissions"].values()
+    assert pending["refused"] == run_mod.SCOPE_UNBOUND
+    assert state_of(target)["scopes"][SCOPE]["cards"][fairness.key_digest(SCOPE, [CARD_ID])]["verdict"] == (
+        run_mod.SCOPE_UNBOUND
+    )
 
 
 def test_an_idle_run_leaves_the_pause_counter_and_a_run_with_work_resets_it(verify_hub, capsys):
