@@ -80,14 +80,55 @@ reason code:
    equal after `normalize` (`seat_disagreement`). The proposal carries the
    proposing seat's text.
 
-Resolver contract. `resolve_commit(abbreviation)` returns the full commit id
-the abbreviation names, or None. The caller resolves it in the repository
-bound to the card's scope, requires git to report it unambiguous, and
-requires the commit to be reachable from an allowed ref such as the default
-branch. Reachability is the identity binding: an attacker who grinds a
-commit with a matching prefix and gets a receipt for it still cannot land it
-on the allowed ref. This module ships no git code. Slice 9 implements the
-resolver.
+Resolver contract (normative for the slice 9 implementation). The caller passes
+`resolve_commit(abbreviation)`, which returns a full commit id or None. The
+contract then requires that id to equal the unique authenticated candidate.
+D3 ("Commit resolver contract") is the full text. The resolver MUST:
+
+1. Work in the git repository at the `[[verify.workspace]]` path bound to the
+   card's scope. `git rev-parse --show-toplevel` must equal that path. Every
+   git command runs with all `GIT_*` environment variables removed, a fixed
+   timeout, and no pager or prompt.
+2. Return None for an abbreviation shorter than `MIN_ABBREVIATION` without
+   calling git. That also covers git's own floor of 4 hex digits for
+   `--disambiguate`.
+3. Return None for a shallow or incomplete repository:
+   `git rev-parse --is-shallow-repository` must print exactly `false`, and
+   `extensions.partialClone` must be unset.
+4. Take the allowed refs from the workspace entry's `commit_refs`, a list of
+   fully qualified remote-tracking refs (`refs/remotes/<remote>/<branch>`).
+   When it is absent, the default is the single ref that
+   `git symbolic-ref refs/remotes/origin/HEAD` names. If that is unset, there
+   is no default and the resolver returns None. Local branches and tags are
+   never allowed refs.
+5. Fetch every remote named by an allowed ref once per run, before any
+   resolution, with `git fetch --prune --no-tags <remote>`. A failed or timed
+   out fetch, or no successful fetch in the current run, returns None. A fetch
+   from an earlier run is stale and never counts. After the fetch, every
+   allowed ref must exist (`git rev-parse --verify --quiet <ref>`), or the
+   resolver returns None.
+6. Run `git rev-parse --disambiguate=<abbreviation>`. It lists every object of
+   any type in the complete object database (loose, packed and alternates)
+   whose id starts with the prefix, reachable or not, and never consults ref
+   names. Exactly one line must come back, otherwise return None.
+7. Check `git cat-file -t <id>` prints exactly `commit`, otherwise return None.
+8. Check that the id is exactly 40 or 64 lowercase hex characters.
+9. Check `git merge-base --is-ancestor <id> <ref>` exits 0 for at least one
+   allowed ref. Exit 1 for every ref, or any other exit, returns None.
+10. Return None on any command error, nonzero exit, timeout or unparsable
+    output, and never raise to signal success.
+
+`git rev-parse --verify <abbreviation>^{commit}` alone is insufficient. It
+resolves ref names before object ids, so a branch or tag named like the
+abbreviation answers instead of the object. Its type peel breaks ties
+between objects of different types instead of reporting them, and it peels
+an annotated tag to the commit it points at. It also says nothing about
+freshness or reachability.
+
+Reachability from an allowed ref after a fresh fetch is the identity
+binding. An attacker who grinds a commit with a matching prefix and gets a
+receipt for it still has to land that commit on an allowed ref. This module
+ships no git code.
 
 Results carry codes, verdicts, block ids and digests. The only free text that
 leaves this module is the op text, which goes to the hub as the proposal.
@@ -197,9 +238,11 @@ Use only the keys shown. A block you cannot judge may be left out.
 PROMPT_SHA256 = io.sha256(INSTRUCTIONS.encode())
 
 Seat = Callable[[str], "str | None"]
-# Maps a marked abbreviation to the full commit id it names, or None. See the resolver contract above.
+# Maps a marked abbreviation to the full commit id it names, or None. The module docstring's resolver
+# contract lists the MUST rules a slice 9 implementation follows.
 Resolver = Callable[[str], "str | None"]
-# Shorter marked abbreviations never expand: a 7-character prefix is 28 bits, cheap to grind.
+# Shorter marked abbreviations never expand: a 7-character prefix is 28 bits, cheap to grind. Slice 9 lowers
+# this to 7 once its resolver enforces the contract above with tests for every None case (D3).
 MIN_ABBREVIATION = 12
 
 
@@ -1105,8 +1148,9 @@ def verify_card(
     rng: random.Random | None = None,
     propose_confirmations: bool = False,
     uncited_refs: Mapping[str, str] | None = None,
-    # TODO(verify slice 9): pass the git-backed resolver (scope repository, unambiguous, reachable from an
-    # allowed ref). Without one, every commit expansion abstains with `verify_commit_unresolved`.
+    # TODO(verify slice 9): pass the git resolver that follows the module docstring's resolver contract
+    # (fresh fetch, --disambiguate over every object, commit type, allowed-ref reachability). Without one,
+    # every commit expansion abstains with `verify_commit_unresolved`.
     resolve_commit: Resolver | None = None,
 ) -> CardResult:
     """Propose, check, confirm and map one card. At most two seat calls.

@@ -441,6 +441,15 @@ Changes:
 - The `memory-verify` care entry in `src/brigade/care_schedules.py` and
   `src/brigade/care_launchers.py`, at 11:00 by default, refusing admin
   credentials and the reflect job's folder.
+- The git commit resolver passed to `verify_card(resolve_commit=...)`,
+  following the "Commit resolver contract" in D3 rule by rule, and the
+  `commit_refs` key on `[[verify.workspace]]` with its default of the
+  remote-tracking default branch.
+- After the resolver tests below pass, lower `MIN_ABBREVIATION` in
+  `src/brigade/memory_verify_contract.py` from 12 to 7. Exact equality with
+  the unique authenticated candidate plus allowed-ref reachability means a
+  ground commit must land on an allowed ref. In the card sample, 1 of the 61
+  accepted marked abbreviations qualifies at 12 and 52 at 7.
 
 Tests (`tests/test_memory_verify_run.py`, with a `FakeHub` subclass in the style
 of `tests/test_memory_reflect_hub.py`):
@@ -451,6 +460,14 @@ of `tests/test_memory_reflect_hub.py`):
 - A real run submits pinned proposals with one card each and a manifest
   `append_evidence` op.
 - Three failures pause scheduled calls, and a manual success clears them.
+- The commit resolver returns None for each case in D3's contract: an
+  abbreviation under the minimum, a repository outside the bound workspace, a
+  shallow clone, a partial clone, a missing or unset allowed ref, a failed
+  fetch, a fetch from an earlier run, no matching object, an abbreviation
+  ambiguous only because of an object on another ref, a match that is not a
+  commit, a commit not reachable from any allowed ref, and any git error or
+  timeout. A branch or tag named like the abbreviation never answers. It
+  returns the full id for a unique, fresh, reachable commit.
 - Principal and scope quota replies stop proposing without a failure.
 - A duplicate pending reply records the existing id.
 - The pending ceiling stops new proposals.

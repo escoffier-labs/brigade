@@ -406,7 +406,9 @@ the reviewer decides whether it is true:
    for that commit, and point a claim such as "Do not commit X to the
    release index" at it. The cost is real: in the same card sample, 1 of
    the 61 accepted marked abbreviations is 12 characters or longer, and 52
-   are exactly 7. v1 therefore expands almost none of today's cards.
+   are exactly 7. Until slice 9 lands its resolver, v1 expands almost none of
+   today's cards. "Commit resolver contract" below says when the minimum
+   drops to 7.
 
    Commit identity is bound in two steps before corroboration. Every
    authenticated `commit` and `baseline_commit` value in the card's assembled
@@ -415,14 +417,9 @@ the reviewer decides whether it is true:
    `verify_commit_ambiguous`, even when both seats pick the same one. Then
    the caller's resolver must return that same id, or the block abstains
    with `verify_commit_unresolved`. Without a resolver every expansion
-   abstains. The resolver resolves the abbreviation in the repository bound
-   to the card's scope, requires git to report it unambiguous, and requires
-   the commit to be reachable from an allowed ref such as the default
-   branch. Reachability from an allowed ref is the identity binding.
-   Grinding a commit with a matching prefix and getting a receipt for it is
-   not enough unless the attacker can also land that commit on the allowed
-   ref. The contract module stays pure and ships only a test fake. Slice 9
-   implements the git resolver.
+   abstains. The resolver's normative rules are in "Commit resolver
+   contract" below. The contract module stays pure and ships only a test
+   fake. Slice 9 implements the git resolver.
 
    Each expanded id must appear in quotes from two independently produced
    countable items. One of them must be an authenticated receipt quote that
@@ -501,6 +498,82 @@ the reviewer decides whether it is true:
 
 These checks catch malformed, ungrounded and steered replies. They cannot
 prove the evidence right, so every op still waits for a reviewer.
+
+### Commit resolver contract
+
+`verify_card` takes `resolve_commit(abbreviation)`, which returns a full
+commit id or None. The contract module calls it only for a marked
+abbreviation that has exactly one authenticated candidate, and accepts the
+result only when it equals that candidate. With no resolver every expansion
+abstains. The rules below are normative for the slice 9 implementation. The
+resolver MUST:
+
+1. Work in the git repository at the `[[verify.workspace]]` path bound to the
+   card's scope, and refuse when `git rev-parse --show-toplevel` names any
+   other directory. Every git command runs with all `GIT_*` environment
+   variables removed, so the environment cannot point git at another object
+   database, and with a fixed timeout and no pager or prompt.
+2. Return None for an abbreviation shorter than the contract minimum without
+   calling git. git itself refuses `--disambiguate` below 4 hex digits, and
+   the contract minimum (12, then 7) is always above that floor.
+3. Return None for a shallow or incomplete repository.
+   `git rev-parse --is-shallow-repository` must print exactly `false`, and
+   `extensions.partialClone` must be unset, because missing history or
+   objects could hide a second match.
+4. Take the allowed refs from a new `commit_refs` key on the
+   `[[verify.workspace]]` entry. It lists fully qualified remote-tracking refs
+   such as `refs/remotes/origin/main`. When the key is absent, the default is
+   the single ref that `git symbolic-ref refs/remotes/origin/HEAD` names,
+   which is the remote-tracking default branch. If that symbolic ref is unset
+   there is no default, and the resolver returns None. Local branches and
+   tags are never allowed refs, because a local process can create or move
+   them without a fetch. Same-user tampering with remote-tracking refs stays
+   out of scope, as in the S24 marker ruling.
+5. Fetch every remote named by an allowed ref once per run, before any
+   resolution, with `git fetch --prune --no-tags <remote>`. A failed or timed
+   out fetch returns None. A fetch is fresh only when it completed in the
+   current run. A fetch from an earlier run is stale and never counts. After
+   the fetch, every allowed ref must exist
+   (`git rev-parse --verify --quiet <ref>`), or the resolver returns None.
+6. Evaluate ambiguity across the complete available object database, not
+   only the allowed refs. `git rev-parse --disambiguate=<abbreviation>` lists
+   every object of any type (loose, packed and alternates) whose id starts
+   with the prefix, reachable or not, and never consults ref names. Exactly
+   one line must come back, or the resolver returns None. A second object on
+   another ref, an unreachable object or a blob with the same prefix makes the
+   abbreviation ambiguous.
+7. Check that `git cat-file -t <id>` prints exactly `commit`, or return None.
+8. Check that the id is exactly 40 or 64 lowercase hex characters, and return
+   it in that spelling. The contract then requires it to equal the unique
+   authenticated candidate.
+9. Check reachability separately with
+   `git merge-base --is-ancestor <id> <ref>` against each allowed ref. Exit 0
+   for at least one ref passes. Exit 1 for every ref, or any other exit,
+   returns None.
+10. Return None on any missing object, ambiguity, command error, nonzero exit,
+    timeout or unparsable output.
+
+`git rev-parse --verify <abbreviation>^{commit}` alone is insufficient. It
+resolves ref names before object ids, so a local branch or tag named like
+the abbreviation would answer instead of the object. The `^{commit}` peel
+uses the object type to break ties between a commit and a tree, blob or tag
+with the same prefix instead of reporting the ambiguity. It also peels an
+annotated tag whose id matches to the commit the tag points at, which is a
+different id. And it says nothing about freshness or reachability.
+
+Reachability from an allowed ref after a fresh fetch is the identity
+binding. A receipt proves only that some worktree used a commit. Grinding a
+commit with a matching prefix and getting a receipt for it is not enough
+unless the attacker can also land that commit on an allowed ref.
+
+The minimum abbreviation stays at 12 hex characters until slice 9 ships this
+resolver with a test for every None case above, including an abbreviation
+that is ambiguous only because of an object on another ref and a shallow
+clone. Slice 9 then lowers the minimum to 7. Exact equality with the unique
+authenticated candidate plus allowed-ref reachability means a ground commit
+must land on an allowed ref, so prefix length stops being the defense. In
+the card sample, 1 of the 61 accepted marked abbreviations qualifies at 12
+characters and 52 qualify at 7.
 
 ### Mapping to ops
 
