@@ -2204,8 +2204,11 @@ under two roots of the scope, under another scope's root, outside the evidence
 directories, or an attested evidence id. A cited bundle is read only through
 the evidence engine's regenerated, eligibility-filtered reply, never from its
 cache files. Every source the engine marks ineligible, every source with an
-integrity mismatch or an untrusted label, and every source whose project the
-scope does not own exactly is dropped and counted by reason. A bundle with no
+integrity mismatch, and every source whose project the scope does not own
+exactly is dropped and counted by reason. So is a source whose trust label is
+missing, outside the engine's set, unknown, quarantined, or changed by the
+time it is read again, and one whose injection status is no longer clean. The
+text used comes from that same read. A bundle with no
 source left is `evidence_unreachable`. Each reachable item is cut on a UTF-8
 boundary (8 KiB per item, 32 KiB per card, 8 items, 3 excerpts of 4 KiB) and
 scanned with the memory rule bundle. A blocked or flagged item is dropped,
@@ -2219,7 +2222,8 @@ and stderr summaries form a separate medium item. A card gets no model call
 (`no_evidence`, `evidence_unreachable`, `evidence_flagged` or
 `uncorroborated`) unless an authenticated receipt and a second independently
 produced item remain, from a different file and run id, sharing no run of 200
-or more bytes anywhere in either source, and drawn from neither command output
+or more bytes anywhere in either source (a source too repetitive to fingerprint
+fully counts as copied), and drawn from neither command output
 nor related excerpts. The archive record must repeat the receipt's source,
 collection, kind, project, path and run exactly, with no integrity mismatch.
 

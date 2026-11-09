@@ -470,21 +470,25 @@ def bundle_source(item_id, snippet, **extra):
     }
 
 
-def source_show(item_id, project, **extra):
+def source_show(item_id, project, text="shown body", label="verified", injection="clean", **extra):
     return {
         "id": item_id,
         "live": True,
         "tombstoned": False,
         "integrity_mismatch": False,
+        "trust_label": label,
+        "provenance": {"trust": {"label": label, "injection": {"status": injection, "count": 0, "rules": []}}},
         "metadata": {"project": project},
+        "text": text,
         **extra,
     }
 
 
 def bundle_replies(bundle_id, rows, shows):
     replies = {("evidence", ("show", bundle_id, "--json")): {"id": bundle_id, "results": rows}}
+    snippets = {row.get("id"): row.get("snippet") for row in rows}
     for item_id, project in shows.items():
-        replies[("show", (item_id, "--json"))] = source_show(item_id, project)
+        replies[("show", (item_id, "--json"))] = source_show(item_id, project, text=snippets.get(item_id) or "x")
     return replies
 
 
@@ -578,6 +582,71 @@ def test_a_bundle_source_the_engine_cannot_revalidate_is_dropped(change):
     assert bundle is not None
     assert bundle.texts == ("kept",)
     assert bundle.dropped == ("source_unverified",)
+
+
+def label_case(row_label, shown):
+    replies = bundle_replies(
+        "b1", [bundle_source("s1", "kept"), bundle_source("s2", "x")], {"s1": "example", "s2": "example"}
+    )
+    replies[("evidence", ("show", "b1", "--json"))]["results"][1]["trust_label"] = row_label
+    if row_label is None:
+        replies[("evidence", ("show", "b1", "--json"))]["results"][1].pop("trust_label")
+    replies[("show", ("s2", "--json"))] = {**source_show("s2", "example", text="dropped"), **shown}
+    return engine(replies).bundle("b1", ("example",))
+
+
+@pytest.mark.parametrize(
+    ("row_label", "shown", "reason"),
+    [
+        (None, {}, "trust_label_invalid"),
+        ("trusted", {}, "trust_label_invalid"),
+        ("Verified", {}, "trust_label_invalid"),
+        ("unknown", {}, "trust_unknown"),
+        ("quarantined", {}, "trust_quarantined"),
+        ("verified", {"trust_label": None}, "trust_label_invalid"),
+        ("verified", {"trust_label": "revoked"}, "trust_label_invalid"),
+        ("verified", {"trust_label": "reviewed"}, "trust_label_changed"),
+        (
+            "verified",
+            {
+                "trust_label": "reviewed",
+                "provenance": {"trust": {"label": "reviewed", "injection": {"status": "clean"}}},
+            },
+            "trust_label_changed",
+        ),
+        ("verified", {"trust_label": "quarantined"}, "trust_quarantined"),
+        (
+            "verified",
+            {"provenance": {"trust": {"label": "reviewed", "injection": {"status": "clean"}}}},
+            "trust_label_changed",
+        ),
+        ("verified", {"provenance": {}}, "trust_label_changed"),
+        (
+            "verified",
+            {"provenance": {"trust": {"label": "verified", "injection": {"status": "flagged"}}}},
+            "injection_not_clean",
+        ),
+        ("verified", {"provenance": {"trust": {"label": "verified"}}}, "injection_not_clean"),
+        ("verified", {"untrusted_body_omitted": True}, "source_body_withheld"),
+        ("verified", {"text": None}, "source_body_withheld"),
+    ],
+)
+def test_bundle_sources_need_one_closed_set_label_and_clean_injection_now(row_label, shown, reason):
+    bundle = label_case(row_label, shown)
+    assert bundle is not None
+    assert bundle.texts == ("kept",)
+    assert bundle.dropped == (reason,)
+
+
+def test_a_clean_bundle_source_uses_the_text_from_its_current_show_reply():
+    bundle = label_case("verified", {"text": "current body"})
+    assert bundle is not None
+    assert bundle.texts == ("kept", "current body")
+    assert bundle.dropped == ()
+    for label in ("untrusted", "reviewed"):
+        assert label_case(
+            label, {"trust_label": label, "provenance": {"trust": {"label": label, "injection": {"status": "clean"}}}}
+        ).texts == ("kept", "dropped")
 
 
 def test_bundle_refs_parse_like_the_canonical_locator_reader():
@@ -956,10 +1025,34 @@ def test_shared_spans_are_found_anywhere_in_a_full_size_source():
         assert not ev.shares_span(noise, other[:1000] + span[:199] + other[1000:]), offset
 
 
-def test_low_entropy_input_stays_bounded():
+def test_low_entropy_input_stays_bounded_and_counts_as_copied():
     zeros = bytes(ev.READ_LIMIT)
     started = time.monotonic()
-    assert ev.shares_span(zeros, b"x" * 100 + bytes(300) + b"y" * 100)
-    assert not ev.shares_span(zeros, bytes(range(1, 256)) * 4)
     assert ev._fingerprints(zeros, ev.COPY_SPAN).saturated
+    assert ev.shares_span(zeros, b"x" * 100 + bytes(300) + b"y" * 100)
+    # Saturation alone counts as copied, even with no shared fingerprint.
+    assert ev.shares_span(zeros, bytes(range(1, 256)) * 4)
     assert time.monotonic() - started < 30
+
+
+def test_a_copied_run_after_a_saturating_prefix_is_found():
+    prefix = bytes(ev.MAX_PRINT_POSITIONS + 1000)
+    span = random.Random(9).randbytes(200)
+    other = random.Random(10).randbytes(3000)
+    first = prefix + span + random.Random(11).randbytes(500)
+    assert ev._fingerprints(first, ev.COPY_SPAN).saturated
+    assert span[0:1] not in first[: len(prefix)]
+    assert ev.shares_span(first, other[:1000] + span + other[1000:])
+
+
+@posix
+def test_a_handoff_hiding_a_copied_span_behind_a_repetitive_prefix_is_not_independent(tmp_path):
+    root, parsed = setup(tmp_path)
+    stdout = words(7, 4000)
+    payload, digest = receipt(stdout=stdout)
+    write(root, RECEIPT, json.dumps(payload, indent=2))
+    archive = Archive(records={("example", RUN): [record(digest)]})
+    copied = stdout.encode()[10_000:10_240]
+    write(root, HANDOFF, b"# Port check\n\n" + b"=" * (ev.MAX_PRINT_POSITIONS + 5000) + b"\n" + copied + b"\n")
+    [result] = run(card(RECEIPT, HANDOFF), parsed, archive)
+    assert result.abstain == ev.UNCORROBORATED

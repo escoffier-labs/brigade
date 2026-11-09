@@ -428,9 +428,12 @@ class EngineArchive:
         revalidation of every source. `evidence show` regenerates the bundle
         from current sources and collapses each ineligible source to a stub
         with a reason code. Every stub is dropped with that code. Each eligible
-        source must carry a literal `integrity_mismatch: false` and a trusted
-        label, and, read again with `show`, must be live with exactly one of
-        `projects` as its project. The public reply does not carry the
+        source must carry a literal `integrity_mismatch: false` and an eligible
+        label from the engine's closed set. Read again with `show`, it must be
+        live, repeat that label, report a clean injection status and carry its
+        body, and have exactly one of `projects` as its project. The text used
+        is the body from that reply, so the text and its current eligibility
+        come from one response. The public reply does not carry the
         bundle's project filter, so ownership is checked per source. Anything
         else is dropped with a code. A malformed reply makes the bundle
         unreachable.
@@ -457,8 +460,10 @@ class EngineArchive:
             if row.get("integrity_mismatch") is not False:
                 dropped.append("integrity_mismatch")
                 continue
-            if row.get("trust_label") in UNTRUSTED_LABELS:
-                dropped.append("trust_quarantined")
+            label = row.get("trust_label")
+            refused = _label_refusal(label)
+            if refused:
+                dropped.append(refused)
                 continue
             shown = self._run("show", [item_id, "--json"])
             if not (
@@ -470,11 +475,16 @@ class EngineArchive:
             ):
                 dropped.append("source_unverified")
                 continue
+            # The label and injection state now, from the same reply as the text used.
+            refused = _shown_refusal(shown, label)
+            if refused:
+                dropped.append(refused)
+                continue
             meta = shown.get("metadata")
             if not isinstance(meta, dict) or meta.get("project") not in projects:
                 dropped.append("source_unowned")
                 continue
-            texts.append(snippet)
+            texts.append(shown["text"])
         observed = _moment_ms(payload.get("regenerated_at")) or _moment_ms(payload.get("generated_at"))
         return Bundle(tuple(texts), observed, tuple(dropped))
 
@@ -542,7 +552,50 @@ INELIGIBLE = frozenset(
         "source_missing",
     }
 )
-UNTRUSTED_LABELS = frozenset({"quarantined", "unknown"})
+# The evidence engine's closed set of trust labels, and the ones whose content it treats as eligible.
+TRUST_LABELS = frozenset({"unknown", "untrusted", "reviewed", "verified", "quarantined"})
+ELIGIBLE_LABELS = frozenset({"untrusted", "reviewed", "verified"})
+
+
+def _label_refusal(label: object) -> str | None:
+    """A drop reason for a label outside the engine's set or one whose content it refuses, else None."""
+    if not isinstance(label, str) or label not in TRUST_LABELS:
+        return "trust_label_invalid"
+    if label == "quarantined":
+        return "trust_quarantined"
+    if label not in ELIGIBLE_LABELS:
+        return "trust_unknown"
+    return None
+
+
+def _shown_refusal(shown: Mapping[str, Any], label: object) -> str | None:
+    """Why the per-source reply cannot vouch for its text now, else None.
+
+    The shown label must be in the closed set, eligible, and equal to the
+    bundle row's label, both at the top level and in the provenance envelope.
+    The envelope's injection status must be `clean`. The body must be present,
+    which the engine only allows for content it still considers eligible.
+    """
+    current = shown.get("trust_label")
+    refused = _label_refusal(current)
+    if refused:
+        return refused
+    envelope = shown.get("provenance")
+    trust = envelope.get("trust") if isinstance(envelope, dict) else None
+    injection = trust.get("injection") if isinstance(trust, dict) else None
+    if not isinstance(trust, dict) or trust.get("label") != current or current != label:
+        return "trust_label_changed"
+    if not isinstance(injection, dict) or injection.get("status") != "clean":
+        return "injection_not_clean"
+    if (
+        shown.get("untrusted_body_omitted")
+        or shown.get("integrity_body_omitted")
+        or not isinstance(shown.get("text"), str)
+    ):
+        return "source_body_withheld"
+    return None
+
+
 MAX_BUNDLE_SOURCES = 200
 ITEM_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
@@ -800,9 +853,11 @@ def shares_span(a: bytes, b: bytes, span: int = COPY_SPAN) -> bool:
     if min(len(a), len(b)) < span:
         return False
     first, second = _fingerprints(a, span), _fingerprints(b, span)
-    shared = first.positions.keys() & second.positions.keys()
-    if shared and (first.saturated or second.saturated):
+    # A saturated input stopped fingerprinting early, so a copied run after the cap would
+    # leave no shared fingerprint. Saturation alone therefore counts as copied.
+    if first.saturated or second.saturated:
         return True
+    shared = first.positions.keys() & second.positions.keys()
     k = max(1, span // 4)
     probes = 0
     for value in shared:
