@@ -2208,13 +2208,20 @@ integrity mismatch, and every source whose project the scope does not own
 exactly is dropped and counted by reason. So is a source whose trust label is
 missing, outside the engine's set, unknown, quarantined, or changed by the
 time it is read again, and one whose injection status is no longer clean. The
-text used comes from that same read. A bundle with no
+text used comes from that same read. A bundle counts toward corroboration only
+when every source it keeps has the engine's item and collection identifiers,
+and, for material Brigade wrote, a run id that agrees with its external id.
+Otherwise it still reaches the prompt as context and counts
+`lineage_incomplete`. Paths are compared after NFC normalization, with POSIX
+separators, relative to the evidence directory. A bundle with no
 source left is `evidence_unreachable`. Each reachable item is cut on a UTF-8
 boundary (8 KiB per item, 32 KiB per card, 8 items, 3 excerpts of 4 KiB) and
 scanned with the memory rule bundle, both as rendered and, for receipts, as
 each decoded field value. Related excerpts count only when the engine's record
 for each hit names one of the scope's projects exactly, because the engine's
-project filter also matches longer names that contain it. A blocked or flagged item is dropped,
+project filter also matches longer names that contain it. Each hit needs an
+explicit eligible trust label that the engine's record repeats, and the text
+used is the record's body, not the search snippet. A blocked or flagged item is dropped,
 counted as `evidence_flagged`, and recorded with its rule ids only.
 
 Only a verify receipt whose bytes match the digest the local evidence archive

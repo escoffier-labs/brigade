@@ -51,8 +51,10 @@ import functools
 import hmac
 import json
 import os
+import posixpath
 import re
 import stat
+import unicodedata
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -349,6 +351,8 @@ class Bundle:
     dropped: tuple[str, ...] = ()
     # The lineage keys of every source kept, so independence sees through the bundle.
     lineage: frozenset[str] = frozenset()
+    # False when any kept source lacks a canonical engine identity. Such a bundle is context only.
+    complete: bool = False
 
 
 @dataclass(frozen=True)
@@ -429,9 +433,13 @@ class EngineArchive:
             meta = shown.get("metadata")
             if not isinstance(meta, dict) or meta.get("project") != project:
                 continue
-            if _shown_refusal(shown, row.get("trust_label", shown.get("trust_label"))):
+            # The same label rule as bundles: an explicit eligible row label, repeated by
+            # the shown record. The text is the shown body, so the text that is cut,
+            # scanned and sent is the text whose eligibility was just checked.
+            label = row.get("trust_label")
+            if _label_refusal(label) or _shown_refusal(shown, label):
                 continue
-            found.append(Excerpt(excerpt_id, snippet, _moment_ms(row.get("created_at"))))
+            found.append(Excerpt(excerpt_id, shown["text"], _moment_ms(row.get("created_at"))))
         return found
 
     def bundle(self, bundle_id: str, projects: tuple[str, ...]) -> Bundle | None:
@@ -461,6 +469,7 @@ class EngineArchive:
         texts: list[str] = []
         dropped: list[str] = []
         keys: set[str] = set()
+        complete = True
         for row in results:
             if not isinstance(row, dict):
                 return None
@@ -494,9 +503,14 @@ class EngineArchive:
                 dropped.append("source_unowned")
                 continue
             texts.append(shown["text"])
-            keys |= lineage(meta.get("path"), meta.get("run_id"), shown.get("external_id"))
+            identity = source_lineage(shown)
+            if identity is None:
+                complete = False
+                # Still a key for every identifier present, so a partial match still blocks a pair.
+                identity = lineage(meta.get("path"), meta.get("run_id"), shown.get("external_id"))
+            keys |= identity
         observed = _moment_ms(payload.get("regenerated_at")) or _moment_ms(payload.get("generated_at"))
-        return Bundle(tuple(texts), observed, tuple(dropped), frozenset(keys))
+        return Bundle(tuple(texts), observed, tuple(dropped), frozenset(keys), complete)
 
     def receipt_records(self, project: str, run_id: str, path: str) -> list[ReceiptRecord] | None:
         """Archive records of one verify receipt, or None when any reply is malformed or ambiguous.
@@ -619,6 +633,8 @@ def _shown_refusal(shown: Mapping[str, Any], label: object) -> str | None:
 
 MAX_BUNDLE_SOURCES = 200
 ITEM_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+# Engine external ids are free-form: printable, no surrounding space, at most 512 characters.
+EXTERNAL_ID = re.compile(r"[^\x00-\x20\x7f](?:[^\x00-\x1f\x7f]{0,510}[^\x00-\x20\x7f])?")
 
 
 def _receipt_hit(hit: object) -> bool:
@@ -695,6 +711,8 @@ class Item:
     # Decoded string values scanned beside the rendered text, so escaping and changed
     # line boundaries in the rendering cannot hide a finding.
     values: tuple[str, ...] = field(default=(), repr=False)
+    # True for material that may reach the prompt but never meets the corroboration rule.
+    context_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -753,17 +771,43 @@ def _item(
 RUN_EXTERNAL_PREFIXES = ("brigade:work-verify:", "brigade:run:")
 
 
+def canonical_path(path: object) -> str | None:
+    """One spelling of an evidence path, or None when it cannot be made relative.
+
+    NFC, POSIX separators, normalized, without a leading `./`. An absolute path
+    is cut back to the first evidence root inside it, so the same file names
+    one key wherever the workspace lives.
+    """
+    if not isinstance(path, str) or not path or "\x00" in path:
+        return None
+    value = posixpath.normpath(unicodedata.normalize("NFC", path).replace("\\", "/"))
+    if value.startswith("/"):
+        parts = value.split("/")
+        found = None
+        for index in range(len(parts)):
+            if _evidence_root("/".join(parts[index:])) is not None:
+                found = "/".join(parts[index:])
+                break
+        if found is None:
+            return None
+        value = found
+    if value in {"", "."} or value == ".." or value.startswith("../"):
+        return None
+    return value
+
+
 def lineage(path: object = None, run_id: object = None, external_id: object = None) -> frozenset[str]:
-    """Identity keys of one source: its path, its run id, and its archive external id.
+    """Identity keys of one source: its canonical path, its run id, and its archive external id.
 
     A run id is also read from a verify-run path and from a receipt external id,
     so a receipt file and its imported archive record share the same keys.
     """
     keys: set[str] = set()
     runs: set[str] = set()
-    if isinstance(path, str) and path:
-        keys.add(f"path:{path}")
-        match = RUN_DIR.fullmatch(path)
+    canonical = canonical_path(path)
+    if canonical is not None:
+        keys.add(f"path:{canonical}")
+        match = RUN_DIR.fullmatch(canonical)
         if match:
             runs.add(match[1])
     if isinstance(external_id, str) and external_id:
@@ -774,6 +818,40 @@ def lineage(path: object = None, run_id: object = None, external_id: object = No
     if isinstance(run_id, str) and run_id:
         runs.add(run_id)
     return frozenset(keys | {f"run:{run}" for run in runs})
+
+
+def source_lineage(shown: Mapping[str, Any]) -> frozenset[str] | None:
+    """The canonical identity keys of one archive source, or None when its lineage is incomplete.
+
+    Complete means the engine's own identifiers are present and well formed:
+    the item's external id and its collection's external id. A source Brigade
+    itself wrote (a receipt or its import) also needs its originating run id,
+    and that run id must agree with the run named by its external id. Engine
+    identifiers come first. The path, when present, only adds a key.
+    """
+    external_id = shown.get("external_id")
+    collection = shown.get("collection")
+    source = shown.get("source")
+    meta = shown.get("metadata")
+    parent = collection.get("external_id") if isinstance(collection, dict) else None
+    if not (
+        isinstance(external_id, str)
+        and EXTERNAL_ID.fullmatch(external_id)
+        and isinstance(parent, str)
+        and EXTERNAL_ID.fullmatch(parent)
+        and isinstance(source, dict)
+        and isinstance(source.get("kind"), str)
+        and source["kind"]
+        and isinstance(meta, dict)
+    ):
+        return None
+    run_id = meta.get("run_id")
+    derived = [external_id.removeprefix(prefix) for prefix in RUN_EXTERNAL_PREFIXES if external_id.startswith(prefix)]
+    brigade_written = source["kind"] == "brigade" or parent.startswith("brigade:") or external_id.startswith("brigade:")
+    if brigade_written or derived or run_id is not None:
+        if not (isinstance(run_id, str) and RUN_ID.fullmatch(run_id) and derived == [run_id]):
+            return None
+    return lineage(meta.get("path"), run_id, external_id) | {f"collection:{parent}"}
 
 
 def _strings(value: object) -> tuple[str, ...]:
@@ -972,7 +1050,7 @@ def corroborated(items: Sequence[Item]) -> bool:
     Command output and excerpts never count toward the pair.
     """
     anchors = [item for item in items if item.rank == AUTHENTICATED and item.kind == RECEIPT_FIELDS]
-    others = [item for item in items if item.kind not in CONTEXT_ONLY]
+    others = [item for item in items if item.kind not in CONTEXT_ONLY and not item.context_only]
     return any(independent(anchor, other) for anchor in anchors for other in others if other is not anchor)
 
 
@@ -1158,6 +1236,10 @@ def _cited(
         item = _item(
             EVIDENCE_BUNDLE, MEDIUM, text, f"bundle:{bundle_id}", None, bundle.observed_ms, raw, lineage=bundle.lineage
         )
+        if not bundle.complete:
+            # A source without a canonical identity could be a paraphrase of anything.
+            assembly.count("lineage_incomplete")
+            item = replace(item, context_only=True)
         return [item], False
     try:
         rel = io.relative(ref)
