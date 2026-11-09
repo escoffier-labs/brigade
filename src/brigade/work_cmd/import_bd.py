@@ -27,6 +27,12 @@ _ISSUE_FIELDS = frozenset(
 """.split()
 )
 _DEP_FIELDS = frozenset("issue_id depends_on_id type id created_at created_by metadata thread_id".split())
+# bd 1.3.4 link types. Only blocks and conditional-blocks keep an issue out of `bd ready`;
+# conditional-blocks becomes a Brigade blocks edge, the others are kept as metadata only.
+_GRAPH_LINK_TYPES = frozenset({"blocks", "parent-child", "discovered-from"})
+_NON_GATING_LINK_TYPES = frozenset(
+    {"related", "relates-to", "tracks", "waits-for", "caused-by", "validates", "supersedes", "until"}
+)
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}\Z")
 
 
@@ -37,7 +43,7 @@ def _invalid(message: str, *, line: int) -> BdImportError:
 # bd export rows carry no schema marker, so the producer release pins the shape.
 # Each series below was checked against a scratch `bd init` export; others fail closed.
 SUPPORTED_BD_SERIES = ("1.3",)
-TESTED_BD_VERSIONS = ("1.3.1", "1.3.2")
+TESTED_BD_VERSIONS = ("1.3.1", "1.3.2", "1.3.4")
 _VERSION = re.compile(r"([0-9]+)\.([0-9]+)\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?\Z")
 
 
@@ -57,9 +63,16 @@ def check_bd_version(bd_version: str) -> str:
     return bd_version
 
 
-def _validated_rows(raw: bytes) -> list[tuple[int, dict[str, Any], bytes, list[dict[str, str]]]]:
-    """Validate every row and the native dependency graph before any caller writes."""
-    rows: list[tuple[int, dict[str, Any], bytes, list[dict[str, str]]]] = []
+BdRow = tuple[int, dict[str, Any], bytes, list[dict[str, str]], list[dict[str, str]]]
+
+
+def _validated_rows(raw: bytes) -> list[BdRow]:
+    """Validate every row and the native dependency graph before any caller writes.
+
+    Each result is ``(line, row, data, edge_proposals, links)``; ``links`` holds the sorted
+    non-gating bd links, which are not graph edges.
+    """
+    rows: list[BdRow] = []
     graph_edges: list[dict[str, str]] = []
     seen: set[str] = set()
     for line, data in enumerate(raw.splitlines(), 1):
@@ -94,6 +107,7 @@ def _validated_rows(raw: bytes) -> list[tuple[int, dict[str, Any], bytes, list[d
         if not isinstance(dependencies, list):
             raise _invalid("bd dependencies must be an array", line=line)
         proposals: list[dict[str, str]] = []
+        links: list[dict[str, str]] = []
         for dep in dependencies:
             if (
                 not isinstance(dep, dict)
@@ -105,18 +119,32 @@ def _validated_rows(raw: bytes) -> list[tuple[int, dict[str, Any], bytes, list[d
                 raise _invalid("unsupported bd dependency row shape", line=line)
             other = dep["depends_on_id"]
             edge_type = dep["type"]
+            if edge_type in _NON_GATING_LINK_TYPES:
+                link = {"type": edge_type, "other": other}
+                if link not in links:
+                    links.append(link)
+                continue
+            if edge_type == "conditional-blocks":
+                edge_type = "blocks"
+            elif edge_type not in _GRAPH_LINK_TYPES:
+                raise BdImportError(
+                    f"bd dependency type {edge_type!r} is not a known bd link type",
+                    reason=edges.REASON_UNKNOWN_EDGE_TYPE,
+                    details={"line": line, "type": edge_type},
+                )
             # bd records an issue's prerequisite/parent as depends_on_id.
             source, target = (key, other) if edge_type == "discovered-from" else (other, key)
             proposal = {"type": edge_type, "source": source, "target": target}
             if proposal not in proposals:
                 proposals.append(proposal)
                 graph_edges.append(proposal)
-        rows.append((line, row, data, proposals))
+        links.sort(key=lambda link: (link["type"], link["other"]))
+        rows.append((line, row, data, proposals, links))
     if rows:
         try:
             edges.validate_graph_plan(
                 {
-                    "nodes": [{"key": row["id"], "text": row["title"]} for _, row, _, _ in rows],
+                    "nodes": [{"key": row["id"], "text": row["title"]} for _, row, _, _, _ in rows],
                     "edges": graph_edges,
                 }
             )
@@ -141,7 +169,7 @@ def issue_text(row: dict[str, Any]) -> str:
 def _parse_snapshot(raw: bytes, bd_version: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     input_digest = hashlib.sha256(raw).hexdigest()
-    for _line, row, data, proposals in _validated_rows(raw):
+    for _line, row, data, proposals, links in _validated_rows(raw):
         key = row["id"]
         record = ledger._sanitize_untrusted_import_record(
             {
@@ -161,6 +189,8 @@ def _parse_snapshot(raw: bytes, bd_version: str) -> list[dict[str, Any]]:
                 "proposed_edges": sorted(proposals, key=lambda edge: (edge["type"], edge["source"], edge["target"])),
                 "status": row["status"],
                 "issue_type": row["issue_type"],
+                # Only when present, so rows without links keep their pre-1.3.4 fingerprint.
+                **({"links": links} if links else {}),
             }
         )
         record["metadata"].update(
@@ -174,6 +204,7 @@ def _parse_snapshot(raw: bytes, bd_version: str) -> list[dict[str, Any]]:
                     "input_digest": input_digest,
                     "status": row["status"],
                     "issue_type": row["issue_type"],
+                    **({"links": links} if links else {}),
                 },
                 "proposed_edges": proposals,
             }
@@ -222,6 +253,7 @@ def import_bd_jsonl(*, target: Path, input_path: Path, bd_version: str, json_out
             "receipt_path": str(receipt_path),
             "created_at": helpers._now().isoformat(),
             "status": "pending",
+            "links_preserved": sum(len(r["metadata"]["bd"].get("links", [])) for r in records),
             "rows": [
                 {"id": r["metadata"]["bd"]["id"], "row_digest": r["metadata"]["bd"]["row_digest"]} for r in records
             ],

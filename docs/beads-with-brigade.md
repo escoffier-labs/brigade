@@ -26,11 +26,33 @@ missing, the command prints a clear message and exits 2.
 ## Supported bd releases
 
 bd export rows carry no schema marker, so Brigade pins the producer release.
-The supported series is 1.3.x. Exports from bd 1.3.1 and 1.3.2 were generated
-from a scratch `bd init` and are tested as fixtures. Any other release fails
+The supported series is 1.3.x. Exports from bd 1.3.1, 1.3.2 and 1.3.4 were
+generated from a scratch `bd init` and are tested as fixtures. Any other release fails
 closed with a readable error before anything is written. So do an unknown
-issue field, an unknown bd status, an unknown edge type, a dependency on an
+issue field, an unknown bd status, a link type bd does not define, a dependency on an
 issue outside the export, and a dependency cycle.
+
+## How bd link types are handled
+
+bd 1.3.4 has 12 link types. Measured against bd 1.3.4, only `blocks` and
+`conditional-blocks` keep an issue out of `bd ready`.
+
+| bd link type | Brigade handling |
+| --- | --- |
+| `blocks` | `blocks` edge, prerequisite to dependent |
+| `conditional-blocks` | `blocks` edge with the same direction, so a held task is not shown as ready |
+| `parent-child` | `parent-child` edge |
+| `discovered-from` | `discovered-from` edge |
+| `related`, `relates-to`, `tracks`, `waits-for`, `caused-by`, `validates`, `supersedes`, `until` | no edge; kept as a sorted list of `{"type", "other"}` under `metadata.bd.links` |
+
+A non-gating link may point at an issue outside the export, because it is not a
+graph edge. The inbox import counts them as `links_preserved` in its receipt, and
+a link change makes the row an additive candidate. The mirror reports
+`links_preserved` and `links_changed` in its run summary. Any other link type
+fails with `unknown_edge_type`.
+
+One known difference: bd leaves an epic ready while its children are open.
+Brigade's `parent-child` edge holds the epic until its children finish.
 
 ## Mirror the ready set in
 

@@ -216,7 +216,7 @@ def test_bd_rejects_entire_file_before_inbox_write(tmp_path, capsys, change, rea
     elif change == "unknown_field":
         rows[1]["surprise"] = True
     elif change == "unknown_edge":
-        rows[1]["dependencies"][0]["type"] = "waits-for"
+        rows[1]["dependencies"][0]["type"] = "frobs"
     elif change == "cycle":
         rows[0]["dependencies"] = [{"issue_id": "example-1", "depends_on_id": "example-2", "type": "blocks"}]
     elif change == "orphan":
@@ -234,6 +234,7 @@ def test_bd_rejects_entire_file_before_inbox_write(tmp_path, capsys, change, rea
     [
         ("parent-child", "example-1", "example-2"),
         ("discovered-from", "example-2", "example-1"),
+        ("conditional-blocks", "example-1", "example-2"),
     ],
 )
 def test_bd_native_edge_directions(tmp_path, capsys, edge_type, source, target):
@@ -243,4 +244,72 @@ def test_bd_native_edge_directions(tmp_path, capsys, edge_type, source, target):
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     assert run_import(tmp_path, path, capsys)[0] == 0
     items = work_cmd.ledger._read_imports(tmp_path)
-    assert items[1]["metadata"]["proposed_edges"] == [{"type": edge_type, "source": source, "target": target}]
+    expected_type = "blocks" if edge_type == "conditional-blocks" else edge_type
+    assert items[1]["metadata"]["proposed_edges"] == [{"type": expected_type, "source": source, "target": target}]
+
+
+def _with_dependency(tmp_path, dep_type, other="example-1", issue=1):
+    rows = [json.loads(line) for line in FIXTURE.read_text().splitlines()]
+    rows[issue]["dependencies"] = [
+        {"issue_id": rows[issue]["id"], "depends_on_id": other, "type": dep_type},
+    ]
+    path = tmp_path / f"{dep_type}.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    return path
+
+
+def test_bd_conditional_blocks_dedupes_against_blocks(tmp_path, capsys):
+    rows = [json.loads(line) for line in FIXTURE.read_text().splitlines()]
+    rows[1]["dependencies"] = [
+        {"issue_id": rows[1]["id"], "depends_on_id": "example-1", "type": "blocks"},
+        {"issue_id": rows[1]["id"], "depends_on_id": "example-1", "type": "conditional-blocks"},
+    ]
+    path = tmp_path / "dup.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    assert run_import(tmp_path, path, capsys)[0] == 0
+    items = work_cmd.ledger._read_imports(tmp_path)
+    assert items[1]["metadata"]["proposed_edges"] == [{"type": "blocks", "source": "example-1", "target": "example-2"}]
+
+
+def test_bd_non_gating_link_is_preserved_without_an_edge(tmp_path, capsys):
+    path = _with_dependency(tmp_path, "related")
+    rc, payload = run_import(tmp_path, path, capsys)
+    assert rc == 0
+    assert payload["links_preserved"] == 1
+    items = work_cmd.ledger._read_imports(tmp_path)
+    assert items[1]["metadata"]["proposed_edges"] == []
+    assert items[1]["metadata"]["bd"]["links"] == [{"type": "related", "other": "example-1"}]
+    assert "links" not in items[0]["metadata"]["bd"]
+
+
+def test_bd_non_gating_link_to_a_missing_issue_still_imports(tmp_path, capsys):
+    path = _with_dependency(tmp_path, "tracks", other="outside-export")
+    rc, payload = run_import(tmp_path, path, capsys)
+    assert rc == 0
+    assert payload["links_preserved"] == 1
+
+
+def test_bd_link_change_changes_the_fingerprint(tmp_path, capsys):
+    base = work_cmd.import_bd._parse_snapshot(_with_dependency(tmp_path, "related").read_bytes(), "1.3.4")
+    other = work_cmd.import_bd._parse_snapshot(_with_dependency(tmp_path, "tracks").read_bytes(), "1.3.4")
+    assert base[1]["metadata"]["source_fingerprint"] != other[1]["metadata"]["source_fingerprint"]
+    assert base[0]["metadata"]["source_fingerprint"] == other[0]["metadata"]["source_fingerprint"]
+
+
+def test_bd_rows_without_links_keep_the_pre_link_fingerprint():
+    # Upgrading must not turn every unchanged, link-free row into a new candidate.
+    records = work_cmd.import_bd._parse_snapshot(FIXTURE.read_bytes(), "1.3.1")
+    for record in records:
+        assert "links" not in record["metadata"]["bd"]
+        expected = work_cmd.helpers._stable_hash(
+            {
+                **{field: record[field] for field in ("text", "kind", "type", "priority", "acceptance")},
+                "proposed_edges": sorted(
+                    record["metadata"]["proposed_edges"],
+                    key=lambda edge: (edge["type"], edge["source"], edge["target"]),
+                ),
+                "status": record["metadata"]["bd"]["status"],
+                "issue_type": record["metadata"]["bd"]["issue_type"],
+            }
+        )
+        assert record["metadata"]["source_fingerprint"] == expected
