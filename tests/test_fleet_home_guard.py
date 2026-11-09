@@ -461,3 +461,89 @@ def test_no_fleet_claim_never_resolves_a_claim_target(relative_home_workspace, m
 
     assert cli.main([*argv, "--no-fleet-claim"]) == 0
     assert dispatched == [1]
+
+
+@pytest.fixture
+def stored_lease(relative_home_workspace, monkeypatch, no_requests):
+    """A Grok Bot lease whose claim key was stored before the home turned relative, with an env hub."""
+    from types import SimpleNamespace
+
+    from brigade import grokbot_jobs
+
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", USER_HUB)
+    monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", "fixture-node-credential")
+    monkeypatch.setattr(grokbot_jobs, "lease_claim_target", lambda *args: "stored-key")
+    calls: list[str] = []
+    for name in ("acquire_claim", "renew_claim", "release_claim", "report_external_event"):
+        monkeypatch.setattr(fleet_client, name, lambda *args, _name=name, **kwargs: calls.append(_name))
+    owner = SimpleNamespace(
+        config=SimpleNamespace(target=relative_home_workspace, bot_id="bot", lease_seconds=60, instance="builder")
+    )
+    owner._lease_target = lambda job_id, lease_id: grokbot_mcp_adapter()._lease_target(owner, job_id, lease_id)
+    return owner, calls
+
+
+def grokbot_mcp_adapter():
+    from brigade import grokbot_mcp
+
+    return grokbot_mcp.GrokbotAdapter
+
+
+def test_grokbot_never_acquires_a_stored_key_under_a_relative_home(stored_lease, no_requests):
+    owner, calls = stored_lease
+    decision, target, _from_row = grokbot_mcp_adapter()._fleet_acquire(owner, "job", "lease", "holder", "session")
+    assert decision.granted is False and target is None
+    assert calls == [] and not no_requests
+
+
+def test_grokbot_never_renews_a_stored_key_under_a_relative_home(stored_lease, no_requests):
+    owner, calls = stored_lease
+    decision = grokbot_mcp_adapter()._fleet_renew(owner, "job", "lease", "holder")
+    assert decision.granted is False
+    assert calls == [] and not no_requests
+
+
+@pytest.mark.parametrize("target", [None, "stored-key"], ids=["from-row", "explicit"])
+def test_grokbot_never_releases_a_stored_key_under_a_relative_home(stored_lease, no_requests, target):
+    owner, calls = stored_lease
+    grokbot_mcp_adapter()._fleet_release(owner, "job", "lease", "holder", target)
+    assert calls == [] and not no_requests
+
+
+def test_grokbot_never_reports_an_event_for_a_stored_key_under_a_relative_home(stored_lease, no_requests):
+    owner, calls = stored_lease
+    grokbot_mcp_adapter()._fleet_event(owner, "job", "lease", "session", "running")
+    assert calls == [] and not no_requests
+
+
+@pytest.mark.parametrize("operation", ["acquire", "renew", "release", "inspect"])
+def test_no_claim_request_leaves_under_a_relative_home_even_with_an_explicit_node(
+    relative_home_workspace, monkeypatch, no_requests, operation
+):
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", USER_HUB)
+    monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", "fixture-node-credential")
+    sent: list[object] = []
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", lambda *args, **kwargs: sent.append(args))
+    call = {
+        "acquire": lambda: fleet_client.acquire_claim("stored-key", node_id="node-a"),
+        "renew": lambda: fleet_client.renew_claim("stored-key", holder="holder", node_id="node-a"),
+        "release": lambda: fleet_client.release_claim("stored-key", holder="holder", node_id="node-a"),
+        "inspect": lambda: fleet_client.inspect_claim("stored-key", node_id="node-a"),
+    }[operation]
+    decision = call()
+    assert decision.granted is False and decision.reason == "relative-brigade-home"
+    assert sent == [] and not no_requests
+
+
+def test_an_operator_release_by_node_sends_nothing_under_a_relative_home(
+    relative_home_workspace, monkeypatch, no_requests, capsys
+):
+    from brigade import cli
+
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", USER_HUB)
+    monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", "fixture-node-credential")
+    sent: list[object] = []
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", lambda *args, **kwargs: sent.append(args))
+    assert cli.main(["fleet", "claims", "--release", "stored-key", "--node", "node-a"]) != 0
+    assert "Traceback" not in capsys.readouterr().err
+    assert sent == [] and not no_requests

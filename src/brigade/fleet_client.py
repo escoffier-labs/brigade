@@ -979,8 +979,8 @@ class ClaimDecision:
     refused this node's credentials (HTTP 401/403), a stable outcome that
     is never retried or fallen back from; see ``FleetClaimAuthError``), or
     ``"hub-unavailable"`` (network/hub failure; callers fall back to the
-    local run lock), or ``"lease-expired"`` (a granted response arrived
-    too late for admission).
+    local run lock), ``"lease-expired"`` (a granted response arrived
+    too late for admission), or ``"relative-brigade-home"`` (nothing sent).
     ``holder`` is the fencing token this operation used; renew and release
     must present the same token. ``superseded`` is the unexpired same-node
     claim a ``supersede_dead_owner`` acquire replaced (issue #1141); a
@@ -1117,6 +1117,11 @@ def _claim_op(
     recorded on the row at acquire; ``supersede`` is the dead lease a
     node-scoped acquire presents (see ``lease_from_lock_owner``).
     """
+    from .fleet_home_guard import RELATIVE_HOME_REFUSAL, absolute_brigade_home
+
+    if absolute_brigade_home() is None:
+        # No trusted home identity, so no claim request leaves, whatever key or node id is reused (#2423).
+        return ClaimDecision(granted=False, reason="relative-brigade-home", detail=RELATIVE_HOME_REFUSAL, holder=holder)
     try:
         config = load_fleet_config() if hub_url is None or token is None else {}
         hub = config["hub_url"] if hub_url is None else hub_url
