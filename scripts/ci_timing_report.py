@@ -10,8 +10,11 @@ Definitions (the campaign doc, docs/phase-adaptive-ci.md, repeats these):
 
 * A run is in the window when its ``created_at`` is at or after ``--since`` and
   before ``--until`` (half-open ``[since, until)``, UTC, so adjacent windows
-  never share a run) and its status is ``completed``. Cancelled and failed runs
-  are included in the "all" aggregates and excluded from the "successful" ones.
+  never share a run) and its first attempt has completed: ``run_attempt`` 1 with
+  status ``completed``, or any later attempt (attempt 1 is complete by
+  definition, even while a re-run is in progress, whose ``latest_conclusion`` is
+  then null). Cancelled and failed runs are included in the "all" aggregates and
+  excluded from the "successful" ones.
 * Every per-run metric describes the FIRST attempt of the run, so wall time,
   runner time and conclusion all come from one attempt and reflect what a
   developer waited for on the first try. For a run with ``run_attempt`` above 1
@@ -22,9 +25,14 @@ Definitions (the campaign doc, docs/phase-adaptive-ci.md, repeats these):
 * ``wall_minutes`` is ``run_started_at`` to ``updated_at`` of the first attempt.
   It excludes time spent waiting in a queue before the run started.
 * ``runner_minutes`` is the sum of ``completed_at - started_at`` over the first
-  attempt's jobs that were not skipped. Cancelled jobs count, because they held
-  a runner. Jobs whose name still holds an unexpanded ``${{`` expression and
-  that lasted zero seconds (cancelled before the matrix expanded) are dropped.
+  attempt's jobs that were not skipped and that held a runner. Cancelled jobs
+  count when they ran, because they held a runner. A job held a runner when the
+  jobs API gives it a non-zero ``runner_id`` or a non-empty ``runner_name``. A job
+  cancelled while queued can carry both timestamps with ``runner_id`` 0 and an
+  empty ``runner_name``; its span is queue wait, so it is counted in
+  ``unassigned_jobs`` and not in any runner metric. Jobs whose name still holds
+  an unexpanded ``${{`` expression and that lasted zero seconds (cancelled
+  before the matrix expanded) are dropped. Wall time is not affected.
 * ``runner_minutes_all_attempts`` is the cost of every attempt, from
   ``/runs/{id}/attempts/{n}/jobs`` for each attempt. The API repeats a
   carried-over job under each later attempt with its original timestamps, so a
@@ -43,12 +51,17 @@ names, runner labels and numbers. A runner label is kept only when it is a
 GitHub-hosted image label (``ubuntu-*``, ``windows-*``, ``macos-*``) or exactly
 ``self-hosted``; any other label is stored as its OS bucket. A job name
 containing a retired engine name is stored with that name replaced by
-``retired-name``, and a job name containing the run's branch name or actor login
-is stored as ``redacted``. It records no user names, branch names or titles. Two
+``retired-name``, and a job name carrying the run's branch name or actor login
+is stored as ``redacted``. That match is on whole words (names split on
+non-alphanumerics): a branch or login of several words matches as that exact
+word sequence, and a single word matches only when it has at least
+``MIN_REDACT_TOKEN`` characters, so a branch called ``lint`` does not hide every
+lint job. It records no user names, branch names, runner names or titles. Two
 invocations over the same window give identical JSON apart from ``generated_at``.
 
-A page-count mismatch, a re-run wall time shorter than its longest job, or a
-redacted job name is written to stderr and to the ``warnings`` list of the JSON.
+A page-count mismatch, a re-run wall time shorter than its longest job, a run
+still being re-run at capture time, or a redacted job name is written to stderr
+and to the ``warnings`` list of the JSON.
 A search slice that reaches the 1,000 row cap is split and retried.
 """
 
@@ -74,6 +87,7 @@ SLICE_HOURS = 6
 SEARCH_RESULT_CAP = 1000  # the Actions runs API stops returning rows past this
 FETCH_WORKERS = 4
 RATE_LIMIT_SLEEP_SECONDS = 60
+MIN_REDACT_TOKEN = 5  # a lone word shorter than this (lint, docs, test) reads as a job word, not a private name
 _ISO = "%Y-%m-%dT%H:%M:%SZ"
 # The repository's retired-name check rejects these spellings in tracked files,
 # and a CI job name can still carry one. Recorded names get a neutral stand-in.
@@ -163,12 +177,33 @@ def safe_runner(labels: Sequence[str] | None) -> str | None:
     return os_of(label)
 
 
-def _private_tokens(run: dict[str, Any]) -> list[str]:
-    """Lower-cased branch and user names of a run, which a job name must not carry."""
+def _words(text: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _private_words(run: dict[str, Any]) -> list[tuple[str, ...]]:
+    """Word sequences of a run's branch and user names, which a job name must not carry."""
     values = [run.get("head_branch")]
     for key in ("actor", "triggering_actor"):
         values.append((run.get(key) or {}).get("login"))
-    return [v.lower() for v in values if isinstance(v, str) and v]
+    return [w for v in values if isinstance(v, str) and (w := _words(v))]
+
+
+def carries_private_name(name: str, private: Sequence[tuple[str, ...]]) -> bool:
+    """True when a job name holds a private name as whole words.
+
+    A several-word name (``feat/hub-seven``) must appear as that exact word
+    sequence. A single word must appear as a word of its own and be at least
+    ``MIN_REDACT_TOKEN`` characters; a shorter lone name cannot be told from an
+    ordinary job word, so it is not redacted.
+    """
+    words = _words(name)
+    for seq in private:
+        if len(seq) == 1 and len(seq[0]) < MIN_REDACT_TOKEN:
+            continue
+        if any(words[i : i + len(seq)] == seq for i in range(len(words) - len(seq) + 1)):
+            return True
+    return False
 
 
 def job_seconds(job: dict[str, Any]) -> int | None:
@@ -181,21 +216,35 @@ def job_seconds(job: dict[str, Any]) -> int | None:
     return max(0, round((parse_ts(completed) - parse_ts(started)).total_seconds()))
 
 
-def _counted_jobs(jobs: Iterable[dict[str, Any]]) -> tuple[list[tuple[dict[str, Any], int]], int]:
-    """Jobs that held a runner, with their seconds, and the number dropped.
+def job_assigned(job: dict[str, Any]) -> bool:
+    """True when the jobs API shows the job was given a runner.
+
+    A job cancelled while queued can carry ``started_at`` and ``completed_at``
+    with ``runner_id`` 0 and an empty ``runner_name``; its span is queue wait.
+    """
+    return bool(job.get("runner_id")) or bool(job.get("runner_name"))
+
+
+def _counted_jobs(jobs: Iterable[dict[str, Any]]) -> tuple[list[tuple[dict[str, Any], int]], int, int]:
+    """Jobs that held a runner, with their seconds, the number dropped, and the number unassigned.
 
     Dropped: skipped or never-started jobs, and zero-second jobs whose name still
     holds an unexpanded ``${{`` matrix expression (cancelled before it expanded).
+    Unassigned: jobs with timestamps that were never given a runner.
     """
     counted: list[tuple[dict[str, Any], int]] = []
-    dropped = 0
+    dropped = unassigned = 0
     for job in jobs:
         seconds = job_seconds(job)
-        if seconds is None or (seconds == 0 and "${{" in job["name"]):
+        if seconds is None:
             dropped += 1
-            continue
-        counted.append((job, seconds))
-    return counted, dropped
+        elif not job_assigned(job):
+            unassigned += 1
+        elif seconds == 0 and "${{" in job["name"]:
+            dropped += 1
+        else:
+            counted.append((job, seconds))
+    return counted, dropped, unassigned
 
 
 def all_attempts_seconds(jobs: Iterable[dict[str, Any]]) -> int:
@@ -230,13 +279,13 @@ def summarize_run(
     (the jobs of every attempt) feeds ``runner_minutes_all_attempts``.
     """
     first = first_attempt or run
-    counted, skipped = _counted_jobs(jobs)
-    private = _private_tokens(run)
+    counted, skipped, unassigned = _counted_jobs(jobs)
+    private = _private_words(run)
     recorded: list[dict[str, Any]] = []
     redacted = 0
     for job, seconds in counted:
         name = job["name"]
-        if any(token in name.lower() for token in private):
+        if carries_private_name(name, private):
             name, redacted = "redacted", redacted + 1
         recorded.append(
             {
@@ -268,6 +317,7 @@ def summarize_run(
         "windows_runner_minutes": round(windows / 60.0, 3),
         "job_count": len(recorded),
         "skipped_jobs": skipped,
+        "unassigned_jobs": unassigned,
         "redacted_jobs": redacted,
         "jobs": recorded,
     }
@@ -424,15 +474,18 @@ def window_slices(since: datetime, until: datetime) -> list[tuple[datetime, date
 def _fetch_slice(
     repo_path: str, workflow: str, start: datetime, end: datetime, warnings: Warnings
 ) -> list[dict[str, Any]]:
-    """All rows created in ``[start, end]`` (inclusive), splitting the slice at the row cap."""
+    """All rows created in ``[start, end]``, splitting the slice at the row cap.
+
+    The API's ``created`` range is inclusive at both ends, so adjacent slices can
+    return the same run; ``fetch_runs`` dedupes by id and applies the half-open
+    ``[since, until)`` cut. No status filter is sent: the API's status is the
+    latest attempt's, and a run being re-run would otherwise drop out.
+    """
     created = f"{start.strftime(_ISO)}..{end.strftime(_ISO)}"
     rows: list[dict[str, Any]] = []
     total: int | None = None
     for page in range(1, SEARCH_RESULT_CAP // PER_PAGE + 1):
-        path = (
-            f"{repo_path}/actions/workflows/{workflow}/runs"
-            f"?created={created}&status=completed&per_page={PER_PAGE}&page={page}"
-        )
+        path = f"{repo_path}/actions/workflows/{workflow}/runs?created={created}&per_page={PER_PAGE}&page={page}"
         data = gh_api(path)
         if page == 1:
             total = data.get("total_count")
@@ -457,12 +510,14 @@ def _fetch_slice(
 def fetch_runs(
     repo_path: str, workflow: str, since: datetime, until: datetime, warnings: Warnings | None = None
 ) -> list[dict[str, Any]]:
-    """Completed runs created in the half-open window ``[since, until)``."""
+    """Runs created in the half-open window ``[since, until)`` whose first attempt has completed."""
     warnings = warnings or Warnings()
     by_id: dict[int, dict[str, Any]] = {}
     for start, end in window_slices(since, until):
         for row in _fetch_slice(repo_path, workflow, start, end, warnings):
-            by_id[row["id"]] = row
+            # Attempt 1 is complete once a later attempt exists, whatever the latest status is.
+            if row.get("run_attempt", 1) > 1 or row.get("status") == "completed":
+                by_id[row["id"]] = row
         _log(f"listed {len(by_id)} runs through {end.strftime(_ISO)}")
     return [by_id[i] for i in sorted(by_id) if since <= parse_ts(by_id[i]["created_at"]) < until]
 
@@ -509,6 +564,11 @@ def summarize_listed_run(repo_path: str, run: dict[str, Any], warnings: Warnings
         summary = summarize_run(run, jobs, first_attempt=first, all_jobs=all_jobs)
     else:
         summary = summarize_run(run, fetch_jobs(repo_path, run_id, warnings))
+    if run.get("status") != "completed":
+        warnings.add(
+            f"run {run_id} was being re-run at capture time: runner_minutes_all_attempts is partial and "
+            "latest_conclusion is null"
+        )
     if wall_conflicts_with_jobs(summary):
         warnings.add(f"run {run_id}: wall time {summary['wall_minutes']} min is shorter than its longest job")
     return summary

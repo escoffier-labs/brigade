@@ -8,21 +8,27 @@ import pytest
 from scripts import ci_timing_report as report
 
 
-def _job(name, label, start, end, conclusion="success"):
+def _job(name, label, start, end, conclusion="success", assigned=True):
     base = "2026-11-09T10:"
     return {
         "name": name,
         "labels": [label],
         "conclusion": conclusion,
+        # The jobs API gives a job that never got a runner runner_id 0 and an empty runner_name.
+        "runner_id": 1001 if assigned else 0,
+        "runner_name": "GitHub Actions 1001" if assigned else "",
         "started_at": None if start is None else f"{base}{start}Z",
         "completed_at": None if end is None else f"{base}{end}Z",
     }
 
 
-def _run(run_id, event="pull_request", conclusion="success", started="00:00", updated="10:00", attempt=1):
+def _run(
+    run_id, event="pull_request", conclusion="success", started="00:00", updated="10:00", attempt=1, status="completed"
+):
     return {
         "id": run_id,
         "event": event,
+        "status": status,
         "conclusion": conclusion,
         "head_sha": "a" * 40,
         "run_attempt": attempt,
@@ -157,7 +163,7 @@ def test_fetch_runs_slices_the_window_dedupes_overlap_and_filters_half_open(monk
         lo, hi = path.split("created=")[1].split("&")[0].split("..")
         lo, hi = report.parse_ts(lo), report.parse_ts(hi)
         runs = [
-            {"id": i, "created_at": ts.strftime("%Y-%m-%dT%H:%M:%SZ")}
+            {"id": i, "status": "completed", "created_at": ts.strftime("%Y-%m-%dT%H:%M:%SZ")}
             for i, ts in rows.items()
             if lo <= ts <= hi or i == 4
         ]
@@ -166,6 +172,39 @@ def test_fetch_runs_slices_the_window_dedupes_overlap_and_filters_half_open(monk
     monkeypatch.setattr(report, "gh_api", fake_api)
     got = report.fetch_runs("repos/o/r", "ci.yml", since, until)
     assert [r["id"] for r in got] == [1, 2]
+
+
+def test_a_run_being_rerun_during_capture_stays_in_its_window(monkeypatch):
+    since = report.parse_ts("2026-11-09T00:00:00Z")
+    created = "2026-11-09T00:30:00Z"
+    rows = [
+        {"id": 1, "status": "completed", "run_attempt": 1, "created_at": created},
+        {"id": 2, "status": "in_progress", "run_attempt": 1, "created_at": created},  # first attempt still running
+        {"id": 3, "status": "in_progress", "run_attempt": 2, "created_at": created},  # attempt 1 done, re-run live
+        {"id": 4, "status": "queued", "run_attempt": 3, "created_at": created},
+        {"id": 5, "status": "completed", "run_attempt": 2, "created_at": created},
+    ]
+    queries = []
+
+    def fake_api(path, **_):
+        queries.append(path)
+        return {"workflow_runs": rows, "total_count": len(rows)}
+
+    monkeypatch.setattr(report, "gh_api", fake_api)
+    got = report.fetch_runs("repos/o/r", "ci.yml", since, since + timedelta(hours=1))
+    assert [r["id"] for r in got] == [1, 3, 4, 5]
+    assert not any("status=" in q for q in queries)  # the API's status is the latest attempt's
+
+
+def test_an_in_progress_rerun_is_measured_on_attempt_one_with_a_null_latest_conclusion(monkeypatch):
+    calls = []
+    monkeypatch.setattr(report, "gh_api", _rerun_fake_api(calls))
+    listed = _run(7, conclusion=None, started="40:00", updated="41:00", attempt=2, status="in_progress")
+    warnings = report.Warnings()
+    out = report.summarize_listed_run("repos/o/r", listed, warnings)
+    assert (out["conclusion"], out["latest_conclusion"]) == ("failure", None)
+    assert out["wall_minutes"] == 26.0 and out["runner_minutes"] == pytest.approx((1500 + 60) / 60)
+    assert len(warnings.items()) == 1 and "being re-run at capture time" in warnings.items()[0]
 
 
 def test_collect_inventory_counts_tests_and_reads_the_collect_summary(tmp_path):
@@ -289,7 +328,10 @@ def test_adjacent_windows_never_share_a_run(monkeypatch):
     t0 = report.parse_ts("2026-11-09T00:00:00Z")
     mid = t0 + timedelta(hours=1)
     end = t0 + timedelta(hours=2)
-    rows = [{"id": 1, "created_at": "2026-11-09T00:30:00Z"}, {"id": 2, "created_at": "2026-11-09T01:00:00Z"}]
+    rows = [
+        {"id": 1, "status": "completed", "created_at": "2026-11-09T00:30:00Z"},
+        {"id": 2, "status": "completed", "created_at": "2026-11-09T01:00:00Z"},
+    ]
 
     def fake_api(path, **_):
         lo, hi = (report.parse_ts(x) for x in path.split("created=")[1].split("&")[0].split(".."))
@@ -316,7 +358,7 @@ def _paged_api(key, total_count, rows):
 
 
 def test_run_listing_follows_a_second_page(monkeypatch):
-    rows = [{"id": i, "created_at": "2026-11-09T00:30:00Z"} for i in range(103)]
+    rows = [{"id": i, "status": "completed", "created_at": "2026-11-09T00:30:00Z"} for i in range(103)]
     monkeypatch.setattr(report, "gh_api", _paged_api("workflow_runs", 103, rows))
     warnings = report.Warnings()
     since = report.parse_ts("2026-11-09T00:00:00Z")
@@ -325,7 +367,7 @@ def test_run_listing_follows_a_second_page(monkeypatch):
 
 
 def test_run_listing_warns_when_rows_disagree_with_total_count(monkeypatch):
-    rows = [{"id": i, "created_at": "2026-11-09T00:30:00Z"} for i in range(103)]
+    rows = [{"id": i, "status": "completed", "created_at": "2026-11-09T00:30:00Z"} for i in range(103)]
     monkeypatch.setattr(report, "gh_api", _paged_api("workflow_runs", 105, rows))
     warnings = report.Warnings()
     since = report.parse_ts("2026-11-09T00:00:00Z")
@@ -347,7 +389,11 @@ def test_fetch_jobs_follows_a_second_page_and_warns_on_mismatch(monkeypatch):
 def _minute_rows(count, same_second=False):
     base = report.parse_ts("2026-11-09T00:00:00Z")
     return [
-        {"id": i, "created_at": (base + timedelta(minutes=0 if same_second else i)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        {
+            "id": i,
+            "status": "completed",
+            "created_at": (base + timedelta(minutes=0 if same_second else i)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
         for i in range(count)
     ]
 
@@ -427,6 +473,39 @@ def test_job_names_holding_the_branch_or_actor_are_redacted():
         assert private not in dumped
 
 
+def test_a_short_branch_name_does_not_redact_unrelated_jobs():
+    run = _run(1)
+    run["head_branch"] = "lint"
+    run["actor"] = {"login": "docs"}
+    jobs = [
+        _job("lint", "ubuntu-latest", "00:00", "00:10"),
+        _job("docs-check (3.12)", "ubuntu-latest", "00:00", "00:20"),
+        _job("mesh (windows-latest, floor)", "ubuntu-latest", "00:00", "00:30"),
+        _job("Feature configuration (domain-only)", "ubuntu-latest", "00:00", "00:40"),
+    ]
+    out = report.summarize_run(run, jobs)
+    assert out["redacted_jobs"] == 0
+    assert sorted(j["name"] for j in out["jobs"]) == sorted(j["name"] for j in jobs)
+    assert {job_family for job_family in report.aggregate([out])["pull_request"]["all"]["job_families"]} == {
+        "lint",
+        "docs-check (3.12)",
+        "mesh (windows-latest, floor)",
+        "Feature configuration (domain-only)",
+    }
+
+
+def test_redaction_matches_whole_words_only():
+    private = [report._words("hub-seven"), report._words("alice"), report._words("lint")]
+    assert report.carries_private_name("deploy (hub-seven)", private)  # exact multi-word sequence
+    assert report.carries_private_name("notify ALICE", private)  # one word of 5+ characters, any case
+    assert report.carries_private_name("notify alice-run", private)  # as a word, beside other words
+    assert not report.carries_private_name("lint", private)  # a short lone name reads as a job word
+    assert not report.carries_private_name("seven hub shard", private)  # same words, wrong order
+    assert not report.carries_private_name("hub-rust / hub (Rust stable)", private)
+    assert not report.carries_private_name("alicecooper check", private)  # substring of a word, not the word
+    assert not report.carries_private_name("anything", [])
+
+
 def test_empty_branch_or_actor_never_redacts_everything():
     run = _run(1)
     run["head_branch"], run["actor"] = "", None
@@ -444,6 +523,50 @@ def test_unexpanded_matrix_jobs_with_zero_seconds_are_not_counted():
     out = report.summarize_run(_run(1), jobs)
     assert out["job_count"] == 2 and out["skipped_jobs"] == 2
     assert sorted(j["seconds"] for j in out["jobs"]) == [0, 7]
+
+
+def test_a_job_cancelled_while_queued_is_not_counted_as_runner_time():
+    # The real shape: trusted-runner-canary, cancelled after hours in the queue, has both timestamps,
+    # runner_id 0, an empty runner_name and no steps.
+    queued = _job("trusted-runner-canary", "self-hosted", "00:00", "50:00", conclusion="cancelled", assigned=False)
+    queued["steps"] = []
+    running = _job("test shard (3.12, 1)", "ubuntu-latest", "00:00", "05:00")
+    cancelled_running = _job("windows-affected-tests", "windows-latest", "00:00", "02:00", conclusion="cancelled")
+    run = _run(1, conclusion="cancelled", started="00:00", updated="20:00")
+    out = report.summarize_run(run, [queued, running, cancelled_running], all_jobs=[queued, running, cancelled_running])
+    assert out["unassigned_jobs"] == 1 and out["skipped_jobs"] == 0
+    assert out["job_count"] == 2
+    assert out["runner_minutes"] == pytest.approx(7.0)  # 300 + 120 seconds, none of the 50 minute queue span
+    assert out["runner_minutes_all_attempts"] == pytest.approx(7.0)
+    assert out["windows_runner_minutes"] == pytest.approx(2.0)
+    assert out["wall_minutes"] == 20.0  # wall time is unchanged
+    assert "trusted-runner-canary" not in [j["name"] for j in out["jobs"]]
+    assert "trusted-runner-canary" not in report.aggregate([out])["pull_request"]["all"]["job_families"]
+    assert report.aggregate([out])["pull_request"]["all"]["runner_minutes_by_os_median"]["self-hosted"] == 0.0
+    assert "GitHub Actions" not in report.dumps(out)  # runner_name is never published
+
+
+def test_runner_assignment_is_read_from_runner_id_or_runner_name():
+    assert report.job_assigned({"runner_id": 5, "runner_name": ""})
+    assert report.job_assigned({"runner_id": 0, "runner_name": "box"})
+    assert not report.job_assigned({"runner_id": 0, "runner_name": ""})
+    assert not report.job_assigned({"runner_id": None, "runner_name": None})
+    assert not report.job_assigned({})
+
+
+def test_unassigned_jobs_are_excluded_from_all_attempt_cost_and_family_stats():
+    queued = _job("trusted-runner-canary", "self-hosted", "00:00", "50:00", conclusion="cancelled", assigned=False)
+    lint = _job("lint", "ubuntu-latest", "00:00", "01:00")
+    rerun = report.summarize_run(
+        _run(2, conclusion="success", started="30:00", updated="31:00", attempt=2),
+        [queued, lint],
+        first_attempt=_run(2, conclusion="failure", started="00:00", updated="10:00"),
+        all_jobs=[queued, lint, dict(queued, started_at="2026-11-09T10:30:00Z", completed_at="2026-11-09T10:55:00Z")],
+    )
+    assert rerun["runner_minutes_all_attempts"] == 1.0
+    agg = report.aggregate([rerun])["pull_request"]["all"]
+    assert "trusted-runner-canary" not in agg["job_families"]
+    assert agg["runner_minutes"]["total"] == 1.0
 
 
 def test_markdown_escapes_pipes_in_table_cells():
