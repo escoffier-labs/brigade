@@ -70,7 +70,7 @@ def _workspace(tmp_path: Path, cards: dict[str, str]) -> Path:
     directory = tmp_path / "memory" / "cards"
     directory.mkdir(parents=True)
     for name, text in cards.items():
-        (directory / name).write_text(text, encoding="utf-8")
+        (directory / name).write_bytes(text.encode("utf-8"))
     return tmp_path
 
 
@@ -215,7 +215,7 @@ def test_a_colliding_create_card_is_what_push_would_refuse(tmp_path: Path):
     content = _card_text()
 
     problem = card_id_collision_problem(CardIdIndex(ws), content, "example-widget.md")
-    (ws / "memory" / "cards" / "example-widget.md").write_text(content, encoding="utf-8")
+    (ws / "memory" / "cards" / "example-widget.md").write_bytes(content.encode("utf-8"))
     ids = [card["card_id"] for card in memory_hub_sync._local_cards(ws)]
 
     assert problem is not None
@@ -232,9 +232,10 @@ def test_lint_targets_reads_the_cards_once_for_many_handoffs(tmp_path: Path, mon
     paths = []
     for number in range(3):
         path = inbox / f"2026-11-09-100{number}-card-{number}.md"
-        path.write_text(
-            _handoff("create-card", card=f"card-{number}.md", content=_card_text(topic=f"topic-{number}")),
-            encoding="utf-8",
+        path.write_bytes(
+            _handoff("create-card", card=f"card-{number}.md", content=_card_text(topic=f"topic-{number}")).encode(
+                "utf-8"
+            )
         )
         paths.append(path)
     calls: list[Path] = []
@@ -258,7 +259,7 @@ def _inbox(tmp_path: Path) -> Path:
 
 def _write(inbox: Path, name: str, card: str, content: str) -> Path:
     path = inbox / name
-    path.write_text(_handoff("create-card", card=card, content=content), encoding="utf-8")
+    path.write_bytes(_handoff("create-card", card=card, content=content).encode("utf-8"))
     return path
 
 
@@ -277,7 +278,7 @@ def test_ingest_rejects_an_explicit_id_collision_and_never_writes_the_card(tmp_p
     inbox = _inbox(tmp_path)
     cards = tmp_path / "memory" / "cards"
     cards.mkdir(parents=True, exist_ok=True)
-    (cards / "existing-by-id.md").write_text(EXISTING_BY_ID, encoding="utf-8")
+    (cards / "existing-by-id.md").write_bytes(EXISTING_BY_ID.encode("utf-8"))
     _write(inbox, "2026-11-09-1000-clash.md", "clash.md", _card_text(topic="fresh", card_id=MINTED))
 
     stats = _ingest(tmp_path)
@@ -295,7 +296,7 @@ def test_ingest_rejection_is_isolated_to_the_colliding_handoff(tmp_path: Path):
     inbox = _inbox(tmp_path)
     cards = tmp_path / "memory" / "cards"
     cards.mkdir(parents=True, exist_ok=True)
-    (cards / "existing-by-id.md").write_text(EXISTING_BY_ID, encoding="utf-8")
+    (cards / "existing-by-id.md").write_bytes(EXISTING_BY_ID.encode("utf-8"))
     _write(inbox, "2026-11-09-1000-clash.md", "clash.md", _card_text(topic="fresh", card_id=MINTED))
     _write(inbox, "2026-11-09-1001-fine.md", "fine.md", _card_text(topic="fine-topic"))
 
@@ -310,7 +311,7 @@ def test_ingest_dry_run_reports_the_rejection_and_writes_nothing(tmp_path: Path)
     inbox = _inbox(tmp_path)
     cards = tmp_path / "memory" / "cards"
     cards.mkdir(parents=True, exist_ok=True)
-    (cards / "existing-by-id.md").write_text(EXISTING_BY_ID, encoding="utf-8")
+    (cards / "existing-by-id.md").write_bytes(EXISTING_BY_ID.encode("utf-8"))
     _write(inbox, "2026-11-09-1000-clash.md", "clash.md", _card_text(topic="fresh", card_id=MINTED))
 
     stats = _ingest(tmp_path, dry_run=True)
@@ -345,7 +346,7 @@ def test_ingest_gives_an_id_less_topic_collision_a_minted_id(tmp_path: Path):
     inbox = _inbox(tmp_path)
     cards = tmp_path / "memory" / "cards"
     cards.mkdir(parents=True, exist_ok=True)
-    (cards / "existing-widget.md").write_text(EXISTING_BY_TOPIC, encoding="utf-8")
+    (cards / "existing-widget.md").write_bytes(EXISTING_BY_TOPIC.encode("utf-8"))
     _write(inbox, "2026-11-09-1000-widget.md", "example-widget.md", _card_text())
 
     stats = _ingest(tmp_path)
@@ -390,11 +391,10 @@ def test_an_update_without_an_id_keeps_the_original_id_claimed(tmp_path: Path, d
     inbox = _inbox(tmp_path)
     cards = tmp_path / "memory" / "cards"
     cards.mkdir(parents=True, exist_ok=True)
-    (cards / "existing-by-id.md").write_text(EXISTING_BY_ID, encoding="utf-8")
+    (cards / "existing-by-id.md").write_bytes(EXISTING_BY_ID.encode("utf-8"))
     revised = _card_text(topic="unrelated-topic", body="revised existing card")
-    (inbox / "2026-11-09-1000-update.md").write_text(
-        _handoff("update-card", card="existing-by-id.md", content=revised, sha=_sha(EXISTING_BY_ID)),
-        encoding="utf-8",
+    (inbox / "2026-11-09-1000-update.md").write_bytes(
+        _handoff("update-card", card="existing-by-id.md", content=revised, sha=_sha(EXISTING_BY_ID)).encode("utf-8")
     )
     _write(
         inbox,
