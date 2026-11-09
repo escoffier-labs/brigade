@@ -27,6 +27,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -37,6 +38,13 @@ LEDGER_KEYS_MAX = 200
 CAPTURE_TIMEOUT_SECONDS = 3.0
 CAPTURE_RESERVE_SECONDS = 1.0
 CAPTURE_MIN_SECONDS = 0.5
+# Recall runs after the brief and gets only what the hook budget has left, less a
+# reserve for writing the injection. Below the minimum it is skipped.
+RECALL_RESERVE_SECONDS = 1.5
+RECALL_MIN_SECONDS = 1.0
+# A deadline this far past belongs to an earlier event in a long-lived process.
+_STALE_DEADLINE_SECONDS = 30.0
+_EVENT_DEADLINE: list[float | None] = [None]
 _SESSION_REF_LABEL = b"brigade.memory.capture.session.v1\x00"
 _CARD_ID = r"[a-z0-9][a-z0-9._-]{0,127}"
 # `cards/<id>.md` paths and `card_id: <id>` fields, as the work brief writes them.
@@ -47,6 +55,22 @@ _FRONTMATTER_READ_BYTES = 64 * 1024
 
 
 __all__ = ["AUDIENCE_ENV", "REMOTE_ENV", "audience", "brief_card_ids", "capture", "recall_text"]
+
+
+def start_event(budget: float) -> None:
+    """Record this hook event's deadline: ``budget`` seconds from now."""
+    _EVENT_DEADLINE[0] = time.monotonic() + budget
+
+
+def recall_budget() -> float | None:
+    """Seconds recall may use now, or None outside a timed hook event."""
+    deadline = _EVENT_DEADLINE[0]
+    if deadline is None:
+        return None
+    now = time.monotonic()
+    if now - deadline > _STALE_DEADLINE_SECONDS:
+        return None
+    return deadline - now - RECALL_RESERVE_SECONDS
 
 
 def brief_card_ids(text: str) -> list[str]:
@@ -160,6 +184,9 @@ def recall_text(target: Path, payload: dict[str, Any], *, prompt: str | None = N
     from .. import memory_hooks
 
     try:
+        budget = recall_budget()
+        if budget is not None and budget < RECALL_MIN_SECONDS:
+            return ""  # the brief used the budget: keep the brief, skip recall
         session_id = _session(payload)
         path = ledger_path(target, session_id) if session_id else None
         named = brief_card_ids(brief) if brief is not None else []
@@ -181,6 +208,7 @@ def recall_text(target: Path, payload: dict[str, Any], *, prompt: str | None = N
             hub=True,
             exclude=list(exclude),
             audience=audience(),
+            timeout=budget,
         )
         if shown and path is not None:
             with contextlib.suppress(OSError):
@@ -333,7 +361,11 @@ def observe_read(target: Path, payload: dict[str, Any]) -> bool:
 def after_event(
     event: str, payload: dict[str, Any], target: Callable[[], Path | None], *, budget: float | None = None
 ) -> None:
-    """Hook-side effects that never change the hook's result: Read observation and the Stop capture."""
+    """Hook-side effects that never change the hook's result: Read observation and the Stop capture.
+
+    It runs last in the event, so it also clears the event's recall deadline.
+    """
+    _EVENT_DEADLINE[0] = None
     try:
         if event == "PostToolUse" and payload.get("tool_name") == "Read":
             tool_input = payload.get("tool_input")

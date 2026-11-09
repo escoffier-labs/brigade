@@ -81,6 +81,10 @@ def hub_matches(memory_root: Path, query: str, query_source: str) -> list[dict[s
     None sends the caller to plain local recall. A hub that is down is not None:
     ``search_payload`` answers from local cards and the replica, silently here.
     """
+    # Fast path: without a memory-care config there is no hub mode, so skip the hub
+    # client imports in the recall child (memory_hub_client.CONFIG_REL).
+    if not (memory_root / ".brigade" / "memory-care.toml").is_file():
+        return None
     from . import memory_hub_search
 
     try:

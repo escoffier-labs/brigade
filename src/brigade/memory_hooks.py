@@ -370,6 +370,7 @@ def recall_cards_payload(
     hub: bool = False,
     exclude: list[str] | None = None,
     audience: str | None = None,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     """Run bounded recall against ``target`` using the prompt, explicit, or checkout terms.
 
@@ -416,7 +417,7 @@ def recall_cards_payload(
             input=request,
             capture_output=True,
             text=True,
-            timeout=RECALL_TIMEOUT_SECONDS,
+            timeout=RECALL_TIMEOUT_SECONDS if timeout is None else min(timeout, RECALL_TIMEOUT_SECONDS),
             check=False,
         )
     except subprocess.TimeoutExpired:
@@ -464,6 +465,7 @@ def recall_for_hook(
     hub: bool = False,
     exclude: list[str] | None = None,
     audience: str | None = None,
+    timeout: float | None = None,
 ) -> tuple[str, list[str]]:
     """Recall text plus the keys of the cards it shows; ``("", [])`` on any failure.
 
@@ -480,7 +482,7 @@ def recall_for_hook(
             # A prompt that normalizes to nothing (whitespace or control
             # characters) recalls nothing, like a blank prompt; no cwd fallback.
             return "", []
-        options: dict[str, Any] = {"hub": hub, "exclude": exclude, "audience": audience}
+        options: dict[str, Any] = {"hub": hub, "exclude": exclude, "audience": audience, "timeout": timeout}
         if prompt is not None:
             payload = recall_cards_payload(
                 target=recall_target, cwd=session_cwd, limit=limit, query=prompt, query_source="prompt", **options

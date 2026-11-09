@@ -2249,6 +2249,7 @@ def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = No
 
 def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
     started = _monotonic()
+    hub_recall.start_event(_hook_timeout_seconds())  # recall gets only what the brief leaves (S24)
     pin = pin if pin is not None else _hook_pin_from_env()
     result = write_attribution.handle_event(event, payload, pin=pin)
     # Live Fleet Hub inbox delivery rides on prompt and tool events of wired sessions.

@@ -540,3 +540,64 @@ def test_a_card_without_an_id_is_opened_under_its_stem(wired):
     card = memory / "memory" / "cards" / "comet.md"
     assert hub_recall.observe_read(target, _payload(target, "PostToolUse", tool_input={"file_path": str(card)}))
     assert hub_recall.load(hub_recall.ledger_path(target, SESSION))["opened"] == ["comet"]
+
+
+# --- the brief runs first, recall gets only the leftover budget ---
+
+
+def _time_session_start(target: Path, monkeypatch: pytest.MonkeyPatch, *, hook_budget: float, brief_seconds: float):
+    order: list[str] = []
+    timeouts: list[float | None] = []
+    monkeypatch.setenv("BRIGADE_HOOK_TIMEOUT_SECONDS", str(hook_budget))
+
+    def slow_brief(_repo: Path) -> str:
+        order.append("brief")
+        time.sleep(brief_seconds)
+        return "work brief: timed"
+
+    def recall(**kwargs: Any) -> tuple[str, list[str]]:
+        order.append("recall")
+        timeouts.append(kwargs.get("timeout"))
+        return "memory recall: comet\n- Comet token rotation | tags: comet | memory/cards/comet.md", ["comet"]
+
+    monkeypatch.setattr(runtime, "_run_brief", slow_brief)
+    monkeypatch.setattr(memory_hooks, "recall_for_hook", recall)
+    result = runtime.handle_payload("SessionStart", _payload(target, "SessionStart", source="startup"))
+    return result, order, timeouts
+
+
+def test_recall_runs_after_the_brief_on_the_budget_it_left(wired, monkeypatch):
+    target, _memory = wired
+    result, order, timeouts = _time_session_start(target, monkeypatch, hook_budget=6.0, brief_seconds=1.0)
+    assert order == ["brief", "recall"]
+    (timeout,) = timeouts
+    # 6 s budget, about 1 s of brief, 1.5 s reserve: well under the 5 s recall cap.
+    assert timeout is not None and 0 < timeout <= 6.0 - 1.0 - hub_recall.RECALL_RESERVE_SECONDS
+    context = result["hookSpecificOutput"]["additionalContext"]
+    assert "work brief: timed" in context and "Comet token rotation" in context
+
+
+def test_a_slow_brief_keeps_its_injection_and_recall_is_skipped(wired, monkeypatch):
+    target, _memory = wired
+    result, order, _timeouts = _time_session_start(target, monkeypatch, hook_budget=3.0, brief_seconds=1.0)
+    assert order == ["brief"]
+    assert "work brief: timed" in result["hookSpecificOutput"]["additionalContext"]
+
+
+def test_a_deadline_from_an_earlier_event_is_ignored(monkeypatch):
+    monkeypatch.setattr(hub_recall, "_EVENT_DEADLINE", [time.monotonic() - 100.0])
+    assert hub_recall.recall_budget() is None
+    hub_recall.start_event(12.0)
+    budget = hub_recall.recall_budget()
+    assert budget is not None and 10.0 < budget <= 12.0 - hub_recall.RECALL_RESERVE_SECONDS
+    hub_recall.after_event("UserPromptSubmit", {}, lambda: None)
+    assert hub_recall.recall_budget() is None
+
+
+def test_recall_without_a_memory_care_config_never_loads_the_hub_client(tmp_path, monkeypatch):
+    from brigade import memory_hub_search
+
+    calls: list[Path] = []
+    monkeypatch.setattr(memory_hub_search, "enabled", lambda root: calls.append(root) or False)
+    assert memory_hook_hub.hub_matches(tmp_path, "comet", "prompt") is None
+    assert calls == []
