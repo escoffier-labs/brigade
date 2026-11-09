@@ -1490,8 +1490,9 @@ async fn assert_s18_push_boundary() {
             .status,
         201
     );
+    // Another credential's unreviewed card never reaches the admin's push.
     assert_eq!(
-        h.call(ADMIN_TOKEN, body("put", "unreviewed", "release checklist"))
+        h.call(NODE_TOKEN, body("put", "unreviewed", "release checklist"))
             .await
             .status,
         201

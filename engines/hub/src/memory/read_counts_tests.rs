@@ -185,6 +185,42 @@ async fn search_hits_count_once_per_card_and_card_reads_count_the_first_chunk() 
     assert_eq!(meta(&db, "read_totals_rows"), Some("2".into()));
 }
 
+/// S23: a connector's own search (`query_source: "connector"`) is a read,
+/// though push-filtered. Unsolicited push hits on `fleet_digest` and
+/// `inbox_list` (`query_source: "push"`) are not.
+#[tokio::test]
+async fn connector_searches_count_and_unsolicited_pushes_do_not() {
+    let h = Hub::with(clean(), None);
+    let mut seq = 0;
+    for id in ["alpha", "beta"] {
+        let body = json!({"action":"import","scope":"fleet","card_id":id,
+                          "text":format!("shared wording {id}"),"client_event_id":h.id()});
+        let r = h.call(ADMIN_TOKEN, body).await;
+        assert_eq!(r.status, 201, "{:?}", r.body);
+        seq = r.body["event"]["seq"].as_i64().unwrap();
+    }
+    let source = |s: &str| json!({"action":"search","query":"shared wording","query_source":s,"min_seq":seq});
+    let pushed = h.call(NODE_TOKEN, source("push")).await;
+    assert_eq!(pushed.status, 200, "{:?}", pushed.body);
+    assert_eq!(pushed.body["matches"].as_array().unwrap().len(), 2);
+    let db = flush(&h);
+    assert_eq!(day_row(&db, "fleet", "alpha"), None);
+    assert_eq!(count(&db, "SELECT count(*) FROM memory_read_totals"), 0);
+    let found = h.call(NODE_TOKEN, source("connector")).await;
+    assert_eq!(found.status, 200, "{:?}", found.body);
+    assert_eq!(found.body["matches"].as_array().unwrap().len(), 2);
+    let db = flush(&h);
+    assert_eq!(day_row(&db, "fleet", "alpha"), Some((1, 0)));
+    assert_eq!(day_row(&db, "fleet", "beta"), Some((1, 0)));
+    assert_eq!(
+        count(&db, "SELECT sum(total_reads) FROM memory_read_totals"),
+        2
+    );
+    // Unknown sources stay refused.
+    let odd = h.call(NODE_TOKEN, source("hook")).await;
+    assert_eq!((odd.status, code(&odd)), (400, "memory_query_invalid"));
+}
+
 #[tokio::test]
 async fn eval_log_status_proposal_and_refused_reads_are_not_counted() {
     let h = Hub::with(clean(), None);

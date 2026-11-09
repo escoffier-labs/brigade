@@ -1,0 +1,1 @@
+- Give the hub manifest binding churn test a large writer deadline so a slow CI runner no longer answers 503 on `propose` before the retained budget refusal is reached (#2411).

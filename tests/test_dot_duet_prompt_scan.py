@@ -6,7 +6,10 @@ from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
+
+from brigade import memory_hub_client
 
 from brigade.dot.memory_tools import MemoryTools
 from brigade.dot.process import CommandResult
@@ -37,6 +40,18 @@ REMOTE = (DOT, DUET)
 # test_grokbot_s26_profiles.py. These cases use local cards, which it never serves.
 EVERY_PROFILE = (DOT, DUET)
 SHA = "ab" * 32
+CONNECTOR_HUB = "https://hub.example.test:3774"
+# Built at runtime: a fixture, not a credential.
+CONNECTOR_TOKEN = "-".join(("fixture", "connector", "value")) * 2
+
+
+def _card_reply(card_id, card):
+    """One push-safe card answer. Its hash matches its text unless the case sets one."""
+    text = card["text"]
+    body = {"scope": "fleet", "card_id": card_id, "revision": 2, "next_offset": None}
+    body.update(card)
+    body.setdefault("content_hash", memory_hub_client.content_hash(text))
+    return {"card": body, "log_epoch": "epoch-1"}
 
 
 def _expected(rule, code):
@@ -45,7 +60,20 @@ def _expected(rule, code):
 
 class Scan(Fixture):
     def memory(self, profile):
-        return MemoryTools(self.runtime, commands=self.runner, profile=profile)
+        authority = lambda: SimpleNamespace(hub=CONNECTOR_HUB, token=CONNECTOR_TOKEN)  # noqa: E731
+        return MemoryTools(self.runtime, commands=self.runner, profile=profile, authority=authority)
+
+    def hub_cards(self, cards):
+        """Dot and Duet read hub cards in process, push-safe, as the connector principal (S23)."""
+        sent = []
+
+        def transport(url, token, body, timeout):
+            sent.append((url, token, body))
+            if body.get("action") != "card" or body["card_id"] not in cards:
+                return 404, {"error": "card not found", "code": "memory_card_not_found"}
+            return 200, _card_reply(body["card_id"], cards[body["card_id"]])
+
+        return patch.object(memory_hub_client, "urllib_transport", transport), sent
 
     def search_reply(self, *matches, retrieval=None):
         reply = {"match_count": len(matches), "matches": list(matches)}
@@ -176,19 +204,14 @@ class TestRemoteProfiles(Scan):
     @requires_local_state
     def test_hub_card_is_scanned_like_a_local_card(self):
         cards = {
-            "hub-clean": {"text": CLEAN_TEXT, "scope": "fleet", "revision": 2, "content_hash": "abc"},
-            "hub-private": {"text": f"Ask {PRIVATE_EMAIL} first.", "scope": "fleet"},
-            "hub-injection": {"text": "Notes.\n\n" + INJECTION, "scope": "fleet"},
+            "hub-clean": {"text": CLEAN_TEXT},
+            "hub-private": {"text": f"Ask {PRIVATE_EMAIL} first."},
+            "hub-injection": {"text": "Notes.\n\n" + INJECTION},
         }
-
-        def handler(argv, stdin):
-            card = cards[argv[-1]]
-            return CommandResult(0, json.dumps({"ok": True, "source": "hub", "card": card}).encode())
-
-        self.runner.handler = handler
+        transport, sent = self.hub_cards(cards)
         for profile in REMOTE:
             memory = self.memory(profile)
-            with patch("brigade.memory_hub_client.hub_mode", return_value="on"):
+            with patch("brigade.memory_hub_client.hub_mode", return_value="on"), transport:
                 clean = memory.memory_card("hub-clean", scope="fleet")
                 assert clean["content"] == CLEAN_TEXT and clean["content_trust"] == "untrusted"
                 assert memory.memory_card("hub-private", scope="fleet") == {
@@ -199,6 +222,10 @@ class TestRemoteProfiles(Scan):
                     "card_id": "hub-injection",
                     "blocked": "classic-injection",
                 }
+        # Every read is push-safe, with the connector's own credential, and nothing ran the CLI.
+        assert {(url, token) for url, token, _ in sent} == {(CONNECTOR_HUB + "/memory", CONNECTOR_TOKEN)}
+        assert all(body["push"] is True for _, _, body in sent)
+        assert self.runner.argvs() == []
 
     @requires_local_state
     def test_a_private_or_injection_path_or_scope_refuses_the_match(self):
@@ -434,26 +461,24 @@ class TestConnectorPayloads(Scan):
 
     @requires_local_state
     def test_hub_card_labels_are_checked_before_they_leave(self):
+        sha = memory_hub_client.content_hash(CLEAN_TEXT)
         cards = {
-            "hub-good": {"text": CLEAN_TEXT, "scope": "fleet", "revision": 2, "content_hash": SHA},
+            "hub-good": {"text": CLEAN_TEXT},
             "hub-odd": {"text": CLEAN_TEXT, "scope": PRIVATE_EMAIL, "revision": "2", "content_hash": PRIVATE_IP},
             "hub-bool": {"text": CLEAN_TEXT, "scope": ["fleet"], "revision": True, "content_hash": "AB" * 32},
+            "hub-moved": {"text": CLEAN_TEXT, "content_hash": SHA},
             "hub-scope-ip": {"text": CLEAN_TEXT, "scope": "repo:relay/" + PRIVATE_IP, "revision": 1},
         }
-
-        def handler(argv, stdin):
-            return CommandResult(0, json.dumps({"ok": True, "source": "hub", "card": cards[argv[-1]]}).encode())
-
-        self.runner.handler = handler
+        transport, _ = self.hub_cards(cards)
         for profile in EVERY_PROFILE:
             memory = self.memory(profile)
-            with patch("brigade.memory_hub_client.hub_mode", return_value="on"):
+            with patch("brigade.memory_hub_client.hub_mode", return_value="on"), transport:
                 good = memory.memory_card("hub-good", scope="fleet")
-                assert (good["scope"], good["revision"], good["sha256"]) == ("fleet", 2, SHA)
-                for name in ("hub-odd", "hub-bool"):
+                assert (good["scope"], good["revision"], good["sha256"]) == ("fleet", 2, sha)
+                # An invalid scope or a hash that does not match the text never opens.
+                for name in ("hub-odd", "hub-bool", "hub-moved"):
                     odd = memory.memory_card(name, scope="fleet")
-                    assert (odd["scope"], odd["revision"], odd["sha256"]) == (None, None, None)
-                    assert odd["content"] == CLEAN_TEXT
+                    assert odd == {"error": "card_not_found", "name": name}
                     serialized = json.dumps(odd)
                     assert PRIVATE_EMAIL not in serialized and PRIVATE_IP not in serialized
                 assert memory.memory_card("hub-scope-ip", scope="fleet") == {
@@ -546,15 +571,11 @@ class TestConnectorPayloads(Scan):
         assert (match["source"], match["revision"], match["trust"]) == ("odd", "3", "odd")
         (self.cards / "clean-card.md").write_text(CLEAN_TEXT)
         assert self.memory(unscanned).memory_card("clean-card")["path"] == absolute
-        cards = {"hub-odd": {"text": CLEAN_TEXT, "scope": "anything", "revision": "2", "content_hash": "abc"}}
-
-        def handler(argv, stdin):
-            return CommandResult(0, json.dumps({"ok": True, "source": "hub", "card": cards[argv[-1]]}).encode())
-
-        self.runner.handler = handler
-        with patch("brigade.memory_hub_client.hub_mode", return_value="on"):
+        # Hub cards are read push-safe whatever the scan setting, so malformed labels never open.
+        transport, _ = self.hub_cards({"hub-odd": {"text": CLEAN_TEXT, "scope": "anything", "revision": "2"}})
+        with patch("brigade.memory_hub_client.hub_mode", return_value="on"), transport:
             odd = self.memory(unscanned).memory_card("hub-odd", scope="anything")
-        assert (odd["scope"], odd["revision"], odd["sha256"]) == ("anything", "2", "abc")
+        assert odd == {"error": "card_not_found", "name": "hub-odd"}
 
 
 class TestConnectorPaths(Scan):
