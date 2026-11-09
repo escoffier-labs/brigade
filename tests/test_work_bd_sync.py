@@ -1,5 +1,6 @@
 """The bd mirror reads bd only, keys tasks by bd id, and lets readiness honor bd edges."""
 
+import hashlib
 import json
 import os
 import subprocess
@@ -14,7 +15,7 @@ from brigade.work_cmd import bd_sync, ledger
 from brigade.work_cmd.import_bd import BdImportError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "bd"
-VERSIONS = ["1.3.1", "1.3.2"]
+VERSIONS = ["1.3.1", "1.3.2"]  # 1.3.4 has mixed link types and its own test
 # Verbs that change bd state. None may ever reach a subprocess.
 MUTATING = ("create", "update", "close", "reopen", "delete", "dep", "sync", "init", "import", "claim", "label")
 
@@ -53,6 +54,40 @@ def mirror(target):
 def ready(target, capsys):
     assert cli.main(["work", "ready", "--target", str(target), "--explain", "--json"]) == 0
     return json.loads(capsys.readouterr().out)
+
+
+def test_bd_1_3_4_mixed_link_types(tmp_path, capsys):
+    version = "1.3.4"
+    rc, payload = sync(tmp_path, capsys, fixture(version), version)
+    assert rc == 0
+    assert payload["links_preserved"] == 5
+    assert payload["links_changed"] == []  # creations are reported under created, not as link changes
+    ids = by_title(version)
+    tasks = mirror(tmp_path)
+    release, crash = tasks[ids["Release gate"]], tasks[ids["Crash found"]]
+    edge_set = {(e["type"], e["source"], e["target"]) for e in ledger._read_task_ledger(tmp_path)["edges"]}
+    assert ("blocks", crash["id"], release["id"]) in edge_set
+    assert len(edge_set) == 4  # conditional-blocks, discovered-from, parent-child, blocks; no link edges
+    assert release["metadata"]["bd"]["links"] == [{"type": "tracks", "other": ids["Implement parser"]}]
+    assert tasks[ids["Document parser"]]["metadata"]["bd"]["links"] == [
+        {"type": "related", "other": ids["Design parser"]},
+        {"type": "waits-for", "other": ids["Implement parser"]},
+    ]
+    assert "links" not in tasks[ids["Design parser"]]["metadata"]["bd"]
+    readiness = ready(tmp_path, capsys)
+    blocked = {item["id"] for item in readiness["blocked"]}
+    assert release["id"] in blocked
+    assert release["id"] not in {item["id"] for item in readiness["ready"]}
+    # A second run is a no-op, and dropping a link updates the mirror.
+    rc, again = sync(tmp_path, capsys, fixture(version), version)
+    assert again["unchanged"] == 7 and again["links_changed"] == []
+    items = rows(version)
+    items[0]["dependencies"] = [d for d in items[0]["dependencies"] if d["type"] != "tracks"]
+    rc, changed = sync(tmp_path, capsys, write_rows(tmp_path / "x.jsonl", items), version)
+    assert changed["links_changed"] == [ids["Release gate"]]
+    expected_digest = hashlib.sha256(json.dumps(items[0]).encode()).hexdigest()
+    assert mirror(tmp_path)[ids["Release gate"]]["metadata"]["bd"]["row_digest"] == expected_digest
+    assert "links" not in mirror(tmp_path)[ids["Release gate"]]["metadata"]["bd"]
 
 
 @pytest.mark.parametrize("version", VERSIONS)

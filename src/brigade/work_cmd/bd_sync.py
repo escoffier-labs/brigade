@@ -147,7 +147,7 @@ def _desired_tasks(raw: bytes) -> dict[str, dict[str, Any]]:
     """Map each bd id to the task content and owned edges the mirror should hold."""
     origin = evidence_redaction.classify_source_origin("bd-jsonl")
     desired: dict[str, dict[str, Any]] = {}
-    for line, row, data, proposals in _validated_rows(raw):
+    for line, row, data, proposals, links in _validated_rows(raw):
         status = row["status"]
         if status not in BD_STATUS_TO_TASK:
             raise _invalid(
@@ -170,6 +170,7 @@ def _desired_tasks(raw: bytes) -> dict[str, dict[str, Any]]:
             "issue_type": row["issue_type"],
             "row_digest": hashlib.sha256(data).hexdigest(),
             "edges": proposals,
+            "links": links,
         }
     return desired
 
@@ -212,6 +213,7 @@ def _apply_mirror(
         "kept_brigade_state": [],
         "edges_added": [],
         "edges_removed": [],
+        "links_changed": [],
     }
     touched: set[str] = set()
 
@@ -296,6 +298,19 @@ def _apply_mirror(
                 task.update(spec["content"])
                 summary["updated"].append({"bd_id": bd_id, "task_id": task["id"]})
                 stamp(task, spec, bd_id, content_applied=True)
+
+    # Non-gating bd links are not graph edges; mirror them as metadata so a link change is visible.
+    created_ids = {item["bd_id"] for item in summary["created"]}
+    for bd_id, spec in desired.items():
+        task_bd = _bd_meta(mirrors[bd_id])
+        if (task_bd.get("links") or []) != spec["links"]:
+            if spec["links"]:
+                task_bd["links"] = spec["links"]
+            else:
+                task_bd.pop("links", None)
+            stamp(mirrors[bd_id], spec, bd_id)
+            if bd_id not in created_ids:
+                summary["links_changed"].append(bd_id)
 
     def task_edge(edge: dict[str, str]) -> tuple[str, str, str]:
         return (edge["type"], str(mirrors[edge["source"]]["id"]), str(mirrors[edge["target"]]["id"]))
@@ -396,6 +411,8 @@ def sync_bd(
         "kept_brigade_state": summary["kept_brigade_state"],
         "edges_added": summary["edges_added"],
         "edges_removed": summary["edges_removed"],
+        "links_preserved": sum(len(spec["links"]) for spec in desired.values()),
+        "links_changed": summary["links_changed"],
         "unchanged": len(desired) - len(summary["changed"]),
         "ready": sorted(item["id"] for item in resolution.ready if item["id"] in mirrored),
         "blocked": sorted(item["id"] for item in resolution.blocked if item["id"] in mirrored),
@@ -409,7 +426,8 @@ def sync_bd(
     print(
         f"{prefix}: bd {version}, issues={len(desired)} created={len(summary['created'])} "
         f"updated={len(summary['updated'])} status_changed={len(summary['status_changed'])} "
-        f"edges_added={len(summary['edges_added'])} edges_removed={len(summary['edges_removed'])}"
+        f"edges_added={len(summary['edges_added'])} edges_removed={len(summary['edges_removed'])} "
+        f"links_preserved={result['links_preserved']}"
     )
     for item in summary["kept_brigade_state"]:
         print(f"  kept Brigade {item['field']} for {item['bd_id']} ({item['task_id']}): {item['brigade_status']}")
