@@ -537,8 +537,12 @@ Slice 9's resolver implementation requires its own security review. This contrac
    `git-remote-http`, often its link target) by pathname from that exec
    directory, which a held descriptor cannot cover. So before any fetch, the
    exact pathname git will launch is followed one link at a time, at most 8
-   hops. Every hop must sit in a canonical directory, with no symlinked
-   directory on the way, whose chain up to `/` passes the same rule, and the
+   hops, exactly as the kernel would. A link target is never normalized,
+   because the kernel resolves `..` from where a link really points. It must
+   be a bare name in the same directory or an absolute path whose every
+   component is a plain name, and an empty, `.` or `..` component is refused
+   at any hop. Every hop's directory chain up to `/` is checked with `lstat`
+   under the same rule, so no symlinked directory is on the way, and the
    final hop must be a native, root-owned regular file. A link that passes
    through a directory another user can write is refused, even when its
    canonical target is trusted. `git-remote-https` must exist. Otherwise the

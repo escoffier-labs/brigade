@@ -14,9 +14,10 @@
    group nor others, and neither setuid nor setgid. git's exec directory
    must meet the same rule, and must be the canonical path git reports.
    `git-remote-https` and `git-remote-http` there must pass before any
-   fetch at every hop of the pathname git launches: each hop in a
-   canonical, root-chained directory and the final one a native root-owned
-   file. The
+   fetch at every hop of the pathname git launches, each link target taken
+   literally (a bare name or a plain absolute path, never `.` or `..`),
+   each hop in a root-chained directory with no link in it, and the final
+   one a native root-owned file. The
    verified git is opened once per run and executed through that held
    descriptor (`fexecve`), so swapping the path after the check changes
    nothing. git launches its helpers by pathname, so for them the residual
@@ -284,18 +285,45 @@ def find_git() -> str | None:
 MAX_LINK_HOPS = 8
 
 
+def _plain(name: str) -> bool:
+    """A single path component that names an entry: not empty, `.` or `..`, and without a slash."""
+    return name not in ("", ".", "..") and "/" not in name and "\0" not in name
+
+
+def _plain_absolute(path: str) -> bool:
+    """An absolute path whose every component is plain, so the kernel walks it exactly as written."""
+    return path.startswith("/") and all(_plain(part) for part in path[1:].split("/"))
+
+
+def _link_hop(directory: str, target: str) -> str | None:
+    """The next pathname for a link in `directory` with this literal target, or None when it is refused.
+
+    Only a bare name (same directory) or a plain absolute path is accepted. A target is never normalized: the
+    kernel resolves `..` against where a link really points, so a lexical clean-up could hide a writable hop.
+    """
+    if _plain(target):
+        return directory.rstrip("/") + "/" + target
+    if _plain_absolute(target):
+        return target
+    return None
+
+
 def trusted_launch_path(path: str) -> bool:
     """True when the exact pathname git will exec is safe at every hop, not only at its canonical target.
 
     git launches a helper by this pathname, so a link anywhere along it that another user could retarget after
-    the check would let that user choose the binary. Each hop must sit in a canonical directory (no symlinked
-    directory on the way) whose chain up to `/` is root-owned and trusted, and the final hop must be a native,
-    root-owned regular file. Links are followed one hop at a time, at most `MAX_LINK_HOPS`.
+    the check would let that user choose the binary. The path and every link target must be plain (see
+    `_link_hop`), and nothing is normalized. Each hop's directory chain up to `/` must pass `root_chain`, which
+    lstats every prefix and refuses any link in it, and the final hop must be a native, root-owned regular
+    file. Links are followed one hop at a time, at most `MAX_LINK_HOPS`.
     """
-    current = os.path.normpath(path)
+    if not _plain_absolute(path):
+        return False
+    current = path
     for _ in range(MAX_LINK_HOPS + 1):
-        directory = os.path.dirname(current)
-        if not os.path.isabs(current) or os.path.realpath(directory) != directory or not root_chain(directory):
+        directory, _name = current.rsplit("/", 1)
+        directory = directory or "/"
+        if not root_chain(directory):
             return False
         try:
             metadata = os.lstat(current)
@@ -306,7 +334,10 @@ def trusted_launch_path(path: str) -> bool:
                 target = os.readlink(current)
             except OSError:
                 return False
-            current = os.path.normpath(os.path.join(directory, target))
+            hop = _link_hop(directory, target)
+            if hop is None:
+                return False
+            current = hop
             continue
         return native_file(current) and _trusted_node(current, metadata)
     return False

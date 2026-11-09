@@ -97,7 +97,9 @@ The resolver MUST:
    directory above it owned by root, not group- or world-writable, and
    neither setuid nor setgid), executed from a held descriptor. Its
    `git-remote-https` and `git-remote-http` helpers must pass the same rule
-   before any fetch at every link hop of the pathname git launches,
+   before any fetch at every link hop of the pathname git launches, with
+   each link target taken literally (a bare name or a plain absolute path,
+   never `.` or `..`),
    with an environment built from scratch: only `PATH` (git's exec directory
    and the system directories), a private empty `HOME` that is removed only
    while it is still the directory the resolver made, `LC_ALL=C`,

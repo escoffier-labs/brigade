@@ -1963,3 +1963,51 @@ def test_a_configured_fetch_mapping_never_moves_a_local_ref(world):
     target = world.commit("target")
     assert world.resolve(short(target)) == target
     assert git(world.workspace, "rev-parse", "refs/tags/local-only") == world.base
+
+
+# --- Fix round 5: link targets are taken literally ---------------------------------------
+
+
+def test_a_link_target_with_dotdot_through_a_writable_alias_is_refused(world, monkeypatch):
+    """Codex P1 reproduction: `alias/../git-remote-http` drops `alias` when normalized lexically, but the kernel
+    resolves `..` from where `alias` points, inside a writable directory that holds a script."""
+    target = world.commit("target")
+    exec_dir = fake_exec_dir(world, monkeypatch)
+    writable = world.root / "w"
+    (writable / "loose").mkdir(parents=True)
+    script = writable / "git-remote-http"
+    script.write_text("#!/bin/sh\nexit 0\n")
+    script.chmod(0o755)
+    os.symlink(writable / "loose", exec_dir / "alias")
+    (exec_dir / "git-remote-https").unlink()
+    os.symlink("alias/../git-remote-http", exec_dir / "git-remote-https")
+    assert os.path.realpath(exec_dir / "git-remote-https") == str(script)  # where the kernel really lands
+    assert world.resolve(short(target)) is None
+    assert "fetch" not in world.calls
+
+
+def test_a_link_target_with_a_dot_component_is_refused(world, monkeypatch):
+    target = world.commit("target")
+    exec_dir = fake_exec_dir(world, monkeypatch)
+    (exec_dir / "git-remote-https").unlink()
+    os.symlink("./git-remote-http", exec_dir / "git-remote-https")
+    assert world.resolve(short(target)) is None
+    assert "fetch" not in world.calls
+
+
+def test_an_absolute_link_target_with_dotdot_is_refused(world, monkeypatch):
+    target = world.commit("target")
+    exec_dir = fake_exec_dir(world, monkeypatch)
+    (exec_dir / "git-remote-https").unlink()
+    os.symlink(f"{exec_dir}/../git-core/git-remote-http", exec_dir / "git-remote-https")
+    assert world.resolve(short(target)) is None
+    assert "fetch" not in world.calls
+
+
+def test_a_plain_absolute_link_target_in_a_trusted_chain_passes(world, monkeypatch):
+    target = world.commit("target")
+    exec_dir = fake_exec_dir(world, monkeypatch)
+    (exec_dir / "git-remote-https").unlink()
+    os.symlink(f"{exec_dir}/git-remote-http", exec_dir / "git-remote-https")
+    assert world.resolve(short(target)) == target
+    assert "fetch" in world.calls
