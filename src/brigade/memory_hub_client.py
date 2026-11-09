@@ -402,11 +402,10 @@ def _absolute_user_config_path() -> Path | None:
     holds its own `.brigade/fleet.toml` (#2423), so a caller that must not take its hub from there
     reads nothing instead.
     """
-    from . import fleet_client
+    from . import fleet_client, fleet_home_guard
 
-    override = os.environ.get("BRIGADE_HOME")
-    home = Path(override).expanduser() if override else Path.home() / ".brigade"
-    return home / fleet_client.FLEET_CONFIG_REL_PATH.name if home.is_absolute() else None
+    home = fleet_home_guard.absolute_brigade_home()
+    return None if home is None else home / fleet_client.FLEET_CONFIG_REL_PATH.name
 
 
 def connector_settings(target: Path) -> HubSettings | None:

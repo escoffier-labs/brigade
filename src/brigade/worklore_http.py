@@ -17,7 +17,7 @@ from . import worklore_campaigns as campaigns
 from . import worklore_ownership as ownership
 from . import worklore_store as store
 from .worklore_scope import ScopeAdmissionError
-from .fleet_client import FLEET_CONFIG_REL_PATH, brigade_home
+from .fleet_home_guard import fleet_config_path
 from .worklore_validate import WorkloreValidationError
 
 _ENABLED_TRUE = frozenset({"1", "true", "yes", "on"})
@@ -123,7 +123,9 @@ def operator_nodes(
 
 
 def _worklore_section(config_path: str | Path | None = None) -> dict[str, Any]:
-    path = Path(config_path) if config_path is not None else brigade_home() / FLEET_CONFIG_REL_PATH.name
+    path = Path(config_path) if config_path is not None else fleet_config_path()
+    if path is None:
+        return {}
     try:
         payload = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError):

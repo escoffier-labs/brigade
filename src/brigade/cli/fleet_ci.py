@@ -9,7 +9,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from .. import fleet_ci_node as node, fleet_client
+from .. import fleet_ci_node as node, fleet_client, fleet_home_guard
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -37,7 +37,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         settings = fleet_client.load_fleet_settings()
         if not settings["hub_url"] or not settings["node_token"]:
             raise ValueError("CI observation commands require a Hub URL and this node token")
-        state = node.NodeState(args.state or fleet_client.brigade_home() / "ci-node.db")
+        state = node.NodeState(args.state or fleet_home_guard.fleet_home() / "ci-node.db")
         common = dict(hub_url=settings["hub_url"], node_token=settings["node_token"])
         if args.fleet_ci_command == "pull":
             relay_url = os.environ.get("BRIGADE_CI_RELAY_URL", "")
@@ -59,6 +59,6 @@ def _dispatch(args: argparse.Namespace) -> int:
     except sqlite3.Error:
         print("error: CI local storage unavailable", file=sys.stderr)
         return 2
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, fleet_client.FleetClientError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

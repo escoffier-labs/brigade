@@ -56,7 +56,7 @@ from typing import Any, TextIO, cast
 
 from . import fleet_hub, fleet_hub_claims
 
-from .fleet_client import FLEET_CONFIG_REL_PATH, brigade_home
+from .fleet_home_guard import fleet_config_path
 
 DEFAULT_HUB_DB_REL_PATH = Path(".brigade") / "fleet-hub.db"
 DEFAULT_DOLT_BINARY = "dolt"
@@ -505,9 +505,9 @@ def dispatch_export(args: argparse.Namespace) -> int:
 
 def load_sink_config() -> SinkConfig:
     """Read ``[fleet.sink]`` from the fleet config; missing file/keys mean off."""
-    config_path = brigade_home() / FLEET_CONFIG_REL_PATH.name
+    config_path = fleet_config_path()
     section: dict[str, Any] = {}
-    if config_path.is_file():
+    if config_path is not None and config_path.is_file():
         try:
             payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError):

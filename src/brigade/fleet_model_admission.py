@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from . import fleet_client as _client
-from . import fleet_model_roster
+from . import fleet_home_guard, fleet_model_roster
 from .fleet_client import FleetClientError
 
 MODEL_ROSTER_MAX_BYTES = 1024 * 1024
@@ -154,15 +154,15 @@ def nofollow_supported() -> bool:
 
 
 def lkg_path() -> Path:
-    return _client.brigade_home() / _client.SPOOL_DIRNAME / LKG_NAME
+    return fleet_home_guard.fleet_home() / _client.SPOOL_DIRNAME / LKG_NAME
 
 
 def high_water_path() -> Path:
-    return _client.brigade_home() / _client.SPOOL_DIRNAME / HIGH_WATER_NAME
+    return fleet_home_guard.fleet_home() / _client.SPOOL_DIRNAME / HIGH_WATER_NAME
 
 
 def audit_spool_path() -> Path:
-    return _client.brigade_home() / _client.SPOOL_DIRNAME / AUDIT_SPOOL_NAME
+    return fleet_home_guard.fleet_home() / _client.SPOOL_DIRNAME / AUDIT_SPOOL_NAME
 
 
 def _iso_z(value: datetime | str) -> str:

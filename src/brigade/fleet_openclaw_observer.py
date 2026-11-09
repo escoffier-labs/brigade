@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence, cast
 
-from . import fleet_client, proc
+from . import fleet_client, fleet_home_guard, proc
 from .fleet_session_presence import ProviderLinkState, SessionSnapshot, _parse_remote
 
 WINDOW_SECONDS = 900
@@ -229,7 +229,7 @@ def _require_node_auth() -> None:
 
 def _rotation_state(harness: str) -> tuple[Path, int]:
     # Reuse the fleet client's portable private-file policy, including Windows.
-    path = fleet_client.brigade_home() / "observer-cursors" / (harness + ".cursor")
+    path = fleet_home_guard.fleet_home() / "observer-cursors" / (harness + ".cursor")
     dir_fd = fleet_client._ensure_private_dir(path.parent)
     try:
         try:

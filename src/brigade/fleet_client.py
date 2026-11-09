@@ -226,7 +226,7 @@ class _PoisonResponse(Exception):
 
 
 def brigade_home() -> Path:
-    """Brigade per-user home directory (override with BRIGADE_HOME for tests)."""
+    """Brigade per-user home directory; fleet readers use ``fleet_home_guard`` instead (#2423)."""
     override = os.environ.get("BRIGADE_HOME")
     if override:
         return Path(override).expanduser()
@@ -244,12 +244,16 @@ def load_fleet_settings(*, strict: bool = False) -> dict[str, str]:
     consulted for whichever value the environment did not set. No fallback
     between the two token kinds happens here (see ``load_fleet_config``).
     Strict callers refuse read or parsing failures when consulting that file.
+    A relative ``BRIGADE_HOME`` never selects that file (#2423): strict callers get
+    ``RelativeBrigadeHomeError``, and others get the environment values only.
     """
     hub_url = os.environ.get("BRIGADE_FLEET_HUB_URL", "").strip()
     admin_token = os.environ.get("BRIGADE_FLEET_TOKEN", "").strip()
     node_token = os.environ.get("BRIGADE_FLEET_NODE_TOKEN", "").strip()
     if not (hub_url and admin_token and node_token):
-        section = _read_fleet_section(brigade_home() / FLEET_CONFIG_REL_PATH.name, strict=strict)
+        from .fleet_home_guard import user_fleet_section
+
+        section = user_fleet_section(strict=strict)
         if not hub_url and isinstance(section.get("hub_url"), str):
             hub_url = section["hub_url"].strip()
         if not admin_token:
@@ -342,8 +346,11 @@ def home_identity_target() -> Path:
     A ``BRIGADE_HOME`` override that does not end in ``.brigade`` is used as
     the target directly (→ ``$BRIGADE_HOME/.brigade/node.toml``). This is the
     same resolution ``resolve_node_id`` and ``brigade node --machine`` use.
+    A relative ``BRIGADE_HOME`` raises ``RelativeBrigadeHomeError``.
     """
-    home = brigade_home()
+    from .fleet_home_guard import fleet_home
+
+    home = fleet_home()
     return home.parent if home.name == ".brigade" else home
 
 
@@ -496,8 +503,10 @@ def _post_events(hub_url: str, token: str, body: Any, *, timeout: float) -> None
 
 
 def spool_path(node_id: str) -> Path:
+    from .fleet_home_guard import fleet_home
+
     safe_node_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in node_id) or "unknown"
-    return brigade_home() / SPOOL_DIRNAME / f"{safe_node_id}.jsonl"
+    return fleet_home() / SPOOL_DIRNAME / f"{safe_node_id}.jsonl"
 
 
 # Spool files are private (#1154): refuse a symlinked path where the OS can

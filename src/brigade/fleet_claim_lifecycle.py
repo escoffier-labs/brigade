@@ -40,7 +40,9 @@ def _token_snapshot() -> tuple[str, str, str]:
     so an environment hub never pairs with another hub's file token.
     """
     client = _client()
-    section = client._read_fleet_section(client.brigade_home() / client.FLEET_CONFIG_REL_PATH.name)
+    from .fleet_home_guard import user_fleet_section
+
+    section = user_fleet_section()
     raw_hub = section.get("hub_url")
     file_hub = raw_hub.strip() if isinstance(raw_hub, str) else ""
     hub_url = os.environ.get("BRIGADE_FLEET_HUB_URL", "").strip() or file_hub

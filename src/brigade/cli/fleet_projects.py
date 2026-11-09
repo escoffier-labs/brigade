@@ -29,11 +29,11 @@ def _message(exc: Exception) -> str:
 
 
 def _dispatch_sync(args: argparse.Namespace) -> int:
-    from .. import fleet_client, fleet_client_policy, fleet_project_board_collect as collector
+    from .. import fleet_client_policy, fleet_home_guard, fleet_project_board_collect as collector
 
-    home = fleet_client.brigade_home()
     now = datetime.now(timezone.utc)
     try:
+        home = fleet_home_guard.fleet_home()
         if not args.dry_run and not args.force:
             wait = collector.too_soon(home, args.owner, args.number, now)
             if wait is not None:
