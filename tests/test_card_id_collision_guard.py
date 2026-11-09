@@ -355,3 +355,57 @@ def test_ingest_gives_an_id_less_topic_collision_a_minted_id(tmp_path: Path):
     assert len(ids) == len(set(ids)), "push would count no collision"
     written = (cards / "example-widget.md").read_text(encoding="utf-8")
     assert "\nid: card-" in written
+
+
+def test_a_failed_archive_still_blocks_a_second_claim_on_the_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    inbox = _inbox(tmp_path)
+    _write(inbox, "2026-11-09-1000-first.md", "first.md", _card_text(topic="first-topic", card_id=MINTED))
+    _write(
+        inbox,
+        "2026-11-09-1001-second.md",
+        "second.md",
+        _card_text(topic="second-topic", card_id=MINTED, body="second distinct card"),
+    )
+    real_archive = ingest_mod._archive
+
+    def archive(src: Path, processed: Path, expected_sha: str | None = None) -> Path:
+        if "first" in src.name:
+            raise OSError("archive failed after the card was written")
+        return real_archive(src, processed, expected_sha)
+
+    monkeypatch.setattr(ingest_mod, "_archive", archive)
+
+    stats = _ingest(tmp_path)
+
+    cards = tmp_path / "memory" / "cards"
+    assert (cards / "first.md").is_file()
+    assert not (cards / "second.md").exists()
+    assert stats.failed == 1
+    assert stats.inboxed == 1 and stats.promoted == 0
+    assert any("card-id-collision" in action for action in stats.actions)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_an_update_without_an_id_keeps_the_original_id_claimed(tmp_path: Path, dry_run: bool):
+    inbox = _inbox(tmp_path)
+    cards = tmp_path / "memory" / "cards"
+    cards.mkdir(parents=True, exist_ok=True)
+    (cards / "existing-by-id.md").write_text(EXISTING_BY_ID, encoding="utf-8")
+    revised = _card_text(topic="unrelated-topic", body="revised existing card")
+    (inbox / "2026-11-09-1000-update.md").write_text(
+        _handoff("update-card", card="existing-by-id.md", content=revised, sha=_sha(EXISTING_BY_ID)),
+        encoding="utf-8",
+    )
+    _write(
+        inbox,
+        "2026-11-09-1001-claim.md",
+        "claim.md",
+        _card_text(topic="claimant", card_id=MINTED, body="claiming card"),
+    )
+
+    stats = _ingest(tmp_path, dry_run=dry_run)
+
+    # The same answer in a dry run and a real run: the update promotes, the create collides.
+    assert stats.promoted == 1 and stats.inboxed == 1
+    assert [action for action in stats.actions if "card-id-collision" in action]
+    assert not (cards / "claim.md").exists()

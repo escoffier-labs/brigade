@@ -336,6 +336,7 @@ def ingest_into(
                     processed_dir=processed_dir,
                     dry_run=dry_run,
                     snapshot=snapshot,
+                    card_ids=card_ids,
                 )
             except TrackedHandoffError:
                 action = Action("skipped", _summary("skip", path.name, _TRACKED_SKIP_CODE))
@@ -352,8 +353,6 @@ def ingest_into(
             # identical copy must not be archived as its duplicate.
             if action.kind in _HANDLED_KINDS:
                 stats.seen_digests.add(sha)
-            if outcome.code == "card-promoted" and action.kind == "promoted":
-                _register_promoted_card(card_ids, outcome, sections, dry_run=dry_run)
             stats.processed += 1
             stats.actions.append(action.summary)
             if action.kind == "promoted":
@@ -617,24 +616,6 @@ class Action:
     summary: str
 
 
-def _register_promoted_card(
-    card_ids: CardIdIndex, outcome: Outcome, sections: Dict[str, str], *, dry_run: bool
-) -> None:
-    """Add the card a handoff just promoted to the run's id index, as written or as it would be."""
-    dest = outcome.dest
-    if dest is None:
-        return
-    try:
-        text = (
-            ensure_card_id_frontmatter(sections.get("suggested card content", "").strip() + "\n")
-            if dry_run
-            else dest.read_text(encoding="utf-8", errors="replace")
-        )
-    except OSError:
-        return
-    card_ids.register((CARDS_RELATIVE / dest.name).as_posix(), text)
-
-
 def _read_card_child(parent: int, name: str) -> tuple[bytes, int] | None:
     """Exact bytes and mode of a card read relative to a held parent, or None when absent."""
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
@@ -734,8 +715,19 @@ def _write_card_descriptor_bound(
 
 
 def _publish_promoted_card(
-    dest: Path, target: Path, sections: Dict[str, str], *, dry_run: bool, expected_sha: str = ""
+    dest: Path,
+    target: Path,
+    sections: Dict[str, str],
+    *,
+    dry_run: bool,
+    expected_sha: str = "",
+    card_ids: CardIdIndex | None = None,
 ) -> None:
+    """Publish (or, in a dry run, simulate) one card and record its id in `card_ids`.
+
+    The card is recorded as soon as the write returns, before the caller archives the
+    handoff, so a failed archive cannot leave the index without a card that is on disk.
+    """
     from contextlib import nullcontext
 
     from .card_identity import valid_card_id
@@ -757,11 +749,15 @@ def _publish_promoted_card(
             raise StaleCardError("expected card SHA256 no longer matches the card")
         return text
 
+    built = ""
+
     def build_content(raw: str | None) -> str:
+        nonlocal built
         content = ensure_fingerprint_frontmatter(sections.get("suggested card content", "").strip() + "\n")
         existing, _ = _frontmatter(raw or "")
         existing_id = valid_card_id(existing.get("id")) or valid_card_id(existing.get("card_id"))
-        return ensure_card_id_frontmatter(content, preserve_id=existing_id)
+        built = ensure_card_id_frontmatter(content, preserve_id=existing_id)
+        return built
 
     lock_path = target / ".brigade/memory/proposals/proposal.lock"
     if not dry_run:
@@ -775,9 +771,13 @@ def _publish_promoted_card(
             parent_fence(dest)
             if dest.is_symlink() or (dest.exists() and not dest.is_file()):
                 raise OSError("publication must be a regular file")
-            check_state(dest.read_bytes() if dest.exists() else None)
-            return
-        _write_card_descriptor_bound(dest, target, check_state, build_content)
+            build_content(check_state(dest.read_bytes() if dest.exists() else None))
+        else:
+            _write_card_descriptor_bound(dest, target, check_state, build_content)
+    if card_ids is not None:
+        # `built` is the text written, or in a dry run the text the same builder would
+        # write, so an update-card that omits an id keeps the destination's id in both.
+        card_ids.register((CARDS_RELATIVE / dest.name).as_posix(), built)
 
 
 def _append_document_nofollow(target: Path, dest: Path, text: str) -> None:
@@ -828,6 +828,7 @@ def _execute(
     processed_dir: Path,
     dry_run: bool,
     snapshot: bytes | None = None,
+    card_ids: CardIdIndex | None = None,
 ) -> Action:
     from .inbox_lock import InboxLockTimeout
     from .memory_evidence_log import log_match
@@ -845,7 +846,9 @@ def _execute(
         if sections.get("recommended memory action", "").strip().lower() == "update-card":
             expected_sha = sections.get(EXPECTED_SHA_SECTION.lower(), "").strip().lower()
         try:
-            _publish_promoted_card(dest, target, sections, dry_run=dry_run, expected_sha=expected_sha)
+            _publish_promoted_card(
+                dest, target, sections, dry_run=dry_run, expected_sha=expected_sha, card_ids=card_ids
+            )
         except InboxLockTimeout:
             return Action("skipped", _summary("skip", name, "card-publication-busy"))
         except (OSError, ValueError) as exc:
