@@ -367,8 +367,8 @@ the queue, changed the `ci.yml` step to also require `start`. #2442's group ran
 published `hub=true` with `trusted-hub-selector-unavailable`. The selector's own
 log line for that run said `hub-selection-source-changed`, which is not what the
 step published. No other run in this table published the fallback; the
-`trusted-hub-selector-unavailable` text in other logs is the step's default line
-before the selector's output replaces it.
+`trusted-hub-selector-unavailable` text in other logs is the step's source,
+which Actions echoes at the top of the step log.
 
 Two of the runs where the hub suite ran failed on hub tests, each passing in
 the other run:
@@ -381,9 +381,13 @@ test runs under the default 20 ms sweep time budget
 (`engines/hub/src/memory/read_counts.rs`), which stopped the first tick at a
 chunk boundary, and the second asserts a ratio within 1.5
 (`push_withheld_tests.rs`). Neither failure comes from this campaign's changes.
-A failed queue entry
-that is re-queued starts a new workflow run with its own run id, not another
-attempt of the failed run. Its cost therefore shows up as extra `merge_group`
+
+The two failures cost different amounts. #2437's group failed, but #2439's
+group, built on top of it, passed, and with `HEADGREEN` that green group merged
+#2437 and #2439 together at 19:14:39Z. The flake cost no extra run. #2446's
+failed group had no green group behind it, so #2446 left the queue and needs
+another run. A failed queue entry that is re-queued starts a new workflow run
+with its own run id, not another attempt of the failed run. Its cost therefore shows up as extra `merge_group`
 runs in the window (the failed one in the `all` view, the retry in either
 view), not in `reruns` or `runner_minutes_all_attempts`, which count Actions
 re-runs of the same run id only.
@@ -468,7 +472,7 @@ for wall and runner time, seconds for a job family.
 | date | change | PR | metric | before | after | n |
 |---|---|---|---|---|---|---|
 <!-- adaptive-ci: append result rows directly below this line -->
-| 2026-11-09 | Test-audit pilot, grokbot tests | [#2438](https://github.com/escoffier-labs/brigade/pull/2438) | grokbot test LOC at the merge commit `7bc63865`; grokbot line coverage | 33,044; 78.618% | 32,595 (-1.4%); 78.618% | 53 files |
+| 2026-11-09 | Test-audit pilot, grokbot tests | [#2438](https://github.com/escoffier-labs/brigade/pull/2438) | grokbot test LOC at the merge commit `7bc63865`; grokbot line coverage at `4940187b` | 33,044; 78.618% | 32,595 (-1.4%); 78.618% | 53 files |
 
 ## Prior art
 
