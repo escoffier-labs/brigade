@@ -275,7 +275,8 @@ class MemoryTools:
             retrieval.update(hub="unavailable", degraded=True, reason="hub-config-invalid")
             warning = WARNING_HUB_UNAVAILABLE
         else:
-            for match in (body.get("matches") if isinstance(body.get("matches"), list) else [])[:limit]:
+            raw_matches = body.get("matches")
+            for match in (raw_matches if isinstance(raw_matches, list) else [])[:limit]:
                 if not isinstance(match, dict):
                     continue
                 if "blocked" in match:
