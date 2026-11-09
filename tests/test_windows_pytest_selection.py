@@ -64,3 +64,20 @@ def test_files_from_rejects_invalid_missing_or_empty_selection(tmp_path, value):
     selected.write_text(value)
     with pytest.raises(ValueError):
         driver.load_selected_files(selected, ["test_selected.py"])
+
+
+def test_keep_order_starts_files_as_listed_while_default_sorts(tmp_path):
+    selected = tmp_path / "files.txt"
+    selected.write_text("test_slow.py\ntest_a.py\ntest_slow.py\ntest_b.py\n")
+    discovered = ["test_a.py", "test_b.py", "test_slow.py"]
+    assert driver.load_selected_files(selected, discovered) == ["test_a.py", "test_b.py", "test_slow.py"]
+    assert driver.load_selected_files(selected, discovered, keep_order=True) == [
+        "test_slow.py",
+        "test_a.py",
+        "test_b.py",
+    ]
+
+
+def test_keep_order_requires_files_from(tmp_path):
+    with pytest.raises(SystemExit):
+        driver.parse_args(["--record", str(tmp_path / "summary.json"), "--keep-order"])

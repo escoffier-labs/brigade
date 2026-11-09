@@ -28,7 +28,10 @@ jobs:
       evidence_ledger: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.evidence_ledger }}
       notify: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.notify }}
       fleet_hub_container: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.fleet_hub_container }}
-      hub: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.hub }}
+      # Fail closed: only exactly 'false' skips the hub suite. Merge groups take
+      # it from the trusted selector loaded from main (hub_merge_group);
+      # pull requests and pushes from the hub_filter step. docs/adaptive-ci.
+      hub: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && (steps.hub_merge_group.outputs.hub == 'false' && 'false' || 'true') || steps.hub_filter.outcome != 'success' && 'true' || steps.hub_filter.outputs.hub == 'false' && 'false' || 'true' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -128,7 +131,7 @@ jobs:
           with Path(os.environ["GITHUB_OUTPUT"]).open("a") as stream:
               stream.write(output)
           PY
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         if: ${{ github.event_name != 'merge_group' }}
         id: filter
         with:
@@ -159,36 +162,73 @@ jobs:
               - 'ops/fleet-hub/**'
               - 'tests/fleet_hub_container_smoke.py'
               - '.github/workflows/ci.yml'
-            hub:
-              - 'engines/hub/**'
-              - 'engines/brigade-guard/**'
-              - 'src/brigade/guard/**'
-              - 'src/brigade/untrusted.py'
-              - 'src/brigade/memory_content_scan.py'
-              - 'scripts/memory_scan_bundle.py'
-              - 'tests/test_memory_content_scan.py'
-              - 'tests/fixtures/memory-scan-corpus.json'
-              - 'tests/fixtures/memory-scan-groups.json'
-              - 'tests/fixtures/memory-scan-adversarial.json'
-              - 'tests/fixtures/memory-scan-private.json'
-              - 'tests/fixtures/memory-scan-secrets.json'
-              - 'tests/test_memory_scan_private.py'
-              - 'tests/test_memory_scan_nfkc.py'
-              - 'tests/fixtures/memory-scan-nfkc.json'
-              - 'tests/memory_scan_adversarial.py'
-              - 'src/brigade/fleet_hub_server.py'
-              - 'tests/test_fleet_hub_server.py'
-              - 'src/brigade/fleet_hub*.py'
-              - 'registry/skills/verify-brigade/hub_contract*'
-              - 'registry/skills/verify-brigade/hub_readonly.py'
-              - 'registry/skills/verify-brigade/hub_audit.py'
-              - 'src/brigade/memory_bm25.py'
-              - 'src/brigade/memory_cmd.py'
-              - 'src/brigade/memory_hub_*.py'
-              - 'src/brigade/memory_retrieval_eval/**'
-              - 'evals/memory-retrieval/**'
-              - '.github/workflows/hub.yml'
-              - '.github/workflows/ci.yml'
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        # Same action and diff source as the step above. The hub path list
+        # lives in one file that the merge-group selector also reads (from main).
+        if: ${{ github.event_name != 'merge_group' }}
+        id: hub_filter
+        with:
+          filters: scripts/ci_hub_paths.yml
+      - name: Select hub suite for the merge group from trusted main
+        id: hub_merge_group
+        if: ${{ github.event_name == 'merge_group' }}
+        run: |
+          # Load the selector and its path list from the tip of main, never
+          # from the proposal. A main without the selector runs the hub suite.
+          python3 -I -S - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+          import tempfile
+
+          def git(*args):
+              return subprocess.run(
+                  ["git", "--no-replace-objects", *args], check=True,
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
+              ).stdout
+
+          result = {"hub": "true", "reason": "trusted-hub-selector-unavailable"}
+          try:
+              # A fixed refspec: the target never comes from the event or the proposal.
+              git("fetch", "--no-tags", "--no-recurse-submodules", "--depth=1", "origin", "+refs/heads/main:refs/ci-hub-select/main")
+              target = git("rev-parse", "--verify", "refs/ci-hub-select/main^{commit}").decode().strip()
+              if not re.fullmatch(r"[0-9a-f]{40}", target):
+                  raise ValueError("invalid target")
+              entry = git("ls-tree", "-z", target, "--", "scripts/ci_hub_select.py")
+              match = re.fullmatch(rb"100644 blob ([0-9a-f]{40})\tscripts/ci_hub_select.py\x00", entry)
+              if not match:
+                  raise ValueError("missing or unsafe selector")
+              blob = match[1].decode("ascii")
+              if not 0 < int(git("cat-file", "-s", blob)) <= 131072:
+                  raise ValueError("invalid selector size")
+              source = git("cat-file", "blob", blob)
+              with tempfile.TemporaryDirectory(prefix="ci-hub-select-", dir=os.environ["RUNNER_TEMP"]) as directory:
+                  trusted = Path(directory) / "selector.py"
+                  trusted.write_bytes(source)
+                  output = Path(directory) / "output"
+                  completed = subprocess.run(
+                      [sys.executable, "-I", "-S", str(trusted)], check=True, timeout=300,
+                      env=dict(os.environ, GITHUB_OUTPUT=str(output), CI_HUB_TARGET=target),
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                  )
+                  print(completed.stdout.decode("utf-8", "replace"), end="")
+                  candidate = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                  if (
+                      set(candidate) != {"hub", "reason"}
+                      or candidate["hub"] not in {"true", "false"}
+                      or not re.fullmatch(r"[a-z-]{1,80}", candidate["reason"])
+                  ):
+                      raise ValueError("invalid selector output")
+                  result = candidate
+          except (KeyError, TypeError, ValueError, UnicodeError, OSError, subprocess.SubprocessError):
+              pass
+          output = "".join(f"{key}={value}\n" for key, value in result.items())
+          print(output, end="")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as stream:
+              stream.write(output)
+          PY
 
   code-graph-msrv:
     name: MSRV (Rust 1.85)
@@ -430,16 +470,59 @@ jobs:
         if: ${{ needs.changes.outputs.notify == 'true' }}
         run: go test -race ./...
 
-  # Stable check name. Maintainers may require it without changing this workflow.
-  # Pull requests only: a merge group reports this job as skipped, which satisfies
-  # a required check, so the queue does not wait on Windows. The 45-minute driver
-  # budget covers the largest selection from the last 200 main commits (257 files).
-  windows-affected-tests:
+  # Pull requests only: a merge group reports these jobs as skipped, which satisfies
+  # a required check, so the queue does not wait on Windows. Selection runs once on
+  # Linux and splits a large selection across up to three hosted Windows runners
+  # (scripts/windows_affected_tests.py). Every selected file still runs once. The
+  # 45-minute driver budget per shard covers the largest selection from the last
+  # 200 main commits (257 files), which now spreads over three runners.
+  windows-affected-plan:
     needs: changes
-    name: windows-affected-tests
+    name: windows-affected-plan
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      base: ${{ steps.plan.outputs.base }}
+      count: ${{ steps.plan.outputs.count }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The test merge's two parents are all selection needs.
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Select and plan affected Windows tests
+        id: plan
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # GitHub tests the pull request merged into the current base tip. Diff from
+          # that merge's first parent. pull_request.base.sha can trail the base branch,
+          # which would count other merged pull requests as this one's changes.
+          merge_head=$(git rev-parse HEAD^2)
+          if [ "$merge_head" != "$PR_HEAD_SHA" ]; then
+            echo "::error::HEAD is not the pull request test merge"
+            exit 1
+          fi
+          base=$(git rev-parse HEAD^1)
+          python3 scripts/windows_affected_tests.py --base "$base" --head HEAD \
+            --output "$RUNNER_TEMP/windows-affected-files.txt" --plan "$RUNNER_TEMP/windows-affected-plan.json"
+          {
+            echo "base=$base"
+            python3 -c 'import json, sys; plan = json.load(open(sys.argv[1])); print("count=%d" % plan["count"]); print("matrix=" + json.dumps(plan["matrix"], separators=(",", ":")))' "$RUNNER_TEMP/windows-affected-plan.json"
+          } >> "$GITHUB_OUTPUT"
+
+  windows-affected-shard:
+    needs: [changes, windows-affected-plan]
+    name: windows-affected-shard (${{ matrix.shard }}/${{ matrix.total }})
+    if: ${{ !cancelled() && needs.windows-affected-plan.result == 'success' && needs.windows-affected-plan.outputs.count != '0' && needs.changes.outputs.docs_only != 'true' && github.event_name == 'pull_request' }}
     runs-on: windows-latest
     timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.windows-affected-plan.outputs.matrix) }}
     defaults:
       run:
         shell: pwsh
@@ -451,52 +534,23 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Select affected Windows tests
-        id: selection
+      - name: Write shard file list
         env:
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SHARD_FILES: ${{ matrix.files }}
         run: |
-          # GitHub tests the pull request merged into the current base tip. Diff from
-          # that merge's first parent. pull_request.base.sha can trail the base branch,
-          # which would count other merged pull requests as this one's changes.
-          $mergeHead = git rev-parse HEAD^2
-          if ($LASTEXITCODE -ne 0 -or $mergeHead -ne $env:PR_HEAD_SHA) { throw "HEAD is not the pull request test merge" }
-          $base = git rev-parse HEAD^1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "base=$base" >> $env:GITHUB_OUTPUT
-          # Hosted Windows includes Python. Selection uses only its standard library.
-          python scripts/windows_affected_tests.py --base $base --head HEAD --output "$env:RUNNER_TEMP/windows-affected-results/files.txt"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # Driver changes exercise the hub files affected by slow FULL flushes.
-          $driverChanged = git diff --name-only $base HEAD -- scripts/windows_pytest.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ($driverChanged) {
-            $flushTests = @(
-              "test_fleet_policy_page.py", "test_fleet_roster_page.py",
-              "test_fleet_message_grants.py", "test_fleet_model_roster.py",
-              "test_fleet_enrollment.py", "test_fleet_dashboard.py",
-              "test_fleet_claim_generations.py", "test_fleet_client_message_credentials.py"
-            )
-            @(Get-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt") + $flushTests |
-              Sort-Object -Unique | Set-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt"
-          }
-          $count = @(Get-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt").Count
-          "count=$count" >> $env:GITHUB_OUTPUT
-      - name: Skip empty selection
-        if: ${{ steps.selection.outputs.count == '0' }}
-        run: Write-Output "No affected Windows tests."
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/windows-affected-results" | Out-Null
+          [IO.File]::WriteAllText("$env:RUNNER_TEMP/windows-affected-results/files.txt", $env:SHARD_FILES, [Text.UTF8Encoding]::new($false))
+          Write-Output "shard ${{ matrix.shard }}/${{ matrix.total }}: $(@(Get-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt").Count) files"
       - name: Set up supported Node for npm launcher tests
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "22.15.0"
       - uses: actions/setup-python@v7
-        if: ${{ steps.selection.outputs.count != '0' }}
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install
-        if: ${{ steps.selection.outputs.count != '0' }}
         run: |
           python -m pip install --upgrade pip
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -508,13 +562,13 @@ jobs:
         timeout-minutes: 5
         run: python scripts/windows_sqlite_flush_probe.py --samples 20 --output "$env:RUNNER_TEMP/windows-affected-results/sqlite-flush.json"
       - name: Run affected Windows tests
-        if: ${{ steps.selection.outputs.count != '0' }}
         timeout-minutes: 45
         env:
-          BASE_SHA: ${{ steps.selection.outputs.base }}
+          BASE_SHA: ${{ needs.windows-affected-plan.outputs.base }}
         run: >-
           python scripts/windows_pytest.py
           --files-from "$env:RUNNER_TEMP/windows-affected-results/files.txt"
+          --keep-order
           --record "$env:RUNNER_TEMP/windows-affected-results/summary.json"
           --base-ref $env:BASE_SHA
           --job-started-at $env:WINDOWS_PYTEST_JOB_STARTED_AT
@@ -524,10 +578,43 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: windows-affected-results
+          name: windows-affected-results-${{ matrix.shard }}of${{ matrix.total }}
           path: ${{ runner.temp }}/windows-affected-results
           if-no-files-found: warn
           retention-days: 7
+
+  # Stable check name for the Windows shards. Do not make it a required status on
+  # its own: like every job here it uses !cancelled(), so a cancelled run skips it,
+  # and GitHub counts a skipped required check as passing. Gate through ci-gate.
+  windows-affected-tests:
+    needs: [changes, windows-affected-plan, windows-affected-shard]
+    name: windows-affected-tests
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every Windows shard
+        env:
+          PLAN_RESULT: ${{ needs.windows-affected-plan.result }}
+          PLAN_COUNT: ${{ needs.windows-affected-plan.outputs.count }}
+          SHARD_RESULT: ${{ needs.windows-affected-shard.result }}
+        run: |
+          if [ "$PLAN_RESULT" != success ]; then
+            echo "::error::windows-affected-plan: $PLAN_RESULT"
+            exit 1
+          fi
+          if [ "$PLAN_COUNT" = 0 ]; then
+            if [ "$SHARD_RESULT" != skipped ]; then
+              echo "::error::windows-affected-shard ran for an empty selection: $SHARD_RESULT"
+              exit 1
+            fi
+            echo "No affected Windows tests."
+            exit 0
+          fi
+          if [ "$SHARD_RESULT" != success ]; then
+            echo "::error::windows-affected-shard: $SHARD_RESULT"
+            exit 1
+          fi
 
   lint:
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
@@ -913,10 +1000,12 @@ jobs:
               and changes.get("outputs", {}).get("fleet_hub_container") == "false"
               and os.environ["EVENT_NAME"] != "merge_group"
           )
+          # `hub` is exactly 'false' only when its selector proved no hub path
+          # changed: in a merge group the trusted selector from main over the
+          # merge base with main, so the same rule applies on every event.
           hub_skip_allowed = (
               changes.get("result") == "success"
               and changes.get("outputs", {}).get("hub") == "false"
-              and os.environ["EVENT_NAME"] != "merge_group"
           )
           mesh_jobs = {"mesh-compatibility", "mesh-cross-version", "mesh-without-extra"}
           mesh_skip_allowed = (

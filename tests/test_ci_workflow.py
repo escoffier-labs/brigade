@@ -122,7 +122,14 @@ def test_docs_classification_gates_every_runtime_job_without_implicit_success():
                 continue
             assert not _job_admitted(text, name, docs="true", event=event), name
             # All event-eligible runtime work remains enabled for code/unknown.
-            pr_only = {"windows-affected-tests", "pr-tier-shadow", "shadow-plan", "shadow-selection"}
+            pr_only = {
+                "windows-affected-plan",
+                "windows-affected-shard",
+                "windows-affected-tests",
+                "pr-tier-shadow",
+                "shadow-plan",
+                "shadow-selection",
+            }
             eligible = name not in pr_only | {"trusted-runner-canary"}
             eligible |= name in pr_only and event == "pull_request"
             eligible |= name == "trusted-runner-canary" and event == "push"
@@ -158,6 +165,15 @@ def _workflow_bash_command(script: str, *options: str) -> list[str]:
     return [_workflow_bash(), *options, "-c", prelude + script]
 
 
+# Pinned to a commit: on pull requests and pushes it selects which suites run.
+PATHS_FILTER_ACTION = "dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3"
+HUB_OUTPUT_EXPRESSION = (
+    "hub: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && "
+    "(steps.hub_merge_group.outputs.hub == 'false' && 'false' || 'true') || steps.hub_filter.outcome != 'success' "
+    "&& 'true' || steps.hub_filter.outputs.hub == 'false' && 'false' || 'true' }}"
+)
+
+
 def _workflow_job_section(text: str, job_name: str) -> str:
     start = text.index(f"  {job_name}:")
     next_job = re.search(r"^  [a-z0-9][a-z0-9-]*:$", text[start + 1 :], re.MULTILINE)
@@ -180,13 +196,15 @@ def test_ci_workflow_path_filter_has_valid_structure_and_engine_paths():
 
     assert "jobs:\n  changes:" in text
     assert "runs-on: ubuntu-latest" in changes
-    assert "uses: dorny/paths-filter@v4" in changes
-    for flag in ("code_graph", "evidence_ledger", "notify", "fleet_hub_container", "hub"):
+    assert f"uses: {PATHS_FILTER_ACTION}" in changes
+    for flag in ("code_graph", "evidence_ledger", "notify", "fleet_hub_container"):
         assert (
             f"{flag}: ${{{{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.{flag} }}}}"
             in changes
         )
-    assert "if: ${{ github.event_name != 'merge_group' }}" in changes
+    assert HUB_OUTPUT_EXPRESSION in changes
+    # The hub list lives in scripts/ci_hub_paths.yml, not inline.
+    assert "            hub:\n" not in changes
     assert "code-graph:" not in changes
     assert "evidence-ledger:" not in changes
     assert "stations/notify:" not in changes
@@ -1747,6 +1765,8 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
         "trusted-runner-canary",
         "engine-rename-installer",
         "ci-gate",
+        "windows-affected-plan",
+        "windows-affected-shard",
         "windows-affected-tests",
         "pr-tier-shadow",
         "shadow-plan",
@@ -1807,16 +1827,37 @@ def test_ci_migration_preserves_complete_matrices():
     ]
 
 
-def test_ci_merge_groups_request_all_component_checks_without_path_filter():
+def test_ci_merge_groups_force_non_hub_component_checks_and_select_hub_from_trusted_main():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     header = text.split("jobs:\n", 1)[0]
     assert "  merge_group:\n    types: [checks_requested]\n" in header
     assert "  push:\n    branches: [main]\n  pull_request:\n" in header
     assert "pull_request_target:" not in header
     changes = _workflow_job_section(text, "changes")
-    filter_step = changes[changes.index("      - uses: dorny/paths-filter@v4") :]
-    assert "        if: ${{ github.event_name != 'merge_group' }}\n" in filter_step
-    for flag in ("code_graph", "evidence_ledger", "notify", "fleet_hub_container", "hub"):
+    assert "continue-on-error" not in changes
+    # Both path filters keep their pre-merge-queue shape: skipped in merge
+    # groups, no base/ref override, so pull requests and pushes diff as before.
+    steps = changes.split("\n      - ")
+    filters = [step for step in steps if step.startswith(f"uses: {PATHS_FILTER_ACTION}")]
+    assert len(filters) == 2
+    for step in filters:
+        assert "        if: ${{ github.event_name != 'merge_group' }}\n" in step
+        assert "base:" not in step
+        assert "ref:" not in step
+    assert "        id: filter\n" in filters[0]
+    assert "        id: hub_filter\n        with:\n          filters: scripts/ci_hub_paths.yml" in filters[1]
+    # Merge groups take `hub` from the selector loaded from main.
+    selector = _workflow_step_section(text, "changes", "Select hub suite for the merge group from trusted main")
+    assert "        id: hub_merge_group\n        if: ${{ github.event_name == 'merge_group' }}\n" in selector
+    body = selector.split("        run: |\n", 1)[1]
+    assert "${{" not in body
+    assert '"+refs/heads/main:refs/ci-hub-select/main"' in body
+    assert '"ls-tree", "-z", target, "--", "scripts/ci_hub_select.py"' in body
+    assert '[sys.executable, "-I", "-S", str(trusted)]' in body
+    assert "python3 -I -S - <<'PY'" in body
+    assert f"      {HUB_OUTPUT_EXPRESSION}\n" in changes
+    # Scope: every other component flag is still forced in merge groups.
+    for flag in ("code_graph", "evidence_ledger", "notify", "fleet_hub_container"):
         assert (
             f"      {flag}: ${{{{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.{flag} }}}}\n"
             in changes
@@ -1871,33 +1912,49 @@ def test_ci_canary_smoke_executes_from_outside_checkout(tmp_path):
     assert "0 failed" in result.stdout
 
 
-def test_windows_affected_job_selects_before_install_and_preserves_driver_policy():
+def test_windows_affected_plan_selects_once_on_linux_from_the_test_merge():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
-    job = _workflow_job_section(text, "windows-affected-tests")
-    assert "name: windows-affected-tests" in job
+    job = _workflow_job_section(text, "windows-affected-plan")
     assert "github.event_name == 'pull_request'" in job
     assert "needs.changes.outputs.docs_only != 'true'" in job
-    assert "runs-on: windows-latest" in job
-    assert "timeout-minutes: 50" in job
-    assert "timeout-minutes: 45" in job
-    assert "fetch-depth: 0" in job
+    assert "runs-on: ubuntu-latest" in job
     assert "persist-credentials: false" in job
     # Diff from the test merge's first parent. pull_request.base.sha can trail
     # the base branch and would count other merged pull requests' changes.
     assert "pull_request.base.sha }}" not in job
     assert "merge_group.base_sha" not in job
     assert "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in job
-    assert "$mergeHead = git rev-parse HEAD^2" in job
-    assert '$mergeHead -ne $env:PR_HEAD_SHA) { throw "HEAD is not the pull request test merge" }' in job
-    assert "$base = git rev-parse HEAD^1" in job
-    assert '"base=$base" >> $env:GITHUB_OUTPUT' in job
-    assert "--base $base --head HEAD" in job
-    assert "BASE_SHA: ${{ steps.selection.outputs.base }}" in job
-    assert job.index("scripts/windows_affected_tests.py") < job.index("actions/setup-python")
-    assert job.count("if: ${{ steps.selection.outputs.count != '0' }}") == 3
-    assert "Skip empty selection" in job
+    assert "merge_head=$(git rev-parse HEAD^2)" in job
+    assert '"$merge_head" != "$PR_HEAD_SHA"' in job
+    assert "base=$(git rev-parse HEAD^1)" in job
+    assert '--base "$base" --head HEAD' in job
+    assert "--plan" in job
+    for output in ("base", "count", "matrix"):
+        assert f"{output}: ${{{{ steps.plan.outputs.{output} }}}}" in job
+    assert "issues: write" not in text
+
+
+def test_windows_affected_shard_runs_its_slice_and_preserves_driver_policy():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    job = _workflow_job_section(text, "windows-affected-shard")
+    assert "needs.windows-affected-plan.outputs.count != '0'" in job
+    assert "needs.windows-affected-plan.result == 'success'" in job
+    assert "github.event_name == 'pull_request'" in job
+    assert "needs.changes.outputs.docs_only != 'true'" in job
+    assert "runs-on: windows-latest" in job
+    assert "timeout-minutes: 50" in job
+    assert "timeout-minutes: 45" in job
+    assert "fail-fast: false" in job
+    assert "matrix: ${{ fromJSON(needs.windows-affected-plan.outputs.matrix) }}" in job
+    assert "fetch-depth: 0" in job
+    assert "persist-credentials: false" in job
+    assert "SHARD_FILES: ${{ matrix.files }}" in job
+    assert "BASE_SHA: ${{ needs.windows-affected-plan.outputs.base }}" in job
+    # No selection happens on the runner: it only runs the planned slice.
+    assert "windows_affected_tests.py" not in job
     for option in (
         "--files-from",
+        "--keep-order",
         "--record",
         "--base-ref",
         "--job-started-at",
@@ -1911,7 +1968,46 @@ def test_windows_affected_job_selects_before_install_and_preserves_driver_policy
         assert option in job
     assert "if: ${{ always() }}" in job
     assert "actions/upload-artifact@v7" in job
-    assert "issues: write" not in text
+    assert "name: windows-affected-results-${{ matrix.shard }}of${{ matrix.total }}" in job
+
+
+@pytest.mark.parametrize(
+    "plan,shard,expected",
+    [
+        ("success", "success", 0),
+        ("success", "failure", 1),
+        ("success", "cancelled", 1),
+        ("success", "skipped", 1),
+        ("failure", "skipped", 1),
+    ],
+)
+def test_windows_affected_aggregate_requires_every_shard(plan, shard, expected):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    job = _workflow_job_section(text, "windows-affected-tests")
+    assert "name: windows-affected-tests" in job
+    assert "github.event_name == 'pull_request'" in job
+    assert "needs.changes.outputs.docs_only != 'true'" in job
+    script = textwrap.dedent(job.split("        run: |\n", 1)[1])
+    result = subprocess.run(
+        _workflow_bash_command(script),
+        env=dict(os.environ, PLAN_RESULT=plan, PLAN_COUNT="12", SHARD_RESULT=shard),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == expected, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("shard,expected", [("skipped", 0), ("success", 1)])
+def test_windows_affected_aggregate_accepts_an_empty_selection_only_when_shards_skip(shard, expected):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    script = textwrap.dedent(_workflow_job_section(text, "windows-affected-tests").split("        run: |\n", 1)[1])
+    result = subprocess.run(
+        _workflow_bash_command(script),
+        env=dict(os.environ, PLAN_RESULT="success", PLAN_COUNT="0", SHARD_RESULT=shard),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == expected, result.stdout + result.stderr
 
 
 def test_windows_nightly_issue_write_permission_is_isolated():
@@ -2114,13 +2210,14 @@ def test_ci_gate_allows_mesh_skip_only_for_unchanged_pr(event, flag, job):
 @pytest.mark.parametrize("event", ["pull_request", "push", "merge_group"])
 @pytest.mark.parametrize("flag", ["true", "false", "", None])
 @pytest.mark.parametrize("result", ["success", "skipped", "failure", "cancelled"])
-def test_ci_gate_allows_hub_rust_skip_only_when_unchanged_outside_the_merge_queue(event, flag, result):
+@pytest.mark.parametrize("changes_result", ["success", "failure", "cancelled", "skipped"])
+def test_ci_gate_allows_hub_rust_skip_only_when_classified_unchanged(event, flag, result, changes_result):
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     gate = _workflow_job_section(text, "ci-gate")
     needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
     names = re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE)
     needs = {name: {"result": "success"} for name in names}
-    needs["changes"]["outputs"] = {"hub": flag, "docs_only": "false"}
+    needs["changes"] = {"result": changes_result, "outputs": {"hub": flag, "docs_only": "false"}}
     needs["hub-rust"] = {"result": result}
     script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
     completed = subprocess.run(
@@ -2129,9 +2226,9 @@ def test_ci_gate_allows_hub_rust_skip_only_when_unchanged_outside_the_merge_queu
         capture_output=True,
         text=True,
     )
-    expected = result == "success" or (result == "skipped" and flag == "false" and event != "merge_group")
+    expected = changes_result == "success" and (result == "success" or (result == "skipped" and flag == "false"))
     assert completed.returncode == (0 if expected else 1), completed.stdout + completed.stderr
-    if not expected:
+    if not expected and changes_result == "success":
         assert "hub-rust: required success, got" in completed.stderr, completed.stdout + completed.stderr
 
 
@@ -2139,24 +2236,21 @@ def test_ci_runs_the_rust_hub_suite_through_the_gate_via_the_reusable_workflow()
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     changes = _workflow_job_section(text, "changes")
     hub = _workflow_job_section(text, "hub-rust")
-    assert (
-        "hub: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || "
-        "steps.filter.outputs.hub }}" in changes
-    )
+    assert HUB_OUTPUT_EXPRESSION in changes
     assert "needs: changes" in hub
     assert "needs.changes.outputs.hub == 'true'" in hub
     assert "needs.changes.outputs.docs_only != 'true'" in hub
     assert "uses: ./.github/workflows/hub.yml" in hub
-    paths = changes.split("            hub:\n", 1)[1]
+    paths = (ROOT / "scripts/ci_hub_paths.yml").read_text()
     for path in (
         "engines/hub/**",
         "src/brigade/fleet_hub*.py",
         "src/brigade/memory_hub_*.py",
-        "registry/skills/verify-brigade/hub_contract*",
+        "registry/skills/verify-brigade/**",
         ".github/workflows/hub.yml",
         ".github/workflows/ci.yml",
     ):
-        assert f"- '{path}'" in paths
+        assert f"  - '{path}'\n" in paths
     # hub.yml is callable only. A push or pull_request trigger there would run
     # the suite a second time, outside ci-gate, on every matching event.
     reusable = (ROOT / ".github/workflows/hub.yml").read_text()
@@ -2167,6 +2261,91 @@ def test_ci_runs_the_rust_hub_suite_through_the_gate_via_the_reusable_workflow()
     # `hub` runs the suite; `hub-arm64` builds the release's second Linux target.
     assert re.findall(r"^  ([a-z0-9-]+):$", reusable.split("jobs:\n", 1)[1], re.MULTILINE) == ["hub", "hub-arm64"]
     assert "toolchain: [stable, '1.85.0']" in reusable
+
+
+@pytest.mark.parametrize("event", ["pull_request", "push", "merge_group"])
+@pytest.mark.parametrize("uncertain", ["false", "true", "", None])
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancelled", "skipped", None])
+@pytest.mark.parametrize("filtered", ["false", "true", "", None])
+def test_ci_hub_output_selects_the_suite_unless_its_selector_says_exactly_false(event, uncertain, outcome, filtered):
+    """Evaluate the literal `hub` output expression the way Actions does."""
+    # Python's and/or/== match Actions' &&/||/== only for string and None
+    # operands, which are the only values these contexts hold here.
+    changes = _workflow_job_section((ROOT / ".github/workflows/ci.yml").read_text(), "changes")
+    line = next(line.strip() for line in changes.splitlines() if line.strip().startswith("hub: ${{"))
+    assert line == HUB_OUTPUT_EXPRESSION
+    for selected in ("false", "true", "", None):
+        context = {
+            "github.event_name": event,
+            "steps.docs.outputs.uncertain": uncertain,
+            "steps.hub_merge_group.outputs.hub": selected,
+            "steps.hub_filter.outcome": outcome,
+            "steps.hub_filter.outputs.hub": filtered,
+        }
+        expression = line.removeprefix("hub: ${{ ").removesuffix(" }}")
+        expression = re.sub(r"\b(?:github|steps)\.[a-z_.]+", lambda m, bound=context: repr(bound[m[0]]), expression)
+        expression = expression.replace("&&", "and").replace("||", "or")
+        value = eval(expression, {"__builtins__": {}}, {})
+        if uncertain != "false":
+            expected = "true"
+        elif event == "merge_group":
+            # Merge groups ignore the proposal-evaluated filter entirely.
+            expected = "false" if selected == "false" else "true"
+        else:
+            expected = "false" if (outcome, filtered) == ("success", "false") else "true"
+        assert value == expected, (selected, value)
+
+
+def test_hub_nightly_runs_the_full_reusable_hub_suite_on_main():
+    text = (ROOT / ".github/workflows/hub-nightly.yml").read_text()
+    header, jobs = text.split("jobs:\n", 1)
+    assert "name: hub-nightly\n" in header
+    assert re.search(r"^  schedule:\n    - cron: ['\"]30 4 \* \* \*['\"]$", header, re.MULTILINE)
+    assert "workflow_dispatch:" in header
+    assert "pull_request:" not in header
+    assert "push:" not in header
+    assert "merge_group:" not in header
+    assert "permissions:\n  contents: read" in header
+    assert "group: hub-nightly-main" in header
+    assert "cancel-in-progress: false" in header
+    assert re.findall(r"^  ([a-z0-9][a-z0-9-]*):$", jobs, re.MULTILINE) == ["hub-rust", "report-failure"]
+    job = _workflow_job_section(text, "hub-rust")
+    assert "if: ${{ github.ref == 'refs/heads/main' }}" in job
+    assert "uses: ./.github/workflows/hub.yml" in job
+    assert "    permissions:\n      contents: read\n" in job
+    assert "needs:" not in job
+    assert "with:" not in job
+    assert "continue-on-error" not in text
+    # The nightly calls the same reusable workflow ci.yml gates on, so both
+    # toolchains and the arm64 build run without a second copy of the suite.
+    reusable = (ROOT / ".github/workflows/hub.yml").read_text()
+    assert "toolchain: [stable, '1.85.0']" in reusable
+    # A calling job cannot set timeout-minutes, so every hub.yml job does.
+    for name in ("hub", "hub-arm64"):
+        assert re.search(r"^    timeout-minutes: \d+$", _workflow_job_section(reusable, name), re.MULTILINE), name
+
+
+def test_hub_nightly_reports_failures_to_one_tracking_issue_with_scoped_permissions():
+    text = (ROOT / ".github/workflows/hub-nightly.yml").read_text()
+    report = _workflow_job_section(text, "report-failure")
+    assert "    needs: hub-rust\n" in report
+    assert (
+        "    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && "
+        "(needs.hub-rust.result == 'failure' || needs.hub-rust.result == 'cancelled') }}\n" in report
+    )
+    assert "    timeout-minutes: 5\n" in report
+    # Only this job may write issues, and nothing else.
+    assert "    permissions:\n      issues: write\n    steps:\n" in report
+    assert text.count("issues: write") == 1
+    assert "uses:" not in report
+    assert "GH_TOKEN: ${{ github.token }}" in report
+    # One tracker: comment on the open labelled issue, create only if none.
+    assert 'title="hub nightly failing"' in report
+    assert 'gh issue list --state open --label "$label" --limit 1' in report
+    assert 'gh issue comment "$number"' in report
+    assert 'gh issue create --title "$title" --label "$label"' in report
+    script = report.split("        run: |\n", 1)[1]
+    assert script.index("gh issue comment") < script.index("gh issue create")
 
 
 def test_mesh_actions_are_pinned_to_full_commits():
@@ -2813,10 +2992,8 @@ def test_windows_verifier_is_resolved_before_path_is_replaced():
     ],
 )
 def test_s18_round2_hub_filter_tracks_scan_inputs(path):
-    text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    changes = _workflow_job_section(text, "changes")
-    hub = changes.split("            hub:\n", 1)[1]
-    assert f"              - '{path}'" in hub
+    hub = (ROOT / "scripts/ci_hub_paths.yml").read_text(encoding="utf-8")
+    assert f"\n  - '{path}'\n" in hub
     workflow = (ROOT / ".github/workflows/hub.yml").read_text(encoding="utf-8")
     assert "on:\n  workflow_call:\n" in workflow
     assert "Memory scan bundle" in workflow
