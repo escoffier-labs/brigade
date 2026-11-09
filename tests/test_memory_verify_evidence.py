@@ -15,6 +15,7 @@ from brigade import dirfd
 from brigade import localio
 from brigade import memory_cmd
 from brigade import memory_proposal_io as io
+from brigade import memory_reflect_candidates as candidates
 from brigade import memory_verify_config as config
 from brigade import memory_verify_evidence as ev
 
@@ -85,8 +86,8 @@ class Archive:
         self.calls.append(("receipt", project, run_id, path))
         return [r for r in self.records.get((project, run_id), [])]
 
-    def bundle(self, bundle_id):
-        self.calls.append(("bundle", bundle_id))
+    def bundle(self, bundle_id, projects):
+        self.calls.append(("bundle", bundle_id, projects))
         return self.bundles.get(bundle_id)
 
     def search(self, project, query, limit):
@@ -458,26 +459,139 @@ def test_the_held_handle_keeps_reading_the_pinned_root_after_a_swap(tmp_path):
 
 
 @posix
-def test_a_bundle_under_an_unlisted_or_second_project_is_unreachable(tmp_path):
+def bundle_source(item_id, snippet, **extra):
+    return {
+        "id": item_id,
+        "snippet": snippet,
+        "integrity_mismatch": False,
+        "trust_label": "verified",
+        "kind": "message",
+        **extra,
+    }
+
+
+def source_show(item_id, project, **extra):
+    return {
+        "id": item_id,
+        "live": True,
+        "tombstoned": False,
+        "integrity_mismatch": False,
+        "metadata": {"project": project},
+        **extra,
+    }
+
+
+def bundle_replies(bundle_id, rows, shows):
+    replies = {("evidence", ("show", bundle_id, "--json")): {"id": bundle_id, "results": rows}}
+    for item_id, project in shows.items():
+        replies[("show", (item_id, "--json"))] = source_show(item_id, project)
+    return replies
+
+
+@posix
+def test_bundle_sources_count_only_when_eligible_and_owned_by_the_scope(tmp_path):
     other = tmp_path / "other"
     other.mkdir()
     _, parsed = setup(
         tmp_path, {"scope": OTHER, "path": str(other), "archive_projects": ["shared"]}, projects=("example", "shared")
     )
-    archive = Archive(
-        bundles={
-            "b-listed": ev.Bundle(("example",), ("listed bundle text",)),
-            "b-unlisted": ev.Bundle(("nobody",), ("x",)),
-            "b-shared": ev.Bundle(("shared",), ("x",)),
-            "b-two": ev.Bundle(("example", "second"), ("x",)),
-            "b-none": ev.Bundle((), ("x",)),
-        }
+    replies = {}
+    replies.update(
+        bundle_replies(
+            "b-mixed",
+            [bundle_source("s1", "owned source text"), bundle_source("s2", "x"), bundle_source("s3", "y")],
+            {"s1": "example", "s2": "shared", "s3": "nobody"},
+        )
     )
-    [result] = run(card(f"{BUNDLE}b-listed"), parsed, archive)
-    assert [(i.kind, i.text) for i in result.items] == [(ev.EVIDENCE_BUNDLE, "listed bundle text")]
-    for bundle in ("b-unlisted", "b-shared", "b-two", "b-none", "b-missing"):
-        [result] = run(card(f"{BUNDLE}{bundle}"), parsed, archive)
-        assert result.abstain == ev.UNREACHABLE, bundle
+    for name, project in (("b-shared", "shared"), ("b-unlisted", "nobody"), ("b-substring", "example-two")):
+        replies.update(bundle_replies(name, [bundle_source(f"{name}-1", "x")], {f"{name}-1": project}))
+    [result] = run(card(f"{BUNDLE}b-mixed"), parsed, engine(replies))
+    assert [(i.kind, i.text) for i in result.items] == [(ev.EVIDENCE_BUNDLE, "owned source text")]
+    assert result.counts["bundle_source_source_unowned"] == 2
+    for name in ("b-shared", "b-unlisted", "b-substring", "b-missing"):
+        [result] = run(card(f"{BUNDLE}{name}"), parsed, engine(replies))
+        assert result.abstain == ev.UNREACHABLE, name
+
+
+@posix
+def test_quarantined_and_mismatched_bundle_sources_contribute_nothing_and_the_cache_is_never_opened(
+    tmp_path, monkeypatch
+):
+    _, parsed = setup(tmp_path)
+    bundle_id = "b-unsafe"
+    # A cache file holding provisional bodies the public reply suppresses.
+    cache = candidates.evidence_bundle_path(f"{BUNDLE}{bundle_id}")[1]
+    assert cache is not None
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(
+        json.dumps({"id": bundle_id, "filters": {"project": "example"}, "results": [{"snippet": "CACHED BODY"}]})
+    )
+    rows = [
+        {"id": "a1b2c3d4e5f6a7b8c9d0e1f2", "eligibility_status": "ineligible", "reason_code": "trust_quarantined"},
+        {"id": "f2e1d0c9b8a7f6e5d4c3b2a1", "eligibility_status": "ineligible", "reason_code": "integrity_mismatch"},
+        bundle_source("s-mismatch", "MISMATCHED BODY", integrity_mismatch=True),
+        bundle_source("s-quarantined", "QUARANTINED BODY", trust_label="quarantined"),
+        {"eligibility_status": "ineligible", "reason_code": "made_up_reason"},
+    ]
+    replies = bundle_replies(bundle_id, rows, {"s-mismatch": "example", "s-quarantined": "example"})
+    opened: list[str] = []
+    real_open, real_os_open = open, os.open
+
+    def spy_open(file, *args, **kwargs):
+        opened.append(os.fspath(file) if not isinstance(file, int) else "")
+        return real_open(file, *args, **kwargs)
+
+    def spy_os_open(path, *args, **kwargs):
+        opened.append(os.fspath(path))
+        return real_os_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", spy_open)
+    monkeypatch.setattr(os, "open", spy_os_open)
+    [result] = run(card(f"{BUNDLE}{bundle_id}"), parsed, engine(replies))
+    monkeypatch.undo()
+    assert result.abstain == ev.UNREACHABLE
+    assert result.items == []
+    assert {key: value for key, value in result.counts.items() if key.startswith("bundle_source_")} == {
+        "bundle_source_trust_quarantined": 2,
+        "bundle_source_integrity_mismatch": 2,
+        "bundle_source_ineligible": 1,
+    }
+    assert not any(cache.name in path or str(cache.parent) in path for path in opened)
+    report = json.dumps(result.report())
+    assert "BODY" not in report
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"integrity_mismatch": True},
+        {"integrity_mismatch": None},
+        {"live": False},
+        {"tombstoned": True},
+        {"id": "other"},
+    ],
+)
+def test_a_bundle_source_the_engine_cannot_revalidate_is_dropped(change):
+    replies = bundle_replies("b1", [bundle_source("s1", "kept"), bundle_source("s2", "dropped")], {"s1": "example"})
+    replies[("show", ("s2", "--json"))] = {**source_show("s2", "example"), **change}
+    bundle = engine(replies).bundle("b1", ("example",))
+    assert bundle is not None
+    assert bundle.texts == ("kept",)
+    assert bundle.dropped == ("source_unverified",)
+
+
+def test_bundle_refs_parse_like_the_canonical_locator_reader():
+    for ref in (f"{BUNDLE}abc", "receipt.json", ".brigade/receipts/x.json", "agent:x/w/l", f"{ev.SHORT_LOCATOR}abc"):
+        assert (ev.bundle_ref(ref) is not None) == candidates.evidence_bundle_path(ref)[0], ref
+    assert ev.bundle_ref(f"{BUNDLE}abc") == ev.bundle_ref(f"{ev.SHORT_LOCATOR}abc") == "abc"
+
+
+def test_a_malformed_bundle_reply_is_unreachable():
+    for reply in (None, [], {"id": "other", "results": []}, {"id": "b1", "results": "x"}, {"id": "b1", "results": [7]}):
+        archive = engine({("evidence", ("show", "b1", "--json")): reply})
+        assert archive.bundle("b1", ("example",)) is None, reply
+    archive = engine({("evidence", ("show", "b1", "--json")): {"id": "b1", "results": [{"id": "--x", "snippet": "s"}]}})
+    assert archive.bundle("b1", ("example",)) is None
 
 
 @posix

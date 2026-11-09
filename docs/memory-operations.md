@@ -2201,8 +2201,12 @@ under one scope only.
 
 A cited item is `evidence_unreachable` when it sits under no bound root or
 under two roots of the scope, under another scope's root, outside the evidence
-directories, in a bundle whose recorded project is missing or not owned by the
-scope, or is an attested evidence id. Each reachable item is cut on a UTF-8
+directories, or an attested evidence id. A cited bundle is read only through
+the evidence engine's regenerated, eligibility-filtered reply, never from its
+cache files. Every source the engine marks ineligible, every source with an
+integrity mismatch or an untrusted label, and every source whose project the
+scope does not own exactly is dropped and counted by reason. A bundle with no
+source left is `evidence_unreachable`. Each reachable item is cut on a UTF-8
 boundary (8 KiB per item, 32 KiB per card, 8 items, 3 excerpts of 4 KiB) and
 scanned with the memory rule bundle. A blocked or flagged item is dropped,
 counted as `evidence_flagged`, and recorded with its rule ids only.

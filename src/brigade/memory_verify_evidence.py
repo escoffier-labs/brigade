@@ -342,9 +342,11 @@ class ReceiptRecord:
 
 @dataclass(frozen=True)
 class Bundle:
-    projects: tuple[str, ...]
+    """The eligible, owned sources of one bundle, and a reason code for every source dropped."""
+
     texts: tuple[str, ...]
     observed_ms: int | None = None
+    dropped: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -357,7 +359,7 @@ class Excerpt:
 class Archive(Protocol):
     def receipt_records(self, project: str, run_id: str, path: str) -> Sequence[ReceiptRecord] | None: ...
 
-    def bundle(self, bundle_id: str) -> Bundle | None: ...
+    def bundle(self, bundle_id: str, projects: tuple[str, ...]) -> Bundle | None: ...
 
     def search(self, project: str, query: str, limit: int) -> Sequence[Excerpt] | None: ...
 
@@ -418,28 +420,63 @@ class EngineArchive:
                 found.append(Excerpt(excerpt_id, snippet, _moment_ms(row.get("created_at"))))
         return found
 
-    def bundle(self, bundle_id: str) -> Bundle | None:
-        path = memory_cmd._evidence_bundle_path(bundle_id)
-        if path is None:
-            return None
-        try:
-            payload = _json(io.text(path, limit=READ_LIMIT, absent=True))
-        except (OSError, ValueError):
-            return None
+    def bundle(self, bundle_id: str, projects: tuple[str, ...]) -> Bundle | None:
+        """A bundle's sources, only through the engine's regenerated, eligibility-filtered reply.
+
+        The engine's cache file is never read: it can hold bodies the public
+        reply suppresses, and reading it skips the engine's MAC check and its
+        revalidation of every source. `evidence show` regenerates the bundle
+        from current sources and collapses each ineligible source to a stub
+        with a reason code. Every stub is dropped with that code. Each eligible
+        source must carry a literal `integrity_mismatch: false` and a trusted
+        label, and, read again with `show`, must be live with exactly one of
+        `projects` as its project. The public reply does not carry the
+        bundle's project filter, so ownership is checked per source. Anything
+        else is dropped with a code. A malformed reply makes the bundle
+        unreachable.
+        """
+        payload = self._run("evidence", ["show", bundle_id, "--json"])
         if not isinstance(payload, dict) or payload.get("id") != bundle_id:
             return None
-        filters = payload.get("filters")
-        project = filters.get("project") if isinstance(filters, dict) else None
         results = payload.get("results")
-        if not isinstance(results, list):
+        if not isinstance(results, list) or len(results) > MAX_BUNDLE_SOURCES:
             return None
-        texts = []
+        texts: list[str] = []
+        dropped: list[str] = []
         for row in results:
-            value = row.get("snippet") if isinstance(row, dict) else None
-            if isinstance(value, str):
-                texts.append(value)
-        projects = (project,) if isinstance(project, str) and project else ()
-        return Bundle(projects, tuple(texts), _moment_ms(payload.get("generated_at")))
+            if not isinstance(row, dict):
+                return None
+            if "eligibility_status" in row:
+                reason = row.get("reason_code")
+                known = row.get("eligibility_status") == "ineligible" and reason in INELIGIBLE
+                dropped.append(str(reason) if known else "ineligible")
+                continue
+            item_id, snippet = row.get("id"), row.get("snippet")
+            if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None or not isinstance(snippet, str):
+                return None
+            if row.get("integrity_mismatch") is not False:
+                dropped.append("integrity_mismatch")
+                continue
+            if row.get("trust_label") in UNTRUSTED_LABELS:
+                dropped.append("trust_quarantined")
+                continue
+            shown = self._run("show", [item_id, "--json"])
+            if not (
+                isinstance(shown, dict)
+                and shown.get("id") == item_id
+                and shown.get("live") is True
+                and shown.get("tombstoned") is False
+                and shown.get("integrity_mismatch") is False
+            ):
+                dropped.append("source_unverified")
+                continue
+            meta = shown.get("metadata")
+            if not isinstance(meta, dict) or meta.get("project") not in projects:
+                dropped.append("source_unowned")
+                continue
+            texts.append(snippet)
+        observed = _moment_ms(payload.get("regenerated_at")) or _moment_ms(payload.get("generated_at"))
+        return Bundle(tuple(texts), observed, tuple(dropped))
 
     def receipt_records(self, project: str, run_id: str, path: str) -> list[ReceiptRecord] | None:
         """Archive records of one verify receipt, or None when any reply is malformed or ambiguous.
@@ -493,6 +530,20 @@ RECEIPT_COLLECTION = {
 }
 RECEIPT_KIND = "brigade_work_verify_receipt"
 DIGEST_SOURCES = frozenset({"receipt_digest", "file_sha256"})
+# The engine's reason codes for a source it refuses to show. Any other code is recorded as `ineligible`.
+INELIGIBLE = frozenset(
+    {
+        "parse_error",
+        "integrity_mismatch",
+        "legacy_unknown",
+        "trust_unknown",
+        "trust_quarantined",
+        "injection_not_clean",
+        "source_missing",
+    }
+)
+UNTRUSTED_LABELS = frozenset({"quarantined", "unknown"})
+MAX_BUNDLE_SOURCES = 200
 ITEM_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
 
@@ -896,6 +947,21 @@ def _file_items(
     return [_item(kind, MEDIUM, text, source, run_id, observed, raw)]
 
 
+# Bundle locators: the full `<engine>://evidence/<id>` form and the short `<engine>:<id>` form, as
+# card evidence front matter writes them. Parsed here without touching the engine's cache location.
+LOCATOR = memory_cmd.EVIDENCE_LOCATOR_PREFIX
+SHORT_LOCATOR = LOCATOR.split("://", 1)[0] + ":"
+BUNDLE_ID = re.compile(r"[A-Za-z0-9._-]{1,128}")
+
+
+def bundle_ref(ref: str) -> str | None:
+    """The bundle id a ref names, or None when it names no bundle."""
+    for prefix in (LOCATOR, SHORT_LOCATOR):
+        if ref.startswith(prefix):
+            return ref.removeprefix(prefix).strip()
+    return None
+
+
 def _attested(ref: str) -> bool:
     """An S19e-1 attested id, `<principal>/<workspace>/<local>`, whose bytes have no hub read action."""
     parts = ref.split("/")
@@ -903,20 +969,24 @@ def _attested(ref: str) -> bool:
 
 
 def _cited(
-    roots: Roots, archive: Archive, scope: str, ref: str, projects: tuple[str, ...]
+    roots: Roots, archive: Archive, scope: str, ref: str, projects: tuple[str, ...], assembly: Assembly
 ) -> tuple[list[Item] | None, bool]:
     """Items for one cited ref, or None when unreachable. The flag says whether it was an attested id."""
     if _attested(ref):
         return None, True
-    is_bundle, cache_path = candidates.evidence_bundle_path(ref)
-    if is_bundle:
-        # The cache file is named `<bundle id>.json`, and only valid ids get a path.
-        bundle_id = cache_path.stem if cache_path is not None else ""
-        if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", bundle_id):
+    bundle_id = bundle_ref(ref)
+    if bundle_id is not None:
+        if not BUNDLE_ID.fullmatch(bundle_id):
             return None, False
-        bundle = archive.bundle(bundle_id)
-        # Exactly one recorded project, and it must belong to this scope alone.
-        if bundle is None or len(bundle.projects) != 1 or bundle.projects[0] not in projects:
+        if not projects:
+            return None, False
+        bundle = archive.bundle(bundle_id, projects)
+        if bundle is None:
+            return None, False
+        for reason in bundle.dropped:
+            assembly.count(f"bundle_source_{reason}")
+        # Only eligible sources the scope owns remain. None left means nothing to read.
+        if not bundle.texts:
             return None, False
         text = "\n".join(bundle.texts)
         raw = text.encode()
@@ -1048,7 +1118,7 @@ def assemble(
         if index >= MAX_ITEMS:
             assembly.count("evidence_over_limit", len(refs) - MAX_ITEMS)
             break
-        found, attested = _cited(roots, archive, scope, ref, projects)
+        found, attested = _cited(roots, archive, scope, ref, projects, assembly)
         if found is None:
             assembly.count(UNREACHABLE)
             if attested:
