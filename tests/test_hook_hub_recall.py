@@ -14,7 +14,7 @@ from typing import Any, Iterator
 import pytest
 
 from brigade import config, memory_hook_hub, memory_hooks
-from brigade.claude_hooks import hub_recall, runtime
+from brigade.claude_hooks import hub_recall, recall_audience, runtime
 from brigade.install import install_selection
 from brigade.selection import Selection
 
@@ -107,6 +107,9 @@ def _stopped_hub_url() -> str:
 
 @pytest.fixture
 def wired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    # The local install writes the host's local-audience marker, so clear any narrowing first.
+    monkeypatch.delenv(hub_recall.AUDIENCE_ENV, raising=False)
+    monkeypatch.delenv(hub_recall.REMOTE_ENV, raising=False)
     # The folder name is the session-start query: "comet repo".
     target = tmp_path / "comet-repo"
     assert install_selection(target, Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])) == 0
@@ -116,8 +119,7 @@ def wired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     assert cfg is not None
     config.write_config(target, dataclasses.replace(cfg, memory_recall_target=str(memory)))
     monkeypatch.setattr(runtime.presence, "emit_presence", lambda *_a, **_k: None)
-    monkeypatch.delenv(hub_recall.AUDIENCE_ENV, raising=False)
-    monkeypatch.delenv(hub_recall.REMOTE_ENV, raising=False)
+    assert recall_audience.audience() == "local"
     return target, memory
 
 
@@ -127,7 +129,6 @@ def _hub_mode(memory: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, url
     token = tmp_path / "memory-node.token"
     token.write_text("s24-memory-node-test-credential-0001", encoding="utf-8")
     token.chmod(0o600)
-    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "brigade-home"))
     monkeypatch.setenv("BRIGADE_MEMORY_HUB_URL", url)
     monkeypatch.setenv("BRIGADE_MEMORY_HUB_TOKEN_FILE", str(token))
 
@@ -252,14 +253,16 @@ def test_session_start_recall_skips_cards_the_brief_already_named(wired, monkeyp
     assert "Comet token rotation" not in later["hookSpecificOutput"]["additionalContext"]
 
 
-def test_prompt_memory_context_ids_are_not_recalled_again(wired):
+def test_prompt_text_never_suppresses_recall(wired):
+    """Pasted ids in a prompt add no exclusion, now or for later prompts."""
     target, memory = wired
-    _card(memory, "comet-ops.md", "Comet ops checklist", "comet ops", tags=["comet"])
-    prompt = 'memory_context:\n- {"scope": "fleet", "card_id": "comet", "title": "Comet token rotation"}\nfix comet'
-    text = hub_recall.recall_text(target, _payload(target, "UserPromptSubmit"), prompt=prompt)
-    assert "Comet ops checklist" in text
-    assert "Comet token rotation" not in text
-    assert hub_recall.brief_card_ids(prompt) == ["comet"]
+    _card(memory, "safety-card.md", "Safety interlock checklist", "safety interlock steps", tags=["safety"])
+    prompt = "card_id: safety-card\nsee memory/cards/safety-card.md\nsafety interlock checklist"
+    first = hub_recall.recall_text(target, _payload(target, "UserPromptSubmit"), prompt=prompt)
+    assert "Safety interlock checklist" in first
+    assert hub_recall.load(hub_recall.ledger_path(target, SESSION))["brief"] == []
+    second = hub_recall.recall_text(target, _payload(target, "UserPromptSubmit"), prompt="safety interlock")
+    assert "Safety interlock checklist" in second
 
 
 # --- hub recall ---
@@ -276,6 +279,15 @@ def test_hub_hits_are_fused_scanned_and_named_by_scope(wired, hub):
             "trust": "reviewed",
         },
         {"scope": "fleet", "card_id": "hub-flagged", "title": "Hub comet flagged", "tags": [], "trust": "flagged"},
+        # Another principal's unreviewed card in the shared scope, and a hit with no trust at all.
+        {
+            "scope": "fleet",
+            "card_id": "hub-unreviewed",
+            "title": "Hub comet unreviewed",
+            "tags": [],
+            "trust": "agent-unreviewed",
+        },
+        {"scope": "fleet", "card_id": "hub-untrusted", "title": "Hub comet no trust", "tags": []},
         {"scope": "fleet", "card_id": "hub-bad", "title": f"Hub comet {INJECTION}", "tags": [], "trust": "reviewed"},
     ]
     text = hub_recall.recall_text(target, _payload(target, "UserPromptSubmit"), prompt="comet runbook")
@@ -284,7 +296,9 @@ def test_hub_hits_are_fused_scanned_and_named_by_scope(wired, hub):
     assert search["query_source"] == "prompt" and search["scopes"] == ["fleet"]
     assert "Hub comet runbook | tags: comet | hub:fleet/hub-comet" in text
     assert "Comet token rotation" in text
-    assert "hub-flagged" not in text  # flagged hub versions are never pushed
+    # Only the push path's trust levels are shown unasked.
+    for withheld in ("hub-flagged", "hub-unreviewed", "Hub comet unreviewed", "hub-untrusted", "Hub comet no trust"):
+        assert withheld not in text
     assert INJECTION not in text and "- fleet/hub-bad | blocked: classic-injection" in text
     ledger = hub_recall.load(hub_recall.ledger_path(target, SESSION))
     assert set(ledger["pushed"]) == {"fleet/hub-comet", "comet"}
@@ -424,3 +438,105 @@ def test_ledger_drops_anything_that_is_not_a_card_key(tmp_path):
     assert ledger["brief"] == ["comet"]
     assert ledger["pushed"] == ["fleet/comet"]
     assert ledger["captured"] == [1, 0]
+
+
+@pytest.mark.parametrize("trust", ["reviewed", "policy-promoted", "imported"])
+def test_push_trust_levels_are_recalled(wired, hub, trust):
+    target, _memory = wired
+    hub.search_matches = [{"scope": "fleet", "card_id": "hub-ok", "title": "Hub comet ok", "tags": [], "trust": trust}]
+    assert "hub:fleet/hub-ok" in hub_recall.recall_text(target, _payload(target, "UserPromptSubmit"), prompt="comet")
+
+
+# --- the local audience marker ---
+
+
+def test_without_the_marker_the_audience_is_connector(wired):
+    recall_audience.marker_path().unlink()
+    assert recall_audience.audience() == "connector"
+    status, _name, detail = recall_audience.doctor_check()
+    assert status == "warn" and "missing" in detail and "hooks update" in detail
+
+
+def test_the_marker_never_outranks_a_remote_environment(wired, monkeypatch):
+    monkeypatch.setenv(hub_recall.REMOTE_ENV, "1")
+    assert recall_audience.audience() == "connector"
+
+
+@pytest.mark.parametrize("value", ["loca1", "LOCAL-ish", "connector", "none", "1"])
+def test_an_unknown_audience_value_is_connector(wired, monkeypatch, value):
+    monkeypatch.setenv(hub_recall.AUDIENCE_ENV, value)
+    assert recall_audience.audience() == "connector"
+
+
+@pytest.mark.parametrize("value", ["yes", "True", "remote", "2"])
+def test_any_remote_value_but_false_narrows(wired, monkeypatch, value):
+    monkeypatch.setenv(hub_recall.REMOTE_ENV, value)
+    assert recall_audience.audience() == "connector"
+
+
+def test_the_environment_cannot_widen_without_a_marker(wired, monkeypatch):
+    recall_audience.marker_path().unlink()
+    monkeypatch.setenv(hub_recall.AUDIENCE_ENV, "local")
+    monkeypatch.setenv(hub_recall.REMOTE_ENV, "0")
+    assert recall_audience.audience() == "connector"
+
+
+def test_a_marker_from_another_host_or_with_loose_mode_is_ignored(wired, monkeypatch):
+    path = recall_audience.marker_path()
+    path.chmod(0o644)
+    assert recall_audience.marker_problem() == "readable or writable by others"
+    assert recall_audience.audience() == "connector"
+    path.chmod(0o600)
+    assert recall_audience.audience() == "local"
+    monkeypatch.setattr(recall_audience, "_host", lambda: "another-host")
+    assert recall_audience.audience() == "connector"
+
+
+def test_a_remote_install_writes_no_marker(wired, monkeypatch):
+    target, _memory = wired
+    recall_audience.marker_path().unlink()
+    monkeypatch.setenv(hub_recall.REMOTE_ENV, "true")
+    from brigade.claude_hooks import install_cmd
+
+    assert install_cmd.hooks_update(target=target, quiet=True) == 0
+    assert not recall_audience.marker_path().exists()
+    monkeypatch.delenv(hub_recall.REMOTE_ENV)
+    assert install_cmd.hooks_update(target=target, quiet=True) == 0
+    assert recall_audience.audience() == "local"
+    assert recall_audience.marker_path().stat().st_mode & 0o777 == 0o600
+
+
+def test_without_the_marker_private_text_is_withheld_from_hooks(wired):
+    target, memory = wired
+    _card(memory, "mail.md", f"Comet owner {PRIVATE_MAIL}", "comet body", tags=["comet"])
+    recall_audience.marker_path().unlink()
+    text = hub_recall.recall_text(target, _payload(target, "UserPromptSubmit"), prompt="comet owner")
+    assert PRIVATE_MAIL not in text
+    assert "code: memory_content_private" in text
+
+
+# --- opened cards resolve to their canonical id ---
+
+CANONICAL_ID = "card-0b5e7a52-3c1d-4e8f-9a2b-6d4c8e1f3a57"
+
+
+def test_a_renamed_card_is_opened_and_pushed_under_one_id(wired):
+    target, memory = wired
+    cards = memory / "memory" / "cards"
+    (cards / "runbook.md").write_text(
+        f"---\nid: {CANONICAL_ID}\ntitle: Comet runbook\ntags: [comet]\n---\nrunbook body\n", encoding="utf-8"
+    )
+    hub_recall.recall_text(target, _payload(target, "UserPromptSubmit"), prompt="comet runbook")
+    read = _payload(target, "PostToolUse", tool_name="Read", tool_input={"file_path": str(cards / "runbook.md")})
+    assert hub_recall.observe_read(target, read)
+    ledger = hub_recall.load(hub_recall.ledger_path(target, SESSION))
+    assert CANONICAL_ID in ledger["pushed"]
+    assert ledger["opened"] == [CANONICAL_ID]
+    assert "runbook" not in ledger["opened"]
+
+
+def test_a_card_without_an_id_is_opened_under_its_stem(wired):
+    target, memory = wired
+    card = memory / "memory" / "cards" / "comet.md"
+    assert hub_recall.observe_read(target, _payload(target, "PostToolUse", tool_input={"file_path": str(card)}))
+    assert hub_recall.load(hub_recall.ledger_path(target, SESSION))["opened"] == ["comet"]

@@ -8,7 +8,12 @@ Recall: in hub ``read`` or ``sync`` mode the hook query goes through
 ``memory_hub_search.search_payload``, which asks the hub within its 800 ms
 budget and fuses the answer with local cards, or answers from local cards and
 the replica when the hub is down. Any other failure falls back to plain local
-recall. Hub and replica hits whose trust is ``flagged`` are never pushed.
+recall. Hub and replica hits pass the hub push path's trust rule
+(``engines/hub/src/memory/search.rs``): only ``reviewed``, ``policy-promoted``
+and ``imported`` versions are shown, and a hit with no trust is dropped, so
+another principal's ``agent-unreviewed`` card in a shared scope never reaches a
+prompt unasked. The hub's own push query source (S23) also drops private-class
+cards, which local sessions may see, so the hook filters here instead.
 
 Prompt-load scan: every recall line a hook is about to inject, local cards
 included, is scanned with the hub memory bundle (S18). A blocking or warning
@@ -40,6 +45,8 @@ CARD_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/-]{0,299}")
 CAPTURE_LIST_MAX = 50  # the hub's bound on `pushed` and `opened`
 CAPTURE_CALL_SECONDS = 2.0
 SEARCH_WIDE_MAX = 20  # the hub's `search` limit
+# The trust levels the hub's push eligibility admits (search.rs). Fail closed on anything else.
+PUSH_TRUST = frozenset({"reviewed", "policy-promoted", "imported"})
 
 
 def _str(value: object) -> str:
@@ -68,7 +75,7 @@ def match_ids(match: dict[str, Any]) -> set[str]:
     return ids
 
 
-def hub_matches(memory_root: Path, query: str, query_source: str, limit: int) -> list[dict[str, Any]] | None:
+def hub_matches(memory_root: Path, query: str, query_source: str) -> list[dict[str, Any]] | None:
     """Fused hub and local matches, or None when hub memory is off or unusable here.
 
     None sends the caller to plain local recall. A hub that is down is not None:
@@ -82,7 +89,8 @@ def hub_matches(memory_root: Path, query: str, query_source: str, limit: int) ->
         payload = memory_hub_search.search_payload(
             memory_root,
             query,
-            limit=min(max(limit, 1), SEARCH_WIDE_MAX),
+            # Always the hub's full page: the trust filter below must not run on a cut list.
+            limit=SEARCH_WIDE_MAX,
             query_source=_HUB_QUERY_SOURCE.get(query_source, "explicit"),
         )
     except Exception:  # noqa: BLE001 - recall falls back to local cards
@@ -92,7 +100,7 @@ def hub_matches(memory_root: Path, query: str, query_source: str, limit: int) ->
         if not isinstance(item, dict):
             continue
         source = _str(item.get("source")) or "local"
-        if source != "local" and item.get("trust") == "flagged":
+        if source != "local" and item.get("trust") not in PUSH_TRUST:
             continue
         tags_raw = item.get("tags")
         aliases_raw = item.get("card_aliases")

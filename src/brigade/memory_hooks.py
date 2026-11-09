@@ -297,7 +297,7 @@ def _recall_cards_payload_impl(
     )
     excluded = [value for value in exclude or () if isinstance(value, str)][:EXCLUDE_MAX]
     wide = min(capped + len(excluded), memory_hook_hub.SEARCH_WIDE_MAX)
-    fused = memory_hook_hub.hub_matches(memory_root, query, query_source, wide) if hub else None
+    fused = memory_hook_hub.hub_matches(memory_root, query, query_source) if hub else None
     try:
         raw = {"matches": []} if fused is not None else search_cards_payload(memory_root, query, limit=wide)
     except (OSError, ValueError):

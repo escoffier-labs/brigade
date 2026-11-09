@@ -2701,16 +2701,25 @@ Invariant tests, in S19a to S19e:
   `memory_context` block.
 - S24 as built (Claude hooks): the hub search, the fallback and the
   prompt-load scan all run in the existing recall child, so its 5 s deadline
-  covers a stopped or hung hub. Session start records the card ids its work
-  brief named, and each prompt adds ids from a `memory_context` block. Card
-  ids are read from `cards/<id>.md` paths and `card_id` fields. "Opened" means
-  a card file read through the Read tool. The Stop hook sends one `capture`
-  per batch of keys not yet captured, at most 50 of each list, so a long
-  session can produce several events under one `session_ref`. A batch the hub
-  did not take is retried at the next Stop with the same `client_event_id`.
-  The hook audience is local unless `CLAUDE_CODE_REMOTE` or
-  `BRIGADE_RECALL_AUDIENCE=connector` marks a session outside the operator's
-  machines.
+  covers a stopped or hung hub. Hub and replica hits pass the push trust rule
+  on the client (`reviewed`, `policy-promoted` or `imported`, and a hit with
+  no trust is dropped), because the hub's push query source also withholds
+  private-class cards that local sessions may see. Session start records the
+  card ids its work brief named, read from `cards/<id>.md` paths and
+  `card_id` fields, and later recalls skip them. Prompt text never adds an
+  exclusion, so a pasted id cannot hide a card. Trusted dispatch envelopes can
+  add theirs in S25, and until then a T3 child may see a card its brief also
+  carried. "Opened" means a `memory/cards/` file read through the Read tool,
+  recorded under its front matter id as recall names it, else its file stem.
+  The Stop hook sends one `capture` per batch of keys not yet captured, at
+  most 50 of each list, so a long session can produce several events under one
+  `session_ref`. A batch the hub did not take is retried at the next Stop with
+  the same `client_event_id`. The hook audience is `connector` by default. It
+  is `local` only on a host that carries the marker the local hook install
+  writes under the Brigade user home, outside any repository, owned by the
+  user, mode 0600 and naming that host. `brigade doctor` warns when it is
+  missing. `CLAUDE_CODE_REMOTE` or any `BRIGADE_RECALL_AUDIENCE` value other
+  than `local` narrows a session to `connector`, and no value widens one.
 - New fields in tool responses are additive. Connector tool snapshots are
   updated in the same PR.
 

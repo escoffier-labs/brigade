@@ -25,6 +25,7 @@ from .package import (
     managed_user_groups,
 )
 from .paths import is_operator_home, resolve_claude_home
+from . import recall_audience
 
 HooksScope = Literal["project", "user"]
 
@@ -309,6 +310,9 @@ def _write_package(
         if pin is not None:
             sidecar["pinned_target"] = str(pin)
     localio.write_json(layout.sidecar_path, sidecar)
+    # S24: this host's local recall audience. Outside any repository, refused in a
+    # remote environment, and a failure only leaves recall on the connector audience.
+    recall_audience.write_marker()
     return {"action": action, "target": str(layout.root), **sidecar}, None
 
 

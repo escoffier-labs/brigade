@@ -3,18 +3,19 @@
 Recall itself runs in the killable recall child (``memory_hooks``), with hub
 routing and the prompt-load scan enabled for hooks. This module adds:
 
-- Deduplication. Card ids the work brief named at session start, and ids in a
-  ``memory_context`` block of a prompt (a T3 child's brief arrives as its first
-  prompt), are kept per session and skipped by every later recall.
+- Deduplication. Card ids the SessionStart work brief named, a source Brigade
+  generated, are kept per session and skipped by every later recall. Prompt
+  text never adds exclusions: a pasted ``card_id: x`` must not hide card x.
+  Trusted dispatch envelopes can add their ids in S25.
 - A per-session ledger of card keys: pushed (shown by a recall hook) and opened
   (read through the Read tool). It holds ids and counters only.
 - The Stop capture: one ``capture`` call per batch, through a killable child,
   with a hashed session reference and the keys not yet captured. With the hub
   stopped or hung the batch stays pending and the hook keeps its cap.
 
-The audience is the operator's local harness unless the session runs in a
-cloud sandbox (``CLAUDE_CODE_REMOTE``) or ``BRIGADE_RECALL_AUDIENCE=connector``
-is set. A connector audience never gets private-class text (S18).
+The audience comes from ``recall_audience``: ``connector`` unless this host
+carries the marker the local hook install writes. A connector audience never
+gets private-class text (S18).
 """
 
 from __future__ import annotations
@@ -29,32 +30,27 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from .recall_audience import AUDIENCE_ENV, REMOTE_ENV, audience
+
 LEDGER_VERSION = 1
 LEDGER_KEYS_MAX = 200
 CAPTURE_TIMEOUT_SECONDS = 3.0
 CAPTURE_RESERVE_SECONDS = 1.0
 CAPTURE_MIN_SECONDS = 0.5
-AUDIENCE_ENV = "BRIGADE_RECALL_AUDIENCE"
-REMOTE_ENV = "CLAUDE_CODE_REMOTE"
 _SESSION_REF_LABEL = b"brigade.memory.capture.session.v1\x00"
 _CARD_ID = r"[a-z0-9][a-z0-9._-]{0,127}"
-# `cards/<id>.md` paths and `card_id: <id>` fields, as briefs and packets write them.
+# `cards/<id>.md` paths and `card_id: <id>` fields, as the work brief writes them.
 _BRIEF_CARD_PATH = re.compile(rf"(?<![A-Za-z0-9._-])cards/({_CARD_ID})\.md(?![A-Za-z0-9_-])")
 _BRIEF_CARD_FIELD = re.compile(rf"\bcard_id[\"']?\s*[:=]\s*[\"']?({_CARD_ID})")
-_READ_CARD_PATH = re.compile(rf"(?:^|[/\\])memory[/\\]cards[/\\]({_CARD_ID})\.md$")
+_READ_CARD_PATH = re.compile(r"(?:^|[/\\])memory[/\\]cards[/\\]([A-Za-z0-9][A-Za-z0-9._-]{0,127})\.md$")
+_FRONTMATTER_READ_BYTES = 64 * 1024
 
 
-def audience() -> str:
-    """``connector`` for a cloud sandbox or an explicit setting, else ``local``."""
-    if (os.environ.get(AUDIENCE_ENV) or "").strip().lower() == "connector":
-        return "connector"
-    if (os.environ.get(REMOTE_ENV) or "").strip().lower() in {"1", "true", "yes"}:
-        return "connector"
-    return "local"
+__all__ = ["AUDIENCE_ENV", "REMOTE_ENV", "audience", "brief_card_ids", "capture", "recall_text"]
 
 
 def brief_card_ids(text: str) -> list[str]:
-    """Card ids a brief or dispatch packet already put in front of the agent."""
+    """Card ids the SessionStart work brief already put in front of the agent. Never call on prompt text."""
     if not isinstance(text, str) or not text:
         return []
     found = [*_BRIEF_CARD_PATH.findall(text), *_BRIEF_CARD_FIELD.findall(text)]
@@ -158,25 +154,24 @@ def recall_text(target: Path, payload: dict[str, Any], *, prompt: str | None = N
     """Bounded recall for a hook, deduplicated against the brief; empty on any failure.
 
     SessionStart passes the brief it just injected, which resets the session's
-    brief ids. UserPromptSubmit passes the prompt: ids in it are added, so a T3
-    child's ``memory_context`` block is never repeated by its own recall.
+    brief ids. UserPromptSubmit passes the prompt as the query only: its text
+    never adds an exclusion.
     """
     from .. import memory_hooks
 
     try:
         session_id = _session(payload)
         path = ledger_path(target, session_id) if session_id else None
-        named = brief_card_ids(brief or "") + brief_card_ids(prompt or "")
+        named = brief_card_ids(brief) if brief is not None else []
         exclude = named
         if path is not None:
             try:
 
                 def note_brief(ledger: dict[str, Any]) -> None:
-                    if brief is not None:
-                        ledger["brief"] = []
+                    ledger["brief"] = []
                     _append(ledger, "brief", named)
 
-                exclude = update(path, note_brief)["brief"] if named or brief is not None else load(path)["brief"]
+                exclude = update(path, note_brief)["brief"] if brief is not None else load(path)["brief"]
             except OSError:
                 exclude = named
         text, shown = memory_hooks.recall_for_hook(
@@ -296,8 +291,27 @@ def capture(target: Path, session_id: str, *, budget: float | None = None) -> st
         return "error"
 
 
+def opened_card_id(card: Path, name: str) -> str | None:
+    """The canonical id recall gives this card: its front matter id, else the file stem.
+
+    Uses the same front matter parser and ``card_identity`` as card search, so a
+    renamed file with ``id: card-<uuid>`` is recorded under that id.
+    """
+    from ..card_identity import card_identity
+    from ..memory_cmd import _parse_frontmatter
+
+    try:
+        with card.open("rb") as handle:
+            text = handle.read(_FRONTMATTER_READ_BYTES).decode("utf-8", errors="replace")
+        frontmatter, _ = _parse_frontmatter(text)
+    except (OSError, ValueError):
+        frontmatter = {}
+    card_id = card_identity(frontmatter, f"memory/cards/{name}.md").card_id
+    return card_id if _keys([card_id]) else None
+
+
 def observe_read(target: Path, payload: dict[str, Any]) -> bool:
-    """Record a card opened through the Read tool. Ids only."""
+    """Record a card opened through the Read tool, under its canonical id. Ids only."""
     tool_input = payload.get("tool_input")
     file_path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
     session_id = _session(payload)
@@ -306,7 +320,13 @@ def observe_read(target: Path, payload: dict[str, Any]) -> bool:
     match = _READ_CARD_PATH.search(file_path)
     if match is None:
         return False
-    update(ledger_path(target, session_id), lambda ledger: _append(ledger, "opened", [match.group(1)]))
+    card = Path(file_path)
+    if not card.is_absolute():
+        card = (_cwd(payload) or target) / card
+    card_id = opened_card_id(card, match.group(1))
+    if card_id is None:
+        return False
+    update(ledger_path(target, session_id), lambda ledger: _append(ledger, "opened", [card_id]))
     return True
 
 
