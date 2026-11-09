@@ -292,13 +292,97 @@ def no_workspace_reads(monkeypatch):
     monkeypatch.setattr(fleet_client, "_read_fleet_section", refuse)
 
 
-def test_the_claim_target_under_a_relative_home_reads_no_workspace_file(
-    relative_home_workspace, no_workspace_reads, no_requests, caplog
-):
-    with caplog.at_level(logging.WARNING, logger="brigade.fleet"):
-        assert fleet_client.resolve_claim_target(relative_home_workspace) == "ws"
-    assert any("BRIGADE_HOME must be an absolute path" in record.message for record in caplog.records)
+def test_a_relative_home_has_no_claim_target(relative_home_workspace, no_workspace_reads, no_requests):
+    # Even where discovery would find the home identity, a relative home gives no key at all, so no
+    # caller can submit a directory name as a shared claim (#2423).
+    with pytest.raises(fleet_home_guard.RelativeBrigadeHomeError):
+        fleet_client.resolve_claim_target(relative_home_workspace)
     assert not no_requests
+
+
+def test_a_relative_home_gives_no_claim_target_for_a_plain_directory(tmp_path, monkeypatch, no_fleet_env):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.chdir(plain)
+    monkeypatch.setenv("BRIGADE_HOME", ".brigade")
+    with pytest.raises(fleet_home_guard.RelativeBrigadeHomeError):
+        fleet_client.resolve_claim_target(plain)
+
+
+def _run_argv(workspace: Path) -> list[str]:
+    roster = workspace / "roster.toml"
+    roster.write_text('orchestrator = "chef"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n', encoding="utf-8")
+    return ["run", "do something", "--roster", str(roster), "--cwd", str(workspace)]
+
+
+def test_a_run_under_a_relative_home_takes_no_claim_on_an_env_hub(
+    relative_home_workspace, monkeypatch, no_requests, caplog
+):
+    from brigade import aboyeur, cli
+
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", USER_HUB)
+    monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", "fixture-node-credential")
+
+    def no_claim(*args, **kwargs):
+        raise AssertionError("a fleet claim was attempted")
+
+    monkeypatch.setattr(fleet_client, "repo_claim", no_claim)
+    monkeypatch.setattr(fleet_client, "acquire_claim", no_claim)
+    dispatched: list[int] = []
+    monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: dispatched.append(1) or 0)
+
+    with caplog.at_level(logging.WARNING, logger="brigade.fleet"):
+        assert cli.main(_run_argv(relative_home_workspace)) == 0
+    assert dispatched == [1]
+    skipped = [r.message for r in caplog.records if "fleet claim skipped for run directory" in r.message]
+    assert skipped == [
+        "fleet claim skipped for run directory ws (BRIGADE_HOME is relative); relying on the local run lock alone"
+    ]
+    assert not no_requests
+
+
+def test_require_fleet_claim_under_a_relative_home_fails_cleanly(relative_home_workspace, monkeypatch, capsys):
+    from brigade import aboyeur, cli
+
+    dispatched: list[int] = []
+    monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: dispatched.append(1) or 0)
+    assert cli.main([*_run_argv(relative_home_workspace), "--require-fleet-claim"]) == 2
+    err = capsys.readouterr().err
+    assert "BRIGADE_HOME must be an absolute path" in err and "Traceback" not in err
+    assert dispatched == []
+
+
+def test_grokbot_takes_no_claim_under_a_relative_home(relative_home_workspace, monkeypatch, no_requests):
+    from types import SimpleNamespace
+
+    from brigade import grokbot_jobs, grokbot_mcp
+
+    # `_fleet_acquire` swallows every exception, so record attempts instead of raising.
+    attempts: list[object] = []
+    monkeypatch.setattr(fleet_client, "acquire_claim", lambda *args, **kwargs: attempts.append(args))
+    monkeypatch.setattr(grokbot_jobs, "lease_claim_target", lambda *args: None)
+    owner = SimpleNamespace(
+        config=SimpleNamespace(target=relative_home_workspace, bot_id="bot", lease_seconds=60, instance="builder")
+    )
+    decision, target, from_row = grokbot_mcp.GrokbotAdapter._fleet_acquire(owner, "job", "lease", "holder", "session")
+    assert decision.granted is False and target is None and from_row is False
+    assert attempts == []
+    assert not no_requests
+
+
+def test_one_home_resolution_serves_the_section_and_its_token_files(tmp_path, monkeypatch, no_fleet_env):
+    first, second = tmp_path / "first" / ".brigade", tmp_path / "second" / ".brigade"
+    for home, label in ((first, "first"), (second, "second")):
+        home.mkdir(parents=True)
+        _token(home / "node.token", f"{label}-node-token")
+        (home / "fleet.toml").write_text(f'[fleet]\nhub_url = "{USER_HUB}"\nnode_token_file = "node.token"\n')
+    homes = iter([first, second, second, second])
+    monkeypatch.setattr(fleet_home_guard, "absolute_brigade_home", lambda: next(homes))
+    monkeypatch.chdir(tmp_path)
+
+    assert fleet_client.load_fleet_settings()["node_token"] == "first-node-token"
+    homes = iter([first, second, second, second])
+    assert fleet_claim_lifecycle._token_snapshot()[1] == "first-node-token"
 
 
 def test_a_local_only_run_with_no_fleet_claim_works_under_a_relative_home(

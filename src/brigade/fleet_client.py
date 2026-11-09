@@ -251,19 +251,19 @@ def load_fleet_settings(*, strict: bool = False) -> dict[str, str]:
     admin_token = os.environ.get("BRIGADE_FLEET_TOKEN", "").strip()
     node_token = os.environ.get("BRIGADE_FLEET_NODE_TOKEN", "").strip()
     if not (hub_url and admin_token and node_token):
-        from .fleet_home_guard import read_token_file, user_fleet_section
+        from .fleet_home_guard import read_token_file, user_fleet_config
 
-        section = user_fleet_section(strict=strict)
+        config_path, section = user_fleet_config(strict=strict)
         if not hub_url and isinstance(section.get("hub_url"), str):
             hub_url = section["hub_url"].strip()
         if not admin_token:
             token_file = section.get("token_file")
             if isinstance(token_file, str) and token_file.strip():
-                admin_token = read_token_file(token_file)
+                admin_token = read_token_file(token_file, config_path)
         if not node_token:
             node_token_file = section.get("node_token_file")
             if isinstance(node_token_file, str) and node_token_file.strip():
-                node_token = read_token_file(node_token_file)
+                node_token = read_token_file(node_token_file, config_path)
     return {"hub_url": hub_url, "admin_token": admin_token, "node_token": node_token}
 
 

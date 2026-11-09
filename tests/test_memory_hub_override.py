@@ -762,3 +762,24 @@ def test_a_relative_fleet_token_path_is_compared_under_the_fleet_toml(hubs, tmp_
     with pytest.raises(hubc.HubConfigError, match="must not use a fleet credential"):
         hubc.load_settings(target, fleet=fleet)
     assert hubs.seen == []
+
+
+def test_one_home_resolution_serves_memory_hub_and_the_fleet_path_check(hubs, tmp_path, monkeypatch):
+    # A second resolution of the home must not move the `[fleet]` path comparison to another fleet.toml.
+    from brigade import fleet_home_guard
+
+    monkeypatch.delenv("BRIGADE_FLEET_NODE_TOKEN", raising=False)
+    first, second = tmp_path / "first", tmp_path / "second"
+    for home in (first, second):
+        home.mkdir()
+    node = token_file(first, NODE_CREDENTIAL, name="node.token")
+    token_file(second, OTHER_CREDENTIAL, name="node.token")
+    user_config(first, {"hub_url": MEMORY_HUB, "node_token_file": node}, fleet={"node_token_file": "node.token"})
+    homes = iter([first, second, second, second])
+    monkeypatch.setattr(fleet_home_guard, "absolute_brigade_home", lambda: next(homes))
+    target = workspace(tmp_path / "ws", mode="read")
+
+    fleet = {"hub_url": FLEET_HUB, "node_token": ADMIN_CREDENTIAL, "admin_token": ""}
+    with pytest.raises(hubc.HubConfigError, match="must not use a fleet credential"):
+        hubc.load_settings(target, fleet=fleet)
+    assert hubs.seen == []

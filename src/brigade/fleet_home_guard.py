@@ -62,10 +62,19 @@ def fleet_config_path(*, strict: bool = False) -> Path | None:
     return None
 
 
+def user_fleet_config(*, strict: bool = False) -> tuple[Path | None, dict[str, Any]]:
+    """The guarded ``fleet.toml`` path and its ``[fleet]`` table, from one resolution of the home.
+
+    Token files named in that table are read with ``read_token_file(raw, path)`` against this same
+    path, so a ``BRIGADE_HOME`` change between the two reads cannot move them to another home.
+    """
+    path = fleet_config_path(strict=strict)
+    return path, ({} if path is None else fleet_client._read_fleet_section(path, strict=strict))
+
+
 def user_fleet_section(*, strict: bool = False) -> dict[str, Any]:
     """The ``[fleet]`` table of the user-level ``fleet.toml``; {} when absent or refused."""
-    path = fleet_config_path(strict=strict)
-    return {} if path is None else fleet_client._read_fleet_section(path, strict=strict)
+    return user_fleet_config(strict=strict)[1]
 
 
 def resolve_against(path: PurePath, config_dir: PurePath) -> PurePath | None:
@@ -87,12 +96,14 @@ def token_path(raw: str, config_path: Path) -> Path | None:
     return None if resolved is None else Path(resolved)
 
 
-def read_token_file(raw: str, config_path: Path | None = None) -> str:
-    """The token in a file named by the user-level ``fleet.toml`` (``config_path`` by default), or "".
+def read_token_file(raw: str, config_path: Path | None) -> str:
+    """The token in a file named by the ``fleet.toml`` at ``config_path``, or "" when there is none.
 
-    A path written with Windows backslashes is tried as written first, then with ``/``.
+    The caller passes the path it read that table from (see ``user_fleet_config``); this never
+    resolves the home again. A path written with Windows backslashes is tried as written first,
+    then with ``/``.
     """
-    base = config_path if config_path is not None else fleet_config_path()
+    base = config_path
     if base is None:
         return ""
     candidates = [raw.strip()]
