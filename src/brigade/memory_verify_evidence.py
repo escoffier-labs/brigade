@@ -837,7 +837,11 @@ def _item(
     *,
     lineage: frozenset[str] = frozenset(),
     values: tuple[str, ...] = (),
+    decoded: tuple[str, ...] = (),
 ) -> Item:
+    # Decoded strings join the comparison material, because JSON escaping (a newline
+    # as `\n`) would otherwise hide a verbatim copy made from the decoded text.
+    plain = b"".join(b"\n" + value.encode() for value in (*values, *decoded))
     return Item(
         kind=kind,
         rank=rank,
@@ -846,7 +850,7 @@ def _item(
         source=source,
         run_id=run_id,
         observed_ms=observed,
-        compare=raw + b"\n" + text.encode(),
+        compare=raw + b"\n" + text.encode() + plain,
         lineage=lineage | (frozenset({f"run:{run_id}"}) if run_id else frozenset()),
         values=values,
     )
@@ -1302,6 +1306,7 @@ def _file_items(
                     raw,
                     lineage=keys,
                     values=_strings(fields),
+                    decoded=_strings(output),
                 )
             ]
             if output:

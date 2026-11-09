@@ -1767,3 +1767,16 @@ def test_shallow_bounds_depth_and_node_count():
     assert ev._shallow([0] * (ev.MAX_JSON_NODES - 1))
     assert not ev._shallow([0] * (ev.MAX_JSON_NODES + 1))
     assert ev._shallow({"a": [1, {"b": 2}], "c": "d"})
+
+
+def test_a_handoff_copying_multiline_receipt_stdout_is_not_independent(tmp_path):
+    root, parsed = setup(tmp_path)
+    lines = [f"tests/test_port.py::test_listener_case_{n:02d} PASSED in 0.{n:02d}s" for n in range(14)]
+    stdout = "\n".join(lines)
+    assert len(stdout.encode()) > 600 and max(len(line) for line in lines) < 200
+    payload, digest = receipt(stdout=stdout)
+    write(root, RECEIPT, json.dumps(payload, indent=2))
+    write(root, HANDOFF, "# Port check\n\nCopied from the run:\n\n" + stdout + "\n")
+    archive = Archive(records={("example", RUN): [record(digest)]})
+    [result] = run(card(RECEIPT, HANDOFF), parsed, archive)
+    assert result.abstain == "uncorroborated"
