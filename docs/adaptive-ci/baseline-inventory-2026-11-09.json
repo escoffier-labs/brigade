@@ -1,0 +1,13 @@
+{
+  "collected": 56878,
+  "collected_total": 56878,
+  "commit": "3510da921d64d1c0f5a531ec5eb8347a125e784d",
+  "generated_at": "2026-11-09T15:18:42Z",
+  "loc_definition": "physical lines of every .py file under tests/ and src/brigade/",
+  "schema_version": 1,
+  "src_loc": 429182,
+  "test_defs": 19501,
+  "test_files": 830,
+  "test_loc": 534657,
+  "test_to_src_loc_ratio": 1.246
+}
