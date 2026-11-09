@@ -17,9 +17,9 @@
   transient attach error is retried instead of treated as final, and a
   duplicate pending reply publishes a packet only when the hub lists its
   manifest as bound to that proposal.
-- An expired verify stage keeps its request id as a tombstone for 90 days, at
-  most 512 at a time, so identical ops are resent under the same id instead of
-  a new one.
+- An expired verify stage keeps its request id as a tombstone for 90 days, so
+  identical ops are resent under the same id instead of a new one. With 512
+  live tombstones the pass opens no new proposal until one ages out.
 - `[verify] enabled = false` now stops every verify run that would call a seat,
   scheduled runs included, with `verify_disabled` before any hub request.
 - A verify card whose earlier request may have opened an unnamed proposal is
@@ -27,3 +27,7 @@
   proposal. Corrections deferred by the per-run cap, the pending ceiling or a
   quota stop are checked again next run instead of waiting out a cooldown.
   `memory verify doctor` probes no seat while `[verify] enabled = false`.
+- A verify replay whose manifest is 23 hours old or more, or that the hub
+  refuses as unbindable, is checked afresh with a new manifest instead of being
+  cached as a final refusal. A full packet directory defers the card without
+  a cooldown.

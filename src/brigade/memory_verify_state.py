@@ -49,7 +49,8 @@ MAX_SUBMISSIONS = 4096
 # Verify keeps the digest of the full submitted ops, marks an id a duplicate reply named, and
 # keeps the request id of an expired stage as a tombstone keyed by that ops digest, with the
 # card's 32-hex fairness key (never its id) so the card is held while the tombstone lives.
-LEDGER_EXTRA = frozenset({"ops_sha256", "duplicate", "expired", "card"})
+# `unsettled` marks a request sent without a definite answer from the hub yet.
+LEDGER_EXTRA = frozenset({"ops_sha256", "duplicate", "expired", "card", "unsettled"})
 SCOPE_KEYS = frozenset({"since_day", "never_read", "counts_ms", "cards"})
 CARD_KEYS = frozenset({"seen", "proposed", "verified", "revision", "evidence", "verdict", "pending", "reads"})
 

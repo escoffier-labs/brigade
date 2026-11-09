@@ -654,7 +654,13 @@ def test_a_full_packet_directory_defers_the_card_before_any_hub_write(verify_hub
     target, hub, _, _ = verify_hub
     monkeypatch.setattr(pk, "PACKET_CAP", 64)
     status, report = verify(target, capsys)
-    assert status == 0 and report["skipped"]["verify_packet_cap"] == 1 and writes(hub) == []
+    assert status == 0 and report["skipped"][run_mod.DEFERRED_PACKET_CAP] == 1 and writes(hub) == []
+    assert "verified" not in entry_for(target, CARD_ID) and packets(target) == []
+    # With room again, the next run checks the card again and proposes it.
+    monkeypatch.setattr(pk, "PACKET_CAP", 64 * 1024 * 1024)
+    status, report = verify(target, capsys)
+    assert CARD_ID in {card["card_id"] for card in report["cards"]}
+    assert [item["card_id"] for item in report["proposals"]] == [CARD_ID]
 
 
 # --- Atomic publication, staging and replay -------------------------------------------------
@@ -786,8 +792,9 @@ def test_the_temporary_file_is_owner_only_inside_the_packet_directory(verify_hub
 
     monkeypatch.setattr(pk, "write_all", observe)
     assert verify(target, capsys)[0] == 0
-    # The stage, then the packet: each through its own temporary file in the packet directory.
-    assert len(seen) == 2 and set(seen) == {(target / pk.PACKETS, 0o600)}
+    # The stage, the stage again with its attach time, then the packet: each through its own
+    # temporary file in the packet directory.
+    assert len(seen) == 3 and set(seen) == {(target / pk.PACKETS, 0o600)}
     assert not list(target.rglob(".packet-*.tmp"))
 
 
@@ -939,27 +946,147 @@ def test_identical_ops_after_an_expired_stage_reuse_the_same_request_id(verify_h
     assert pending["client_event_id"] == first["client_event_id"] and "expired" not in pending
 
 
-def test_tombstones_are_bounded_by_age_and_count(verify_hub, monkeypatch):
-    target, hub, _, _ = verify_hub
-    now = int(time.time() * 1000)
-    run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
-    ages = [run_mod.TOMBSTONE_DAYS * DAY, run_mod.TOMBSTONE_DAYS * DAY - DAY, 3 * DAY, 2 * DAY, DAY]
+def tombstones(target, count, now, *, aged=0):
+    """`count` live tombstones for cards that are not live, the first `aged` of them past the age-out."""
     state = state_of(target)
-    for index, age in enumerate(ages):
+    for index in range(count):
+        age = run_mod.TOMBSTONE_DAYS * DAY if index < aged else DAY
         key = f"{index:064x}"
         state["submissions"][key] = {
             "client_event_id": hubc.event_id(now - age),
             "ops_sha256": key,
             "expired": True,
+            "card": f"{index:032x}",
         }
     vstate.save(target, state)
+
+
+def test_tombstones_age_out_after_90_days_and_never_earlier(verify_hub, monkeypatch):
+    target, hub, _, _ = verify_hub
+    now = int(time.time() * 1000)
     run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
-    # Under the cap, only the request 90 days old ages out.
-    assert sorted(state_of(target)["submissions"]) == [f"{index:064x}" for index in range(1, 5)]
-    # Over the cap, the oldest go first and the youngest stay.
+    tombstones(target, 4, now, aged=1)
     monkeypatch.setattr(run_mod, "MAX_TOMBSTONES", 2)
     run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
-    assert sorted(state_of(target)["submissions"]) == [f"{3:064x}", f"{4:064x}"]
+    # Only the one past 90 days goes. Being over the cap never drops a live hold.
+    assert sorted(state_of(target)["submissions"]) == [f"{index:064x}" for index in range(1, 4)]
+
+
+def test_at_the_tombstone_cap_no_proposal_opens_and_every_hold_stays(verify_hub, capsys, resolver):
+    target, hub, _, _ = verify_hub
+    hub.propose_reply = (429, {"code": "memory_proposal_scope_quota", "error": "quota"})
+    assert verify(target, capsys)[0] == 0  # Binds the state to this hub without opening anything.
+    hub.propose_reply = None
+    state = state_of(target)
+    state["submissions"] = {}
+    for entry in state["scopes"][SCOPE]["cards"].values():
+        entry.pop("verified", None)
+    vstate.save(target, state)
+    now = int(time.time() * 1000)
+    tombstones(target, run_mod.MAX_TOMBSTONES, now)
+    hub.calls.clear()
+    status, report = verify(target, capsys)
+    assert status == 0 and report["proposals"] == [] and writes(hub) == []
+    assert report["skipped"][run_mod.DEFERRED_TOMBSTONES] == 1
+    held = [entry for entry in state_of(target)["submissions"].values() if entry.get("expired")]
+    assert len(held) == run_mod.MAX_TOMBSTONES
+    assert "verified" not in entry_for(target, CARD_ID)  # Deferred, so no cooldown.
+
+
+def test_a_tombstone_that_ages_out_frees_a_slot_for_a_proposal(verify_hub, capsys, resolver):
+    target, hub, _, _ = verify_hub
+    now = int(time.time() * 1000)
+    run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    state = state_of(target)
+    state["submissions"] = {}
+    for entry in state["scopes"][SCOPE]["cards"].values():
+        entry.pop("verified", None)
+        entry.pop("pending", None)
+    vstate.save(target, state)
+    tombstones(target, run_mod.MAX_TOMBSTONES, now, aged=1)
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    assert [item["card_id"] for item in report["proposals"]] == [CARD_ID]
+    held = [entry for entry in state_of(target)["submissions"].values() if entry.get("expired")]
+    assert len(held) == run_mod.MAX_TOMBSTONES - 1
+
+
+def quota_then(target, hub, now):
+    """A quota-stopped submission at `now`: its stage and request id wait for a replay."""
+    hub.propose_reply = (429, {"code": "memory_proposal_scope_quota", "error": "quota"})
+    run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    hub.propose_reply = None
+    (first,) = [call for call in hub.calls if call["action"] == "propose"]
+    (staged,) = packets(target)
+    assert json.loads((target / pk.PACKETS / staged).read_bytes())["attached_ms"] == now
+    return first
+
+
+def test_a_replay_past_the_manifest_window_is_recomputed_not_refused(verify_hub, resolver):
+    target, hub, _, _ = verify_hub
+    now = int(time.time() * 1000) - 2 * DAY
+    first = quota_then(target, hub, now)
+    report = run_mod.run_payload(
+        target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now + 25 * 3600_000
+    )
+    assert report["skipped"][run_mod.MANIFEST_EXPIRED] == 1
+    # The quota answer was definite, so no hold: the card is checked afresh and proposed under a new request.
+    (opened,) = report["proposals"]
+    assert opened["card_id"] == CARD_ID
+    last = [call for call in hub.calls if call["action"] == "propose"][-1]
+    assert last["client_event_id"] != first["client_event_id"]
+    assert last["ops"][-1]["evidence_ids"] != first["ops"][-1]["evidence_ids"]
+    assert not any(entry.get("refused") or entry.get("expired") for entry in state_of(target)["submissions"].values())
+
+
+def test_a_replay_inside_the_manifest_window_resends_the_same_request(verify_hub, resolver):
+    target, hub, _, _ = verify_hub
+    now = int(time.time() * 1000) - 2 * DAY
+    first = quota_then(target, hub, now)
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now + 3600_000)
+    assert run_mod.MANIFEST_EXPIRED not in report["skipped"]
+    (opened,) = report["proposals"]
+    last = [call for call in hub.calls if call["action"] == "propose"][-1]
+    assert (last["client_event_id"], last["ops"]) == (first["client_event_id"], first["ops"])
+
+
+def test_a_binding_refusal_on_replay_is_not_cached_as_final(verify_hub, resolver):
+    target, hub, _, _ = verify_hub
+    now = int(time.time() * 1000) - 2 * DAY
+    first = quota_then(target, hub, now)
+    original = hub.do_propose
+    answers = [(422, {"code": run_mod.BINDING_INVALID, "error": "manifest is not pending and unbound"})]
+
+    def binding_refused_once(body):
+        return answers.pop() if answers else original(body)
+
+    hub.do_propose = binding_refused_once
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now + 3600_000)
+    assert report["skipped"][run_mod.MANIFEST_EXPIRED] == 1
+    assert [item["card_id"] for item in report["proposals"]] == [CARD_ID]
+    last = [call for call in hub.calls if call["action"] == "propose"][-1]
+    assert last["client_event_id"] != first["client_event_id"]
+    assert not any(entry.get("refused") for entry in state_of(target)["submissions"].values())
+
+
+def test_a_stale_manifest_after_a_lost_reply_keeps_the_card_held(verify_hub, resolver):
+    target, hub, _, _ = verify_hub
+    now = int(time.time() * 1000) - 2 * DAY
+    hub.propose_reply = (503, {})
+    report = run_mod.run_payload(target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now)
+    assert report["code"] == "hub_unavailable"
+    (pending,) = state_of(target)["submissions"].values()
+    assert pending["unsettled"] is True
+    hub.propose_reply = None
+    proposes = sum(1 for call in hub.calls if call["action"] == "propose")
+    report = run_mod.run_payload(
+        target=target, dry_run=False, list_ids=False, scheduled=False, now_ms=now + 25 * 3600_000
+    )
+    assert report["skipped"][run_mod.MANIFEST_EXPIRED] == 1
+    # The lost reply may have opened a proposal, so the request is a tombstone and the card stays held.
+    assert report["skipped"][run_mod.UNRESOLVED_REQUEST] == 1 and report["proposals"] == []
+    assert sum(1 for call in hub.calls if call["action"] == "propose") == proposes
+    ((tombstone),) = state_of(target)["submissions"].values()
+    assert tombstone["expired"] is True and tombstone["client_event_id"] == pending["client_event_id"]
 
 
 def test_a_stage_with_an_altered_append_evidence_op_is_refused(verify_hub, capsys, resolver):

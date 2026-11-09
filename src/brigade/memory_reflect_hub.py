@@ -77,6 +77,7 @@ LEDGER_FIELDS = {
     "duplicate": lambda value: value is True,
     "expired": lambda value: value is True,
     "card": lambda value: isinstance(value, str) and CLUSTER_KEY.fullmatch(value) is not None,
+    "unsettled": lambda value: value is True,
 }
 
 

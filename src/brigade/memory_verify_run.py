@@ -53,7 +53,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -79,7 +79,7 @@ MAX_NEW_PROPOSALS = 4
 PENDING_CEILING = pick.PENDING_CEILING
 # proposal_show reads per run. The ceiling keeps remembered proposals far below this.
 MAX_SHOWS = 64
-# Request ids of expired stages, kept so identical ops are resent under the same id. The oldest go first.
+# Request ids of expired stages, kept until they age out. At the cap, the run opens no new proposal.
 TOMBSTONE_DAYS = 90
 MAX_TOMBSTONES = 512
 DAY_MS = pick.DAY_MS
@@ -310,24 +310,25 @@ def _remember(
     room = vstate.MAX_SUBMISSIONS - 4 * MAX_NEW_PROPOSALS
     for _, digest in settled[: max(0, len(submissions) - room)]:
         del submissions[digest]
-    evict_tombstones(submissions, now)
     return tables
 
 
 def evict_tombstones(submissions: dict[str, dict[str, Any]], now: int) -> int:
-    """Drop tombstones whose request is `TOMBSTONE_DAYS` old, then the oldest past `MAX_TOMBSTONES`."""
-    tombstones = sorted(
-        (pending["client_event_id"], key) for key, pending in submissions.items() if pending.get("expired")
-    )
-    keep = []
-    for minted, key in tombstones:
-        if now - (hubc.event_id_ms(minted) or 0) >= TOMBSTONE_DAYS * DAY_MS:
+    """Drop tombstones whose request is `TOMBSTONE_DAYS` old. Returns the number still live.
+
+    A live tombstone holds its card, so it is never dropped early. When
+    `MAX_TOMBSTONES` are live, the run opens no new proposal instead
+    (`verify_deferred_tombstones`), which keeps their number bounded.
+    """
+    live = 0
+    for key, pending in list(submissions.items()):
+        if not pending.get("expired"):
+            continue
+        if now - (hubc.event_id_ms(pending["client_event_id"]) or 0) >= TOMBSTONE_DAYS * DAY_MS:
             del submissions[key]
         else:
-            keep.append(key)
-    for key in keep[: max(0, len(keep) - MAX_TOMBSTONES)]:
-        del submissions[key]
-    return len(tombstones) - min(len(keep), MAX_TOMBSTONES)
+            live += 1
+    return live
 
 
 def _held_cards(state: dict[str, Any]) -> frozenset[str]:
@@ -573,7 +574,7 @@ def _attach(client: hubc.MemoryHubClient, staged: packets.Stage, observed: int) 
         if exc.denies_access:
             raise
         if exc.status == 409 and exc.code == EVIDENCE_CONFLICT:
-            return None  # The id is the manifest's digest, so the same manifest is already attached.
+            return ALREADY_ATTACHED  # The id is the manifest's digest, so this manifest is on the hub.
         if exc.status == 429 and exc.code in hubc.EVIDENCE_QUOTA_REFUSALS:
             return "evidence_quota"
         if exc.code in EVIDENCE_CAPS:
@@ -596,8 +597,13 @@ OPENED, DUPLICATE, REFUSED, UNRESOLVED, DROPPED = "opened", "duplicate", "refuse
 DEFERRED = "deferred"
 DEFERRED_CAP = "verify_deferred_cap"
 DEFERRED_QUOTA = "verify_deferred_quota"
+DEFERRED_TOMBSTONES = "verify_deferred_tombstones"
+DEFERRED_PACKET_CAP = "verify_deferred_packet_cap"
+MANIFEST_EXPIRED = "verify_manifest_expired"
+BINDING_INVALID = "memory_manifest_binding_invalid"
 MANIFEST_REFUSED = "verify_manifest_refused"
 MANIFEST_TRANSIENT = "manifest_transient"
+ALREADY_ATTACHED = "already_attached"
 # Durable card reasons, kept as the card's verdict code in the state file.
 PACKET_UNBOUND = "verify_packet_unbound"
 STAGE_EXPIRED = "verify_stage_expired"
@@ -624,6 +630,8 @@ class Sender:
     # Scopes bound in `[[verify.workspace]]` and readable by the hub settings, right now.
     bound: frozenset[str] = frozenset()
     reasons: dict[tuple[str, str], str] = field(default_factory=dict)
+    # MAX_TOMBSTONES live tombstones: no new proposal opens until one ages out.
+    tombstones_full: bool = False
 
     @property
     def ledger(self) -> dict[str, dict[str, Any]]:
@@ -704,6 +712,32 @@ class Sender:
         self.record(staged, PACKET_UNBOUND, eligible=False)
         return DUPLICATE
 
+    def bury(self, staged: packets.Stage, current: dict[str, Any]) -> None:
+        """Replace a request's ledger entry with a tombstone that holds its card."""
+        del self.ledger[staged.digest]
+        ops = current.get("ops_sha256")
+        if ops is not None and not current.get("refused"):
+            self.ledger[ops] = {
+                "client_event_id": current["client_event_id"],
+                "ops_sha256": ops,
+                "expired": True,
+                "card": fairness.key_digest(staged.scope, [staged.card_id]),
+            }
+
+    def manifest_expired(self, staged: packets.Stage, current: dict[str, Any]) -> str:
+        """Retire a submission whose manifest the hub will no longer bind, so the card is checked afresh.
+
+        A request the hub definitely answered without opening is forgotten. One
+        whose answer may have been lost becomes a tombstone, which keeps the card's hold.
+        """
+        packets.drop(self.target, staged)
+        if current.get("unsettled"):
+            self.bury(staged, current)
+        else:
+            del self.ledger[staged.digest]
+        self.record(staged, MANIFEST_EXPIRED, eligible=True)
+        return DROPPED
+
     def send(self, staged: packets.Stage, *, replay: bool) -> str:
         """Attach the staged manifest and submit the staged ops through the request id ledger.
 
@@ -734,6 +768,8 @@ class Sender:
         if remembered.get("refused"):
             packets.drop(self.target, staged)
             return REFUSED
+        if replay and staged.manifest_stale(self.now):
+            return self.manifest_expired(staged, remembered)
         hold = (
             tally.stop
             if tally.stop is not None
@@ -747,6 +783,14 @@ class Sender:
             tally.skip(hold)
             return UNRESOLVED
         blocked = _attach(self.client, staged, self.observed)
+        if blocked == ALREADY_ATTACHED or (blocked is None and staged.attached_ms is None):
+            if staged.attached_ms is None:
+                # A fresh attach starts the hub's unbound clock now. One already on the hub started
+                # it after the stage was written, so the stage's creation time is the safe bound.
+                attached = self.now if blocked is None else staged.created_ms
+                staged = replace(staged, attached_ms=attached)
+                packets.stage(self.target, staged)
+            blocked = None
         if blocked is not None:
             tally.skip(blocked)
             if blocked == "evidence_quota":
@@ -760,6 +804,10 @@ class Sender:
             self.save()
             packets.drop(self.target, staged)
             return REFUSED
+        # Unsettled until the hub answers this request id definitely, so a lost reply is never
+        # mistaken for a refusal.
+        remembered["unsettled"] = True
+        self.save()
         sent = ledger.submit(
             self.client,
             self.ledger,
@@ -767,8 +815,12 @@ class Sender:
             list(staged.ops),
             base_epoch=self.epoch,
             save=self.save,
-            fields={"ops_sha256": staged.ops_sha256},
+            fields={"ops_sha256": staged.ops_sha256, "unsettled": True},
         )
+        current = self.ledger.get(staged.digest)
+        if current is not None and sent.outcome != ledger.UNAVAILABLE:
+            current.pop("unsettled", None)
+            self.save()
         tally.refused.extend({"card_id": staged.card_id, "code": code} for code in sent.refusals)
         if sent.outcome == ledger.QUOTA:
             tally.stop = "proposal_quota"
@@ -776,6 +828,10 @@ class Sender:
             return UNRESOLVED
         if sent.outcome in (ledger.DENIED, ledger.UNAVAILABLE):
             raise VerifyRunError(sent.code or "hub_unavailable", "hub refused the verify request")
+        if replay and sent.outcome == ledger.FAILED and sent.code == BINDING_INVALID and current is not None:
+            # The manifest aged past the hub's unbound lifetime: not a verdict on the correction.
+            current.pop("refused", None)
+            return self.manifest_expired(staged, current)
         tally.attempted += 1
         if sent.outcome == ledger.FAILED:
             tally.failed += 1
@@ -825,15 +881,7 @@ class Sender:
                 if current is not None and not current.get("proposal_id"):
                     # The hub may hold this request even though no reply arrived. Keep its id as a
                     # tombstone, keyed by the full ops digest, so identical ops are resent under it.
-                    del self.ledger[staged.digest]
-                    ops = current.get("ops_sha256")
-                    if ops is not None and not current.get("refused"):
-                        self.ledger[ops] = {
-                            "client_event_id": current["client_event_id"],
-                            "ops_sha256": ops,
-                            "expired": True,
-                            "card": fairness.key_digest(staged.scope, [staged.card_id]),
-                        }
+                    self.bury(staged, current)
                 self.record(staged, STAGE_EXPIRED, eligible=True)
                 continue
             if self.send(staged, replay=True) == UNRESOLVED:
@@ -858,8 +906,10 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
     tally.skip("proposal_show_failed", unread)
     tables: dict[str, dict[str, dict[str, Any]]] = {}
     unresolved: set[tuple[str, str]] = set()
+    tombstones = sum(1 for pending in state.get("submissions", {}).values() if pending.get("expired"))
     if not dry_run:
         tables = _remember(state, picked, updates, now)
+        tombstones = evict_tombstones(state.setdefault("submissions", {}), now)
         vstate.save(target, state)  # The one write that carries every complete read count snapshot.
     known = {key: entry for cards in tables.values() for key, entry in cards.items()} if not dry_run else picked.entries
     sender = Sender(
@@ -874,6 +924,7 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
         _pending_count(known),
         status["principal"],
         frozenset(scope for scope in settings.scopes() if scope in hub_settings.read_scopes),
+        tombstones_full=tombstones >= MAX_TOMBSTONES,
     )
     if not dry_run:
         unresolved = sender.reconcile()
@@ -1015,6 +1066,10 @@ def _propose(
     if tally.stop is not None:
         tally.skip(DEFERRED_QUOTA)
         return DEFERRED
+    if sender.tombstones_full:
+        # Fail closed: a new request could become one more tombstone, and live ones are never dropped.
+        tally.skip(DEFERRED_TOMBSTONES)
+        return DEFERRED
     if len(tally.proposals) >= MAX_NEW_PROPOSALS or sender.pending >= PENDING_CEILING:
         tally.skip(DEFERRED_CAP)
         return DEFERRED
@@ -1040,8 +1095,8 @@ def _propose(
     record = staged.record()
     # The stage and, later, the packet it publishes both take room until the stage is removed.
     if not packets.room(sender.target, len(record) + len(shown.packet)):
-        tally.skip("verify_packet_cap")
-        return None
+        tally.skip(DEFERRED_PACKET_CAP)
+        return DEFERRED
     # Publish the request id and the digest of the full ops before anything is sent, so a
     # transient failure from here on leaves a request the next run can replay exactly.
     current = sender.ledger.get(digest)

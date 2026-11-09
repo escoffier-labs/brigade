@@ -2550,7 +2550,7 @@ card, evidence or model text, and it is scanned before attachment
 | `evidence_cap` | The card already holds the most manifests this principal may attach to it |
 | `duplicate_pending` | The hub already holds this proposal. Its id is remembered |
 | `already_proposed`, `refused` | The ledger already holds a proposal id or a final refusal for this correction |
-| `verify_packet_cap` | The packet directory has no room, so nothing was attached or proposed |
+| `verify_deferred_packet_cap` | The packet directory has no room, so nothing was staged, attached or proposed. The card stays out of its cooldown |
 | `seat_quota`, `seat_quota_deferred` | A seat answered a rate limit. The run stops verifying without a failure |
 | `seat_timeout`, `seat_failed` | One call failed. The card is skipped and not marked verified |
 | `verify_deferred_time` | The 20-minute wall clock ran out before this card |
@@ -2565,8 +2565,10 @@ card, evidence or model text, and it is scanned before attachment
 | `verify_stage_ops_mismatch` | A stage's ops no longer hash to the digest the request id ledger keeps. Nothing is sent, the request is closed and no new id is minted |
 | `verify_scope_unbound` | A stage's scope is no longer bound in `[[verify.workspace]]` or readable. Nothing is sent to it and the request is closed |
 | `verify_stage_expired` | A stage without a result reached its 7-day limit. It is deleted, its request id is kept as a tombstone and the card is eligible again |
+| `verify_manifest_expired` | A replay's manifest was attached 23 hours ago or more, or the hub answered `memory_manifest_binding_invalid`. The hub binds a verifier manifest only within 24 hours of attaching it, so the stage is discarded and the card stays eligible for a fresh check. A request the hub definitely refused is forgotten, and one whose reply may have been lost becomes a tombstone |
 | `request_id_reused` | A submission's ops matched a tombstone, so it was sent under the expired request's id |
 | `verify_unresolved_request` | The card has a live tombstone, so it is not selected and no new correction is proposed for it |
+| `verify_deferred_tombstones` | 512 tombstones are live, so no new proposal opens until one ages out. The card stays out of its cooldown |
 | `verify_deferred_cap`, `verify_deferred_quota` | The card's correction was not submitted because of the per-run cap or the pending ceiling, or after a quota stop. Nothing is staged and the card stays out of its cooldown, so the next run checks it again |
 | `proposal_show_failed` | A remembered proposal could not be read. It still counts as open this run |
 
@@ -2616,6 +2618,17 @@ manifests only to a caller with `review` on every target, so a verifier
 principal holding `read`, `reflect` and `read_stats` always records
 `verify_packet_unbound` instead.
 
+Each stage records when its manifest first reached the hub. The hub binds a
+verifier manifest only within 24 hours of attaching it, so a replay stops at
+23 hours (`MANIFEST_WINDOW_MS` in `memory_verify_packets`, derived from the
+hub's 24-hour constant). It discards the stage and records
+`verify_manifest_expired`, and a later check builds a new manifest and
+request. A `memory_manifest_binding_invalid` refusal on a replay is treated
+the same way, never as a final refusal of the correction. The ledger marks a
+request `unsettled` from just before each `propose` until the hub answers it
+definitely. An unsettled request is kept as a tombstone, so its card stays
+held as described below.
+
 A stage holds card text, evidence, prompts and raw replies, so it expires.
 A stage whose submission still has no result 7 days after it was created is
 deleted and the card's verdict becomes `verify_stage_expired`, which makes the
@@ -2633,15 +2646,20 @@ client prevents that: while a tombstone lives, its card is not selected
 the tombstone may only resend exactly the tombstone's ops under its request
 id (`request_id_reused`), so the hub's idempotency answers with the original
 proposal if that request landed. Any other correction for the card is held
-with the same reason. Tombstones are kept for 90 days from the request's
-creation and at most 512 at a time, oldest evicted first. When a tombstone
-goes, its card can be selected and proposed again.
+with the same reason. A tombstone is kept for 90 days from the request's
+creation and never dropped earlier, because dropping it would reopen the
+duplicate window for its card. When a tombstone goes, its card can be
+selected and proposed again. At most 512 tombstones may be live. When 512 are
+live, the run fails closed: it opens no new proposal, records
+`verify_deferred_tombstones` for each card it would have proposed, and keeps
+those cards out of their cooldown, so they are checked again once a
+tombstone ages out. Replays of requests already in the ledger still run.
 
 When a run finds a packet's proposal no longer open, it renames the packet to
 `<proposal-id>.t<ms>.json` with the time it noticed, and a later run deletes it
 14 days after that. The directory holds at most 64 MiB. A new packet first
 displaces the oldest terminal packets, never an open one. When there is still
-no room, the card is deferred with `verify_packet_cap` before anything is
+no room, the card is deferred with `verify_deferred_packet_cap` before anything is
 attached.
 
 ### Scheduling

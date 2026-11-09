@@ -52,6 +52,10 @@ PACKET_CAP = 64 * 1024 * 1024
 PACKET_DAYS = 14
 # A stage whose submission has no result is deleted this long after it was created.
 STAGE_DAYS = 7
+# The hub refuses to bind a verifier manifest left unbound for 24 hours (UNBOUND_MS in
+# engines/hub/src/memory/manifest_binding.rs). A replay stops an hour short of that.
+HUB_UNBOUND_MS = 24 * 3600 * 1000
+MANIFEST_WINDOW_MS = HUB_UNBOUND_MS - 3600 * 1000
 DAY_MS = pick.DAY_MS
 STAGE_SCHEMA = "brigade.memory-verify-stage.v1"
 WORKSPACE_ID = "memory-verify"
@@ -61,7 +65,19 @@ DONE_PACKET = re.compile(r"([0-9A-HJKMNP-TV-Z]{26})\.t([0-9]{1,16})\.json")
 STAGED = re.compile(r"staged-([0-9a-f]{64})\.json")
 TEMPORARY = re.compile(r"\.packet-[0-9a-f]{32}\.tmp")
 STAGE_KEYS = frozenset(
-    {"schema", "digest", "scope", "card_id", "evidence_id", "stance", "manifest", "packet", "ops", "created_ms"}
+    {
+        "schema",
+        "digest",
+        "scope",
+        "card_id",
+        "evidence_id",
+        "stance",
+        "manifest",
+        "packet",
+        "ops",
+        "created_ms",
+        "attached_ms",
+    }
 )
 
 
@@ -154,6 +170,8 @@ class Stage:
     packet: bytes = field(repr=False)
     ops: tuple[dict[str, Any], ...] = field(repr=False)
     created_ms: int = 0
+    # When the hub first held this manifest, or None before any attach succeeded.
+    attached_ms: int | None = None
 
     @property
     def name(self) -> str:
@@ -171,6 +189,10 @@ class Stage:
     def expired(self, now: int) -> bool:
         return now - self.created_ms >= STAGE_DAYS * DAY_MS
 
+    def manifest_stale(self, now: int) -> bool:
+        """The attached manifest is too old for the hub to bind it to a proposal."""
+        return self.attached_ms is not None and now - self.attached_ms >= MANIFEST_WINDOW_MS
+
     def record(self) -> bytes:
         return io.json_bytes(
             {
@@ -184,6 +206,7 @@ class Stage:
                 "packet": base64.b64encode(self.packet).decode("ascii"),
                 "ops": list(self.ops),
                 "created_ms": self.created_ms,
+                "attached_ms": self.attached_ms,
             }
         )
 
@@ -228,10 +251,20 @@ def parse(data: bytes, digest: str, submission_digest: Any) -> Stage | None:
         or submission_digest(ops[:-1]) != digest
         or type(value["created_ms"]) is not int
         or value["created_ms"] < 0
+        or not (value["attached_ms"] is None or (type(value["attached_ms"]) is int and value["attached_ms"] >= 0))
     ):
         return None
     return Stage(
-        digest, scope, card_id, evidence_id, value["stance"], manifest, packet, tuple(ops), value["created_ms"]
+        digest,
+        scope,
+        card_id,
+        evidence_id,
+        value["stance"],
+        manifest,
+        packet,
+        tuple(ops),
+        value["created_ms"],
+        value["attached_ms"],
     )
 
 
