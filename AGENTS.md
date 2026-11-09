@@ -139,7 +139,9 @@ cannot get from the repo, git history or an existing card: a root cause, a
 decision with its reason, a new operational fact, or a stated preference. Run
 `brigade memory search` first and update that card where one exists. Write it
 with `brigade handoff draft` (format in `.claude/memory-handoffs/TEMPLATE.md`).
-If nothing qualifies, end with one line, `Nothing durable: <reason>`, and write
+It is the supported writer: it publishes atomically (private temp, fsync,
+no-replace rename), and a writer that bypasses it must do the same
+(`docs/handoff-promotion.md`). If nothing qualifies, end with one line, `Nothing durable: <reason>`, and write
 no file. A code or config edit alone is not a reason.
 
 ## Cursor Cloud specific instructions

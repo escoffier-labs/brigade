@@ -8,7 +8,6 @@ import hashlib
 import os
 import re
 import sys
-import tempfile
 import time
 import shutil
 from dataclasses import dataclass
@@ -28,6 +27,7 @@ from ..handoff_ingest_rules import (
 from ..localio import write_json as _write_json
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
+from .. import handoff_publish as _publish_mod
 from . import issue_ops as _issue_ops_mod
 from . import linting as _linting_mod
 from . import sources as _sources_mod
@@ -879,44 +879,14 @@ def build_draft(
     if not preflight.valid:
         raise HandoffDraftRefused(list(preflight.errors))
     inbox_path.mkdir(parents=True, exist_ok=True)
-    if force:
-        # Overwrite by writing a private temp file and renaming it over the draft.
-        # A rename replaces a symlink at the destination instead of following it,
-        # so this stays no-follow and atomic even where O_NOFOLLOW is missing.
-        if path.is_symlink():
-            raise ValueError(f"handoff draft path is a symlink: {path}")
-        fd, tmp_name = tempfile.mkstemp(dir=inbox_path, prefix=f".{path.name}.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(text)
-            os.replace(tmp_name, path)
-        except BaseException:
-            Path(tmp_name).unlink(missing_ok=True)
-            raise
-    else:
-        if hasattr(os, "O_NOFOLLOW"):
-            # Exclusive no-follow create: never truncate a file or follow a planted symlink.
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-            try:
-                fd = os.open(path, flags, 0o600)
-            except FileExistsError as exc:
-                raise ValueError(f"handoff draft already exists: {path}") from exc
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(text)
-        else:
-            # Without O_NOFOLLOW (Windows), O_EXCL can follow a dangling symlink. Hard-link a
-            # private temp file into place instead: a link never follows the destination and
-            # fails on any existing entry, symlinks included.
-            fd, tmp_name = tempfile.mkstemp(dir=inbox_path, prefix=f".{path.name}.", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                    handle.write(text)
-                try:
-                    os.link(tmp_name, path)
-                except FileExistsError as exc:
-                    raise ValueError(f"handoff draft already exists: {path}") from exc
-            finally:
-                Path(tmp_name).unlink(missing_ok=True)
+    if force and path.is_symlink():
+        raise ValueError(f"handoff draft path is a symlink: {path}")
+    # Publish atomically: a private temp in the inbox, fsync, then a no-replace rename, so a
+    # reader or a worktree rescue never sees a half-written `*.md` and never holds a stale handle.
+    try:
+        _publish_mod.publish_handoff(inbox_path, path.name, text, replace=force)
+    except _publish_mod.HandoffNameTaken as exc:
+        raise ValueError(str(exc)) from exc
     lint_result = _linting_mod.lint_file(path, workspace=workspace_root)
     guard_result = _linting_mod._guard_handoff_path(path, target=target, policy=guard_policy) if guard else None
     return {
