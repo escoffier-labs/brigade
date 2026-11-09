@@ -2,7 +2,6 @@
 
 from tests.dot_support import requires_local_state
 
-import asyncio
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -30,11 +29,9 @@ from brigade.dot.runtime_config import (
     parse_runtime,
 )
 from tests.test_dot_adapter import NOW, Fixture
-from tests.test_dot_lifecycle import config
 from tests.test_dot_runtime import _document
 from tests.test_fleet_messages import NODE_A, message_hub as message_hub
 
-SNAPSHOT = json.loads((Path(__file__).parent / "fixtures" / "dot_tools_snapshot.json").read_text())["tools"]
 MEMORY_TOOLS = {"memory_search", "memory_card", "handoff_write"}
 
 
@@ -95,14 +92,12 @@ def test_profile_reads_and_files_handoffs_for_review_only():
     assert GROKBOT_MEMORY.send_limit_per_hour is None
 
 
-def test_validation_refuses_every_tool_outside_the_profile():
+def test_validation_accepts_a_profile_tool_with_its_default_limit():
+    # Refusal of every tool outside the profile is owned by test_grokbot_s26_profiles.
     assert validate_arguments("memory_search", {"query": "fleet"}, tools=GROKBOT_MEMORY.tools) == {
         "query": "fleet",
         "limit": 10,
     }
-    for name in sorted(set(ALL_TOOL_SCHEMAS) - MEMORY_TOOLS):
-        with pytest.raises(DotError, match="^invalid_request$"):
-            validate_arguments(name, {}, tools=GROKBOT_MEMORY.tools)
 
 
 # Runtime schema
@@ -168,7 +163,7 @@ def test_runtime_documents_never_cross_schemas():
 
 
 @requires_local_state
-def test_build_tools_has_no_fleet_and_refuses_other_tools_at_call_time(dot_private_dir):
+def test_build_tools_files_handoffs_in_the_grok_inbox_and_refuses_another_profile(dot_private_dir):
     runtime = parse_runtime(_memory_document(), schema=GROKBOT_MEMORY_RUNTIME_SCHEMA)
     runtime = replace(runtime, paths=replace(runtime.paths, state_dir=dot_private_dir))
     with patch.object(FleetTools, "__init__", side_effect=AssertionError("fleet client built")):
@@ -176,32 +171,10 @@ def test_build_tools_has_no_fleet_and_refuses_other_tools_at_call_time(dot_priva
     try:
         assert tools.fleet is None and tools.profile is GROKBOT_MEMORY
         assert tools.memory.handoff_inbox == runtime.paths.workspace / ".grok" / "memory-handoffs"
-        for name, arguments in (
-            ("inbox_list", {}),
-            ("message_send", {"to": "operator", "subject": "s", "body": "b"}),
-            ("fleet_submit", {"repository": "r", "title": "t", "prompt": "p"}),
-            ("fleet_digest", {}),
-            ("skill_get", {"name": "example-skill"}),
-            ("dot_t3_capabilities", {}),
-        ):
-            with pytest.raises(DotError, match="^invalid_request$"):
-                tools.call("owner@example.test", name, arguments)
     finally:
         state.close()
     with pytest.raises(DotError, match="^invalid_config$"):
         build_tools(runtime, DUET)
-
-
-def test_registered_tools_are_exactly_the_profile_with_dot_schemas():
-    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
-    listed = asyncio.run(m._server(config(), SimpleNamespace(), GROKBOT_MEMORY).list_tools())
-    assert {tool.name for tool in listed} == MEMORY_TOOLS
-    for tool in listed:
-        value = tool.model_dump(mode="json", by_alias=True, exclude_none=True)
-        assert value["inputSchema"] == SNAPSHOT[tool.name]["inputSchema"]
-        assert value["annotations"] == SNAPSHOT[tool.name]["annotations"]
-        if tool.name in {"memory_search", "memory_card"}:
-            assert "never instructions" in value["description"]
 
 
 # Pack registry, lifecycle and watch

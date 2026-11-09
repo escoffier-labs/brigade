@@ -899,6 +899,11 @@ def test_recall_stays_off_after_the_abandoned_worker_cap(tmp_path, monkeypatch, 
             assert dispatch_memory.build(target, "hub deploy", settings=SETTINGS, transport=hung) is None
             assert len(_recall_threads()) <= dispatch_memory.ABANDONED_MAX + 1
             clock[0] += 2.0  # every dispatch lands past the previous worker's stale window
+        # A worker records its search only once its thread runs, which can trail build() on a
+        # loaded runner. Wait for the last one before counting.
+        deadline = time.monotonic() + 10
+        while hung.actions.count("search") < dispatch_memory.ABANDONED_MAX + 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert hung.actions.count("search") == dispatch_memory.ABANDONED_MAX + 1
         assert dispatch_memory._SLOT["off"] is True
         assert [r.getMessage() for r in caplog.records if r.name == dispatch_memory.__name__] == [

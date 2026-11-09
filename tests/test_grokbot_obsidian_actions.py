@@ -14,6 +14,7 @@ from brigade.grokbot_obsidian.contracts import ERROR_MESSAGES, ObsidianError
 from brigade.grokbot_obsidian import store as store_mod
 from brigade.grokbot_obsidian.store import ObsidianActionStore, write_approval_file
 from brigade.grokbot_obsidian.tools import ObsidianTools
+from tests.test_grokbot_obsidian_adapters import ScriptedClient, _hit, _vault_file
 
 
 ACTION_ID = "a" * 32
@@ -405,43 +406,19 @@ def test_tools_filter_and_deny_allowed_paths_with_sensitive_tags(tmp_path: Path)
     tagged = "01 - Projects/secret.md"
     policy = {**POLICY, "sensitiveTags": ("private",)}
 
-    class TagAwareClient:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, object]] = []
-            self.files = {
-                allowed: {"content": "public note", "tags": [], "etag": "aaaaaa"},
-                tagged: {"content": "secret note", "tags": ["private"], "etag": "bbbbbb"},
-            }
-
-        def call_tool(self, name: str, arguments=None):
-            payload = arguments or {}
-            self.calls.append((name, payload))
-            if name == "search_simple":
-                return [
-                    {
-                        "filename": path,
-                        "score": 1.0,
-                        "matches": [
-                            {
-                                "match": {"start": 0, "end": 4, "source": "content"},
-                                "context": "note",
-                            }
-                        ],
-                    }
-                    for path in (allowed, tagged)
-                ]
-            if name == "vault_read" and payload.get("path") in self.files and set(payload) == {"path"}:
-                return self.files[payload["path"]]
-            if name == "vault_get_document_map":
-                return {"version": "aaaaaa"}
-            if name in {"vault_patch", "vault_move", "vault_delete"}:
-                return {"ok": True}
-            raise AssertionError(name)
-
-        def close(self) -> None:
-            return None
-
-    client = TagAwareClient()
+    client = ScriptedClient(
+        {
+            "search_simple": [_hit(allowed, "note"), _hit(tagged, "note")],
+            "vault_get_document_map": {"version": "aaaaaa"},
+            "vault_patch": {"ok": True},
+            "vault_move": {"ok": True},
+            "vault_delete": {"ok": True},
+        },
+        files={
+            allowed: _vault_file("public note", []),
+            tagged: _vault_file("secret note", ["private"], "bbbbbb"),
+        },
+    )
     tools = ObsidianTools(
         native=NativeMcpPort(client, policy=policy),
         policy=policy,
@@ -470,3 +447,7 @@ def test_tools_filter_and_deny_allowed_paths_with_sensitive_tags(tmp_path: Path)
     assert "vault_patch" not in {name for name, _ in client.calls}
     assert "vault_move" not in {name for name, _ in client.calls}
     assert "vault_delete" not in {name for name, _ in client.calls}
+    # ScriptedClient answers unknown vault_read paths with None; pin the read set
+    # so an out-of-scope read (such as a move destination) still fails here.
+    read_paths = {payload["path"] for name, payload in client.calls if name == "vault_read"}
+    assert read_paths <= {allowed, tagged}

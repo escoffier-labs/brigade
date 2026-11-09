@@ -55,16 +55,13 @@ The executable is resolved to its canonical path, opened without following
 links and hashed. Immediately before each launch it is resolved, opened and
 hashed again, and the call is refused when anything differs from the resolved
 seat. The verified descriptor stays open through process creation, and the
-child execs that open file (`proc.run_held`, Linux `/proc/self/fd`), so
-a rename or replacement after the check cannot put another binary in front
-of the prompt. Platforms without that mechanism (other POSIX systems) refuse
-every seat with `verify_seat_not_isolated`. Windows already refuses the work
-area. The held descriptor is moved to 3 or above before the launch, so it can
-never be the child's stdin, stdout or stderr. It survives the exec: the seat
-process and its children inherit one read-only descriptor to the seat
-executable. That residual is accepted for v1, because Python has no
-`execveat` and a `preexec_fn` is unsafe with threads, and Claude seats run
-with tools disabled.
+child execs that open file (`proc.run_held`, Linux `fexecve`), so a rename
+or replacement after the check cannot put another binary in front of the
+prompt. Platforms without that mechanism (other POSIX systems) refuse every
+seat with `verify_seat_not_isolated`. Windows already refuses the work area.
+The held descriptor is moved to 3 or above before the launch, so it can never
+be the child's stdin, stdout or stderr. It is marked close-on-exec right
+before the exec, so neither the seat process nor anything it starts keeps it.
 
 `memory verify doctor` probes each seat once. A pass needs a successful call
 whose observable evidence holds (above), an unchanged empty working directory,

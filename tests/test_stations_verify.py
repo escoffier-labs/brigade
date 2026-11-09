@@ -16,6 +16,10 @@ from tests._child_publish import PUBLISH_SOURCE, wait_for_text
 from brigade import cli, managed, stations_cmd
 
 
+# How long the timeout test's descendant would live if the runner failed to kill it.
+DESCENDANT_LIFETIME_SECONDS = 30
+
+
 def _write_executable(directory: Path, name: str, body: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
@@ -437,7 +441,7 @@ def test_timeout_kills_descendant_holding_pipe_and_sanitizes_payload(tmp_path, m
         f"""
 {PUBLISH_SOURCE}
 import pathlib, subprocess, sys
-child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep({DESCENDANT_LIFETIME_SECONDS})'])
 stat_fields = pathlib.Path(f'/proc/{{child.pid}}/stat').read_text().rsplit(')', 1)[1].split()
 publish({str(pid_file)!r}, f'{{child.pid}} {{stat_fields[19]}}')
 print('sensitive child output', flush=True)
@@ -445,29 +449,47 @@ raise SystemExit(0)
 """,
     )
     monkeypatch.setenv("PATH", f"{binary.parent}{os.pathsep}{os.environ.get('PATH', '')}")
-    _write_manifest(
-        tmp_path / "sidecar",
-        tool={
-            "name": "station-helper",
-            "command": "station-helper",
-            "surfaces": [_surface(command=["station-helper"], timeout_seconds=0.2)],
-        },
-    )
 
-    started = time.monotonic()
-    payload = stations_cmd.verify_payload(str(tmp_path / "sidecar"))
-    elapsed = time.monotonic() - started
+    # The probe timeout starts when the helper is spawned, and the helper is a
+    # fresh interpreter that must boot, start a second interpreter and publish
+    # before the timeout kills its whole process group. On a loaded runner a
+    # fixed 0.2s budget can expire first, so the descendant never exists and
+    # there is nothing to assert about (#2427). Start with the short budget and
+    # retry with a doubled one until the helper got far enough to publish. Each
+    # attempt must still time out and stay sanitized, so the timeout behavior
+    # under test is unchanged.
+    published = None
+    timeout_seconds = 0.2
+    for _attempt in range(7):
+        pid_file.unlink(missing_ok=True)
+        _write_manifest(
+            tmp_path / "sidecar",
+            tool={
+                "name": "station-helper",
+                "command": "station-helper",
+                "surfaces": [_surface(command=["station-helper"], timeout_seconds=timeout_seconds)],
+            },
+        )
 
-    result = payload["tools"][0]["surfaces"][0]
-    assert result["timed_out"] is True
-    assert result["overflowed"] is False
-    assert result["status"] == "timeout"
-    assert elapsed < 3
-    serialized = json.dumps(payload)
-    assert "sensitive child output" not in serialized
-    assert set(["exit_code", "duration_ms", "stdout_bytes", "stderr_bytes", "total_bytes"]) <= set(result)
-    published = wait_for_text(pid_file, timeout=5)
-    assert published is not None, "station child did not publish its PID"
+        started = time.monotonic()
+        payload = stations_cmd.verify_payload(str(tmp_path / "sidecar"))
+        elapsed = time.monotonic() - started
+
+        result = payload["tools"][0]["surfaces"][0]
+        assert result["timed_out"] is True
+        assert result["overflowed"] is False
+        assert result["status"] == "timeout"
+        # The descendant sleeps for DESCENDANT_LIFETIME_SECONDS and holds the
+        # pipe, so returning well before that shows the group was killed.
+        assert elapsed < DESCENDANT_LIFETIME_SECONDS / 2
+        serialized = json.dumps(payload)
+        assert "sensitive child output" not in serialized
+        assert set(["exit_code", "duration_ms", "stdout_bytes", "stderr_bytes", "total_bytes"]) <= set(result)
+        published = wait_for_text(pid_file, timeout=0.2)
+        if published is not None:
+            break
+        timeout_seconds *= 2
+    assert published is not None, "station child did not publish its PID within any timeout budget"
     child_pid_text, original_start_time = published.split()
     child_pid = int(child_pid_text)
     stat_path = Path(f"/proc/{child_pid}/stat")
@@ -492,8 +514,11 @@ raise SystemExit(0)
             return None
         return next(line.split()[1] for line in status.splitlines() if line.startswith("State:"))
 
+    # SIGKILL was already delivered when verify_payload returned. The descendant
+    # only needs CPU time to exit, which a loaded runner can delay, so poll for
+    # the exit with a deadline well under the descendant's own lifetime.
     state = "unknown"
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + DESCENDANT_LIFETIME_SECONDS / 6
     while time.monotonic() < deadline:
         state = original_process_state()
         if state is None or state == "Z":

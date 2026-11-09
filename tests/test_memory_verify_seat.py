@@ -483,8 +483,8 @@ def test_platforms_without_held_descriptor_exec_refuse_every_seat(target, monkey
     assert caught.value.code == "verify_seat_not_isolated"
 
 
-def _native_echo() -> str | None:
-    found = shutil.which("echo")
+def _native_program(name: str) -> str | None:
+    found = shutil.which(name)
     if found is None:
         return None
     real = os.path.realpath(found)
@@ -494,15 +494,15 @@ def _native_echo() -> str | None:
 
 @SAFE
 def test_a_binary_swapped_after_verification_never_receives_the_prompt(target, tmp_path, monkeypatch):
-    echo = _native_echo()
-    if echo is None:
-        pytest.skip("needs a native echo binary")
-    # The verified seat binary is a real native program that prints its arguments. Some runners
-    # ship echo as a single-utility build that requires argv[0] and its own file name (from
-    # /proc/self/exe) to both be "echo", so the seat binary is named echo.
-    seat_bin = tmp_path / "seat-bin" / "echo"
+    shell = _native_program("sh")
+    if shell is None:
+        pytest.skip("needs a native sh binary")
+    # The verified seat binary is a copy of the native shell, which prints its arguments below.
+    # It is not echo: some runners ship echo as a single-utility build that refuses to start
+    # unless the path it was executed by names echo, and a held exec goes through a descriptor.
+    seat_bin = tmp_path / "seat-bin" / "seat"
     seat_bin.parent.mkdir()
-    shutil.copyfile(echo, seat_bin)
+    shutil.copyfile(shell, seat_bin)
     seat_bin.chmod(0o700)
     monkeypatch.setattr(
         seats,
@@ -511,22 +511,20 @@ def test_a_binary_swapped_after_verification_never_receives_the_prompt(target, t
     )
     marker = tmp_path / "swapped-binary-ran"
     seat = seats.resolve(target, "verify-propose", "propose")
-    assert os.path.basename(seat.executable) == "echo"
+    assert os.path.basename(seat.executable) == "seat"
     seen = {}
 
     def swap_then_spawn(argv, held_fd, **kwargs):
         # After verification, before the spawn: the canonical path now names a different program.
-        # The verified file moves aside under its own name instead of being unlinked, because an
-        # unlinked file reads as "echo (deleted)" in /proc/self/exe and the name check would fail.
-        kept = tmp_path / "kept" / "echo"
+        kept = tmp_path / "kept" / "seat"
         kept.parent.mkdir()
         os.rename(seat_bin, kept)
         seat_bin.write_text(f"#!/bin/sh\ncat > /dev/null\ntouch {marker}\n", encoding="utf-8")
         seat_bin.chmod(0o700)
         assert os.path.realpath(seat.executable) == str(seat_bin)
         seen["fds"] = (held_fd,)
-        # argv[0] is only a display name, set to the program's own name for the same reason.
-        seen["result"] = proc.run_held(["echo", *argv[1:]], held_fd, **kwargs)
+        # The held shell prints the seat arguments, so the output shows which image ran.
+        seen["result"] = proc.run_held(["sh", "-c", 'echo "$@"', "sh", *argv[1:]], held_fd, **kwargs)
         return seen["result"]
 
     monkeypatch.setattr(seats, "LAUNCH", swap_then_spawn)
@@ -536,7 +534,7 @@ def test_a_binary_swapped_after_verification_never_receives_the_prompt(target, t
             with pytest.raises(OSError):
                 os.fstat(fd)
     assert not marker.exists()
-    # The held image ran: echo printed the profile flags. That is not stream-json, so the call fails.
+    # The held image ran: the shell printed the profile flags. That is not stream-json, so the call fails.
     assert seen["result"].code == 0 and "--safe-mode" in seen["result"].stdout, seen["result"].stderr[-500:]
     assert reply.status == "seat_failed"
     assert leftovers(target) == []
@@ -550,11 +548,12 @@ def test_run_held_refuses_a_descriptor_that_could_be_a_standard_stream():
 
 @SAFE
 def test_a_held_executable_opened_while_stdin_is_closed_still_runs_the_held_image(tmp_path):
-    echo = _native_echo()
-    if echo is None:
-        pytest.skip("needs a native echo binary")
-    held = tmp_path / "held-echo"
-    shutil.copyfile(echo, held)
+    shell = _native_program("sh")
+    if shell is None:
+        pytest.skip("needs a native sh binary")
+    # A shell, not echo: a single-utility echo refuses a held exec (see the swap test above).
+    held = tmp_path / "held-shell"
+    shutil.copyfile(shell, held)
     held.chmod(0o700)
     # A child with fd 0 closed: the open lands in slot 0 unless it is moved up.
     script = textwrap.dedent(
@@ -563,7 +562,7 @@ def test_a_held_executable_opened_while_stdin_is_closed_still_runs_the_held_imag
         from brigade import memory_verify_seat as seats, proc
         os.close(0)
         fd, canonical, identity = seats.open_executable({str(held)!r})
-        result = proc.run_held([canonical, "held-image-ran"], fd, timeout=30, stdin=b"")
+        result = proc.run_held([canonical, "-c", "echo held-image-ran"], fd, timeout=30, stdin=b"")
         os.close(fd)
         print(json.dumps({{"fd": fd, "code": result.code, "stdout": result.stdout}}))
         """

@@ -1882,7 +1882,11 @@ def _scanner_validate_import_output(
     return import_path, records, [f"{scanner.get('id')}: {error}" for error in errors]
 
 
-def _scanner_import_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
+def _scanner_import_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    # Directories leave out st_nlink: creating or removing any subdirectory changes it, so a sibling mkdir
+    # in a shared ancestor looked like a swapped component (#2417). Device and inode still catch a swap.
+    if stat.S_ISDIR(metadata.st_mode):
+        return metadata.st_dev, metadata.st_ino, metadata.st_mode
     return metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink
 
 

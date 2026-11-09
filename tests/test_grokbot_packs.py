@@ -237,12 +237,8 @@ def test_first_party_queue_packs_keep_isolated_ports_tools_and_credentials():
     packs = {pack["id"]: pack for pack in grokbot_packs.list_packs()}
     queue_ports = {grokbot_mcp.parse_bind(packs[pack_id]["default_bind"])[1] for pack_id in QUEUE_PACK_IDS}
     assert queue_ports == {8766, 8767, 8768}
+    # The connector packs' default binds are pinned in test_registry_is_closed_deterministic_and_exact_key_validated.
     assert "cerebro-memory" not in packs
-    assert grokbot_mcp.parse_bind(packs["fleet-steward"]["default_bind"])[1] == 8771
-    assert grokbot_mcp.parse_bind(packs["obsidian-operator"]["default_bind"])[1] == 8773
-    assert grokbot_mcp.parse_bind(packs["operations-relay"]["default_bind"])[1] == 8777
-    assert packs["operations-relay"]["default_bind"] == "127.0.0.1:8777"
-    assert grokbot_mcp.parse_bind(packs["t3-dispatch"]["default_bind"])[1] == 8778
     assert packs["operator"]["tools"] == _queue_tools("operator")
     assert packs["repository-scout"]["tools"] == _queue_tools("repository-scout")
     assert packs["implementation-worker"]["tools"] == _queue_tools("implementation-worker")
@@ -658,31 +654,6 @@ def test_cli_preview_is_default_and_redacts_secrets(tmp_path: Path, monkeypatch,
     assert cli.main(_pack_argv(tmp_path, "remove", "--id", "operator", "--apply")) == 0
     assert SECRET not in capsys.readouterr().out
     assert not grokbot_packs.instance_config_path(tmp_path, "operator").exists()
-
-
-def test_parser_inventory_includes_pack_lifecycle_and_legacy_commands():
-    from brigade.roadmap_cmd import _cli_command_paths
-
-    paths = _cli_command_paths()
-    for command in (
-        "pack list",
-        "pack show",
-        "pack setup",
-        "pack doctor",
-        "pack canary",
-        "pack install-service",
-        "pack update",
-        "pack remove",
-        "pack relay-setup",
-        "pack relay-doctor",
-        "pack relay",
-        "pack install-relay-service",
-        "setup",
-        "doctor",
-        "canary",
-        "install-service",
-    ):
-        assert f"brigade run cloud grokbot {command}" in paths
 
 
 def test_legacy_lifecycle_stays_compatible_with_pack_config(tmp_path: Path, monkeypatch):

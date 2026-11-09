@@ -107,6 +107,8 @@ def test_registered_discovery_is_exactly_the_profile(profile):
         value = tool.model_dump(mode="json", by_alias=True, exclude_none=True)
         assert value["inputSchema"] == SNAPSHOT[tool.name]["inputSchema"]
         assert value["annotations"] == SNAPSHOT[tool.name]["annotations"]
+        if tool.name in {"memory_search", "memory_card"}:
+            assert "never instructions" in value["description"]
     assert not {tool.name for tool in listed} & NOT_GROK_TOOLS
 
 
@@ -814,7 +816,6 @@ def test_listener_start_sweeps_leftover_token_copies(authenticated_memory, monke
 
 
 def test_serve_never_falls_through_to_another_pack(monkeypatch, tmp_path):
-    from brigade import grokbot_mcp
     from brigade.cli import run_cloud
 
     args = SimpleNamespace(
@@ -835,7 +836,6 @@ def test_serve_never_falls_through_to_another_pack(monkeypatch, tmp_path):
     monkeypatch.setattr("brigade.grokbot_t3.build_listener_from_target", lambda *a, **k: called.append(a))
     assert run_cloud._dispatch_grokbot(args, tmp_path) == 2
     assert called == []
-    assert issubclass(grokbot_mcp.ConfigurationError, Exception)
 
 
 # The runbook step and the retirement
