@@ -379,25 +379,56 @@ the reviewer decides whether it is true:
 
 1. Every quote must be an exact substring, 20 to 400 bytes long, of the
    evidence item it names.
-2. `contradicted`, `changed`, `superseded` and `history` need quotes from at
-   least two independently produced items. At least one of those quotes must
-   fall inside the authenticated fields of a receipt, and must carry field
-   values rather than only field names and JSON punctuation. Quotes from
-   command output or low-rank excerpts can add context but cannot meet this
-   rule.
-3. `changed` needs its quoting evidence to be newer than the head revision's
-   log time.
+2. Corroboration is about the claim, not only about two sources. For
+   `contradicted`, `changed` and `history`, the claim material is every
+   content word and value that the replacement or `previously` text adds to
+   the block. Both texts are compared after the normalization of rule 9 and
+   the canonical reading of rule 5, ignoring case and a short list of
+   function words. Negations are not on that list. Every material word must
+   appear in quotes from two independently produced items, and one of those
+   quotes must be an authenticated receipt quote that covers a whole factual
+   field holding that exact value. Empty material never corroborates.
+
+   The factual fields are an explicit allowlist: `commit` and
+   `baseline_commit`, which name the code state Brigade read from git, and
+   each command's `exit_code`, the observed outcome. Every other
+   authenticated field is excluded. `argv` is text the caller chose, so a
+   command such as `echo "the color is red"` would otherwise authenticate
+   any sentence. `status` and the start and end times read the same on
+   almost every receipt. `run_id`, `manifest_id` and `tree_fingerprint` are
+   Brigade's own bookkeeping and state nothing about a card's subject. Quotes
+   from command output or low-rank excerpts can add context but never hold
+   material. In v1 a correction can therefore change only values a receipt
+   authenticates, such as a commit id. Other corrections abstain with
+   `verify_uncorroborated` until a richer authenticated source exists, and
+   the D7 metrics measure that cost.
+
+   `superseded` has no claim text to bind, so it uses the source-level form:
+   an authenticated quote covering a whole factual field and one
+   independently produced countable item. The residual is that this form
+   cannot show the evidence concerns this card. The same-scope, live, newer
+   target rule (6), the single-block rule and the reviewer bound it.
+3. `changed` needs rule 2 to hold using only evidence newer than the head
+   revision's log time.
 4. A replacement or `previously` text must differ from the block, stay a
    single paragraph with no newline, carriage return or `^`, and be at most 1.5 times the block length plus 200 bytes,
    within the hub's 8,192-byte limit.
-5. Novelty check: every URL, path, host-like name, email address, code span,
-   command-line flag and number of three or more digits in a replacement or
-   `previously` text must appear in the original block, or in quotes from two
-   independently produced items that can meet rule 2. A token counts only
-   as a whole word or a whole code span, judged after NFKC folding, and
-   quotes from command output or excerpts never count. One planted handoff
-   therefore cannot introduce a token. A reply that adds one is rejected with
-   `verify_novel_token`.
+5. Novelty check: every URL, path, host-like name, IP address, email
+   address, code span, command-line flag and number of three or more digits
+   in a replacement or `previously` text must appear in the original block,
+   or in quotes from two independently produced items that can meet rule 2.
+   Tokens compare by their canonical reading: NFKC, then a fixed table that
+   maps dot, slash, backslash, at, colon and dash lookalikes (such as
+   U+3002, U+2024, U+2215 and U+29F8) to ASCII, then up to three rounds of
+   strict percent decoding (UTF-8 only) and HTML character references. Hosts,
+   addresses and emails compare without case. A word that still holds an
+   escape after the last round, or decodes to invalid UTF-8, has no
+   canonical reading and is rejected. So is a word with a non-ASCII
+   punctuation or symbol character between two letters or digits, which
+   catches lookalikes the table does not list. A token counts only as a
+   whole word or a whole code span, and quotes from command output or
+   excerpts never count. One planted handoff therefore cannot introduce a
+   token. A reply that adds one is rejected with `verify_novel_token`.
 6. `superseded_by` must be one of the related card ids supplied for that call,
    live, in the same scope and with a newer head revision. `superseded` may
    produce an op only for a card with exactly one claim block.
@@ -439,7 +470,7 @@ prove the evidence right, so every op still waits for a reviewer.
 | `changed` | `replace_block` with the replacement | Same op. The verdict is kept in the manifest so reviewers can tell a wrong claim from a stale one. |
 | `history` | `add_previously` with the `previously` text | The claim is current, but cited older evidence records a different earlier value a reader may meet. |
 | `superseded` | `supersede_card` with the related card as `other_card` | Single-claim-block cards only (check 6). The newer card already holds the corrected claim. A multi-block card abstains with `supersede_partial`. |
-| `supported` with uncited support | `append_evidence` | Only with `[verify] propose_confirmations = true`, default false. |
+| `supported` with uncited support | `append_evidence` | Only with `[verify] propose_confirmations = true`, default false. The whole claim must meet rule 2 as its material. A ref is cited only for an uncited countable item whose quote holds that material, and only when every source mapped to the ref is such an item, so command output and excerpts never become citations. |
 | `supported` otherwise | None | Recorded in local state as verified. |
 
 Each proposal names one card. Every correction proposal also carries an

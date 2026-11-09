@@ -25,12 +25,18 @@ reason code:
 
 1. Quotes are exact substrings of the item they name, 20 to 400 UTF-8 bytes,
    not blank (`verify_quote_invalid`).
-2. Corrections need quotes from two independently produced items, one inside
-   the authenticated fields of a receipt (`verify_uncorroborated`). The
+2. Corroboration is about the claim (`verify_uncorroborated`). The claim
+   material is every content word and value the replacement or `previously`
+   text adds to the block, after agreement normalization and canonical
+   folding. Each material word must sit in quotes from two independently
+   produced countable items, and one of them must be an authenticated
+   receipt whose quote covers a whole factual field (`commit`,
+   `baseline_commit` or a command's `exit_code`) with that value. The
    independence test is slice 6's `independent`, over its compare material,
-   which already holds the decoded strings of every rendered receipt. An
-   authenticated quote must carry field content, not only JSON keys and
-   punctuation, and command output or excerpts never meet the rule.
+   which already holds the decoded strings of every rendered receipt.
+   Command output, excerpts, argv, status and times never corroborate.
+   `superseded` has no claim text, so it needs the source-level form: a
+   factual-field quote and one independent countable item.
 3. `changed` meets check 2 with items observed after the head revision's log
    time (`verify_not_newer`).
 4. Replacement and `previously` text: one claim block, different from the
@@ -41,9 +47,11 @@ reason code:
 5. Novelty: every URL, path, host-like name, IP address, email address, code
    span, flag and number of three or more digits must appear in the block, or
    in the quotes of two independently produced items that can corroborate
-   (`verify_novel_token`). One planted handoff cannot add a token, and quotes
-   from command output and session excerpts never count, because that text
-   can come from anywhere.
+   (`verify_novel_token`). Words compare by their canonical reading: NFKC, a
+   table of dot, slash, at, colon and dash lookalikes, and bounded strict
+   percent and HTML-reference decoding. Hosts and emails compare without
+   case. A word with no canonical reading, or with an unlisted non-ASCII
+   separator between letters, fails closed.
 6. `superseded_by` names a related card supplied for the call, live, in the
    same scope and changed after this card (`verify_supersede_target`). A card
    with more than one claim block abstains with `supersede_partial`.
@@ -51,6 +59,9 @@ reason code:
    (`verify_scan_flagged`).
 8. Only `high` confidence makes an op (`verify_low_confidence`), and
    `insufficient` never does.
+8a. `supported` opens `append_evidence` only with confirmations on, when the
+   whole claim passes check 2, and only for refs whose every mapped source
+   is a countable item holding claim material. Excerpts never become refs.
 9. The confirm seat repeats the call with the evidence shuffled and a fresh
    nonce. Its block must pass checks 1 to 8 on its own (`verify_unconfirmed`)
    and give the same verdict and the same op: type, `other_card`, and text
@@ -63,12 +74,15 @@ leaves this module is the op text, which goes to the hub as the proposal.
 
 from __future__ import annotations
 
+import functools
+import html
 import json
 import math
 import random
 import re
 import secrets
 import unicodedata
+import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -90,8 +104,6 @@ MAX_QUOTES = 8
 QUOTE_MIN_BYTES = 20
 QUOTE_MAX_BYTES = 400
 HUB_TEXT_LIMIT = 8192
-# An authenticated quote must hold this many characters of field values once keys and JSON punctuation go.
-MIN_FIELD_CHARS = 8
 NONCE_BYTES = 16
 
 VERDICTS = ("supported", "contradicted", "changed", "superseded", "history", "insufficient")
@@ -498,6 +510,33 @@ def scan_problem(text: str) -> bool:
 
 
 # Novelty (check 5). Words are whitespace-separated and lose surrounding punctuation.
+
+# Characters that read as governed syntax but survive NFKC, mapped to the ASCII they imitate. NFKC already
+# folds the full-width and small forms of these to ASCII, and they are listed again so the table does not
+# depend on that. A non-ASCII punctuation or symbol character between two letters or digits that is not
+# listed here still makes its word governed (see `sensitive`), so an unlisted lookalike fails closed.
+DOT_LOOKALIKES = "\u3002\uff0e\uff61\u2024\ufe52\u0701\u0702\u06d4\u2e3c\ua4f8\ua60e\u1362\u0df4\U00010a50"
+SLASH_LOOKALIKES = "\u2215\u2044\uff0f\u29f8\u2571\u27cb\u2cc6\u3033\u2f03"
+BACKSLASH_LOOKALIKES = "\uff3c\u2216\u29f5\u29f9\ufe68\u27cd"
+AT_LOOKALIKES = "\uff20\ufe6b"
+COLON_LOOKALIKES = "\uff1a\u2236\ua789\ufe13\ufe55\u0589\u0703\u0704\u02d0"
+DASH_LOOKALIKES = "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe63\uff0d\u2043\u02d7\u058a"
+LOOKALIKES = str.maketrans(
+    {
+        **dict.fromkeys(DOT_LOOKALIKES, "."),
+        **dict.fromkeys(SLASH_LOOKALIKES, "/"),
+        **dict.fromkeys(BACKSLASH_LOOKALIKES, "\\"),
+        **dict.fromkeys(AT_LOOKALIKES, "@"),
+        **dict.fromkeys(COLON_LOOKALIKES, ":"),
+        **dict.fromkeys(DASH_LOOKALIKES, "-"),
+    }
+)
+PERCENT = re.compile(r"%[0-9A-Fa-f]{2}")
+ENTITY = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
+DECODE_PASSES = 3
+# Non-ASCII characters of these classes between two letters or digits make a word governed.
+SEPARATOR_CATEGORIES = frozenset({"Po", "Pd", "Pc", "Ps", "Pe", "Sm", "So", "Sk"})
+
 OPENERS = "([{<\"'`*_"
 CLOSERS = ")]}>\"'`*_.,;:!?"
 URL = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://|\bwww\.", re.IGNORECASE)
@@ -510,58 +549,120 @@ FLAG = re.compile(r"\A--?[^\W\d_]")
 NUMBER = re.compile(r"\d{3,}")
 
 
+def _fold(text: str) -> str:
+    return unicodedata.normalize("NFKC", text).translate(LOOKALIKES)
+
+
+def canonical(text: str) -> str | None:
+    """The governed reading of `text`, or None when it cannot be classified.
+
+    NFKC, then the lookalike table, then up to `DECODE_PASSES` rounds of strict
+    percent decoding (UTF-8 only) and HTML character references, folding again
+    after each round. Text that still holds an escape after the last round, or
+    that decodes to invalid UTF-8, has no classifiable reading.
+    """
+    value = _fold(text)
+    for _ in range(DECODE_PASSES):
+        if not (PERCENT.search(value) or ENTITY.search(value)):
+            return value
+        try:
+            decoded = urllib.parse.unquote(value, errors="strict")
+        except UnicodeDecodeError:
+            return None
+        value = _fold(ENTITY.sub(lambda match: html.unescape(match[0]), decoded))
+    return None if PERCENT.search(value) or ENTITY.search(value) else value
+
+
 def _trim(word: str) -> str:
     return word.lstrip(OPENERS).rstrip(CLOSERS)
 
 
-def sensitive(word: str) -> bool:
-    """Whether a word carries a token the novelty check governs.
-
-    Detection runs on the NFKC form, so full-width dots, slashes, at signs and
-    digits count as their ASCII forms. The word itself is what must match.
-    """
-    if len(word) > MAX_PLAIN_WORD:
-        return True
-    folded = unicodedata.normalize("NFKC", word)
-    return bool(
-        URL.search(folded)
-        or "@" in folded
-        or "/" in folded
-        or "\\" in folded
-        or folded.startswith("~")
-        or HOST.search(folded)
-        or IPV4.search(folded)
-        or (IPV6.search(folded) and any(ch.isalnum() for ch in folded))
-        or FLAG.search(folded)
-        or NUMBER.search(folded)
+def _hidden_separator(word: str) -> bool:
+    return any(
+        ord(ch) > 0x7F
+        and unicodedata.category(ch) in SEPARATOR_CATEGORIES
+        and word[i - 1].isalnum()
+        and word[i + 1].isalnum()
+        for i, ch in enumerate(word[1:-1], start=1)
     )
 
 
-def _words(text: str) -> set[str]:
-    return {trimmed for word in text.split() if (trimmed := _trim(word))}
+def sensitive(word: str) -> bool:
+    """Whether a word carries a token the novelty check governs. `word` is already canonical."""
+    if len(word) > MAX_PLAIN_WORD or _hidden_separator(word):
+        return True
+    return bool(
+        URL.search(word)
+        or "@" in word
+        or "/" in word
+        or "\\" in word
+        or word.startswith("~")
+        or HOST.search(word)
+        or IPV4.search(word)
+        or (IPV6.search(word) and any(ch.isalnum() for ch in word))
+        or FLAG.search(word)
+        or NUMBER.search(word)
+    )
 
 
-def _holds(kind: str, token: str, source: str) -> bool:
-    return _whole_span(token, source) if kind == "span" else token in _words(source)
+def _key(word: str) -> str:
+    """The comparison key of a canonical word. Hosts, addresses and emails compare without case."""
+    if "/" not in word and ("@" in word or HOST.fullmatch(word) or IPV4.fullmatch(word) or IPV6.fullmatch(word)):
+        return word.casefold()
+    return word
+
+
+def _source_keys(text: str) -> set[str]:
+    """Comparison keys of every word of a holder. A word without a canonical reading keeps its folded form."""
+    keys = set()
+    for raw in text.split():
+        value = canonical(raw)
+        trimmed = _trim(value if value is not None else _fold(raw))
+        if trimmed:
+            keys.add(_key(trimmed))
+    return keys
+
+
+def governed_tokens(text: str) -> list[str] | None:
+    """The comparison keys of every governed word of `text`, or None when a word cannot be classified."""
+    keys = []
+    for raw in text.split():
+        value = canonical(raw)
+        if value is None:
+            return None
+        trimmed = _trim(value)
+        if trimmed and (sensitive(trimmed) or sensitive(_trim(raw))):
+            keys.append(_key(trimmed))
+    return sorted(set(keys))
 
 
 def novel_tokens(text: str, block: str, quoted: Sequence[tuple[ev.Item, str]]) -> list[str]:
     """Every governed token in `text` the block does not hold and two independent quotes do not both hold.
 
-    A token counts as held by a source only as a whole word or a whole code
-    span. Outside the block, it must sit in the quotes of two countable items
-    that slice 6's `independent` accepts as separately produced, so a single
-    planted handoff cannot introduce one. Quotes from command output and
-    excerpts never count. Callers report only whether this is empty.
+    Words are compared by their canonical reading (`canonical`), so a percent
+    escape, an HTML reference or a lookalike dot names the same host as the
+    plain form. A word with no canonical reading fails closed. Code spans must
+    appear verbatim. Outside the block a token must sit in the quotes of two
+    countable items that slice 6's `independent` accepts as separately
+    produced, so a single planted handoff cannot introduce one. Quotes from
+    command output and excerpts never count. Callers report only whether
+    this is empty.
     """
     spans, paired = code_spans(text)
-    tokens = [("span", text[start:end]) for start, end in spans]
-    tokens += [("word", word) for word in sorted(_words(text)) if sensitive(word)]
     novel: list[str] = [] if paired else ["`"]
+    words = governed_tokens(text)
+    if words is None:
+        return ["%"]
+    block_keys = _source_keys(block)
+    tokens = [("span", text[start:end]) for start, end in spans] + [("word", word) for word in words]
     for kind, token in tokens:
-        if _holds(kind, token, block):
+        if _whole_span(token, block) if kind == "span" else token in block_keys:
             continue
-        holders = [item for item, quote in quoted if _countable(item) and _holds(kind, token, quote)]
+        holders = [
+            item
+            for item, quote in quoted
+            if _countable(item) and (_whole_span(token, quote) if kind == "span" else token in _source_keys(quote))
+        ]
         if not any(ev.independent(a, b) for i, a in enumerate(holders) for b in holders[i + 1 :]):
             novel.append(token)
     return novel
@@ -580,18 +681,16 @@ def _whole_span(span: str, source: str) -> bool:
 
 # --- Corroboration ------------------------------------------------------------------------
 
-FIELD_KEYS = re.compile(
-    "|".join(
-        re.escape(f'"{key}"')
-        for key in sorted({*ev.AUTH_TOP, *ev.AUTH_COMMAND, "commit", "commands"}, key=len, reverse=True)
-    )
+# Receipt fields whose values state a fact a claim can rest on (D3, check 2). `commit` and `baseline_commit`
+# name the code state Brigade read from git, and `exit_code` is the observed outcome of a command. Every other
+# authenticated field is excluded: `argv` is text the caller chose, `status` and the times are the same on
+# almost every receipt, and `run_id`, `manifest_id` and `tree_fingerprint` are Brigade's own bookkeeping.
+FACT_TOP = ("commit", "baseline_commit")
+FACT_COMMAND = ("exit_code",)
+# Words a claim change may add or drop without new evidence. Negations are not here, so adding one needs support.
+MATERIAL_STOP = ev.STOP | frozenset(
+    "a an the is are was be been at in on of to for by as it its this that now still then and or with from".split()
 )
-JSON_NOISE = re.compile(r'[\s{}\[\]:,"]+')
-
-
-def field_content(quote: str) -> int:
-    """Characters of field values in a quote from rendered receipt fields, without keys and JSON punctuation."""
-    return len(JSON_NOISE.sub("", FIELD_KEYS.sub("", quote)))
 
 
 def _anchor(item: ev.Item) -> bool:
@@ -602,15 +701,94 @@ def _countable(item: ev.Item) -> bool:
     return item.kind not in ev.CONTEXT_ONLY and not item.context_only
 
 
-def corroborated(quoted: Sequence[tuple[ev.Item, str]]) -> bool:
-    """Check 2 over the quoted items only.
+def _pair(key: str, value: object) -> tuple[str, str] | None:
+    if isinstance(value, str) and value:
+        return f'"{key}": {json.dumps(value, ensure_ascii=False)}', value.casefold()
+    if type(value) is int:
+        return f'"{key}": {value}', str(value)
+    return None
 
-    An anchor is an authenticated receipt-fields item quoted for field content.
-    It needs one independent countable item, by slice 6's `independent`, which
-    compares sources, runs, lineage and copied spans over the decoded strings.
+
+@functools.lru_cache(maxsize=64)
+def _facts(text: str) -> tuple[tuple[str, str], ...]:
+    """The factual field pairs of rendered receipt fields, exactly as slice 6 renders them, with value keys."""
+    try:
+        fields = json.loads(text)
+    except (ValueError, RecursionError):
+        return ()
+    if not isinstance(fields, dict) or not ev._shallow(fields):
+        return ()
+    pairs = [_pair(key, fields.get(key)) for key in FACT_TOP]
+    commands = fields.get("commands")
+    for command in commands if isinstance(commands, list) else []:
+        if isinstance(command, dict):
+            pairs.extend(_pair(key, command.get(key)) for key in FACT_COMMAND)
+    return tuple(pair for pair in pairs if pair is not None)
+
+
+def factual_keys(item: ev.Item, quote: str) -> set[str]:
+    """Value keys of the factual pairs a quote of an authenticated receipt covers whole. Empty for any other item."""
+    if not _anchor(item):
+        return set()
+    return {value for pair, value in _facts(item.text) if _covers(quote, pair)}
+
+
+def _covers(quote: str, pair: str) -> bool:
+    """A string pair ends at its closing quote. A number pair must be followed by its separator, so 1 is not 12."""
+    if pair.endswith('"'):
+        return pair in quote
+    return pair + "," in quote or pair + "\n" in quote
+
+
+def _material_keys(text: str) -> set[str]:
+    keys = set()
+    for raw in normalize(text).split():
+        value = canonical(raw)
+        word = _trim(value if value is not None else _fold(raw)).casefold()
+        if any(ch.isalnum() for ch in word) and word not in MATERIAL_STOP:
+            keys.add(word)
+    return keys
+
+
+def claim_material(text: str, baseline: str = "") -> set[str]:
+    """Content words and values of `text` that `baseline` lacks, after agreement normalization and canonical folding."""
+    return _material_keys(text) - _material_keys(baseline)
+
+
+def _holds_material(item: ev.Item, quote: str, word: str) -> bool:
+    if _anchor(item):
+        return word in factual_keys(item, quote)
+    return _countable(item) and word in _material_keys(quote)
+
+
+def claim_corroborated(material: set[str], quoted: Sequence[tuple[ev.Item, str]]) -> bool:
+    """Check 2 for a claim: every material word sits in quotes from two independent countable items.
+
+    One of the two must be an authenticated receipt whose quote covers a
+    factual field (`FACT_TOP`, `FACT_COMMAND`) with that exact value. An
+    authenticated receipt holds a word only through those fields, never
+    through its argv, status or times. Empty material never corroborates.
     """
-    anchors = [item for item, text in quoted if _anchor(item) and field_content(text) >= MIN_FIELD_CHARS]
-    others = [item for item, _text in quoted if _countable(item)]
+    if not material:
+        return False
+    for word in material:
+        holders = [item for item, quote in quoted if _holds_material(item, quote, word)]
+        anchors = [item for item, quote in quoted if word in factual_keys(item, quote)]
+        if not any(ev.independent(anchor, other) for anchor in anchors for other in holders if other is not anchor):
+            return False
+    return True
+
+
+def corroborated(quoted: Sequence[tuple[ev.Item, str]]) -> bool:
+    """Source-level check 2, used for `superseded`, which carries no claim text to bind.
+
+    The anchor is an authenticated receipt quoted across a whole factual
+    field. It needs one independent countable item, by slice 6's
+    `independent`, which compares sources, runs, lineage and copied spans
+    over the decoded strings.
+    """
+    anchors = [item for item, quote in quoted if factual_keys(item, quote)]
+    others = [item for item, _quote in quoted if _countable(item)]
     return any(ev.independent(anchor, other) for anchor in anchors for other in others if other is not anchor)
 
 
@@ -697,6 +875,15 @@ def _target(card: CardInput, name: str) -> Related | None:
     return target
 
 
+def _newer(card: CardInput, quoted: Sequence[tuple[ev.Item, str]]) -> list[tuple[ev.Item, str]]:
+    since = card.updated_ms
+    return [
+        (item, text)
+        for item, text in quoted
+        if since is not None and item.observed_ms is not None and item.observed_ms > since
+    ]
+
+
 def check_block(
     card: CardInput,
     reply: BlockReply,
@@ -723,18 +910,9 @@ def check_block(
     quoted = [(items[q.evidence], q.text) for q in reply.quotes]
     if reply.verdict == "supported":
         return _supported(block, reply, quoted, propose_confirmations, uncited_refs or {})
-    if not corroborated(quoted):
-        return Checked(reply.verdict, reason=UNCORROBORATED)
-    if reply.verdict == "changed":
-        since = card.updated_ms
-        newer = [
-            (item, text)
-            for item, text in quoted
-            if since is not None and item.observed_ms is not None and item.observed_ms > since
-        ]
-        if not corroborated(newer):
-            return Checked(reply.verdict, reason=NOT_NEWER)
     if reply.verdict == "superseded":
+        if not corroborated(quoted):
+            return Checked(reply.verdict, reason=UNCORROBORATED)
         if card.claim_blocks != 1:
             return Checked(reply.verdict, reason=SUPERSEDE_PARTIAL)
         target = _target(card, reply.superseded_by or "")
@@ -751,6 +929,11 @@ def check_block(
         return Checked(reply.verdict, reason=NOVEL_TOKEN)
     if scan_problem(text):
         return Checked(reply.verdict, reason=SCAN_FLAGGED)
+    material = claim_material(text, block.claim)
+    if not claim_corroborated(material, quoted):
+        return Checked(reply.verdict, reason=UNCORROBORATED)
+    if reply.verdict == "changed" and not claim_corroborated(material, _newer(card, quoted)):
+        return Checked(reply.verdict, reason=NOT_NEWER)
     kind = PREVIOUSLY if reply.verdict == "history" else REPLACE
     return Checked(reply.verdict, op=Op(kind, block.block_id, block.sha256, text=text))
 
@@ -762,13 +945,35 @@ def _supported(
     propose_confirmations: bool,
     uncited_refs: Mapping[str, str],
 ) -> Checked:
-    """`supported` opens `append_evidence` only for uncited support, and only when confirmations are on."""
+    """`supported` opens `append_evidence` only for corroborated, uncited, countable support.
+
+    Confirmations must be on. The claim itself must pass `claim_corroborated`
+    with the block's whole content as its material. A ref is cited only for a
+    countable quoted item that holds some of that material, and only when
+    every source mapped to that ref is such an item, so command output and
+    excerpts never become a citation.
+    """
     if not propose_confirmations:
         return Checked(reply.verdict, reason=VERIFIED)
-    refs = sorted({uncited_refs[item.source] for item, _text in quoted if item.source in uncited_refs})
-    if not refs or any(not isinstance(ref, str) or not ref for ref in refs):
+    material = claim_material(block.claim)
+    if not claim_corroborated(material, quoted):
         return Checked(reply.verdict, reason=VERIFIED)
-    return Checked(reply.verdict, op=Op(APPEND, block.block_id, block.sha256, evidence_ids=tuple(refs)))
+    eligible = {
+        item.source
+        for item, quote in quoted
+        if _countable(item)
+        and item.source in uncited_refs
+        and any(_holds_material(item, quote, word) for word in material)
+    }
+    refs = set()
+    for source in eligible:
+        ref = uncited_refs[source]
+        mapped = {other for other, value in uncited_refs.items() if value == ref}
+        if isinstance(ref, str) and ref and mapped <= eligible:
+            refs.add(ref)
+    if not refs:
+        return Checked(reply.verdict, reason=VERIFIED)
+    return Checked(reply.verdict, op=Op(APPEND, block.block_id, block.sha256, evidence_ids=tuple(sorted(refs))))
 
 
 # --- One card -----------------------------------------------------------------------------
