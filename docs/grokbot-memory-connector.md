@@ -27,9 +27,15 @@ claim, fleet, skill, messaging or capabilities tool is reachable from it.
 | `memory_card` | Read one card in bounded chunks. | No |
 | `handoff_write` | Submit one Memory Handoff to the hub review queue. | Hub `memory_handoffs` only |
 
-`memory_search` and `memory_card` run the same `brigade memory` commands Dot
-and Duet use, with the prompt-load scan on. The difference is the credential
-and the source. The connector points those commands at a private copy of the
+`memory_search` and `memory_card` run the `brigade memory` commands (`memory
+search` and `memory hub card`), with the prompt-load scan on. Dot and Duet no
+longer use those commands with hub memory on (S23): they search and read in
+process with push trust. This profile is grant-scoped instead, by choice. Its
+principal holds only the grants the runbook gives it, and the hub's `search`
+and `card` answer within those grants without the push trust filter, so a card
+it may read opens whatever its trust or scan state, with the prompt-load scan
+still applied. The difference from the host node is the credential and the
+source. The connector points those commands at a private copy of the
 token its listener pinned at startup (`hub.message_token_file`), not the host's
 node credential, so the principal's grants are the boundary. A token file or
 hub URL that changes after startup is refused with `hub_credential_changed`

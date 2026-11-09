@@ -18,7 +18,7 @@ from .fleet_tools import FleetTools
 from .hub_inbox import HubInbox
 from .hub_tools import HubTools
 from .inbox_tools import InboxTools
-from .memory_push import MemoryPush, PushScan, digest_query, inbox_query
+from .memory_push import MAX_DIGEST_HITS, MAX_PUSH_HITS, MemoryPush, PushScan, digest_query, inbox_query
 from .memory_tools import MemoryTools
 from .process import CommandRunner, bound_result
 from .profile import (
@@ -37,6 +37,8 @@ from .state import BridgeState, Clock, summarize_arguments, utc_now
 MAX_UNACKED = 1000
 # Responses that carry memory hits, and how each derives its query from its own content.
 PUSH_QUERIES = {"inbox_list": inbox_query, "fleet_digest": digest_query}
+# The digest covers more ground than the next message, so it carries more hits.
+PUSH_LIMITS = {"inbox_list": MAX_PUSH_HITS, "fleet_digest": MAX_DIGEST_HITS}
 PUSH_SCAN_LABEL = "memory_push_scan"
 SEND_WINDOW_SECONDS = 3600
 
@@ -109,7 +111,11 @@ class DotTools:
             runtime_profile(profile, runtime.dispatch_enabled),
         )
         self.fleet, self.hub, self.memory, self.inbox = fleet, hub, memory, inbox
-        self.push = MemoryPush(runtime.paths.workspace, enabled=runtime.memory_push and self.profile.memory_push)
+        self.push = MemoryPush(
+            runtime.paths.workspace,
+            enabled=runtime.memory_push and self.profile.memory_push,
+            hub=lambda query, limit: self.memory.push_search(query, limit),
+        )
 
     def call(self, owner: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
@@ -153,7 +159,7 @@ class DotTools:
                     raise DotError("bridge_unavailable")
             if name in PUSH_QUERIES and isinstance(result, dict) and "error" not in result:
                 scan = PushScan()
-                pushed = self.push.hits(PUSH_QUERIES[name](result), scan)
+                pushed = self.push.hits(PUSH_QUERIES[name](result), scan, limit=PUSH_LIMITS[name])
                 if pushed is not None:
                     result["memory_hits"] = pushed
                 if scan.dropped or scan.error:

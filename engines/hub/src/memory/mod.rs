@@ -78,6 +78,8 @@ mod proposal_review_tests;
 #[cfg(test)]
 mod proposal_tests;
 #[cfg(test)]
+mod push_tests;
+#[cfg(test)]
 mod tests;
 
 use crate::{
@@ -991,6 +993,12 @@ impl Store {
             "card" | "log" | "status" | "proposal_list" | "proposal_show" | "read_stats" => {
                 self.read(credential, action, map).await
             }
+            // S23: unsolicited connector push hits are not reads. A
+            // connector's explicit search (`query_source: "connector"`) gets
+            // the same filter from `search::parse` and is counted below.
+            "search" if map.get("query_source").and_then(Json::as_str) == Some("push") => {
+                self.search_for(credential, map, true).await
+            }
             "search" => self.search(credential, map).await,
             "preflight" => self.preflight(credential, map).await,
             "reindex" | "embed_lease" | "embed_submit" | "embed_failed" => {
@@ -1529,7 +1537,8 @@ impl Store {
         })
     }
 
-    /// S23's internal push boundary. The public search contract stays unchanged.
+    /// The push boundary. Over the route it is `search` with
+    /// `query_source: "push"` (S23).
     pub async fn push(&self, credential: &Credential, map: &Map<String, Json>) -> Reply {
         if let Some(refusal) = self.verifier_refusal(credential).await {
             return refusal;
@@ -1549,7 +1558,8 @@ impl Store {
     ) -> Reply {
         let mut reply = self.search_ranked(credential, map, push).await;
         let eval = map.get("eval").and_then(Json::as_bool) == Some(true);
-        // Evaluation searches and the hub's own searches are not reads.
+        // Evaluation searches and unsolicited push hits are not reads. A
+        // connector's explicit search is one, though it is push-filtered.
         if reply.status == 200 && !eval && !push {
             let now_ms = self.clock.now_ms();
             let principal = credential.principal();
@@ -1576,7 +1586,7 @@ impl Store {
             Err(reply) => return reply,
         };
         request.weights = self.rrf;
-        request.push = push;
+        request.push |= push;
         request.prompt |= push;
         let snapshot = match request.min_seq {
             Some(min) => self.index.wait(min, MIN_SEQ_WAIT).await,
@@ -1849,6 +1859,19 @@ fn nullable(v: &Value) -> Json {
     }
 }
 
+/// The head, revision and scan receipt a push card read joins (S23).
+const PUSH_HEAD_FROM: &str = "memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_scans s ON s.content_hash=c.content_hash";
+
+/// A live head with a clean receipt under the rule set in parameter
+/// `ruleset` and push trust for the writer in parameters `writer` and
+/// `writer + 1`. Discovery and the read itself share it.
+fn push_head_where(ruleset: usize, writer: usize) -> String {
+    format!(
+        "c.state='live' AND {} AND r.scan_state='clean' AND s.ruleset_version=?{ruleset} AND s.state='clean'",
+        search::push_trust_sql(writer)
+    )
+}
+
 fn reads<T: ReadTx + ?Sized>(
     tx: &T,
     credential: &Credential,
@@ -1859,7 +1882,7 @@ fn reads<T: ReadTx + ?Sized>(
     indexed_seq: i64,
 ) -> rusqlite::Result<Reply> {
     let allowed: &[&str] = match action {
-        "card" => &["action", "card_id", "scope", "revision", "offset"],
+        "card" => &["action", "card_id", "scope", "revision", "offset", "push"],
         "log" => &["action", "after_seq", "limit"],
         "status" => &["action", "scopes"],
         _ => &["action"],
@@ -2057,6 +2080,29 @@ fn reads<T: ReadTx + ?Sized>(
                     }
                 },
             };
+            // S23: a connector reads only what push could send it, the live
+            // head with a current clean scan receipt and push trust.
+            let push = match map.get("push") {
+                None | Some(Json::Null) => false,
+                Some(Json::Bool(b)) => *b,
+                Some(_) => return Ok(invalid("push must be a boolean")),
+            };
+            if push && revision.is_some() {
+                return Ok(invalid(
+                    "push reads the live head only, so it takes no revision",
+                ));
+            }
+            let ruleset = match (push, &scan) {
+                (false, _) => None,
+                (true, (true, Some(ruleset))) => Some(ruleset.clone()),
+                (true, _) => {
+                    return Ok(error(
+                        503,
+                        "memory_scan_unavailable",
+                        "a push read needs the scanner's current rule set",
+                    ));
+                }
+            };
             let mut readable = auth::Readable::new(tx, credential);
             let scope = match scope {
                 Some(s) => {
@@ -2071,10 +2117,27 @@ fn reads<T: ReadTx + ?Sized>(
                 }
                 None => {
                     let mut scopes = Vec::new();
-                    for r in tx.query(
-                        "SELECT scope FROM memory_cards WHERE card_id=?1 ORDER BY scope",
-                        &[Value::Text(card_id.into())],
-                    )? {
+                    // A push read discovers only push-eligible heads, so a
+                    // withheld copy never shows up as a scope or an ambiguity.
+                    let candidates = match &ruleset {
+                        Some(ruleset) => tx.query(
+                            &format!(
+                                "SELECT c.scope FROM {PUSH_HEAD_FROM} WHERE c.card_id=?1 AND {} ORDER BY c.scope",
+                                push_head_where(2, 3)
+                            ),
+                            &[
+                                Value::Text(card_id.into()),
+                                Value::Text(ruleset.clone()),
+                                Value::Text(credential.principal().into()),
+                                Value::Text(credential.class().into()),
+                            ],
+                        )?,
+                        None => tx.query(
+                            "SELECT scope FROM memory_cards WHERE card_id=?1 ORDER BY scope",
+                            &[Value::Text(card_id.into())],
+                        )?,
+                    };
+                    for r in candidates {
                         let s = text(&r[0]);
                         if readable.scope(&s)? {
                             scopes.push(s);
@@ -2096,12 +2159,25 @@ fn reads<T: ReadTx + ?Sized>(
                 }
             };
             let params = [Value::Text(scope.clone()), Value::Text(card_id.into())];
-            let row = match revision {
-                Some(rev) => tx.query(
+            let row = match (revision, ruleset) {
+                (_, Some(ruleset)) => tx.query(
+                    &format!(
+                        "SELECT c.revision,c.content_hash,c.trust,c.state,b.bytes,r.scan_state,r.writer,r.created_at FROM {PUSH_HEAD_FROM} JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND {}",
+                        push_head_where(3, 4)
+                    ),
+                    &[
+                        params[0].clone(),
+                        params[1].clone(),
+                        Value::Text(ruleset),
+                        Value::Text(credential.principal().into()),
+                        Value::Text(credential.class().into()),
+                    ],
+                )?,
+                (Some(rev), None) => tx.query(
                     "SELECT r.revision,r.content_hash,r.trust,r.state,b.bytes,r.scan_state,r.writer,r.created_at FROM memory_card_revisions r JOIN memory_blobs b ON b.content_hash=r.content_hash WHERE r.scope=?1 AND r.card_id=?2 AND r.revision=?3",
                     &[params[0].clone(), params[1].clone(), Value::Integer(rev)],
                 )?,
-                None => tx.query(
+                (None, None) => tx.query(
                     "SELECT c.revision,c.content_hash,c.trust,c.state,b.bytes,r.scan_state,r.writer,r.created_at FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2",
                     &params,
                 )?,

@@ -43,6 +43,18 @@ pub struct Request {
     pub dense: Option<(std::sync::Arc<super::dense::Matrix>, Vec<f32>)>,
 }
 
+/// The trust a connector may receive, over `memory_cards c`: reviewed,
+/// policy-promoted and imported heads, and an `agent-unreviewed` head only for
+/// the credential that wrote it. `writer` numbers the parameter holding the
+/// principal, and the next one holds its credential class. Push search and
+/// push card reads share it (S23).
+pub fn push_trust_sql(writer: usize) -> String {
+    format!(
+        "(c.trust IN ('imported','reviewed','policy-promoted') OR (c.trust='agent-unreviewed' AND c.writer=?{writer} AND c.writer_class=?{}))",
+        writer + 1
+    )
+}
+
 fn invalid(message: &str) -> Reply {
     error(400, "memory_query_invalid", message)
 }
@@ -103,7 +115,24 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
     // With no embedder configured every mode is answered by BM25 (D30).
     one_of("ranking", &["default", "raw"])?;
     one_of("mode", &["auto", "lexical", "hybrid"])?;
-    one_of("query_source", &["prompt", "cwd", "explicit"])?;
+    one_of(
+        "query_source",
+        &["prompt", "cwd", "explicit", "push", "connector"],
+    )?;
+    // S23: `push` asks for hits a connector shows unasked and `connector` is a
+    // connector's own explicit search. Both get the push filter and egress
+    // scan, keep the one default ranking and have no evaluation form. Only
+    // `connector` counts as a read (`Store::search_for`).
+    let source = map.get("query_source").and_then(Json::as_str);
+    let push = matches!(source, Some("push" | "connector"));
+    if push && map.get("eval").and_then(Json::as_bool) == Some(true) {
+        return Err(invalid("query_source push or connector takes no eval"));
+    }
+    if push && map.get("ranking").and_then(Json::as_str) == Some("raw") {
+        return Err(invalid(
+            "query_source push or connector takes the default ranking",
+        ));
+    }
     match map.get("sources") {
         None | Some(Json::Null) => {}
         Some(Json::Array(items)) if items.iter().all(|i| i.as_str() == Some("automation")) => {}
@@ -151,11 +180,8 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
         limit,
         scopes,
         min_seq,
-        prompt: matches!(
-            map.get("query_source").and_then(Json::as_str),
-            Some("prompt")
-        ),
-        push: false,
+        prompt: push || source == Some("prompt"),
+        push,
         eval: map.get("eval").and_then(Json::as_bool).unwrap_or(false),
         raw: map.get("ranking").and_then(Json::as_str) == Some("raw"),
         automation: map
@@ -282,7 +308,8 @@ pub fn run<T: ReadTx + ?Sized>(
     };
     // Push revalidates the exact snapshot head and its current scan receipt.
     // Unavailable, pending, private, flagged, retired and stale versions never
-    // leave here: only a clean receipt may reach a connector.
+    // leave here: only a clean receipt may reach a connector. An
+    // `agent-unreviewed` head goes only to the credential that wrote it.
     let eligible = |hits: Vec<(u32, f64)>| -> rusqlite::Result<Vec<(u32, f64)>> {
         if !request.push {
             return Ok(hits);
@@ -294,8 +321,8 @@ pub fn run<T: ReadTx + ?Sized>(
                 for (n, score) in hits {
                     let d = snap.doc(n);
                     let rows = tx.query(
-                        "SELECT 1 FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_scans s ON s.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.revision=?3 AND c.content_hash=?4 AND c.state='live' AND c.trust IN ('imported','reviewed','policy-promoted') AND r.scan_state='clean' AND s.ruleset_version=?5 AND s.state='clean'",
-                        &[Value::Text(scopes[d.scope as usize].to_string()), Value::Text(d.card_id.to_string()), Value::Integer(d.revision), Value::Text(d.content_hash.to_string()), Value::Text(ruleset.clone())],
+                        &format!("SELECT 1 FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_scans s ON s.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.revision=?3 AND c.content_hash=?4 AND c.state='live' AND {} AND r.scan_state='clean' AND s.ruleset_version=?5 AND s.state='clean'", push_trust_sql(6)),
+                        &[Value::Text(scopes[d.scope as usize].to_string()), Value::Text(d.card_id.to_string()), Value::Integer(d.revision), Value::Text(d.content_hash.to_string()), Value::Text(ruleset.clone()), Value::Text(credential.principal().into()), Value::Text(credential.class().into())],
                     )?;
                     if !rows.is_empty() {
                         eligible.push((n, score));
