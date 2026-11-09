@@ -47,7 +47,10 @@ source if the two ever disagree.
 
 - **Window.** Runs whose `created_at` is at or after `--since` and before
   `--until` (UTC, half-open `[since, until)`, so adjacent windows never share a
-  run) and whose status is `completed`, for one workflow file.
+  run) and whose first attempt has completed, for one workflow file: a
+  `run_attempt` 1 run with status `completed`, or any run with a later attempt
+  (attempt 1 is complete by definition, even while a re-run is in progress,
+  which leaves `latest_conclusion` null).
 - **First attempt.** Every per-run metric describes the first attempt of the
   run, so wall time, runner time and conclusion come from one attempt and show
   what a developer waited for on the first try. For a run whose `run_attempt`
@@ -63,10 +66,17 @@ source if the two ever disagree.
 - **Wall minutes.** `run_started_at` to `updated_at` of the first attempt. It
   excludes time queued before the run started.
 - **Runner minutes.** Sum of `completed_at - started_at` over the first
-  attempt's jobs that were not skipped. Cancelled jobs count, because they held
-  a runner, and each matrix job counts. Zero-second jobs whose name still holds
-  an unexpanded `${{` expression (cancelled before the matrix expanded) are
-  dropped. The sum measures cost and wall minutes measure latency. Re-run cost
+  attempt's jobs that were not skipped and that held a runner. Cancelled jobs
+  count when they ran, because they held a runner, and each matrix job counts.
+  A job held a runner when the jobs API gives it a non-zero `runner_id` or a
+  non-empty `runner_name`. A job cancelled while queued can carry both
+  timestamps with `runner_id` 0 and an empty `runner_name`, so its span is queue
+  wait. Those jobs are excluded from every runner metric (runner
+  minutes, Windows runner minutes, all-attempt cost and the job families) and
+  counted per run as `unassigned_jobs`. The runner name itself is never stored.
+  Zero-second jobs whose name still holds an unexpanded `${{` expression
+  (cancelled before the matrix expanded) are dropped. Wall minutes are not
+  affected. The sum measures cost and wall minutes measure latency. Re-run cost
   is not in this number.
 - **Runner minutes, all attempts.** The same sum over every attempt of the run,
   reported separately as `runner_minutes_all_attempts`. The jobs API lists a
@@ -89,7 +99,8 @@ source if the two ever disagree.
   in (`runs_with`, `ran_fraction`), its job instances, and median, p90 and max
   seconds.
 - **Warnings.** A page count that disagrees with `total_count`, a re-run whose
-  wall time is shorter than its longest job, and a redacted job name are
+  wall time is shorter than its longest job, a run still being re-run at capture
+  time (its all-attempt cost is partial), and a redacted job name are
   printed to stderr and stored in the `warnings` list of the JSON. A search
   slice that reaches the 1,000 row cap is split and retried, and the script
   exits non-zero if a one second slice still reaches it.
@@ -98,8 +109,13 @@ source if the two ever disagree.
   labels and numbers. It does not store user names, branch names or PR titles.
   A runner label is kept only when it is a GitHub-hosted image label
   (`ubuntu-*`, `windows-*`, `macos-*`) or exactly `self-hosted`. Any other label
-  is stored as its OS bucket. A job name containing the run's branch name or
-  actor login (case-insensitive) is stored as `redacted`.
+  is stored as its OS bucket. A job name carrying the run's branch name or
+  actor login is stored as `redacted`. The match is case-insensitive and on
+  whole words (the name is split on non-alphanumerics): a name of several words
+  must appear as that exact word sequence, and a single word must be at least
+  five characters, so a branch called `lint` or `docs` does not rewrite every
+  lint or docs job. A lone name of four characters or fewer therefore cannot be
+  detected in a job name.
 
 Test-suite size (`--inventory`) is the commit, test file count, `def test_`
 count, test and source LOC, and the pytest collected item count read from a
@@ -140,7 +156,7 @@ window taken the same way.
 
 Files: `docs/adaptive-ci/baseline-ci-2026-11-09.json` (raw, per-run and
 per-job) and `.md` (summary). Window 2026-11-08T22:00:00Z to
-2026-11-09T12:00:00Z (half-open), 123 completed runs. Times are
+2026-11-09T12:00:00Z (half-open), 123 runs. Times are
 minutes, first attempt of each run.
 
 | event | view | n | wall median | wall p75 | wall p90 | wall max | runner median | runner p90 | Windows runner median | Windows runner p90 |
@@ -149,10 +165,12 @@ minutes, first attempt of each run.
 | merge_group | all | 29 | 14.9 | 15.2 | 15.4 | 15.8 | 126.7 | 133.9 | 12.4 | 13.6 |
 | pull_request | successful | 19 | 14.7 | 17.2 | 26.6 | 33.9 | 75.7 | 83.8 | 9.8 | 31.9 |
 | pull_request | all | 74 | 10.4 | 14.6 | 18.0 | 33.9 | 55.1 | 78.9 | 10.8 | 22.3 |
-| push | all | 20 | 11.0 | 32.3 | 134.3 | 509.5 | 92.6 | 222.6 | 7.7 | 8.9 |
+| push | all | 20 | 11.0 | 32.3 | 134.3 | 509.5 | 79.5 | 110.8 | 7.7 | 8.9 |
 
 All 20 `push` runs in the window were cancelled, so there is no `push`
-baseline. The `all` rows include cancelled runs, which end early, so they read
+baseline. Each holds a `trusted-runner-canary` job that was cancelled in the
+queue (no runner assigned), which the report counts as `unassigned_jobs` and
+leaves out of runner minutes. The `all` rows include cancelled runs, which end early, so they read
 lower than the `successful` rows. Compare successful runs. The `successful`
 view holds runs whose first attempt passed, so a run that failed first and
 passed on a re-run is in the `all` rows only (see the re-run caveat).
@@ -194,29 +212,29 @@ not per run:
 Files: `docs/adaptive-ci/baseline-ci-2026-11-09-extended.json` (aggregates
 only, no per-run list) and `.md`.
 
-Window 2026-11-05T15:00:00Z to 2026-11-09T12:00:00Z (half-open), 495 completed runs. Times are minutes, first attempt of each run.
+Window 2026-11-05T15:00:00Z to 2026-11-09T12:00:00Z (half-open), 497 runs. Times are minutes, first attempt of each run.
 
 | event | view | n | wall median | wall p75 | wall p90 | wall max | runner median | runner p90 | Windows runner median | Windows runner p90 |
 |---|---|---|---|---|---|---|---|---|---|---|
 | merge_group | successful | 70 | 11.5 | 13.4 | 15.1 | 15.8 | 120.5 | 125.3 | 12.6 | 13.9 |
 | merge_group | all | 88 | 11.6 | 13.9 | 15.1 | 15.8 | 120.5 | 129.1 | 12.6 | 13.8 |
-| pull_request | successful | 110 | 11.7 | 14.3 | 19.3 | 71.7 | 70.6 | 87.4 | 9.2 | 24.8 |
-| pull_request | all | 340 | 11.1 | 13.4 | 19.1 | 71.7 | 61.7 | 86.2 | 9.2 | 24.0 |
-| push | all | 67 | 35.4 | 88.9 | 254.7 | 638.5 | 126.9 | 358.0 | 8.0 | 9.3 |
+| pull_request | successful | 111 | 11.7 | 14.2 | 19.3 | 71.7 | 70.5 | 87.3 | 9.2 | 24.7 |
+| pull_request | all | 342 | 11.0 | 13.4 | 19.0 | 71.7 | 61.4 | 86.1 | 9.2 | 24.0 |
+| push | all | 67 | 35.4 | 88.9 | 254.7 | 638.5 | 93.4 | 108.7 | 8.0 | 9.3 |
 
-`pull_request`, successful runs, n=110:
+`pull_request`, successful runs, n=111:
 
 | family | runner | ran in | median s | p90 s |
 |---|---|---|---|---|
-| test shard 3.12 | ubuntu-latest | 109/110 | 480 | 584 |
-| hub-rust / hub (Rust 1.85.0) | ubuntu-latest | 80/110 | 636 | 761 |
-| hub-rust / hub (Rust stable) | ubuntu-latest | 80/110 | 612 | 707 |
-| windows-native-acceptance | windows-latest | 109/110 | 316 | 352 |
-| windows-affected-tests | windows-latest | 109/110 | 143 | 1124 |
-| engine-rename-installer | ubuntu-latest | 109/110 | 93 | 106 |
-| content-guard | ubuntu-latest | 110/110 | 70 | 79 |
-| quickstart-smoke (windows-latest) | windows-latest | 109/110 | 56 | 71 |
-| lint | ubuntu-latest | 109/110 | 44 | 51 |
+| test shard 3.12 | ubuntu-latest | 110/111 | 479 | 583 |
+| hub-rust / hub (Rust 1.85.0) | ubuntu-latest | 80/111 | 636 | 761 |
+| hub-rust / hub (Rust stable) | ubuntu-latest | 80/111 | 612 | 707 |
+| windows-native-acceptance | windows-latest | 110/111 | 316 | 351 |
+| windows-affected-tests | windows-latest | 110/111 | 144 | 1124 |
+| engine-rename-installer | ubuntu-latest | 110/111 | 93 | 107 |
+| content-guard | ubuntu-latest | 111/111 | 70 | 79 |
+| quickstart-smoke (windows-latest) | windows-latest | 110/111 | 56 | 73 |
+| lint | ubuntu-latest | 110/111 | 44 | 51 |
 
 `merge_group`, successful runs, n=70:
 
@@ -238,12 +256,26 @@ The timing script was run twice over the strict window and twice over the
 extended window, each pair with the final script. Within each pair the JSON was
 identical apart from `generated_at` (`diff` after removing that line, zero
 differing lines), and the extended pair used `--aggregates-only`. No capture
-printed a warning. The strict window lists one more run (123, against 122 in an
-earlier capture) because a `push` run created inside the window finished
-between the captures: `push` runs wait on the self-hosted
-`trusted-runner-canary` job for hours (max 38,294 seconds). A window is only
-reproducible once every run created in it has completed, so end a window well
-before the capture, and treat `push` numbers as unstable.
+printed a warning.
+
+A window's run list does not depend on the status the API reports now. The
+script lists runs without a status filter, because the API's status is the
+latest attempt's and a run being re-run at capture time would otherwise drop out
+of its window although its first attempt finished long before. It keeps a
+`run_attempt` 1 run when its status is `completed` and any later attempt
+unconditionally. Listing without the filter also returned two completed
+first-attempt pull request runs (ids 42265815042 and 42513224413) that the
+`status=completed` listing omitted, which is why the extended window holds 497
+runs here and 495 in the earlier capture (the strict window is 123 either way).
+
+Two things can still move a number between captures. A window is only complete
+once every run created in it has finished its first attempt, so end a window
+well before the capture and treat `push` numbers as unstable: `push` runs wait
+on the self-hosted `trusted-runner-canary` job for hours. And
+`runner_minutes_all_attempts` for a run that is being re-run at capture time is
+partial, which the script reports as a warning. GitHub allows re-runs for 30
+days, so recapturing an old window later can change that one field and
+`latest_conclusion`, never the first-attempt metrics.
 
 ### Caveats
 
@@ -255,17 +287,23 @@ before the capture, and treat `push` numbers as unstable.
 - Re-runs are measured on their first attempt. 5 of the 74 pull request runs
   in the strict window were re-run. All 5 failed on the first attempt and passed
   later, so none is in the `successful` view. Their first-attempt wall times are
-  10.2, 11.2, 14.6, 15.4 and 26.5 minutes. Counting every attempt they cost 97.9
+  10.2, 11.2, 14.6, 15.4 and 26.5 minutes. Counting every attempt they cost 97.7
   more runner minutes than their first attempts alone, and the headline runner
   minutes leave that out. `runner_minutes_all_attempts` holds the figure: the
   pull request `all` view has a median of 55.1 runner minutes on first attempts
   against 56.6 over every attempt. A flaky test therefore lowers the `successful` n and raises the `all` cost
   instead of appearing as a slow successful run. In the
-  extended window 12 of 340 pull request runs were re-run.
-- `trusted-runner-canary` runs on a self-hosted runner and counts in runner
-  minutes (the report keeps a per-OS median, `self-hosted` included). It does
-  not appear in successful `pull_request` or `merge_group` runs, so those
-  numbers are unaffected. It dominates `push` runner and wall time.
+  extended window 12 of 342 pull request runs were re-run.
+- `trusted-runner-canary` runs on a self-hosted runner and waits hours for one.
+  A run cancelled in that queue has the job's timestamps set but no runner
+  assigned, so the report counts it in `unassigned_jobs` and leaves its span out
+  of runner minutes. Across the strict window 194 jobs in 54 runs were
+  unassigned (all cancelled): 128 in 34 pull request runs, almost all with a
+  near-zero span, and 66 in the 20 `push` runs, 20 of them the canary and
+  together about 1,061 queue minutes that an earlier capture had counted as
+  runner time. It does not appear in successful `pull_request` or `merge_group`
+  runs, so those numbers are unaffected. It still dominates `push` wall time,
+  which is not changed.
 - Hosted runner speed varies between runs. Compare medians and p90 across
   several runs, never a single run.
 - The inventory's pytest count was collected on a clean checkout of the same
@@ -328,6 +366,12 @@ Rules for a result:
 3. Report n for both sides and report unchanged and worse numbers too.
 4. Judge a pruned test by the failures it used to catch as well as the seconds
    saved. Say how the lane showed the coverage was kept or the risk accepted.
+5. A change that reduces flaky failures shows up in `reruns` and in
+   `runner_minutes_all_attempts`, not in the `successful` percentiles: a flaky
+   run that passes only on a re-run is not in the `successful` view at all (its
+   first attempt failed), so fewer flakes raise the `successful` n without
+   moving its wall or runner percentiles. A lane that claims fewer flaky
+   failures must cite those two fields for both windows.
 
 ## Results log
 

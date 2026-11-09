@@ -3,7 +3,7 @@
 - Window (run created_at, UTC, half-open): 2026-11-08T22:00:00Z up to but not including 2026-11-09T12:00:00Z
 - Runs: 123 completed
 - Label: strict baseline
-- Generated: 2026-11-09T16:24:38Z
+- Generated: 2026-11-09T16:56:02Z
 
 ## merge_group
 
@@ -67,7 +67,7 @@ Runs with a re-run (metrics are first attempts): 0
 | runs | n | wall min median | p75 | p90 | max | runner min median | p90 | Windows runner min median | p90 |
 |---|---|---|---|---|---|---|---|---|---|
 | successful | 0 | - | - | - | - | - | - | - | - |
-| all | 20 | 11.0 | 32.3 | 134.3 | 509.5 | 92.6 | 222.6 | 7.7 | 8.9 |
+| all | 20 | 11.0 | 32.3 | 134.3 | 509.5 | 79.5 | 110.8 | 7.7 | 8.9 |
 
 Job families in successful runs, top 0 by p90 seconds (over job instances, not per run):
 
