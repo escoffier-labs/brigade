@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from . import memory_fairness as fairness
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
 from . import memory_hub_sync as sync
@@ -167,7 +168,7 @@ def _submission_digest(ops: list[dict[str, Any]]) -> str:
 def _cluster_key(ops: list[dict[str, Any]]) -> str:
     """Name a submission by scope and card ids, so rewrites keep its key."""
     ids = {op["card_id"] for op in ops} | {op["other_card"]["card_id"] for op in ops if "other_card" in op}
-    return io.sha256(io.json_bytes([ops[0]["scope"], sorted(ids)]))[:32]
+    return fairness.key_digest(ops[0]["scope"], ids)
 
 
 def _cluster_cap() -> int:
@@ -446,8 +447,7 @@ def _reflect(
             table.setdefault(name, {})[key] = list(entry) if entry else [now, 0]
         tables[lane] = table
 
-    def priority(key: str, entry: list[int]) -> tuple[int, int, str]:
-        return entry[1], entry[0], key
+    priority = fairness.priority
 
     # Keys not seen this run are dropped. The cap never binds for observed keys, but if it
     # did, keys are admitted in scheduling order, so the most recently served go first.
