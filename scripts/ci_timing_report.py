@@ -8,27 +8,48 @@ no network calls.
 
 Definitions (the campaign doc, docs/phase-adaptive-ci.md, repeats these):
 
-* A run is in the window when its ``created_at`` is within ``--since`` and
-  ``--until`` (inclusive, UTC) and its status is ``completed``. Cancelled and
-  failed runs are included in the "all" aggregates and excluded from the
-  "successful" ones.
-* ``wall_minutes`` is ``run_started_at`` to ``updated_at`` of the latest
-  attempt. It excludes time spent waiting in a queue before the run started.
-* ``runner_minutes`` is the sum of ``completed_at - started_at`` over the
-  latest attempt's jobs that were not skipped. Cancelled jobs count, because
-  they held a runner.
+* A run is in the window when its ``created_at`` is at or after ``--since`` and
+  before ``--until`` (half-open ``[since, until)``, UTC, so adjacent windows
+  never share a run) and its status is ``completed``. Cancelled and failed runs
+  are included in the "all" aggregates and excluded from the "successful" ones.
+* Every per-run metric describes the FIRST attempt of the run, so wall time,
+  runner time and conclusion all come from one attempt and reflect what a
+  developer waited for on the first try. For a run with ``run_attempt`` above 1
+  the script reads ``/runs/{id}/attempts/1`` and ``/runs/{id}/attempts/1/jobs``.
+  ``conclusion`` is the first attempt's. ``latest_conclusion``, ``run_attempt``
+  (latest) and ``reran`` are recorded beside it, and aggregates count ``reruns``
+  per event.
+* ``wall_minutes`` is ``run_started_at`` to ``updated_at`` of the first attempt.
+  It excludes time spent waiting in a queue before the run started.
+* ``runner_minutes`` is the sum of ``completed_at - started_at`` over the first
+  attempt's jobs that were not skipped. Cancelled jobs count, because they held
+  a runner. Jobs whose name still holds an unexpanded ``${{`` expression and
+  that lasted zero seconds (cancelled before the matrix expanded) are dropped.
+* ``runner_minutes_all_attempts`` is the cost of every attempt, from
+  ``/runs/{id}/attempts/{n}/jobs`` for each attempt. The API repeats a
+  carried-over job under each later attempt with its original timestamps, so a
+  job whose name and timestamps match an earlier record is counted once. The
+  headline numbers exclude re-run cost.
 * Percentiles use linear interpolation between order statistics (the same
   definition as numpy's default and ``statistics.quantiles(method="inclusive")``).
+  Job-family percentiles are over job instances, not over runs.
 * A job family normalizes matrix names: a trailing integer shard index is
   dropped (``test shard (3.12, 1)`` becomes ``test shard 3.12``) and a
   free-text argument group is dropped (``install-from-source (x, --depth y)``
   becomes ``install-from-source``). Other names are kept whole.
 
-Output holds run ids, SHAs, events, job names and numbers only. A job name
+Output holds run ids, SHAs (traceable to commits through the API), events, job
+names, runner labels and numbers. A runner label is kept only when it is a
+GitHub-hosted image label (``ubuntu-*``, ``windows-*``, ``macos-*``) or exactly
+``self-hosted``; any other label is stored as its OS bucket. A job name
 containing a retired engine name is stored with that name replaced by
-``retired-name``. It records no
-user names, branch names or titles. Two invocations over the same window give
-identical JSON apart from ``generated_at``.
+``retired-name``, and a job name containing the run's branch name or actor login
+is stored as ``redacted``. It records no user names, branch names or titles. Two
+invocations over the same window give identical JSON apart from ``generated_at``.
+
+A page-count mismatch, a re-run wall time shorter than its longest job, or a
+redacted job name is written to stderr and to the ``warnings`` list of the JSON.
+A search slice that reaches the 1,000 row cap is split and retried.
 """
 
 from __future__ import annotations
@@ -46,7 +67,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 1  # inventory file
+TIMING_SCHEMA_VERSION = 2  # timing report: first-attempt metrics, warnings
 PER_PAGE = 100
 SLICE_HOURS = 6
 SEARCH_RESULT_CAP = 1000  # the Actions runs API stops returning rows past this
@@ -55,6 +77,8 @@ RATE_LIMIT_SLEEP_SECONDS = 60
 _ISO = "%Y-%m-%dT%H:%M:%SZ"
 # The repository's retired-name check rejects these spellings in tracked files,
 # and a CI job name can still carry one. Recorded names get a neutral stand-in.
+# Runner labels safe to publish: GitHub-hosted images, and the bare self-hosted label.
+_HOSTED_LABEL = re.compile(r"(?:ubuntu|windows|macos)-[a-z0-9._-]+", re.IGNORECASE)
 _RETIRED_NAME = re.compile(r"graph[ _-]?trail|mise[ _-]?ledger", re.IGNORECASE)
 # gh failures worth a short retry: server errors and dropped HTTP/2 or TCP streams.
 _TRANSIENT = re.compile(
@@ -125,6 +149,28 @@ def record_name(name: str) -> str:
     return _RETIRED_NAME.sub("retired-name", name)
 
 
+def safe_runner(labels: Sequence[str] | None) -> str | None:
+    """First runner label if it names a GitHub-hosted image or ``self-hosted``, else its OS bucket.
+
+    A label list comes from the workflow file, so a self-hosted runner can put a
+    host name first. Only labels that cannot identify a machine are published.
+    """
+    if not labels:
+        return None
+    label = labels[0]
+    if label == "self-hosted" or _HOSTED_LABEL.fullmatch(label):
+        return label
+    return os_of(label)
+
+
+def _private_tokens(run: dict[str, Any]) -> list[str]:
+    """Lower-cased branch and user names of a run, which a job name must not carry."""
+    values = [run.get("head_branch")]
+    for key in ("actor", "triggering_actor"):
+        values.append((run.get(key) or {}).get("login"))
+    return [v.lower() for v in values if isinstance(v, str) and v]
+
+
 def job_seconds(job: dict[str, Any]) -> int | None:
     """Duration of one job, or None when it did not run on a runner."""
     if job.get("conclusion") == "skipped":
@@ -135,43 +181,102 @@ def job_seconds(job: dict[str, Any]) -> int | None:
     return max(0, round((parse_ts(completed) - parse_ts(started)).total_seconds()))
 
 
-def summarize_run(run: dict[str, Any], jobs: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    """Reduce one API run and its jobs to the recorded fields."""
-    recorded: list[dict[str, Any]] = []
-    skipped = 0
+def _counted_jobs(jobs: Iterable[dict[str, Any]]) -> tuple[list[tuple[dict[str, Any], int]], int]:
+    """Jobs that held a runner, with their seconds, and the number dropped.
+
+    Dropped: skipped or never-started jobs, and zero-second jobs whose name still
+    holds an unexpanded ``${{`` matrix expression (cancelled before it expanded).
+    """
+    counted: list[tuple[dict[str, Any], int]] = []
+    dropped = 0
     for job in jobs:
         seconds = job_seconds(job)
-        if seconds is None:
-            skipped += 1
+        if seconds is None or (seconds == 0 and "${{" in job["name"]):
+            dropped += 1
             continue
-        labels = job.get("labels") or []
+        counted.append((job, seconds))
+    return counted, dropped
+
+
+def all_attempts_seconds(jobs: Iterable[dict[str, Any]]) -> int:
+    """Runner seconds over every attempt, counting a carried-over job once.
+
+    The jobs API lists a job that a later attempt did not re-run again under that
+    attempt, with a new id and the original timestamps, so records are keyed on
+    name and timestamps rather than id.
+    """
+    seen: set[tuple[Any, Any, Any]] = set()
+    unique = []
+    for job in jobs:
+        key = (job.get("name"), job.get("started_at"), job.get("completed_at"))
+        if key not in seen:
+            seen.add(key)
+            unique.append(job)
+    return sum(seconds for _, seconds in _counted_jobs(unique)[0])
+
+
+def summarize_run(
+    run: dict[str, Any],
+    jobs: Iterable[dict[str, Any]],
+    *,
+    first_attempt: dict[str, Any] | None = None,
+    all_jobs: Iterable[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Reduce one run to the recorded fields, all measured on its first attempt.
+
+    ``run`` is the listed (latest attempt) run. ``first_attempt`` is the run
+    object of attempt 1 and ``jobs`` its jobs; when the run was never re-run,
+    ``first_attempt`` is omitted and ``run`` itself is attempt 1. ``all_jobs``
+    (the jobs of every attempt) feeds ``runner_minutes_all_attempts``.
+    """
+    first = first_attempt or run
+    counted, skipped = _counted_jobs(jobs)
+    private = _private_tokens(run)
+    recorded: list[dict[str, Any]] = []
+    redacted = 0
+    for job, seconds in counted:
+        name = job["name"]
+        if any(token in name.lower() for token in private):
+            name, redacted = "redacted", redacted + 1
         recorded.append(
             {
-                "name": record_name(job["name"]),
-                "runner": labels[0] if labels else None,
+                "name": record_name(name),
+                "runner": safe_runner(job.get("labels")),
                 "seconds": seconds,
                 "conclusion": job.get("conclusion"),
             }
         )
     recorded.sort(key=lambda j: (j["name"], j["seconds"], str(j["conclusion"])))
-    started = run.get("run_started_at") or run["created_at"]
-    wall = (parse_ts(run["updated_at"]) - parse_ts(started)).total_seconds() / 60.0
+    started = first.get("run_started_at") or first["created_at"]
+    wall = (parse_ts(first["updated_at"]) - parse_ts(started)).total_seconds() / 60.0
     total = sum(j["seconds"] for j in recorded)
     windows = sum(j["seconds"] for j in recorded if os_of(j["runner"]) == "windows")
+    attempt = run.get("run_attempt", 1)
+    every_attempt = total if all_jobs is None else all_attempts_seconds(all_jobs)
     return {
         "id": run["id"],
         "event": run["event"],
-        "conclusion": run.get("conclusion"),
+        "conclusion": first.get("conclusion"),
+        "latest_conclusion": run.get("conclusion"),
         "head_sha": run.get("head_sha"),
-        "run_attempt": run.get("run_attempt", 1),
+        "run_attempt": attempt,
+        "reran": attempt > 1,
         "created_at": run["created_at"],
         "wall_minutes": round(max(0.0, wall), 3),
         "runner_minutes": round(total / 60.0, 3),
+        "runner_minutes_all_attempts": round(every_attempt / 60.0, 3),
         "windows_runner_minutes": round(windows / 60.0, 3),
         "job_count": len(recorded),
         "skipped_jobs": skipped,
+        "redacted_jobs": redacted,
         "jobs": recorded,
     }
+
+
+def wall_conflicts_with_jobs(summary: dict[str, Any], tolerance_seconds: int = 5) -> bool:
+    """True when the run's wall time is shorter than its longest job (impossible)."""
+    longest = max((j["seconds"] for j in summary["jobs"]), default=0)
+    return summary["wall_minutes"] * 60.0 + tolerance_seconds < longest
 
 
 def _stats(values: Sequence[float], keys: Sequence[tuple[str, float]]) -> dict[str, Any]:
@@ -183,6 +288,7 @@ def aggregate_group(runs: Sequence[dict[str, Any]]) -> dict[str, Any]:
     count = len(runs)
     wall = [r["wall_minutes"] for r in runs]
     runner = [r["runner_minutes"] for r in runs]
+    every_attempt = [r["runner_minutes_all_attempts"] for r in runs]
     windows = [r["windows_runner_minutes"] for r in runs]
     by_os: dict[str, list[float]] = {}
     for run in runs:
@@ -225,6 +331,10 @@ def aggregate_group(runs: Sequence[dict[str, Any]]) -> dict[str, Any]:
             "max": _round(max(runner)) if runner else None,
             "total": _round(sum(runner)),
         },
+        "runner_minutes_all_attempts": {
+            **_stats(every_attempt, (("median", 50), ("p90", 90))),
+            "total": _round(sum(every_attempt)),
+        },
         "windows_runner_minutes": {
             **_stats(windows, (("median", 50), ("p90", 90))),
             "total": _round(sum(windows)),
@@ -245,7 +355,7 @@ def aggregate(runs: Sequence[dict[str, Any]]) -> dict[str, Any]:
             "successful": aggregate_group([r for r in in_event if r["conclusion"] == "success"]),
             "all": aggregate_group(in_event),
             "conclusions": dict(sorted(Counter(str(r["conclusion"]) for r in in_event).items())),
-            "rerun_attempts": sum(1 for r in in_event if r["run_attempt"] > 1),
+            "reruns": sum(1 for r in in_event if r["reran"]),
         }
     return result
 
@@ -285,8 +395,22 @@ def gh_api(path: str, *, sleep: Callable[[float], None] = time.sleep) -> Any:
             raise RuntimeError(f"gh api failed for {route}: {proc.stderr.strip() or proc.stdout.strip()}")
 
 
+class Warnings:
+    """Collects data-quality warnings: printed to stderr and stored in the report."""
+
+    def __init__(self) -> None:
+        self._items: list[str] = []
+
+    def add(self, message: str) -> None:
+        _log(f"warning: {message}")
+        self._items.append(message)
+
+    def items(self) -> list[str]:
+        return sorted(set(self._items))
+
+
 def window_slices(since: datetime, until: datetime) -> list[tuple[datetime, datetime]]:
-    """Split a window so each query stays under the API's 1000 row cap."""
+    """Split a window so each query normally stays under the API's 1000 row cap."""
     slices = []
     cursor = since
     step = timedelta(hours=SLICE_HOURS)
@@ -297,48 +421,110 @@ def window_slices(since: datetime, until: datetime) -> list[tuple[datetime, date
     return slices or [(since, until)]
 
 
-def fetch_runs(repo_path: str, workflow: str, since: datetime, until: datetime) -> list[dict[str, Any]]:
+def _fetch_slice(
+    repo_path: str, workflow: str, start: datetime, end: datetime, warnings: Warnings
+) -> list[dict[str, Any]]:
+    """All rows created in ``[start, end]`` (inclusive), splitting the slice at the row cap."""
+    created = f"{start.strftime(_ISO)}..{end.strftime(_ISO)}"
+    rows: list[dict[str, Any]] = []
+    total: int | None = None
+    for page in range(1, SEARCH_RESULT_CAP // PER_PAGE + 1):
+        path = (
+            f"{repo_path}/actions/workflows/{workflow}/runs"
+            f"?created={created}&status=completed&per_page={PER_PAGE}&page={page}"
+        )
+        data = gh_api(path)
+        if page == 1:
+            total = data.get("total_count")
+        batch = data.get("workflow_runs", [])
+        rows.extend(batch)
+        if len(batch) < PER_PAGE:
+            break
+    if len(rows) >= SEARCH_RESULT_CAP or (total is not None and total > SEARCH_RESULT_CAP):
+        seconds = int((end - start).total_seconds())
+        if seconds <= 1:
+            raise RuntimeError(f"slice {created} holds more than {SEARCH_RESULT_CAP} runs and cannot be split further")
+        mid = start + timedelta(seconds=seconds // 2)
+        _log(f"slice {created} reached the {SEARCH_RESULT_CAP} row cap; splitting at {mid.strftime(_ISO)}")
+        return _fetch_slice(repo_path, workflow, start, mid, warnings) + _fetch_slice(
+            repo_path, workflow, mid, end, warnings
+        )
+    if total is not None and total != len(rows):
+        warnings.add(f"run listing {created} returned {len(rows)} rows but total_count was {total}")
+    return rows
+
+
+def fetch_runs(
+    repo_path: str, workflow: str, since: datetime, until: datetime, warnings: Warnings | None = None
+) -> list[dict[str, Any]]:
+    """Completed runs created in the half-open window ``[since, until)``."""
+    warnings = warnings or Warnings()
     by_id: dict[int, dict[str, Any]] = {}
     for start, end in window_slices(since, until):
-        created = f"{start.strftime(_ISO)}..{end.strftime(_ISO)}"
-        got = 0
-        for page in range(1, SEARCH_RESULT_CAP // PER_PAGE + 1):
-            path = (
-                f"{repo_path}/actions/workflows/{workflow}/runs"
-                f"?created={created}&status=completed&per_page={PER_PAGE}&page={page}"
-            )
-            rows = gh_api(path).get("workflow_runs", [])
-            got += len(rows)
-            for row in rows:
-                by_id[row["id"]] = row
-            if len(rows) < PER_PAGE:
-                break
-        if got >= SEARCH_RESULT_CAP:
-            _log(f"warning: slice {created} hit the {SEARCH_RESULT_CAP} row cap; runs may be missing")
+        for row in _fetch_slice(repo_path, workflow, start, end, warnings):
+            by_id[row["id"]] = row
         _log(f"listed {len(by_id)} runs through {end.strftime(_ISO)}")
-    return [by_id[i] for i in sorted(by_id) if since <= parse_ts(by_id[i]["created_at"]) <= until]
+    return [by_id[i] for i in sorted(by_id) if since <= parse_ts(by_id[i]["created_at"]) < until]
 
 
-def fetch_jobs(repo_path: str, run_id: int) -> list[dict[str, Any]]:
+def fetch_jobs(
+    repo_path: str,
+    run_id: int,
+    warnings: Warnings | None = None,
+    *,
+    attempt: int | None = None,
+    job_filter: str = "latest",
+) -> list[dict[str, Any]]:
+    """Jobs of one run: a specific ``attempt``, or the run's jobs under ``job_filter`` (``latest``)."""
+    warnings = warnings or Warnings()
+    scope = f"attempt {attempt}" if attempt is not None else f"filter={job_filter}"
+    base = f"{repo_path}/actions/runs/{run_id}/"
+    base += f"attempts/{attempt}/jobs?" if attempt is not None else f"jobs?filter={job_filter}&"
     jobs: list[dict[str, Any]] = []
+    total: int | None = None
     page = 1
     while True:
-        data = gh_api(f"{repo_path}/actions/runs/{run_id}/jobs?filter=latest&per_page={PER_PAGE}&page={page}")
+        data = gh_api(f"{base}per_page={PER_PAGE}&page={page}")
+        if page == 1:
+            total = data.get("total_count")
         batch = data.get("jobs", [])
         jobs.extend(batch)
-        if len(batch) < PER_PAGE or len(jobs) >= data.get("total_count", 0):
-            return jobs
+        if len(batch) < PER_PAGE or (total is not None and len(jobs) >= total):
+            break
         page += 1
+    if total is not None and total != len(jobs):
+        warnings.add(f"run {run_id} jobs ({scope}): {len(jobs)} rows but total_count was {total}")
+    return jobs
 
 
-def collect_runs(repo_path: str, workflow: str, since: datetime, until: datetime) -> list[dict[str, Any]]:
-    listed = fetch_runs(repo_path, workflow, since, until)
+def summarize_listed_run(repo_path: str, run: dict[str, Any], warnings: Warnings) -> dict[str, Any]:
+    """Fetch what a run needs and reduce it, measuring the first attempt."""
+    run_id = run["id"]
+    if run.get("run_attempt", 1) > 1:
+        first = gh_api(f"{repo_path}/actions/runs/{run_id}/attempts/1")
+        # One call per attempt rather than ``filter=all``: that listing is large for a run
+        # with many attempts, and its second page returned persistent HTTP 502s.
+        per_attempt = [fetch_jobs(repo_path, run_id, warnings, attempt=n) for n in range(1, run["run_attempt"] + 1)]
+        jobs, all_jobs = per_attempt[0], [job for batch in per_attempt for job in batch]
+        summary = summarize_run(run, jobs, first_attempt=first, all_jobs=all_jobs)
+    else:
+        summary = summarize_run(run, fetch_jobs(repo_path, run_id, warnings))
+    if wall_conflicts_with_jobs(summary):
+        warnings.add(f"run {run_id}: wall time {summary['wall_minutes']} min is shorter than its longest job")
+    return summary
+
+
+def collect_runs(
+    repo_path: str, workflow: str, since: datetime, until: datetime, warnings: Warnings | None = None
+) -> list[dict[str, Any]]:
+    warnings = warnings or Warnings()
+    listed = fetch_runs(repo_path, workflow, since, until, warnings)
     total = len(listed)
     _log(f"fetching jobs for {total} runs")
     done = 0
 
     def one(run: dict[str, Any]) -> dict[str, Any]:
-        return summarize_run(run, fetch_jobs(repo_path, run["id"]))
+        return summarize_listed_run(repo_path, run, warnings)
 
     summaries = []
     with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
@@ -347,6 +533,9 @@ def collect_runs(repo_path: str, workflow: str, since: datetime, until: datetime
             done += 1
             if done % 25 == 0 or done == total:
                 _log(f"jobs {done}/{total}")
+    redacted = sum(r["redacted_jobs"] for r in summaries)
+    if redacted:
+        warnings.add(f"{redacted} job names contained a branch or user name and were stored as 'redacted'")
     return sorted(summaries, key=lambda r: (r["created_at"], r["id"]))
 
 
@@ -376,16 +565,24 @@ def dumps(value: Any, level: int = 0) -> str:
 
 
 def build_report(
-    runs: Sequence[dict[str, Any]], *, workflow: str, since: str, until: str, label: str | None, repo: str
+    runs: Sequence[dict[str, Any]],
+    *,
+    workflow: str,
+    since: str,
+    until: str,
+    label: str | None,
+    repo: str,
+    warnings: Sequence[str] = (),
 ) -> dict[str, Any]:
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": TIMING_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).strftime(_ISO),
         "repo": repo,
         "workflow": workflow,
         "window": {"since": since, "until": until},
         "label": label,
         "run_count": len(runs),
+        "warnings": list(warnings),
         "aggregates": aggregate(runs),
         "runs": list(runs),
     }
@@ -399,20 +596,27 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
+def _cell(value: Any) -> str:
+    """One Markdown table cell, with ``|`` escaped so a name cannot split the row."""
+    return _fmt(value).replace("|", "\\|")
+
+
 def render_markdown(report: dict[str, Any], *, top_families: int = 12) -> str:
     window = report["window"]
     lines = [
         f"# CI timing: {report['workflow']}",
         "",
-        f"- Window (run created_at, UTC): {window['since']} to {window['until']}",
+        f"- Window (run created_at, UTC, half-open): {window['since']} up to but not including {window['until']}",
         f"- Runs: {report['run_count']} completed",
     ]
     if report.get("label"):
         lines.append(f"- Label: {report['label']}")
+    for warning in report.get("warnings", []):
+        lines.append(f"- Warning: {warning}")
     lines += ["- Generated: " + report["generated_at"], ""]
     for event, data in report["aggregates"].items():
         lines += [f"## {event}", "", "Conclusions: " + ", ".join(f"{k} {v}" for k, v in data["conclusions"].items())]
-        lines += [f"Runs with a re-run attempt: {data['rerun_attempts']}", ""]
+        lines += [f"Runs with a re-run (metrics are first attempts): {data['reruns']}", ""]
         lines += [
             "| runs | n | wall min median | p75 | p90 | max | runner min median | p90 | Windows runner min median | p90 |",
             "|---|---|---|---|---|---|---|---|---|---|",
@@ -432,19 +636,19 @@ def render_markdown(report: dict[str, Any], *, top_families: int = 12) -> str:
                 x["median"],
                 x["p90"],
             ]
-            lines.append("| " + " | ".join(_fmt(c) for c in cells) + " |")
+            lines.append("| " + " | ".join(_cell(c) for c in cells) + " |")
         families = data["successful"]["job_families"]
         ranked = sorted(families.items(), key=lambda kv: (-(kv[1]["p90_seconds"] or 0), kv[0]))[:top_families]
         lines += [
             "",
-            f"Job families in successful runs, top {len(ranked)} by p90 seconds:",
+            f"Job families in successful runs, top {len(ranked)} by p90 seconds (over job instances, not per run):",
             "",
             "| family | runner | ran in | median s | p90 s | max s |",
             "|---|---|---|---|---|---|",
         ]
         for family, f in ranked:
             lines.append(
-                f"| {family} | {f['runner']} | {f['runs_with']}/{data['successful']['runs']} "
+                f"| {_cell(family)} | {_cell(f['runner'])} | {f['runs_with']}/{data['successful']['runs']} "
                 f"| {_fmt(f['median_seconds'])} | {_fmt(f['p90_seconds'])} | {f['max_seconds']} |"
             )
         lines.append("")
@@ -513,8 +717,8 @@ def collect_inventory(root: Path, collect_text: str | None) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--workflow", default="ci.yml", help="workflow file name (default ci.yml)")
-    p.add_argument("--since", help="window start, ISO UTC, filters run created_at")
-    p.add_argument("--until", help="window end, ISO UTC, filters run created_at")
+    p.add_argument("--since", help="window start, ISO UTC, inclusive, filters run created_at")
+    p.add_argument("--until", help="window end, ISO UTC, exclusive, filters run created_at")
     p.add_argument("--output", required=True, help="path of the JSON report")
     p.add_argument("--markdown", help="path of the Markdown summary (timing mode)")
     p.add_argument("--label", help="free-text label stored in the report")
@@ -549,7 +753,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             ).stdout
         )["nameWithOwner"]
     )
-    runs = collect_runs(repo_path, args.workflow, since, until)
+    warnings = Warnings()
+    runs = collect_runs(repo_path, args.workflow, since, until, warnings)
     report = build_report(
         runs,
         workflow=args.workflow,
@@ -557,6 +762,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         until=until.strftime(_ISO),
         label=args.label,
         repo=repo,
+        warnings=warnings.items(),
     )
     stored = {k: v for k, v in report.items() if k != "runs"} if args.aggregates_only else report
     out.write_text(dumps(stored) + "\n", encoding="utf-8")
