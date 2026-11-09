@@ -2256,21 +2256,35 @@ collection, kind, project, path and run exactly, with no integrity mismatch.
 ```bash
 brigade memory verify status --target <verify-folder>
 brigade memory verify run --dry-run --no-model --target <verify-folder> [--list-ids]
+brigade memory verify run --dry-run --target <verify-folder>
+brigade memory verify run --target <verify-folder> [--scheduled]
 ```
 
 `status` reports whether verification is configured, the number of bound
 scopes and workspaces, the pause state and the never-read count from the last
 recorded run. It makes no hub call.
 
-`run` requires both `--dry-run` and `--no-model` until the model-backed pass
-lands. Anything else is refused with `verify_live_unavailable` (exit 2)
-before any hub call. The dry run pulls the replica, reads per-card counts
-with `read_stats`, scores every card in the bound scopes and prints the
-selected card ids, their scores and lanes, and counted skip reasons. It calls
-no seat, submits and attaches nothing, and writes no state, so the pause
-counter does not move. Output never holds card text, titles or evidence.
-`--list-ids` adds the never-read card ids, still without titles or text.
-Failures print a fixed code and reason only.
+`run --dry-run --no-model` pulls the replica, reads per-card counts with
+`read_stats`, scores every card in the bound scopes and prints the selected
+card ids, their scores and lanes, and counted skip reasons. It calls no seat,
+submits and attaches nothing, and writes no state, so the pause counter does
+not move. `--no-model` without `--dry-run` is refused with
+`verify_no_model_requires_dry_run` (exit 2) before any hub call.
+`run --dry-run` also calls both seats and checks their replies, then attaches,
+submits and writes nothing, and leaves the pause counter alone.
+With `[verify] enabled = false`, every run that would call a seat (`run`,
+`run --scheduled` and `run --dry-run`) refuses with `verify_disabled` and
+exits 1 before any seat call, hub request or state write, so an installed
+care job does nothing and its log shows why. `run --dry-run --no-model`
+calls no seat and keeps working, so selection can be previewed before the
+pass is enabled. That preview still reads the hub: `status`, the replica
+pull and `read_stats`. `memory verify doctor` with `enabled = false` checks
+the folder and the `[verify]` configuration, then refuses with
+`verify_disabled` (exit 1) without probing either seat, because a probe calls
+the seat's model. A plain `run`
+is the live pass described under "The live run". Output never holds card
+text, titles or evidence. `--list-ids` adds the never-read card ids, still
+without titles or text. Failures print a fixed code and reason only.
 
 Verify keeps its own hub replica under `.brigade/memory/verify/hub/`, with its
 own building directory and locks. It never reads, locks or writes the shared
@@ -2459,15 +2473,224 @@ unavailable. With several scopes the total is null when any scope's count is.
 
 ### When `read_stats` is rate limited
 
+After a scope's `read_stats` listing has been paged to the end, a non-dry
+run stores the whole scope snapshot in one atomic state write: `reads` for
+every live card of the scope (zero for a card with no row) and the scope's
+`counts_ms`, the run's own clock. A listing that stops early, by a refusal or
+a rate limit on a later page, stores nothing for that scope.
+
 When `read_stats` answers `429 memory_read_stats_rate_limited` for a scope,
-the run counts `read_stats_limited` and `read_stats_unavailable` and skips the
-scope: none of its cards are scored or selected, and its never-read count is
-null. Other scopes are unaffected. The scope's card history still loads, so
-its pending proposals count toward the job-wide pending ceiling. Counts cached in the state file are never
-used in place of a reply, because nothing writes a trusted snapshot of them
-yet. The state format already holds per-card `reads` and a per-scope
-`counts_ms`, so the later run that stores complete snapshots needs no format
-change.
+the run counts `read_stats_limited`. If the state holds a snapshot of that
+scope under the same binding, no more than two days old, the scope is scored
+from it and reported as `cached`. Otherwise the run also counts
+`read_stats_unavailable` and skips the scope: none of its cards are scored or
+selected. Either way the scope's never-read count is null, because a snapshot
+never feeds the never-read report. Other scopes are unaffected. The scope's
+card history still loads, so its pending proposals count toward the job-wide
+pending ceiling. The snapshot carries no MAC: tampering by the same user is
+out of scope, as for the reflect markers.
+
+### The live run
+
+A run without `--dry-run` takes these steps in order:
+
+1. It refuses a folder that holds the reflect job's state
+   (`.brigade/memory/reflect/`) with `verify_reflect_folder`.
+2. It reads the hub's `status` and stops before any model call or hub write
+   unless the credential is not the admin credential
+   (`verify_admin_credential`), the hub advertises both `verifier_floor` and
+   `verifier_manifests` (`verify_hub_floor_missing`), `verifier` is true
+   (`verify_not_verifier`) and `reflect_principal` is false
+   (`verify_reflect_principal`). Nothing is inferred from preflight hold
+   reasons.
+3. It resolves both seats with their recorded probes.
+4. It reads every remembered pending proposal with `proposal_show`. A
+   proposal that is no longer pending or held frees its card and its place
+   under the ceiling of 8.
+5. It selects cards, stores the read count snapshots, assembles evidence and
+   calls the seats one card at a time.
+6. For a card whose checks produce an op, it builds a local review packet and
+   a manifest, and stages the exact submission (ops, manifest and packet) in
+   the packet directory before anything is sent. It then attaches the manifest
+   with `evidence.attach` and opens one proposal for that one card. The
+   proposal holds the correction ops and an `append_evidence` op that cites
+   the manifest, all pinned to the card's revision and block hashes.
+   Submission reuses reflect's request id ledger, so a lost reply replays the
+   same request.
+
+Before checking cards, every non-dry run reconciles the stages. A stage whose
+ledger entry holds a proposal id is published as that proposal's packet, so a
+crash between submit and publication loses nothing (`packets_recovered`). A
+stage whose request has no result yet, after a transient refusal, a quota
+reply or a crash, is sent again unchanged under the same request id. Its card
+is not checked again and does not enter its cooldown until the request has a
+result (`submission_unresolved`).
+
+Commit-id expansions need a git resolver, which a later slice adds. Until
+then every expansion abstains with `verify_commit_unresolved`, so no
+`replace_block` is opened.
+
+What reaches the hub: the reads above, the manifest and the proposal ops. The
+manifest is `brigade.memory-verify-manifest.v1` JSON with the card, each
+block's verdict and confidence code, the reference, kind, trust rank,
+observation time, sha256 and quoted byte ranges of each item the quotes used,
+the rule ids of dropped items, the seat names and pinned models, and the
+digests of the instructions, the packet and the prompt input. It carries no
+card, evidence or model text, and it is scanned before attachment
+(`verify_manifest_unclean`). Its evidence id is
+`<principal>/memory-verify/<sha256 of the manifest>`.
+
+| Run reason | Meaning |
+|---|---|
+| `dry_run_proposal` | A dry run would have attached and proposed for this card |
+| `verify_deferred_proposals` | The run already opened 4 new proposals |
+| `pending_ceiling` | The job already has 8 pending proposals |
+| `proposal_quota` | The hub answered a proposal quota. The run stops proposing and still verifies the rest |
+| `evidence_quota` | The hub answered a retained evidence quota. Handled like `proposal_quota` |
+| `evidence_cap` | The card already holds the most manifests this principal may attach to it |
+| `duplicate_pending` | The hub already holds this proposal. Its id is remembered |
+| `already_proposed`, `refused` | The ledger already holds a proposal id or a final refusal for this correction |
+| `verify_deferred_packet_cap` | The packet directory has no room, so nothing was staged, attached or proposed. The card stays out of its cooldown |
+| `seat_quota`, `seat_quota_deferred` | A seat answered a rate limit. The run stops verifying without a failure |
+| `seat_timeout`, `seat_failed` | One call failed. The card is skipped and not marked verified |
+| `verify_deferred_time` | The 20-minute wall clock ran out before this card |
+| `packets_settled`, `packets_expired` | Packets marked terminal or deleted this run |
+| `packets_recovered` | A staged packet of an already opened proposal was published |
+| `packets_temporary_removed`, `packets_stage_invalid` | A crashed write's temporary file, or a stage that failed its checks, was removed |
+| `verify_packet_mismatch` | A different packet already holds the proposal's name. It is kept for review, never overwritten |
+| `submission_unresolved`, `submission_unresolved_card` | A request without a result waits for the next run's replay, and its card is not checked again |
+| `manifest_transient` | Attaching the manifest met a 5xx, 408, 429, `retryable` or uncoded refusal. The stage and request id stay for the next run. Only a coded 4xx refusal is final (`manifest_refused`) |
+| `verify_packet_unbound` | The hub answered duplicate pending, and `proposal_show` did not list exactly one bound verifier manifest with this stage's manifest digest. No packet is published under that id, and the stage is discarded |
+| `verify_binding_unchecked` | The `proposal_show` read for a duplicate failed. The stage stays for the next run, until it expires |
+| `verify_stage_ops_mismatch` | A stage's ops no longer hash to the digest the request id ledger keeps. The stage is never sent and no id is minted from it. Its request follows the shared rule: held as a tombstone when unsettled, forgotten otherwise |
+| `verify_scope_unbound` | A stage's scope is no longer bound in `[[verify.workspace]]` or readable. Nothing is sent to it, and its request follows the shared rule. A stage whose request this job opened (`created`) is published as its proposal's packet first, which needs no hub request. The start-of-run `proposal_show` refresh also skips scopes that are no longer bound |
+| `verify_stage_expired` | A stage without a result reached its 7-day limit. It is deleted. Its request id is kept as a tombstone only when the request is unsettled, and is forgotten otherwise |
+| `verify_manifest_expired` | A replay's manifest was attached 23 hours ago or more, or the hub answered `memory_manifest_binding_invalid`. The hub binds a verifier manifest only within 24 hours of attaching it, so the stage is discarded and the card stays eligible for a fresh check. A request the hub definitely refused is forgotten, and one whose reply may have been lost becomes a tombstone |
+| `verify_unsettled_recovered` | An unsettled request had no stage, so it became a tombstone that holds its card |
+| `request_id_reused` | A submission's ops matched a tombstone, so it was sent under the expired request's id |
+| `verify_unresolved_request` | The card has a live tombstone, so it is not selected and no new correction is proposed for it |
+| `verify_deferred_tombstones` | 512 tombstones are live, so no new proposal opens until one ages out. The card stays out of its cooldown |
+| `verify_deferred_cap`, `verify_deferred_quota` | The card's correction was not submitted because of the per-run cap or the pending ceiling, or after a quota stop. Nothing is staged and the card stays out of its cooldown, so the next run checks it again |
+| `proposal_show_failed` | A remembered proposal could not be read. It still counts as open this run |
+
+A run fails, and counts toward the pause, on a transport, configuration or
+authorization error, on a failed pre-run check, on a refused seat, on a seat
+authentication or isolation failure, when every model call fails
+(`verify_seats_failed`) and when the hub refuses every proposal the run
+attempted (`all_proposals_refused`).
+
+The pause counter follows one rule. A failed non-dry run adds one. A
+completed non-dry run resets it to zero only when it did work: at least one
+seat call answered, or at least one submission reached a result (opened,
+matched a pending duplicate, or was finally refused). A completed run that
+did neither, for example because every card was inside its interval, reports
+`idle: true` and leaves the counter as it was. A dry run never changes it.
+Three consecutive failures pause the scheduled job. `--scheduled` then returns
+`paused` without a hub call, and only a manual non-dry run that did work
+clears the pause.
+
+### Review packets
+
+Each opened proposal has a packet at
+`.brigade/memory/verify/packets/<proposal-id>.json`: the evidence texts with
+their trust ranks and whether they counted, the scan findings of dropped
+items, the seats, both prompts and raw replies, the outcomes and the ops. The
+directory is owner-only (0700) and every file in it is owner-only (0600). The
+manifest's `packet_sha256` binds the packet bytes.
+
+Every file in the directory is published the same way: an owner-only
+temporary file created exclusively without following links, written and
+fsynced, renamed over its final name, then the directory fsynced. A crash
+never leaves a partial file under a final name, and the next run removes
+leftover temporary files it owns. A submission's stage,
+`staged-<ledger digest>.json`, is published before the manifest is attached
+and removed once the packet is published. A packet already under a
+proposal's name is never replaced: identical bytes are left alone, and
+different bytes are reported as `verify_packet_mismatch` and kept for review.
+
+The request id ledger keeps the digest of every submitted op, the manifest's
+`append_evidence` op included, beside the request id. A stage is sent again
+only when its ops still hash to that digest and its scope is still bound and
+readable. When the hub answers duplicate pending, the packet is published
+under the existing proposal's id only when `proposal_show` lists exactly one
+applicable bound verifier manifest (`pending_review` or `active`) whose
+`artifact_sha256` equals the stage's manifest digest. The hub lists bound
+manifests only to a caller with `review` on every target, so a verifier
+principal holding `read`, `reflect` and `read_stats` always records
+`verify_packet_unbound` instead.
+
+Each stage records when its manifest first reached the hub. The hub binds a
+verifier manifest only within 24 hours of attaching it, so a replay stops at
+23 hours (`MANIFEST_WINDOW_MS` in `memory_verify_packets`, derived from the
+hub's 24-hour constant). It discards the stage and records
+`verify_manifest_expired`, and a later check builds a new manifest and
+request. A `memory_manifest_binding_invalid` refusal on a replay is treated
+the same way, never as a final refusal of the correction. The ledger marks a
+request `unsettled` from just before each `propose` until the hub answers it
+definitely. An unsettled request is kept as a tombstone, so its card stays
+held as described below.
+
+A stage holds card text, evidence, prompts and raw replies, so it expires.
+A stage whose submission still has no result 7 days after it was created is
+deleted and the card's verdict becomes `verify_stage_expired`, which makes the
+card eligible again. Packets of settled proposals expire 14 days after
+settling, as above.
+
+State changes reach the state file before the files they replace are
+removed. Retiring a stage saves the tombstone or the forgotten request first
+and deletes the stage second, so a crash between the two leaves a stage that
+the next run retires again. A proposal id is saved in the same write as its
+provenance: `created` when this request opened the proposal, `duplicate` when
+the hub named another one. A recovered stage is published directly only
+under `created`. Any other id, including one whose provenance was never
+saved, goes through the binding check first. As a backstop, every run starts
+by turning an `unsettled` request that has no stage into a tombstone
+(`verify_unsettled_recovered`), so its card stays held.
+
+Every path that discards a stage without sending it (stage expiry, manifest
+expiry, an unbound scope and an ops mismatch) follows one rule for its
+request. A request the hub answered definitely, by a refusal or a quota
+reply, cannot have opened a proposal, so it is forgotten and the card stays
+eligible. A request that is still `unsettled`, sent without a definite
+answer, may have opened one even though no reply arrived. Its ledger entry
+becomes a tombstone holding the request id, the digest of the full ops and
+the card's 32-hex key digest (never its id), keyed by the ops digest. The hub's duplicate-pending rule compares whole
+proposal digests, not cards, and each check's prompts carry fresh nonces, so
+a regenerated correction for the same card would open a second proposal. The
+client prevents that: while a tombstone lives, its card is not selected
+(`verify_unresolved_request`). A card already checked in the run that created
+the tombstone may only resend exactly the tombstone's ops under its request
+id (`request_id_reused`), so the hub's idempotency answers with the original
+proposal if that request landed. Any other correction for the card is held
+with the same reason. A tombstone is kept for 90 days from the request's
+creation and never dropped earlier, because dropping it would reopen the
+duplicate window for its card. When a tombstone goes, its card can be
+selected and proposed again. At most 512 tombstones may be live. When 512 are
+live, the run fails closed: it opens no new proposal, records
+`verify_deferred_tombstones` for each card it would have proposed, and keeps
+those cards out of their cooldown, so they are checked again once a
+tombstone ages out. Replays of requests already in the ledger still run.
+
+When a run finds a packet's proposal no longer open, it renames the packet to
+`<proposal-id>.t<ms>.json` with the time it noticed, and a later run deletes it
+14 days after that. The directory holds at most 64 MiB. A new packet first
+displaces the oldest terminal packets, never an open one. When there is still
+no room, the card is deferred with `verify_deferred_packet_cap` before anything is
+attached.
+
+### Scheduling
+
+```bash
+brigade memory care install --target <verify-folder> --entry memory-verify
+```
+
+The `memory-verify` entry runs `brigade memory verify run --scheduled` at
+11:00, an hour after `memory-reflect`. Install refuses the reflect job's
+folder, an install that names both entries, a folder without
+`[hub] mode = "read"`, and any credential other than the folder's own explicit
+memory hub credential: a folder that would fall back to the fleet node token,
+or an override that names a fleet node or admin token. `brigade care status`
+reads the entry's pause state from the verify state file.
 
 ### State file
 
@@ -2475,9 +2698,9 @@ change.
 `schedule.json`: owner-only, read without following links, written through an
 exclusive temporary file and an atomic rename, and held under its own
 `state.lock`. It is limited to 8 MiB. It holds key digests, days, revisions,
-verdict codes, proposal ids and cached read counts, never card ids or text.
-Three consecutive failed runs pause the scheduled job, separately from the
-reflect job's pause.
+verdict codes, proposal ids, cached read counts and the request id ledger,
+never card ids or text. Three consecutive failed runs pause the scheduled
+job, separately from the reflect job's pause.
 
 A state file that is oversized, malformed, linked or readable by others makes
 every verify command fail closed with `verify_state` and the fixed reason

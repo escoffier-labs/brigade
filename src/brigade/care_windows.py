@@ -74,7 +74,7 @@ def preserve_scope_arguments(desired: str, existing: str) -> str:
 
 
 def task_run(entry: CareEntry, *, workspace: Path) -> str:
-    if entry.kind in ("runbook", "reflect"):
+    if entry.kind in ("runbook", "reflect", "verify"):
         return subprocess.list2cmdline(entry_argv(entry, workspace))
     workspace_text = os.fspath(workspace).replace("/", "\\")
     cd_target = f'\\"{workspace_text}\\"' if " " in workspace_text or "\t" in workspace_text else workspace_text
@@ -83,7 +83,7 @@ def task_run(entry: CareEntry, *, workspace: Path) -> str:
 
 
 def create_command(entry: CareEntry, *, command: str, name: str, schedule: str, account: str) -> str:
-    if entry.kind not in ("runbook", "reflect"):
+    if entry.kind not in ("runbook", "reflect", "verify"):
         return f'schtasks /Create /TN "{name}" /TR "{command}" {schedule} {account} /F'
 
     # schtasks /TR is limited to 261 characters and passes through cmd quoting.

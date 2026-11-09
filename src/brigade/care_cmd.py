@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from . import care_patrol, care_schedules, managed_block, memory_cmd, runbook_cmd
-from .care_launchers import entry_argv, explicit_workspace, persisted_scope, runbook_argv, scoped_entries
+from .care_launchers import entry_argv, explicit_workspace, hub_job_status, install_refusal, persisted_scope
+from .care_launchers import runbook_argv, scoped_entries, verify_entry
 from .care_windows import create_command as _windows_create_command, task_run as _schtasks_task_run
 from .isolated_exec import trusted_cwd
 
@@ -72,7 +73,7 @@ class CareEntry:
     schedule: str  # crontab five-field expression
     on_calendar: str  # systemd OnCalendar=
     description: str
-    kind: Literal["runbook", "shell", "reflect"]
+    kind: Literal["runbook", "shell", "reflect", "verify"]
     runbook_rel: str | None = None
     shell: str | None = None  # multi-command shell body without cd/PATH
     runbook_id: str | None = None
@@ -161,6 +162,8 @@ MEMORY_REFLECT_ENTRY = CareEntry(
     kind="reflect",
 )
 
+MEMORY_VERIFY_ENTRY = verify_entry(CareEntry)
+
 MEMORY_JOB_ENTRIES: tuple[CareEntry, ...] = (
     CareEntry(
         entry_id="handoff-ingest",
@@ -218,9 +221,10 @@ REPEATED_FAILURE_THRESHOLD = 2
 
 
 def _catalog_by_id() -> dict[str, CareEntry]:
+    patrol_entry = care_patrol.entry(CareEntry)
     return {
         entry.entry_id: entry
-        for entry in (*CARE_ENTRIES, *MEMORY_JOB_ENTRIES, MEMORY_REFLECT_ENTRY, care_patrol.entry(CareEntry))
+        for entry in (*CARE_ENTRIES, *MEMORY_JOB_ENTRIES, MEMORY_REFLECT_ENTRY, MEMORY_VERIFY_ENTRY, patrol_entry)
     }
 
 
@@ -543,7 +547,7 @@ def _cron_escape_path(value: str) -> str:
 
 
 def _cron_command(entry: CareEntry, *, workspace: Path) -> str:
-    if entry.kind in ("runbook", "reflect"):
+    if entry.kind in ("runbook", "reflect", "verify"):
         workspace = workspace.expanduser().resolve()
         cwd = trusted_cwd()
         body = " ".join(f'"{_cron_escape_path(arg)}"' for arg in entry_argv(entry, workspace))
@@ -720,17 +724,8 @@ def _entry_status(target: Path, entry: CareEntry) -> dict[str, Any]:
         "kind": entry.kind,
         "description": entry.description,
     }
-    if entry.kind == "reflect":
-        from .memory_reflect_hub import schedule_status
-
-        try:
-            state = schedule_status(target)
-            payload.update({k: state[k] for k in ("consecutive_failures", "paused")})
-            payload["last_receipt"] = {"status": state.get("last_status")} if "last_status" in state else None
-            payload["repeated_failure"] = state["paused"]
-        except (OSError, ValueError):
-            payload.update(paused=True, state_error="reflect schedule state is unreadable")
-        return payload
+    if entry.kind in ("reflect", "verify"):
+        return hub_job_status(target, entry, payload)
     assert entry.kind == "runbook"
     assert entry.runbook_rel is not None
     path = target / entry.runbook_rel
@@ -1157,7 +1152,7 @@ def install(
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    runbook_error = _required_runbook_error(target, entries)
+    runbook_error = _required_runbook_error(target, entries) or install_refusal(target, entries)
     if runbook_error:
         print(f"error: {runbook_error}", file=sys.stderr)
         return 2

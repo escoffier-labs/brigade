@@ -7,8 +7,8 @@ file and an atomic rename, and guarded by its own lock file. It is limited to
 reason that names the file and carries none of its bytes. Recovery is to
 inspect and remove the file, as for `schedule.json`.
 
-The file holds key digests, days, revisions, verdict codes, proposal ids and
-read counts. It never holds card ids, card text, titles or evidence. Its pause
+The file holds key digests, days, revisions, verdict codes, proposal ids,
+read counts and the request id ledger. It never holds card ids, card text, titles or evidence. Its pause
 counter is separate from the reflect job's.
 """
 
@@ -25,6 +25,7 @@ from typing import Any
 from . import memory_hub_client as hubc
 from . import memory_proposal_io as io
 from .inbox_lock import InboxLockTimeout, held_file_lock
+from .memory_reflect_hub import valid_submission
 
 ROOT = ".brigade/memory/verify"
 STATE = f"{ROOT}/state.json"
@@ -42,7 +43,15 @@ LOCK_ERROR = "verify state is locked by another run"
 KEY = re.compile(r"[0-9a-f]{32}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
 CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
-TOP_KEYS = frozenset({"schema", "consecutive_failures", "paused", "last_status", "binding", "scopes"})
+TOP_KEYS = frozenset({"schema", "consecutive_failures", "paused", "last_status", "binding", "scopes", "submissions"})
+# The S19d request id ledger, shared with reflect: one entry per correction, keyed by its ops digest.
+MAX_SUBMISSIONS = 4096
+# Verify keeps the digest of the full submitted ops, marks an id a duplicate reply named, and
+# keeps the request id of an expired stage as a tombstone keyed by that ops digest, with the
+# card's 32-hex fairness key (never its id) so the card is held while the tombstone lives.
+# `unsettled` marks a request sent without a definite answer from the hub yet. `created` and
+# `duplicate` are saved with a proposal id and say whether this request opened it.
+LEDGER_EXTRA = frozenset({"ops_sha256", "duplicate", "expired", "card", "unsettled", "created"})
 SCOPE_KEYS = frozenset({"since_day", "never_read", "counts_ms", "cards"})
 CARD_KEYS = frozenset({"seen", "proposed", "verified", "revision", "evidence", "verdict", "pending", "reads"})
 
@@ -108,6 +117,14 @@ def _validate(state: object) -> dict[str, Any]:
         raise VerifyStateError()
     if "binding" in state and not (isinstance(state["binding"], str) and DIGEST.fullmatch(state["binding"])):
         raise VerifyStateError()
+    submissions = state.get("submissions", {})
+    if (
+        not isinstance(submissions, dict)
+        or len(submissions) > MAX_SUBMISSIONS
+        or (submissions and "binding" not in state)
+        or not all(valid_submission(digest, pending, LEDGER_EXTRA) for digest, pending in submissions.items())
+    ):
+        raise VerifyStateError()
     scopes = state.get("scopes")
     if not isinstance(scopes, dict) or len(scopes) > MAX_SCOPES:
         raise VerifyStateError()
@@ -118,8 +135,8 @@ def _validate(state: object) -> dict[str, Any]:
         for field in ("since_day", "never_read"):
             if table.get(field) is not None and not _count(table[field]):
                 raise VerifyStateError()
-        # When cached read counts were observed, in ms since the epoch. Never null. Validated
-        # now so slice 9, which first writes counts, needs no format change. Not read yet.
+        # When the cached read counts were observed, in ms since the epoch. Never null. Written
+        # only after a complete read_stats pagination of the scope (memory_verify_run).
         if "counts_ms" in table and not _count(table["counts_ms"]):
             raise VerifyStateError()
         cards = table.get("cards", {})

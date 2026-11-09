@@ -11,6 +11,9 @@ from typing import Any, Iterable
 
 
 SCHTASKS_WEEKDAYS = ("SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT")
+# memory-verify runs an hour after memory-reflect (10:00), so duplicate merges reach the shared scope quota first.
+MEMORY_VERIFY_SCHEDULE = "0 11 * * *"
+MEMORY_VERIFY_CALENDAR = "*-*-* 11:00:00"
 _CRON_FIELD = re.compile(r"^[0-9*/,-]+$")
 _KNOWN_MISELEDGER_TIMERS = {"brigadeclaw-daily-report": "brigadeclaw-daily-report.timer"}
 _SYSTEMD_ON_CALENDAR = re.compile(
