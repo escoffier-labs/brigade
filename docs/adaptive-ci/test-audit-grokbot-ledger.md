@@ -532,7 +532,7 @@ Files: `test_grokbot_findings.py`, `test_grokbot_findings_relay.py`, `test_grokb
 | `test_cli_preview_defaults_to_write_nothing_and_omits_finding_text` | 1 | R | partial or cov, cov 252 lines, uniq 0 |
 | `test_cli_apply_json_stays_free_of_finding_text` | 1 | R | partial or cov, cov 609 lines, uniq 0 |
 | `test_relay_findings_help_is_preview_first_without_credential_options` | 1 | R | partial or cov, cov 1 lines, uniq 0 |
-| `test_existing_findings_commands_remain_in_parser_inventory` | 1 | R | partial or cov, cov 1 lines, uniq 0 |
+| `test_existing_findings_commands_remain_in_parser_inventory` | 1 | D | Copied command list, deleted in the review round on the same grounds as the findings.py inventory copies. Remaining proof: tests/test_cli_inventory_contract.py::test_parser_inventory_and_missing_cli_agree_after_alias_normalization (M11). |
 
 ### test_grokbot_reconcile.py (36 declarations, partial)
 

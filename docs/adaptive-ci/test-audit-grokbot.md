@@ -178,9 +178,9 @@ No test failed at the baseline (1,999 passed, 0 skipped with the `grokbot` extra
 
 The junk found falls into four shapes. Each maps to a question in the authoring gate.
 
-1. **A name that promises more than the body does.** Three `fleet_tools` tests claim replay races, stale-reservation release and receipt saturation. Their bodies deny one observer-only proposal that is refused before any of those guards. None of the three catches the guard its name describes: mutating the capacity refusal (M3a-base, M3b-base) or the reservation exclusivity (M3c-base) leaves all three green. Gate question 2, "what credible regression makes this fail," catches this. A reviewer who has to write the one-line answer, or who runs the mutation, sees it at once.
+1. **A name that promises more than the body does.** Three `fleet_tools` tests claim replay races, stale-reservation release and receipt saturation. Their bodies deny one observer-only proposal that is refused before any of those guards. None of the three catches the guard its name describes: mutating the capacity refusal (M3a-base, M3b-base) or the reservation exclusivity (M3c-base) leaves all three green. They were not worthless: all three fail when an approved observer-era proposal triggers a restart, but `fleet_remediation.py` already proves that contract, so they protected nothing unique. Gate question 2, "what credible regression makes this fail," catches this. A reviewer who has to write the one-line answer, or who runs the mutation, sees it at once.
 2. **A copied inventory.** Four tests list CLI command names that a generic parser-versus-docs contract already compares. Gate question 3 (existing proof at the strongest boundary) catches it.
-3. **A layer replay.** The MCP late-claim test restates a jobs-owner contract and survives the mutation that breaks it (M12-base). Gate question 3 again.
+3. **A layer replay.** The MCP late-claim test restates a jobs-owner contract. It survives the budget mutation (M12-base) but catches a second form of the same bug, counting queue wait against `timeout_seconds`. The jobs keepers (`jobs.py::test_a_late_claim_gets_its_whole_execution_budget` and its neighbour) catch both forms, so the deletion loses no proof. Gate question 3 again.
 4. **Siblings that differ by one constant.** Nine groups differed by a literal, a state, or one assertion. They are tables now. Gate question 3 asks for extending a table before adding a test.
 
 Practical points for adopting a gate in Brigade:
@@ -217,3 +217,21 @@ Every run went through `brigade work verify run --target . --argv-json ... --cap
 | Mutations, three batches (40 rows) | `20261109-153407-work-verify-ba789c`, `20261109-153613-work-verify-f26664`, `20261109-154416-work-verify-760c0c` | worktree `src/` diff exit code 0 after each batch |
 
 An earlier mutation attempt (`20261109-153323-work-verify-b7b81a`) was interrupted on purpose after it showed a same-size `.pyc` cache hit, and rerun with `PYTHONDONTWRITEBYTECODE=1`.
+
+## Review round
+
+Three independent reviews ran on head `4940187b`: Codex (no major issues), a Claude PR review, and a separate Opus preservation review that re-checked every changed declaration against its keeper and ran 30 mutations on the PR head (all killed) plus 7 against the deleted tests on `origin/main`. Its verdict: all 42 changed declarations keep their contract.
+
+Changes made in response:
+
+- `test_tools_filter_and_deny_allowed_paths_with_sensitive_tags` lost a strictness check when it moved from an inline client to the shared `ScriptedClient`, which returns `None` for an unknown `vault_read` path instead of raising. The test now asserts that every `vault_read` path is one of the two fixture notes, so an out-of-scope read fails again.
+- `test_grokbot_findings_relay.py::test_existing_findings_commands_remain_in_parser_inventory` was a copied inventory left behind by the first pass. It is deleted on the same grounds as the other inventory copies.
+- Two sentences above were corrected: the three `fleet_tools` tests protected nothing unique (not nothing), and the deleted MCP late-claim test caught one of two forms of the budget bug.
+
+Not changed, recorded as follow-ups:
+
+- The s26 call-time refusal test calls every tool with `{}`. For tools with required arguments, the refusal can come from argument validation rather than the profile gate. The no-argument tools still pin the gate.
+- `test_grokbot_memory_credential.py` has two weak tests: one asserts `_on_windows()` against a copy of its own body, and one uses `all(...)` over doctor output, which passes on empty output.
+- The reviewer's spot read of four `cov only` files found those two weak tests and no assertion-free probes, mock-implemented behaviour or duplicate contract replays. A per-lane pass would likely add a handful of declarations, not move the percentage much.
+
+The before/after tables above describe head `4940187b`. The review round removes one more declaration (8 lines) and adds a 3-line assertion.

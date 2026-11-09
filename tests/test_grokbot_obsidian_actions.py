@@ -447,3 +447,7 @@ def test_tools_filter_and_deny_allowed_paths_with_sensitive_tags(tmp_path: Path)
     assert "vault_patch" not in {name for name, _ in client.calls}
     assert "vault_move" not in {name for name, _ in client.calls}
     assert "vault_delete" not in {name for name, _ in client.calls}
+    # ScriptedClient answers unknown vault_read paths with None; pin the read set
+    # so an out-of-scope read (such as a move destination) still fails here.
+    read_paths = {payload["path"] for name, payload in client.calls if name == "vault_read"}
+    assert read_paths <= {allowed, tagged}
