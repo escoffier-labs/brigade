@@ -1621,3 +1621,68 @@ def test_high_fd_closes_the_original_when_the_copy_fails(monkeypatch):
     with pytest.raises(OSError):
         proc.high_fd(1)
     assert closed == [1]
+
+
+posix = pytest.mark.skipif(not proc.held_exec_supported(), reason="held executable launch needs Linux fexecve")
+
+
+def _held_native_shell(tmp_path):
+    """A copy of the system shell, open read-only at descriptor 3 or above."""
+    import shutil
+
+    found = shutil.which("sh")
+    if found is None:
+        pytest.skip("needs a POSIX shell")
+    real = os.path.realpath(found)
+    with open(real, "rb") as handle:
+        if handle.read(4) != b"\x7fELF":
+            pytest.skip("needs a native shell binary")
+    copy = tmp_path / "held-native-shell"
+    shutil.copyfile(real, copy)
+    copy.chmod(0o700)
+    return proc.high_fd(os.open(copy, os.O_RDONLY)), copy
+
+
+@posix
+def test_a_held_seat_and_its_children_do_not_keep_the_held_descriptor(tmp_path):
+    fd, copy = _held_native_shell(tmp_path)
+    try:
+        # ls is a child of the held seat and lists the seat's descriptors and its own.
+        result = proc.run_held(["sh", "-c", "ls -l /proc/$$/fd/ /proc/self/fd/"], fd, timeout=30, stdin=b"")
+    finally:
+        os.close(fd)
+    assert result.code == 0, result.stderr
+    assert result.stdout.count("/fd/:") == 2, result.stdout
+    assert copy.name not in result.stdout, result.stdout
+
+
+@posix
+def test_a_held_seat_gets_exactly_its_environment_and_default_signals(tmp_path):
+    fd, _ = _held_native_shell(tmp_path)
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BRIGADE_HELD_PROBE": "kept"}
+    script = 'echo "probe=$BRIGADE_HELD_PROBE ctype=${LC_CTYPE-unset}"; grep SigIgn /proc/$$/status'
+    try:
+        result = proc.run_held(["sh", "-c", script], fd, timeout=30, env=env, stdin=b"")
+    finally:
+        os.close(fd)
+    assert result.code == 0, result.stderr
+    assert "probe=kept ctype=unset" in result.stdout
+    ignored = int(result.stdout.split("SigIgn:")[1].split()[0], 16)
+    for number in (signal.SIGPIPE, signal.SIGXFSZ):
+        assert not ignored & (1 << (number - 1)), result.stdout
+
+
+@posix
+def test_a_held_script_is_refused_without_running(tmp_path):
+    marker = tmp_path / "script-ran"
+    script = tmp_path / "held-script"
+    script.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    script.chmod(0o700)
+    fd = proc.high_fd(os.open(script, os.O_RDONLY))
+    try:
+        result = proc.run_held(["held-script"], fd, timeout=30, stdin=b"")
+    finally:
+        os.close(fd)
+    assert result.code == 126
+    assert "command launch failed: held-script (not a native binary" in result.stderr
+    assert not marker.exists()

@@ -1445,36 +1445,65 @@ def run_held(
     stdin: bytes | None = None,
     process_registry: ProcessRegistry | None = None,
 ) -> Result:
-    """Run the executable file open behind ``held_fd``, never whatever a path names at spawn time.
+    """Run the native executable open behind ``held_fd``, never whatever a path names at spawn time.
 
     ``args[0]`` is only the display name. The child inherits ``held_fd`` and
-    nothing else (``run`` itself passes no descriptors), and execs it through
-    :func:`held_exec_path`. Timeout, tree termination and output bounds match
-    :func:`run`. Platforms without the mechanism raise ``OSError``.
+    nothing else (``run`` itself passes no descriptors), and starts as the
+    small :data:`_HELD_LAUNCHER`, which marks the descriptor close-on-exec and
+    execs it with ``fexecve`` (``execveat`` with ``AT_EMPTY_PATH``). The kernel
+    resolves the open file before it closes close-on-exec descriptors, so the
+    held image runs and neither it nor anything it starts keeps the
+    descriptor. Timeout, tree termination and output bounds match :func:`run`.
+    Platforms without the mechanism raise ``OSError``.
+
+    Only native binaries run this way. A ``#!`` script needs its descriptor
+    after the exec, because the interpreter reopens it by path, so the kernel
+    refuses it with ``ENOENT`` and the call returns code 126 without running
+    anything. The launcher passes on the exact environment the call was given
+    and restores the signal dispositions Python ignores at startup.
 
     ``held_fd`` must be 3 or above (see :func:`high_fd`), so it is never the
-    child's stdin, stdout or stderr. Residual: the descriptor survives the
-    exec, so the launched program and its children inherit one read-only
-    descriptor to the executable. Python has no ``execveat``, and a
-    ``preexec_fn`` that closed it after exec is impossible and unsafe with
-    threads before it, so this is accepted.
+    child's stdin, stdout or stderr.
     """
     if held_fd < HELD_FD_MIN:
         raise OSError("a held executable descriptor must be 3 or above")
+    if not held_exec_supported():
+        raise OSError("launching a held executable descriptor is unavailable on this platform")
     return _launch_and_collect(
-        args,
+        [sys.executable, "-I", "-S", "-c", _HELD_LAUNCHER, str(held_fd), *args],
         subprocess.PIPE,
         timeout=timeout,
         env=env,
         cwd=cwd,
         stdin=stdin,
         process_registry=process_registry,
-        executable=held_exec_path(held_fd),
         pass_fds=(held_fd,),
     )
 
 
 HELD_FD_MIN = 3
+
+# Runs as ``python -I -S -c _HELD_LAUNCHER <fd> <argv...>`` in the child of
+# :func:`run_held`, then replaces itself with the held executable. Python's
+# startup may add LC_CTYPE (locale coercion) and ignores SIGPIPE and SIGXFSZ,
+# so the environment is read back from the kernel's copy and those signals are
+# reset before the exec.
+_HELD_LAUNCHER = r"""
+import errno, os, signal, sys
+for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
+    if hasattr(signal, name):
+        signal.signal(getattr(signal, name), signal.SIG_DFL)
+fd, argv = int(sys.argv[1]), sys.argv[2:]
+with open("/proc/self/environ", "rb") as handle:
+    env = dict(entry.partition(b"=")[::2] for entry in handle.read().split(b"\0") if entry.find(b"=") > 0)
+os.set_inheritable(fd, False)
+try:
+    os.execve(fd, argv, env)
+except OSError as exc:
+    reason = "not a native binary this system runs" if exc.errno == errno.ENOENT else exc.strerror
+    os.write(2, ("command launch failed: %s (%s)\n" % (os.path.basename(argv[0]), reason)).encode())
+    os._exit(126)
+"""
 
 
 def high_fd(fd: int) -> int:
@@ -1503,21 +1532,13 @@ def high_fd(fd: int) -> int:
 
 
 def held_exec_supported() -> bool:
-    """Whether a child can exec a file through an inherited descriptor (Linux ``/proc/self/fd``)."""
-    return sys.platform.startswith("linux") and os.path.isdir("/proc/self/fd")
-
-
-def held_exec_path(fd: int) -> str:
-    """The path that makes a child exec the open file behind ``fd``, passed with ``pass_fds=(fd,)``.
-
-    The child inherits ``fd`` at the same number, and the kernel resolves the
-    child's ``/proc/self/fd/<fd>`` magic link to that open file, never to a
-    path, so a rename or replacement after the file was opened cannot change
-    what runs. Platforms without the mechanism raise ``OSError``.
-    """
-    if not held_exec_supported():
-        raise OSError("launching a held executable descriptor is unavailable on this platform")
-    return f"/proc/self/fd/{fd}"
+    """Whether :func:`run_held` can exec a held descriptor here (Linux ``fexecve`` and ``/proc``)."""
+    return (
+        sys.platform.startswith("linux")
+        and os.path.isdir("/proc/self/fd")
+        and os.execve in os.supports_fd
+        and bool(sys.executable)
+    )
 
 
 def run_to_file(
@@ -1561,7 +1582,6 @@ def _launch_and_collect(
     stdin: bytes | None = None,
     process_registry: ProcessRegistry | None = None,
     supervise_group: bool = False,
-    executable: str | None = None,
     pass_fds: tuple[int, ...] = (),
 ) -> Result:
     _check_launch_allowed(process_registry)
@@ -1580,8 +1600,6 @@ def _launch_and_collect(
             )
     try:
         popen_kwargs: dict[str, Any] = dict(_process_group_kwargs(suspend=windows_launch))
-        if executable is not None:
-            popen_kwargs["executable"] = executable
         if pass_fds:
             popen_kwargs["pass_fds"] = pass_fds
         process = subprocess.Popen(
