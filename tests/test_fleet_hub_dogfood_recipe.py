@@ -423,6 +423,92 @@ def test_the_staged_operator_copy_is_0600_under_any_umask(project, tmp_path, mon
     assert _mode(folder / setup.OPERATOR_TOKEN) == 0o600
 
 
+PROC_FDS = Path("/proc/self/fd")
+linux_fds = pytest.mark.skipif(not PROC_FDS.is_dir(), reason="counts descriptors through /proc/self/fd")
+
+
+def _open_fds():
+    return len(os.listdir(PROC_FDS))
+
+
+def _staging_names(folder):
+    return [p.name for p in folder.iterdir() if p.name.startswith(f".{setup.OPERATOR_TOKEN}.")]
+
+
+@linux_fds
+def test_an_fstat_failure_after_open_leaks_no_descriptor(project, tmp_path, monkeypatch):
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    before = _open_fds()
+    with monkeypatch.context() as patch:
+
+        def broken_fstat(fd):
+            raise OSError(5, "simulated fstat failure")
+
+        patch.setattr(setup.os, "fstat", broken_fstat)
+        with pytest.raises(OSError, match="simulated fstat failure"):
+            setup.ensure_operator_token(folder)
+    assert _open_fds() == before
+
+
+@linux_fds
+@pytest.mark.parametrize("step", ["fdopen", "replace"])
+def test_a_staging_failure_leaks_no_descriptor_and_no_staging_file(project, tmp_path, monkeypatch, step):
+    """Remove the copy so the sync stages a new one, then fail before or at the rename."""
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    (folder / setup.OPERATOR_TOKEN).unlink()
+    before = _open_fds()
+    with monkeypatch.context() as patch:
+
+        def broken(*args, **kwargs):
+            raise OSError(5, f"simulated {step} failure")
+
+        patch.setattr(setup.os, step, broken)
+        with pytest.raises(OSError, match=f"simulated {step} failure"):
+            setup.ensure_operator_token(folder)
+    assert _open_fds() == before
+    assert _staging_names(folder) == []
+    assert not (folder / setup.OPERATOR_TOKEN).exists()
+
+
+def _runbook_copy_block():
+    runbook = (ROOT / "docs" / "runbooks" / "fleet-hub-dogfood.md").read_text(encoding="utf-8")
+    start = runbook.index("(\n  set -eu\n")
+    return runbook[start : runbook.index("\n)\n", start) + 2]
+
+
+def test_both_runbooks_carry_the_same_operator_copy_block():
+    containers = (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text(encoding="utf-8")
+    assert _runbook_copy_block() in containers
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="runs the runbook's GNU coreutils commands")
+@pytest.mark.parametrize("failure", [None, "missing-source", "unreadable-source"])
+def test_the_runbook_copy_block_installs_whole_or_leaves_nothing(tmp_path, failure):
+    folder = tmp_path / "secrets"
+    folder.mkdir(mode=0o700)
+    source = folder / "admin-token.txt"
+    if failure != "missing-source":
+        source.write_text("fake-admin-token\n", encoding="ascii")
+        source.chmod(0o000 if failure == "unreadable-source" else 0o444)
+    if failure == "unreadable-source" and os.access(source, os.R_OK):
+        pytest.skip("this user reads mode-0000 files (root)")
+    done = subprocess.run(
+        ["bash", "-c", _runbook_copy_block()], cwd=tmp_path, capture_output=True, text=True, timeout=30, check=False
+    )
+    operator = folder / "operator-admin-token.txt"
+    leftovers = [p.name for p in folder.iterdir() if p.name.startswith(".operator-admin-token.")]
+    assert leftovers == []
+    if failure is None:
+        assert done.returncode == 0, done.stderr
+        assert operator.read_text(encoding="ascii") == "fake-admin-token\n"
+        assert _mode(operator) == 0o600
+    else:
+        assert done.returncode != 0
+        assert not operator.exists()
+
+
 def test_brigade_ref_needs_its_archive_digest_and_version(project, tmp_path):
     ref, digest = ("--brigade-ref", "0" * 40), ("--brigade-sha256", "f" * 64)
     assert _init(project, tmp_path, *ref) == 1

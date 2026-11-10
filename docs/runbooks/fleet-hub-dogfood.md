@@ -81,13 +81,21 @@ to `admin-token.txt`. They create it when it is missing, rewrite it after the
 admin token changes and reset its mode to 0600. To add it to an existing
 install without rerunning setup, run this from the recipe directory. It
 writes a 0600 file inside `secrets/` and renames it over the copy, so the copy
-is never a partial file or wider than 0600:
+is never a partial file or wider than 0600. It stops at the first failing
+command, and its `EXIT` trap removes the temporary file, so a failure leaves no
+stray copy of the token:
 
 ```bash
-operator_tmp="$(mktemp secrets/.operator-admin-token.XXXXXX)"
-cat secrets/admin-token.txt > "$operator_tmp"
-chmod 0600 "$operator_tmp"
-mv -fT "$operator_tmp" secrets/operator-admin-token.txt
+(
+  set -eu
+  umask 077
+  operator_tmp="$(mktemp secrets/.operator-admin-token.XXXXXX)"
+  trap 'rm -f "$operator_tmp"' EXIT
+  cat secrets/admin-token.txt > "$operator_tmp"
+  chmod 0600 "$operator_tmp"
+  mv -fT "$operator_tmp" secrets/operator-admin-token.txt
+  trap - EXIT
+)
 ```
 
 ## Prerequisites

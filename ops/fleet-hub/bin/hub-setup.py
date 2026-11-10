@@ -22,6 +22,7 @@ package, a unit or a container. Stdlib only.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import ipaddress
 import json
@@ -359,7 +360,13 @@ def _open_regular(name: str, dir_fd: int) -> int | None:
         if exc.errno in _NOFOLLOW_ERRNOS:
             raise SetupError(f"secrets/{name} is a symlink; move it aside and rerun") from None
         raise
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+    # The caller owns `fd` only once it is returned, so every other exit closes it here.
+    try:
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+    except BaseException:
+        os.close(fd)
+        raise
+    if not regular:
         os.close(fd)
         raise SetupError(f"secrets/{name} is not a regular file; move it aside and rerun")
     return fd
@@ -402,8 +409,17 @@ def _sync_operator_token(dir_fd: int) -> str | None:
     staging = f".{OPERATOR_TOKEN}.{secrets.token_hex(8)}"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     fd = os.open(staging, flags, 0o600, dir_fd=dir_fd)
+    # Any failure before the rename unlinks the staging file in the `finally` below.
     try:
-        with os.fdopen(fd, "wb") as handle:
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            # fdopen failed, so no file object owns the descriptor. io.open may already have
+            # closed it on a late failure, hence the suppress.
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+        with handle:
             # The umask can narrow the create mode below 0600 (0400 under 0277), which the CLI refuses.
             os.fchmod(handle.fileno(), 0o600)
             handle.write(token)
@@ -443,6 +459,13 @@ def _ensure_operator_token_by_path(folder: Path) -> str | None:
 def ensure_secrets(project: Path, *, remote_token: Path | None) -> list[str]:
     folder = project / "secrets"
     # Checked before anything is created or chmodded under it, since both follow the path.
+    #
+    # Threat model: `secrets/` is 0700, so only its owner and root can change what is in it.
+    # Two same-UID races remain and are accepted: swapping `secrets/` for a symlink between
+    # this check and the descriptor open in ensure_operator_token, and swapping the staging
+    # name before `os.replace` resolves it again. A process that can do either already runs
+    # as the owner and can read admin-token.txt directly, so neither race gives it anything
+    # new, and the 0700 directory keeps other users out of both.
     if folder.is_symlink():
         raise SetupError("secrets/ is a symlink or not a directory; move it aside and rerun")
     _private_dir(folder)
