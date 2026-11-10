@@ -43,6 +43,8 @@ hub:
   - 'src/brigade/memory_cmd.py'
   - 'src/brigade/memory_hub_*.py'
   - 'src/brigade/memory_retrieval_eval/**'
+  - 'ops/fleet-hub/bin/hub-setup.py'
+  - 'ops/fleet-hub/r1-models.json'
   - 'evals/memory-retrieval/**'
   - 'pyproject.toml'
   - '.github/workflows/hub.yml'

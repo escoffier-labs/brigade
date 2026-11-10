@@ -60,11 +60,20 @@ Secrets, in `ops/fleet-hub/secrets/` (mode 0700, ignored by Git):
   mounted read-only and named by `BRIGADE_FLEET_FINDINGS_KEY_FILE`. It is off
   the state volume, so a volume copy alone cannot test guesses.
 - `front-authkey`: the private network's auth key for the front's first login.
-- `embed-token`: only for the `remote` embedder backend.
+- `embed-token`: only for the `remote` embedder backend, the token the
+  endpoint probe passed with, mode 0400. Unlike the other secrets, setup
+  replaces it whenever a probe passes with a different token, and removes
+  it when the configuration leaves the remote backend, so the hub never
+  sends one endpoint's token to another. If setup fails and cannot put
+  the previous configuration back, it leaves no token, and the hub answers
+  in BM25 mode until setup is rerun.
+- `embed-local-token`: only for the `local` backend, mode 0400. The hub
+  sends a bearer token to every embedder endpoint, so setup makes a random
+  one. The recipe's embedder ignores it.
 - `operator-admin-token.txt`: the operator's copy of the admin token, mode
   0600. No container mounts it.
 
-Each container's file is mode 0444. The containers run as other UIDs and must
+Each other container file is mode 0444. The containers run as other UIDs and must
 read the bind mount, so the 0700 directory protects the files from other host
 users.
 
