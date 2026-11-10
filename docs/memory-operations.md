@@ -2044,6 +2044,37 @@ file's generation (`memory`), the hub's (`hub`) and whether they match
 (`current`), and the hub logs a warning at start and after each flag change
 while they differ.
 
+### Restoring the memory database from a copy
+
+Revisions are unique only within one `log_epoch`. A memory file restored from
+a copy hands out revision numbers that clients saw before the loss, so it
+needs a new epoch before the hub serves it. With the hub stopped, put the copy
+in place, remove the replaced file's `-wal`, `-shm` and `-journal`, then run:
+
+```bash
+brigade-hub memory-restore-epoch --memory-db <state dir>/fleet-hub-memory.db
+```
+
+It prints one JSON line with `previous_log_epoch` and the new `log_epoch`, and
+changes nothing else in the file. It refuses, exits 1 and leaves the file
+unchanged in these cases: a process still holds the file, a non-empty `-wal`
+or any `-journal` sits beside it, the file is not a memory file, its schema is
+newer than this `brigade-hub`, or SQLite's `quick_check` fails. A copy from an
+older schema is accepted, and the hub migrates it when it opens it. Each run
+starts another epoch that no client has seen, so a rerun is safe. The command
+keeps no marker of an earlier run: any marker in the file would also be in a
+copy taken before the hub served, and restoring that copy later would then
+skip the rotation.
+
+Once the hub serves the new epoch, a `put`, `retire` or proposal action based
+on a revision from before the restore is refused with `409
+memory_epoch_changed`. Each client's next `brigade memory hub pull` discards
+its replica, rebuilds it from the restored log and reports `rebuilt` with the
+warning `the hub's log_epoch changed`. A spooled `sync` write based on the old
+epoch becomes a local proposal and is never sent. Writes acknowledged after
+the copy are lost. The dogfood recipe's steps are in
+[the dogfood runbook](runbooks/fleet-hub-dogfood.md#restore-from-a-copy).
+
 ### Recovery after restoring either database
 
 After restoring the hub database, the memory database or both, start the hub

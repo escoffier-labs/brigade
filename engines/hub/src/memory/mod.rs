@@ -44,6 +44,9 @@ mod read_stats_tests;
 mod rescan;
 #[cfg(test)]
 mod rescan_tests;
+pub mod restore;
+#[cfg(test)]
+mod restore_tests;
 pub mod retrieval_eval;
 mod retrieval_eval_gates;
 #[cfg(test)]

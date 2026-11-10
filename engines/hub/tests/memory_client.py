@@ -8,10 +8,14 @@ Run from engines/hub with Brigade importable (CI installs it with `pip install -
 import json
 import os
 import secrets
+import shutil
 import signal
+import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -243,6 +247,127 @@ class Client(unittest.TestCase):
         status = sync.status(target, settings, hubc.client_for(settings))
         self.assertEqual(status["hub"], {"available": False, "reason": "unreachable"})
         self.assertNotIn(self.node_token, json.dumps(status))
+
+
+class RestoredMemoryFile(unittest.TestCase):
+    """#2292: `brigade-hub memory-restore-epoch` on a restored copy, then a client pull."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.work = Path(self.directory.name)
+        (self.work / "hub").mkdir()
+        names = ("BRIGADE_HOME", "BRIGADE_FLEET_HUB_URL", "BRIGADE_FLEET_NODE_TOKEN")
+        self.saved_env = {k: os.environ.get(k) for k in names}
+        self.saved_free_port = hc.free_port
+        self.hub = None
+
+    def tearDown(self):
+        hc.free_port = self.saved_free_port
+        if self.hub is not None:
+            hc.stop_hub(self.hub)
+        for key, value in self.saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        self.directory.cleanup()
+
+    def launch(self):
+        self.hub = hc.launch_hub(
+            TEMPLATE, brigade=[sys.executable, "-m", "brigade"], state_dir=self.work / "hub", startup_timeout=30
+        )
+        return self.hub
+
+    def restore_epoch(self, memory: Path) -> tuple[int, dict]:
+        done = subprocess.run(
+            [str(BINARY), "memory-restore-epoch", "--memory-db", str(memory)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        return done.returncode, json.loads(done.stdout)
+
+    def test_a_restored_copy_gets_a_new_epoch_and_a_client_pull_rebuilds(self):
+        hub = self.launch()
+        memory = self.work / "hub" / "fleet-hub-memory.db"
+        node = hc.request(
+            hub.url, "POST", "/nodes", body={"action": "add", "node_id": "restore-it"}, token=hub.admin_token
+        )
+        self.assertEqual(node.status, 200, node)
+        os.environ.update(
+            BRIGADE_HOME=str(self.work / "home"),
+            BRIGADE_FLEET_HUB_URL=hub.url,
+            BRIGADE_FLEET_NODE_TOKEN=node.json["token"],
+        )
+        os.environ.pop("BRIGADE_FLEET_TOKEN", None)
+        client = hubc.MemoryHubClient(hub.url, node.json["token"])
+        target = self.work / "client"
+        (target / "memory" / "cards").mkdir(parents=True)
+        (target / ".brigade").mkdir()
+        (target / ".brigade" / "memory-care.toml").write_text(
+            '[hub]\nmode = "read"\nscope = "fleet"\nread_scopes = ["fleet"]\n', encoding="utf-8"
+        )
+        settings = hubc.load_settings(target)
+
+        def put(card: str, text: str, base: int | None = None, epoch: str | None = None) -> dict:
+            return client.call(
+                "put",
+                scope="fleet",
+                card_id=card,
+                base_revision=base,
+                base_epoch=epoch,
+                text=text,
+                client_event_id=hubc.event_id(),
+            )
+
+        r1 = put("apple", "apple before the copy")["event"]["revision"]
+        old_epoch = sync.pull(target, hubc.client_for(settings), settings)["log_epoch"]
+        # The hourly backup's path: SQLite's online backup API on the live file.
+        copy = self.work / "copy.db"
+        with closing(sqlite3.connect(memory)) as live, closing(sqlite3.connect(copy)) as dest:
+            live.backup(dest)
+        r2 = put("apple", "apple after the copy", r1, old_epoch)["event"]["revision"]
+        put("banana", "banana after the copy")
+        sync.pull(target, hubc.client_for(settings), settings)
+        self.assertIn(store.Replica.key("fleet", "banana"), store.replica(target).heads)
+
+        # Refused while the hub holds the file, which keeps its epoch.
+        code, refused = self.restore_epoch(memory)
+        self.assertEqual(code, 1, refused)
+        self.assertFalse(refused["ok"])
+        error = refused["error"]
+        self.assertTrue("held by another process" in error or "-wal sits beside" in error, refused)
+        self.assertEqual(client.call("status")["log_epoch"], old_epoch)
+
+        # Fence: stop the hub, put the copy back without the old sidecars, rotate.
+        port = int(hub.url.rsplit(":", 1)[1])
+        hc.stop_hub(hub)
+        self.hub = None
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            Path(f"{memory}{suffix}").unlink(missing_ok=True)
+        shutil.copyfile(copy, memory)
+        code, rotated = self.restore_epoch(memory)
+        self.assertEqual(code, 0, rotated)
+        self.assertEqual(rotated["previous_log_epoch"], old_epoch)
+        self.assertNotEqual(rotated["log_epoch"], old_epoch)
+
+        # Same address, so the client sees the same hub under a new epoch.
+        hc.free_port = lambda: port
+        hub = self.launch()
+        self.assertEqual(client.call("status")["log_epoch"], rotated["log_epoch"])
+        report = sync.pull(target, hubc.client_for(settings), settings)
+        self.assertTrue(report["rebuilt"], report)
+        rebuilt = "the hub's log_epoch changed; the old replica was discarded and is being rebuilt"
+        self.assertIn(rebuilt, report["warnings"])
+        replica = store.replica(target)
+        self.assertEqual(replica.meta["log_epoch"], rotated["log_epoch"])
+        self.assertIn(store.Replica.key("fleet", "apple"), replica.heads)
+        self.assertNotIn(store.Replica.key("fleet", "banana"), replica.heads)
+        # A write based on a revision from before the restore is refused.
+        with self.assertRaises(hubc.HubRefusal) as caught:
+            put("apple", "edit of the lost revision", r2, old_epoch)
+        self.assertEqual((caught.exception.status, caught.exception.code), (409, "memory_epoch_changed"))
 
 
 if __name__ == "__main__":

@@ -261,8 +261,8 @@ writer holds the hub file's write lock, after re-reading the caller's
 credential (D23). The content scan hook reports unavailable until S18, so no
 write raises a card's trust, and `import` answers `503 memory_scan_unavailable`.
 After restoring the memory file from a copy, start a new `log_epoch` before
-serving it (`brigade_hub::memory::schema::rotate_epoch`, which S31's restore
-tool calls). `/metrics` adds `brigade_hub_memory_*` lines for batches,
+serving it with `brigade-hub memory-restore-epoch --memory-db <file>`, with
+the hub stopped ([memory operations](../../docs/memory-operations.md#restoring-the-memory-database-from-a-copy)). `/metrics` adds `brigade_hub_memory_*` lines for batches,
 hub-lock residence and wait, authority timeouts and the residence bucket.
 
 `search` (S13b) answers from an in-memory lexical index that the hub builds
