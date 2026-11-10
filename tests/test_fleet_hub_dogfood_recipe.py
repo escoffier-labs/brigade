@@ -2991,7 +2991,8 @@ def test_entry_execs_fleet_serve_with_the_memory_config_compose_names(tmp_path, 
 
     fleet_cli.register(parser.add_subparsers(dest="command"))
     args = parser.parse_args(execs[0][3:])
-    assert (args.engine, str(args.memory_config), args.route_mode) == (
+    # A container path: compare as POSIX, since Windows renders the parsed Path with backslashes.
+    assert (args.engine, args.memory_config.as_posix(), args.route_mode) == (
         "rust",
         "/etc/brigade/hub.toml",
         ["memory=native"],
