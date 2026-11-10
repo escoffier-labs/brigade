@@ -172,64 +172,143 @@ def connect_refused(host: str, port: int, timeout: float = 2.0) -> bool:
         return True
 
 
-# The identity probes `access` sends to a host loopback listener: the hub's
-# health route, and its status route with the forged identity header. The hub
-# answers the first with {"service": "brigade-fleet-hub"} and the second with a
-# JSON 401, both under a `brigade-fleet-hub/1` Server header.
-IDENTITY_PROBES = (("/health", {}), ("/status", {"Tailscale-User-Login": FORGED_LOGIN}))
-IDENTITY_TIMEOUT = 3.0
-HUB_MARKER = b"brigade"
+# A reachable listener on host loopback is a FAIL unless the operator exempts
+# its port with --allow-loopback-listener PORT=REASON and the check can name the
+# process holding the socket. No HTTP answer proves a listener is not a proxy
+# to the hub, so the probe below is evidence for the record, never a pass.
+PROC = Path("/proc")
+PROBE_DEADLINE = 5.0
+PROBE_CAP = 65536
+EVIDENCE_PROBES = (("/health", {}), ("/status", {"Tailscale-User-Login": FORGED_LOGIN}))
+LOOPBACK_HEX = {
+    "0100007F",  # 127.0.0.1
+    "00000000",  # 0.0.0.0
+    "00000000000000000000000001000000",  # ::1
+    "00000000000000000000000000000000",  # ::
+    "0000000000000000FFFF00000100007F",  # ::ffff:127.0.0.1
+}
 
 
-def http_answer_is_hub(status: int, headers: list[tuple[str, str]], body: bytes) -> bool:
-    """Whether one HTTP answer could come from the hub, or from a proxy in front of it.
+def parse_exemptions(values: list[str]) -> dict[int, str]:
+    """PORT=REASON pairs from --allow-loopback-listener. A reason is required."""
+    exemptions: dict[int, str] = {}
+    for value in values:
+        port, _, reason = value.partition("=")
+        if not port.strip().isdigit() or not reason.strip():
+            raise ValueError(f"--allow-loopback-listener wants PORT=REASON, got {value!r}")
+        exemptions[int(port)] = reason.strip()
+    return exemptions
 
-    Hub-like: a 401 or 403 (the hub's answer to a forged identity without a
-    token, and what an authenticating proxy would send), or "brigade" in any
-    header value or in the body, case-insensitive.
+
+def probe_evidence(host: str, port: int, deadline: float | None = None) -> dict[str, Any]:
+    """Status line and headers each evidence probe gets, within one total deadline per listener.
+
+    Reads raw bytes up to PROBE_CAP per probe, so a reset after the headers
+    keeps what already arrived, and a peer that trickles bytes is cut off at
+    the deadline. Bodies are never kept.
     """
-    if status in (401, 403):
-        return True
-    text = b" ".join(value.encode("latin-1", "replace") for _name, value in headers) + b" " + body
-    return HUB_MARKER in text.lower()
-
-
-def loopback_identity(host: str, port: int, timeout: float | None = None) -> tuple[str, Any]:
-    """Classify a reachable host loopback listener as "hub", "other" or "ambiguous".
-
-    The rule `access` applies, failing closed:
-    - "other" only when every identity probe gets a positive non-hub answer:
-      the connection is reset, or closed or answered without an HTTP status
-      line, or the HTTP answer fails `http_answer_is_hub`.
-    - "hub" when any probe's HTTP answer passes `http_answer_is_hub`.
-    - "ambiguous" for anything else (timeout, any other error).
-    `access` reports INFO only for "other". "hub" and "ambiguous" are FAIL.
-    """
-    seen: dict[str, Any] = {}
-    for path, headers in IDENTITY_PROBES:
-        conn = http.client.HTTPConnection(host, port, timeout=timeout or IDENTITY_TIMEOUT)
+    stop = time.monotonic() + (deadline or PROBE_DEADLINE)
+    evidence: dict[str, Any] = {}
+    for path, headers in EVIDENCE_PROBES:
+        data, ended = b"", "eof"
+        remaining = stop - time.monotonic()
+        if remaining <= 0:
+            evidence[path] = {"ended": "deadline before the probe"}
+            continue
         try:
-            conn.request("GET", path, headers=headers)
-            response = conn.getresponse()
-            body = response.read(65536)
-            answer = (response.status, response.getheaders(), body)
+            with socket.create_connection((host, port), timeout=remaining) as conn:
+                lines = [f"GET {path} HTTP/1.0", f"Host: {host}:{port}"]
+                lines += [f"{name}: {value}" for name, value in headers.items()]
+                conn.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("ascii"))
+                while len(data) < PROBE_CAP:
+                    remaining = stop - time.monotonic()
+                    if remaining <= 0:
+                        ended = "deadline"
+                        break
+                    conn.settimeout(remaining)
+                    chunk = conn.recv(min(4096, PROBE_CAP - len(data)))
+                    if not chunk:
+                        break
+                    data += chunk
+                else:
+                    ended = "cap"
         except ConnectionResetError:
-            seen[path] = "reset"
+            ended = "reset"
+        except TimeoutError:
+            ended = "deadline"
+        except OSError as exc:
+            ended = f"error: {type(exc).__name__}"
+        head = data.split(b"\r\n\r\n", 1)[0].decode("latin-1").split("\r\n")
+        evidence[path] = {
+            "status_line": head[0][:200] if data else None,
+            "headers": {
+                name.strip().lower(): value.strip()[:200]
+                for name, sep, value in (line.partition(":") for line in head[1:])
+                if sep
+            }
+            if data
+            else {},
+            "bytes": len(data),
+            "ended": ended,
+        }
+    return evidence
+
+
+def loopback_holders(port: int, proc: Path | None = None) -> list[dict[str, Any]] | None:
+    """The processes holding host LISTEN sockets on `port` that loopback reaches, or None.
+
+    Reads the host's /proc/net/tcp and tcp6 for LISTEN sockets on loopback or
+    the wildcard address, then maps each socket inode to the processes whose
+    fds hold it. None when no socket is found or any socket has no readable
+    holder, as for another account's process.
+    """
+    root = proc or PROC
+    inodes: set[str] = set()
+    for name in ("tcp", "tcp6"):
+        try:
+            table = (root / "net" / name).read_text(encoding="utf-8")
+        except OSError:
             continue
-        except (http.client.BadStatusLine, http.client.LineTooLong):
-            # RemoteDisconnected (closed before a status line) is a BadStatusLine.
-            seen[path] = "not http"
+        for line in table.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) < 10 or fields[3] != "0A":
+                continue
+            address, _, hex_port = fields[1].rpartition(":")
+            if int(hex_port, 16) == port and address in LOOPBACK_HEX:
+                inodes.add(fields[9])
+    if not inodes:
+        return None
+    found: dict[str, list[dict[str, Any]]] = {inode: [] for inode in inodes}
+    for entry in root.iterdir():
+        if not entry.name.isdigit():
             continue
-        except (OSError, http.client.HTTPException) as exc:
-            seen[path] = f"no answer: {type(exc).__name__}"
-            return "ambiguous", seen
-        finally:
-            conn.close()
-        status, response_headers, body = answer
-        seen[path] = {"status": status, "content_type": response.getheader("Content-Type")}
-        if http_answer_is_hub(status, response_headers, body):
-            return "hub", seen
-    return "other", seen
+        try:
+            links = [os.readlink(fd) for fd in (entry / "fd").iterdir()]
+        except OSError:
+            continue
+        held = {link[8:-1] for link in links if link.startswith("socket:[")} & inodes
+        if not held:
+            continue
+        try:
+            holder = {
+                "pid": int(entry.name),
+                "exe": os.path.realpath(entry / "exe"),
+                "comm": (entry / "comm").read_text(encoding="utf-8").strip(),
+                "cgroup": (entry / "cgroup").read_text(encoding="utf-8").strip(),
+            }
+        except OSError:
+            continue
+        for inode in held:
+            found[inode].append(holder)
+    if not all(found.values()):
+        return None
+    unique = {holder["pid"]: holder for holders in found.values() for holder in holders}
+    return [unique[pid] for pid in sorted(unique)]
+
+
+def hub_image_holder(holder: dict[str, Any], hub_containers: list[str]) -> bool:
+    """Whether a holder runs the hub's binary or sits in a container of the hub's image."""
+    return Path(holder["exe"]).name == "brigade-hub" or any(cid and cid in holder["cgroup"] for cid in hub_containers)
 
 
 def front_url() -> str:
@@ -595,26 +674,47 @@ def check_access(args: argparse.Namespace, result: Result) -> None:
     addresses = ["127.0.0.1", "::1"] + inspect(
         holder, "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"
     ).split()
-    # Host loopback is the host's own namespace, so a listener there reaches the
-    # hub only through host networking, a published port, or a host-side proxy.
-    # The first two FAIL outright. A proxy cannot be told from an unrelated
-    # service by address, so the listener must prove by protocol that it is not
-    # the hub (loopback_identity), and anything short of that FAILs.
+    # Any reachable listener is a FAIL, as on any address. On host loopback an
+    # operator exemption (--allow-loopback-listener PORT=REASON) turns it into
+    # INFO only when the netns container is not on host networking, the port is not
+    # published, the socket's holder process can be named, and that holder is
+    # not the hub's binary or in a container of the hub's image. The probe
+    # evidence goes into the record either way and never decides the result.
+    exemptions = parse_exemptions(getattr(args, "allow_loopback_listener", None) or [])
     own_namespace = inspect(holder, "{{.HostConfig.NetworkMode}}") != "host"
     bindings = inspect(holder, "{{json .HostConfig.PortBindings}}")
+    image = inspect(hub, "{{.Image}}")
+    hub_containers = [hub] + (
+        run(["docker", "ps", "-a", "-q", "--no-trunc", "--filter", f"ancestor={image}"]).stdout.split() if image else []
+    )
+    used: set[int] = set()
     for address in addresses:
         for port in sorted(ports):
             name = f"host cannot connect to {address}:{port}"
             if connect_refused(address, port):
                 result.add("PASS", name)
-            elif address in ("127.0.0.1", "::1") and own_namespace and not published(bindings, port):
-                verdict, seen = loopback_identity(address, port)
-                if verdict == "other":
-                    result.add("INFO", name, {"listener": "answers as a non-hub service", "probes": seen})
-                else:
-                    result.add("FAIL", name, {"listener": verdict, "probes": seen})
+                continue
+            detail: dict[str, Any] = {"evidence": probe_evidence(address, port)}
+            if address not in ("127.0.0.1", "::1") or port not in exemptions:
+                result.add("FAIL", name, detail)
+                continue
+            used.add(port)
+            detail["exemption"] = exemptions[port]
+            holders = loopback_holders(port)
+            detail["holders"] = [{key: h[key] for key in ("pid", "exe", "comm")} for h in holders or []]
+            if not own_namespace or published(bindings, port):
+                detail["exemption_applied"] = "no: the netns container uses host networking or publishes the port"
+            elif holders is None:
+                detail["exemption_applied"] = "no: the socket's holder process could not be identified"
+            elif any(hub_image_holder(h, hub_containers) for h in holders):
+                detail["exemption_applied"] = "no: a holder runs the hub's binary or image"
             else:
-                result.add("FAIL", name)
+                detail["exemption_applied"] = "yes"
+                result.add("INFO", name, detail)
+                continue
+            result.add("FAIL", name, detail)
+    for port in sorted(set(exemptions) - used):
+        result.add("INFO", f"exemption for port {port} not used", exemptions[port])
     status: int | str = 0
     try:
         status = get(front_url() + "/status", headers={"Tailscale-User-Login": FORGED_LOGIN})[0]
@@ -1385,6 +1485,14 @@ def parser() -> argparse.ArgumentParser:
             )
         elif name == "probe":
             q.add_argument("--runs", type=int, default=5)
+        elif name == "access":
+            q.add_argument(
+                "--allow-loopback-listener",
+                action="append",
+                default=[],
+                metavar="PORT=REASON",
+                help="Exempt a host loopback listener on PORT whose holder process is named and is not the hub; repeat.",
+            )
         elif name == "hardening":
             q.add_argument("--volume", required=True)
             q.add_argument("--backup-dir", required=True)

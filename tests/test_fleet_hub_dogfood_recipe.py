@@ -485,6 +485,8 @@ def _access(
     network_mode="brigade-hub_default",
     inodes="101\n102\n",
     hub_port=3774,
+    allow=(),
+    proc=None,
 ):
     import argparse
 
@@ -493,21 +495,32 @@ def _access(
             return "192.0.2.10 "
         if "NetworkMode" in template:
             return network_mode
+        if "{{.Image}}" in template:
+            return "sha256:hubimage"
         assert "PortBindings" in template
         return bindings
 
     tables = _namespace_tables(hub_port) + "\n#inodes\n" + inodes
+
+    def fake_run(argv, **_kw):
+        if argv[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(argv, 0, "c-hub-sibling\n", "")
+        return subprocess.CompletedProcess(argv, 0, tables, "")
+
     monkeypatch.setattr(checks, "HUB_PORT", hub_port)
     monkeypatch.setattr(checks, "container_id", lambda service, project=checks.RECIPE: f"c-{service}")
     monkeypatch.setattr(checks, "inspect", fake_inspect)
-    monkeypatch.setattr(checks, "run", lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, tables, ""))
+    monkeypatch.setattr(checks, "run", fake_run)
     monkeypatch.setattr(checks, "connect_refused", lambda host, port, timeout=2.0: (host, port) not in open_ports)
     monkeypatch.setattr(checks, "front_url", lambda: "https://front.example.test")
     monkeypatch.setattr(checks, "get", lambda url, headers=None, timeout=5: (401, b""))
-    # raising=False keeps the helper usable against a check without the identity probe.
-    monkeypatch.setattr(checks, "IDENTITY_TIMEOUT", 0.5, raising=False)
+    # raising=False keeps the helper usable against a check without these knobs.
+    monkeypatch.setattr(checks, "PROBE_DEADLINE", 1.0, raising=False)
+    monkeypatch.setattr(checks, "IDENTITY_TIMEOUT", 1.0, raising=False)
+    if proc is not None:
+        monkeypatch.setattr(checks, "PROC", proc, raising=False)
     result = checks.Result("access")
-    checks.check_access(argparse.Namespace(), result)
+    checks.check_access(argparse.Namespace(allow_loopback_listener=list(allow)), result)
     return result
 
 
@@ -535,29 +548,24 @@ def _http_listener(answer):
     return server
 
 
-def _raw_listener(reply: bytes | None):
-    """A loopback TCP listener that sends `reply` and closes, or with None never answers."""
+def _raw_listener(serve_one):
+    """A loopback TCP listener that hands each accepted connection to `serve_one(conn, stop)`."""
     import socket as socket_module
     import threading
 
     listener = socket_module.create_server(("127.0.0.1", 0))
-    held = []
+    stop = threading.Event()
 
     def serve():
-        while True:
+        while not stop.is_set():
             try:
                 conn, _ = listener.accept()
             except OSError:
                 return
-            if reply is None:
-                held.append(conn)
-                continue
-            conn.recv(4096)
-            conn.sendall(reply)
-            conn.close()
+            threading.Thread(target=serve_one, args=(conn, stop), daemon=True).start()
 
     threading.Thread(target=serve, daemon=True).start()
-    return listener, held
+    return listener, stop
 
 
 def _loopback_item(result, port):
@@ -565,85 +573,175 @@ def _loopback_item(result, port):
     return item
 
 
-HUB_HEALTH = (
-    200,
-    {"Server": "brigade-fleet-hub/1", "Content-Type": "application/json"},
-    b'{"ok": true, "service": "brigade-fleet-hub"}',
-)
-HUB_STATUS = (401, {"Server": "brigade-fleet-hub/1", "Content-Type": "application/json"}, b'{"error": "unauthorized"}')
+PAGE = (200, {"Content-Type": "text/html; charset=utf-8"}, b"<!doctype html><title>app</title>")
 
 
-def test_access_reports_an_unrelated_loopback_service_and_skips_the_front_peerapi(monkeypatch):
-    # #2305: a desktop app on the hub's port number on host loopback and the
-    # front's peerapi on the holder's address are not the hub.
-    page = (200, {"Content-Type": "text/html; charset=utf-8"}, b"<!doctype html><title>app</title>")
-    server = _http_listener(lambda _path, _headers: page)
+def _fake_proc(
+    tmp_path, port, *, holder_exe="/opt/desktop-app/app", comm="app", cgroup="0::/user.slice", resolvable=True
+):
+    """A /proc tree with one LISTEN socket on 127.0.0.1:port held by pid 4242."""
+    proc = tmp_path / "proc"
+    (proc / "net").mkdir(parents=True)
+    (proc / "net" / "tcp").write_text(
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+        + _tcp_row(0, "0100007F", port, 777)
+        + "\n",
+        encoding="utf-8",
+    )
+    pid = proc / "4242"
+    (pid / "fd").mkdir(parents=True)
+    if resolvable:
+        os.symlink("socket:[777]", pid / "fd" / "9")
+    os.symlink(holder_exe, pid / "exe")
+    (pid / "comm").write_text(comm + "\n", encoding="utf-8")
+    (pid / "cgroup").write_text(cgroup + "\n", encoding="utf-8")
+    return proc
+
+
+def test_access_skips_the_front_peerapi_and_fails_an_unexempted_loopback_listener(monkeypatch):
+    # #2305: the front's peerapi on the holder's address is not probed. A host
+    # loopback listener on a hub port fails unless the operator exempts it.
+    server = _http_listener(lambda _path, _headers: PAGE)
     port = server.server_address[1]
     try:
         result = _access(monkeypatch, open_ports={("127.0.0.1", port), ("192.0.2.10", 45045)}, hub_port=port)
     finally:
         server.shutdown()
         server.server_close()
-    assert result.status == "pass"
     probed = {item["name"] for item in result.items if item["name"].startswith("host cannot connect")}
     assert not any(name.endswith(":45045") or name.endswith(":34717") for name in probed)
-    assert _loopback_item(result, port)["status"] == "INFO"
+    item = _loopback_item(result, port)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert item["detail"]["evidence"]["/health"]["status_line"].startswith("HTTP/1.0 200")
 
 
-@pytest.mark.parametrize(
-    "answer",
-    [
-        # The hub itself, or a transparent proxy to it.
-        lambda path, _headers: HUB_HEALTH if path == "/health" else HUB_STATUS,
-        # A proxy that strips the Server header but relays the hub's body.
-        lambda path, _headers: (200, {"Content-Type": "application/json"}, HUB_HEALTH[2]),
-        # An authenticating proxy: no hub markers, but 401 on the forged identity.
-        lambda path, headers: (401, {}, b"") if headers.get("Tailscale-User-Login") else (200, {}, b"ok"),
-    ],
-    ids=["hub", "stripped-proxy", "auth-proxy"],
-)
-def test_access_fails_on_a_loopback_listener_that_answers_like_the_hub(monkeypatch, answer):
-    server = _http_listener(answer)
+posix_proc = pytest.mark.skipif(os.name == "nt", reason="fake /proc needs POSIX symlinks")
+
+
+@posix_proc
+def test_access_exempts_a_loopback_listener_whose_holder_is_named(monkeypatch, tmp_path):
+    server = _http_listener(lambda _path, _headers: PAGE)
     port = server.server_address[1]
     try:
-        result = _access(monkeypatch, open_ports={("127.0.0.1", port)}, hub_port=port)
+        result = _access(
+            monkeypatch,
+            open_ports={("127.0.0.1", port)},
+            hub_port=port,
+            allow=[f"{port}=desktop app on host loopback"],
+            proc=_fake_proc(tmp_path, port),
+        )
     finally:
         server.shutdown()
         server.server_close()
-    assert result.status == "fail"
-    item = _loopback_item(result, port)
-    assert item["status"] == "FAIL" and item["detail"]["listener"] == "hub"
-
-
-def test_access_fails_closed_when_a_loopback_listener_never_answers(monkeypatch):
-    listener, held = _raw_listener(None)
-    port = listener.getsockname()[1]
-    try:
-        result = _access(monkeypatch, open_ports={("127.0.0.1", port)}, hub_port=port)
-    finally:
-        listener.close()
-        for conn in held:
-            conn.close()
-    item = _loopback_item(result, port)
-    assert result.status == "fail" and item["detail"]["listener"] == "ambiguous"
-
-
-def test_access_reports_a_non_http_loopback_listener(monkeypatch):
-    listener, _held = _raw_listener(b"SSH-2.0-example\r\n")
-    port = listener.getsockname()[1]
-    try:
-        result = _access(monkeypatch, open_ports={("127.0.0.1", port)}, hub_port=port)
-    finally:
-        listener.close()
     item = _loopback_item(result, port)
     assert result.status == "pass" and item["status"] == "INFO"
-    assert item["detail"]["probes"] == {"/health": "not http", "/status": "not http"}
+    assert item["detail"]["exemption"] == "desktop app on host loopback"
+    assert item["detail"]["holders"] == [{"pid": 4242, "exe": "/opt/desktop-app/app", "comm": "app"}]
+
+
+@posix_proc
+@pytest.mark.parametrize(
+    "proc_kwargs, reason",
+    [
+        ({"resolvable": False}, "could not be identified"),
+        ({"holder_exe": "/usr/local/bin/brigade-hub", "comm": "brigade-hub"}, "hub's binary or image"),
+        ({"cgroup": "0::/system.slice/docker-c-hub-sibling.scope"}, "hub's binary or image"),
+    ],
+    ids=["unresolved-holder", "hub-binary", "hub-image-container"],
+)
+def test_access_refuses_an_exemption_it_cannot_justify(monkeypatch, tmp_path, proc_kwargs, reason):
+    server = _http_listener(lambda _path, _headers: PAGE)
+    port = server.server_address[1]
+    try:
+        result = _access(
+            monkeypatch,
+            open_ports={("127.0.0.1", port)},
+            hub_port=port,
+            allow=[f"{port}=claimed to be a desktop app"],
+            proc=_fake_proc(tmp_path, port, **proc_kwargs),
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    item = _loopback_item(result, port)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert reason in item["detail"]["exemption_applied"]
+
+
+def test_access_bounds_a_trickling_loopback_listener(monkeypatch):
+    import threading
+
+    def trickle(conn, stop):
+        with conn:
+            conn.recv(4096)
+            while not stop.is_set():
+                try:
+                    conn.sendall(b"H")
+                except OSError:
+                    return
+                stop.wait(0.05)
+
+    listener, stop = _raw_listener(trickle)
+    port = listener.getsockname()[1]
+    box = {}
+    worker = threading.Thread(
+        target=lambda: box.setdefault("result", _access(monkeypatch, open_ports={("127.0.0.1", port)}, hub_port=port)),
+        daemon=True,
+    )
+    try:
+        worker.start()
+        # Both probes share one 1 s deadline; allow generous slack, never the open-ended read.
+        worker.join(timeout=8)
+        finished = not worker.is_alive()
+    finally:
+        stop.set()
+        listener.close()
+    assert finished, "the probe of a trickling listener did not stop at its deadline"
+    item = _loopback_item(box["result"], port)
+    assert item["status"] == "FAIL"
+    assert {probe["ended"] for probe in item["detail"]["evidence"].values()} <= {
+        "deadline",
+        "deadline before the probe",
+    }
+
+
+def test_access_keeps_a_401_that_arrived_before_a_reset(monkeypatch):
+    import socket as socket_module
+    import struct
+
+    def answer_then_reset(conn, _stop):
+        conn.recv(4096)
+        conn.sendall(b"HTTP/1.1 401 Unauthorized\r\nServer: proxy\r\nContent-Length: 1000\r\n\r\npartial")
+        conn.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_LINGER, struct.pack("ii", 1, 0))
+        conn.close()
+
+    listener, stop = _raw_listener(answer_then_reset)
+    port = listener.getsockname()[1]
+    try:
+        result = _access(monkeypatch, open_ports={("127.0.0.1", port)}, hub_port=port)
+    finally:
+        stop.set()
+        listener.close()
+    item = _loopback_item(result, port)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    status = item["detail"]["evidence"]["/status"]
+    assert status["status_line"] == "HTTP/1.1 401 Unauthorized"
+    assert status["headers"]["server"] == "proxy"
+
+
+def test_access_rejects_a_malformed_exemption():
+    with pytest.raises(ValueError):
+        checks.parse_exemptions(["3774"])
+    with pytest.raises(ValueError):
+        checks.parse_exemptions(["app=reason"])
+    assert checks.parse_exemptions(["3774=desktop app = T3"]) == {3774: "desktop app = T3"}
 
 
 def test_access_fails_when_the_hub_port_is_reachable(monkeypatch):
     published = json.dumps({"3774/tcp": [{"HostIp": "127.0.0.1", "HostPort": "3774"}]})
-    assert _access(monkeypatch, open_ports={("127.0.0.1", 3774)}, bindings=published).status == "fail"
-    assert _access(monkeypatch, open_ports={("127.0.0.1", 3774)}, network_mode="host").status == "fail"
+    allow = ["3774=claimed exemption"]
+    assert _access(monkeypatch, open_ports={("127.0.0.1", 3774)}, bindings=published, allow=allow).status == "fail"
+    assert _access(monkeypatch, open_ports={("127.0.0.1", 3774)}, network_mode="host", allow=allow).status == "fail"
     assert _access(monkeypatch, open_ports={("192.0.2.10", 34293)}).status == "fail"
 
 

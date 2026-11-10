@@ -431,7 +431,7 @@ After the matching host actions are done, run each check from
 | cgroup readbacks | `checks/s31_checks.py cgroups --hub-cpus <...> --embed-cpus <...> --service <agent-service> ...` |
 | I/O weight or latency target only | `checks/s31_checks.py io --device-id <MAJ:MIN>`, then, as the compose account, `checks/s31_checks.py fdatasync --slice brigade-hub.slice --path <dir on the data root> --writer <dir on the same device>`. Only the probe enters the slice, and the writer stays in the caller's session |
 | Setup on throwaway projects | `checks/s31_checks.py setup [--remote --remote-url <URL> --remote-token-file <FILE>]` |
-| Access from the host | `checks/s31_checks.py access` |
+| Access from the host | `checks/s31_checks.py access [--allow-loopback-listener PORT=REASON ...]`, see [Loopback exemptions](#loopback-exemptions) |
 | Front: forged header, SSH off, forwarded-for | `checks/s31_checks.py front` (starts a header echo for the test only) |
 | Refused connections at the fleet's concurrency | `checks/s31_checks.py load --concurrency <N>` |
 | Hub memory answers on the Rust hub | `checks/s31_checks.py memory` |
@@ -440,6 +440,31 @@ After the matching host actions are done, run each check from
 | Restore tool and the full drive on a copy | `checks/s31_checks.py restore --drive` |
 | Agent-account hardening | the `hardening` command above, from a throwaway account |
 | Measurements | `checks/s31_checks.py probe`, `checks/s31_checks.py commit --fanout <N>` with and without the fan-out, and `checks/s31_checks.py fdatasync` on both hosts' hub volumes |
+
+### Loopback exemptions
+
+`access` fails on any listener the host can reach at a hub port, including one
+on host loopback. The hub runs in its own network namespace, so a loopback
+listener at its port number is another host process, but no network probe can
+prove that process is not a proxy to the hub. The check records each listener's
+status line and headers as evidence and never passes on them.
+
+When an unrelated host service holds a hub port number on loopback, exempt it
+by port with a reason the record keeps:
+
+```bash
+checks/s31_checks.py access \
+  --allow-loopback-listener "3774=desktop app on host loopback, not the hub (checked by its holder process)"
+```
+
+The exemption turns that listener into INFO only when all of these hold: the
+netns container does not use host networking and publishes no port, the check
+can name the process holding the socket (pid, the real path of its executable
+and its command name, from the host's socket inode to process mapping), and that
+process is neither `brigade-hub` nor in a container of the hub's image. Run the
+check as the account that owns the service, because another account's sockets
+cannot be read and then the exemption does not apply. An exemption that matches
+no reachable listener is recorded as unused.
 
 The status fields of [Retrieval modes](../phase-v2-hub-architecture.md#retrieval-modes)
 (`lexical` and `ok` for BM25 chosen, `degraded` for a hybrid project whose
