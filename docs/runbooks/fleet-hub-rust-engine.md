@@ -129,8 +129,9 @@ The log shows `brigade fleet hub listening on 127.0.0.1:3774 (brigade-hub front,
 Run the S29 read-only probe from the hub host against the loopback port, as
 the gate requires.
 
-Phase 3, one family at a time: add `--route-mode heartbeat=native` (S6), then `claims=native`, `messages=native` and `registration=native`, each
-after the previous family passed its gate. Phase 4 adds
+Phase 3, one family at a time: add `--route-mode heartbeat=native` (S6, step 2a), then `claims=native` (S7, step 2b), `messages=native` and `registration=native`, each
+after the previous family passed its gate. The 0.31.0 release gate requires phase 3 for at least the heartbeat and claims
+families, which are steps 2a and 2b. Phase 4 adds
 `--route-mode memory=native`. Each change is the same drop-in edit, then
 `systemctl daemon-reload` and a restart.
 

@@ -2756,8 +2756,10 @@ The connectivity work is landing in parts, the first step of S23 and S26, so
 that the later slices only swap the source to hub memory. #2216 (merged) adds
 the `grokbot-memory` connector profile on the memory that exists today.
 #2221 (merged 2026-11-03) adds bounded memory hits to the `inbox_list` and
-`fleet_digest` responses. The principal inbox `request_denied` fix has not
-landed. The terms the interim work was held to, and where #2221 left them:
+`fleet_digest` responses. #2276 (merged 2026-11-04) added the prompt-load scan
+on that push path, and #2219 (merged 2026-11-03) shipped the principal inbox
+`request_denied` fix. The terms the interim work was held to, and where #2221
+left them:
 
 - The field. #2221 ships one top-level `memory_hits` object per response,
   `{content_trust: "untrusted", hits, next}`, with at most 3 hits. Each hit is
@@ -3734,7 +3736,7 @@ one fits and what it needs from this revision.
 | S3b proxy hardening | merged (#2226) on 2026-11-03 as `06f6a4560`, at head `8caebd92d` | S3b | The merge left its admission keying unchanged, and S3c completes that rule. Closes the managed-loopback cap, the 24-slot proxied cap, 502 and 504, `/ready`, child-death exit, descriptor limits and request-target refusal. Leaves buffered JSON, upstream mode, front admission and the claim-client runs to S3c, restart with backoff and the drain length to S10. Its README forbids a live deployment before upstream mode lands and names S10 for it, which S3c corrects |
 | Embedder benchmark | merged (#2217) | S16a | Done. It set `remote` as the provisional default, since no CPU embedder fits the allotment, and the hosting decision keeps that default for production. S16b confirms `remote` over the tailnet and `local` on the dogfood hub's GPU, after S17's R1 runs, the S6a harness and S31. Its R1 rows limit setup's model list to the 8B model until another passes R1 (D30) |
 | Hub hosting | decided 2026-11-03 (D28, Q8 closed) | S31, S32 | Production stays on the LXC hub host. S31 stands up the dogfood hub on the GPU workstation from the Compose recipe with today's Python hub. S32, the production move, is gated and outside the release |
-| Connectivity work: Grok Bot memory profile (#2216, merged), memory hits in inbox and digest responses (#2221, merged), the prompt-load scan on #2221's push path and the principal inbox `request_denied` fix (neither landed) | partly merged | first step of S23 and S26 | The terms in [Interim connectivity](#interim-connectivity). #2216 shipped `handoff_write` with the profile. #2221 merged with its `memory_hits` field, which S23 now adopts, and without the prompt-load scan, which a follow-up PR adds |
+| Connectivity work: Grok Bot memory profile (#2216, merged), memory hits in inbox and digest responses (#2221, merged), the prompt-load scan on #2221's push path (#2276, merged 2026-11-04) and the principal inbox `request_denied` fix (#2219, merged 2026-11-03) | merged | first step of S23 and S26 | The terms in [Interim connectivity](#interim-connectivity). #2216 shipped `handoff_write` with the profile. #2221 merged with its `memory_hits` field, which S23 now adopts, and without the prompt-load scan. #2276 added the scan and #2219 shipped the `request_denied` fix, so all four connectivity PRs have landed |
 | #2187 Tier 0 preflight | merged | local diagnostic | S19c's hub `preflight` action returns the same `brigade.memory-tier0-preflight.v1` report, filled from hub facts. The hub adds the pinned-block check and blocker re-verification inside the apply transaction |
 | #2213 engine rename plan | merged plan | naming | The hub binary is `brigade-hub` with no alias. S10 rebases on the rename's manifest and installer slice (R5) if R5 lands first |
 | #2212 native PCRE2 guard | merged, ASCII only | the engine D16 names | It sends only ASCII text scanned with the default rules to PCRE2 and everything else to Python `re`. S18a adds a UTF mode with parity tests for hub use. The guard's own behavior stays as #2212 ships it |
@@ -3835,8 +3837,8 @@ after phase 3:  S11, then S12a to S12i one family per PR, S28 after S12g
 gated, outside the release:  S32 after S31, S6 and S16b, with the maintainer's go-ahead
 
 external prerequisites:  #2212 (merged, for S18a)  #2187 (merged, for S19c)
-                         connectivity-pr (for S23 and S26): #2216 and #2221 merged,
-                           the #2221 prompt-load scan and the request_denied fix not landed
+                         connectivity-pr (for S23 and S26): #2216, #2221, #2276 and
+                           #2219 merged
                          phase-3 (for S11)
 ```
 
@@ -3911,10 +3913,20 @@ The questions this gate depended on, Q1, Q2 and Q6, are decided (2026-11-04):
 
 - Hub: S1, S1b, S2, S3, S3b, S3c, S4a, S4b, S5, S6a, S6, S7, S8, S9, S10, S29,
   S30 and S31, with cutover phase 3 complete for at least the heartbeat and
-  claims families on the production LXC hub host. S31 is the dogfood hub and
-  the Compose recipe everyday users install. Its deployment runs are
+  claims families on the production LXC hub host. In the
+  [cutover runbook](runbooks/fleet-hub-rust-engine.md#cutover-phase-by-phase)
+  those two flips are steps 2a (heartbeat to `native`) and 2b (claims to
+  `native`), and together they are this gate's phase 3. S31 is the dogfood hub
+  and the Compose recipe everyday users install. Its deployment runs are
   recorded, and a miss holds production where it is without holding the
   release. S32, the production move, is not in the release gate.
+- S6 throughput is measured with pinned-CPU runs and the load recorded for
+  each run (maintainer decision, 2026-11-08). Server and client processes sit
+  on separate pinned CPUs, a load average under 2 is not reachable on the
+  reference machine, and each case is run at least twice with every run
+  reported. The ratio to the Python hub is taken at the same allotment. The
+  method and runs are in `engines/hub/bench/S6.md` (#2308). The gate numbers
+  themselves are unchanged.
 - Memory: S13a, S13b, S14, S15, S16a, S16b, S17 (if no model passes R1,
   setup starts every install in BM25 mode and says why), S18a, S18, S19a,
   S19b, S19c (hub auto-apply refused) and S20.
@@ -3926,15 +3938,19 @@ The questions this gate depended on, Q1, Q2 and Q6, are decided (2026-11-04):
 - Connectivity: S22a, S22, and S23 to S26.
 - External prerequisites: #2212 (merged) for S18a, #2187 (merged) for S19c,
   and the connectivity work (`connectivity-pr`) for S23 and S26: #2216 and
-  #2221 merged, and two PRs not landed, the prompt-load scan on #2221's push
-  path and the principal inbox `request_denied` fix. The release waits for
-  all of them.
+  #2221 merged, and the two follow-ups, the prompt-load scan on #2221's push
+  path (#2276, merged) and the principal inbox `request_denied` fix (#2219,
+  merged). All of them have landed.
 - If S18a or S18 is not ready, memory ships search-only. Every version is
   stored with scan state `pending`, no trust is raised, nothing is pushed to
   anyone, the writer included, and S20 and S23 to S26 wait. That is the scan
   rule of D24 and [Content scanning](#content-scanning), with no exception.
-- After the release: S11 (contract v2), S12a to S12i (cold families), S19d,
-  S19e, S21, S27 as soon as S23 to S26 are live, and S28 after S12g.
+- Merged since the gate was written, and not part of it: S19d (#2366) and
+  S19e-1 and S19e-2 (#2368, #2371 and #2374). They add the scheduled
+  proposal-only reflect entry, evidence attestation and the bound retrieval
+  evaluation.
+- After the release: S11 (contract v2), S12a to S12i (cold families), S21, S27
+  as soon as S23 to S26 are live, and S28 after S12g.
 
 ## Proposal security hardening (#2379)
 
