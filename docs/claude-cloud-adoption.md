@@ -88,8 +88,15 @@ provider lifecycle through this unsupported observation path.
 Claude registered rows now classify as `needs-investigation` instead of
 `pending` or artifact-derived `landed`. This intentional compatibility change
 prevents consumers from mapping unavailable lifecycle to running or succeeded.
-The local Center activity projection always reports Claude as `unknown`,
+The local Center activity projection reports these Claude rows as `unknown`,
 including inferred branch rows. Other providers keep their existing projection.
+
+Rows that carry a `--routine-id` are the exception. A conductor launched those
+sessions through a one-time routine and reports their run state itself, so they
+classify from GitHub artifacts and the conductor's report. The rules, the extra
+fields and the runbook are in
+[Claude cloud capabilities](claude-cloud-capabilities.md#conductor-runbook).
+Rows without a routine ID keep every rule on this page.
 
 A matching merged PR sets the separate `artifact_state: landed`, while provider
 lifecycle stays unknown. Explicit PR references match the canonical URL.
@@ -109,14 +116,15 @@ complete; a failed, truncated or unproven snapshot reports `null` instead.
 Status exposes `lifecycle_counts.claude-cloud` with `active: null`, unknown row
 count, and `coverage: unavailable`. Classification counts count local rows, not
 active provider sessions. An empty local registry cannot prove zero active
-Claude sessions. The provider source remains unwired and disabled by policy for
-launch and live inventory. Doctor reports that limitation without invoking
-Claude or reading its credentials.
+Claude sessions. The provider source remains unwired, with authority
+`conductor-routed`: Brigade has no launch and no live inventory, and the
+conductor supplies both. Doctor reports that without invoking Claude or reading
+its credentials, and passes because local tracking needs no provider wire.
 
 ## Remaining issue scope
 
 Adoption is observational. It never admits, binds, renews or releases a Hub
-holder. Automatic launch remains disabled. Status and doctor never send cloud
+holder. Brigade does not launch Claude cloud sessions. Status and doctor never send cloud
 follow-ups, teleport, authenticate a browser, follow arbitrary detail links,
 contact provider/private endpoints or inspect provider credential stores. Local
 `claude agents --json --all` inventory remains separate from cloud discovery.
