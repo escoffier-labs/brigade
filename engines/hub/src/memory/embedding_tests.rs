@@ -1189,6 +1189,68 @@ fn schema_one_upgrades_and_finished_jobs_expire_in_bounded_sweep() {
     );
 }
 
+/// Security review of #2479: a model swapped to the pinned one while a
+/// document batch is in flight stores no vector under the pinned identity.
+#[tokio::test]
+async fn a_model_swapped_around_a_document_batch_stores_nothing() {
+    use super::embedder_tests::{fake_with_listing, tags_for};
+    let (pin, other) = (
+        tags_for("fake-model", "fake-digest"),
+        tags_for("fake-model", "swapped-digest"),
+    );
+    let server = fake_with_listing(None, other.clone()).await;
+    let mut h = Hub::with(scan::bundled(), None);
+    let id = setup(&mut h);
+    let runtime = h.store.as_mut().unwrap().retrieval.take().unwrap();
+    let mut config = runtime.config.clone();
+    config.endpoint = server.url.clone();
+    config.allowlist = vec![server.url.clone()];
+    config.pull = false;
+    h.store.as_mut().unwrap().retrieval =
+        Some(embedder::Runtime::new(config, scan::bundled()).unwrap());
+    h.store.as_mut().unwrap().pull_embeddings = false;
+    h.store.as_ref().unwrap().load_dense().await;
+    h.put(ADMIN_TOKEN, "fleet", "one", None, "apple fruit")
+        .await;
+    let tick = async |h: &mut Hub| {
+        h.store
+            .as_ref()
+            .unwrap()
+            .retrieval
+            .as_ref()
+            .unwrap()
+            .reset_backoff();
+        h.set_clock(h.now() + 3_600_001);
+        h.store.as_ref().unwrap().embedding_tick().await;
+    };
+    // The listing reports another model until the request arrives and the
+    // pinned one after it, so the vectors came from the other model.
+    *server.on_embed.lock().unwrap() = Some(pin.clone());
+    tick(&mut h).await;
+    assert_eq!(*server.embeds.lock().unwrap(), 1);
+    assert_eq!(rows(&h, "SELECT count(*) FROM memory_vectors").await, 0);
+    let status = h.store.as_ref().unwrap().retrieval_status();
+    assert_eq!(
+        (status["state"].as_str(), status["reason"].as_str()),
+        (Some("degraded"), Some("digest-mismatch")),
+        "{status}"
+    );
+    // Swapped away from the pin while the request is in flight.
+    *server.on_embed.lock().unwrap() = Some(other);
+    tick(&mut h).await;
+    assert_eq!(*server.embeds.lock().unwrap(), 2);
+    assert_eq!(rows(&h, "SELECT count(*) FROM memory_vectors").await, 0);
+    // The pinned model on both sides of the request: stored.
+    *server.listed.lock().unwrap() = pin;
+    tick(&mut h).await;
+    assert_eq!(rows(&h, "SELECT count(*) FROM memory_vectors").await, 1);
+    assert_eq!(
+        h.store.as_ref().unwrap().dense.current(&id).unwrap().rows,
+        1
+    );
+    server.task.abort();
+}
+
 #[tokio::test]
 async fn stopped_endpoint_during_initial_backfill_is_degraded_and_findable() {
     let mut h = Hub::with(scan::bundled(), None);

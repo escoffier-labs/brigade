@@ -1003,20 +1003,29 @@ async fn a_query_with_the_wrong_row_count_is_an_error_not_a_panic() {
 
 /// A server shaped like a local `/api/embed` one: the embedding reply carries
 /// no digest unless `reply_digest` is set, and `GET /api/tags` lists the
-/// model with whatever `listed` holds now. Counts listing reads.
-struct Listing {
-    url: String,
-    listed: Arc<Mutex<serde_json::Value>>,
-    reads: Arc<Mutex<usize>>,
-    task: tokio::task::JoinHandle<()>,
+/// model with whatever `listed` holds now. Counts listing reads and embedding
+/// requests. When `on_embed` holds a value, an arriving embedding request
+/// replaces `listed` with it before answering, which is a model swapped
+/// while the request is in flight.
+pub(super) struct Listing {
+    pub(super) url: String,
+    pub(super) listed: Arc<Mutex<serde_json::Value>>,
+    pub(super) on_embed: Arc<Mutex<Option<serde_json::Value>>>,
+    pub(super) reads: Arc<Mutex<usize>>,
+    pub(super) embeds: Arc<Mutex<usize>>,
+    pub(super) task: tokio::task::JoinHandle<()>,
 }
 fn tags(digest: &str) -> serde_json::Value {
+    tags_for("test-model", digest)
+}
+pub(super) fn tags_for(name: &str, digest: &str) -> serde_json::Value {
+    let name = format!("{name}:latest");
     json!({"models": [
         {"name": "other-model:latest", "model": "other-model:latest", "digest": "other-digest"},
-        {"name": "test-model:latest", "model": "test-model:latest", "digest": digest},
+        {"name": name, "model": name, "digest": digest},
     ]})
 }
-async fn fake_with_listing(
+pub(super) async fn fake_with_listing(
     reply_digest: Option<&'static str>,
     listed: serde_json::Value,
 ) -> Listing {
@@ -1024,14 +1033,19 @@ async fn fake_with_listing(
     let address = listener.local_addr().unwrap();
     let listed = Arc::new(Mutex::new(listed));
     let reads = Arc::new(Mutex::new(0));
+    let on_embed = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let embeds = Arc::new(Mutex::new(0));
     let (state, count) = (listed.clone(), reads.clone());
+    let (swap, sent) = (on_embed.clone(), embeds.clone());
     let task = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let (state, count) = (state.clone(), count.clone());
+            let (swap, sent) = (swap.clone(), sent.clone());
             tokio::spawn(async move {
                 let service = hyper::service::service_fn(
                     move |req: hyper::Request<hyper::body::Incoming>| {
                         let (state, count) = (state.clone(), count.clone());
+                        let (swap, sent) = (swap.clone(), sent.clone());
                         async move {
                             let reply = |status: u16, body: String| {
                                 Ok::<_, hyper::Error>(
@@ -1062,6 +1076,10 @@ async fn fake_with_listing(
                             let body = req.into_body().collect().await?.to_bytes();
                             let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
                             let n = value["input"].as_array().unwrap().len();
+                            *sent.lock().unwrap() += 1;
+                            if let Some(next) = swap.lock().unwrap().take() {
+                                *state.lock().unwrap() = next;
+                            }
                             let mut body = json!({"embeddings": vec![vec![3.0, 4.0]; n], "data": (0..n).map(|i| json!({"index": i, "embedding": [3.0, 4.0]})).collect::<Vec<_>>()});
                             if let Some(digest) = reply_digest {
                                 body["model_digest"] = json!(digest);
@@ -1079,7 +1097,9 @@ async fn fake_with_listing(
     Listing {
         url: format!("http://{address}/api/embed"),
         listed,
+        on_embed,
         reads,
+        embeds,
         task,
     }
 }
@@ -1116,7 +1136,8 @@ async fn a_reply_without_a_digest_is_checked_against_the_model_listing() {
     assert_eq!(*server.reads.lock().unwrap(), 1);
 
     // The model behind the name changes. The cached reading still answers a
-    // query, and a document batch reads the listing again and is refused.
+    // query, and a document batch reads the listing again and is refused on
+    // the reading it takes before its request.
     *server.listed.lock().unwrap() = tags("swapped-digest");
     assert_eq!(reason(&endpoint, Kind::Query).await, None);
     assert_eq!(
@@ -1137,11 +1158,12 @@ async fn a_reply_without_a_digest_is_checked_against_the_model_listing() {
     );
     assert_eq!(*server.reads.lock().unwrap(), 3);
 
-    // The pinned model is back: the probe's reading clears the refusal.
+    // The pinned model is back: the probe reads before and after its
+    // request, and those readings clear the refusal.
     *server.listed.lock().unwrap() = tags("test-digest");
     assert_eq!(reason(&endpoint, Kind::Probe).await, None);
     assert_eq!(reason(&endpoint, Kind::Query).await, None);
-    assert_eq!(*server.reads.lock().unwrap(), 4);
+    assert_eq!(*server.reads.lock().unwrap(), 5);
     server.task.abort();
 }
 
@@ -1184,14 +1206,20 @@ async fn a_digest_in_the_reply_decides_without_the_listing() {
         Some("digest-mismatch")
     );
     server.task.abort();
-    // The reply reports the pin, and the listing reports another model.
+    assert_eq!(*server.reads.lock().unwrap(), 0);
+    // The reply reports the pin, and the listing reports another model. A
+    // document batch takes its reading before the request, since the hub
+    // cannot know yet whether the reply will carry a digest. That reading
+    // does not count against a reply that does, and no second one is taken.
     let agreeing = fake_with_listing(Some("test-digest"), tags("swapped-digest")).await;
     let endpoint = HttpEmbedder::new(config(agreeing.url.clone()), scan::bundled()).unwrap();
     assert_eq!(reason(&endpoint, Kind::Document).await, None);
-    assert_eq!(
-        *server.reads.lock().unwrap() + *agreeing.reads.lock().unwrap(),
-        0
-    );
+    assert_eq!(*agreeing.reads.lock().unwrap(), 1);
+    // A listing that does not answer does not refuse such a reply either.
+    *agreeing.listed.lock().unwrap() = serde_json::Value::Null;
+    assert_eq!(reason(&endpoint, Kind::Document).await, None);
+    assert_eq!(reason(&endpoint, Kind::Query).await, None);
+    assert_eq!(*agreeing.reads.lock().unwrap(), 2);
     agreeing.task.abort();
 
     // `v1/embeddings` has no listing, so a reply without a digest is refused
@@ -1206,6 +1234,141 @@ async fn a_digest_in_the_reply_decides_without_the_listing() {
     );
     assert_eq!(*server.reads.lock().unwrap(), 0);
     server.task.abort();
+}
+
+/// One bracketed call against a server whose listing reports `before` until
+/// the embedding request arrives and `after` from then on. Returns the
+/// refusal, the listing reads and the embedding requests.
+async fn bracketed(
+    kind: Kind,
+    before: serde_json::Value,
+    after: serde_json::Value,
+) -> (Option<&'static str>, usize, usize) {
+    let server = fake_with_listing(None, before).await;
+    *server.on_embed.lock().unwrap() = Some(after);
+    let endpoint = HttpEmbedder::new(config(server.url.clone()), scan::bundled()).unwrap();
+    let refused = reason(&endpoint, kind).await;
+    server.task.abort();
+    (
+        refused,
+        *server.reads.lock().unwrap(),
+        *server.embeds.lock().unwrap(),
+    )
+}
+
+/// Security review of #2479: the model's identity comes from a second
+/// route, so a call whose vectors are stored reads the listing before its
+/// request and again after the reply, and both readings must report the pin.
+#[tokio::test]
+async fn a_stored_embedding_is_bracketed_by_two_listing_reads() {
+    let (pin, other) = (tags("test-digest"), tags("swapped-digest"));
+    for kind in [Kind::Document, Kind::Probe] {
+        // Both readings report the pin: accepted, with one request between.
+        assert_eq!(
+            bracketed(kind, pin.clone(), pin.clone()).await,
+            (None, 2, 1),
+            "{kind:?}"
+        );
+        // Swapped before the reply was computed, from another model to the
+        // pinned one. The reading after the reply reports the pin, and only
+        // the reading before the request shows the other model.
+        assert_eq!(
+            bracketed(kind, other.clone(), pin.clone()).await,
+            (Some("digest-mismatch"), 1, 1),
+            "{kind:?}"
+        );
+        // Swapped away from the pin while the request was in flight.
+        assert_eq!(
+            bracketed(kind, pin.clone(), other.clone()).await,
+            (Some("digest-mismatch"), 2, 1),
+            "{kind:?}"
+        );
+        // The listing names another model on both sides of a request that
+        // the embedding route answered.
+        assert_eq!(
+            bracketed(kind, other.clone(), other.clone()).await,
+            (Some("digest-mismatch"), 1, 1),
+            "{kind:?}"
+        );
+        // The listing does not answer on one side, or cannot vouch for the
+        // model there.
+        for unreadable in [
+            serde_json::Value::Null,
+            json!({"models": [{"name": "test-model:latest"}]}),
+            json!("not an object"),
+        ] {
+            assert_eq!(
+                bracketed(kind, unreadable.clone(), pin.clone()).await.0,
+                Some("digest-mismatch"),
+                "{kind:?} before {unreadable}"
+            );
+            assert_eq!(
+                bracketed(kind, pin.clone(), unreadable.clone()).await.0,
+                Some("digest-mismatch"),
+                "{kind:?} after {unreadable}"
+            );
+        }
+    }
+    // A query is not stored and keeps one reading, taken after its reply.
+    assert_eq!(
+        bracketed(Kind::Query, other.clone(), pin.clone()).await,
+        (None, 1, 1)
+    );
+}
+
+/// A listing read that fails outright, not only one that reports another
+/// model, refuses the call on either side.
+#[tokio::test]
+async fn a_listing_reply_that_does_not_parse_refuses_a_stored_embedding() {
+    for fail_first in [true, false] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let reads = Arc::new(Mutex::new(0));
+        let count = reads.clone();
+        let task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let count = count.clone();
+                tokio::spawn(async move {
+                    let service = hyper::service::service_fn(
+                        move |req: hyper::Request<hyper::body::Incoming>| {
+                            let count = count.clone();
+                            async move {
+                                let body = if req.method() == hyper::Method::GET {
+                                    let mut count = count.lock().unwrap();
+                                    *count += 1;
+                                    if (*count == 1) == fail_first {
+                                        // A body that is not JSON.
+                                        "<html>".to_string()
+                                    } else {
+                                        tags("test-digest").to_string()
+                                    }
+                                } else {
+                                    json!({"embeddings": [[3.0, 4.0]]}).to_string()
+                                };
+                                Ok::<_, hyper::Error>(hyper::Response::new(Full::new(Bytes::from(
+                                    body,
+                                ))))
+                            }
+                        },
+                    );
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        let endpoint = HttpEmbedder::new(
+            config(format!("http://{address}/api/embed")),
+            scan::bundled(),
+        )
+        .unwrap();
+        assert_eq!(
+            reason(&endpoint, Kind::Document).await,
+            Some("embedder-response-invalid"),
+            "fail_first {fail_first}"
+        );
+        task.abort();
+    }
 }
 
 #[test]

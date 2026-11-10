@@ -81,19 +81,43 @@ origin, each with a digest. For the `api/embed` shape, when a reply carries
 no digest, the hub reads that listing and compares the digest listed for
 `name` with the pinned `model_digest`. A name without a tag matches the
 listing's `name:latest` entry. The request goes to the same scheme, host and
-port as the endpoint, to the address the embedding reply came from on plain
-HTTP, with the same bearer token and no card or query text. The reply is
+port as the endpoint, to the pinned address on plain HTTP, with the same bearer token and no card or query text. The reply is
 refused with `digest-mismatch` when the listing does not answer 200, does
 not list the model, lists it without a digest, lists two digests for it, or
-lists a digest other than the pinned one. A document batch and the breaker's
-probe read the listing again every time, after the reply, so no vector is
-stored against an older reading. A query reuses a reading for up to 30 s.
-Once a reading shows another digest, every reply is refused until a later
-reading shows the pinned one again. A digest in the reply always decides on
-its own, and then the listing is never read. The `v1/embeddings` shape has no
-listing, so its replies must carry the digest. The listing check cannot see
-a model replaced between a reply and the reading that follows it. An
-endpoint that needs that guarantee must report the digest in each reply.
+lists a digest other than the pinned one. A digest in the reply always
+decides on its own. The `v1/embeddings` shape has no listing, so its replies
+must carry the digest.
+
+The listing is a second route, so one reading cannot say which model
+computed a reply. A model changed between the reply and the reading would
+be vouched for by the wrong listing. The hub therefore brackets every call
+whose result is kept:
+
+- A document batch is bracketed, because its vectors are stored. The hub
+  reads the listing before the `/api/embed` request and again after the
+  reply. It keeps the vectors only when both readings succeed and both
+  report the pinned digest. Otherwise it drops them, stores nothing, and
+  reports `digest-mismatch` (or the transport reason when a reading failed
+  outright). Retrieval is then degraded and BM25 answers.
+- The breaker's probe is bracketed the same way, because its success closes
+  the breaker for every later query.
+- A query is not bracketed. Its vector ranks one search and is never
+  stored. It takes one reading after its reply and reuses a reading for up
+  to 30 s, which keeps it inside the 250 ms deadline.
+
+Both readings go to the same allowlisted origin with the same token, pinned
+address and 1 MiB size limit as before, and both count against the call's
+own deadline (30 s for a document batch, 10 s for the probe). The reading
+before the request is taken on every bracketed call, since the hub cannot
+know yet whether the reply will carry a digest. It does not count against a
+reply that does. Once a reading shows another digest, queries are refused
+too until a later reading shows the pinned one again.
+
+One case remains. A model swapped away and back again inside a single embed
+request, pinned to another and back to pinned, shows the pinned digest at
+both readings while the reply came from the other model. That takes two
+deliberate operator actions on the embedding server within one request. An
+endpoint that must rule it out has to report the digest in each reply.
 
 Vectors must have the
 configured dimensions, finite values and a nonzero norm. The hub normalizes

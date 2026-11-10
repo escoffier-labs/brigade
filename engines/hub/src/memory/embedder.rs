@@ -29,7 +29,8 @@ const POOL_IDLE_PER_HOST: usize = 2;
 pub const BATCH_BYTES: usize = 32 * 1024;
 pub const BATCH_CARDS: usize = 4;
 /// How long one reading of the server's model listing answers for query
-/// replies that carry no digest. Document and probe replies read it again.
+/// replies that carry no digest. A document batch and the breaker's probe
+/// read it before the request and again after the reply.
 pub const LISTING_TTL: Duration = Duration::from_secs(30);
 const LISTING_BYTES: usize = 1 << 20;
 
@@ -414,9 +415,9 @@ impl HttpEmbedder {
     /// model, for a reply that carried none. `Ok(None)` when this endpoint
     /// has no listing, the listing does not answer 200, or it does not name
     /// the model. A query reuses a reading younger than [`LISTING_TTL`]. A
-    /// document batch and the breaker's probe always read again, so vectors
-    /// are stored only against a listing read after their reply, and a
-    /// digest that changed refuses every reply from the next reading on.
+    /// document batch and the breaker's probe always read again, and `send`
+    /// calls this on both sides of their request. A digest that changed
+    /// refuses every reply from the next reading on.
     async fn listing_digest(
         &self,
         kind: Kind,
@@ -433,7 +434,7 @@ impl HttpEmbedder {
         }
         let mut url = listing.clone();
         if let Some(ip) = pinned {
-            // The address the embedding reply came from, already checked.
+            // The pinned address the embedding request uses, already checked.
             url.set_ip_host(ip)
                 .map_err(|_| EmbedError::new("endpoint-refused"))?;
         }
@@ -518,6 +519,20 @@ impl HttpEmbedder {
             url.set_ip_host(ip)
                 .map_err(|_| EmbedError::new("endpoint-refused"))?;
         }
+        // A document batch is stored, and the probe closes the breaker, so
+        // both are bracketed: the listing is read here, before the request,
+        // and again after the reply. The model's identity comes from a
+        // second route, and one reading after the reply cannot tell a reply
+        // computed by another model that was replaced just before that
+        // reading. The outcome counts only for a reply that carries no
+        // digest, so a failure here does not refuse a reply that does. Both
+        // readings run inside the caller's deadline. A query is not stored
+        // and keeps its single reading.
+        let before = if kind != Kind::Query && self.listing.is_some() {
+            Some(self.listing_digest(kind, pinned).await)
+        } else {
+            None
+        };
         let payload = if self.config.shape == "api/embed" {
             json!({"model": self.config.id.name, "input": texts, "truncate": false})
         } else {
@@ -576,10 +591,17 @@ impl HttpEmbedder {
             .map_err(|_| EmbedError::new("embedder-response-invalid"))?;
         // A digest in the reply decides alone. Only a reply with none, from
         // an endpoint with a model listing, is checked against that listing.
+        // For a bracketed call both readings must succeed and report the
+        // pin, or the vectors are dropped here and nothing is stored.
         let listed;
         let digest = match value["model_digest"].as_str().or(header_digest.as_deref()) {
             Some(reported) => Some(reported),
             None => {
+                if let Some(before) = before {
+                    if before?.as_deref() != Some(self.config.id.model_digest.as_str()) {
+                        return Err(EmbedError::new("digest-mismatch"));
+                    }
+                }
                 listed = self.listing_digest(kind, pinned).await?;
                 listed.as_deref()
             }
