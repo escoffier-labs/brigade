@@ -1274,8 +1274,16 @@ cards wait for S19e evidence attestation. The keeper is the lowest card id in
 an eligible group. Skipped ops are counted by reason without card text.
 A group missing pins or valid metadata is also skipped. A pass with no
 translatable candidates is a successful no-op. Legacy replicas refresh missing
-scan metadata from the hub before deriving candidates. Any heads still missing
-scan state after the refresh stay skipped.
+scan metadata from the hub before deriving candidates. A head whose revision
+moved while the refresh ran keeps no scan state and stays skipped. The refresh
+itself fails when the hub predates scan metadata (its card reads carry no
+`scan_state`). It also fails when the hub no longer serves a card, the log
+epoch or the replica changes during the refresh, or the added metadata would
+push the replica past `[hub] replica_max_mb`. Any of these fails the run with
+`hub_reflect_config`, and three consecutive failed runs pause scheduled
+reflection. Upgrade a hub that predates scan metadata. Otherwise run
+`brigade memory hub pull`, raising `[hub] replica_max_mb` first for a replica
+near its cap, then resume as described below.
 
 This pass does not invent anchors or evidence. Local reflection still derives
 its existing evidence and review candidates when hub mode is off. S19e-1 adds
@@ -1642,6 +1650,15 @@ file and run reflect manually. This discards the pause counter and remembered
 submission ids, so inspect existing hub proposals before resuming to avoid
 opening duplicates. Invalid JSON, malformed bindings and malformed submission
 entries are refused cleanly without contacting the hub.
+
+A stored non-retryable refusal, such as `memory_content_blocked`, does not
+expire when hub policy or the hub's scan ruleset is relaxed. Later runs keep
+skipping that submission and count it under `skipped_reasons.refused`. It
+becomes eligible again only when a card revision the submission pins changes,
+or when the binding changes (a new hub, principal, log epoch or set of
+configured read scopes). Deleting `schedule.json` also clears it, but discards
+remembered proposal ids too and can reopen duplicates, so inspect pending hub
+proposals first.
 
 Credentials use the existing hub client. Configure `[memory_hub] hub_url` and
 `node_token_file` in the user's `~/.brigade/fleet.toml`, or set both
