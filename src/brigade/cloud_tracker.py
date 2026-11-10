@@ -13,6 +13,7 @@ from typing import Any, ContextManager
 from uuid import uuid4
 
 from . import localio
+from . import claude_cloud_routine
 from .claude_cloud_identity import normalize_claude_cloud_identity
 from .inbox_lock import held_file_lock
 
@@ -197,6 +198,10 @@ def _claude_binding(
     branch: str | None,
     commit: str | None,
     pr: str | None,
+    routine_id: str | None = None,
+    issue: str | None = None,
+    session_url: str | None = None,
+    observed_status: str | None = None,
 ) -> dict[str, Any]:
     identity_input = session_id if session_id is not None else task_id
     if identity_input is None:
@@ -229,7 +234,7 @@ def _claude_binding(
         if not re.fullmatch(r"[1-9][0-9]{0,18}", number) or int(number) > (1 << 63) - 1:
             raise ValueError("Invalid Claude PR reference")
         pr_url = f"https://github.com/{repository}/pull/{number}"
-    return {
+    binding: dict[str, Any] = {
         "task_id": identity.session_id,
         "session_id": identity.session_id,
         "session_url": identity.url,
@@ -238,6 +243,23 @@ def _claude_binding(
         "commit": commit.lower() if commit else None,
         "pr_url": pr_url,
     }
+    # Conductor-launched routine sessions. Every value is a caller-supplied
+    # association: nothing here contacts the provider or proves existence.
+    if session_url is not None:
+        binding["session_url"] = normalize_claude_cloud_identity(session_url).url
+    if routine_id is not None:
+        binding["routine_id"] = claude_cloud_routine.normalize_routine_id(routine_id)
+    if issue is not None:
+        binding["issue"] = claude_cloud_routine.normalize_issue(issue, repository)
+    if observed_status is not None:
+        if routine_id is None:
+            raise ValueError("Claude observed status requires --routine-id")
+        binding["provider_lifecycle"] = {
+            "state": claude_cloud_routine.normalize_observed_status(observed_status),
+            "source": claude_cloud_routine.LIFECYCLE_SOURCE,
+            "last_confirmed_at": _now_iso(),
+        }
+    return binding
 
 
 def _claude_session_ids(entry: dict[str, Any]) -> set[str]:
@@ -272,13 +294,25 @@ def _register_claude_binding(registry: dict[str, Any], entry: dict[str, Any]) ->
         if existing.get("repo") != entry["repo"]:
             # Unbound legacy rows cannot establish a repository either.
             raise ValueError("Claude repository binding conflict")
-        for key in ("branch", "commit", "pr_url"):
+        keys = ("branch", "commit", "pr_url", "routine_id", "issue")
+        for key in keys:
             supplied = entry.get(key)
             if supplied is not None and existing.get(key) not in (None, supplied):
                 raise ValueError("Claude reference conflict")
-        for key in ("branch", "commit", "pr_url"):
+        # A derived session URL may be replaced by an explicit one, once.
+        derived_url = normalize_claude_cloud_identity(entry["session_id"]).url
+        explicit_url = entry.get("session_url") if entry.get("session_url") != derived_url else None
+        if explicit_url is not None and existing.get("session_url") not in (None, derived_url, explicit_url):
+            raise ValueError("Claude reference conflict")
+        for key in keys:
             if entry.get(key) is not None:
                 existing[key] = entry[key]
+        if explicit_url is not None:
+            existing["session_url"] = explicit_url
+        if "provider_lifecycle" in entry:
+            # A newer conductor report replaces the older one. It is an
+            # observation with its own time, never part of the identity.
+            existing["provider_lifecycle"] = entry["provider_lifecycle"]
         return existing
     registry["entries"].append(entry)
     return entry
@@ -301,13 +335,17 @@ def register(
     repo: str | None = None,
     commit: str | None = None,
     pr: str | None = None,
+    routine_id: str | None = None,
+    issue: str | None = None,
+    session_url: str | None = None,
+    observed_status: str | None = None,
 ) -> dict[str, Any]:
     if provider not in TRACKER_PROVIDERS:
         raise ValueError("provider must be one of: codex-cloud, cursor-cloud, grokbot-cloud, claude-cloud")
     if not label.strip():
         raise ValueError("label must not be empty")
     binding = None
-    if any(value is not None for value in (repo, commit, pr)):
+    if any(value is not None for value in (repo, commit, pr, routine_id, issue, session_url, observed_status)):
         if provider != "claude-cloud" or repo is None:
             raise ValueError("Explicit Claude references require --provider claude-cloud and --repo")
         if lease_holder is not None:
@@ -319,6 +357,10 @@ def register(
             branch=branch,
             commit=commit,
             pr=pr,
+            routine_id=routine_id,
+            issue=issue,
+            session_url=session_url,
+            observed_status=observed_status,
         )
         task_id = binding["task_id"]
         source = "adopt-session"
@@ -382,6 +424,10 @@ def adopt(
     repo: str | None = None,
     commit: str | None = None,
     pr: str | None = None,
+    routine_id: str | None = None,
+    issue: str | None = None,
+    session_url: str | None = None,
+    observed_status: str | None = None,
 ) -> dict[str, Any]:
     if not task_id and not branch and not (repo is not None and session_id is not None):
         raise ValueError("adopt requires --task-id and/or --branch")
@@ -410,6 +456,10 @@ def adopt(
         repo=repo,
         commit=commit,
         pr=pr,
+        routine_id=routine_id,
+        issue=issue,
+        session_url=session_url,
+        observed_status=observed_status,
     )
     return entry
 
@@ -493,8 +543,15 @@ def _classify_entry(
     if isinstance(provider_info, dict):
         provider_state = _normalize_provider_state(provider_info.get("state"))
         ready_at = _parse_time(provider_info.get("ready_at"))
+    claude_lifecycle: dict[str, Any] | None = None
+    routine_row = False
     if provider == "claude-cloud":
-        provider_state = None
+        claude_lifecycle = _claude_lifecycle(entry, now=now, stale_hours=stale_ready_hours)
+        routine_row = _is_claude_routine_entry(entry)
+        # Only a fresh conductor report on a routine row is a provider state.
+        provider_state = (
+            claude_lifecycle["state"] if routine_row and claude_lifecycle.get("freshness") == "fresh" else None
+        )
         ready_at = None
     branches = _branch_names(github)
     prs = _prs_for_branch(github, branch)
@@ -583,8 +640,18 @@ def _classify_entry(
     else:
         classification = "pending"
 
-    if provider == "claude-cloud":
+    if claude_lifecycle is not None:
         classification = "needs-investigation"
+        if routine_row:
+            classification = _claude_routine_classification(
+                entry,
+                merged=merged,
+                open_pr=open_pr,
+                provider_state=provider_state,
+                confirmed=_parse_time(claude_lifecycle.get("last_confirmed_at")),
+                now=now,
+                stale_hours=stale_ready_hours,
+            )
 
     row = {
         "id": entry.get("id"),
@@ -601,21 +668,86 @@ def _classify_entry(
         "evidence": evidence,
         "pr": prs[0] if prs else None,
     }
-    if provider == "claude-cloud":
-        row["provider_lifecycle"] = _claude_lifecycle(entry, now=now, stale_hours=stale_ready_hours)
-        row["artifact_state"] = "landed" if merged else "unobserved"
-        evidence["provider"].update(row["provider_lifecycle"])
+    if claude_lifecycle is not None:
+        row["provider_lifecycle"] = claude_lifecycle
+        row["artifact_state"] = "landed" if merged else "pr-open" if routine_row and open_pr else "unobserved"
+        evidence["provider"].update(claude_lifecycle)
+        evidence["provider"]["state"] = provider_state
         evidence["provider"]["wired"] = False
-        for key in ("repo", "commit", "pr_url", "session_url", "local_continuation", "lease_evidence"):
+        for key in CLAUDE_ROW_KEYS:
             if key in entry:
                 row[key] = entry[key]
     return row
+
+
+CLAUDE_ROW_KEYS = (
+    "repo",
+    "commit",
+    "pr_url",
+    "session_url",
+    "routine_id",
+    "issue",
+    "local_continuation",
+    "lease_evidence",
+)
+
+
+def _is_claude_routine_entry(entry: dict[str, Any]) -> bool:
+    """True for a repository-bound Claude row that a conductor launched through a routine."""
+    return bool(entry.get("repo")) and isinstance(entry.get("routine_id"), str)
+
+
+def _claude_routine_classification(
+    entry: dict[str, Any],
+    *,
+    merged: bool,
+    open_pr: bool,
+    provider_state: str | None,
+    confirmed: datetime | None,
+    now: datetime,
+    stale_hours: int,
+) -> str:
+    """Classify a routine row from GitHub artifacts first, then the conductor report."""
+    dispatched = _parse_time(entry.get("dispatched_at"))
+    if merged:
+        return "landed"
+    if provider_state in ACTIVE_STATES:
+        return "pending"
+    if open_pr:
+        age = _hours_since(confirmed if provider_state else dispatched, now)
+        return "stale" if age is not None and age >= stale_hours else "ready-to-land"
+    if provider_state is not None:
+        # Reported finished, failed or unrecognized with no PR to review.
+        return "needs-investigation"
+    age = _hours_since(dispatched, now)
+    return "pending" if age is not None and age < stale_hours else "needs-investigation"
 
 
 def _claude_lifecycle(entry: dict[str, Any], *, now: datetime, stale_hours: int) -> dict[str, Any]:
     previous = entry.get("provider_lifecycle")
     confirmed = _parse_time(previous.get("last_confirmed_at")) if isinstance(previous, dict) else None
     age = _hours_since(confirmed, now)
+    if (
+        isinstance(previous, dict)
+        and previous.get("source") == claude_cloud_routine.LIFECYCLE_SOURCE
+        and isinstance(previous.get("state"), str)
+        and confirmed is not None
+        and age is not None
+        and _is_claude_routine_entry(entry)
+    ):
+        # The conductor read this word from the routine run. It ages out
+        # instead of being refreshed by polling.
+        fresh = age < stale_hours
+        return {
+            "state": previous["state"] if fresh else "unknown",
+            "reported_state": previous["state"],
+            "source": claude_cloud_routine.LIFECYCLE_SOURCE,
+            "reason": None if fresh else "report-stale",
+            "observed_at": _now_iso(now),
+            "last_confirmed_at": _now_iso(confirmed),
+            "freshness": "fresh" if fresh else "stale",
+            "age_hours": age,
+        }
     return {
         "state": "unknown",
         "source": "unsupported-provider-status",
@@ -875,8 +1007,8 @@ def status_payload(
         },
         "claude-cloud": {
             "wired": False,
-            "authority": "disabled-by-policy",
-            "detail": "explicit local adoption supported; provider status unavailable; automatic launch disabled",
+            "authority": claude_cloud_routine.OBSERVATION_REASON,
+            "detail": claude_cloud_routine.SOURCE_DETAIL,
         },
         "grokbot-cloud": {
             "wired": True,
@@ -899,9 +1031,7 @@ def status_payload(
                 }
             )
             if provider == "claude-cloud":
-                source["detail"] = (
-                    "explicit local adoption supported; provider status unavailable; automatic launch disabled"
-                )
+                source["detail"] = claude_cloud_routine.SOURCE_DETAIL
             elif observation.reason is not None:
                 source["detail"] = observation.reason
             elif "detail" in source:
@@ -917,7 +1047,18 @@ def status_payload(
         "lifecycle_counts": {
             "claude-cloud": {
                 "active": None,
-                "unknown": sum(1 for row in entries if row.get("provider") == "claude-cloud"),
+                "unknown": sum(
+                    1
+                    for row in entries
+                    if row.get("provider") == "claude-cloud"
+                    and (row.get("provider_lifecycle") or {}).get("state") == "unknown"
+                ),
+                "reported": sum(
+                    1
+                    for row in entries
+                    if row.get("provider") == "claude-cloud"
+                    and (row.get("provider_lifecycle") or {}).get("state") != "unknown"
+                ),
                 "coverage": "unavailable",
             },
         },
@@ -1556,7 +1697,9 @@ def observe_provider(provider: str, target: Path, *, codex_max_items: int | None
     if provider == "grokbot-cloud":
         return _grokbot_cloud_observation()
     if provider == "claude-cloud":
-        return ProviderObservation(False, False, "disabled-by-policy", {})
+        # No provider wire exists in Brigade. The conductor launches and reads
+        # routine runs, and reports what it saw through register or adopt.
+        return ProviderObservation(False, False, claude_cloud_routine.OBSERVATION_REASON, {})
     return ProviderObservation(False, False, "unsupported-provider", {})
 
 
@@ -1643,7 +1786,7 @@ def center_activity_records(
                 "task_label": str(row.get("label") or row.get("branch") or "Cloud task"),
                 "model": None,
                 "state": "unknown"
-                if row.get("provider") == "claude-cloud"
+                if row.get("provider") == "claude-cloud" and not row.get("routine_id")
                 else state_map.get(classification, "unknown"),
                 "classification": classification,
                 "started_at": started,
@@ -1670,12 +1813,7 @@ def center_activity_records(
             for key in (
                 "provider_lifecycle",
                 "artifact_state",
-                "repo",
-                "commit",
-                "pr_url",
-                "session_url",
-                "local_continuation",
-                "lease_evidence",
+                *CLAUDE_ROW_KEYS,
             ):
                 if key in row:
                     records[-1][key] = row[key]
