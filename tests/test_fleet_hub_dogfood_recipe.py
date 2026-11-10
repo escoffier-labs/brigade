@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -55,13 +56,17 @@ def no_gpu_host(argv):
     return 0, '{"runc": {}}'
 
 
-def endpoint(status=200, dims=MODEL["dimensions"], digest="sha256:" + "a" * 64):
+def endpoint(status=200, dims=MODEL["dimensions"], digest="sha256:" + "a" * 64, header="x-model-digest", body=None):
     calls = []
 
-    def post(url, body, headers):
-        calls.append((url, body, headers))
+    def post(url, request, headers):
+        calls.append((url, request, headers))
         assert headers["Authorization"].startswith("Bearer ")
-        return status, ({"x-embedder-model-digest": digest} if digest else {}), {"embeddings": [[0.1] * dims]}
+        vector = [0.1] * dims
+        payload = {"data": [{"embedding": vector}]} if url.endswith("/v1/embeddings") else {"embeddings": [vector]}
+        if body is not None:
+            payload["model_digest"] = body
+        return status, ({header: digest} if digest else {}), payload
 
     post.calls = calls
     return post
@@ -98,14 +103,86 @@ def _token(tmp_path):
 # ------------------------------------------------------------- mode selection
 
 
+# Every key the Rust hub's embedder parser reads for an endpoint backend
+# (engines/hub/src/memory/embedder.rs, Config::parse). engines/hub/tests/setup_config.py
+# starts the hub itself on setup's output.
+PARSER_KEYS = {
+    "backend",
+    "endpoint",
+    "allowlist",
+    "token_file",
+    "shape",
+    "name",
+    "model_digest",
+    "dimensions",
+    "input_chars",
+    "query_prefix",
+    "query_prefix_version",
+}
+
+
+def _embedder(project):
+    return tomllib.loads(_toml(project))["memory"]["embedder"]
+
+
 def test_supported_gpu_writes_gpu_profile_local_backend_and_an_r1_model(project, tmp_path, capsys):
     assert _init(project, tmp_path, run=gpu_host()) == 0
     env = _env(project)
     assert env["COMPOSE_PROFILES"] == "gpu" and env["BRIGADE_RETRIEVAL"] == "hybrid"
     assert env["BRIGADE_EMBED_BACKEND"] == "local" and env["BRIGADE_EMBED_MODEL"] == MODEL["name"]
     toml = _toml(project)
-    assert 'retrieval = "hybrid"' in toml and 'backend = "local"' in toml and "http://embedder:11434" in toml
+    assert 'retrieval = "hybrid"' in toml and 'backend = "local"' in toml
+    assert _embedder(project) == {
+        "backend": "local",
+        "endpoint": "http://embedder:11434/api/embed",
+        "allowlist": ["http://embedder:11434/api/embed"],
+        "token_file": "/run/secrets/embed_token",
+        "shape": "api/embed",
+        "name": MODEL["name"],
+        "model_digest": MODEL["model_digest"],
+        "dimensions": MODEL["dimensions"],
+        "input_chars": MODEL["input_chars"],
+        "query_prefix": MODEL["query_prefix"],
+        "query_prefix_version": MODEL["query_prefix_version"],
+    }
     assert "hybrid, backend local" in capsys.readouterr().out
+    # The hub needs a token file for every endpoint, so the local backend gets its own.
+    assert len((project / "secrets" / "embed-local-token").read_text(encoding="utf-8").strip()) >= 32
+    assert not (project / "secrets" / "embed-token").exists()
+    assert "file: ./secrets/embed-local-token" in (project / "compose.override.yaml").read_text(encoding="utf-8")
+
+
+def test_hybrid_embedder_table_has_exactly_the_parser_keys(project, tmp_path):
+    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert set(_embedder(project)) == PARSER_KEYS
+    project_remote = tmp_path / "remote" / "ops" / "fleet-hub"
+    shutil.copytree(
+        RECIPE, project_remote, ignore=shutil.ignore_patterns(".env", "config", "secrets", "compose.override.yaml")
+    )
+    rc = _init(
+        project_remote,
+        tmp_path,
+        "--no-gpu",
+        "--remote-url",
+        "https://embed.example.test/",
+        "--remote-token-file",
+        str(_token(tmp_path)),
+        "--remote-api",
+        "v1/embeddings",
+    )
+    assert rc == 0
+    table = _embedder(project_remote)
+    assert set(table) == PARSER_KEYS
+    assert table["endpoint"] == "https://embed.example.test/v1/embeddings" and table["allowlist"] == [table["endpoint"]]
+    assert table["shape"] == "v1/embeddings"
+
+
+def test_r1_file_without_the_schema_2_values_is_refused(project, tmp_path, capsys):
+    r1 = tmp_path / "r1.json"
+    old = {key: value for key, value in MODEL.items() if key not in ("input_chars", "query_prefix")}
+    r1.write_text(json.dumps({"schema": 1, "models": [old]}), encoding="utf-8")
+    assert _init(project, tmp_path, run=gpu_host(), r1=r1) == 1
+    assert "lacks input_chars, query_prefix" in capsys.readouterr().err
 
 
 def test_gpu_with_no_r1_model_starts_in_bm25_mode_and_says_why(project, tmp_path, capsys):
@@ -147,18 +224,40 @@ def test_remote_endpoint_without_gpu_writes_remote_and_no_embedder(project, tmp_
     assert rc == 0
     env = _env(project)
     assert env["COMPOSE_PROFILES"] == "" and env["BRIGADE_EMBED_BACKEND"] == "remote"
-    toml = _toml(project)
-    assert 'backend = "remote"' in toml and 'model_digest = "sha256:' in toml
-    assert 'token_file = "/run/secrets/embed_token"' in toml
-    assert post.calls and post.calls[0][0] == "http://gpu-host.example.ts.net:11434/api/embed"
+    table = _embedder(project)
+    assert table["backend"] == "remote" and table["model_digest"] == "sha256:" + "a" * 64
+    assert table["token_file"] == "/run/secrets/embed_token"
+    assert table["endpoint"] == "http://gpu-host.example.ts.net:11434/api/embed"
+    assert table["allowlist"] == [table["endpoint"]]
+    assert post.calls and post.calls[0][0] == table["endpoint"]
+    # The probe sends the request the hub sends.
+    assert post.calls[0][1] == {"model": MODEL["name"], "input": [setup.PROBE_TEXT], "truncate": False}
     assert (project / "secrets" / "embed-token").read_text(encoding="utf-8").strip() == "fake-remote-embed-token"
-    assert "embed_token" in (project / "compose.override.yaml").read_text(encoding="utf-8")
+    assert "file: ./secrets/embed-token" in (project / "compose.override.yaml").read_text(encoding="utf-8")
+    assert not (project / "secrets" / "embed-local-token").exists()
+
+
+def test_remote_digest_in_the_body_is_accepted(project, tmp_path):
+    post = endpoint(digest=None, body="sha256:" + "b" * 64)
+    rc = _init(
+        project,
+        tmp_path,
+        "--remote-url",
+        "https://embed.example.test",
+        "--remote-token-file",
+        str(_token(tmp_path)),
+        post=post,
+    )
+    assert rc == 0 and _embedder(project)["model_digest"] == "sha256:" + "b" * 64
 
 
 @pytest.mark.parametrize(
     ("url", "post", "reason"),
     [
         ("https://embed.example.test", endpoint(digest=None), "reports no model digest"),
+        # The hub reads only `x-model-digest`, so a digest under another header would never match.
+        ("https://embed.example.test", endpoint(header="x-embedder-model-digest"), "reports no model digest"),
+        ("https://embed.example.test", endpoint(body="sha256:" + "c" * 64), "two different model digests"),
         ("https://embed.example.test", endpoint(dims=1024), "1024 dimensions"),
         ("https://embed.example.test", endpoint(status=401), "HTTP 401"),
         ("http://192.0.2.10:11434", endpoint(), "must be HTTPS, or HTTP to a tailnet"),
@@ -536,6 +635,20 @@ def test_switch_hybrid_to_lexical_and_back(project, tmp_path):
     assert setup.main(["--project-dir", str(project), "switch", "--to", "hybrid"], run=gpu_host()) == 0
     assert _env(project)["COMPOSE_PROFILES"] == "gpu" and 'retrieval = "hybrid"' in _toml(project)
     assert (project / "secrets" / "admin-token.txt").read_bytes() == secrets_before
+
+
+def test_switch_from_local_to_remote_mounts_the_operator_token(project, tmp_path):
+    assert _init(project, tmp_path, run=gpu_host()) == 0
+    local = (project / "secrets" / "embed-local-token").read_bytes()
+    argv = ["--project-dir", str(project), "switch", "--to", "hybrid", "--no-gpu"]
+    argv += ["--remote-url", "https://embed.example.test", "--remote-token-file", str(_token(tmp_path))]
+    assert setup.main(argv, run=no_gpu_host, post=endpoint()) == 0
+    assert _embedder(project)["backend"] == "remote"
+    assert (project / "secrets" / "embed-token").read_text(encoding="utf-8").strip() == "fake-remote-embed-token"
+    assert "file: ./secrets/embed-token" in (project / "compose.override.yaml").read_text(encoding="utf-8")
+    assert (project / "secrets" / "embed-local-token").read_bytes() == local
+    assert setup.main(["--project-dir", str(project), "switch", "--to", "lexical"]) == 0
+    assert not (project / "compose.override.yaml").exists()
 
 
 def test_switch_to_hybrid_without_a_probed_embedder_changes_nothing(project, tmp_path, capsys):

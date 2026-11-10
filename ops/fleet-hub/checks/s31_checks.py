@@ -728,6 +728,15 @@ def check_setup(args: argparse.Namespace, result: Result) -> None:
         "status fields (mode, effective, state) per Retrieval modes",
         "needs the memory status route from S15",
     )
+    # engines/hub/tests/setup_config.py starts the hub binary on setup's hybrid output in CI.
+    # Starting the Compose hub here would not prove more: it reads hub.toml beside its
+    # database, not the mounted config/hub.toml, and the embed token must be owned by the
+    # hub's user with mode 0600 or 0400 while Compose mounts the operator's 0444 copy.
+    result.add(
+        "PENDING",
+        "the Compose hub reads setup's config/hub.toml and its embedder token",
+        "needs --memory-config through fleet serve and a hub-owned embed token in the recipe",
+    )
 
 
 def check_access(args: argparse.Namespace, result: Result) -> None:

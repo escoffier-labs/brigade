@@ -43,7 +43,8 @@ Conventions:
 
 - Installs or changes: `ops/fleet-hub/secrets/` (mode 0700) with
   `admin-token.txt`, `findings-key` (32 random bytes) and `front-authkey`,
-  each mode 0444, plus `embed-token` for a remote embedder, and
+  each mode 0444, plus `embed-token` for a remote embedder or
+  `embed-local-token` for the local one, and
   `operator-admin-token.txt` (mode 0600), the operator's copy of the admin
   token for `brigade memory rescan` and `reindex`. Also `.env`,
   `config/hub.toml`, the backup directory (mode 0700) and the empty recovery

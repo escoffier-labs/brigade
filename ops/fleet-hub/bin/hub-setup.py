@@ -12,11 +12,14 @@
 3. Otherwise BM25 mode (`lexical`). Setup names every check that failed and
    says how to switch later.
 
-It never writes a hybrid configuration it could not probe and never overwrites
-an existing secret. The one derived file, the operator's mode-0600 copy of the
-admin token, follows the container copy. `switch` changes the mode either way,
-and `units` renders the systemd templates for review. Nothing here installs a
-package, a unit or a container. Stdlib only.
+Either hybrid path writes the `[memory.embedder]` table the Rust hub parses
+(docs/hub-memory-embedder.md): the request URL and its allowlist entry, the
+token file, the request shape, and the model values R1 ran with from
+r1-models.json. It never writes a hybrid configuration it could not probe and
+never overwrites an existing secret. The one derived file, the operator's
+mode-0600 copy of the admin token, follows the container copy. `switch` changes
+the mode either way, and `units` renders the systemd templates for review.
+Nothing here installs a package, a unit or a container. Stdlib only.
 """
 
 from __future__ import annotations
@@ -44,6 +47,22 @@ from typing import Any
 RECIPE = Path(__file__).resolve().parents[1]
 DEFAULT_EMBED_IMAGE = "ollama/ollama:0.18.0@sha256:e23e6499890325d31f3454cdc83f7a613a2423c8a9e167bbafea0b0e3c27d7c6"
 LOCAL_ENDPOINT = "http://embedder:11434"
+# Where Compose mounts the embedder token in the hub container (compose.override.yaml).
+EMBED_TOKEN_MOUNT = "/run/secrets/embed_token"
+# The token files under secrets/: the operator's remote token, and one setup makes for
+# the local backend. Separate files, so a switch between backends never reuses the
+# other backend's token and never needs to overwrite a secret.
+EMBED_TOKEN_FILES = {"remote": "embed-token", "local": "embed-local-token"}
+# What each R1 model entry must carry before setup offers it (r1-models.json, schema 2).
+R1_KEYS = (
+    "name",
+    "dimensions",
+    "gpu_memory_mib",
+    "model_digest",
+    "input_chars",
+    "query_prefix",
+    "query_prefix_version",
+)
 PROBE_TEXT = "brigade setup probe"
 TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
 TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
@@ -98,17 +117,47 @@ class Decision:
     backend: str | None = None
     model: str | None = None
     dimensions: int | None = None
+    # The full request URL the hub posts to: the base URL plus the shape.
     endpoint: str | None = None
     api: str | None = None
     token_file: str | None = None
     model_digest: str | None = None
+    input_chars: int | None = None
+    query_prefix: str | None = None
+    query_prefix_version: int | None = None
     profiles: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
 
 
 def load_r1(path: Path) -> list[dict[str, Any]]:
     document = json.loads(path.read_text(encoding="utf-8"))
-    return [model for model in document.get("models", []) if model.get("r1") == "passed"]
+    passed = [model for model in document.get("models", []) if model.get("r1") == "passed"]
+    for model in passed:
+        missing = [key for key in R1_KEYS if key not in model]
+        if missing:
+            raise SetupError(f"{path}: model {model.get('name', '?')} lacks {', '.join(missing)} (schema 2)")
+    return passed
+
+
+def hybrid(model: dict[str, Any], **values: Any) -> Decision:
+    """A hybrid decision carrying the values R1 ran this model with."""
+    return Decision(
+        retrieval="hybrid",
+        model=model["name"],
+        dimensions=int(model["dimensions"]),
+        input_chars=int(model["input_chars"]),
+        query_prefix=str(model["query_prefix"]),
+        query_prefix_version=int(model["query_prefix_version"]),
+        token_file=EMBED_TOKEN_MOUNT,
+        **values,
+    )
+
+
+def embed_body(api: str, model: str, text: str) -> dict[str, Any]:
+    """The request body the hub sends for this shape (engines/hub/src/memory/embedder.rs)."""
+    if api == "v1/embeddings":
+        return {"model": model, "input": [text], "encoding_format": "float"}
+    return {"model": model, "input": [text], "truncate": False}
 
 
 def detect_gpu(run: Runner, models: list[dict[str, Any]], image: str) -> tuple[dict[str, Any] | None, list[str]]:
@@ -184,13 +233,11 @@ def probe_remote(
     if not token:
         return None, [f"remote: token file {token_file} is empty"]
     failures = []
+    endpoint = url.rstrip("/") + "/" + api
     for model in models:
-        if api == "v1/embeddings":
-            body: dict[str, Any] = {"model": model["name"], "input": [PROBE_TEXT]}
-        else:
-            body = {"model": model["name"], "input": PROBE_TEXT}
+        body = embed_body(api, model["name"], PROBE_TEXT)
         try:
-            status, headers, payload = post(url.rstrip("/") + "/" + api, body, {"Authorization": f"Bearer {token}"})
+            status, headers, payload = post(endpoint, body, {"Authorization": f"Bearer {token}"})
         except (OSError, ValueError) as exc:
             failures.append(f"remote: probe of {model['name']} failed: {exc}")
             continue
@@ -205,23 +252,18 @@ def probe_remote(
         if len(vector) != int(model["dimensions"]):
             failures.append(f"remote: {model['name']} returned {len(vector)} dimensions, R1 ran {model['dimensions']}")
             continue
-        digest = headers.get("x-embedder-model-digest") or payload.get("model_digest")
-        if not digest:
-            failures.append("remote: the endpoint reports no model digest, which the contract requires")
+        # Where the hub reads it: the body's `model_digest` or the `x-model-digest`
+        # header, and both must agree when both appear.
+        header_digest = headers.get("x-model-digest")
+        body_digest = payload.get("model_digest")
+        if header_digest and body_digest and header_digest != body_digest:
+            failures.append("remote: the endpoint reports two different model digests")
             continue
-        return (
-            Decision(
-                retrieval="hybrid",
-                backend="remote",
-                model=model["name"],
-                dimensions=int(model["dimensions"]),
-                endpoint=url,
-                api=api,
-                token_file="/run/secrets/embed_token",
-                model_digest=str(digest),
-            ),
-            [],
-        )
+        digest = body_digest or header_digest
+        if not digest or not isinstance(digest, str):
+            failures.append("remote: the endpoint reports no model digest (model_digest or x-model-digest)")
+            continue
+        return hybrid(model, backend="remote", endpoint=endpoint, api=api, model_digest=digest), []
     return None, failures
 
 
@@ -242,13 +284,14 @@ def decide(
     else:
         model, gpu_failed = detect_gpu(run, models, embed_image)
         if model is not None:
-            return Decision(
-                retrieval="hybrid",
+            # The recipe's embedder container is not running yet, so the digest is
+            # the one R1 ran. A server reporting another digest is refused by the hub.
+            return hybrid(
+                model,
                 backend="local",
-                model=model["name"],
-                dimensions=int(model["dimensions"]),
-                endpoint=LOCAL_ENDPOINT,
+                endpoint=LOCAL_ENDPOINT + "/api/embed",
                 api="api/embed",
+                model_digest=str(model["model_digest"]),
                 profiles=["gpu"],
             )
         failed += gpu_failed
@@ -263,26 +306,51 @@ def decide(
     return Decision(retrieval="lexical", failed=failed)
 
 
+def _toml_string(value: str) -> str:
+    # A JSON string is a valid TOML basic string: both escape quotes,
+    # backslashes and control characters the same way.
+    return json.dumps(value)
+
+
 def hub_toml(decision: Decision) -> str:
+    """`[memory]` with exactly the embedder keys the Rust hub parses (engines/hub/src/memory/embedder.rs)."""
     lines = [
-        "# Written by bin/hub-setup.py. Read by the planned Rust hub (S10, S15); today's Python hub ignores it.",
+        "# Written by bin/hub-setup.py. The Rust hub reads [memory] (docs/hub-memory-embedder.md).",
         "[memory]",
-        f'retrieval = "{decision.retrieval}"',
+        f"retrieval = {_toml_string(decision.retrieval)}",
     ]
     if decision.retrieval == "hybrid":
+        values = (
+            decision.backend,
+            decision.endpoint,
+            decision.api,
+            decision.token_file,
+            decision.model,
+            decision.model_digest,
+            decision.dimensions,
+            decision.input_chars,
+            decision.query_prefix,
+            decision.query_prefix_version,
+        )
+        if any(value is None for value in values):
+            raise SetupError("refusing to write hybrid: the embedder decision is incomplete")
+        endpoint = _toml_string(str(decision.endpoint))
         lines += [
             "",
             "[memory.embedder]",
-            f'backend = "{decision.backend}"',
-            f'endpoint = "{decision.endpoint}"',
-            f'api = "{decision.api}"',
-            f'model = "{decision.model}"',
-            f"dimensions = {decision.dimensions}",
+            f"backend = {_toml_string(str(decision.backend))}",
+            f"endpoint = {endpoint}",
+            # The hub posts only to an endpoint its allowlist names exactly.
+            f"allowlist = [{endpoint}]",
+            f"token_file = {_toml_string(str(decision.token_file))}",
+            f"shape = {_toml_string(str(decision.api))}",
+            f"name = {_toml_string(str(decision.model))}",
+            f"model_digest = {_toml_string(str(decision.model_digest))}",
+            f"dimensions = {int(decision.dimensions or 0)}",
+            f"input_chars = {int(decision.input_chars or 0)}",
+            f"query_prefix = {_toml_string(str(decision.query_prefix))}",
+            f"query_prefix_version = {int(decision.query_prefix_version or 0)}",
         ]
-        if decision.token_file:
-            lines.append(f'token_file = "{decision.token_file}"')
-        if decision.model_digest:
-            lines.append(f'model_digest = "{decision.model_digest}"')
     return "\n".join(lines) + "\n"
 
 
@@ -456,7 +524,7 @@ def _ensure_operator_token_by_path(folder: Path) -> str | None:
     return action
 
 
-def ensure_secrets(project: Path, *, remote_token: Path | None) -> list[str]:
+def ensure_secrets(project: Path, *, remote_token: Path | None, local_token: bool = False) -> list[str]:
     folder = project / "secrets"
     # Checked before anything is created or chmodded under it, since both follow the path.
     #
@@ -481,19 +549,25 @@ def ensure_secrets(project: Path, *, remote_token: Path | None) -> list[str]:
     # empty file keeps Compose valid; the front then waits for an interactive login.
     if write_secret(folder / "front-authkey", b""):
         created.append("front-authkey (empty: put the private network's auth key here before the first start)")
-    if remote_token is not None and write_secret(folder / "embed-token", remote_token.read_bytes()):
-        created.append("embed-token")
+    remote = EMBED_TOKEN_FILES["remote"]
+    if remote_token is not None and write_secret(folder / remote, remote_token.read_bytes()):
+        created.append(remote)
+    # The hub sends a bearer token to every embedder endpoint and needs a token file
+    # for it. The recipe's embedder ignores it, and an authenticating front would check it.
+    local = EMBED_TOKEN_FILES["local"]
+    if local_token and write_secret(folder / local, (secrets.token_urlsafe(32) + "\n").encode("ascii")):
+        created.append(local)
     return created
 
 
 def _compose_override(project: Path, decision: Decision) -> None:
-    """Mount the remote token only for the remote backend, so other modes need no such file."""
+    """Mount the embedder token only in hybrid mode, so BM25 mode needs no such file."""
     override = project / "compose.override.yaml"
-    if decision.backend == "remote":
+    if decision.retrieval == "hybrid":
         override.write_text(
-            "# Written by bin/hub-setup.py for the remote embedder backend.\n"
+            f"# Written by bin/hub-setup.py for the {decision.backend} embedder backend.\n"
             "services:\n  hub:\n    secrets:\n      - admin_token\n      - findings_key\n      - embed_token\n"
-            "secrets:\n  embed_token:\n    file: ./secrets/embed-token\n",
+            f"secrets:\n  embed_token:\n    file: ./secrets/{EMBED_TOKEN_FILES[str(decision.backend)]}\n",
             encoding="utf-8",
         )
     elif override.exists() and override.read_text(encoding="utf-8").startswith("# Written by bin/hub-setup.py"):
@@ -585,7 +659,7 @@ def cmd_init(args: argparse.Namespace, run: Runner, post: Poster) -> int:
     env_updates = _base_env(args)
     decision = _decide_from_args(args, run, post)
     token = Path(args.remote_token_file).expanduser() if decision.backend == "remote" else None
-    created = ensure_secrets(project, remote_token=token)
+    created = ensure_secrets(project, remote_token=token, local_token=decision.backend == "local")
     backup_dir = Path(env_updates["BRIGADE_BACKUP_DIR"])
     _private_dir(backup_dir)
     # `brigade fleet restore` counts only a ledger file that exists, so a lost
@@ -614,7 +688,7 @@ def cmd_switch(args: argparse.Namespace, run: Runner, post: Poster) -> int:
             print(report(decision))
             raise SetupError("refusing to write hybrid: no embedder passed its probe, so the mode is unchanged")
         token = Path(args.remote_token_file).expanduser() if decision.backend == "remote" else None
-        ensure_secrets(project, remote_token=token)
+        ensure_secrets(project, remote_token=token, local_token=decision.backend == "local")
     apply(project, decision, {})
     print(report(decision))
     if args.to == "lexical":

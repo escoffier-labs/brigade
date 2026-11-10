@@ -1,13 +1,17 @@
 {
-  "schema": 1,
-  "note": "Setup offers only models whose r1 is passed. Update this file when an R1 run changes a result (S16a, S17).",
+  "schema": 2,
+  "note": "Setup offers only models whose r1 is passed. Update this file when an R1 run changes a result (S16a, S17). Schema 2 adds the values R1 ran each model with, which setup writes into [memory.embedder]: model_digest (the digest the embedding server reported), input_chars, query_prefix and query_prefix_version. Change the prefix only with a new prefix version and a new R1 run.",
   "models": [
     {
       "name": "qwen3-embedding:8b",
       "dimensions": 4096,
       "gpu_memory_mib": 6144,
+      "model_digest": "64b933495768fbd3b87c20583d379728a07471e0c66733a9df87cd1901b3c44b",
+      "input_chars": 6000,
+      "query_prefix": "Instruct: Given a question, retrieve the memory note that answers it\nQuery: ",
+      "query_prefix_version": 1,
       "r1": "passed",
-      "evidence": "Both private halves of R1 in #2217. The public-fixture half runs in S17."
+      "evidence": "Both private halves of R1 in #2217. The public-fixture half passed on 2026-11-10 (R1 run on origin/main 1b55c176, criterion 3 at the 0.05 limit, 6 of 120)."
     }
   ]
 }

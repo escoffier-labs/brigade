@@ -58,6 +58,8 @@ jobs:
         run: python tests/registration.py
       - name: Memory route availability and restart
         run: python tests/memory.py
+      - name: Compose setup's hybrid configuration starts the hub (#2467)
+        run: python tests/setup_config.py
       - name: Python hub memory client against native memory
         run: python tests/memory_client.py
       - name: Native claims wire parity, fencing and contention
