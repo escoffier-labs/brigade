@@ -453,17 +453,21 @@ def _tcp_row(slot: int, address: str, port: int, inode: int) -> str:
     return f"   {slot}: {address}:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000 10001 0 {inode} 1"
 
 
-# The live namespace: the hub and its Python upstream on loopback, the front's
-# tailscaled peerapi on every address, and Docker's embedded DNS.
-NAMESPACE_TABLES = "\n".join(
-    [
-        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
-        _tcp_row(0, "0100007F", 3774, 101),
-        _tcp_row(1, "0100007F", 34293, 102),
-        _tcp_row(2, "00000000", 45045, 201),
-        _tcp_row(3, "0B00007F", 34717, 301),
-    ]
-)
+def _namespace_tables(hub_port: int = 3774) -> str:
+    # The live namespace: the hub and its Python upstream on loopback, the front's
+    # tailscaled peerapi on every address, and Docker's embedded DNS.
+    return "\n".join(
+        [
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
+            _tcp_row(0, "0100007F", hub_port, 101),
+            _tcp_row(1, "0100007F", 34293, 102),
+            _tcp_row(2, "00000000", 45045, 201),
+            _tcp_row(3, "0B00007F", 34717, 301),
+        ]
+    )
+
+
+NAMESPACE_TABLES = _namespace_tables()
 
 
 def test_listening_ports_filters_by_socket_inode():
@@ -473,7 +477,15 @@ def test_listening_ports_filters_by_socket_inode():
     assert checks.listening_ports(tables, inodes) == {3774, 34293}
 
 
-def _access(monkeypatch, *, open_ports, bindings="{}", network_mode="brigade-hub_default", inodes="101\n102\n"):
+def _access(
+    monkeypatch,
+    *,
+    open_ports,
+    bindings="{}",
+    network_mode="brigade-hub_default",
+    inodes="101\n102\n",
+    hub_port=3774,
+):
     import argparse
 
     def fake_inspect(_container, template):
@@ -484,30 +496,148 @@ def _access(monkeypatch, *, open_ports, bindings="{}", network_mode="brigade-hub
         assert "PortBindings" in template
         return bindings
 
+    tables = _namespace_tables(hub_port) + "\n#inodes\n" + inodes
+    monkeypatch.setattr(checks, "HUB_PORT", hub_port)
     monkeypatch.setattr(checks, "container_id", lambda service, project=checks.RECIPE: f"c-{service}")
     monkeypatch.setattr(checks, "inspect", fake_inspect)
-    monkeypatch.setattr(
-        checks,
-        "run",
-        lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, NAMESPACE_TABLES + "\n#inodes\n" + inodes, ""),
-    )
+    monkeypatch.setattr(checks, "run", lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, tables, ""))
     monkeypatch.setattr(checks, "connect_refused", lambda host, port, timeout=2.0: (host, port) not in open_ports)
     monkeypatch.setattr(checks, "front_url", lambda: "https://front.example.test")
     monkeypatch.setattr(checks, "get", lambda url, headers=None, timeout=5: (401, b""))
+    # raising=False keeps the helper usable against a check without the identity probe.
+    monkeypatch.setattr(checks, "IDENTITY_TIMEOUT", 0.5, raising=False)
     result = checks.Result("access")
     checks.check_access(argparse.Namespace(), result)
     return result
 
 
-def test_access_ignores_host_loopback_services_and_the_front_peerapi(monkeypatch):
-    # #2305: a desktop app on host 127.0.0.1:3774 and the front's peerapi on the
-    # holder's address are not the hub. The hub ports are refused everywhere.
-    result = _access(monkeypatch, open_ports={("127.0.0.1", 3774), ("192.0.2.10", 45045)})
+def _http_listener(answer):
+    """A real loopback HTTP server; `answer(path, headers)` returns (status, headers, body)."""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            status, headers, body = answer(self.path, self.headers)
+            self.send_response_only(status)
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def _raw_listener(reply: bytes | None):
+    """A loopback TCP listener that sends `reply` and closes, or with None never answers."""
+    import socket as socket_module
+    import threading
+
+    listener = socket_module.create_server(("127.0.0.1", 0))
+    held = []
+
+    def serve():
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            if reply is None:
+                held.append(conn)
+                continue
+            conn.recv(4096)
+            conn.sendall(reply)
+            conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return listener, held
+
+
+def _loopback_item(result, port):
+    (item,) = [item for item in result.items if item["name"] == f"host cannot connect to 127.0.0.1:{port}"]
+    return item
+
+
+HUB_HEALTH = (
+    200,
+    {"Server": "brigade-fleet-hub/1", "Content-Type": "application/json"},
+    b'{"ok": true, "service": "brigade-fleet-hub"}',
+)
+HUB_STATUS = (401, {"Server": "brigade-fleet-hub/1", "Content-Type": "application/json"}, b'{"error": "unauthorized"}')
+
+
+def test_access_reports_an_unrelated_loopback_service_and_skips_the_front_peerapi(monkeypatch):
+    # #2305: a desktop app on the hub's port number on host loopback and the
+    # front's peerapi on the holder's address are not the hub.
+    page = (200, {"Content-Type": "text/html; charset=utf-8"}, b"<!doctype html><title>app</title>")
+    server = _http_listener(lambda _path, _headers: page)
+    port = server.server_address[1]
+    try:
+        result = _access(monkeypatch, open_ports={("127.0.0.1", port), ("192.0.2.10", 45045)}, hub_port=port)
+    finally:
+        server.shutdown()
+        server.server_close()
     assert result.status == "pass"
     probed = {item["name"] for item in result.items if item["name"].startswith("host cannot connect")}
     assert not any(name.endswith(":45045") or name.endswith(":34717") for name in probed)
-    (loopback,) = [item for item in result.items if item["name"] == "host cannot connect to 127.0.0.1:3774"]
-    assert loopback["status"] == "INFO"
+    assert _loopback_item(result, port)["status"] == "INFO"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # The hub itself, or a transparent proxy to it.
+        lambda path, _headers: HUB_HEALTH if path == "/health" else HUB_STATUS,
+        # A proxy that strips the Server header but relays the hub's body.
+        lambda path, _headers: (200, {"Content-Type": "application/json"}, HUB_HEALTH[2]),
+        # An authenticating proxy: no hub markers, but 401 on the forged identity.
+        lambda path, headers: (401, {}, b"") if headers.get("Tailscale-User-Login") else (200, {}, b"ok"),
+    ],
+    ids=["hub", "stripped-proxy", "auth-proxy"],
+)
+def test_access_fails_on_a_loopback_listener_that_answers_like_the_hub(monkeypatch, answer):
+    server = _http_listener(answer)
+    port = server.server_address[1]
+    try:
+        result = _access(monkeypatch, open_ports={("127.0.0.1", port)}, hub_port=port)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert result.status == "fail"
+    item = _loopback_item(result, port)
+    assert item["status"] == "FAIL" and item["detail"]["listener"] == "hub"
+
+
+def test_access_fails_closed_when_a_loopback_listener_never_answers(monkeypatch):
+    listener, held = _raw_listener(None)
+    port = listener.getsockname()[1]
+    try:
+        result = _access(monkeypatch, open_ports={("127.0.0.1", port)}, hub_port=port)
+    finally:
+        listener.close()
+        for conn in held:
+            conn.close()
+    item = _loopback_item(result, port)
+    assert result.status == "fail" and item["detail"]["listener"] == "ambiguous"
+
+
+def test_access_reports_a_non_http_loopback_listener(monkeypatch):
+    listener, _held = _raw_listener(b"SSH-2.0-example\r\n")
+    port = listener.getsockname()[1]
+    try:
+        result = _access(monkeypatch, open_ports={("127.0.0.1", port)}, hub_port=port)
+    finally:
+        listener.close()
+    item = _loopback_item(result, port)
+    assert result.status == "pass" and item["status"] == "INFO"
+    assert item["detail"]["probes"] == {"/health": "not http", "/status": "not http"}
 
 
 def test_access_fails_when_the_hub_port_is_reachable(monkeypatch):

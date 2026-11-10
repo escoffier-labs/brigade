@@ -172,6 +172,66 @@ def connect_refused(host: str, port: int, timeout: float = 2.0) -> bool:
         return True
 
 
+# The identity probes `access` sends to a host loopback listener: the hub's
+# health route, and its status route with the forged identity header. The hub
+# answers the first with {"service": "brigade-fleet-hub"} and the second with a
+# JSON 401, both under a `brigade-fleet-hub/1` Server header.
+IDENTITY_PROBES = (("/health", {}), ("/status", {"Tailscale-User-Login": FORGED_LOGIN}))
+IDENTITY_TIMEOUT = 3.0
+HUB_MARKER = b"brigade"
+
+
+def http_answer_is_hub(status: int, headers: list[tuple[str, str]], body: bytes) -> bool:
+    """Whether one HTTP answer could come from the hub, or from a proxy in front of it.
+
+    Hub-like: a 401 or 403 (the hub's answer to a forged identity without a
+    token, and what an authenticating proxy would send), or "brigade" in any
+    header value or in the body, case-insensitive.
+    """
+    if status in (401, 403):
+        return True
+    text = b" ".join(value.encode("latin-1", "replace") for _name, value in headers) + b" " + body
+    return HUB_MARKER in text.lower()
+
+
+def loopback_identity(host: str, port: int, timeout: float | None = None) -> tuple[str, Any]:
+    """Classify a reachable host loopback listener as "hub", "other" or "ambiguous".
+
+    The rule `access` applies, failing closed:
+    - "other" only when every identity probe gets a positive non-hub answer:
+      the connection is reset, or closed or answered without an HTTP status
+      line, or the HTTP answer fails `http_answer_is_hub`.
+    - "hub" when any probe's HTTP answer passes `http_answer_is_hub`.
+    - "ambiguous" for anything else (timeout, any other error).
+    `access` reports INFO only for "other". "hub" and "ambiguous" are FAIL.
+    """
+    seen: dict[str, Any] = {}
+    for path, headers in IDENTITY_PROBES:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout or IDENTITY_TIMEOUT)
+        try:
+            conn.request("GET", path, headers=headers)
+            response = conn.getresponse()
+            body = response.read(65536)
+            answer = (response.status, response.getheaders(), body)
+        except ConnectionResetError:
+            seen[path] = "reset"
+            continue
+        except (http.client.BadStatusLine, http.client.LineTooLong):
+            # RemoteDisconnected (closed before a status line) is a BadStatusLine.
+            seen[path] = "not http"
+            continue
+        except (OSError, http.client.HTTPException) as exc:
+            seen[path] = f"no answer: {type(exc).__name__}"
+            return "ambiguous", seen
+        finally:
+            conn.close()
+        status, response_headers, body = answer
+        seen[path] = {"status": status, "content_type": response.getheader("Content-Type")}
+        if http_answer_is_hub(status, response_headers, body):
+            return "hub", seen
+    return "other", seen
+
+
 def front_url() -> str:
     url = os.environ.get("BRIGADE_S31_FRONT_URL")
     if not url:
@@ -535,9 +595,11 @@ def check_access(args: argparse.Namespace, result: Result) -> None:
     addresses = ["127.0.0.1", "::1"] + inspect(
         holder, "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"
     ).split()
-    # Host loopback is the host's own namespace. A connection there reaches the
-    # hub only if the holder shares the host's namespace or publishes the port,
-    # so otherwise a listener there is some other host service.
+    # Host loopback is the host's own namespace, so a listener there reaches the
+    # hub only through host networking, a published port, or a host-side proxy.
+    # The first two FAIL outright. A proxy cannot be told from an unrelated
+    # service by address, so the listener must prove by protocol that it is not
+    # the hub (loopback_identity), and anything short of that FAILs.
     own_namespace = inspect(holder, "{{.HostConfig.NetworkMode}}") != "host"
     bindings = inspect(holder, "{{json .HostConfig.PortBindings}}")
     for address in addresses:
@@ -546,9 +608,11 @@ def check_access(args: argparse.Namespace, result: Result) -> None:
             if connect_refused(address, port):
                 result.add("PASS", name)
             elif address in ("127.0.0.1", "::1") and own_namespace and not published(bindings, port):
-                result.add(
-                    "INFO", name, "a host service answers; the holder has its own namespace and publishes no port"
-                )
+                verdict, seen = loopback_identity(address, port)
+                if verdict == "other":
+                    result.add("INFO", name, {"listener": "answers as a non-hub service", "probes": seen})
+                else:
+                    result.add("FAIL", name, {"listener": verdict, "probes": seen})
             else:
                 result.add("FAIL", name)
     status: int | str = 0
