@@ -298,6 +298,33 @@ def test_launch_refusal_names_the_conductor_route_and_reads_nothing(tmp_path, ca
     assert not cloud_tracker.registry_path(tmp_path).exists()
 
 
+@pytest.mark.parametrize("as_json", [True, False])
+def test_launch_refusal_spawns_nothing_when_the_windows_platform_probe_falls_back(
+    tmp_path, capsys, monkeypatch, as_json
+):
+    """On Windows ``platform.system()`` runs the ``ver`` command when its WMI query fails."""
+    import platform
+    import subprocess
+
+    from brigade import component_paths
+
+    def windows_probe():
+        subprocess.run("ver", shell=True, check=False)  # the offline fixture forbids this
+        return "Windows"
+
+    monkeypatch.setattr(platform, "system", windows_probe)
+    monkeypatch.setattr(component_paths, "_HOST_IS_WINDOWS", True, raising=False)
+    monkeypatch.chdir(tmp_path)  # a Windows-form data root is a relative name on this host
+    argv = ["run", "cloud", "launch", "--target", str(tmp_path), "--provider", "claude-cloud"]
+    argv += ["--repo", REPO, "--label", "issue-7", "--prompt-file", str(tmp_path / "missing-prompt.md")]
+
+    assert cli.main(argv + (["--json"] if as_json else [])) == 2
+    captured = capsys.readouterr()
+
+    assert "conductor-routed-launch" in (captured.out if as_json else captured.err)
+    assert not cloud_tracker.registry_path(tmp_path).exists()
+
+
 def test_doctor_passes_offline_and_canary_reports_no_inventory(tmp_path, capsys):
     assert cli.main(["run", "cloud", "doctor", "--target", str(tmp_path), "--provider", "claude-cloud", "--json"]) == 0
     doctor = json.loads(capsys.readouterr().out)

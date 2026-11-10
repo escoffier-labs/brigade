@@ -57,7 +57,8 @@ def test_macos_defaults_use_library_paths():
 
 
 @patch("brigade.component_paths.host_platform.system", return_value="Darwin")
-def test_default_detection_uses_platform_system_for_macos(_mock_system):
+def test_default_detection_uses_platform_system_for_macos(_mock_system, monkeypatch):
+    monkeypatch.setattr(component_paths, "_HOST_IS_WINDOWS", False)
     env = {"HOME": "/Users/alice", "USERPROFILE": "/Users/alice"}
     data = component_paths.data_root(env=env)
     cache = component_paths.cache_root(env=env)
@@ -137,3 +138,17 @@ def test_installed_previous_state_path_uses_brigade_subdir():
 def test_cached_asset_path_rejects_unsafe_inputs(sha256, asset_name):
     with pytest.raises(ValueError):
         component_paths.cached_asset_path("/tmp/cache", sha256, asset_name)
+
+
+def test_default_detection_on_windows_never_probes_the_platform(monkeypatch):
+    """The stdlib probe can run the ``ver`` command in a child process on Windows."""
+
+    def forbidden():
+        pytest.fail("default detection invoked platform.system")
+
+    monkeypatch.setattr(component_paths, "_HOST_IS_WINDOWS", True, raising=False)
+    monkeypatch.setattr(component_paths.host_platform, "system", forbidden)
+    local = r"C:\Users\alice\AppData\Local"  # content-guard: allow windows-home-path
+
+    assert component_paths.data_root(env={"LOCALAPPDATA": local}) == local
+    assert component_paths.cache_root(env={"LOCALAPPDATA": local}).startswith("C:")
