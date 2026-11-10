@@ -584,8 +584,12 @@ def _program(tmp_path, name="app"):
     return os.path.realpath(path)
 
 
-def _fake_proc(tmp_path, port, *, holder_exe, comm="app", cgroup="0::/user.slice", resolvable=True):
-    """A /proc tree with one LISTEN socket on 127.0.0.1:port held by pid 4242 running `holder_exe`."""
+def _fake_proc(tmp_path, port, *, holder_exe, comm="app", cgroup="0::/user.slice", resolvable=True, co_holder=None):
+    """A /proc tree with one LISTEN socket on 127.0.0.1:port held by pid 4242 running `holder_exe`.
+
+    `co_holder` adds pid 4243 holding the same socket: a dict with `exe`,
+    `comm`, and `cgroup` (None leaves its cgroup file unreadable).
+    """
     proc = tmp_path / "proc"
     (proc / "net").mkdir(parents=True)
     (proc / "net" / "tcp").write_text(
@@ -601,6 +605,14 @@ def _fake_proc(tmp_path, port, *, holder_exe, comm="app", cgroup="0::/user.slice
     os.symlink(holder_exe, pid / "exe")
     (pid / "comm").write_text(comm + "\n", encoding="utf-8")
     (pid / "cgroup").write_text(cgroup + "\n", encoding="utf-8")
+    if co_holder is not None:
+        other = proc / "4243"
+        (other / "fd").mkdir(parents=True)
+        os.symlink("socket:[777]", other / "fd" / "3")
+        os.symlink(co_holder["exe"], other / "exe")
+        (other / "comm").write_text(co_holder["comm"] + "\n", encoding="utf-8")
+        if co_holder["cgroup"] is not None:
+            (other / "cgroup").write_text(co_holder["cgroup"] + "\n", encoding="utf-8")
     return proc
 
 
@@ -681,6 +693,26 @@ def test_access_refuses_an_exemption_it_cannot_justify(monkeypatch, tmp_path, pr
     result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, **proc_kwargs)
     assert result.status == "fail" and item["status"] == "FAIL"
     assert reason in item["detail"]["exemption_applied"]
+
+
+@posix_proc
+def test_access_refuses_an_exemption_when_a_co_holder_cannot_be_read(monkeypatch, tmp_path):
+    # Two processes share the listening socket. The exempted app reads fine,
+    # and the other, here the hub, has an unreadable cgroup: it must not be dropped.
+    app = _program(tmp_path)
+    hub = _program(tmp_path, "brigade-hub")
+    co_holder = {"exe": hub, "comm": "brigade-hub", "cgroup": None}
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, co_holder=co_holder)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert "could not be identified" in item["detail"]["exemption_applied"]
+
+
+def test_loopback_holders_fail_closed_without_a_proc_tree(tmp_path):
+    # Windows, or any host without /proc: no holder can be named, so no
+    # exemption can apply.
+    assert checks.loopback_holders(3774, proc=tmp_path / "no-proc") is None
+    (tmp_path / "proc" / "net").mkdir(parents=True)
+    assert checks.loopback_holders(3774, proc=tmp_path / "proc") is None
 
 
 @posix_proc
@@ -775,6 +807,9 @@ def test_access_bounds_a_trickling_loopback_listener(monkeypatch):
     }
 
 
+# An abortive close (SO_LINGER 0) makes Windows discard received data the
+# client has not read yet, so whether the 401 survives the reset is a race there.
+@pytest.mark.skipif(os.name == "nt", reason="Windows drops unread data on an incoming RST")
 def test_access_keeps_a_401_that_arrived_before_a_reset(monkeypatch):
     import socket as socket_module
     import struct

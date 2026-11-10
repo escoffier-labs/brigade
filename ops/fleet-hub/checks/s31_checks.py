@@ -288,8 +288,9 @@ def loopback_holders(port: int, proc: Path | None = None) -> list[dict[str, Any]
 
     Reads the host's /proc/net/tcp and tcp6 for LISTEN sockets on loopback or
     the wildcard address, then maps each socket inode to the processes whose
-    fds hold it. None when no socket is found or any socket has no readable
-    holder, as for another account's process.
+    fds hold it. None when no socket is found, when any socket has no readable
+    holder (as for another account's process), or when any process found
+    holding a socket has an unreadable exe link, comm or cgroup.
     """
     root = proc or PROC
     inodes: set[str] = set()
@@ -312,13 +313,24 @@ def loopback_holders(port: int, proc: Path | None = None) -> list[dict[str, Any]
         if not entry.name.isdigit():
             continue
         try:
-            links = [os.readlink(fd) for fd in (entry / "fd").iterdir()]
+            fds = list((entry / "fd").iterdir())
         except OSError:
+            # Another account's fd table: its sockets are invisible here, and
+            # an inode no readable process holds leaves the lookup unresolved.
             continue
+        links = []
+        for fd in fds:
+            try:
+                links.append(os.readlink(fd))
+            except OSError:
+                continue  # closed while scanning
         held = {link[8:-1] for link in links if link.startswith("socket:[")} & inodes
         if not held:
             continue
+        # A known holder whose identity cannot be read could be anything,
+        # including the hub, so the whole lookup is unresolved.
         try:
+            os.readlink(entry / "exe")  # realpath alone never fails on an unreadable link
             holder = {
                 "pid": int(entry.name),
                 "exe": os.path.realpath(entry / "exe"),
@@ -326,7 +338,7 @@ def loopback_holders(port: int, proc: Path | None = None) -> list[dict[str, Any]
                 "cgroup": (entry / "cgroup").read_text(encoding="utf-8").strip(),
             }
         except OSError:
-            continue
+            return None
         for inode in held:
             found[inode].append(holder)
     if not all(found.values()):
