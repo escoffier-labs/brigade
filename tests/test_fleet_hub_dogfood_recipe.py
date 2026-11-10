@@ -449,6 +449,80 @@ def test_listening_ports_reads_only_listen_rows():
     assert checks.listening_ports(table) == {3774, 0xA1B2}
 
 
+def _tcp_row(slot: int, address: str, port: int, inode: int) -> str:
+    return f"   {slot}: {address}:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000 10001 0 {inode} 1"
+
+
+# The live namespace: the hub and its Python upstream on loopback, the front's
+# tailscaled peerapi on every address, and Docker's embedded DNS.
+NAMESPACE_TABLES = "\n".join(
+    [
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
+        _tcp_row(0, "0100007F", 3774, 101),
+        _tcp_row(1, "0100007F", 34293, 102),
+        _tcp_row(2, "00000000", 45045, 201),
+        _tcp_row(3, "0B00007F", 34717, 301),
+    ]
+)
+
+
+def test_listening_ports_filters_by_socket_inode():
+    tables, inodes = checks.split_hub_sockets(NAMESPACE_TABLES + "\n#inodes\n101\n102\n")
+    assert inodes == {"101", "102"}
+    assert checks.listening_ports(tables) == {3774, 34293, 45045, 34717}
+    assert checks.listening_ports(tables, inodes) == {3774, 34293}
+
+
+def _access(monkeypatch, *, open_ports, bindings="{}", network_mode="brigade-hub_default", inodes="101\n102\n"):
+    import argparse
+
+    def fake_inspect(_container, template):
+        if "IPAddress" in template:
+            return "192.0.2.10 "
+        if "NetworkMode" in template:
+            return network_mode
+        assert "PortBindings" in template
+        return bindings
+
+    monkeypatch.setattr(checks, "container_id", lambda service, project=checks.RECIPE: f"c-{service}")
+    monkeypatch.setattr(checks, "inspect", fake_inspect)
+    monkeypatch.setattr(
+        checks,
+        "run",
+        lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, NAMESPACE_TABLES + "\n#inodes\n" + inodes, ""),
+    )
+    monkeypatch.setattr(checks, "connect_refused", lambda host, port, timeout=2.0: (host, port) not in open_ports)
+    monkeypatch.setattr(checks, "front_url", lambda: "https://front.example.test")
+    monkeypatch.setattr(checks, "get", lambda url, headers=None, timeout=5: (401, b""))
+    result = checks.Result("access")
+    checks.check_access(argparse.Namespace(), result)
+    return result
+
+
+def test_access_ignores_host_loopback_services_and_the_front_peerapi(monkeypatch):
+    # #2305: a desktop app on host 127.0.0.1:3774 and the front's peerapi on the
+    # holder's address are not the hub. The hub ports are refused everywhere.
+    result = _access(monkeypatch, open_ports={("127.0.0.1", 3774), ("192.0.2.10", 45045)})
+    assert result.status == "pass"
+    probed = {item["name"] for item in result.items if item["name"].startswith("host cannot connect")}
+    assert not any(name.endswith(":45045") or name.endswith(":34717") for name in probed)
+    (loopback,) = [item for item in result.items if item["name"] == "host cannot connect to 127.0.0.1:3774"]
+    assert loopback["status"] == "INFO"
+
+
+def test_access_fails_when_the_hub_port_is_reachable(monkeypatch):
+    published = json.dumps({"3774/tcp": [{"HostIp": "127.0.0.1", "HostPort": "3774"}]})
+    assert _access(monkeypatch, open_ports={("127.0.0.1", 3774)}, bindings=published).status == "fail"
+    assert _access(monkeypatch, open_ports={("127.0.0.1", 3774)}, network_mode="host").status == "fail"
+    assert _access(monkeypatch, open_ports={("192.0.2.10", 34293)}).status == "fail"
+
+
+def test_access_probes_every_listener_when_hub_inodes_are_unreadable(monkeypatch):
+    result = _access(monkeypatch, open_ports={("192.0.2.10", 45045)}, inodes="")
+    assert result.status == "fail"
+    assert any(item["name"] == "hub socket inodes unreadable" for item in result.items)
+
+
 def test_header_echo_verdicts():
     forged = checks.evaluate_echo({"Tailscale-User-Login": checks.FORGED_LOGIN, "X-Forwarded-For": checks.FORGED_FOR})
     assert forged["login_forged"] and forged["client_value_kept"]

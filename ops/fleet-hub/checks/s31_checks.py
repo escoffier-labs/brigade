@@ -123,14 +123,45 @@ def percentile(values: list[float], share: float) -> float:
     return ordered[index]
 
 
-def listening_ports(proc_net_tcp: str) -> set[int]:
-    """Ports in LISTEN state (0A) from /proc/net/tcp or tcp6 text."""
+def listening_ports(proc_net_tcp: str, inodes: set[str] | None = None) -> set[int]:
+    """Ports in LISTEN state (0A) from /proc/net/tcp or tcp6 text.
+
+    With `inodes`, only sockets whose inode (the tenth column) is in the set.
+    """
     ports = set()
     for line in proc_net_tcp.splitlines()[1:]:
         fields = line.split()
         if len(fields) > 3 and fields[3] == "0A":
+            if inodes is not None and (len(fields) < 10 or fields[9] not in inodes):
+                continue
             ports.add(int(fields[1].rsplit(":", 1)[1], 16))
     return ports
+
+
+# Run inside the hub container by `access`. The holder's namespace is shared
+# with the front, so its socket tables also list the front's tailscaled peerapi
+# and Docker's embedded DNS. The container's own PID namespace shows only the
+# hub's processes, and their socket inodes pick out the hub's listeners.
+HUB_SOCKETS = (
+    "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null; echo '#inodes'; "
+    'for f in /proc/[0-9]*/fd/*; do readlink "$f"; done 2>/dev/null'
+    " | sed -n 's/^socket:\\[\\([0-9]*\\)\\]$/\\1/p'"
+)
+
+
+def split_hub_sockets(text: str) -> tuple[str, set[str]]:
+    """The socket tables and the hub processes' socket inodes from HUB_SOCKETS output."""
+    tables, _, inodes = text.partition("#inodes")
+    return tables, {line.strip() for line in inodes.splitlines() if line.strip()}
+
+
+def published(holder_bindings: str, port: int) -> bool:
+    """Whether the holder's HostConfig.PortBindings JSON maps `port` to the host."""
+    try:
+        bindings = json.loads(holder_bindings or "null") or {}
+    except ValueError:
+        return True
+    return bool(bindings.get(f"{port}/tcp"))
 
 
 def connect_refused(host: str, port: int, timeout: float = 2.0) -> bool:
@@ -489,15 +520,37 @@ def check_access(args: argparse.Namespace, result: Result) -> None:
     if not hub or not holder:
         result.add("FAIL", "hub and holder running")
         return
-    tables = run(["docker", "exec", hub, "sh", "-c", "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null"]).stdout
-    ports = listening_ports(tables)
+    tables, inodes = split_hub_sockets(run(["docker", "exec", hub, "sh", "-c", HUB_SOCKETS]).stdout)
+    every = listening_ports(tables)
+    ports = listening_ports(tables, inodes) if inodes else every
+    if not inodes:
+        result.add("INFO", "hub socket inodes unreadable", "probing every listener in the namespace")
     result.ok(HUB_PORT in ports, "hub listens on its port inside the namespace", sorted(ports))
+    if every - ports:
+        result.add(
+            "INFO",
+            "listeners of other containers in the namespace (front's peerapi, Docker DNS)",
+            sorted(every - ports),
+        )
     addresses = ["127.0.0.1", "::1"] + inspect(
         holder, "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"
     ).split()
+    # Host loopback is the host's own namespace. A connection there reaches the
+    # hub only if the holder shares the host's namespace or publishes the port,
+    # so otherwise a listener there is some other host service.
+    own_namespace = inspect(holder, "{{.HostConfig.NetworkMode}}") != "host"
+    bindings = inspect(holder, "{{json .HostConfig.PortBindings}}")
     for address in addresses:
         for port in sorted(ports):
-            result.ok(connect_refused(address, port), f"host cannot connect to {address}:{port}")
+            name = f"host cannot connect to {address}:{port}"
+            if connect_refused(address, port):
+                result.add("PASS", name)
+            elif address in ("127.0.0.1", "::1") and own_namespace and not published(bindings, port):
+                result.add(
+                    "INFO", name, "a host service answers; the holder has its own namespace and publishes no port"
+                )
+            else:
+                result.add("FAIL", name)
     status: int | str = 0
     try:
         status = get(front_url() + "/status", headers={"Tailscale-User-Login": FORGED_LOGIN})[0]
