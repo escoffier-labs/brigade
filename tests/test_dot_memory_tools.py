@@ -137,8 +137,36 @@ class HandoffChecks(Fixture):
     @requires_local_state
     def test_untrusted_inbox_refused(self):
         os.chmod(self.inbox, 0o777)
-        with self.assertRaisesRegex(DotError, "^handoff_unavailable$"):
-            self.call("handoff_write", slug="bridge-probe", content=HANDOFF)
+        refusal = {"error": "handoff_unavailable", "reason": "inbox_untrusted"}
+        self.assertEqual(self.call("handoff_write", slug="bridge-probe", content=HANDOFF), refusal)
+        self.assertEqual(self.runner.calls, [])
+
+    @requires_local_state
+    def test_inbox_made_under_umask_0002_is_written(self):
+        # A default umask of 0002 leaves the inbox and its parent 0775 in the user's own group.
+        self.runner.handler = lambda argv, stdin: CommandResult(0, lint_report(True))
+        for directory in (self.inbox.parent, self.inbox):
+            os.chmod(directory, 0o775)
+        result = self.call("handoff_write", slug="group-inbox", content=HANDOFF)
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual([path.name for path in self.inbox.iterdir()], [result["filename"]])
+
+    @requires_local_state
+    def test_world_writable_inbox_parent_refused_with_a_reason(self):
+        os.chmod(self.inbox, 0o775)
+        os.chmod(self.inbox.parent, 0o777)
+        try:
+            refusal = {"error": "handoff_unavailable", "reason": "inbox_untrusted"}
+            self.assertEqual(self.call("handoff_write", slug="bridge-probe", content=HANDOFF), refusal)
+        finally:
+            os.chmod(self.inbox.parent, 0o755)
+        self.assertEqual(self.runner.calls, [])
+
+    @requires_local_state
+    def test_missing_inbox_names_itself(self):
+        self.inbox.rmdir()
+        refusal = {"error": "handoff_unavailable", "reason": "inbox_missing"}
+        self.assertEqual(self.call("handoff_write", slug="bridge-probe", content=HANDOFF), refusal)
         self.assertEqual(self.runner.calls, [])
 
 

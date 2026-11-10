@@ -264,6 +264,9 @@ and skill names.
 - `handoff_write` goes through the handoff linter and lands under
   `.claude/memory-handoffs` with a `-duet-` filename, so ingested knowledge is
   attributable and reviewable.
+  The inbox and its parent may be group-writable for the listener user's own
+  primary group, which is what a umask of 0002 creates. A refusal answers
+  `handoff_unavailable` with a `reason` naming the step that failed.
 - `skills_deny` keeps private skills out of search and reads. a denied skill
   looks the same as a missing one.
 - Separate state, token, audience and resource mean a compromised Duet session

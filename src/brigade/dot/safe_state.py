@@ -150,12 +150,22 @@ def private_directory(directory: Path, *, create: bool = False) -> int:
             os.close(current)
 
 
-def trusted_directory(directory: Path, *, allow_group_write: bool = False, code: str = "unsafe_state") -> int:
+def trusted_directory(
+    directory: Path,
+    *,
+    allow_group_write: bool = False,
+    allow_group_write_ancestors: bool = False,
+    code: str = "unsafe_state",
+) -> int:
     """Open an existing directory through O_NOFOLLOW components.
 
     Same ancestor rule as private_directory. The final directory must be owned by
     this user and not world-writable. Group write is accepted only when asked and
     only for this user's own primary group (the canonical cards dir is 0775).
+
+    `allow_group_write_ancestors` extends that one exception to ancestors this user
+    owns: a umask of 0002 creates a handoff inbox and its parent as 0775. A
+    world-writable ancestor, another group or another owner is still refused.
     """
     require(os.name == "posix", code)
     current = None
@@ -176,9 +186,19 @@ def trusted_directory(directory: Path, *, allow_group_write: bool = False, code:
                     and (not info.st_mode & 0o020 or (allow_group_write and info.st_gid == os.getegid()))
                 )
             else:
+                own_group = (
+                    allow_group_write_ancestors
+                    and info.st_uid == os.geteuid()
+                    and info.st_gid == os.getegid()
+                    and not info.st_mode & 0o002
+                )
                 require(
                     info.st_uid in (0, os.geteuid())
-                    and (not info.st_mode & 0o022 or (info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)))
+                    and (
+                        not info.st_mode & 0o022
+                        or own_group
+                        or (info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX))
+                    )
                 )
         descriptor, current = current, None
         return descriptor

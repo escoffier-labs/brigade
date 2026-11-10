@@ -691,7 +691,7 @@ class MemoryTools:
                 env=self.environment,
             )
         except OSError:
-            return None, {"error": "handoff_unavailable"}
+            return None, {"error": "handoff_unavailable", "reason": "lint_state_unavailable"}
         finally:
             if state_fd is not None:
                 if lint_written:
@@ -724,7 +724,18 @@ class MemoryTools:
         require(isinstance(moment, datetime) and moment.utcoffset() is not None, "clock_unavailable")
         prefix = self.profile.handoff_prefix
         filename = f"{moment.astimezone():%Y-%m-%d-%H%M}-{prefix}-{slug}.md"
-        inbox = trusted_directory(self.handoff_inbox, code="handoff_unavailable")
+        try:
+            # A umask of 0002 creates the inbox and its parent as 0775 in this user's own group.
+            inbox = trusted_directory(
+                self.handoff_inbox,
+                allow_group_write=True,
+                allow_group_write_ancestors=True,
+                code="handoff_unavailable",
+            )
+        except DotError:
+            # Name the failing step: a bare code sent the last live failure to the wrong one.
+            reason = "inbox_untrusted" if os.path.isdir(self.handoff_inbox) else "inbox_missing"
+            return {"error": "handoff_unavailable", "reason": reason}
         temporary = f".{prefix}-{uuid4().hex}.tmp"
         temporary_written = False
         try:
@@ -737,7 +748,7 @@ class MemoryTools:
             # Lint a private copy before anything appears in the ingested inbox.
             entry, refusal = self._lint_handoff(encoded)
             if refusal is not None or entry is None:
-                return refusal or {"error": "handoff_unavailable"}
+                return refusal or {"error": "handoff_unavailable", "reason": "lint_unavailable"}
             # Publish atomically and never overwrite: write a hidden temp file, then
             # hard-link it to the final name (link fails if the name exists).
             descriptor = os.open(
@@ -767,7 +778,7 @@ class MemoryTools:
         except DotError:
             raise
         except OSError:
-            return {"error": "handoff_unavailable"}
+            return {"error": "handoff_unavailable", "reason": "inbox_write_failed"}
         finally:
             if temporary_written:
                 try:
