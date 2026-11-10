@@ -724,6 +724,16 @@ with `brigade fleet msg sent --id MESSAGE_ID --token-file example-agent.token
 --json`, and drain that credential's queue with `brigade fleet msg flush
 --token-file example-agent.token --json`.
 
+A stored message is not a delivered message. A chat agent reads its inbox only
+when someone opens a chat, so a send can sit unread for hours. Add
+`--undelivered-after MINUTES` to `brigade fleet msg sent` to mark each message
+`acknowledged`, `pending` or `undelivered`. A message with no `acked_at` that
+is older than the deadline is `undelivered`, and its id is listed under
+`undelivered`. For example, `brigade fleet msg sent --after 0
+--undelivered-after 60 --json` reports every sent message on the page that went
+an hour without an acknowledgement. Use another route for that work instead of
+waiting.
+
 Replace grants, clear send and reply permission, or revoke the credential:
 
 ```bash
