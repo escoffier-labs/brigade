@@ -2932,6 +2932,7 @@ def test_entry_replaces_a_symlink_at_the_copy_and_needs_a_private_directory(tmp_
     assert "is missing" in (entry.deliver_embed_token(str(source), str(tmp_path / "absent" / "embed_token")) or "")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the copy is made only on POSIX")
 def test_entry_without_a_mounted_token_removes_an_earlier_copy(tmp_path):
     """BM25 mode mounts no embedder token, so no copy from a hybrid start stays behind."""
     target = _token_folder(tmp_path) / "embed_token"

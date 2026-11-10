@@ -723,7 +723,7 @@ def hub_memory_config(project: Path, state: Path) -> Path:
     if embedder.get("token_file") == EMBED_TOKEN_COPY:
         secret = project / "secrets" / EMBED_TOKEN_FILES[str(embedder.get("backend"))]
         copy = state / "embed_token"
-        fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+        fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o400)
         with os.fdopen(fd, "wb") as handle:
             handle.write(secret.read_bytes())
         text = text.replace(f"token_file = {json.dumps(EMBED_TOKEN_COPY)}", f"token_file = {json.dumps(str(copy))}")

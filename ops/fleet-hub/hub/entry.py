@@ -109,6 +109,9 @@ def deliver_embed_token(source: str = EMBED_TOKEN_MOUNT, target: str = EMBED_TOK
     a symlink planted at the target is replaced, never followed. With no mounted
     token any earlier copy is removed. Never prints the token.
     """
+    if os.name != "posix":
+        # The container is Linux. Elsewhere there is no mount, owner or mode to act on.
+        return None
     folder = os.path.dirname(target)
     try:
         fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)

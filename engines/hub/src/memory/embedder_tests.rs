@@ -1218,10 +1218,13 @@ fn the_listing_url_stays_on_the_endpoint_origin() {
         "http://embedder:11434/api/tags"
     );
     assert_eq!(
-        listing_url("api/embed", &url("https://10.0.0.5:8443/front/api/embed"))
-            .unwrap()
-            .as_str(),
-        "https://10.0.0.5:8443/front/api/tags"
+        listing_url(
+            "api/embed",
+            &url("https://embed.example.test:8443/front/api/embed")
+        )
+        .unwrap()
+        .as_str(),
+        "https://embed.example.test:8443/front/api/tags"
     );
     assert!(listing_url("v1/embeddings", &url("http://embedder:11434/api/embed")).is_none());
     assert!(listing_url("api/embed", &url("http://embedder:11434/embed")).is_none());
