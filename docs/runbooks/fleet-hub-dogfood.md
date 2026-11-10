@@ -431,7 +431,7 @@ After the matching host actions are done, run each check from
 | cgroup readbacks | `checks/s31_checks.py cgroups --hub-cpus <...> --embed-cpus <...> --service <agent-service> ...` |
 | I/O weight or latency target only | `checks/s31_checks.py io --device-id <MAJ:MIN>`, then, as the compose account, `checks/s31_checks.py fdatasync --slice brigade-hub.slice --path <dir on the data root> --writer <dir on the same device>`. Only the probe enters the slice, and the writer stays in the caller's session |
 | Setup on throwaway projects | `checks/s31_checks.py setup [--remote --remote-url <URL> --remote-token-file <FILE>]` |
-| Access from the host | `checks/s31_checks.py access [--allow-loopback-listener PORT=REASON ...]`, see [Loopback exemptions](#loopback-exemptions) |
+| Access from the host | `checks/s31_checks.py access [--allow-loopback-listener PORT=EXE_REALPATH//REASON ...]`, see [Loopback exemptions](#loopback-exemptions) |
 | Front: forged header, SSH off, forwarded-for | `checks/s31_checks.py front` (starts a header echo for the test only) |
 | Refused connections at the fleet's concurrency | `checks/s31_checks.py load --concurrency <N>` |
 | Hub memory answers on the Rust hub | `checks/s31_checks.py memory` |
@@ -449,22 +449,46 @@ listener at its port number is another host process, but no network probe can
 prove that process is not a proxy to the hub. The check records each listener's
 status line and headers as evidence and never passes on them.
 
-When an unrelated host service holds a hub port number on loopback, exempt it
-by port with a reason the record keeps:
+An exemption trusts the named program not to forward to the hub. Before you
+add one, confirm what the program is and that it does not proxy or relay to
+the hub port. The check can confirm which program holds the socket, not what
+that program does.
+
+To exempt an unrelated program that holds a hub port number on host loopback,
+find the canonical path of its executable and name it in the exemption:
 
 ```bash
+ss -ltnpH 'sport = :3774'              # the holder's pid
+readlink -f /proc/<PID>/exe            # EXE_REALPATH
 checks/s31_checks.py access \
-  --allow-loopback-listener "3774=desktop app on host loopback, not the hub (checked by its holder process)"
+  --allow-loopback-listener "3774=/opt/desktop-app/bin/app//desktop app on host loopback, verified not to forward to the hub"
 ```
 
-The exemption turns that listener into INFO only when all of these hold: the
-netns container does not use host networking and publishes no port, the check
-can name the process holding the socket (pid, the real path of its executable
-and its command name, from the host's socket inode to process mapping), and that
-process is neither `brigade-hub` nor in a container of the hub's image. Run the
-check as the account that owns the service, because another account's sockets
-cannot be read and then the exemption does not apply. An exemption that matches
-no reachable listener is recorded as unused.
+The value is `PORT=EXE_REALPATH//REASON`. PORT is digits, so the first `=` ends
+it. EXE_REALPATH must be the canonical absolute path that `readlink -f` prints,
+and a canonical path never contains `//`, so the first `//` after it starts the
+reason. The reason may contain any text and is required. The check rejects
+anything else, including a relative or non-normalized path and a path ending in
+` (deleted)`. The flag repeats for more ports.
+
+The exemption turns that listener into INFO only when all of these hold:
+
+- The netns container does not use host networking and publishes no port at
+  all, because a published container port can sit behind any host port number.
+- The check can name every process holding a LISTEN socket on that port on
+  loopback or the wildcard address, from the host's socket inode to process
+  mapping. Run the check as the account that owns the program, because another
+  account's sockets cannot be read and then the exemption does not apply.
+- Every holder's `/proc/<pid>/exe` resolves to exactly EXE_REALPATH. A copy at
+  another path, another program, or a binary that was replaced or deleted
+  since it started (its link reads `... (deleted)`) does not match.
+- No holder is `brigade-hub` or sits in a container of the hub's image.
+
+Otherwise the result is FAIL and the record says which condition failed. The
+record keeps the port, the path, the reason, and each holder's pid, executable
+and command name. An exemption that matches no reachable listener is recorded
+as unused. A program that runs from a per-launch mount path needs the path
+updated after each launch.
 
 The status fields of [Retrieval modes](../phase-v2-hub-architecture.md#retrieval-modes)
 (`lexical` and `ok` for BM25 chosen, `degraded` for a hybrid project whose

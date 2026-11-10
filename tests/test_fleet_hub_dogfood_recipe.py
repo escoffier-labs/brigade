@@ -576,10 +576,16 @@ def _loopback_item(result, port):
 PAGE = (200, {"Content-Type": "text/html; charset=utf-8"}, b"<!doctype html><title>app</title>")
 
 
-def _fake_proc(
-    tmp_path, port, *, holder_exe="/opt/desktop-app/app", comm="app", cgroup="0::/user.slice", resolvable=True
-):
-    """A /proc tree with one LISTEN socket on 127.0.0.1:port held by pid 4242."""
+def _program(tmp_path, name="app"):
+    """A real file standing in for a program, and its canonical path."""
+    path = tmp_path / "programs" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    return os.path.realpath(path)
+
+
+def _fake_proc(tmp_path, port, *, holder_exe, comm="app", cgroup="0::/user.slice", resolvable=True):
+    """A /proc tree with one LISTEN socket on 127.0.0.1:port held by pid 4242 running `holder_exe`."""
     proc = tmp_path / "proc"
     (proc / "net").mkdir(parents=True)
     (proc / "net" / "tcp").write_text(
@@ -596,6 +602,24 @@ def _fake_proc(
     (pid / "comm").write_text(comm + "\n", encoding="utf-8")
     (pid / "cgroup").write_text(cgroup + "\n", encoding="utf-8")
     return proc
+
+
+def _exempted_access(monkeypatch, tmp_path, *, exempt_exe, holder_exe, bindings="{}", **proc_kwargs):
+    server = _http_listener(lambda _path, _headers: PAGE)
+    port = server.server_address[1]
+    try:
+        result = _access(
+            monkeypatch,
+            open_ports={("127.0.0.1", port)},
+            hub_port=port,
+            bindings=bindings,
+            allow=[f"{port}={exempt_exe}//desktop app on host loopback"],
+            proc=_fake_proc(tmp_path, port, holder_exe=holder_exe, **proc_kwargs),
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    return result, _loopback_item(result, port)
 
 
 def test_access_skips_the_front_peerapi_and_fails_an_unexempted_loopback_listener(monkeypatch):
@@ -619,24 +643,28 @@ posix_proc = pytest.mark.skipif(os.name == "nt", reason="fake /proc needs POSIX 
 
 
 @posix_proc
-def test_access_exempts_a_loopback_listener_whose_holder_is_named(monkeypatch, tmp_path):
-    server = _http_listener(lambda _path, _headers: PAGE)
-    port = server.server_address[1]
-    try:
-        result = _access(
-            monkeypatch,
-            open_ports={("127.0.0.1", port)},
-            hub_port=port,
-            allow=[f"{port}=desktop app on host loopback"],
-            proc=_fake_proc(tmp_path, port),
-        )
-    finally:
-        server.shutdown()
-        server.server_close()
-    item = _loopback_item(result, port)
+def test_access_exempts_a_loopback_listener_held_by_the_named_program(monkeypatch, tmp_path):
+    app = _program(tmp_path)
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=app)
     assert result.status == "pass" and item["status"] == "INFO"
-    assert item["detail"]["exemption"] == "desktop app on host loopback"
-    assert item["detail"]["holders"] == [{"pid": 4242, "exe": "/opt/desktop-app/app", "comm": "app"}]
+    assert item["detail"]["exemption"] == {"exe": app, "reason": "desktop app on host loopback"}
+    assert item["detail"]["holders"] == [{"pid": 4242, "exe": app, "comm": "app"}]
+
+
+@posix_proc
+@pytest.mark.parametrize("holder", ["other-program", "deleted", "renamed-copy"])
+def test_access_refuses_an_exemption_when_the_holder_is_not_the_named_program(monkeypatch, tmp_path, holder):
+    app = _program(tmp_path)
+    holder_exe = {
+        "other-program": _program(tmp_path, "socat"),
+        # The kernel's exe link for an unlinked binary reads "<path> (deleted)".
+        "deleted": app + " (deleted)",
+        # The same program copied to another path under another name.
+        "renamed-copy": _program(tmp_path / "elsewhere", "app-copy"),
+    }[holder]
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=holder_exe)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert "not the exempted path" in item["detail"]["exemption_applied"]
 
 
 @posix_proc
@@ -644,28 +672,70 @@ def test_access_exempts_a_loopback_listener_whose_holder_is_named(monkeypatch, t
     "proc_kwargs, reason",
     [
         ({"resolvable": False}, "could not be identified"),
-        ({"holder_exe": "/usr/local/bin/brigade-hub", "comm": "brigade-hub"}, "hub's binary or image"),
         ({"cgroup": "0::/system.slice/docker-c-hub-sibling.scope"}, "hub's binary or image"),
     ],
-    ids=["unresolved-holder", "hub-binary", "hub-image-container"],
+    ids=["unresolved-holder", "hub-image-container"],
 )
 def test_access_refuses_an_exemption_it_cannot_justify(monkeypatch, tmp_path, proc_kwargs, reason):
-    server = _http_listener(lambda _path, _headers: PAGE)
-    port = server.server_address[1]
-    try:
-        result = _access(
-            monkeypatch,
-            open_ports={("127.0.0.1", port)},
-            hub_port=port,
-            allow=[f"{port}=claimed to be a desktop app"],
-            proc=_fake_proc(tmp_path, port, **proc_kwargs),
-        )
-    finally:
-        server.shutdown()
-        server.server_close()
-    item = _loopback_item(result, port)
+    app = _program(tmp_path)
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, **proc_kwargs)
     assert result.status == "fail" and item["status"] == "FAIL"
     assert reason in item["detail"]["exemption_applied"]
+
+
+@posix_proc
+def test_access_never_exempts_the_hub_binary_even_when_named(monkeypatch, tmp_path):
+    hub = _program(tmp_path, "brigade-hub")
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=hub, holder_exe=hub, comm="brigade-hub")
+    assert result.status == "fail" and "hub's binary or image" in item["detail"]["exemption_applied"]
+
+
+@posix_proc
+def test_access_refuses_exemptions_when_any_port_is_published(monkeypatch, tmp_path):
+    # A container port published to host loopback 3774 under another key.
+    app = _program(tmp_path)
+    published = json.dumps({"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "3774"}]})
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, bindings=published)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert "publishes a port" in item["detail"]["exemption_applied"]
+
+
+@pytest.mark.parametrize("connect_cost, sends", [(1.5, []), (0.25, [0.75, 0.5])], ids=["spent", "partial"])
+def test_probe_connect_and_send_share_one_budget(monkeypatch, connect_cost, sends):
+    from types import SimpleNamespace
+
+    clock = [0.0]
+    seen: list[float] = []
+
+    class Conn:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def settimeout(self, value):
+            self.timeout = value
+
+        def sendall(self, _data):
+            seen.append(round(self.timeout, 6))
+
+        def recv(self, _size):
+            return b""
+
+    def connect(_address, timeout):
+        clock[0] += connect_cost
+        return Conn(timeout)
+
+    monkeypatch.setattr(checks, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(checks, "socket", SimpleNamespace(create_connection=connect))
+    evidence = checks.probe_evidence("192.0.2.1", 3774, deadline=1.0)
+    assert seen == sends
+    if not sends:
+        assert evidence["/health"]["ended"] == "deadline"
 
 
 def test_access_bounds_a_trickling_loopback_listener(monkeypatch):
@@ -729,17 +799,33 @@ def test_access_keeps_a_401_that_arrived_before_a_reset(monkeypatch):
     assert status["headers"]["server"] == "proxy"
 
 
-def test_access_rejects_a_malformed_exemption():
+@pytest.mark.parametrize(
+    "value",
+    [
+        "3774=desktop app",
+        "app=/opt/app//reason",
+        "3774=opt/app//reason",
+        "3774=/opt/../opt/app//reason",
+        "3774=/opt/app/x/.//reason",
+        "3774=/opt/app//",
+        "3774=/opt/app (deleted)//reason",
+        "3774=///reason",
+    ],
+)
+def test_access_rejects_a_malformed_exemption(value):
     with pytest.raises(ValueError):
-        checks.parse_exemptions(["3774"])
-    with pytest.raises(ValueError):
-        checks.parse_exemptions(["app=reason"])
-    assert checks.parse_exemptions(["3774=desktop app = T3"]) == {3774: "desktop app = T3"}
+        checks.parse_exemptions([value])
+
+
+def test_access_exemption_reason_may_hold_separators():
+    assert checks.parse_exemptions(["3774=/opt/app/bin/app//desktop app, see https://example.test/a=b"]) == {
+        3774: ("/opt/app/bin/app", "desktop app, see https://example.test/a=b")
+    }
 
 
 def test_access_fails_when_the_hub_port_is_reachable(monkeypatch):
     published = json.dumps({"3774/tcp": [{"HostIp": "127.0.0.1", "HostPort": "3774"}]})
-    allow = ["3774=claimed exemption"]
+    allow = ["3774=/opt/app/bin/app//claimed exemption"]
     assert _access(monkeypatch, open_ports={("127.0.0.1", 3774)}, bindings=published, allow=allow).status == "fail"
     assert _access(monkeypatch, open_ports={("127.0.0.1", 3774)}, network_mode="host", allow=allow).status == "fail"
     assert _access(monkeypatch, open_ports={("192.0.2.10", 34293)}).status == "fail"

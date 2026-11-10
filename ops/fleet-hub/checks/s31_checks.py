@@ -15,6 +15,7 @@ import concurrent.futures
 import http.client
 import json
 import os
+import posixpath
 import secrets
 import socket
 import sqlite3
@@ -155,13 +156,17 @@ def split_hub_sockets(text: str) -> tuple[str, set[str]]:
     return tables, {line.strip() for line in inodes.splitlines() if line.strip()}
 
 
-def published(holder_bindings: str, port: int) -> bool:
-    """Whether the holder's HostConfig.PortBindings JSON maps `port` to the host."""
+def publishes_any_port(holder_bindings: str) -> bool:
+    """Whether the holder's HostConfig.PortBindings JSON maps any port to the host (unreadable counts as yes).
+
+    Any binding refuses every loopback exemption: a container port published
+    to a host loopback port can sit behind any host port number.
+    """
     try:
         bindings = json.loads(holder_bindings or "null") or {}
     except ValueError:
         return True
-    return bool(bindings.get(f"{port}/tcp"))
+    return not isinstance(bindings, dict) or any(bindings.values())
 
 
 def connect_refused(host: str, port: int, timeout: float = 2.0) -> bool:
@@ -173,8 +178,9 @@ def connect_refused(host: str, port: int, timeout: float = 2.0) -> bool:
 
 
 # A reachable listener on host loopback is a FAIL unless the operator exempts
-# its port with --allow-loopback-listener PORT=REASON and the check can name the
-# process holding the socket. No HTTP answer proves a listener is not a proxy
+# its port with --allow-loopback-listener PORT=EXE_REALPATH//REASON and every
+# process holding the socket runs exactly that executable. The exemption trusts
+# that program not to forward to the hub. No HTTP answer proves a listener is not a proxy
 # to the hub, so the probe below is evidence for the record, never a pass.
 PROC = Path("/proc")
 PROBE_DEADLINE = 5.0
@@ -189,14 +195,32 @@ LOOPBACK_HEX = {
 }
 
 
-def parse_exemptions(values: list[str]) -> dict[int, str]:
-    """PORT=REASON pairs from --allow-loopback-listener. A reason is required."""
-    exemptions: dict[int, str] = {}
+EXEMPTION_SEPARATOR = "//"
+DELETED = " (deleted)"
+
+
+def parse_exemptions(values: list[str]) -> dict[int, tuple[str, str]]:
+    """PORT=EXE_REALPATH//REASON triples from --allow-loopback-listener.
+
+    PORT is digits, so the first "=" ends it. EXE_REALPATH must be the
+    canonical absolute path `readlink -f /proc/<pid>/exe` prints. A canonical
+    path never contains "//", so the first "//" after it ends the path and the
+    reason may contain anything. A reason is required.
+    """
+    exemptions: dict[int, tuple[str, str]] = {}
     for value in values:
-        port, _, reason = value.partition("=")
-        if not port.strip().isdigit() or not reason.strip():
-            raise ValueError(f"--allow-loopback-listener wants PORT=REASON, got {value!r}")
-        exemptions[int(port)] = reason.strip()
+        port, _, rest = value.partition("=")
+        exe, separator, reason = rest.partition(EXEMPTION_SEPARATOR)
+        canonical = (
+            exe.startswith("/")
+            and exe != "/"
+            and posixpath.normpath(exe) == exe
+            and not exe.startswith("//")
+            and not exe.endswith(DELETED)
+        )
+        if not port.isdigit() or not separator or not canonical or not reason.strip():
+            raise ValueError(f"--allow-loopback-listener wants PORT=EXE_REALPATH//REASON, got {value!r}")
+        exemptions[int(port)] = (exe, reason.strip())
     return exemptions
 
 
@@ -217,6 +241,11 @@ def probe_evidence(host: str, port: int, deadline: float | None = None) -> dict[
             continue
         try:
             with socket.create_connection((host, port), timeout=remaining) as conn:
+                # The connect spent part of the budget: recompute before the send.
+                remaining = stop - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("deadline reached after connect")
+                conn.settimeout(remaining)
                 lines = [f"GET {path} HTTP/1.0", f"Host: {host}:{port}"]
                 lines += [f"{name}: {value}" for name, value in headers.items()]
                 conn.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("ascii"))
@@ -308,7 +337,8 @@ def loopback_holders(port: int, proc: Path | None = None) -> list[dict[str, Any]
 
 def hub_image_holder(holder: dict[str, Any], hub_containers: list[str]) -> bool:
     """Whether a holder runs the hub's binary or sits in a container of the hub's image."""
-    return Path(holder["exe"]).name == "brigade-hub" or any(cid and cid in holder["cgroup"] for cid in hub_containers)
+    name = Path(holder["exe"].removesuffix(DELETED)).name
+    return name == "brigade-hub" or any(cid and cid in holder["cgroup"] for cid in hub_containers)
 
 
 def front_url() -> str:
@@ -675,10 +705,12 @@ def check_access(args: argparse.Namespace, result: Result) -> None:
         holder, "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"
     ).split()
     # Any reachable listener is a FAIL, as on any address. On host loopback an
-    # operator exemption (--allow-loopback-listener PORT=REASON) turns it into
-    # INFO only when the netns container is not on host networking, the port is not
-    # published, the socket's holder process can be named, and that holder is
-    # not the hub's binary or in a container of the hub's image. The probe
+    # operator exemption (--allow-loopback-listener PORT=EXE_REALPATH//REASON)
+    # turns it into INFO only when the netns container is not on host
+    # networking and publishes no port, every socket holder can be named, each
+    # holder's /proc/<pid>/exe realpath equals EXE_REALPATH exactly (a deleted
+    # binary reads "... (deleted)" and never matches), and no holder is the
+    # hub's binary or in a container of the hub's image. The probe
     # evidence goes into the record either way and never decides the result.
     exemptions = parse_exemptions(getattr(args, "allow_loopback_listener", None) or [])
     own_namespace = inspect(holder, "{{.HostConfig.NetworkMode}}") != "host"
@@ -699,13 +731,16 @@ def check_access(args: argparse.Namespace, result: Result) -> None:
                 result.add("FAIL", name, detail)
                 continue
             used.add(port)
-            detail["exemption"] = exemptions[port]
+            expected_exe, reason = exemptions[port]
+            detail["exemption"] = {"exe": expected_exe, "reason": reason}
             holders = loopback_holders(port)
             detail["holders"] = [{key: h[key] for key in ("pid", "exe", "comm")} for h in holders or []]
-            if not own_namespace or published(bindings, port):
-                detail["exemption_applied"] = "no: the netns container uses host networking or publishes the port"
+            if not own_namespace or publishes_any_port(bindings):
+                detail["exemption_applied"] = "no: the netns container uses host networking or publishes a port"
             elif holders is None:
                 detail["exemption_applied"] = "no: the socket's holder process could not be identified"
+            elif any(h["exe"] != expected_exe for h in holders):
+                detail["exemption_applied"] = "no: a holder's executable is not the exempted path (or was deleted)"
             elif any(hub_image_holder(h, hub_containers) for h in holders):
                 detail["exemption_applied"] = "no: a holder runs the hub's binary or image"
             else:
@@ -714,7 +749,9 @@ def check_access(args: argparse.Namespace, result: Result) -> None:
                 continue
             result.add("FAIL", name, detail)
     for port in sorted(set(exemptions) - used):
-        result.add("INFO", f"exemption for port {port} not used", exemptions[port])
+        result.add(
+            "INFO", f"exemption for port {port} not used", {"exe": exemptions[port][0], "reason": exemptions[port][1]}
+        )
     status: int | str = 0
     try:
         status = get(front_url() + "/status", headers={"Tailscale-User-Login": FORGED_LOGIN})[0]
@@ -1490,8 +1527,8 @@ def parser() -> argparse.ArgumentParser:
                 "--allow-loopback-listener",
                 action="append",
                 default=[],
-                metavar="PORT=REASON",
-                help="Exempt a host loopback listener on PORT whose holder process is named and is not the hub; repeat.",
+                metavar="PORT=EXE_REALPATH//REASON",
+                help="Exempt a host loopback listener on PORT held only by the program at EXE_REALPATH; repeat.",
             )
         elif name == "hardening":
             q.add_argument("--volume", required=True)
