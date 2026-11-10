@@ -31,7 +31,7 @@ jobs:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Verify tag matches every declared version
         env:
           TAG: ${{ github.ref_name }}
@@ -80,7 +80,7 @@ jobs:
       run:
         working-directory: engines/code-graph
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
@@ -108,7 +108,7 @@ jobs:
           Copy-Item target/release/brigade-code-graph.exe "$env:GITHUB_WORKSPACE/release-assets/brigade-code-graph-${{ matrix.platform }}.exe"
           Copy-Item target/release/graphtrail-mcp.exe "$env:GITHUB_WORKSPACE/release-assets/graphtrail-mcp-${{ matrix.platform }}.exe"
           Copy-Item target/release/brigade-code-graph-mcp.exe "$env:GITHUB_WORKSPACE/release-assets/brigade-code-graph-mcp-${{ matrix.platform }}.exe"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: rust-${{ matrix.platform }}
           path: release-assets/
@@ -131,8 +131,8 @@ jobs:
           - platform: linux-arm64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.12'
       - name: Install this Brigade for the managed Python upstream
@@ -151,7 +151,7 @@ jobs:
         run: |
           mkdir -p release-assets
           cp engines/hub/target/release/brigade-hub "release-assets/brigade-hub-${{ matrix.platform }}"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: rust-hub-${{ matrix.platform }}
           path: release-assets/
@@ -185,8 +185,8 @@ jobs:
       run:
         working-directory: engines/evidence-ledger
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: stable
           cache: false
@@ -202,7 +202,7 @@ jobs:
           go build -trimpath -o "$GITHUB_WORKSPACE/release-assets/miseledger-${{ matrix.platform }}$suffix" ./cmd/miseledger
           go build -trimpath -o "$GITHUB_WORKSPACE/release-assets/brigade-evidence-${{ matrix.platform }}$suffix" ./cmd/brigade-evidence
           go build -trimpath -o "$GITHUB_WORKSPACE/release-assets/sessionfind-${{ matrix.platform }}$suffix" ./cmd/sessionfind
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: go-${{ matrix.platform }}
           path: release-assets/
@@ -236,8 +236,8 @@ jobs:
       run:
         working-directory: stations/notify
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: stable
           cache: false
@@ -260,7 +260,7 @@ jobs:
           VERSION="${AGENT_NOTIFY_TAG#v}"
           BUILD_DATE="$(date -u -d "@$(git show -s --format=%ct ${AGENT_NOTIFY_COMMIT})" +%Y-%m-%dT%H:%M:%SZ)"
           go build -trimpath -ldflags "-X main.version=${VERSION} -X main.commit=${AGENT_NOTIFY_COMMIT} -X main.buildDate=${BUILD_DATE} -s -w" -o "$GITHUB_WORKSPACE/release-assets/agent-notify-${{ matrix.platform }}$suffix" ./cmd/agent-notify
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: agent-notify-${{ matrix.platform }}
           path: release-assets/
@@ -275,16 +275,16 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: rust-*
           path: downloaded/rust
-      - uses: actions/download-artifact@v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: go-*
           path: downloaded/go
-      - uses: actions/download-artifact@v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: agent-notify-*
           path: downloaded/agent-notify
@@ -301,7 +301,7 @@ jobs:
             --assets-dir release-assets --output release-assets/component-manifest-v1.json \
             --checksums-output release-assets/checksums.txt
           test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 44
-      - uses: actions/attest@v4
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: |
             release-assets/graphtrail-linux-amd64
@@ -347,7 +347,7 @@ jobs:
             release-assets/brigade-hub-linux-amd64
             release-assets/brigade-hub-linux-arm64
             release-assets/component-manifest-v1.json
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: unified-release-assets
           path: release-assets/
@@ -359,7 +359,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: unified-release-assets
           path: release-assets
@@ -429,7 +429,7 @@ jobs:
       attestations: read
       artifact-metadata: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Redownload, checksum, provenance, and attestation gate
         env:
           GH_TOKEN: ${{ github.token }}
@@ -455,12 +455,12 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: unified-release-assets
           path: release-assets
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.12'
       - name: Replace the packaged manifest with the release manifest
@@ -486,8 +486,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.12'
       - name: Verify check.brigade.tools reports the published version
@@ -524,8 +524,8 @@ jobs:
             kind: windows
             extra: ''
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.12'
       - name: Ensure Rosetta for darwin-amd64 smoke
