@@ -82,9 +82,12 @@ copies the mounted token to `/run/brigade/embed_token` with that owner and
 mode 0400, on a tmpfs private to the container, and refuses a symlink at the
 mount. `config/hub.toml` names that copy.
 
-Setup sets `secrets/` to mode 0700 on every run and refuses to write a token
-into a `secrets/` that group or other users can still enter. Run `chmod 700
-secrets` and rerun it.
+Setup creates `secrets/` with mode 0700 and never changes the mode of one
+that already exists. If group or other users can enter an existing `secrets/`,
+setup writes nothing and stops, because those users may already have read the
+mode 0444 tokens in it. Run `chmod 700 secrets`, rotate the admin token, the
+findings key and the embedder tokens if other users could have read them, then
+rerun setup.
 
 A mounted token the entrypoint cannot copy stops the hub only when
 `config/hub.toml` selects hybrid retrieval and its embedder reads

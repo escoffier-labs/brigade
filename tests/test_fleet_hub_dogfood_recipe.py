@@ -729,6 +729,7 @@ def _tree(*roots):
 WRITE_STEPS = [
     ("write_secret", "after"),
     ("ensure_operator_token", "after"),
+    ("_secrets_dir", "after"),
     ("_private_dir", "after"),
     ("_drop_remote_token", "after"),
     ("write_env", "before"),
@@ -757,6 +758,8 @@ def _fail_at(monkeypatch, name, when):
 def test_a_failure_at_any_write_step_leaves_the_endpoint_and_token_as_they_were(
     project, tmp_path, monkeypatch, capsys, command, name, when
 ):
+    if (command, name) == ("switch", "_private_dir"):
+        pytest.skip("switch has no backup directory, the only folder _private_dir makes")
     backups = tmp_path / "backups"
     if command != "first-init":
         token_a = _named_token(tmp_path, "a.token", "token-for-endpoint-a")

@@ -100,32 +100,85 @@ def test_setup_resets_a_remote_token_an_earlier_setup_wrote_0400_and_then_leaves
     assert "embed-token" not in capsys.readouterr().out.split("secrets written:")[-1]
 
 
-@POSIX
-def test_setup_keeps_an_open_secrets_folder_0700(project, tmp_path):
-    (project / "secrets").mkdir(mode=0o755)
-    (project / "secrets").chmod(0o755)
-    assert _init_remote(project, tmp_path) == 0
-    assert _mode(project / "secrets") == 0o700
-
-
-@POSIX
-@pytest.mark.parametrize("backend", ["remote", "local"])
-def test_setup_refuses_to_write_a_token_into_a_secrets_folder_others_can_enter(
-    project, tmp_path, monkeypatch, capsys, backend
-):
-    """A filesystem that ignores the chmod leaves the folder 0755, and a 0444 token there is readable by anyone."""
-    (project / "secrets").mkdir(mode=0o755)
-    (project / "secrets").chmod(0o755)
-    monkeypatch.setattr(setup, "_private_dir", lambda path: path.mkdir(parents=True, exist_ok=True))
+def _init_backend(project, tmp_path, backend):
     if backend == "remote":
-        rc = _init_remote(project, tmp_path)
-    else:
-        argv = ["--project-dir", str(project), "init", "--backup-dir", str(tmp_path / "backups")]
-        rc = setup.main(argv, run=_gpu, post=_post)
-    assert rc != 0
+        return _init_remote(project, tmp_path)
+    argv = ["--project-dir", str(project), "init", "--backup-dir", str(tmp_path / "backups")]
+    return setup.main(argv, run=_gpu, post=_post)
+
+
+@POSIX
+@pytest.mark.parametrize("mode", [0o755, 0o750])
+@pytest.mark.parametrize("backend", ["remote", "local"])
+def test_setup_refuses_an_existing_secrets_folder_others_can_enter_and_writes_nothing(
+    project, tmp_path, capsys, mode, backend
+):
+    """A wider folder may already have shown its 0444 tokens to other users, so setup never tightens it quietly."""
+    folder = project / "secrets"
+    folder.mkdir()
+    folder.chmod(mode)
+    before = sorted(path.name for path in project.iterdir())
+    assert _init_backend(project, tmp_path, backend) != 0
+    err = capsys.readouterr().err
+    assert f"secrets/ has mode {mode:04o}" in err
+    assert "chmod 700" in err and "rotate any token" in err
+    for name in ("admin token", "findings key", "embedder tokens"):
+        assert name in err
+    assert _mode(folder) == mode
+    assert list(folder.iterdir()) == []
+    assert sorted(path.name for path in project.iterdir()) == before
+    assert not (tmp_path / "backups").exists()
+
+
+@POSIX
+def test_a_refused_secrets_folder_keeps_the_tokens_an_earlier_setup_left_in_it(project, tmp_path, capsys):
+    assert _init_remote(project, tmp_path) == 0
+    folder = project / "secrets"
+    kept = {path.name: path.read_bytes() for path in folder.iterdir()}
+    config = (project / "config" / "hub.toml").read_bytes()
+    folder.chmod(0o755)
+    assert _init_remote(project, tmp_path) != 0
     assert "secrets/ has mode 0755" in capsys.readouterr().err
-    assert not (project / "secrets" / "embed-token").exists()
-    assert not (project / "secrets" / "embed-local-token").exists()
+    assert _mode(folder) == 0o755
+    assert {path.name: path.read_bytes() for path in folder.iterdir()} == kept
+    assert (project / "config" / "hub.toml").read_bytes() == config
+
+
+@POSIX
+@pytest.mark.parametrize("umask", [0o002, 0o000, 0o277])
+def test_setup_creates_a_new_secrets_folder_0700_under_any_umask(project, tmp_path, umask):
+    previous = os.umask(umask)
+    try:
+        created = setup.ensure_secrets(project)
+        assert os.umask(umask) == umask
+    finally:
+        os.umask(previous)
+    assert created and _mode(project / "secrets") == 0o700
+
+
+@POSIX
+def test_setup_proceeds_with_an_existing_0700_secrets_folder(project, tmp_path):
+    folder = project / "secrets"
+    folder.mkdir()
+    folder.chmod(0o700)
+    assert _init_remote(project, tmp_path) == 0
+    assert _mode(folder) == 0o700 and _mode(folder / "embed-token") == 0o444
+
+
+@POSIX
+def test_setup_refuses_a_new_secrets_folder_the_filesystem_made_wider_than_0700(project, tmp_path, monkeypatch, capsys):
+    """A filesystem that ignores the mode leaves the new folder 0755, and a 0444 token there is readable by anyone."""
+    mkdir = os.mkdir
+
+    def wide(path, mode=0o777, **kwargs):
+        mkdir(path, mode, **kwargs)
+        if Path(path).name == "secrets":
+            os.chmod(path, 0o755)
+
+    monkeypatch.setattr(setup.os, "mkdir", wide)
+    assert _init_remote(project, tmp_path) != 0
+    assert "secrets/ was created with mode 0755" in capsys.readouterr().err
+    assert not (project / "secrets").exists()
     assert not (project / "config" / "hub.toml").exists()
 
 

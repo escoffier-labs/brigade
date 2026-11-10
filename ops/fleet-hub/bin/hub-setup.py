@@ -402,12 +402,13 @@ def _private_dir(path: Path) -> None:
 
 
 def _require_private(folder: Path) -> None:
-    """Refuse to put a container-readable secret in a secrets/ that group or other users can enter.
+    """Refuse a `secrets/` that group or other users can enter. Its mode is never changed here.
 
     The mounted secrets are mode 0444 so the hub container's UID can read the
     bind mount, which leaves the folder's mode 0700 as the only thing keeping
-    other host users out. `_private_dir` sets that mode. This is the check that
-    it held, for a filesystem that ignores the chmod or a folder widened since.
+    other host users out. A folder found wider than that may already have shown
+    its 0444 tokens to those users, so setup stops and says so. Tightening it
+    quietly would hide that, and only the operator can decide what to rotate.
     """
     if os.name != "posix":
         return
@@ -415,8 +416,37 @@ def _require_private(folder: Path) -> None:
     if mode is not None and mode & 0o077:
         raise SetupError(
             f"secrets/ has mode {mode:04o}, which lets group or other users in, and the token files in it are "
-            "mode 0444 for the hub container. Run chmod 700 on it and rerun"
+            "mode 0444 for the hub container. Setup wrote nothing and left the folder as it is. Run chmod 700 "
+            "on it, rotate any token in it that other users could have read (the admin token, the findings key "
+            "and the embedder tokens), then rerun setup"
         )
+
+
+def _secrets_dir(folder: Path) -> None:
+    """Make `secrets/` mode 0700 when it is absent, and refuse an existing one that is wider. Never chmod one.
+
+    A new folder is made under a umask of 0077, so it is 0700 whatever umask
+    setup was started with, and then read back for a filesystem that ignores the
+    mode. An existing folder is only looked at.
+    """
+    if _check_dir(folder, "secrets/") is None:
+        folder.parent.mkdir(parents=True, exist_ok=True)
+        previous = os.umask(0o077)
+        try:
+            os.mkdir(folder, 0o700)
+        except FileExistsError:
+            pass  # Made by someone else since the check: an existing folder, so it is checked and never chmodded.
+        else:
+            created = _check_dir(folder, "secrets/")
+            if os.name == "posix" and created != 0o700:
+                raise SetupError(
+                    f"secrets/ was created with mode {created or 0:04o}, not 0700. Check that this filesystem "
+                    "keeps POSIX modes, then rerun setup"
+                )
+            return
+        finally:
+            os.umask(previous)
+    _require_private(folder)
 
 
 def write_secret(path: Path, data: bytes, mode: int = 0o444) -> bool:
@@ -574,7 +604,7 @@ def _ensure_operator_token_by_path(folder: Path) -> str | None:
 
 def ensure_secrets(project: Path, *, local_token: bool = False) -> list[str]:
     folder = project / "secrets"
-    # Checked before anything is created or chmodded under it, since both follow the path.
+    # Checked before anything is created under it, since that follows the path.
     #
     # Threat model: `secrets/` is 0700, so only its owner and root can change what is in it.
     # Two same-UID races remain and are accepted: swapping `secrets/` for a symlink between
@@ -584,8 +614,7 @@ def ensure_secrets(project: Path, *, local_token: bool = False) -> list[str]:
     # new, and the 0700 directory keeps other users out of both.
     if folder.is_symlink():
         raise SetupError("secrets/ is a symlink or not a directory; move it aside and rerun")
-    _private_dir(folder)
-    _require_private(folder)
+    _secrets_dir(folder)
     created = []
     if write_secret(folder / "admin-token.txt", (secrets.token_urlsafe(32) + "\n").encode("ascii")):
         created.append("admin-token.txt")
@@ -818,7 +847,7 @@ class SetupFiles:
             if mode is None:
                 attempt(self._label(path), lambda path=path: _remove_created_dir(path))
             else:
-                attempt(self._label(path), lambda path=path, mode=mode: os.chmod(path, mode))
+                attempt(self._label(path), lambda path=path, mode=mode: _restore_dir_mode(path, mode))
         old_token = self.files.get(self.token)
         if not left and old_token is not None:
             attempt(self._label(self.token), lambda: _put_file(self.token, *old_token))
@@ -830,6 +859,12 @@ class SetupFiles:
             )
         if interrupt is not None:
             raise interrupt
+
+
+def _restore_dir_mode(path: Path, mode: int) -> None:
+    """Put back a directory's mode only if this run changed it, so a folder setup refused is never chmodded."""
+    if _check_dir(path, str(path)) != mode:
+        os.chmod(path, mode)
 
 
 def _remove_created_dir(path: Path) -> None:
