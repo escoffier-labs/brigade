@@ -148,6 +148,15 @@ def test_compose_runbook_pins_the_built_local_image_id():
     assert 'python3 -c \'import re,sys; m=re.fullmatch(r"(\\d+)\\.(\\d+)\\.(\\d+)", sys.argv[1])' in runbook
     assert 'generated_token="$(python3 -c' in runbook
     assert "printf '%s\\n' \"$generated_token\" > secrets/admin-token.txt" in runbook
+    # memory rescan and reindex accept only a mode-0600 --admin-token-file.
+    assert 'operator_tmp="$(mktemp secrets/.operator-admin-token.XXXXXX)"' in runbook
+    assert 'mv -fT "$operator_tmp" secrets/operator-admin-token.txt' in runbook
+    # The copy runs fail-fast in a subshell whose EXIT trap removes the temporary token file.
+    copy = runbook[runbook.index("(\n  set -eu\n") : runbook.index("\n)\n", runbook.index("  set -eu\n"))]
+    assert "  umask 077\n" in copy
+    assert copy.index("operator_tmp=") < copy.index("""  trap 'rm -f "$operator_tmp"' EXIT""")
+    assert copy.index("  cat secrets/admin-token.txt") > copy.index("trap 'rm -f")
+    assert copy.rstrip().endswith("  trap - EXIT")
     assert 're.match(r"^(\\d+)\\.(\\d+)\\.(\\d+)", sys.argv[1])' not in runbook
 
 

@@ -43,7 +43,9 @@ Conventions:
 
 - Installs or changes: `ops/fleet-hub/secrets/` (mode 0700) with
   `admin-token.txt`, `findings-key` (32 random bytes) and `front-authkey`,
-  each mode 0444, plus `embed-token` for a remote embedder. Also `.env`,
+  each mode 0444, plus `embed-token` for a remote embedder, and
+  `operator-admin-token.txt` (mode 0600), the operator's copy of the admin
+  token for `brigade memory rescan` and `reindex`. Also `.env`,
   `config/hub.toml`, the backup directory (mode 0700) and the empty recovery
   ledger in it (mode 0600). All ignored by Git or outside the checkout.
 - Why: the recipe's two secrets. The admin token is a Docker secret, and the
@@ -63,7 +65,8 @@ Conventions:
   Then copy `admin-token.txt` and `findings-key` to the password manager.
   They are backed up apart from the database copies.
 - Verify: `stat -c '%a %n' secrets secrets/* "$HOME/brigade-hub-backups"`
-  prints 700 for the directories and 444 for each file.
+  prints 700 for the directories, 600 for `operator-admin-token.txt` and 444
+  for each other file.
   `wc -c secrets/findings-key` prints 32.
 - Undo: before the hub holds data, `rm -r secrets .env config compose.override.yaml`.
   After it holds findings, a missing or different `findings-key` makes

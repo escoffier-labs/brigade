@@ -81,8 +81,26 @@ generated_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 test -n "$generated_token" || { echo "Token generation returned an empty value" >&2; exit 1; }
 printf '%s\n' "$generated_token" > secrets/admin-token.txt
 unset generated_token
+(
+  set -eu
+  umask 077
+  operator_tmp="$(mktemp secrets/.operator-admin-token.XXXXXX)"
+  trap 'rm -f "$operator_tmp"' EXIT
+  cat secrets/admin-token.txt > "$operator_tmp"
+  chmod 0600 "$operator_tmp"
+  mv -fT "$operator_tmp" secrets/operator-admin-token.txt
+  trap - EXIT
+)
 chmod 0444 secrets/admin-token.txt
 ```
+
+The 0444 file is the container's copy. `brigade memory rescan` and
+`brigade memory reindex` accept only a mode-0600 `--admin-token-file`, so pass
+them `secrets/operator-admin-token.txt`. The subshell writes it as a 0600 file
+inside `secrets/` and renames it into place, so the copy is never partial or
+wider than 0600. It stops at the first failing command, and its `EXIT` trap
+removes the temporary file, so a failure leaves no stray copy of the token.
+After rotating the token, rerun the subshell so the two copies match.
 
 Before starting the service, record the built image's immutable local image ID
 in an ignored Compose override. The base Compose file uses a version tag for

@@ -195,6 +195,320 @@ def test_secrets_are_private_and_never_overwritten(project, tmp_path):
     assert {name: (folder / name).read_bytes() for name in setup.SECRET_FILES} == first
 
 
+posix_modes = pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits are not enforced on Windows")
+
+
+def _mode(path):
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def test_setup_writes_an_owner_only_operator_copy_of_the_admin_token(project, tmp_path):
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    operator = folder / setup.OPERATOR_TOKEN
+    assert operator.read_bytes() == (folder / "admin-token.txt").read_bytes()
+    if os.name == "posix":
+        assert _mode(operator) == 0o600
+        # The container copy keeps the mode the hub's own UID needs to read the bind mount.
+        assert _mode(folder / "admin-token.txt") == 0o444
+    # Compose never mounts the operator copy into a container.
+    assert setup.OPERATOR_TOKEN not in (RECIPE / "compose.yaml").read_text(encoding="utf-8")
+    assert not [p.name for p in folder.iterdir() if p.name.startswith(f".{setup.OPERATOR_TOKEN}")]
+
+
+def _admin_cli(monkeypatch, tmp_path, command, token_file):
+    from brigade import memory_embed
+    from brigade.cli import main
+
+    settings = memory_embed.hubc.HubSettings(mode="read", hub_url="https://hub.example.com", token="fake-node-token")
+    monkeypatch.setattr(memory_embed.hubc, "load_settings", lambda _: settings)
+    seen = []
+
+    class AdminClient:
+        def __init__(self, url, credential):
+            seen.append(credential)
+
+        def call(self, action, **fields):
+            return {"action": action}
+
+    monkeypatch.setattr(memory_embed.hubc, "MemoryHubClient", AdminClient)
+    argv = ["memory", command, "--target", str(tmp_path), "--admin-token-file", str(token_file)]
+    return main(argv), seen
+
+
+@pytest.mark.parametrize("command", ["rescan", "reindex"])
+def test_memory_rescan_and_reindex_accept_the_operator_copy_setup_writes(project, tmp_path, monkeypatch, command):
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    expected = (folder / "admin-token.txt").read_text(encoding="ascii").strip()
+    code, seen = _admin_cli(monkeypatch, tmp_path, command, folder / setup.OPERATOR_TOKEN)
+    assert code == 0
+    assert len(seen) == 1 and seen[0] == expected
+
+
+@posix_modes
+@pytest.mark.parametrize("command", ["rescan", "reindex"])
+def test_memory_rescan_and_reindex_still_refuse_the_0444_container_copy(project, tmp_path, monkeypatch, command):
+    assert _init(project, tmp_path) == 0
+    code, seen = _admin_cli(monkeypatch, tmp_path, command, project / "secrets" / "admin-token.txt")
+    assert code == 1 and seen == []
+
+
+def test_rerunning_setup_adds_the_operator_copy_to_an_existing_install(project, tmp_path, capsys):
+    """An install from before the operator copy has only the 0444 container copy."""
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    (folder / setup.OPERATOR_TOKEN).unlink()
+    container = (folder / "admin-token.txt").read_bytes()
+    capsys.readouterr()
+    assert _init(project, tmp_path) == 0
+    out = capsys.readouterr().out
+    assert f"secrets written: {setup.OPERATOR_TOKEN} (mode 0600" in out
+    assert container.decode("ascii").strip() not in out
+    assert (folder / "admin-token.txt").read_bytes() == container
+    assert (folder / setup.OPERATOR_TOKEN).read_bytes() == container
+    if os.name == "posix":
+        assert _mode(folder / setup.OPERATOR_TOKEN) == 0o600
+        assert _mode(folder / "admin-token.txt") == 0o444
+
+
+@posix_modes
+def test_rerunning_setup_resets_a_drifted_operator_copy_mode(project, tmp_path, capsys):
+    assert _init(project, tmp_path) == 0
+    operator = project / "secrets" / setup.OPERATOR_TOKEN
+    operator.chmod(0o444)
+    capsys.readouterr()
+    assert _init(project, tmp_path) == 0
+    assert "(mode reset to 0600)" in capsys.readouterr().out
+    assert _mode(operator) == 0o600
+    capsys.readouterr()
+    assert _init(project, tmp_path) == 0
+    assert setup.OPERATOR_TOKEN not in capsys.readouterr().out
+
+
+def test_rotating_the_container_copy_refreshes_the_operator_copy(project, tmp_path, capsys):
+    """Deleting admin-token.txt and rerunning setup rotates the token. The operator copy follows."""
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    old = (folder / "admin-token.txt").read_bytes()
+    (folder / "admin-token.txt").chmod(0o600)
+    (folder / "admin-token.txt").unlink()
+    capsys.readouterr()
+    assert _init(project, tmp_path) == 0
+    out = capsys.readouterr().out
+    new = (folder / "admin-token.txt").read_bytes()
+    assert new != old
+    assert "(refreshed: admin-token.txt changed)" in out
+    assert old.decode("ascii").strip() not in out and new.decode("ascii").strip() not in out
+    assert (folder / setup.OPERATOR_TOKEN).read_bytes() == new
+    if os.name == "posix":
+        assert _mode(folder / setup.OPERATOR_TOKEN) == 0o600
+
+
+def test_setup_refuses_an_operator_copy_that_is_a_symlink(project, tmp_path):
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("not the token\n", encoding="ascii")
+    (folder / setup.OPERATOR_TOKEN).unlink()
+    try:
+        (folder / setup.OPERATOR_TOKEN).symlink_to(elsewhere)
+    except OSError:
+        pytest.skip("symlinks are not available")
+    assert _init(project, tmp_path) == 1
+    assert elsewhere.read_text(encoding="ascii") == "not the token\n"
+
+
+def _symlink_or_skip(link, target, **kwargs):
+    try:
+        link.symlink_to(target, **kwargs)
+    except OSError:
+        pytest.skip("symlinks are not available")
+
+
+@posix_modes
+def test_setup_refuses_a_symlinked_admin_token_source(project, tmp_path, capsys):
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    elsewhere = tmp_path / "elsewhere-token"
+    elsewhere.write_text("not-the-hub-token\n", encoding="ascii")
+    (folder / "admin-token.txt").chmod(0o600)
+    (folder / "admin-token.txt").unlink()
+    (folder / setup.OPERATOR_TOKEN).unlink()
+    _symlink_or_skip(folder / "admin-token.txt", elsewhere)
+    capsys.readouterr()
+    assert _init(project, tmp_path) == 1
+    err = capsys.readouterr().err
+    assert "secrets/admin-token.txt is a symlink" in err and "not-the-hub-token" not in err
+    assert not (folder / setup.OPERATOR_TOKEN).exists()
+
+
+@posix_modes
+def test_setup_refuses_a_symlinked_secrets_directory(project, tmp_path):
+    real = tmp_path / "real-secrets"
+    real.mkdir(mode=0o755)
+    _symlink_or_skip(project / "secrets", real, target_is_directory=True)
+    assert _init(project, tmp_path) == 1
+    assert list(real.iterdir()) == []
+    assert _mode(real) == 0o755
+
+
+@posix_modes
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_setup_refuses_a_non_regular_operator_copy(project, tmp_path, capsys, kind):
+    assert _init(project, tmp_path) == 0
+    operator = project / "secrets" / setup.OPERATOR_TOKEN
+    operator.unlink()
+    if kind == "fifo":
+        os.mkfifo(operator, 0o600)
+    else:
+        operator.mkdir()
+    capsys.readouterr()
+    # A FIFO must be refused, not opened in a way that blocks setup.
+    assert _init(project, tmp_path) == 1
+    assert f"secrets/{setup.OPERATOR_TOKEN} is not a regular file" in capsys.readouterr().err
+
+
+@posix_modes
+def test_a_swap_after_the_checks_never_chmods_the_swapped_in_file(project, tmp_path, monkeypatch):
+    """Swap the operator copy for a symlink after setup has read it, before the mode repair."""
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    operator = folder / setup.OPERATOR_TOKEN
+    operator.chmod(0o444)
+    victim = tmp_path / "victim"
+    victim.write_text("someone else's file\n", encoding="ascii")
+    victim.chmod(0o644)
+    real_compare = setup.secrets.compare_digest
+    swapped = []
+
+    def swap_then_compare(left, right):
+        # Both writers compare the copy with the token after reading it and before repairing its mode.
+        if not swapped:
+            operator.rename(folder / "aside")
+            operator.symlink_to(victim)
+            swapped.append(True)
+        return real_compare(left, right)
+
+    monkeypatch.setattr(setup.secrets, "compare_digest", swap_then_compare)
+    setup.ensure_operator_token(folder)
+    assert swapped
+    assert _mode(victim) == 0o644
+    assert victim.read_text(encoding="ascii") == "someone else's file\n"
+
+
+@posix_modes
+@pytest.mark.parametrize("umask", [0o000, 0o277])
+def test_the_staged_operator_copy_is_0600_under_any_umask(project, tmp_path, monkeypatch, umask):
+    staged = []
+    real_replace = os.replace
+
+    def spy(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        info = os.stat(src, dir_fd=src_dir_fd, follow_symlinks=False)
+        staged.append((os.path.basename(src), stat.S_IMODE(info.st_mode)))
+        return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    (folder / setup.OPERATOR_TOKEN).unlink()
+    monkeypatch.setattr(setup.os, "replace", spy)
+    # Only the copy's own write runs under the test umask: setup's other files are not the subject here.
+    previous = os.umask(umask)
+    try:
+        assert setup.ensure_operator_token(folder) is not None
+    finally:
+        os.umask(previous)
+    modes = [mode for name, mode in staged if name.startswith(f".{setup.OPERATOR_TOKEN}.")]
+    assert modes == [0o600]
+    assert _mode(folder / setup.OPERATOR_TOKEN) == 0o600
+
+
+PROC_FDS = Path("/proc/self/fd")
+linux_fds = pytest.mark.skipif(not PROC_FDS.is_dir(), reason="counts descriptors through /proc/self/fd")
+
+
+def _open_fds():
+    return len(os.listdir(PROC_FDS))
+
+
+def _staging_names(folder):
+    return [p.name for p in folder.iterdir() if p.name.startswith(f".{setup.OPERATOR_TOKEN}.")]
+
+
+@linux_fds
+def test_an_fstat_failure_after_open_leaks_no_descriptor(project, tmp_path, monkeypatch):
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    before = _open_fds()
+    with monkeypatch.context() as patch:
+
+        def broken_fstat(fd):
+            raise OSError(5, "simulated fstat failure")
+
+        patch.setattr(setup.os, "fstat", broken_fstat)
+        with pytest.raises(OSError, match="simulated fstat failure"):
+            setup.ensure_operator_token(folder)
+    assert _open_fds() == before
+
+
+@linux_fds
+@pytest.mark.parametrize("step", ["fdopen", "replace"])
+def test_a_staging_failure_leaks_no_descriptor_and_no_staging_file(project, tmp_path, monkeypatch, step):
+    """Remove the copy so the sync stages a new one, then fail before or at the rename."""
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    (folder / setup.OPERATOR_TOKEN).unlink()
+    before = _open_fds()
+    with monkeypatch.context() as patch:
+
+        def broken(*args, **kwargs):
+            raise OSError(5, f"simulated {step} failure")
+
+        patch.setattr(setup.os, step, broken)
+        with pytest.raises(OSError, match=f"simulated {step} failure"):
+            setup.ensure_operator_token(folder)
+    assert _open_fds() == before
+    assert _staging_names(folder) == []
+    assert not (folder / setup.OPERATOR_TOKEN).exists()
+
+
+def _runbook_copy_block():
+    runbook = (ROOT / "docs" / "runbooks" / "fleet-hub-dogfood.md").read_text(encoding="utf-8")
+    start = runbook.index("(\n  set -eu\n")
+    return runbook[start : runbook.index("\n)\n", start) + 2]
+
+
+def test_both_runbooks_carry_the_same_operator_copy_block():
+    containers = (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text(encoding="utf-8")
+    assert _runbook_copy_block() in containers
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="runs the runbook's GNU coreutils commands")
+@pytest.mark.parametrize("failure", [None, "missing-source", "unreadable-source"])
+def test_the_runbook_copy_block_installs_whole_or_leaves_nothing(tmp_path, failure):
+    folder = tmp_path / "secrets"
+    folder.mkdir(mode=0o700)
+    source = folder / "admin-token.txt"
+    if failure != "missing-source":
+        source.write_text("fake-admin-token\n", encoding="ascii")
+        source.chmod(0o000 if failure == "unreadable-source" else 0o444)
+    if failure == "unreadable-source" and os.access(source, os.R_OK):
+        pytest.skip("this user reads mode-0000 files (root)")
+    done = subprocess.run(
+        ["bash", "-c", _runbook_copy_block()], cwd=tmp_path, capture_output=True, text=True, timeout=30, check=False
+    )
+    operator = folder / "operator-admin-token.txt"
+    leftovers = [p.name for p in folder.iterdir() if p.name.startswith(".operator-admin-token.")]
+    assert leftovers == []
+    if failure is None:
+        assert done.returncode == 0, done.stderr
+        assert operator.read_text(encoding="ascii") == "fake-admin-token\n"
+        assert _mode(operator) == 0o600
+    else:
+        assert done.returncode != 0
+        assert not operator.exists()
+
+
 def test_brigade_ref_needs_its_archive_digest_and_version(project, tmp_path):
     ref, digest = ("--brigade-ref", "0" * 40), ("--brigade-sha256", "f" * 64)
     assert _init(project, tmp_path, *ref) == 1

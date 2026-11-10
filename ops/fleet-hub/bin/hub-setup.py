@@ -13,20 +13,24 @@
    says how to switch later.
 
 It never writes a hybrid configuration it could not probe and never overwrites
-an existing secret. `switch` changes the mode either way, and `units` renders
-the systemd templates for review. Nothing here installs a package, a unit or a
-container. Stdlib only.
+an existing secret. The one derived file, the operator's mode-0600 copy of the
+admin token, follows the container copy. `switch` changes the mode either way,
+and `units` renders the systemd templates for review. Nothing here installs a
+package, a unit or a container. Stdlib only.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import errno
 import ipaddress
 import json
 import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import urllib.error
@@ -44,6 +48,9 @@ PROBE_TEXT = "brigade setup probe"
 TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
 TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
 SECRET_FILES = ("admin-token.txt", "findings-key", "front-authkey")
+# The operator's copy of the admin token for `brigade memory rescan` and `reindex`
+# (`--admin-token-file`), which accept only mode 0600. Compose never mounts it.
+OPERATOR_TOKEN = "operator-admin-token.txt"
 UNIT_TEMPLATES = (
     ("brigade-hub-compose.service.in", "brigade-hub-compose.service"),
     ("brigade-hub-watchdog.service.in", "brigade-hub-watchdog.service"),
@@ -311,12 +318,163 @@ def write_secret(path: Path, data: bytes) -> bool:
     return True
 
 
+def ensure_operator_token(folder: Path) -> str | None:
+    """Keep the operator's mode-0600 copy of the admin token in step with the container copy.
+
+    `brigade memory rescan` and `reindex` take `--admin-token-file` and accept only
+    a mode-0600 file, while the container copy must stay 0444 for the hub's UID.
+    Creates the copy when it is missing (an install from before this copy existed),
+    refreshes it when the container copy changed and resets a drifted mode. Returns
+    what it did, or None. Never prints either token.
+
+    On POSIX every step goes through one descriptor for `secrets/` and descriptors
+    opened without following a symlink, so swapping a name after the checks cannot
+    redirect a read, a chmod or the final rename to another file.
+    """
+    if os.name != "posix":
+        return _ensure_operator_token_by_path(folder)
+    try:
+        dir_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        if exc.errno in _NOFOLLOW_ERRNOS | {errno.ENOTDIR}:
+            raise SetupError("secrets/ is a symlink or not a directory; move it aside and rerun") from None
+        raise
+    try:
+        return _sync_operator_token(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+# O_NOFOLLOW on a symlink fails with ELOOP on Linux and macOS, EMLINK on FreeBSD.
+_NOFOLLOW_ERRNOS = frozenset({errno.ELOOP, errno.EMLINK})
+
+
+def _open_regular(name: str, dir_fd: int) -> int | None:
+    """A read descriptor for `name` in `secrets/`, never through a symlink. None when it is absent."""
+    try:
+        # O_NONBLOCK so a FIFO planted under the name is refused instead of blocking the open.
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno in _NOFOLLOW_ERRNOS:
+            raise SetupError(f"secrets/{name} is a symlink; move it aside and rerun") from None
+        raise
+    # The caller owns `fd` only once it is returned, so every other exit closes it here.
+    try:
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+    except BaseException:
+        os.close(fd)
+        raise
+    if not regular:
+        os.close(fd)
+        raise SetupError(f"secrets/{name} is not a regular file; move it aside and rerun")
+    return fd
+
+
+def _read_fd(fd: int) -> bytes:
+    chunks = []
+    while chunk := os.read(fd, 65536):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _sync_operator_token(dir_fd: int) -> str | None:
+    source = _open_regular("admin-token.txt", dir_fd)
+    if source is None:
+        raise SetupError("secrets/admin-token.txt is missing")
+    try:
+        token = _read_fd(source)
+    finally:
+        os.close(source)
+    target = _open_regular(OPERATOR_TOKEN, dir_fd)
+    if target is not None:
+        try:
+            if secrets.compare_digest(_read_fd(target), token):
+                if stat.S_IMODE(os.fstat(target).st_mode) == 0o600:
+                    return None
+                try:
+                    os.fchmod(target, 0o600)
+                except PermissionError as exc:
+                    raise SetupError(
+                        f"cannot reset secrets/{OPERATOR_TOKEN} to mode 0600; chmod it as its owner"
+                    ) from exc
+                return f"{OPERATOR_TOKEN} (mode reset to 0600)"
+        finally:
+            os.close(target)
+        action = f"{OPERATOR_TOKEN} (refreshed: admin-token.txt changed)"
+    else:
+        action = f"{OPERATOR_TOKEN} (mode 0600, for --admin-token-file)"
+    # Write a new private file and rename it over the copy, so the copy is never briefly wider than 0600.
+    staging = f".{OPERATOR_TOKEN}.{secrets.token_hex(8)}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(staging, flags, 0o600, dir_fd=dir_fd)
+    # Any failure before the rename unlinks the staging file in the `finally` below.
+    try:
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            # fdopen failed, so no file object owns the descriptor. io.open may already have
+            # closed it on a late failure, hence the suppress.
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+        with handle:
+            # The umask can narrow the create mode below 0600 (0400 under 0277), which the CLI refuses.
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(token)
+        os.replace(staging, OPERATOR_TOKEN, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    finally:
+        try:
+            os.unlink(staging, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+    return action
+
+
+def _ensure_operator_token_by_path(folder: Path) -> str | None:
+    """The same steps by path, for Windows, which has no descriptor-relative opens or POSIX modes."""
+    source = folder / "admin-token.txt"
+    target = folder / OPERATOR_TOKEN
+    token = source.read_bytes()
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise SetupError(f"secrets/{OPERATOR_TOKEN} is not a regular file; move it aside and rerun")
+    if target.exists():
+        if secrets.compare_digest(target.read_bytes(), token):
+            return None
+        action = f"{OPERATOR_TOKEN} (refreshed: admin-token.txt changed)"
+    else:
+        action = f"{OPERATOR_TOKEN} (mode 0600, for --admin-token-file)"
+    staging = folder / f".{OPERATOR_TOKEN}.{secrets.token_hex(8)}"
+    fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(token)
+        os.replace(staging, target)
+    finally:
+        staging.unlink(missing_ok=True)
+    return action
+
+
 def ensure_secrets(project: Path, *, remote_token: Path | None) -> list[str]:
     folder = project / "secrets"
+    # Checked before anything is created or chmodded under it, since both follow the path.
+    #
+    # Threat model: `secrets/` is 0700, so only its owner and root can change what is in it.
+    # Two same-UID races remain and are accepted: swapping `secrets/` for a symlink between
+    # this check and the descriptor open in ensure_operator_token, and swapping the staging
+    # name before `os.replace` resolves it again. A process that can do either already runs
+    # as the owner and can read admin-token.txt directly, so neither race gives it anything
+    # new, and the 0700 directory keeps other users out of both.
+    if folder.is_symlink():
+        raise SetupError("secrets/ is a symlink or not a directory; move it aside and rerun")
     _private_dir(folder)
     created = []
     if write_secret(folder / "admin-token.txt", (secrets.token_urlsafe(32) + "\n").encode("ascii")):
         created.append("admin-token.txt")
+    operator = ensure_operator_token(folder)
+    if operator:
+        created.append(operator)
     if write_secret(folder / "findings-key", secrets.token_bytes(32)):
         created.append("findings-key")
     # The front's auth key comes from the private network's admin console. An
@@ -438,7 +596,7 @@ def cmd_init(args: argparse.Namespace, run: Runner, post: Poster) -> int:
     apply(project, decision, env_updates)
     print(report(decision))
     if created:
-        print("secrets created: " + ", ".join(created))
+        print("secrets written: " + ", ".join(created))
     print(f"backup directory: {backup_dir} (mode 0700)")
     return 0
 
