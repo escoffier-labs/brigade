@@ -100,10 +100,8 @@ class SetupConfigStartsTheHub(unittest.TestCase):
                     fixture.hc.stop_hub(hub)
 
     def install(self, project: Path, decision) -> None:
-        """What setup's init and switch do: secrets, the probed token, then the config."""
-        setup.ensure_secrets(project, local_token=decision.backend == "local")
-        setup.install_probed_token(project, decision)
-        setup.apply(project, decision, {})
+        """What setup's init and switch write, through the same transaction."""
+        setup.write_install(project, decision, {}, with_secrets=True)
 
     def accepted(self, project: Path, mode: str) -> dict:
         seen = s31.hub_on_setup_config(str(fixture.BINARY), sys.executable, project, embed=mode == "hybrid")

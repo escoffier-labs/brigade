@@ -726,10 +726,11 @@ WRITE_STEPS = [
     ("write_secret", "after"),
     ("ensure_operator_token", "after"),
     ("_private_dir", "after"),
-    ("install_probed_token", "after"),
+    ("_drop_remote_token", "after"),
     ("write_env", "before"),
     ("write_env", "after"),
     ("_compose_override", "after"),
+    ("install_probed_token", "after"),
 ]
 
 
@@ -769,6 +770,171 @@ def test_a_failure_at_any_write_step_leaves_the_endpoint_and_token_as_they_were(
     assert rc == 1 and "injected failure" in capsys.readouterr().err
     # Byte-identical files with the same modes, and nothing where nothing was.
     assert _tree(project, backups) == before
+
+
+ENDPOINT_OF = {
+    "token-for-endpoint-a": "https://a.example.test/api/embed",
+    "token-for-endpoint-b": "https://b.example.test/api/embed",
+}
+
+
+def _pair_matches(project):
+    """The invariant: secrets/embed-token is absent, or hub.toml names the endpoint it was probed against."""
+    token = project / "secrets" / "embed-token"
+    if not os.path.lexists(token):
+        return True
+    config = project / "config" / "hub.toml"
+    if not config.is_file():
+        return False
+    embedder = tomllib.loads(config.read_text(encoding="utf-8")).get("memory", {}).get("embedder", {})
+    return embedder.get("endpoint") == ENDPOINT_OF.get(token.read_text(encoding="utf-8").strip())
+
+
+def _remote_a(project, tmp_path):
+    token_a = _named_token(tmp_path, "a.token", "token-for-endpoint-a")
+    assert _init(project, tmp_path, "--remote-url", "https://a.example.test", "--remote-token-file", str(token_a)) == 0
+    assert _pair_matches(project) and (project / "secrets" / "embed-token").exists()
+
+
+def _to_remote_b(project, tmp_path, command):
+    token_b = _named_token(tmp_path, "b.token", "token-for-endpoint-b")
+    if command == "switch":
+        return _switch_remote(project, "https://b.example.test", token_b)
+    return _init(project, tmp_path, "--remote-url", "https://b.example.test", "--remote-token-file", str(token_b))
+
+
+@pytest.mark.parametrize("command", ["switch", "re-init"])
+@pytest.mark.parametrize(
+    "death",
+    [
+        "apply",  # after step (a): the old token is gone, the old config stays
+        "write_env",  # inside step (b): hub.toml names endpoint B, no token yet
+        "install_probed_token",  # after step (b): the new config, no token yet
+    ],
+)
+def test_process_death_after_any_forward_step_never_leaves_a_mismatched_pair(
+    project, tmp_path, monkeypatch, command, death
+):
+    _remote_a(project, tmp_path)
+
+    def die(*_args, **_kwargs):
+        raise SystemExit("simulated process death")
+
+    # A dead process runs no rollback.
+    monkeypatch.setattr(setup.SetupFiles, "restore", lambda self: None)
+    monkeypatch.setattr(setup, death, die)
+    with pytest.raises(SystemExit):
+        _to_remote_b(project, tmp_path, command)
+    assert _pair_matches(project)
+
+
+@pytest.mark.parametrize("command", ["switch", "re-init"])
+@pytest.mark.parametrize("failing", ["_compose_override", "install_probed_token"])
+def test_a_failed_hub_toml_restore_leaves_no_remote_token(project, tmp_path, monkeypatch, capsys, command, failing):
+    _remote_a(project, tmp_path)
+    _fail_at(monkeypatch, failing, "after")
+    real_put = setup._put_file
+
+    def put(path, data, mode):
+        if path.name == "hub.toml":
+            raise OSError("simulated restore failure")
+        real_put(path, data, mode)
+
+    monkeypatch.setattr(setup, "_put_file", put)
+    assert _to_remote_b(project, tmp_path, command) == 1
+    assert not os.path.lexists(project / "secrets" / "embed-token")
+    err = capsys.readouterr().err
+    assert "could not put back config/hub.toml" in err and "BM25" in err and "rerun" in err
+
+
+@pytest.mark.parametrize("command", ["switch", "re-init"])
+def test_a_base_exception_inside_the_rollback_leaves_no_remote_token(project, tmp_path, monkeypatch, command):
+    _remote_a(project, tmp_path)
+    _fail_at(monkeypatch, "_compose_override", "after")
+    real_put = setup._put_file
+
+    def put(path, data, mode):
+        if path.name == ".env":
+            raise KeyboardInterrupt
+        real_put(path, data, mode)
+
+    monkeypatch.setattr(setup, "_put_file", put)
+    with pytest.raises(KeyboardInterrupt):
+        _to_remote_b(project, tmp_path, command)
+    assert not os.path.lexists(project / "secrets" / "embed-token")
+    # The rest of the rollback still ran: hub.toml names endpoint A again.
+    assert _pair_matches(project) and "https://a.example.test/api/embed" in _toml(project)
+
+
+def test_leaving_the_remote_backend_removes_its_token(project, tmp_path, capsys):
+    _remote_a(project, tmp_path)
+    capsys.readouterr()
+    assert setup.main(["--project-dir", str(project), "switch", "--to", "lexical"]) == 0
+    assert not os.path.lexists(project / "secrets" / "embed-token")
+    assert "embed-token removed" in capsys.readouterr().out
+
+
+@posix_modes
+@pytest.mark.parametrize("which", ["config", "backups"])
+def test_setup_refuses_a_symlinked_managed_directory_before_writing_anything(project, tmp_path, capsys, which):
+    real = tmp_path / f"real-{which}"
+    real.mkdir(mode=0o755)
+    backups = tmp_path / "backups"
+    _symlink_or_skip(project / "config" if which == "config" else backups, real, target_is_directory=True)
+    before = _tree(project)
+    assert _init(project, tmp_path) == 1
+    assert "is a symlink or not a directory" in capsys.readouterr().err
+    assert _tree(project) == before
+    assert list(real.iterdir()) == [] and stat.S_IMODE(real.stat().st_mode) == 0o755
+
+
+@posix_modes
+def test_windows_read_only_attribute_comes_back_when_the_replace_fails(tmp_path, monkeypatch):
+    target = tmp_path / "embed-token"
+    target.write_bytes(b"old\n")
+    target.chmod(0o444)
+    monkeypatch.setattr(setup, "_WINDOWS", True)
+    real_replace = setup.os.replace
+
+    def refuse(src, dst):
+        if Path(dst) == target:
+            raise PermissionError("simulated replace failure")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(setup.os, "replace", refuse)
+    with pytest.raises(PermissionError):
+        setup._put_file(target, b"new\n", 0o400)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o444 and target.read_bytes() == b"old\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["embed-token"]
+
+
+@posix_modes
+def test_windows_read_only_is_cleared_only_on_a_read_only_destination(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup, "_WINDOWS", True)
+    writable = tmp_path / "writable"
+    writable.write_bytes(b"x")
+    writable.chmod(0o644)
+    chmods = []
+    real_chmod = setup.os.chmod
+    monkeypatch.setattr(
+        setup.os, "chmod", lambda path, mode: (chmods.append((Path(path).name, mode)), real_chmod(path, mode))
+    )
+    setup._put_file(writable, b"y", 0o600)
+    assert [name for name, _ in chmods if name == "writable"] == []
+    read_only = tmp_path / "read-only"
+    read_only.write_bytes(b"x")
+    real_chmod(read_only, 0o444)
+    real_unlink = setup.os.unlink
+    monkeypatch.setattr(
+        setup.os,
+        "unlink",
+        lambda path: (
+            (_ for _ in ()).throw(PermissionError("simulated")) if Path(path) == read_only else real_unlink(path)
+        ),
+    )
+    with pytest.raises(PermissionError):
+        setup._remove_file(read_only)
+    assert stat.S_IMODE(read_only.stat().st_mode) == 0o444
 
 
 def test_setup_refuses_a_symlinked_generated_file_before_writing_anything(project, tmp_path, capsys):

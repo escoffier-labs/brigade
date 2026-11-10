@@ -584,14 +584,40 @@ def ensure_secrets(project: Path, *, local_token: bool = False) -> list[str]:
     return created
 
 
-def _remove_file(path: Path) -> None:
-    """Delete `path` if it is there. Windows refuses to delete a read-only file, so it is made writable first."""
+_WINDOWS = os.name == "nt"
+REMOTE_TOKEN = EMBED_TOKEN_FILES["remote"]
+
+
+def _writable_for(path: Path) -> int | None:
+    """On Windows, clear the read-only attribute of `path` if it is set, which a rename over it or a delete needs.
+
+    Returns the original mode when it changed something, so a caller whose
+    rename or delete then fails can put the attribute back, and None otherwise.
+    """
+    if not _WINDOWS:
+        return None
     try:
-        if os.name == "nt" and not path.is_symlink():
-            os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or info.st_mode & stat.S_IWRITE:
+        return None
+    os.chmod(path, stat.S_IMODE(info.st_mode) | stat.S_IWRITE)
+    return stat.S_IMODE(info.st_mode)
+
+
+def _remove_file(path: Path) -> None:
+    """Delete `path` if it is there."""
+    original = _writable_for(path)
+    try:
         os.unlink(path)
     except FileNotFoundError:
         pass
+    except BaseException:
+        if original is not None:
+            with contextlib.suppress(OSError):
+                os.chmod(path, original)
+        raise
 
 
 def _put_file(path: Path, data: bytes, mode: int) -> None:
@@ -603,41 +629,69 @@ def _put_file(path: Path, data: bytes, mode: int) -> None:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
         os.chmod(staging, mode)
-        if os.name == "nt" and path.exists() and not path.is_symlink():
-            # Windows refuses to rename over a read-only file.
-            os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
-        os.replace(staging, path)
+        original = _writable_for(path)
+        try:
+            os.replace(staging, path)
+        except BaseException:
+            if original is not None:
+                with contextlib.suppress(OSError):
+                    os.chmod(path, original)
+            raise
     finally:
         _remove_file(staging)
+
+
+def _check_dir(path: Path, label: str) -> int | None:
+    """The mode of a directory setup manages, None when it is absent. A symlink or other file there is refused."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        raise SetupError(f"{label} is a symlink or not a directory; move it aside and rerun")
+    return stat.S_IMODE(info.st_mode)
 
 
 class SetupFiles:
     """Every file and directory `init` and `switch` write, as they were before either one started.
 
-    The endpoint in config/hub.toml and the token in secrets/embed-token must
-    change together, or the hub sends one endpoint's token to another, so a
-    failure at any step puts every one of them back: the same bytes and mode
-    for a file that existed, no file where there was none, and a directory
-    created here removed again once it is empty. A path that is a symlink or
-    not a regular file is refused before anything is written, as the later
-    steps would refuse it. Same-UID races stay the accepted residual described
-    in ensure_secrets.
+    Threat model (#2468): setup runs as the operator on their own host, and
+    same-UID races are accepted residuals. The one invariant setup holds through
+    any failure, a failure inside the rollback, or process death: secrets/embed-token
+    is never on disk next to a config naming a different endpoint than the one
+    that token was probed against. A missing token is the safe state: the hub
+    then fails closed with embedder-refused and answers in BM25 mode. There is
+    no durable journal, so the invariant comes from ordering:
+
+    - Forward (write_install): (a) remove the remote token unless this run
+      leaves the endpoint and the token exactly as they are, (b) write
+      config/hub.toml and the other generated files, (c) install the new probed
+      token last. Process death at any point leaves no token or the matching pair.
+    - Rollback (restore): remove the remote token first, restore every other
+      file and directory, and put the old token back only if all of that
+      succeeded. Any failure or BaseException in the rollback leaves no remote
+      token, and setup says it must be rerun.
+
+    The local token needs no such rule: it is only ever paired with the recipe's
+    own embedder, whose endpoint never changes, and a remote config mounts the
+    remote token instead.
+
+    A file that is a symlink or not a regular file, and a managed directory that
+    is a symlink or not a directory, is refused before anything is written.
     """
 
     def __init__(self, project: Path, backup_dir: Path | None = None) -> None:
-        folder = project / "secrets"
-        if folder.is_symlink():
-            raise SetupError("secrets/ is a symlink or not a directory; move it aside and rerun")
         self.project = project
+        folder = project / "secrets"
+        dirs = [project / "config", folder] + ([backup_dir] if backup_dir is not None else [])
+        self.dirs = {path: _check_dir(path, self._label(path) + "/") for path in dirs}
         names = (*SECRET_FILES, OPERATOR_TOKEN, *EMBED_TOKEN_FILES.values())
         files = [project / "config" / "hub.toml", project / ".env", project / "compose.override.yaml"]
         files += [folder / name for name in names]
-        dirs = [project / "config", folder]
         if backup_dir is not None:
             files.append(backup_dir / "recovery-ledger.jsonl")
-            dirs.append(backup_dir)
-        self.dirs = {path: stat.S_IMODE(path.stat().st_mode) if path.is_dir() else None for path in dirs}
         self.files = {path: self._read(path) for path in files}
+        self.token = folder / REMOTE_TOKEN
 
     def _label(self, path: Path) -> str:
         try:
@@ -662,32 +716,67 @@ class SetupFiles:
             os.close(fd)
 
     def restore(self) -> None:
-        """Put every file and directory back. Names, never contents, of anything that could not be."""
-        left = []
+        """Put everything back, the remote token last and only if everything else went back.
+
+        Reports names, never contents. A BaseException raised while restoring one
+        path does not stop the others, and is raised again at the end.
+        """
+        left: list[str] = []
+        interrupt: BaseException | None = None
+
+        def attempt(label: str, action: Callable[[], None]) -> bool:
+            nonlocal interrupt
+            try:
+                action()
+                return True
+            except BaseException as exc:
+                left.append(label)
+                if not isinstance(exc, Exception) and interrupt is None:
+                    interrupt = exc
+                return False
+
+        # First, so that nothing below can leave a token beside a config it does not match.
+        token_gone = attempt(self._label(self.token), lambda: _remove_file(self.token))
         for path, saved in self.files.items():
-            try:
-                if saved is None:
-                    _remove_file(path)
-                else:
-                    _put_file(path, *saved)
-            except OSError:
-                left.append(self._label(path))
+            if path == self.token:
+                continue
+            if saved is None:
+                attempt(self._label(path), lambda path=path: _remove_file(path))
+            else:
+                attempt(self._label(path), lambda path=path, saved=saved: _put_file(path, *saved))
         for path, mode in self.dirs.items():
-            try:
-                if mode is None:
-                    if path.is_dir() and not path.is_symlink():
-                        path.rmdir()
-                else:
-                    os.chmod(path, mode)
-            except OSError:
-                left.append(self._label(path))
-        if left:
-            print(f"error: could not put back {', '.join(left)}; check them before starting the hub", file=sys.stderr)
+            if mode is None:
+                attempt(self._label(path), lambda path=path: _remove_created_dir(path))
+            else:
+                attempt(self._label(path), lambda path=path, mode=mode: os.chmod(path, mode))
+        old_token = self.files.get(self.token)
+        if not left and old_token is not None:
+            attempt(self._label(self.token), lambda: _put_file(self.token, *old_token))
+        if not token_gone:
+            print(
+                f"error: could not remove {self._label(self.token)}; delete it before starting the hub, "
+                "then rerun bin/hub-setup.py",
+                file=sys.stderr,
+            )
+        elif left:
+            print(
+                f"error: could not put back {', '.join(left)}. No remote embedder token is left on disk, so the hub "
+                "answers in BM25 mode until bin/hub-setup.py is rerun.",
+                file=sys.stderr,
+            )
+        if interrupt is not None:
+            raise interrupt
+
+
+def _remove_created_dir(path: Path) -> None:
+    """Remove a directory this run created, once it is empty. A symlink or file there is refused, never followed."""
+    if _check_dir(path, str(path)) is not None:
+        path.rmdir()
 
 
 @contextlib.contextmanager
 def all_or_nothing(project: Path, backup_dir: Path | None = None) -> Iterator[None]:
-    """Run setup's writes so that a failure at any step leaves every file as it was (SetupFiles)."""
+    """Run setup's writes so that a failure at any step puts every file back (SetupFiles has the threat model)."""
     saved = SetupFiles(project, backup_dir)
     try:
         yield
@@ -696,31 +785,78 @@ def all_or_nothing(project: Path, backup_dir: Path | None = None) -> Iterator[No
         raise
 
 
-def install_probed_token(project: Path, decision: Decision) -> str | None:
-    """Install the token the remote probe passed as secrets/embed-token, mode 0400.
+def _drop_remote_token(project: Path, decision: Decision) -> bool:
+    """Forward step (a): remove secrets/embed-token unless this run leaves the endpoint and the token as they are.
 
-    Unlike the other secrets this one is replaced, never kept: a new endpoint
-    comes with its own token, and keeping the old file would send the old
-    endpoint's token to the new one. Callers run it inside all_or_nothing, so a
-    later failure puts the previous token back together with the previous
-    endpoint. Returns what it did.
+    Then nothing written after this can sit beside a token probed against
+    another endpoint, and leaving the remote backend leaves no token behind.
+    Returns whether it removed one.
+    """
+    target = project / "secrets" / REMOTE_TOKEN
+    if not os.path.lexists(target):
+        return False
+    config = project / "config" / "hub.toml"
+    if decision.backend == "remote" and decision.probed_token is not None and config.is_file():
+        data = (decision.probed_token + "\n").encode("utf-8")
+        same_config = config.read_text(encoding="utf-8") == hub_toml(decision)
+        if same_config and target.is_file() and secrets.compare_digest(target.read_bytes(), data):
+            return False
+    _remove_file(target)
+    return True
+
+
+def install_probed_token(project: Path, decision: Decision) -> str | None:
+    """Forward step (c): install the token the remote probe passed as secrets/embed-token, mode 0400.
+
+    Runs after config/hub.toml names the endpoint it was probed against. Unlike
+    the other secrets it is replaced, never kept: a new endpoint comes with its
+    own token. Returns what it did.
     """
     if decision.backend != "remote" or decision.probed_token is None:
         return None
     folder = project / "secrets"
-    name = EMBED_TOKEN_FILES["remote"]
-    target = folder / name
+    target = folder / REMOTE_TOKEN
     data = (decision.probed_token + "\n").encode("utf-8")
-    if folder.is_symlink() or not folder.is_dir():
-        raise SetupError("secrets/ is a symlink or not a directory; move it aside and rerun")
-    if target.is_symlink() or (target.exists() and not target.is_file()):
-        raise SetupError(f"secrets/{name} is a symlink or not a regular file; move it aside and rerun")
+    _check_dir(folder, "secrets/")
+    if os.path.lexists(target) and (target.is_symlink() or not target.is_file()):
+        raise SetupError(f"secrets/{REMOTE_TOKEN} is a symlink or not a regular file; move it aside and rerun")
     old = target.read_bytes() if target.exists() else None
     if old is not None and secrets.compare_digest(old, data) and stat.S_IMODE(target.stat().st_mode) == 0o400:
         return None
     # The hub's token rule: mode 0600 or 0400, owned by the hub's user.
     _put_file(target, data, 0o400)
-    return f"{name} (replaced)" if old is not None else name
+    return REMOTE_TOKEN
+
+
+def write_install(
+    project: Path,
+    decision: Decision,
+    env_updates: dict[str, str],
+    *,
+    with_secrets: bool,
+    backup_dir: Path | None = None,
+) -> list[str]:
+    """Everything init and switch write, in the order SetupFiles describes, as one transaction.
+
+    Returns what changed under secrets/, for the report.
+    """
+    with all_or_nothing(project, backup_dir):
+        created = ensure_secrets(project, local_token=decision.backend == "local") if with_secrets else []
+        if backup_dir is not None:
+            _private_dir(backup_dir)
+            # `brigade fleet restore` counts only a ledger file that exists, so a lost
+            # ledger is never mistaken for a store that never saw a restore.
+            ledger = backup_dir / "recovery-ledger.jsonl"
+            if not ledger.exists():
+                os.close(os.open(ledger, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        dropped = _drop_remote_token(project, decision)
+        apply(project, decision, env_updates)
+        installed = install_probed_token(project, decision)
+    if installed:
+        created.append(f"{installed} (replaced)" if dropped else installed)
+    elif dropped:
+        created.append(f"{REMOTE_TOKEN} removed (no remote endpoint is configured)")
+    return created
 
 
 def _compose_override(project: Path, decision: Decision) -> None:
@@ -820,20 +956,12 @@ def cmd_init(args: argparse.Namespace, run: Runner, post: Poster) -> int:
     if not (project / "compose.yaml").is_file():
         raise SetupError(f"{project} has no compose.yaml; point --project-dir at a copy of ops/fleet-hub")
     env_updates = _base_env(args)
+    # The directory as given: _base_env resolves it, which would follow a symlink there.
+    given = Path(args.backup_dir).expanduser().absolute()
+    _check_dir(given, f"backup directory {given}")
     decision = _decide_from_args(args, run, post)
     backup_dir = Path(env_updates["BRIGADE_BACKUP_DIR"])
-    with all_or_nothing(project, backup_dir):
-        created = ensure_secrets(project, local_token=decision.backend == "local")
-        _private_dir(backup_dir)
-        # `brigade fleet restore` counts only a ledger file that exists, so a lost
-        # ledger is never mistaken for a store that never saw a restore.
-        ledger = backup_dir / "recovery-ledger.jsonl"
-        if not ledger.exists():
-            os.close(os.open(ledger, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-        installed = install_probed_token(project, decision)
-        apply(project, decision, env_updates)
-    if installed:
-        created.append(installed)
+    created = write_install(project, decision, env_updates, with_secrets=True, backup_dir=backup_dir)
     print(report(decision))
     if created:
         print("secrets written: " + ", ".join(created))
@@ -853,14 +981,10 @@ def cmd_switch(args: argparse.Namespace, run: Runner, post: Poster) -> int:
         if decision.retrieval != "hybrid":
             print(report(decision))
             raise SetupError("refusing to write hybrid: no embedder passed its probe, so the mode is unchanged")
-    with all_or_nothing(project):
-        if decision.retrieval == "hybrid":
-            ensure_secrets(project, local_token=decision.backend == "local")
-        installed = install_probed_token(project, decision)
-        apply(project, decision, {})
+    changed = write_install(project, decision, {}, with_secrets=decision.retrieval == "hybrid")
     print(report(decision))
-    if installed:
-        print(f"secrets written: {installed}")
+    if changed:
+        print("secrets written: " + ", ".join(changed))
     if args.to == "lexical":
         print(
             "next: docker compose --profile gpu rm -sf embedder, then docker compose up -d (runbook: Switch retrieval modes)"
