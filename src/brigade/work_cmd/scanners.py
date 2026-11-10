@@ -1877,8 +1877,12 @@ def _scanner_validate_import_output(
         return import_path, [], [f"{scanner.get('id')}: import_format must be jsonl"]
     try:
         records, errors = _scanner_read_import_jsonl(target, scanner)
-    except (OSError, UnicodeDecodeError):
+    except FileNotFoundError:
         return import_path, [], [f"{scanner.get('id')}: import file not found: {import_path}"]
+    except OSError as exc:
+        return import_path, [], [f"{scanner.get('id')}: cannot read import file: {import_path}: {exc}"]
+    except UnicodeDecodeError as exc:
+        return import_path, [], [f"{scanner.get('id')}: import file is not valid UTF-8: {import_path}: {exc}"]
     return import_path, records, [f"{scanner.get('id')}: {error}" for error in errors]
 
 
