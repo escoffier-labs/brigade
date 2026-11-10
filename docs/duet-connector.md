@@ -291,6 +291,9 @@ and skill names.
 - `handoff_write` goes through the handoff linter and lands under
   `.claude/memory-handoffs` with a `-duet-` filename, so ingested knowledge is
   attributable and reviewable.
+  The next `brigade ingest` on a workspace that selects the `claude` writer
+  harness reads that inbox, and a promoted card is then found by
+  `brigade memory search`. `docs/grokbot-dot.md` describes the steps.
 - `skills_deny` keeps private skills out of search and reads. a denied skill
   looks the same as a missing one.
 - Separate state, token, audience and resource mean a compromised Duet session

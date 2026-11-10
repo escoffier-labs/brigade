@@ -182,6 +182,16 @@ injection-shaped, and returns `{card_id, blocked}` with no text, plus `code: "me
 when only the private class applies. `memory_search` still lists such a match by id, without its
 title, summary or tags, so the card can be opened locally. See `docs/memory-operations.md`.
 
+`handoff_write` is the write side. It runs `brigade handoff lint --target <workspace>` on a private
+copy in the state directory, and a handoff the linter rejects is refused with `handoff_invalid` and
+never reaches an inbox. A valid one is published as `<date>-<time>-dot-<slug>.md` in
+`.codex/memory-handoffs` under `paths.workspace`. An existing name is never replaced: the call
+returns `handoff_exists`. The next `brigade ingest --target <workspace>` reads that inbox when the
+workspace selects the `codex` writer harness or lists the inbox in `.brigade/handoff-sources.json`.
+With `--promote-cards`, a `create-card` handoff becomes a card under `memory/cards`, the handoff
+moves to the inbox's `processed/` directory, and `brigade memory search` finds the card on its next
+call. A workspace without that inbox makes the call fail with `handoff_unavailable`.
+
 ### Unread counts and the conductor alias
 
 `fleet_digest` carries an `unread` section with one entry per principal the

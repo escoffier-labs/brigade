@@ -365,8 +365,8 @@ def test_poll_does_not_refresh_old_provider_fact_and_preserves_other_evidence(tm
 
 
 def test_doctor_and_status_are_offline_and_branch_discovery_is_unbound(tmp_path, capsys):
-    assert cli.main(["run", "cloud", "doctor", "--target", str(tmp_path), "--provider", "claude-cloud", "--json"]) == 1
-    assert json.loads(capsys.readouterr().out)["reason"] == "disabled-by-policy"
+    assert cli.main(["run", "cloud", "doctor", "--target", str(tmp_path), "--provider", "claude-cloud", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["reason"] == "conductor-routed"
     assert cli.main(["run", "cloud", "status", "--target", str(tmp_path), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["sources"]["claude-cloud"]["wired"] is False
     payload = cloud_tracker.status_payload(tmp_path, github={"branches": ["claude/fixture"], "prs": []})

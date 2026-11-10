@@ -38,10 +38,13 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_launch = cloud_sub.add_parser(
         "launch",
-        help="Launch a Codex Cloud or Cursor Cloud session from a private prompt file.",
+        help=(
+            "Launch a Codex Cloud or Cursor Cloud session from a private prompt file. "
+            "Claude cloud sessions are launched by the conductor through routines, never here."
+        ),
     )
     p_launch.add_argument("--target", type=Path, default=Path("."), help="Workspace with .brigade/cloud state.")
-    p_launch.add_argument("--provider", required=True, choices=("codex-cloud", "cursor-cloud"))
+    p_launch.add_argument("--provider", required=True, choices=("codex-cloud", "cursor-cloud", "claude-cloud"))
     p_launch.add_argument("--repo", required=True, help="GitHub owner/repo or https://github.com/owner/repo URL.")
     p_launch.add_argument("--label", required=True, help="Registry label. Prompt text is never stored.")
     p_launch.add_argument(
@@ -90,6 +93,20 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         command_parser.add_argument("--repo", default=None, help="Explicit Claude GitHub owner/repo binding.")
         command_parser.add_argument("--commit", default=None, help="Claude immutable full Git commit SHA.")
         command_parser.add_argument("--pr", default=None, help="Claude PR number or canonical GitHub PR URL.")
+        command_parser.add_argument(
+            "--routine-id", default=None, help="Claude routine ID (trig_...) that launched the session."
+        )
+        command_parser.add_argument(
+            "--issue", default=None, help="Claude issue number or issue URL in the bound repository."
+        )
+        command_parser.add_argument(
+            "--session-url", default=None, help="Claude session URL when it differs from the session ID form."
+        )
+        command_parser.add_argument(
+            "--observed-status",
+            default=None,
+            help="Run status word the conductor read from the routine run. Requires --routine-id.",
+        )
 
     p_sweep = cloud_sub.add_parser(
         "sweep",
@@ -547,6 +564,10 @@ def dispatch(args) -> int:
                     repo=args.repo,
                     commit=args.commit,
                     pr=args.pr,
+                    routine_id=args.routine_id,
+                    issue=args.issue,
+                    session_url=args.session_url,
+                    observed_status=args.observed_status,
                     branch=args.branch,
                     expected_artifact=(
                         {"kind": "branch", "pattern": args.branch or "codex/*"}
@@ -587,6 +608,10 @@ def dispatch(args) -> int:
                 repo=args.repo,
                 commit=args.commit,
                 pr=args.pr,
+                routine_id=args.routine_id,
+                issue=args.issue,
+                session_url=args.session_url,
+                observed_status=args.observed_status,
             )
         except (ValueError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -723,6 +748,21 @@ def _dispatch_launch(args, target: Path) -> int:
     from .. import cloud_tracker, cursor_cloud
 
     provider = args.provider
+    if provider == "claude-cloud":
+        # Refused before the label or the prompt file is read: nothing private is touched.
+        from .. import claude_cloud_routine
+
+        return _emit_launch_payload(
+            {
+                "ok": False,
+                "provider": provider,
+                "reason": claude_cloud_routine.LAUNCH_REFUSAL_REASON,
+                "detail": claude_cloud_routine.LAUNCH_REFUSAL_DETAIL,
+                "runbook": claude_cloud_routine.RUNBOOK,
+            },
+            as_json=args.json,
+            exit_code=2,
+        )
     try:
         label = _canonicalize_launch_label(args.label)
     except ValueError:
@@ -902,6 +942,8 @@ def _emit_launch_payload(payload: dict[str, Any], *, as_json: bool, exit_code: i
         if isinstance(task_id, str) and codex_cloud.parse_task_id(task_id) == task_id:
             extra = f" task={task_id}"
     print(f"error: {payload.get('reason', 'launch-failed')}{extra}", file=sys.stderr)
+    if isinstance(payload.get("detail"), str):
+        print(payload["detail"], file=sys.stderr)
     return exit_code
 
 
@@ -958,6 +1000,15 @@ def _dispatch_cloud_ops(args, target: Path) -> int:
         "reachable": observation.reachable,
         "reason": observation.reason,
     }
+    if args.provider == "claude-cloud":
+        from .. import claude_cloud_routine
+
+        # Tracking is a local registry contract with no provider wire to probe,
+        # so doctor passes offline. Canary still fails: no inventory exists.
+        provider_result["ok"] = command == "doctor"
+        provider_result["launch"] = "conductor-routine"
+        provider_result["detail"] = claude_cloud_routine.SOURCE_DETAIL
+        provider_result["runbook"] = claude_cloud_routine.RUNBOOK
     if command == "canary":
         tasks = observation.tasks
         if args.provider == "grokbot-cloud" and provider_result["ok"]:

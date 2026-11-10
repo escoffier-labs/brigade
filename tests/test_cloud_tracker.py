@@ -1075,7 +1075,7 @@ def test_observe_provider_details_keeps_unconfigured_and_failed_inventory_distin
     assert observations["grokbot-cloud"].configured is True
     assert observations["grokbot-cloud"].reachable is False
     assert observations["grokbot-cloud"].reason == "actor-not-enrolled"
-    assert observations["claude-cloud"].reason == "disabled-by-policy"
+    assert observations["claude-cloud"].reason == "conductor-routed"
 
     payload = cloud_tracker.status_payload(
         tmp_path,
@@ -1083,7 +1083,7 @@ def test_observe_provider_details_keeps_unconfigured_and_failed_inventory_distin
         github={"branches": [], "prs": []},
     )
     assert payload["sources"]["cursor-cloud"]["reachable"] is False
-    assert payload["sources"]["claude-cloud"]["reason"] == "disabled-by-policy"
+    assert payload["sources"]["claude-cloud"]["reason"] == "conductor-routed"
 
 
 def test_provider_auth_failures_are_configured_but_not_reachable(monkeypatch, tmp_path: Path):
