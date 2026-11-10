@@ -494,7 +494,7 @@ After the matching host actions are done, run each check from
 | cgroup readbacks | `checks/s31_checks.py cgroups --hub-cpus <...> --embed-cpus <...> --service <agent-service> ...` |
 | I/O weight or latency target only | `checks/s31_checks.py io --device-id <MAJ:MIN>`, then, as the compose account, `checks/s31_checks.py fdatasync --slice brigade-hub.slice --path <dir on the data root> --writer <dir on the same device>`. Only the probe enters the slice, and the writer stays in the caller's session |
 | Setup on throwaway projects | `checks/s31_checks.py setup [--remote --remote-url <URL> --remote-token-file <FILE>]` |
-| Access from the host | `checks/s31_checks.py access` |
+| Access from the host | `checks/s31_checks.py access [--allow-loopback-listener PORT=EXE_REALPATH//REASON ...]`, see [Loopback exemptions](#loopback-exemptions) |
 | Front: forged header, SSH off, forwarded-for | `checks/s31_checks.py front` (starts a header echo for the test only) |
 | Refused connections at the fleet's concurrency | `checks/s31_checks.py load --concurrency <N>` |
 | Hub memory answers on the Rust hub | `checks/s31_checks.py memory` |
@@ -503,6 +503,78 @@ After the matching host actions are done, run each check from
 | Restore tool and the full drive on a copy | `checks/s31_checks.py restore --drive` |
 | Agent-account hardening | the `hardening` command above, from a throwaway account |
 | Measurements | `checks/s31_checks.py probe`, `checks/s31_checks.py commit --fanout <N>` with and without the fan-out, and `checks/s31_checks.py fdatasync` on both hosts' hub volumes |
+
+### Loopback exemptions
+
+`access` fails on any listener the host can reach at a hub port, including one
+on host loopback. The hub runs in its own network namespace, so a loopback
+listener at its port number is another host process, but no network probe can
+prove that process is not a proxy to the hub. The check records each listener's
+status line and headers as evidence and never passes on them.
+
+An exemption trusts the named program not to forward to the hub. Before you
+add one, confirm what the program is and that it does not proxy or relay to
+the hub port. The check can confirm which program holds the socket, not what
+that program does.
+
+To exempt an unrelated program that holds a hub port number on host loopback,
+find the canonical path of its executable and name it in the exemption:
+
+```bash
+ss -ltnpH 'sport = :3774'              # the holder's pid
+readlink -f /proc/<PID>/exe            # EXE_REALPATH
+sudo --preserve-env=BRIGADE_S31_FRONT_URL python3 checks/s31_checks.py \
+  --record "$PWD/s31-results.jsonl" access \
+  --allow-loopback-listener "3774=/opt/desktop-app/bin/app//desktop app on host loopback, verified not to forward to the hub"
+```
+
+The value is `PORT=EXE_REALPATH//REASON`. PORT is digits, so the first `=` ends
+it. EXE_REALPATH must be the canonical absolute path that `readlink -f` prints,
+and a canonical path never contains `//`, so the first `//` after it starts the
+reason. The reason may contain any text and is required. The check rejects
+anything else, including a relative or non-normalized path and a path ending in
+` (deleted)`. The flag repeats for more ports.
+
+An exemption needs a complete census of the processes holding the socket, and
+only root can read every process's fd table. Run the check with an exemption
+under `sudo`, as above. Without root every exemption is refused with the reason
+`exemption needs a complete holder census; run the access check as root`, and
+the listener stays FAIL. The check without exemptions still runs unprivileged.
+
+Running it as root executes the checkout's `checks/s31_checks.py` as root. Run
+it only from a checkout that no other account can write to, and pass an
+absolute `--record` path. The check appends to the record without following a
+symlink, refuses anything that is not a regular file, and as root refuses a
+record file owned by any account other than root or the one that ran `sudo`.
+
+The check detects exposure misconfiguration. It does not defend against a
+privileged process that deliberately evades it while it runs, because such a
+process could also edit the check.
+
+The exemption turns that listener into INFO only when all of these hold:
+
+- The check runs as root.
+- The netns container does not use host networking and publishes no port at
+  all, because a published container port can sit behind any host port number.
+- The census is complete: every process's fd table and fd links on the host
+  were read while nothing changed. Any read error, such as a non-dumpable child
+  that inherited the socket, refuses the exemption, because a hidden co-holder
+  could be the hub. A process or fd that vanishes during the scan refuses it
+  too, with `processes changed during the census; rerun`. On a busy host, run
+  the check again.
+- The check can name every process holding a LISTEN socket on that port on
+  loopback or the wildcard address, and can read each holder's executable link,
+  command name and cgroup.
+- Every holder's `/proc/<pid>/exe` resolves to exactly EXE_REALPATH. A copy at
+  another path, another program, or a binary that was replaced or deleted
+  since it started (its link reads `... (deleted)`) does not match.
+- No holder is `brigade-hub` or sits in a container of the hub's image.
+
+Otherwise the result is FAIL and the record says which condition failed. The
+record keeps the port, the path, the reason, and each holder's pid, executable
+and command name. An exemption that matches no reachable listener is recorded
+as unused. A program that runs from a per-launch mount path needs the path
+updated after each launch.
 
 The status fields of [Retrieval modes](../phase-v2-hub-architecture.md#retrieval-modes)
 (`lexical` and `ok` for BM25 chosen, `degraded` for a hybrid project whose

@@ -763,6 +763,537 @@ def test_listening_ports_reads_only_listen_rows():
     assert checks.listening_ports(table) == {3774, 0xA1B2}
 
 
+def _tcp_row(slot: int, address: str, port: int, inode: int) -> str:
+    return f"   {slot}: {address}:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000 10001 0 {inode} 1"
+
+
+def _namespace_tables(hub_port: int = 3774) -> str:
+    # The live namespace: the hub and its Python upstream on loopback, the front's
+    # tailscaled peerapi on every address, and Docker's embedded DNS.
+    return "\n".join(
+        [
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
+            _tcp_row(0, "0100007F", hub_port, 101),
+            _tcp_row(1, "0100007F", 34293, 102),
+            _tcp_row(2, "00000000", 45045, 201),
+            _tcp_row(3, "0B00007F", 34717, 301),
+        ]
+    )
+
+
+NAMESPACE_TABLES = _namespace_tables()
+
+
+def test_listening_ports_filters_by_socket_inode():
+    tables, inodes = checks.split_hub_sockets(NAMESPACE_TABLES + "\n#inodes\n101\n102\n")
+    assert inodes == {"101", "102"}
+    assert checks.listening_ports(tables) == {3774, 34293, 45045, 34717}
+    assert checks.listening_ports(tables, inodes) == {3774, 34293}
+
+
+def _access(
+    monkeypatch,
+    *,
+    open_ports,
+    bindings="{}",
+    network_mode="brigade-hub_default",
+    inodes="101\n102\n",
+    hub_port=3774,
+    allow=(),
+    proc=None,
+    euid=0,
+):
+    import argparse
+
+    def fake_inspect(_container, template):
+        if "IPAddress" in template:
+            return "192.0.2.10 "
+        if "NetworkMode" in template:
+            return network_mode
+        if "{{.Image}}" in template:
+            return "sha256:hubimage"
+        assert "PortBindings" in template
+        return bindings
+
+    tables = _namespace_tables(hub_port) + "\n#inodes\n" + inodes
+
+    def fake_run(argv, **_kw):
+        if argv[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(argv, 0, "c-hub-sibling\n", "")
+        return subprocess.CompletedProcess(argv, 0, tables, "")
+
+    monkeypatch.setattr(checks, "HUB_PORT", hub_port)
+    monkeypatch.setattr(checks, "container_id", lambda service, project=checks.RECIPE: f"c-{service}")
+    monkeypatch.setattr(checks, "inspect", fake_inspect)
+    monkeypatch.setattr(checks, "run", fake_run)
+    monkeypatch.setattr(checks, "connect_refused", lambda host, port, timeout=2.0: (host, port) not in open_ports)
+    monkeypatch.setattr(checks, "front_url", lambda: "https://front.example.test")
+    monkeypatch.setattr(checks, "get", lambda url, headers=None, timeout=5: (401, b""))
+    # raising=False keeps the helper usable against a check without these knobs.
+    monkeypatch.setattr(checks, "PROBE_DEADLINE", 1.0, raising=False)
+    monkeypatch.setattr(checks, "IDENTITY_TIMEOUT", 1.0, raising=False)
+    if proc is not None:
+        monkeypatch.setattr(checks, "PROC", proc, raising=False)
+    monkeypatch.setattr(checks, "effective_uid", lambda: euid, raising=False)
+    result = checks.Result("access")
+    checks.check_access(argparse.Namespace(allow_loopback_listener=list(allow)), result)
+    return result
+
+
+def _http_listener(answer):
+    """A real loopback HTTP server; `answer(path, headers)` returns (status, headers, body)."""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            status, headers, body = answer(self.path, self.headers)
+            self.send_response_only(status)
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def _raw_listener(serve_one):
+    """A loopback TCP listener that hands each accepted connection to `serve_one(conn, stop)`."""
+    import socket as socket_module
+    import threading
+
+    listener = socket_module.create_server(("127.0.0.1", 0))
+    stop = threading.Event()
+
+    def serve():
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=serve_one, args=(conn, stop), daemon=True).start()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return listener, stop
+
+
+def _loopback_item(result, port):
+    (item,) = [item for item in result.items if item["name"] == f"host cannot connect to 127.0.0.1:{port}"]
+    return item
+
+
+PAGE = (200, {"Content-Type": "text/html; charset=utf-8"}, b"<!doctype html><title>app</title>")
+
+
+def _program(tmp_path, name="app"):
+    """A real file standing in for a program, and its canonical path."""
+    path = tmp_path / "programs" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    return os.path.realpath(path)
+
+
+def _fake_proc(
+    tmp_path,
+    port,
+    *,
+    holder_exe,
+    comm="app",
+    cgroup="0::/user.slice",
+    resolvable=True,
+    co_holder=None,
+    vanished_pid=False,
+):
+    """A /proc tree with one LISTEN socket on 127.0.0.1:port held by pid 4242 running `holder_exe`.
+
+    `co_holder` adds pid 4243 holding the same socket: a dict with `exe`,
+    `comm`, and `cgroup` (None makes its cgroup unreadable, as a directory).
+    `vanished_pid` adds pid 4244 with no fd table, as a process gone mid-scan.
+    """
+    proc = tmp_path / "proc"
+    (proc / "net").mkdir(parents=True)
+    (proc / "net" / "tcp").write_text(
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+        + _tcp_row(0, "0100007F", port, 777)
+        + "\n",
+        encoding="utf-8",
+    )
+    pid = proc / "4242"
+    (pid / "fd").mkdir(parents=True)
+    if resolvable:
+        os.symlink("socket:[777]", pid / "fd" / "9")
+    os.symlink(holder_exe, pid / "exe")
+    (pid / "comm").write_text(comm + "\n", encoding="utf-8")
+    (pid / "cgroup").write_text(cgroup + "\n", encoding="utf-8")
+    if co_holder is not None:
+        other = proc / "4243"
+        (other / "fd").mkdir(parents=True)
+        os.symlink("socket:[777]", other / "fd" / "3")
+        os.symlink(co_holder["exe"], other / "exe")
+        (other / "comm").write_text(co_holder["comm"] + "\n", encoding="utf-8")
+        if co_holder["cgroup"] is not None:
+            (other / "cgroup").write_text(co_holder["cgroup"] + "\n", encoding="utf-8")
+        else:
+            # Unreadable for a reason other than vanishing (IsADirectoryError).
+            (other / "cgroup").mkdir()
+    if vanished_pid:
+        (proc / "4244").mkdir()
+    return proc
+
+
+def _exempted_access(monkeypatch, tmp_path, *, exempt_exe, holder_exe, bindings="{}", euid=0, **proc_kwargs):
+    server = _http_listener(lambda _path, _headers: PAGE)
+    port = server.server_address[1]
+    try:
+        result = _access(
+            monkeypatch,
+            open_ports={("127.0.0.1", port)},
+            hub_port=port,
+            bindings=bindings,
+            euid=euid,
+            allow=[f"{port}={exempt_exe}//desktop app on host loopback"],
+            proc=_fake_proc(tmp_path, port, holder_exe=holder_exe, **proc_kwargs),
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    return result, _loopback_item(result, port)
+
+
+def test_access_skips_the_front_peerapi_and_fails_an_unexempted_loopback_listener(monkeypatch):
+    # #2305: the front's peerapi on the holder's address is not probed. A host
+    # loopback listener on a hub port fails unless the operator exempts it.
+    server = _http_listener(lambda _path, _headers: PAGE)
+    port = server.server_address[1]
+    try:
+        result = _access(monkeypatch, open_ports={("127.0.0.1", port), ("192.0.2.10", 45045)}, hub_port=port)
+    finally:
+        server.shutdown()
+        server.server_close()
+    probed = {item["name"] for item in result.items if item["name"].startswith("host cannot connect")}
+    assert not any(name.endswith(":45045") or name.endswith(":34717") for name in probed)
+    item = _loopback_item(result, port)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert item["detail"]["evidence"]["/health"]["status_line"].startswith("HTTP/1.0 200")
+
+
+posix_proc = pytest.mark.skipif(os.name == "nt", reason="fake /proc needs POSIX symlinks")
+
+
+@posix_proc
+def test_access_exempts_a_loopback_listener_held_by_the_named_program(monkeypatch, tmp_path):
+    app = _program(tmp_path)
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=app)
+    assert result.status == "pass" and item["status"] == "INFO"
+    assert item["detail"]["exemption"] == {"exe": app, "reason": "desktop app on host loopback"}
+    assert item["detail"]["holders"] == [{"pid": 4242, "exe": app, "comm": "app"}]
+    assert item["detail"].get("census") == "complete (euid 0)"
+
+
+@posix_proc
+@pytest.mark.parametrize("holder", ["other-program", "deleted", "renamed-copy"])
+def test_access_refuses_an_exemption_when_the_holder_is_not_the_named_program(monkeypatch, tmp_path, holder):
+    app = _program(tmp_path)
+    holder_exe = {
+        "other-program": _program(tmp_path, "socat"),
+        # The kernel's exe link for an unlinked binary reads "<path> (deleted)".
+        "deleted": app + " (deleted)",
+        # The same program copied to another path under another name.
+        "renamed-copy": _program(tmp_path / "elsewhere", "app-copy"),
+    }[holder]
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=holder_exe)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert "not the exempted path" in item["detail"]["exemption_applied"]
+
+
+@posix_proc
+@pytest.mark.parametrize(
+    "proc_kwargs, reason",
+    [
+        ({"resolvable": False}, "could not be identified"),
+        ({"cgroup": "0::/system.slice/docker-c-hub-sibling.scope"}, "hub's binary or image"),
+    ],
+    ids=["unresolved-holder", "hub-image-container"],
+)
+def test_access_refuses_an_exemption_it_cannot_justify(monkeypatch, tmp_path, proc_kwargs, reason):
+    app = _program(tmp_path)
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, **proc_kwargs)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert reason in item["detail"]["exemption_applied"]
+
+
+@posix_proc
+def test_access_refuses_an_exemption_when_a_co_holder_cannot_be_read(monkeypatch, tmp_path):
+    # Two processes share the listening socket. The exempted app reads fine,
+    # and the other, here the hub, has an unreadable cgroup: it must not be dropped.
+    app = _program(tmp_path)
+    hub = _program(tmp_path, "brigade-hub")
+    co_holder = {"exe": hub, "comm": "brigade-hub", "cgroup": None}
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, co_holder=co_holder)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert "could not be identified" in item["detail"]["exemption_applied"]
+
+
+def test_loopback_holders_fail_closed_without_a_proc_tree(tmp_path):
+    # Windows, or any host without /proc: no holder can be named, so no
+    # exemption can apply.
+    assert checks.loopback_holders(3774, proc=tmp_path / "no-proc") is None
+    (tmp_path / "proc" / "net").mkdir(parents=True)
+    assert checks.loopback_holders(3774, proc=tmp_path / "proc") is None
+
+
+@posix_proc
+def test_access_refuses_every_exemption_without_root(monkeypatch, tmp_path):
+    app = _program(tmp_path)
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, euid=1000)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert item["detail"]["exemption_applied"] == (
+        "no: exemption needs a complete holder census; run the access check as root"
+    )
+
+
+def _readlink_failing_for(monkeypatch, fragment, error):
+    """os.readlink raising `error` for any path containing `fragment`, as a hidden fd does."""
+    real = os.readlink
+
+    def readlink(path, *args, **kwargs):
+        if fragment in str(path):
+            raise error
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "readlink", readlink)
+
+
+CO_HOLDER = {"comm": "app", "cgroup": "0::/user.slice"}
+
+
+@posix_proc
+def test_access_refuses_an_exemption_when_a_co_holder_fd_link_is_hidden(monkeypatch, tmp_path):
+    # A non-dumpable child that inherited the socket: its fd links raise PermissionError even for root.
+    app = _program(tmp_path)
+    _readlink_failing_for(monkeypatch, f"{os.sep}4243{os.sep}fd{os.sep}", PermissionError(13, "denied"))
+    result, item = _exempted_access(
+        monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, co_holder={"exe": app, **CO_HOLDER}
+    )
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert "census is incomplete" in item["detail"]["exemption_applied"]
+    assert item["detail"]["census"] == "incomplete: pid 4243 fd 3: PermissionError"
+
+
+@posix_proc
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads any fd directory")
+def test_access_refuses_an_exemption_when_a_co_holder_fd_table_is_unreadable(monkeypatch, tmp_path):
+    # Another account's process: its whole fd directory is unreadable.
+    app = _program(tmp_path)
+    proc = None
+    server = _http_listener(lambda _path, _headers: PAGE)
+    port = server.server_address[1]
+    try:
+        proc = _fake_proc(tmp_path, port, holder_exe=app, co_holder={"exe": app, **CO_HOLDER})
+        os.chmod(proc / "4243" / "fd", 0)
+        result = _access(
+            monkeypatch,
+            open_ports={("127.0.0.1", port)},
+            hub_port=port,
+            allow=[f"{port}={app}//desktop app on host loopback"],
+            proc=proc,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        if proc is not None:
+            os.chmod(proc / "4243" / "fd", 0o700)
+    item = _loopback_item(result, port)
+    assert result.status == "fail" and "census is incomplete" in item["detail"]["exemption_applied"]
+
+
+CENSUS_CHANGED_REASON = "no: processes changed during the census; rerun"
+
+
+@posix_proc
+def test_access_refuses_an_exemption_when_an_fd_vanished_during_the_census(monkeypatch, tmp_path):
+    app = _program(tmp_path)
+    _readlink_failing_for(monkeypatch, f"{os.sep}4243{os.sep}fd{os.sep}", FileNotFoundError(2, "gone"))
+    result, item = _exempted_access(
+        monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, co_holder={"exe": app, **CO_HOLDER}
+    )
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert item["detail"]["exemption_applied"] == CENSUS_CHANGED_REASON
+
+
+@posix_proc
+def test_access_refuses_an_exemption_when_a_process_vanished_during_the_census(monkeypatch, tmp_path):
+    app = _program(tmp_path)
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, vanished_pid=True)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert item["detail"]["exemption_applied"] == CENSUS_CHANGED_REASON
+    assert item["detail"]["census"] == "changed: pid 4244 vanished"
+
+
+@posix_proc
+def test_access_never_exempts_the_hub_binary_even_when_named(monkeypatch, tmp_path):
+    hub = _program(tmp_path, "brigade-hub")
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=hub, holder_exe=hub, comm="brigade-hub")
+    assert result.status == "fail" and "hub's binary or image" in item["detail"]["exemption_applied"]
+
+
+@posix_proc
+def test_access_refuses_exemptions_when_any_port_is_published(monkeypatch, tmp_path):
+    # A container port published to host loopback 3774 under another key.
+    app = _program(tmp_path)
+    published = json.dumps({"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "3774"}]})
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, bindings=published)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert "publishes a port" in item["detail"]["exemption_applied"]
+
+
+@pytest.mark.parametrize("connect_cost, sends", [(1.5, []), (0.25, [0.75, 0.5])], ids=["spent", "partial"])
+def test_probe_connect_and_send_share_one_budget(monkeypatch, connect_cost, sends):
+    from types import SimpleNamespace
+
+    clock = [0.0]
+    seen: list[float] = []
+
+    class Conn:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def settimeout(self, value):
+            self.timeout = value
+
+        def sendall(self, _data):
+            seen.append(round(self.timeout, 6))
+
+        def recv(self, _size):
+            return b""
+
+    def connect(_address, timeout):
+        clock[0] += connect_cost
+        return Conn(timeout)
+
+    monkeypatch.setattr(checks, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(checks, "socket", SimpleNamespace(create_connection=connect))
+    evidence = checks.probe_evidence("192.0.2.1", 3774, deadline=1.0)
+    assert seen == sends
+    if not sends:
+        assert evidence["/health"]["ended"] == "deadline"
+
+
+def test_access_bounds_a_trickling_loopback_listener(monkeypatch):
+    import threading
+
+    def trickle(conn, stop):
+        with conn:
+            conn.recv(4096)
+            while not stop.is_set():
+                try:
+                    conn.sendall(b"H")
+                except OSError:
+                    return
+                stop.wait(0.05)
+
+    listener, stop = _raw_listener(trickle)
+    port = listener.getsockname()[1]
+    box = {}
+    worker = threading.Thread(
+        target=lambda: box.setdefault("result", _access(monkeypatch, open_ports={("127.0.0.1", port)}, hub_port=port)),
+        daemon=True,
+    )
+    try:
+        worker.start()
+        # Both probes share one 1 s deadline; allow generous slack, never the open-ended read.
+        worker.join(timeout=8)
+        finished = not worker.is_alive()
+    finally:
+        stop.set()
+        listener.close()
+    assert finished, "the probe of a trickling listener did not stop at its deadline"
+    item = _loopback_item(box["result"], port)
+    assert item["status"] == "FAIL"
+    assert {probe["ended"] for probe in item["detail"]["evidence"].values()} <= {
+        "deadline",
+        "deadline before the probe",
+    }
+
+
+# An abortive close (SO_LINGER 0) makes Windows discard received data the
+# client has not read yet, so whether the 401 survives the reset is a race there.
+@pytest.mark.skipif(os.name == "nt", reason="Windows drops unread data on an incoming RST")
+def test_access_keeps_a_401_that_arrived_before_a_reset(monkeypatch):
+    import socket as socket_module
+    import struct
+
+    def answer_then_reset(conn, _stop):
+        conn.recv(4096)
+        conn.sendall(b"HTTP/1.1 401 Unauthorized\r\nServer: proxy\r\nContent-Length: 1000\r\n\r\npartial")
+        conn.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_LINGER, struct.pack("ii", 1, 0))
+        conn.close()
+
+    listener, stop = _raw_listener(answer_then_reset)
+    port = listener.getsockname()[1]
+    try:
+        result = _access(monkeypatch, open_ports={("127.0.0.1", port)}, hub_port=port)
+    finally:
+        stop.set()
+        listener.close()
+    item = _loopback_item(result, port)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    status = item["detail"]["evidence"]["/status"]
+    assert status["status_line"] == "HTTP/1.1 401 Unauthorized"
+    assert status["headers"]["server"] == "proxy"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "3774=desktop app",
+        "app=/opt/app//reason",
+        "3774=opt/app//reason",
+        "3774=/opt/../opt/app//reason",
+        "3774=/opt/app/x/.//reason",
+        "3774=/opt/app//",
+        "3774=/opt/app (deleted)//reason",
+        "3774=///reason",
+    ],
+)
+def test_access_rejects_a_malformed_exemption(value):
+    with pytest.raises(ValueError):
+        checks.parse_exemptions([value])
+
+
+def test_access_exemption_reason_may_hold_separators():
+    assert checks.parse_exemptions(["3774=/opt/app/bin/app//desktop app, see https://example.test/a=b"]) == {
+        3774: ("/opt/app/bin/app", "desktop app, see https://example.test/a=b")
+    }
+
+
+def test_access_fails_when_the_hub_port_is_reachable(monkeypatch):
+    published = json.dumps({"3774/tcp": [{"HostIp": "127.0.0.1", "HostPort": "3774"}]})
+    allow = ["3774=/opt/app/bin/app//claimed exemption"]
+    assert _access(monkeypatch, open_ports={("127.0.0.1", 3774)}, bindings=published, allow=allow).status == "fail"
+    assert _access(monkeypatch, open_ports={("127.0.0.1", 3774)}, network_mode="host", allow=allow).status == "fail"
+    assert _access(monkeypatch, open_ports={("192.0.2.10", 34293)}).status == "fail"
+
+
+def test_access_probes_every_listener_when_hub_inodes_are_unreadable(monkeypatch):
+    result = _access(monkeypatch, open_ports={("192.0.2.10", 45045)}, inodes="")
+    assert result.status == "fail"
+    assert any(item["name"] == "hub socket inodes unreadable" for item in result.items)
+
+
 def test_header_echo_verdicts():
     forged = checks.evaluate_echo({"Tailscale-User-Login": checks.FORGED_LOGIN, "X-Forwarded-For": checks.FORGED_FOR})
     assert forged["login_forged"] and forged["client_value_kept"]
@@ -1623,3 +2154,52 @@ def test_entry_execs_fleet_serve_with_the_rust_engine_when_the_image_has_it(tmp_
             ],
         )
     ]
+
+
+def _stand_in_check(monkeypatch):
+    def stand_in(_args, result):
+        """Stand-in check that records one INFO item."""
+        result.add("INFO", "stand-in")
+
+    monkeypatch.setitem(checks.CHECKS, "gpu", stand_in)
+
+
+def _main_code(argv):
+    try:
+        return checks.main(argv)
+    except OSError as exc:
+        return f"raised {type(exc).__name__}"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+def test_record_refuses_a_symlinked_path(monkeypatch, tmp_path):
+    _stand_in_check(monkeypatch)
+    target = tmp_path / "elsewhere.jsonl"
+    target.write_text("untouched\n", encoding="utf-8")
+    link = tmp_path / "s31-results.jsonl"
+    link.symlink_to(target)
+    assert _main_code(["--record", str(link), "gpu"]) == 2
+    assert target.read_text(encoding="utf-8") == "untouched\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX device file")
+@pytest.mark.parametrize("kind", ["device", "directory"])
+def test_record_refuses_a_non_regular_path(monkeypatch, tmp_path, kind):
+    _stand_in_check(monkeypatch)
+    path = os.devnull if kind == "device" else str(tmp_path)
+    assert _main_code(["--record", path, "gpu"]) == 2
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="needs a non-root test account")
+def test_record_as_root_refuses_a_file_owned_by_another_account(monkeypatch, tmp_path):
+    _stand_in_check(monkeypatch)
+    record = tmp_path / "s31-results.jsonl"
+    record.write_text("", encoding="utf-8")
+    monkeypatch.setattr(checks, "effective_uid", lambda: 0, raising=False)
+    monkeypatch.delenv("SUDO_UID", raising=False)
+    assert _main_code(["--record", str(record), "gpu"]) == 2
+    assert record.read_text(encoding="utf-8") == ""
+    # The invoking account's own file is accepted under sudo.
+    monkeypatch.setenv("SUDO_UID", str(os.getuid()))
+    assert _main_code(["--record", str(record), "gpu"]) == 0
+    assert json.loads(record.read_text(encoding="utf-8"))["check"] == "gpu"

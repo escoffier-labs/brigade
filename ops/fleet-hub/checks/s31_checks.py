@@ -15,6 +15,7 @@ import concurrent.futures
 import http.client
 import json
 import os
+import posixpath
 import secrets
 import socket
 import sqlite3
@@ -123,14 +124,49 @@ def percentile(values: list[float], share: float) -> float:
     return ordered[index]
 
 
-def listening_ports(proc_net_tcp: str) -> set[int]:
-    """Ports in LISTEN state (0A) from /proc/net/tcp or tcp6 text."""
+def listening_ports(proc_net_tcp: str, inodes: set[str] | None = None) -> set[int]:
+    """Ports in LISTEN state (0A) from /proc/net/tcp or tcp6 text.
+
+    With `inodes`, only sockets whose inode (the tenth column) is in the set.
+    """
     ports = set()
     for line in proc_net_tcp.splitlines()[1:]:
         fields = line.split()
         if len(fields) > 3 and fields[3] == "0A":
+            if inodes is not None and (len(fields) < 10 or fields[9] not in inodes):
+                continue
             ports.add(int(fields[1].rsplit(":", 1)[1], 16))
     return ports
+
+
+# Run inside the hub container by `access`. The holder's namespace is shared
+# with the front, so its socket tables also list the front's tailscaled peerapi
+# and Docker's embedded DNS. The container's own PID namespace shows only the
+# hub's processes, and their socket inodes pick out the hub's listeners.
+HUB_SOCKETS = (
+    "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null; echo '#inodes'; "
+    'for f in /proc/[0-9]*/fd/*; do readlink "$f"; done 2>/dev/null'
+    " | sed -n 's/^socket:\\[\\([0-9]*\\)\\]$/\\1/p'"
+)
+
+
+def split_hub_sockets(text: str) -> tuple[str, set[str]]:
+    """The socket tables and the hub processes' socket inodes from HUB_SOCKETS output."""
+    tables, _, inodes = text.partition("#inodes")
+    return tables, {line.strip() for line in inodes.splitlines() if line.strip()}
+
+
+def publishes_any_port(holder_bindings: str) -> bool:
+    """Whether the holder's HostConfig.PortBindings JSON maps any port to the host (unreadable counts as yes).
+
+    Any binding refuses every loopback exemption: a container port published
+    to a host loopback port can sit behind any host port number.
+    """
+    try:
+        bindings = json.loads(holder_bindings or "null") or {}
+    except ValueError:
+        return True
+    return not isinstance(bindings, dict) or any(bindings.values())
 
 
 def connect_refused(host: str, port: int, timeout: float = 2.0) -> bool:
@@ -139,6 +175,218 @@ def connect_refused(host: str, port: int, timeout: float = 2.0) -> bool:
             return False
     except OSError:
         return True
+
+
+# A reachable listener on host loopback is a FAIL unless the operator exempts
+# its port with --allow-loopback-listener PORT=EXE_REALPATH//REASON and every
+# process holding the socket runs exactly that executable. The exemption trusts
+# that program not to forward to the hub. No HTTP answer proves a listener is not a proxy
+# to the hub, so the probe below is evidence for the record, never a pass.
+PROC = Path("/proc")
+PROBE_DEADLINE = 5.0
+PROBE_CAP = 65536
+EVIDENCE_PROBES = (("/health", {}), ("/status", {"Tailscale-User-Login": FORGED_LOGIN}))
+LOOPBACK_HEX = {
+    "0100007F",  # 127.0.0.1
+    "00000000",  # 0.0.0.0
+    "00000000000000000000000001000000",  # ::1
+    "00000000000000000000000000000000",  # ::
+    "0000000000000000FFFF00000100007F",  # ::ffff:127.0.0.1
+}
+
+
+EXEMPTION_SEPARATOR = "//"
+DELETED = " (deleted)"
+
+
+def parse_exemptions(values: list[str]) -> dict[int, tuple[str, str]]:
+    """PORT=EXE_REALPATH//REASON triples from --allow-loopback-listener.
+
+    PORT is digits, so the first "=" ends it. EXE_REALPATH must be the
+    canonical absolute path `readlink -f /proc/<pid>/exe` prints. A canonical
+    path never contains "//", so the first "//" after it ends the path and the
+    reason may contain anything. A reason is required.
+    """
+    exemptions: dict[int, tuple[str, str]] = {}
+    for value in values:
+        port, _, rest = value.partition("=")
+        exe, separator, reason = rest.partition(EXEMPTION_SEPARATOR)
+        canonical = (
+            exe.startswith("/")
+            and exe != "/"
+            and posixpath.normpath(exe) == exe
+            and not exe.startswith("//")
+            and not exe.endswith(DELETED)
+        )
+        if not port.isdigit() or not separator or not canonical or not reason.strip():
+            raise ValueError(f"--allow-loopback-listener wants PORT=EXE_REALPATH//REASON, got {value!r}")
+        exemptions[int(port)] = (exe, reason.strip())
+    return exemptions
+
+
+def probe_evidence(host: str, port: int, deadline: float | None = None) -> dict[str, Any]:
+    """Status line and headers each evidence probe gets, within one total deadline per listener.
+
+    Reads raw bytes up to PROBE_CAP per probe, so a reset after the headers
+    keeps what already arrived, and a peer that trickles bytes is cut off at
+    the deadline. Bodies are never kept.
+    """
+    stop = time.monotonic() + (deadline or PROBE_DEADLINE)
+    evidence: dict[str, Any] = {}
+    for path, headers in EVIDENCE_PROBES:
+        data, ended = b"", "eof"
+        remaining = stop - time.monotonic()
+        if remaining <= 0:
+            evidence[path] = {"ended": "deadline before the probe"}
+            continue
+        try:
+            with socket.create_connection((host, port), timeout=remaining) as conn:
+                # The connect spent part of the budget: recompute before the send.
+                remaining = stop - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("deadline reached after connect")
+                conn.settimeout(remaining)
+                lines = [f"GET {path} HTTP/1.0", f"Host: {host}:{port}"]
+                lines += [f"{name}: {value}" for name, value in headers.items()]
+                conn.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("ascii"))
+                while len(data) < PROBE_CAP:
+                    remaining = stop - time.monotonic()
+                    if remaining <= 0:
+                        ended = "deadline"
+                        break
+                    conn.settimeout(remaining)
+                    chunk = conn.recv(min(4096, PROBE_CAP - len(data)))
+                    if not chunk:
+                        break
+                    data += chunk
+                else:
+                    ended = "cap"
+        except ConnectionResetError:
+            ended = "reset"
+        except TimeoutError:
+            ended = "deadline"
+        except OSError as exc:
+            ended = f"error: {type(exc).__name__}"
+        head = data.split(b"\r\n\r\n", 1)[0].decode("latin-1").split("\r\n")
+        evidence[path] = {
+            "status_line": head[0][:200] if data else None,
+            "headers": {
+                name.strip().lower(): value.strip()[:200]
+                for name, sep, value in (line.partition(":") for line in head[1:])
+                if sep
+            }
+            if data
+            else {},
+            "bytes": len(data),
+            "ended": ended,
+        }
+    return evidence
+
+
+# Threat model: the S31 access check detects exposure misconfiguration. It
+# does not defend against a privileged process that deliberately evades it
+# while it runs, because such a process could also edit the check. Accepted
+# residual: a privileged holder that forks, changes UID and exits mid-scan to
+# slip past the census. Any process or fd that vanishes during the scan
+# refuses every exemption instead, so a census only counts when nothing moved.
+CENSUS_NEEDS_ROOT = "exemption needs a complete holder census; run the access check as root"
+CENSUS_CHANGED = "processes changed during the census; rerun"
+VANISHED = (FileNotFoundError, ProcessLookupError)
+
+
+class CensusIncomplete(Exception):
+    """A process's fd table or fd link could not be read, so a holder may be hidden."""
+
+
+class CensusChanged(CensusIncomplete):
+    """A process or fd vanished during the scan, so the census is not one consistent picture."""
+
+
+def effective_uid() -> int | None:
+    """The effective uid, or None where the platform has none (no exemption can apply there)."""
+    return os.geteuid() if hasattr(os, "geteuid") else None
+
+
+def loopback_holders(port: int, proc: Path | None = None) -> list[dict[str, Any]] | None:
+    """The processes holding host LISTEN sockets on `port` that loopback reaches, or None.
+
+    Reads the host's /proc/net/tcp and tcp6 for LISTEN sockets on loopback or
+    the wildcard address, then maps each socket inode to the processes whose
+    fds hold it. None when no socket is found, when any socket has no readable
+    holder, or when any process found holding a socket has an unreadable exe
+    link, comm or cgroup. Raises CensusChanged when any process or fd vanishes
+    during the scan, and CensusIncomplete when any process's fd table or fd
+    link cannot be read for another reason, because then a holder may be
+    hidden. The scanning process itself is skipped: listing its own fd table
+    opens and closes a directory fd. Only a scan as root can be complete.
+    """
+    root = proc or PROC
+    inodes: set[str] = set()
+    for name in ("tcp", "tcp6"):
+        try:
+            table = (root / "net" / name).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in table.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) < 10 or fields[3] != "0A":
+                continue
+            address, _, hex_port = fields[1].rpartition(":")
+            if int(hex_port, 16) == port and address in LOOPBACK_HEX:
+                inodes.add(fields[9])
+    if not inodes:
+        return None
+    found: dict[str, list[dict[str, Any]]] = {inode: [] for inode in inodes}
+    me = str(os.getpid())
+    for entry in root.iterdir():
+        if not entry.name.isdigit() or entry.name == me:
+            continue
+        # Every process's fd table must be read: one hidden co-holder (another
+        # account, a non-dumpable child) could be the hub, and a process or fd
+        # that vanished mid-scan could have been one.
+        try:
+            fds = list((entry / "fd").iterdir())
+        except VANISHED as exc:
+            raise CensusChanged(f"pid {entry.name} vanished") from exc
+        except OSError as exc:
+            raise CensusIncomplete(f"pid {entry.name} fd table: {type(exc).__name__}") from exc
+        links = []
+        for fd in fds:
+            try:
+                links.append(os.readlink(fd))
+            except VANISHED as exc:
+                raise CensusChanged(f"pid {entry.name} fd {fd.name} vanished") from exc
+            except OSError as exc:
+                raise CensusIncomplete(f"pid {entry.name} fd {fd.name}: {type(exc).__name__}") from exc
+        held = {link[8:-1] for link in links if link.startswith("socket:[")} & inodes
+        if not held:
+            continue
+        # A known holder whose identity cannot be read could be anything,
+        # including the hub, so the whole lookup is unresolved.
+        try:
+            os.readlink(entry / "exe")  # realpath alone never fails on an unreadable link
+            holder = {
+                "pid": int(entry.name),
+                "exe": os.path.realpath(entry / "exe"),
+                "comm": (entry / "comm").read_text(encoding="utf-8").strip(),
+                "cgroup": (entry / "cgroup").read_text(encoding="utf-8").strip(),
+            }
+        except VANISHED as exc:
+            raise CensusChanged(f"holder pid {entry.name} vanished") from exc
+        except OSError:
+            return None
+        for inode in held:
+            found[inode].append(holder)
+    if not all(found.values()):
+        return None
+    unique = {holder["pid"]: holder for holders in found.values() for holder in holders}
+    return [unique[pid] for pid in sorted(unique)]
+
+
+def hub_image_holder(holder: dict[str, Any], hub_containers: list[str]) -> bool:
+    """Whether a holder runs the hub's binary or sits in a container of the hub's image."""
+    name = Path(holder["exe"].removesuffix(DELETED)).name
+    return name == "brigade-hub" or any(cid and cid in holder["cgroup"] for cid in hub_containers)
 
 
 def front_url() -> str:
@@ -489,15 +737,86 @@ def check_access(args: argparse.Namespace, result: Result) -> None:
     if not hub or not holder:
         result.add("FAIL", "hub and holder running")
         return
-    tables = run(["docker", "exec", hub, "sh", "-c", "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null"]).stdout
-    ports = listening_ports(tables)
+    tables, inodes = split_hub_sockets(run(["docker", "exec", hub, "sh", "-c", HUB_SOCKETS]).stdout)
+    every = listening_ports(tables)
+    ports = listening_ports(tables, inodes) if inodes else every
+    if not inodes:
+        result.add("INFO", "hub socket inodes unreadable", "probing every listener in the namespace")
     result.ok(HUB_PORT in ports, "hub listens on its port inside the namespace", sorted(ports))
+    if every - ports:
+        result.add(
+            "INFO",
+            "listeners of other containers in the namespace (front's peerapi, Docker DNS)",
+            sorted(every - ports),
+        )
     addresses = ["127.0.0.1", "::1"] + inspect(
         holder, "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"
     ).split()
+    # Any reachable listener is a FAIL, as on any address. On host loopback an
+    # operator exemption (--allow-loopback-listener PORT=EXE_REALPATH//REASON)
+    # turns it into INFO only when the check runs as root (so the holder census
+    # covers every process), the netns container is not on host networking
+    # and publishes no port, every socket holder can be named, each
+    # holder's /proc/<pid>/exe realpath equals EXE_REALPATH exactly (a deleted
+    # binary reads "... (deleted)" and never matches), and no holder is the
+    # hub's binary or in a container of the hub's image. The probe
+    # evidence goes into the record either way and never decides the result.
+    exemptions = parse_exemptions(getattr(args, "allow_loopback_listener", None) or [])
+    own_namespace = inspect(holder, "{{.HostConfig.NetworkMode}}") != "host"
+    bindings = inspect(holder, "{{json .HostConfig.PortBindings}}")
+    image = inspect(hub, "{{.Image}}")
+    hub_containers = [hub] + (
+        run(["docker", "ps", "-a", "-q", "--no-trunc", "--filter", f"ancestor={image}"]).stdout.split() if image else []
+    )
+    used: set[int] = set()
     for address in addresses:
         for port in sorted(ports):
-            result.ok(connect_refused(address, port), f"host cannot connect to {address}:{port}")
+            name = f"host cannot connect to {address}:{port}"
+            if connect_refused(address, port):
+                result.add("PASS", name)
+                continue
+            detail: dict[str, Any] = {"evidence": probe_evidence(address, port)}
+            if address not in ("127.0.0.1", "::1") or port not in exemptions:
+                result.add("FAIL", name, detail)
+                continue
+            used.add(port)
+            expected_exe, reason = exemptions[port]
+            detail["exemption"] = {"exe": expected_exe, "reason": reason}
+            census = ""
+            holders = None
+            if effective_uid() == 0:
+                try:
+                    holders = loopback_holders(port)
+                    census = "complete (euid 0)"
+                except CensusChanged as exc:
+                    census = f"changed: {exc}"
+                except CensusIncomplete as exc:
+                    census = f"incomplete: {exc}"
+            detail["census"] = census or "not taken (not root)"
+            detail["holders"] = [{key: h[key] for key in ("pid", "exe", "comm")} for h in holders or []]
+            if not own_namespace or publishes_any_port(bindings):
+                detail["exemption_applied"] = "no: the netns container uses host networking or publishes a port"
+            elif not census:
+                detail["exemption_applied"] = "no: " + CENSUS_NEEDS_ROOT
+            elif census.startswith("changed"):
+                detail["exemption_applied"] = "no: " + CENSUS_CHANGED
+            elif census.startswith("incomplete"):
+                detail["exemption_applied"] = "no: the holder census is incomplete, so a holder may be hidden"
+            elif holders is None:
+                detail["exemption_applied"] = "no: the socket's holder process could not be identified"
+            elif any(h["exe"] != expected_exe for h in holders):
+                detail["exemption_applied"] = "no: a holder's executable is not the exempted path (or was deleted)"
+            elif any(hub_image_holder(h, hub_containers) for h in holders):
+                detail["exemption_applied"] = "no: a holder runs the hub's binary or image"
+            else:
+                detail["exemption_applied"] = "yes"
+                result.add("INFO", name, detail)
+                continue
+            result.add("FAIL", name, detail)
+    for port in sorted(set(exemptions) - used):
+        result.add(
+            "INFO", f"exemption for port {port} not used", {"exe": exemptions[port][0], "reason": exemptions[port][1]}
+        )
     status: int | str = 0
     try:
         status = get(front_url() + "/status", headers={"Tailscale-User-Login": FORGED_LOGIN})[0]
@@ -1268,11 +1587,49 @@ def parser() -> argparse.ArgumentParser:
             )
         elif name == "probe":
             q.add_argument("--runs", type=int, default=5)
+        elif name == "access":
+            q.add_argument(
+                "--allow-loopback-listener",
+                action="append",
+                default=[],
+                metavar="PORT=EXE_REALPATH//REASON",
+                help="Exempt a host loopback listener on PORT held only by the program at EXE_REALPATH; needs root; repeat.",
+            )
         elif name == "hardening":
             q.add_argument("--volume", required=True)
             q.add_argument("--backup-dir", required=True)
             q.add_argument("--hub-pid", type=int, required=True)
     return p
+
+
+def append_record(path: str, line: str) -> None:
+    """Append one record line without following a symlink or writing into a non-regular file.
+
+    As root (the exempted access check runs under sudo), the file must belong
+    to root or to the invoking SUDO_UID, so a file another account planted is
+    refused.
+    """
+    # O_NONBLOCK makes a FIFO without a reader fail instead of hanging the open.
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    for name in ("O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK"):
+        flags |= getattr(os, name, 0)
+    fd = os.open(path, flags, 0o644)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("not a regular file")
+        if effective_uid() == 0:
+            owners = {0}
+            sudo_uid = os.environ.get("SUDO_UID", "")
+            if sudo_uid.isdigit():
+                owners.add(int(sudo_uid))
+            if info.st_uid not in owners:
+                raise ValueError(f"owned by uid {info.st_uid}, not root or SUDO_UID")
+        data = line.encode("utf-8")
+        while data:
+            data = data[os.write(fd, data) :]
+    finally:
+        os.close(fd)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1290,8 +1647,11 @@ def main(argv: list[str] | None = None) -> int:
         "items": result.items,
     }
     if args.check != "summary":
-        with open(args.record, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
+        try:
+            append_record(args.record, json.dumps(record, sort_keys=True) + "\n")
+        except (OSError, ValueError) as exc:
+            print(f"refusing --record {args.record}: {exc}", file=sys.stderr)
+            return 2
     print(f"{args.check}: {result.status.upper()}")
     return 0 if result.status != "fail" else 1
 
