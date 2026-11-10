@@ -13,7 +13,10 @@ use std::{
     net::IpAddr,
     path::PathBuf,
     pin::Pin,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::time::Instant;
@@ -28,6 +31,19 @@ const POOL_IDLE: Duration = Duration::from_secs(30);
 const POOL_IDLE_PER_HOST: usize = 2;
 pub const BATCH_BYTES: usize = 32 * 1024;
 pub const BATCH_CARDS: usize = 4;
+/// How long one reading of the server's model listing answers for query
+/// replies that carry no digest. A document batch and the breaker's probe
+/// read it before the request and again after the reply.
+pub const LISTING_TTL: Duration = Duration::from_secs(30);
+const LISTING_BYTES: usize = 1 << 20;
+/// One reading of the model listing gets this share of the call's deadline,
+/// and never more than [`LISTING_CAP`]. A listing route that stalls costs a
+/// call this much per reading and never its whole deadline.
+const LISTING_SHARE: u32 = 5;
+const LISTING_CAP: Duration = Duration::from_secs(2);
+pub(crate) fn listing_budget(deadline: Duration) -> Duration {
+    (deadline / LISTING_SHARE).min(LISTING_CAP)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmbedderId {
@@ -189,6 +205,56 @@ pub struct HttpEmbedder {
     token: hyper::header::HeaderValue,
     client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
     scanner: Arc<dyn Scanner>,
+    /// The model listing beside an `/api/embed` endpoint, on the same origin.
+    listing: Option<Url>,
+    listed: Mutex<Option<Listed>>,
+    /// Whether the last reply carried a digest of its own. Such an endpoint
+    /// needs no listing, so the reading before a request is skipped for it.
+    reply_digest: AtomicBool,
+}
+/// What the server's model listing last reported for the configured model.
+struct Listed {
+    digest: Option<String>,
+    at: Instant,
+}
+/// The listing URL for an `api/embed` endpoint: the same scheme, host, port
+/// and path prefix, with `/api/embed` replaced by `/api/tags`. No other shape
+/// and no other path has one, so such an endpoint must report the digest in
+/// its reply.
+pub(crate) fn listing_url(shape: &str, endpoint: &Url) -> Option<Url> {
+    let prefix = endpoint.path().strip_suffix("/api/embed")?;
+    if shape != "api/embed" {
+        return None;
+    }
+    let mut url = endpoint.clone();
+    url.set_path(&format!("{prefix}/api/tags"));
+    Some(url)
+}
+/// The digest a model listing reports for `name`. The listing names a model
+/// with its tag, so a configured name without one matches `name:latest`.
+/// Entries that disagree report nothing.
+pub(crate) fn listed_digest(listing: &Value, name: &str) -> Option<String> {
+    let tagged = match name.rsplit('/').next() {
+        Some(last) if !last.contains(':') => format!("{name}:latest"),
+        _ => name.to_string(),
+    };
+    let mut found: Option<&str> = None;
+    for model in listing["models"].as_array()? {
+        let named = |key: &str| {
+            model[key]
+                .as_str()
+                .is_some_and(|n| n == name || n == tagged)
+        };
+        if !(named("name") || named("model")) {
+            continue;
+        }
+        let digest = model["digest"].as_str().filter(|d| !d.is_empty())?;
+        if found.is_some_and(|d| d != digest) {
+            return None;
+        }
+        found = Some(digest);
+    }
+    found.map(String::from)
 }
 fn loopback_literal(url: &Url) -> bool {
     url.host_str().is_some_and(|h| {
@@ -331,6 +397,9 @@ impl HttpEmbedder {
             .pool_max_idle_per_host(POOL_IDLE_PER_HOST)
             .build(https);
         Ok(Arc::new(Self {
+            listing: listing_url(&config.shape, &url),
+            reply_digest: AtomicBool::new(false),
+            listed: Mutex::new(None),
             config,
             url,
             token,
@@ -338,10 +407,99 @@ impl HttpEmbedder {
             scanner,
         }))
     }
+    /// Plain HTTP resolves once and pins the connect address, so DNS cannot
+    /// change between the policy check and the connection. HTTPS connects
+    /// through its own resolver and has no pinned address.
+    async fn pin(&self) -> Result<Option<IpAddr>, EmbedError> {
+        if self.url.scheme() != "http" {
+            return Ok(None);
+        }
+        let addresses: Vec<_> = tokio::net::lookup_host((
+            self.host().trim_matches(['[', ']']),
+            self.url.port_or_known_default().unwrap(),
+        ))
+        .await
+        .map_err(|_| EmbedError::new("embedder-unavailable"))?
+        .collect();
+        if addresses.is_empty() || addresses.iter().any(|a| !private(a.ip())) {
+            return Err(EmbedError::new("endpoint-refused"));
+        }
+        Ok(Some(addresses[0].ip()))
+    }
+    /// The digest the server's model listing reports for the configured
+    /// model, for a reply that carried none. `Ok(None)` when this endpoint
+    /// has no listing, the listing does not answer 200, or it does not name
+    /// the model. A query reuses a reading younger than [`LISTING_TTL`]. A
+    /// document batch and the breaker's probe always read again, and `send`
+    /// calls this on both sides of their request. A digest that changed
+    /// refuses every reply from the next reading on. One reading that does
+    /// not finish inside `budget` is `embedder-timeout`.
+    async fn listing_digest(
+        &self,
+        kind: Kind,
+        pinned: Option<IpAddr>,
+        budget: Duration,
+    ) -> Result<Option<String>, EmbedError> {
+        let Some(listing) = &self.listing else {
+            return Ok(None);
+        };
+        if kind == Kind::Query {
+            let listed = self.listed.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(listed) = listed.as_ref().filter(|l| l.at.elapsed() < LISTING_TTL) {
+                return Ok(listed.digest.clone());
+            }
+        }
+        let mut url = listing.clone();
+        if let Some(ip) = pinned {
+            // The pinned address the embedding request uses, already checked.
+            url.set_ip_host(ip)
+                .map_err(|_| EmbedError::new("endpoint-refused"))?;
+        }
+        // No card or query text goes into this request. The token goes only
+        // to the origin that already received it with the embedding request.
+        let req = hyper::Request::get(url.as_str())
+            .header("Host", self.url.authority())
+            .header("Authorization", self.token.clone())
+            .body(Full::new(Bytes::new()))
+            .map_err(|_| EmbedError::new("endpoint-refused"))?;
+        let read = async {
+            let response = self
+                .client
+                .request(req)
+                .await
+                .map_err(|_| EmbedError::new("embedder-unavailable"))?;
+            if response.status().as_u16() != 200 {
+                return Ok(None);
+            }
+            let bytes = Limited::new(response.into_body(), LISTING_BYTES)
+                .collect()
+                .await
+                .map_err(|_| EmbedError::new("embedder-response-invalid"))?
+                .to_bytes();
+            let value: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| EmbedError::new("embedder-response-invalid"))?;
+            Ok(listed_digest(&value, &self.config.id.name))
+        };
+        // The headers and the body together, so a listing that stalls at
+        // either point gives the rest of the deadline back to the caller.
+        let digest = tokio::time::timeout(budget, read)
+            .await
+            .unwrap_or_else(|_| Err(EmbedError::new("embedder-timeout")))?;
+        *self.listed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Listed {
+            digest: digest.clone(),
+            at: Instant::now(),
+        });
+        Ok(digest)
+    }
     pub fn host(&self) -> &str {
         self.url.host_str().unwrap_or("")
     }
-    async fn send(&self, kind: Kind, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedError> {
+    async fn send(
+        &self,
+        kind: Kind,
+        texts: Vec<String>,
+        deadline: Duration,
+    ) -> Result<Vec<Vec<f32>>, EmbedError> {
         if texts.is_empty()
             || texts.len()
                 > if kind == Kind::Document {
@@ -377,28 +535,40 @@ impl HttpEmbedder {
             return Err(EmbedError::new("content-private"));
         }
         let mut url = self.url.clone();
-        if url.scheme() == "http" {
-            // Resolve once and pin the connect address. No DNS rebinding between policy and connect.
-            let addresses: Vec<_> = tokio::net::lookup_host((
-                self.host().trim_matches(['[', ']']),
-                url.port_or_known_default().unwrap(),
-            ))
-            .await
-            .map_err(|_| EmbedError::new("embedder-unavailable"))?
-            .collect();
-            if addresses.is_empty() || addresses.iter().any(|a| !private(a.ip())) {
-                return Err(EmbedError::new("endpoint-refused"));
-            }
-            if unscanned && !unscanned_permitted(&url, Some(addresses[0].ip())) {
+        let pinned = self.pin().await?;
+        if let Some(ip) = pinned {
+            if unscanned && !unscanned_permitted(&url, Some(ip)) {
                 return Err(EmbedError::new("scan-unavailable"));
             }
             // `localhost` mapped to a LAN host gets no private text.
-            if private_text && !private_permitted(&url, Some(addresses[0].ip())) {
+            if private_text && !private_permitted(&url, Some(ip)) {
                 return Err(EmbedError::new("content-private"));
             }
-            url.set_ip_host(addresses[0].ip())
+            url.set_ip_host(ip)
                 .map_err(|_| EmbedError::new("endpoint-refused"))?;
         }
+        // A document batch is stored, and the probe closes the breaker, so
+        // both are bracketed: the listing is read here, before the request,
+        // and again after the reply. The model's identity comes from a
+        // second route, and one reading after the reply cannot tell a reply
+        // computed by another model that was replaced just before that
+        // reading. The outcome counts only for a reply that carries no
+        // digest, so a failure or a stall here does not refuse a reply that
+        // does. Each reading has its own share of the caller's deadline. A
+        // query is not stored and keeps its single reading.
+        //
+        // An endpoint whose last reply carried a digest is not read here at
+        // all: its replies identify the model themselves, as they did
+        // before the listing existed. If such an endpoint then answers
+        // without a digest, that reply has no reading before it and is
+        // refused below, and the next call is bracketed again.
+        let budget = listing_budget(deadline);
+        let bracketed = kind != Kind::Query && self.listing.is_some();
+        let before = if bracketed && !self.reply_digest.load(Ordering::Relaxed) {
+            Some(self.listing_digest(kind, pinned, budget).await)
+        } else {
+            None
+        };
         let payload = if self.config.shape == "api/embed" {
             json!({"model": self.config.id.name, "input": texts, "truncate": false})
         } else {
@@ -455,7 +625,29 @@ impl HttpEmbedder {
         .to_bytes();
         let value: Value = serde_json::from_slice(&bytes)
             .map_err(|_| EmbedError::new("embedder-response-invalid"))?;
-        let digest = value["model_digest"].as_str().or(header_digest.as_deref());
+        // A digest in the reply decides alone. Only a reply with none, from
+        // an endpoint with a model listing, is checked against that listing.
+        // For a bracketed call both readings must succeed inside their
+        // budgets and report the pin, or the vectors are dropped here and
+        // nothing is stored.
+        let listed;
+        let reported = value["model_digest"].as_str().or(header_digest.as_deref());
+        self.reply_digest
+            .store(reported.is_some(), Ordering::Relaxed);
+        let digest = match reported {
+            Some(reported) => Some(reported),
+            None => {
+                if bracketed {
+                    // No reading before the request is no evidence for it.
+                    let before = before.ok_or_else(|| EmbedError::new("digest-mismatch"))?;
+                    if before?.as_deref() != Some(self.config.id.model_digest.as_str()) {
+                        return Err(EmbedError::new("digest-mismatch"));
+                    }
+                }
+                listed = self.listing_digest(kind, pinned, budget).await?;
+                listed.as_deref()
+            }
+        };
         if digest != Some(self.config.id.model_digest.as_str())
             || header_digest
                 .as_ref()
@@ -505,7 +697,7 @@ impl Embedder for Arc<HttpEmbedder> {
     fn embed(&self, kind: Kind, texts: Vec<String>, deadline: Duration) -> Embedding {
         let this = self.clone();
         Box::pin(async move {
-            tokio::time::timeout(deadline, this.send(kind, texts))
+            tokio::time::timeout(deadline, this.send(kind, texts, deadline))
                 .await
                 .unwrap_or_else(|_| Err(EmbedError::new("embedder-timeout")))
         })

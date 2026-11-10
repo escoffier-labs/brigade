@@ -161,12 +161,17 @@ def hub_argv(
     trust_tailscale_identity: bool,
     trust_forwarded_proto: bool,
     route_modes: Sequence[str],
+    memory_config: Path | None = None,
 ) -> list[str]:
     argv = [str(binary), "--host", host, "--port", str(port), "--db", str(db_path)]
     if token_file is not None:
         argv += ["--token-file", str(token_file)]
     if deck_config_path is not None:
         argv += ["--deck-config", str(deck_config_path)]
+    if memory_config is not None:
+        # brigade-hub stops startup when a file named this way cannot be read
+        # or does not validate, and its log names the file it read.
+        argv += ["--memory-config", str(memory_config)]
     for flag, enabled in (
         ("--allow-admin-writes", allow_admin_writes),
         ("--require-sealed", require_sealed),
@@ -301,6 +306,7 @@ def run(
     trust_tailscale_identity: bool,
     trust_forwarded_proto: bool,
     route_modes: Sequence[str] = (),
+    memory_config: Path | None = None,
     hub_binary: Path | None = None,
     hub_sha256: str | None = None,
     hub_sha256_file: Path | None = None,
@@ -357,6 +363,7 @@ def run(
             trust_tailscale_identity=trust_tailscale_identity,
             trust_forwarded_proto=trust_forwarded_proto,
             route_modes=route_modes,
+            memory_config=memory_config,
         )
         return _supervise(
             argv,
@@ -365,6 +372,7 @@ def run(
             detail=(
                 f"brigade-hub front, managed Python upstream; db {db_path}; "
                 f"route modes {', '.join(route_modes) or 'defaults'}"
+                + (f"; memory config {memory_config}" if memory_config is not None else "")
             ),
             interval=interval,
             failures=failures,

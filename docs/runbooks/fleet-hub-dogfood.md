@@ -61,21 +61,49 @@ Secrets, in `ops/fleet-hub/secrets/` (mode 0700, ignored by Git):
   the state volume, so a volume copy alone cannot test guesses.
 - `front-authkey`: the private network's auth key for the front's first login.
 - `embed-token`: only for the `remote` embedder backend, the token the
-  endpoint probe passed with, mode 0400. Unlike the other secrets, setup
+  endpoint probe passed with, mode 0444. Unlike the other secrets, setup
   replaces it whenever a probe passes with a different token, and removes
   it when the configuration leaves the remote backend, so the hub never
   sends one endpoint's token to another. If setup fails and cannot put
   the previous configuration back, it leaves no token, and the hub answers
   in BM25 mode until setup is rerun.
-- `embed-local-token`: only for the `local` backend, mode 0400. The hub
+- `embed-local-token`: only for the `local` backend, mode 0444. The hub
   sends a bearer token to every embedder endpoint, so setup makes a random
-  one. The recipe's embedder ignores it.
+  one. The recipe's embedder ignores it. Setup resets a copy an earlier
+  version wrote with mode 0400, which the hub container could not read.
 - `operator-admin-token.txt`: the operator's copy of the admin token, mode
   0600. No container mounts it.
 
-Each other container file is mode 0444. The containers run as other UIDs and must
+Each container file is mode 0444. The containers run as other UIDs and must
 read the bind mount, so the 0700 directory protects the files from other host
-users.
+users. The hub itself accepts an embedder token only from a file its own user
+owns with mode 0400 or 0600. At each start the hub container's entrypoint
+copies the mounted token to `/run/brigade/embed_token` with that owner and
+mode 0400, on a tmpfs private to the container, and refuses a symlink at the
+mount. `config/hub.toml` names that copy.
+
+Setup creates `secrets/` with mode 0700 and never changes the mode of one
+that already exists. If group or other users can enter an existing `secrets/`,
+setup writes nothing and stops, because those users may already have read the
+mode 0444 tokens in it. Run `chmod 700 secrets`, rotate the admin token, the
+findings key and the embedder tokens if other users could have read them, then
+rerun setup.
+
+A mounted token the entrypoint cannot copy stops the hub only when
+`config/hub.toml` selects hybrid retrieval and its embedder reads
+`/run/brigade/embed_token`. The usual cause is a token file an earlier setup
+wrote with mode 0400, which the hub container's user (UID 10001) cannot read.
+The log then has one `error:` line that names the mount, and the fix is to
+rerun `bin/hub-setup.py` and start the hub again. With a lexical config, or an
+embedder that reads another token file, the same condition is a `warning:`
+line and the hub starts without a copy.
+
+The hub reads `config/hub.toml` because `compose.yaml` passes
+`--memory-config /etc/brigade/hub.toml`. Its log has one line naming the file
+and the retrieval mode, for example `memory configuration:
+/etc/brigade/hub.toml (named by --memory-config), retrieval hybrid`. An image
+built from a `BRIGADE_REF` older than that flag logs a warning and runs in
+BM25 mode.
 
 `brigade memory rescan` and `brigade memory reindex` accept only a mode-0600
 `--admin-token-file`, so they refuse the 0444 container copy. Pass the operator

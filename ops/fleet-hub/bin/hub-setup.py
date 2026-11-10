@@ -49,6 +49,10 @@ DEFAULT_EMBED_IMAGE = "ollama/ollama:0.18.0@sha256:e23e6499890325d31f3454cdc83f7
 LOCAL_ENDPOINT = "http://embedder:11434"
 # Where Compose mounts the embedder token in the hub container (compose.override.yaml).
 EMBED_TOKEN_MOUNT = "/run/secrets/embed_token"
+# Where hub/entry.py puts the hub's own copy of that mount, and what hub.toml names.
+# The hub accepts only a token file its own user owns with mode 0400 or 0600, and a
+# bind mount keeps the operator's ownership, so the entrypoint copies it at each start.
+EMBED_TOKEN_COPY = "/run/brigade/embed_token"
 # The token files under secrets/: the operator's remote token, and one setup makes for
 # the local backend. Separate files, so a switch between backends never reuses the
 # other backend's token and never needs to overwrite a secret.
@@ -151,7 +155,7 @@ def hybrid(model: dict[str, Any], **values: Any) -> Decision:
         input_chars=int(model["input_chars"]),
         query_prefix=str(model["query_prefix"]),
         query_prefix_version=int(model["query_prefix_version"]),
-        token_file=EMBED_TOKEN_MOUNT,
+        token_file=EMBED_TOKEN_COPY,
         **values,
     )
 
@@ -397,10 +401,59 @@ def _private_dir(path: Path) -> None:
     os.chmod(path, 0o700)
 
 
+def _require_private(folder: Path) -> None:
+    """Refuse a `secrets/` that group or other users can enter. Its mode is never changed here.
+
+    The mounted secrets are mode 0444 so the hub container's UID can read the
+    bind mount, which leaves the folder's mode 0700 as the only thing keeping
+    other host users out. A folder found wider than that may already have shown
+    its 0444 tokens to those users, so setup stops and says so. Tightening it
+    quietly would hide that, and only the operator can decide what to rotate.
+    """
+    if os.name != "posix":
+        return
+    mode = _check_dir(folder, "secrets/")
+    if mode is not None and mode & 0o077:
+        raise SetupError(
+            f"secrets/ has mode {mode:04o}, which lets group or other users in, and the token files in it are "
+            "mode 0444 for the hub container. Setup wrote nothing and left the folder as it is. Run chmod 700 "
+            "on it, rotate any token in it that other users could have read (the admin token, the findings key "
+            "and the embedder tokens), then rerun setup"
+        )
+
+
+def _secrets_dir(folder: Path) -> None:
+    """Make `secrets/` mode 0700 when it is absent, and refuse an existing one that is wider. Never chmod one.
+
+    A new folder is made under a umask of 0077, so it is 0700 whatever umask
+    setup was started with, and then read back for a filesystem that ignores the
+    mode. An existing folder is only looked at.
+    """
+    if _check_dir(folder, "secrets/") is None:
+        folder.parent.mkdir(parents=True, exist_ok=True)
+        previous = os.umask(0o077)
+        try:
+            os.mkdir(folder, 0o700)
+        except FileExistsError:
+            pass  # Made by someone else since the check: an existing folder, so it is checked and never chmodded.
+        else:
+            created = _check_dir(folder, "secrets/")
+            if os.name == "posix" and created != 0o700:
+                raise SetupError(
+                    f"secrets/ was created with mode {created or 0:04o}, not 0700. Check that this filesystem "
+                    "keeps POSIX modes, then rerun setup"
+                )
+            return
+        finally:
+            os.umask(previous)
+    _require_private(folder)
+
+
 def write_secret(path: Path, data: bytes, mode: int = 0o444) -> bool:
     """Create a secret once. Mode 0444 inside a 0700 directory: the container's own UID must read the bind mount.
 
-    Embedder tokens take 0400, the mode the hub's token rule accepts.
+    That holds for the embedder tokens too. The hub's token rule (its own user,
+    mode 0400 or 0600) is met by the copy hub/entry.py makes inside the container.
     """
     if path.exists():
         return False
@@ -551,7 +604,7 @@ def _ensure_operator_token_by_path(folder: Path) -> str | None:
 
 def ensure_secrets(project: Path, *, local_token: bool = False) -> list[str]:
     folder = project / "secrets"
-    # Checked before anything is created or chmodded under it, since both follow the path.
+    # Checked before anything is created under it, since that follows the path.
     #
     # Threat model: `secrets/` is 0700, so only its owner and root can change what is in it.
     # Two same-UID races remain and are accepted: swapping `secrets/` for a symlink between
@@ -561,7 +614,7 @@ def ensure_secrets(project: Path, *, local_token: bool = False) -> list[str]:
     # new, and the 0700 directory keeps other users out of both.
     if folder.is_symlink():
         raise SetupError("secrets/ is a symlink or not a directory; move it aside and rerun")
-    _private_dir(folder)
+    _secrets_dir(folder)
     created = []
     if write_secret(folder / "admin-token.txt", (secrets.token_urlsafe(32) + "\n").encode("ascii")):
         created.append("admin-token.txt")
@@ -579,9 +632,37 @@ def ensure_secrets(project: Path, *, local_token: bool = False) -> list[str]:
     # Setup makes this one and it only ever goes to the recipe's own embedder, so unlike
     # the remote token it never changes with the endpoint and is created once.
     local = EMBED_TOKEN_FILES["local"]
-    if local_token and write_secret(folder / local, (secrets.token_urlsafe(32) + "\n").encode("ascii"), 0o400):
-        created.append(local)
+    if local_token:
+        if write_secret(folder / local, (secrets.token_urlsafe(32) + "\n").encode("ascii")):
+            created.append(local)
+        elif _reset_container_mode(folder, local):
+            created.append(f"{local} (mode reset to 0444)")
     return created
+
+
+def _reset_container_mode(folder: Path, name: str) -> bool:
+    """Reset secrets/`name` to 0444 if it has another mode. Returns whether it changed.
+
+    Setup before #2469 wrote the local embedder token 0400, which the hub
+    container's UID cannot read through the bind mount. The mode changes through
+    a descriptor opened without following a symlink, and a symlink is refused.
+    """
+    if os.name != "posix":
+        return False
+    dir_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        fd = _open_regular(name, dir_fd)
+        if fd is None:
+            return False
+        try:
+            if stat.S_IMODE(os.fstat(fd).st_mode) == 0o444:
+                return False
+            os.fchmod(fd, 0o444)
+            return True
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dir_fd)
 
 
 _WINDOWS = os.name == "nt"
@@ -667,10 +748,13 @@ class SetupFiles:
       leaves the endpoint and the token exactly as they are, (b) write
       config/hub.toml and the other generated files, (c) install the new probed
       token last. Process death at any point leaves no token or the matching pair.
-    - Rollback (restore): remove the remote token first, restore every other
-      file and directory, and put the old token back only if all of that
-      succeeded. Any failure or BaseException in the rollback leaves no remote
-      token, and setup says it must be rerun.
+    - Rollback (restore): remove the remote token first. If it cannot be
+      removed, restore returns early and keeps this run's files in place, since
+      that token matches them and putting the old files back would pair it with
+      the old endpoint. Otherwise restore every other file and directory, and
+      put the old token back only if all of that succeeded. Any later failure
+      or BaseException in the rollback leaves no remote token, and setup says
+      it must be rerun.
 
     The local token needs no such rule: it is only ever paired with the recipe's
     own embedder, whose endpoint never changes, and a remote config mounts the
@@ -718,8 +802,11 @@ class SetupFiles:
     def restore(self) -> None:
         """Put everything back, the remote token last and only if everything else went back.
 
-        Reports names, never contents. A BaseException raised while restoring one
-        path does not stop the others, and is raised again at the end.
+        Returns early, restoring nothing, when the remote token cannot be removed:
+        the rollback then keeps this run's files in place, because that token
+        matches them and not the files from before. Reports names, never contents.
+        A BaseException raised while restoring one path does not stop the others,
+        and is raised again at the end.
         """
         left: list[str] = []
         interrupt: BaseException | None = None
@@ -760,7 +847,7 @@ class SetupFiles:
             if mode is None:
                 attempt(self._label(path), lambda path=path: _remove_created_dir(path))
             else:
-                attempt(self._label(path), lambda path=path, mode=mode: os.chmod(path, mode))
+                attempt(self._label(path), lambda path=path, mode=mode: _restore_dir_mode(path, mode))
         old_token = self.files.get(self.token)
         if not left and old_token is not None:
             attempt(self._label(self.token), lambda: _put_file(self.token, *old_token))
@@ -772,6 +859,12 @@ class SetupFiles:
             )
         if interrupt is not None:
             raise interrupt
+
+
+def _restore_dir_mode(path: Path, mode: int) -> None:
+    """Put back a directory's mode only if this run changed it, so a folder setup refused is never chmodded."""
+    if _check_dir(path, str(path)) != mode:
+        os.chmod(path, mode)
 
 
 def _remove_created_dir(path: Path) -> None:
@@ -812,7 +905,7 @@ def _drop_remote_token(project: Path, decision: Decision) -> bool:
 
 
 def install_probed_token(project: Path, decision: Decision) -> str | None:
-    """Forward step (c): install the token the remote probe passed as secrets/embed-token, mode 0400.
+    """Forward step (c): install the token the remote probe passed as secrets/embed-token, mode 0444.
 
     Runs after config/hub.toml names the endpoint it was probed against. Unlike
     the other secrets it is replaced, never kept: a new endpoint comes with its
@@ -823,14 +916,16 @@ def install_probed_token(project: Path, decision: Decision) -> str | None:
     folder = project / "secrets"
     target = folder / REMOTE_TOKEN
     data = (decision.probed_token + "\n").encode("utf-8")
-    _check_dir(folder, "secrets/")
+    # Checked again at the last step, right before the 0444 file is written.
+    _require_private(folder)
     if os.path.lexists(target) and (target.is_symlink() or not target.is_file()):
         raise SetupError(f"secrets/{REMOTE_TOKEN} is a symlink or not a regular file; move it aside and rerun")
     old = target.read_bytes() if target.exists() else None
-    if old is not None and secrets.compare_digest(old, data) and stat.S_IMODE(target.stat().st_mode) == 0o400:
+    if old is not None and secrets.compare_digest(old, data) and stat.S_IMODE(target.stat().st_mode) == 0o444:
         return None
-    # The hub's token rule: mode 0600 or 0400, owned by the hub's user.
-    _put_file(target, data, 0o400)
+    # 0444 inside the 0700 directory, like the other mounted secrets: the hub container's
+    # UID must read the bind mount. hub/entry.py makes the hub-owned 0400 copy the hub reads.
+    _put_file(target, data, 0o444)
     return REMOTE_TOKEN
 
 
@@ -846,6 +941,10 @@ def write_install(
 
     Returns what changed under secrets/, for the report.
     """
+    if with_secrets and _check_dir(project / "secrets", "secrets/") is not None:
+        # An existing secrets/ is judged before SetupFiles reads anything in it, so a refusal
+        # leaves its files exactly as they were. An absent one is made inside the transaction.
+        _require_private(project / "secrets")
     with all_or_nothing(project, backup_dir):
         created = ensure_secrets(project, local_token=decision.backend == "local") if with_secrets else []
         if backup_dir is not None:
