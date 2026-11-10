@@ -493,7 +493,10 @@ def delivery_report(payload: dict[str, Any], *, deadline_minutes: float, now: da
     if not math.isfinite(deadline_minutes) or deadline_minutes <= 0:
         raise fleet_client.FleetClientError("undelivered deadline must be a positive number of minutes")
     moment = datetime.now(timezone.utc) if now is None else now
-    cutoff = moment - timedelta(minutes=deadline_minutes)
+    try:
+        cutoff = moment - timedelta(minutes=deadline_minutes)
+    except OverflowError:
+        raise fleet_client.FleetClientError("undelivered deadline is too large") from None
     messages = []
     undelivered = []
     for message in payload["messages"]:
