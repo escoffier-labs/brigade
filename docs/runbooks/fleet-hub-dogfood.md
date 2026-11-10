@@ -79,8 +79,16 @@ brigade memory rescan --target . --admin-token-file secrets/operator-admin-token
 `bin/hub-setup.py init` and `switch --to hybrid` keep the operator copy equal
 to `admin-token.txt`. They create it when it is missing, rewrite it after the
 admin token changes and reset its mode to 0600. To add it to an existing
-install without rerunning setup, run this from the recipe directory:
-`install -m 0600 secrets/admin-token.txt secrets/operator-admin-token.txt`.
+install without rerunning setup, run this from the recipe directory. It
+writes a 0600 file inside `secrets/` and renames it over the copy, so the copy
+is never a partial file or wider than 0600:
+
+```bash
+operator_tmp="$(mktemp secrets/.operator-admin-token.XXXXXX)"
+cat secrets/admin-token.txt > "$operator_tmp"
+chmod 0600 "$operator_tmp"
+mv -fT "$operator_tmp" secrets/operator-admin-token.txt
+```
 
 ## Prerequisites
 

@@ -81,14 +81,19 @@ generated_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 test -n "$generated_token" || { echo "Token generation returned an empty value" >&2; exit 1; }
 printf '%s\n' "$generated_token" > secrets/admin-token.txt
 unset generated_token
-install -m 0600 secrets/admin-token.txt secrets/operator-admin-token.txt
+operator_tmp="$(mktemp secrets/.operator-admin-token.XXXXXX)"
+cat secrets/admin-token.txt > "$operator_tmp"
+chmod 0600 "$operator_tmp"
+mv -fT "$operator_tmp" secrets/operator-admin-token.txt
 chmod 0444 secrets/admin-token.txt
 ```
 
 The 0444 file is the container's copy. `brigade memory rescan` and
 `brigade memory reindex` accept only a mode-0600 `--admin-token-file`, so pass
-them `secrets/operator-admin-token.txt`. After rotating the token, repeat the
-`install` line so the two copies match.
+them `secrets/operator-admin-token.txt`. The four `operator_tmp` lines write it
+as a 0600 file inside `secrets/` and rename it into place, so the copy is never
+partial or wider than 0600. After rotating the token, repeat those four lines
+so the two copies match.
 
 Before starting the service, record the built image's immutable local image ID
 in an ignored Compose override. The base Compose file uses a version tag for

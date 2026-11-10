@@ -319,6 +319,110 @@ def test_setup_refuses_an_operator_copy_that_is_a_symlink(project, tmp_path):
     assert elsewhere.read_text(encoding="ascii") == "not the token\n"
 
 
+def _symlink_or_skip(link, target, **kwargs):
+    try:
+        link.symlink_to(target, **kwargs)
+    except OSError:
+        pytest.skip("symlinks are not available")
+
+
+@posix_modes
+def test_setup_refuses_a_symlinked_admin_token_source(project, tmp_path, capsys):
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    elsewhere = tmp_path / "elsewhere-token"
+    elsewhere.write_text("not-the-hub-token\n", encoding="ascii")
+    (folder / "admin-token.txt").chmod(0o600)
+    (folder / "admin-token.txt").unlink()
+    (folder / setup.OPERATOR_TOKEN).unlink()
+    _symlink_or_skip(folder / "admin-token.txt", elsewhere)
+    capsys.readouterr()
+    assert _init(project, tmp_path) == 1
+    err = capsys.readouterr().err
+    assert "secrets/admin-token.txt is a symlink" in err and "not-the-hub-token" not in err
+    assert not (folder / setup.OPERATOR_TOKEN).exists()
+
+
+@posix_modes
+def test_setup_refuses_a_symlinked_secrets_directory(project, tmp_path):
+    real = tmp_path / "real-secrets"
+    real.mkdir(mode=0o755)
+    _symlink_or_skip(project / "secrets", real, target_is_directory=True)
+    assert _init(project, tmp_path) == 1
+    assert list(real.iterdir()) == []
+    assert _mode(real) == 0o755
+
+
+@posix_modes
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_setup_refuses_a_non_regular_operator_copy(project, tmp_path, capsys, kind):
+    assert _init(project, tmp_path) == 0
+    operator = project / "secrets" / setup.OPERATOR_TOKEN
+    operator.unlink()
+    if kind == "fifo":
+        os.mkfifo(operator, 0o600)
+    else:
+        operator.mkdir()
+    capsys.readouterr()
+    # A FIFO must be refused, not opened in a way that blocks setup.
+    assert _init(project, tmp_path) == 1
+    assert f"secrets/{setup.OPERATOR_TOKEN} is not a regular file" in capsys.readouterr().err
+
+
+@posix_modes
+def test_a_swap_after_the_checks_never_chmods_the_swapped_in_file(project, tmp_path, monkeypatch):
+    """Swap the operator copy for a symlink after setup has read it, before the mode repair."""
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    operator = folder / setup.OPERATOR_TOKEN
+    operator.chmod(0o444)
+    victim = tmp_path / "victim"
+    victim.write_text("someone else's file\n", encoding="ascii")
+    victim.chmod(0o644)
+    real_compare = setup.secrets.compare_digest
+    swapped = []
+
+    def swap_then_compare(left, right):
+        # Both writers compare the copy with the token after reading it and before repairing its mode.
+        if not swapped:
+            operator.rename(folder / "aside")
+            operator.symlink_to(victim)
+            swapped.append(True)
+        return real_compare(left, right)
+
+    monkeypatch.setattr(setup.secrets, "compare_digest", swap_then_compare)
+    setup.ensure_operator_token(folder)
+    assert swapped
+    assert _mode(victim) == 0o644
+    assert victim.read_text(encoding="ascii") == "someone else's file\n"
+
+
+@posix_modes
+@pytest.mark.parametrize("umask", [0o000, 0o277])
+def test_the_staged_operator_copy_is_0600_under_any_umask(project, tmp_path, monkeypatch, umask):
+    staged = []
+    real_replace = os.replace
+
+    def spy(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        info = os.stat(src, dir_fd=src_dir_fd, follow_symlinks=False)
+        staged.append((os.path.basename(src), stat.S_IMODE(info.st_mode)))
+        return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    (folder / setup.OPERATOR_TOKEN).unlink()
+    monkeypatch.setattr(setup.os, "replace", spy)
+    # Only the copy's own write runs under the test umask: setup's other files are not the subject here.
+    previous = os.umask(umask)
+    try:
+        assert setup.ensure_operator_token(folder) is not None
+    finally:
+        os.umask(previous)
+    modes = [mode for name, mode in staged if name.startswith(f".{setup.OPERATOR_TOKEN}.")]
+    assert modes == [0o600]
+    assert _mode(folder / setup.OPERATOR_TOKEN) == 0o600
+
+
 def test_brigade_ref_needs_its_archive_digest_and_version(project, tmp_path):
     ref, digest = ("--brigade-ref", "0" * 40), ("--brigade-sha256", "f" * 64)
     assert _init(project, tmp_path, *ref) == 1
