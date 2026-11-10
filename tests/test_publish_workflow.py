@@ -18,6 +18,15 @@ STABLE_PUBLISH_TAG_FILTER = "v[0-9]+.[0-9]+.[0-9]+"
 STABLE_PUBLISH_TAG_GUARD = re.compile(r"v\d+\.\d+\.\d+")
 
 
+@pytest.mark.parametrize("workflow", ["publish.yml", "hub.yml"])
+def test_release_and_hub_workflows_pin_every_action_by_commit_sha(workflow):
+    text = (ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
+    refs = re.findall(r"^\s*(?:-\s+)?uses:\s*(\S+)", text, flags=re.MULTILINE)
+    assert refs
+    unpinned = [ref for ref in refs if not ref.startswith("./") and not re.search(r"@[0-9a-f]{40}$", ref)]
+    assert unpinned == []
+
+
 def test_publish_job_is_gated_by_matching_version_tag_before_environment():
     text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
     job = text.index("  build-and-publish:")
@@ -85,7 +94,7 @@ def test_publish_workflow_builds_the_complete_native_matrix_then_attests_and_rel
         "component-manifest-v1.json",
     ):
         assert subject in text
-    assert "actions/attest@v4" in text
+    assert "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4" in text
     assert "id-token: write" in text
     assert "attestations: write" in text
     assert "artifact-metadata: write" in text
@@ -107,9 +116,7 @@ def test_go_native_build_disables_setup_go_cache_for_the_cross_platform_matrix()
     text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
     section = text[text.index("  build-go-native:") : text.index("  assemble-release:")]
 
-    setup_go = section[
-        section.index("      - uses: actions/setup-go@v7") : section.index("      - name: Build pure-Go")
-    ]
+    setup_go = section[section.index("      - uses: actions/setup-go@") : section.index("      - name: Build pure-Go")]
     assert "go-version: stable" in setup_go
     assert "cache: false" in setup_go
 
@@ -209,7 +216,7 @@ def test_publish_workflow_builds_five_agent_notify_binaries_with_release_metadat
     # The wall-clock form must be absent so a re-run cannot drift the build date.
     assert 'BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"' not in section
     assert "date -u +%Y-%m-%dT%H:%M:%SZ" not in section
-    assert "actions/upload-artifact@v7" in section
+    assert "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7" in section
     assert "if-no-files-found: error" in section
 
 

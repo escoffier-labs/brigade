@@ -1,0 +1,1 @@
+- Pin every action in `publish.yml` and `hub.yml` to a full commit SHA, with the version tag in a trailing comment, and add a test that fails on any new tag reference in those two files (#2399).
