@@ -41,9 +41,18 @@ CONDUCTOR = "agent:conductor"
 
 
 @pytest.mark.parametrize("schema", [RUNTIME_SCHEMA, DUET_RUNTIME_SCHEMA])
+def test_fresh_runtime_config_template_lists_the_conductor_alias(schema):
+    document = runtime_template(schema)
+    assert CONDUCTOR_ALIAS == "conductor"
+    # Placeholders only: the template never carries a node UUID as the conductor recipient.
+    assert document["hub"]["recipients"]["conductor"] == "agent:conductor"
+
+
+# The template holds POSIX paths, which the parser accepts as absolute only on the platform Dot runs on.
+@requires_local_state
+@pytest.mark.parametrize("schema", [RUNTIME_SCHEMA, DUET_RUNTIME_SCHEMA])
 def test_fresh_runtime_config_lists_the_conductor_alias(schema):
     document = runtime_template(schema)
-    assert CONDUCTOR_ALIAS in document["hub"]["recipients"]
     runtime = parse_runtime(json.loads(json.dumps(document)), schema=schema)
     assert runtime.schema == schema
     assert CONDUCTOR_ALIAS == "conductor" and "conductor" in runtime.hub.recipients
@@ -56,6 +65,7 @@ def test_runtime_template_refuses_other_schemas():
         runtime_template(GROKBOT_INBOX_RUNTIME_SCHEMA)
 
 
+@requires_local_state
 @pytest.mark.parametrize("pack, schema", [("dot", RUNTIME_SCHEMA), ("duet", DUET_RUNTIME_SCHEMA)])
 def test_runtime_template_command_prints_a_document_that_parses(pack, schema, capsys):
     assert dot_main.main(["runtime-template", "--pack", pack]) == 0
