@@ -40,6 +40,18 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
 /// Rotate the epoch of the memory file at `path`, refusing on any check.
 pub fn rotate_restored(path: &Path, now_ms: i64) -> Result<Rotated, String> {
     let shown = path.display();
+    // SQLite resolves a symlink and uses the sidecars beside the real file, so
+    // checking `<link>-wal` would miss a stale WAL there. Refuse the link, then
+    // check sidecars against and open the one canonical path, which also
+    // settles any symlinked parent directory.
+    let link = std::fs::symlink_metadata(path).map_err(|e| format!("{shown}: {e}"))?;
+    if link.file_type().is_symlink() {
+        return Err(format!(
+            "{shown} is a symbolic link: pass the real path of the memory file, so the -wal and -journal checked are the ones SQLite would use"
+        ));
+    }
+    let real = std::fs::canonicalize(path).map_err(|e| format!("{shown}: {e}"))?;
+    let path = real.as_path();
     let metadata = std::fs::metadata(path).map_err(|e| format!("{shown}: {e}"))?;
     if !metadata.is_file() {
         return Err(format!("{shown} is not a regular file"));

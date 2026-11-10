@@ -237,3 +237,42 @@ async fn a_rerun_mints_another_unseen_epoch_and_changes_nothing_else() {
     assert_eq!(rows(&h.memory()), before);
     assert_eq!(first.user_version, schema::USER_VERSION);
 }
+
+/// SQLite follows a symlink and replays the WAL beside the real file, so a
+/// link must not let a stale WAL there pass the sidecar check.
+#[cfg(unix)]
+#[tokio::test]
+async fn refuses_a_symlinked_path_and_checks_sidecars_beside_the_real_file() {
+    let mut h = Hub::new();
+    h.put(NODE_TOKEN, "fleet", "linked", None, "one").await;
+    let copy = take_copy(&h, "copy.db");
+    restore_copy(&mut h, &copy);
+    let real = h.memory();
+    let wal = PathBuf::from(format!("{}-wal", real.display()));
+    std::fs::write(&wal, b"frames of the replaced file").unwrap();
+    let (file_before, wal_before) = (std::fs::read(&real).unwrap(), std::fs::read(&wal).unwrap());
+    // A link to the file, whose own `-wal` name holds nothing.
+    let link = h.dir.join("linked-memory.db");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let error = rotate_restored(&link, h.now()).unwrap_err();
+    assert!(error.contains("is a symbolic link"), "{error}");
+    let args = [
+        "memory-restore-epoch",
+        "--memory-db",
+        link.to_str().unwrap(),
+    ];
+    assert_eq!(restore::main(args.map(Into::into)), 1);
+    // A symlinked parent directory resolves to the real file's sidecars.
+    let parent = h.dir.join("linked-dir");
+    std::os::unix::fs::symlink(&h.dir, &parent).unwrap();
+    let through = parent.join("fleet-hub-memory.db");
+    let error = rotate_restored(&through, h.now()).unwrap_err();
+    assert!(
+        error.contains("-wal sits beside the memory file"),
+        "{error}"
+    );
+    let canonical = std::fs::canonicalize(&real).unwrap();
+    assert!(error.contains(&canonical.display().to_string()), "{error}");
+    assert_eq!(std::fs::read(&real).unwrap(), file_before);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+}

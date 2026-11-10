@@ -375,8 +375,8 @@ write of that kind becomes a local proposal.
 
    The command prints one JSON line with `previous_log_epoch` and the new
    `log_epoch`. Keep it with the restore record. It changes only the
-   `log_epoch` value and refuses, changing nothing, in these cases: a
-   process still holds the file, a non-empty `-wal` or any `-journal` sits
+   `log_epoch` value and refuses, changing nothing, in these cases: the
+   path is a symbolic link, a process still holds the file, a non-empty `-wal` or any `-journal` sits
    beside it, the file is not a memory file, its schema is newer than this
    `brigade-hub`, or SQLite's `quick_check` fails. Running it again starts
    another new epoch, which is safe. Never skip the command because an

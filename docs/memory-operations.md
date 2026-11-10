@@ -2057,7 +2057,8 @@ brigade-hub memory-restore-epoch --memory-db <state dir>/fleet-hub-memory.db
 
 It prints one JSON line with `previous_log_epoch` and the new `log_epoch`, and
 changes nothing else in the file. It refuses, exits 1 and leaves the file
-unchanged in these cases: a process still holds the file, a non-empty `-wal`
+unchanged in these cases: the path is a symbolic link (pass the real path), a
+process still holds the file, a non-empty `-wal`
 or any `-journal` sits beside it, the file is not a memory file, its schema is
 newer than this `brigade-hub`, or SQLite's `quick_check` fails. A copy from an
 older schema is accepted, and the hub migrates it when it opens it. Each run
