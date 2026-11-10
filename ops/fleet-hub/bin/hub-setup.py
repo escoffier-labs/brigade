@@ -941,6 +941,10 @@ def write_install(
 
     Returns what changed under secrets/, for the report.
     """
+    if with_secrets and _check_dir(project / "secrets", "secrets/") is not None:
+        # An existing secrets/ is judged before SetupFiles reads anything in it, so a refusal
+        # leaves its files exactly as they were. An absent one is made inside the transaction.
+        _require_private(project / "secrets")
     with all_or_nothing(project, backup_dir):
         created = ensure_secrets(project, local_token=decision.backend == "local") if with_secrets else []
         if backup_dir is not None:

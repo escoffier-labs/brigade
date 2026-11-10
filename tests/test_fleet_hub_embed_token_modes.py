@@ -135,13 +135,28 @@ def test_a_refused_secrets_folder_keeps_the_tokens_an_earlier_setup_left_in_it(p
     assert _init_remote(project, tmp_path) == 0
     folder = project / "secrets"
     kept = {path.name: path.read_bytes() for path in folder.iterdir()}
+    # A rollback that removes and rewrites a token gives back the same bytes on a new inode.
+    inodes = {path.name: path.stat().st_ino for path in folder.iterdir()}
     config = (project / "config" / "hub.toml").read_bytes()
     folder.chmod(0o755)
     assert _init_remote(project, tmp_path) != 0
     assert "secrets/ has mode 0755" in capsys.readouterr().err
     assert _mode(folder) == 0o755
     assert {path.name: path.read_bytes() for path in folder.iterdir()} == kept
+    assert {path.name: path.stat().st_ino for path in folder.iterdir()} == inodes
     assert (project / "config" / "hub.toml").read_bytes() == config
+
+
+@POSIX
+def test_a_refused_secrets_folder_is_judged_before_the_transaction_reads_it(project, tmp_path, monkeypatch):
+    assert _init_remote(project, tmp_path) == 0
+    (project / "secrets").chmod(0o755)
+
+    def no_transaction(*_args, **_kwargs):
+        raise AssertionError("SetupFiles snapshotted a secrets/ folder that setup refuses")
+
+    monkeypatch.setattr(setup, "SetupFiles", no_transaction)
+    assert _init_remote(project, tmp_path) != 0
 
 
 @POSIX
