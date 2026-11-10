@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
@@ -24,6 +24,9 @@ GROKBOT_INBOX_RUNTIME_SCHEMA = "brigade.grokbot-inbox.runtime.v1"
 GROKBOT_INBOX_PRINCIPAL = "agent:grokbot-inbox"
 # The alias every connector keeps for the conductor, so an agent can start a message to it.
 CONDUCTOR_ALIAS = "conductor"
+# What a connector-computed assignment permits. Nothing else is ever authorized by an inbox message.
+ASSIGNMENT_ACTIONS = ("create_branch", "commit", "push_branch", "open_pull_request")
+MAX_ASSIGNMENT_REPOSITORIES = 64
 MAX_SKILLS_DENY = 256
 MAX_RUNTIME_BYTES = 65_536
 
@@ -72,6 +75,8 @@ class HubConfig:
     message_token_file: Path = field(repr=False)
     poll_seconds: int
     recipients: Mapping[str, str]
+    # `assignments.repositories` from the runtime file. Empty means no inbox message is ever an assignment.
+    assignment_repositories: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -213,6 +218,20 @@ def _parse_repo(value: object) -> str:
     return digest_pr_repo
 
 
+def _with_assignments(hub: HubConfig, root: Mapping[str, object]) -> HubConfig:
+    """Attach the optional `assignments.repositories` allowlist of exact `owner/repo` names."""
+    if "assignments" not in root:
+        return hub
+    data = _object(root["assignments"], {"repositories"})
+    raw = data["repositories"]
+    if not isinstance(raw, list) or len(raw) > MAX_ASSIGNMENT_REPOSITORIES:
+        raise _invalid()
+    names = [_parse_repo(item) for item in raw]
+    if len(set(names)) != len(names):
+        raise _invalid()
+    return replace(hub, assignment_repositories=frozenset(names))
+
+
 def _parse_notify(root: Mapping[str, object]) -> tuple[str, ...] | None:
     if "notify_command" not in root:
         return None
@@ -254,7 +273,7 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
             "callback_hosts",
             "owner_authorization",
         },
-        optional={"notify_command", "messaging_enabled", "memory_push"},
+        optional={"notify_command", "messaging_enabled", "memory_push", "assignments"},
     )
     if root["schema"] != RUNTIME_SCHEMA:
         raise _invalid()
@@ -263,7 +282,7 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
 
     paths = _parse_dispatch_paths(root["paths"])
 
-    hub = _parse_hub(root["hub"])
+    hub = _with_assignments(_parse_hub(root["hub"]), root)
 
     dispatch_enabled = _boolean(root["dispatch_enabled"])
     events_enabled = _boolean(root["events_enabled"])
@@ -375,6 +394,7 @@ def _parse_duet_runtime(payload: object) -> Runtime:
             "dispatch_enabled",
             "owner_authorization",
             "dispatch_limits",
+            "assignments",
         },
     )
     if root["schema"] != DUET_RUNTIME_SCHEMA:
@@ -391,7 +411,7 @@ def _parse_duet_runtime(payload: object) -> Runtime:
         if "owner_authorization" in root or "dispatch_limits" in root:
             raise _invalid()
         paths = _parse_hosted_paths(root["paths"])
-    hub = _parse_hub(root["hub"])
+    hub = _with_assignments(_parse_hub(root["hub"]), root)
     # Duet never shares another agent's Hub principal, inbox or acknowledgement state.
     if hub.principal != DUET_PRINCIPAL:
         raise _invalid()
@@ -554,6 +574,8 @@ def runtime_template(schema: str = RUNTIME_SCHEMA) -> dict[str, object]:
             "recipients": {CONDUCTOR_ALIAS: "agent:conductor", "operator": "agent:operator"},
         },
         "digest_pr_repo": "example-org/example-project",
+        # Empty on purpose: no inbox message is an assignment until the owner lists a repository here.
+        "assignments": {"repositories": []},
     }
     if duet:
         document["messaging_enabled"] = True

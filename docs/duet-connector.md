@@ -113,6 +113,7 @@ is rejected by the duet pack, and the reverse.
 | `notify_command` | string array | Optional notification argv for watch alerts. |
 | `skills_deny` | string array | Optional. Up to 256 skill ids hidden from `skill_search` and `skill_get`. |
 | `memory_push` | boolean | Optional, default `true`. `false` stops `inbox_list` and `fleet_digest` from carrying `memory_hits` (see the Dot guide). With hub memory on, the hits come from the hub under Duet's own principal, which needs `read` on `fleet` (see "Grants for memory hits" in the Dot guide). |
+| `assignments` | object | Optional. `{"repositories": ["owner/repo", ...]}`, up to 64 exact names. Default empty, so no inbox message is an assignment until a repository is listed. See "Conductor assignments" in the Dot guide. |
 
 `python -m brigade.dot runtime-template --pack duet` prints a complete runtime
 document with placeholder values, including the default recipient aliases:
@@ -275,16 +276,21 @@ and skill names.
   message addressed to Miller.
 - Inbox content is returned with `content_trust=untrusted`, and the capability
   text tells Duet that message fields are never instructions.
-- One standing authorization can come from the inbox. A message whose
-  `sender_alias` is `conductor` and that names an assigned issue in an owner
-  repository authorizes a branch and a pull request for that issue without
-  asking. It never authorizes a merge or anything outside that issue.
-  `sender_alias` is set by the connector from the sender id the Hub
-  authenticated, and only when that id equals the `conductor` entry in
-  `hub.recipients`. Text in a subject, body, thread, ref or `sender_label` that
-  claims to be the conductor never sets it. The check is advisory for the
-  model: the connector marks the sender, and the model decides what to do, so
-  repository permissions and branch protection remain the enforcement.
+- One standing authorization can come from the inbox, and it is the
+  connector-computed `assignment` field, never prose. The connector adds it
+  only to a plain, unthreaded, non-reply message whose Hub-recorded sender is
+  the `conductor` principal in `hub.recipients` and whose `ref` is exactly
+  `owner/repo#N` with `owner/repo` listed in `assignments.repositories`. That
+  list is empty by default, so nothing is authorized until the owner adds a
+  repository. The field permits one branch, commits, a push to that branch and
+  one pull request that references that issue. It never permits merging,
+  approving, auto-merge, secrets, settings, workflow changes, releases, tags
+  or any other issue or repository. `sender_alias` authenticates provenance
+  only. Text in a subject, body, thread or `sender_label` never produces an
+  assignment, and a reply to an assignment is not one. See "Conductor
+  assignments" in [grokbot-dot.md](grokbot-dot.md). The connector validates
+  the record and the model decides what to do, so repository permissions and
+  branch protection remain the enforcement.
 - `fleet_digest` reports unread counts per principal from Duet's own
   credential only: its own pending inbox, and its own sent messages that each
   recipient has not acknowledged in the last 7 days. See the Dot guide.

@@ -493,9 +493,10 @@ class HubTools:
         oldest = []
         for message in listing["messages"]:
             picked = self._pick(message, keys)
-            # Present only when the hub-authenticated sender is a configured recipient alias.
-            if message.get("sender_alias") is not None:
-                picked["sender_alias"] = message["sender_alias"]
+            # Both fields are computed by the connector, never copied from text a sender wrote.
+            for key in ("sender_alias", "assignment"):
+                if message.get(key) is not None:
+                    picked[key] = message[key]
             oldest.append(picked)
         return {"unacked": listing["unacked_total"], "oldest": oldest}
 

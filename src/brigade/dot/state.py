@@ -11,7 +11,7 @@ import time
 from typing import Any, Callable, Iterable, Mapping
 
 from .contracts import require
-from .runtime_config import CONDUCTOR_ALIAS
+from .runtime_config import ASSIGNMENT_ACTIONS, CONDUCTOR_ALIAS
 from .safe_state import PrivateDatabase, redact_credentials
 
 MAX_OPERATIONS = 500
@@ -67,6 +67,46 @@ def sender_alias(sender: object, aliases: Mapping[str, str] | None) -> str | Non
     if aliases.get(CONDUCTOR_ALIAS) == sender:
         return CONDUCTOR_ALIAS
     return next((alias for alias in sorted(aliases) if aliases[alias] == sender), None)
+
+
+_ASSIGNMENT_REF_RE = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,9})")
+
+
+def assignment(
+    row: Mapping[str, Any],
+    *,
+    aliases: Mapping[str, str] | None,
+    repositories: Iterable[str],
+    own: Iterable[str] = (),
+) -> dict[str, Any] | None:
+    """The trusted assignment a mirrored inbox row carries, or None.
+
+    This is the only thing in an inbox message that authorizes work. The hub has a closed set of
+    message kinds (message, question, completion), so there is no dedicated assignment kind and the
+    record is the `ref` field of a plain message. Every condition is structural and all must hold:
+
+    - the hub-recorded sender id is the configured `conductor` recipient, that recipient is an
+      `agent:` principal, and it is not one of this connector's `own` ids, so a message the connector
+      sent to itself never qualifies.
+    - the kind is `message`, and the row is not a reply and carries no thread. The hub copies `ref`
+      and `thread` from the original onto a reply, so a reply to an assignment is not an assignment.
+    - `ref` is exactly `owner/repo#N` and `owner/repo` is in the configured allowlist.
+
+    The subject, body, thread and sender_label are never read.
+    """
+    allowed = frozenset(repositories)
+    conductor = (aliases or {}).get(CONDUCTOR_ALIAS)
+    sender, ref = row.get("sender"), row.get("ref")
+    if not allowed or not isinstance(conductor, str) or not conductor.startswith("agent:"):
+        return None
+    if sender != conductor or sender in frozenset(own):
+        return None
+    if (row.get("kind") or "message") != "message" or row.get("reply_to") is not None or row.get("thread"):
+        return None
+    match = _ASSIGNMENT_REF_RE.fullmatch(ref) if isinstance(ref, str) else None
+    if match is None or match.group(1) not in allowed:
+        return None
+    return {"repository": match.group(1), "issue": int(match.group(2)), "actions": list(ASSIGNMENT_ACTIONS)}
 
 
 def call_label(name: Any) -> str:
@@ -302,10 +342,13 @@ class BridgeState(PrivateDatabase):
         node_id: str,
         scope: str = "",
         aliases: Mapping[str, str] | None = None,
+        assignment_repositories: Iterable[str] = (),
+        own: Iterable[str] = (),
     ) -> dict[str, Any]:
         """List mirrored inbox rows. `aliases` (alias to recipient id) adds `sender_alias` to a message
         whose hub-authenticated sender is a configured recipient. It never reads `sender_label` or any
-        other field the sender controls."""
+        other field the sender controls. `assignment_repositories` adds the connector-computed
+        `assignment` object to a row that passes every check in `assignment`."""
         from .inbox_tools import legacy_message
 
         with self.transaction() as c:
@@ -318,11 +361,15 @@ class BridgeState(PrivateDatabase):
                 "SELECT COUNT(*) FROM hub_inbox WHERE scope=? AND acked_at IS NULL", (scope,)
             ).fetchone()[0]
         messages = []
-        for row in rows:
-            message = legacy_message(dict(row), node_id)
+        for stored in rows:
+            row = dict(stored)
+            message = legacy_message(row, node_id)
             alias = sender_alias(row["sender"], aliases)
             if alias is not None:
                 message["sender_alias"] = alias
+            assigned = assignment(row, aliases=aliases, repositories=assignment_repositories, own=own)
+            if assigned is not None:
+                message["assignment"] = assigned
             messages.append(message)
         return {"unacked_total": pending, "messages": messages}
 

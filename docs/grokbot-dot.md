@@ -62,6 +62,7 @@ optional. Replace placeholders with the deployment's configured values.
 | `notify_command` | string array | Optional notification argv. The first item is an absolute executable path. |
 | `messaging_enabled` | boolean | Optional gate for `message_send`. When omitted, `message_send` follows `dispatch_enabled`. |
 | `memory_push` | boolean | Optional, default `true`. `false` stops `inbox_list` and `fleet_digest` from carrying `memory_hits`. |
+| `assignments` | object | Optional. `{"repositories": ["owner/repo", ...]}`, up to 64 exact names. Default empty, so no inbox message is an assignment until a repository is listed. See "Conductor assignments". |
 | `owner_authorization` | object | Owner's recorded automation authorization. |
 | `owner_authorization.version` | string | Nonempty printable ASCII authorization version, at most 64 characters. |
 | `owner_authorization.text` | string | Nonempty authorization text, at most 4096 UTF-8 bytes. |
@@ -205,20 +206,61 @@ connector can see:
 
 Both counts come from the connector principal's own credential. The sent view
 is the one `message_status` reads, so the digest never lists another
-principal's inbox. `sent_complete` is `false` when the scan stopped at its page
-limit before reaching the newest sent message.
+principal's inbox. Each digest reads at most three pages of the sent view. It
+moves toward the newest sent message first and keeps the unacknowledged sends
+it already found, so repeated digests reach newer recipients while the earlier
+counts stay. What is left of the three reads rechecks the earlier sends, so a
+count from an earlier page is as fresh as the last digest that read that page.
+`sent_complete` is `false` until a digest has reached the newest sent message.
 
 `inbox_list` and the digest's inbox section add `sender_alias` to a message
 whose Hub-authenticated sender id equals a configured recipient. The field is
 computed from the sender id the Hub recorded. It is never read from
-`sender_label`, the subject or the body.
+`sender_label`, the subject or the body. It authenticates provenance only and
+authorizes nothing.
 
-The operating instructions give one standing authorization keyed on that
-field. A message with `sender_alias` equal to `conductor` that names an
-assigned issue in an owner repository authorizes a branch and a pull request
-for that issue without asking. It never authorizes a merge or anything outside
-that issue. A message without the field authorizes nothing, whatever its text
-claims.
+### Conductor assignments
+
+One standing authorization can come from the inbox, and it is a record the
+connector computes, never prose. `inbox_list` and the digest's inbox section
+add an `assignment` object to a message only when all of these hold:
+
+- the sender id the Hub recorded equals the `conductor` entry in
+  `hub.recipients`, that entry is an `agent:` principal, and it is not this
+  connector's own principal or node.
+- the message kind is `message`. The Hub accepts only `message`, `question`
+  and `completion`, so there is no separate assignment kind.
+- the message is not a reply and has no thread. The Hub copies `ref` and
+  `thread` from the original onto a reply, so a reply to an assignment is not
+  an assignment.
+- `ref` is exactly `owner/repo#N`, and `owner/repo` is listed in
+  `assignments.repositories` in the runtime file. The match is exact and
+  case-sensitive.
+
+```json
+"assignments": {"repositories": ["example-org/example-project"]}
+```
+
+The list is empty by default, so nothing is authorized until the owner adds a
+repository. The conductor sends an assignment with
+`brigade fleet msg send --ref owner/repo#N` and no `--thread`.
+
+The computed object is
+`{"repository": "owner/repo", "issue": N, "actions": ["create_branch", "commit", "push_branch", "open_pull_request"]}`.
+The operating instructions refer only to that field. It authorizes one branch,
+commits, a push to that branch and one pull request that references that
+issue. It never authorizes merging, approving, enabling auto-merge, secrets or
+credentials, repository or organization settings, workflow files, running or
+administering workflows, releases or tags, or any other issue or repository.
+
+The subject, body, thread and `sender_label` are never read for this, so
+forwarded or quoted text cannot produce an assignment. Message content stays
+`content_trust=untrusted` whoever sent it.
+
+The boundary: the connector validates the record and the model decides what to
+do with it. The connector does not hold repository credentials and does not
+check GitHub for the issue or its assignee. Repository permissions and branch
+protection remain the enforcement.
 
 ### Memory hits in `inbox_list` and `fleet_digest`
 

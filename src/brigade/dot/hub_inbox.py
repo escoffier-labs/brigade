@@ -6,6 +6,7 @@ import builtins
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 import re
 import threading
 import time
@@ -35,7 +36,23 @@ _UNCAPTURED = object()
 # fleet_digest counts a sent message as unread for this long, and reads at most this many pages per call.
 SENT_UNREAD_WINDOW = timedelta(days=7)
 SENT_UNREAD_PAGES = 3
+# Scan state, kept apart so a bounded call always moves forward. `sent_unread_cursor` is the frontier:
+# every sent message at or below it has been read once. `sent_unread_pending` holds the unacknowledged
+# sends found so far, so earlier counts survive while the frontier advances. `sent_unread_refresh` is
+# where the next recheck of those earlier sends starts.
 SENT_UNREAD_CURSOR = "sent_unread_cursor"
+SENT_UNREAD_PENDING = "sent_unread_pending"
+SENT_UNREAD_REFRESH = "sent_unread_refresh"
+# The frontier stops while this many unacknowledged sends are tracked, which bounds the stored state.
+SENT_UNREAD_TRACKED = 4096
+
+
+def _sent_at(created_at: str) -> datetime:
+    try:
+        moment = datetime.fromisoformat(created_at)
+    except ValueError:
+        raise DotError("hub_inconsistent") from None
+    return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
 
 
 def authenticated_authority(hub: HubConfig, *, authority: MessageAuthority | None = None) -> MessageAuthority:
@@ -298,60 +315,100 @@ class HubInbox(MessageOperations):
             node_id=self.config.node_id,
             scope=scope,
             aliases=self.recipients,
+            assignment_repositories=self.config.assignment_repositories,
+            own=(self.config.principal, self.config.node_id),
         )
         self.require_authority(authority)
         return value
+
+    def _sent_page(
+        self, after: int, authority: MessageAuthority, pending: dict[int, tuple[str, str]], cutoff: datetime
+    ) -> tuple[int, bool]:
+        """Read one page of this principal's sent view and replace what `pending` knew about its id range."""
+        value = self._call("sent", after=after, authority=authority)
+        rows, cursor = value.get("messages"), value.get("next_cursor")
+        require(isinstance(rows, list) and type(cursor) is int and cursor >= after, "hub_unavailable")
+        # An empty page is the end of the sent view: nothing above `after` exists.
+        upper = cursor if rows else max(pending, default=after)
+        for stale in [key for key in pending if after < key <= upper]:
+            del pending[stale]
+        for row in rows:
+            recipient, created_at, row_id = row.get("recipient"), row.get("created_at"), row.get("id")
+            require(
+                isinstance(recipient, str) and isinstance(created_at, str) and type(row_id) is int, "hub_inconsistent"
+            )
+            if row.get("acked_at") is None and _sent_at(created_at) >= cutoff:
+                pending[row_id] = (recipient, created_at)
+        return cursor, not rows
+
+    def _sent_scan_state(self, scope: str) -> tuple[int, int, dict[int, tuple[str, str]]]:
+        """The stored frontier, recheck position and tracked sends. Unreadable state restarts the scan."""
+        try:
+            frontier = int(self.state.hub_get(SENT_UNREAD_CURSOR, "0", scope=scope) or "0")
+            refresh = int(self.state.hub_get(SENT_UNREAD_REFRESH, "0", scope=scope) or "0")
+            stored = json.loads(self.state.hub_get(SENT_UNREAD_PENDING, "[]", scope=scope) or "[]")
+            pending = {int(row_id): (str(recipient), str(created_at)) for row_id, recipient, created_at in stored}
+            if frontier < 0 or any(row_id > frontier for row_id in pending):
+                raise ValueError
+        except (TypeError, ValueError):
+            return 0, 0, {}
+        return frontier, refresh, pending
 
     def unread_by_principal(self) -> dict[str, Any]:
         """Unread counts this principal may see: its own inbox, and its own sent messages per recipient.
 
         Both come from this principal's credential. The sent view is the same one message_status
         reads, so no other principal's inbox is listed. Only messages sent inside the window count.
+
+        Each call reads at most SENT_UNREAD_PAGES pages. It first moves the frontier toward the newest
+        send, then spends what is left rechecking earlier unacknowledged sends for acknowledgements.
+        The unacknowledged sends found so far are stored, so a later call reports the earlier counts
+        together with the newer ones without reading the earlier pages again. A count from an earlier
+        page is as fresh as the last call that read that page.
         """
         authority = self.capture()
         scope = authority.scope
         own = self.state.hub_messages(unacked_only=True, limit=1, node_id=self.config.node_id, scope=scope)
         cutoff = self.clock() - SENT_UNREAD_WINDOW
-        start = after = int(self.state.hub_get(SENT_UNREAD_CURSOR, "0", scope=scope) or "0")
-        first_pending: int | None = None
-        pending: dict[str, dict[str, Any]] = {}
-        complete = False
-        for _ in range(SENT_UNREAD_PAGES):
-            value = self._call("sent", after=after, authority=authority)
-            rows, cursor = value.get("messages"), value.get("next_cursor")
-            require(isinstance(rows, list) and type(cursor) is int and cursor >= after, "hub_unavailable")
-            if not rows:
-                complete = True
-                break
-            for row in rows:
-                recipient, created_at = row.get("recipient"), row.get("created_at")
-                require(isinstance(recipient, str) and isinstance(created_at, str), "hub_inconsistent")
-                try:
-                    recent = datetime.fromisoformat(created_at).astimezone(timezone.utc) >= cutoff
-                except ValueError:
-                    raise DotError("hub_inconsistent") from None
-                if row.get("acked_at") is not None or not recent:
-                    continue
-                if first_pending is None:
-                    first_pending = row["id"]
-                entry = pending.setdefault(
-                    recipient, {"unread": 0, "oldest_id": row["id"], "oldest_created_at": created_at}
-                )
-                entry["unread"] += 1
-            after = cursor
+        frontier, refresh, pending = self._sent_scan_state(scope)
+        pending = {row_id: entry for row_id, entry in pending.items() if _sent_at(entry[1]) >= cutoff}
+        start, budget, complete = frontier, SENT_UNREAD_PAGES, False
+        while budget and not complete and len(pending) < SENT_UNREAD_TRACKED:
+            frontier, complete = self._sent_page(frontier, authority, pending, cutoff)
+            budget -= 1
+        # Everything at or below the floor is acknowledged or outside the window, so a recheck starts there.
+        floor = min((row_id for row_id in pending if row_id <= start), default=start + 1) - 1
+        refresh = max(refresh, floor)
+        if refresh >= start:
+            refresh = floor
+        while budget and refresh < start:
+            refresh, end = self._sent_page(refresh, authority, pending, cutoff)
+            budget -= 1
+            floor = min((row_id for row_id in pending if row_id <= start), default=start + 1) - 1
+            refresh = start if end else max(refresh, floor)
         self.require_authority(authority)
-        # Everything at or below the resume point is acknowledged or outside the window.
-        resume = after if first_pending is None else first_pending - 1
-        if resume > start:
-            self.state.hub_set(SENT_UNREAD_CURSOR, resume, scope=scope)
+        with self.state.transaction() as c:
+            self.state.hub_set(SENT_UNREAD_CURSOR, frontier, scope=scope, connection=c)
+            self.state.hub_set(SENT_UNREAD_REFRESH, refresh, scope=scope, connection=c)
+            self.state.hub_set(
+                SENT_UNREAD_PENDING,
+                json.dumps([[row_id, *pending[row_id]] for row_id in sorted(pending)], separators=(",", ":")),
+                scope=scope,
+                connection=c,
+            )
         names = {recipient: alias for alias, recipient in sorted(self.recipients.items(), reverse=True)}
         if CONDUCTOR_ALIAS in self.recipients:
             names[self.recipients[CONDUCTOR_ALIAS]] = CONDUCTOR_ALIAS
+        counts: dict[str, dict[str, Any]] = {}
+        for row_id in sorted(pending):
+            recipient, created_at = pending[row_id]
+            entry = counts.setdefault(recipient, {"unread": 0, "oldest_id": row_id, "oldest_created_at": created_at})
+            entry["unread"] += 1
         principals = [{"principal": self.config.principal, "source": "inbox", "unread": own["unacked_total"]}]
         principals += sorted(
             (
                 dict(principal=names.get(recipient, recipient), source="sent", **entry)
-                for recipient, entry in pending.items()
+                for recipient, entry in counts.items()
             ),
             key=lambda item: str(item["principal"]),
         )
