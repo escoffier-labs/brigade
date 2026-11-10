@@ -460,7 +460,7 @@ find the canonical path of its executable and name it in the exemption:
 ```bash
 ss -ltnpH 'sport = :3774'              # the holder's pid
 readlink -f /proc/<PID>/exe            # EXE_REALPATH
-checks/s31_checks.py access \
+sudo --preserve-env=BRIGADE_S31_FRONT_URL python3 checks/s31_checks.py access \
   --allow-loopback-listener "3774=/opt/desktop-app/bin/app//desktop app on host loopback, verified not to forward to the hub"
 ```
 
@@ -471,14 +471,24 @@ reason. The reason may contain any text and is required. The check rejects
 anything else, including a relative or non-normalized path and a path ending in
 ` (deleted)`. The flag repeats for more ports.
 
+An exemption needs a complete census of the processes holding the socket, and
+only root can read every process's fd table. Run the check with an exemption
+under `sudo`, as above. Without root every exemption is refused with the reason
+`exemption needs a complete holder census; run the access check as root`, and
+the listener stays FAIL. The check without exemptions still runs unprivileged.
+
 The exemption turns that listener into INFO only when all of these hold:
 
+- The check runs as root.
 - The netns container does not use host networking and publishes no port at
   all, because a published container port can sit behind any host port number.
+- The census is complete: every process's fd table and fd links on the host
+  were read. Any read error other than an fd or process vanishing during the
+  scan, such as a non-dumpable child that inherited the socket, refuses the
+  exemption, because a hidden co-holder could be the hub.
 - The check can name every process holding a LISTEN socket on that port on
-  loopback or the wildcard address, from the host's socket inode to process
-  mapping. Run the check as the account that owns the program, because another
-  account's sockets cannot be read and then the exemption does not apply.
+  loopback or the wildcard address, and can read each holder's executable link,
+  command name and cgroup.
 - Every holder's `/proc/<pid>/exe` resolves to exactly EXE_REALPATH. A copy at
   another path, another program, or a binary that was replaced or deleted
   since it started (its link reads `... (deleted)`) does not match.

@@ -487,6 +487,7 @@ def _access(
     hub_port=3774,
     allow=(),
     proc=None,
+    euid=0,
 ):
     import argparse
 
@@ -519,6 +520,7 @@ def _access(
     monkeypatch.setattr(checks, "IDENTITY_TIMEOUT", 1.0, raising=False)
     if proc is not None:
         monkeypatch.setattr(checks, "PROC", proc, raising=False)
+    monkeypatch.setattr(checks, "effective_uid", lambda: euid, raising=False)
     result = checks.Result("access")
     checks.check_access(argparse.Namespace(allow_loopback_listener=list(allow)), result)
     return result
@@ -616,7 +618,7 @@ def _fake_proc(tmp_path, port, *, holder_exe, comm="app", cgroup="0::/user.slice
     return proc
 
 
-def _exempted_access(monkeypatch, tmp_path, *, exempt_exe, holder_exe, bindings="{}", **proc_kwargs):
+def _exempted_access(monkeypatch, tmp_path, *, exempt_exe, holder_exe, bindings="{}", euid=0, **proc_kwargs):
     server = _http_listener(lambda _path, _headers: PAGE)
     port = server.server_address[1]
     try:
@@ -625,6 +627,7 @@ def _exempted_access(monkeypatch, tmp_path, *, exempt_exe, holder_exe, bindings=
             open_ports={("127.0.0.1", port)},
             hub_port=port,
             bindings=bindings,
+            euid=euid,
             allow=[f"{port}={exempt_exe}//desktop app on host loopback"],
             proc=_fake_proc(tmp_path, port, holder_exe=holder_exe, **proc_kwargs),
         )
@@ -661,6 +664,7 @@ def test_access_exempts_a_loopback_listener_held_by_the_named_program(monkeypatc
     assert result.status == "pass" and item["status"] == "INFO"
     assert item["detail"]["exemption"] == {"exe": app, "reason": "desktop app on host loopback"}
     assert item["detail"]["holders"] == [{"pid": 4242, "exe": app, "comm": "app"}]
+    assert item["detail"].get("census") == "complete (euid 0)"
 
 
 @posix_proc
@@ -713,6 +717,83 @@ def test_loopback_holders_fail_closed_without_a_proc_tree(tmp_path):
     assert checks.loopback_holders(3774, proc=tmp_path / "no-proc") is None
     (tmp_path / "proc" / "net").mkdir(parents=True)
     assert checks.loopback_holders(3774, proc=tmp_path / "proc") is None
+
+
+@posix_proc
+def test_access_refuses_every_exemption_without_root(monkeypatch, tmp_path):
+    app = _program(tmp_path)
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, euid=1000)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert item["detail"]["exemption_applied"] == (
+        "no: exemption needs a complete holder census; run the access check as root"
+    )
+
+
+def _readlink_failing_for(monkeypatch, fragment, error):
+    """os.readlink raising `error` for any path containing `fragment`, as a hidden fd does."""
+    real = os.readlink
+
+    def readlink(path, *args, **kwargs):
+        if fragment in str(path):
+            raise error
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "readlink", readlink)
+
+
+CO_HOLDER = {"comm": "app", "cgroup": "0::/user.slice"}
+
+
+@posix_proc
+def test_access_refuses_an_exemption_when_a_co_holder_fd_link_is_hidden(monkeypatch, tmp_path):
+    # A non-dumpable child that inherited the socket: its fd links raise PermissionError even for root.
+    app = _program(tmp_path)
+    _readlink_failing_for(monkeypatch, f"{os.sep}4243{os.sep}fd{os.sep}", PermissionError(13, "denied"))
+    result, item = _exempted_access(
+        monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, co_holder={"exe": app, **CO_HOLDER}
+    )
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert "census is incomplete" in item["detail"]["exemption_applied"]
+    assert item["detail"]["census"] == "incomplete: pid 4243 fd 3: PermissionError"
+
+
+@posix_proc
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads any fd directory")
+def test_access_refuses_an_exemption_when_a_co_holder_fd_table_is_unreadable(monkeypatch, tmp_path):
+    # Another account's process: its whole fd directory is unreadable.
+    app = _program(tmp_path)
+    proc = None
+    server = _http_listener(lambda _path, _headers: PAGE)
+    port = server.server_address[1]
+    try:
+        proc = _fake_proc(tmp_path, port, holder_exe=app, co_holder={"exe": app, **CO_HOLDER})
+        os.chmod(proc / "4243" / "fd", 0)
+        result = _access(
+            monkeypatch,
+            open_ports={("127.0.0.1", port)},
+            hub_port=port,
+            allow=[f"{port}={app}//desktop app on host loopback"],
+            proc=proc,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        if proc is not None:
+            os.chmod(proc / "4243" / "fd", 0o700)
+    item = _loopback_item(result, port)
+    assert result.status == "fail" and "census is incomplete" in item["detail"]["exemption_applied"]
+
+
+@posix_proc
+def test_access_skips_an_fd_that_vanished_during_the_census(monkeypatch, tmp_path):
+    app = _program(tmp_path)
+    _readlink_failing_for(monkeypatch, f"{os.sep}4243{os.sep}fd{os.sep}", FileNotFoundError(2, "gone"))
+    result, item = _exempted_access(
+        monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, co_holder={"exe": app, **CO_HOLDER}
+    )
+    assert result.status == "pass" and item["status"] == "INFO"
+    assert item["detail"].get("census") == "complete (euid 0)"
+    assert [holder["pid"] for holder in item["detail"]["holders"]] == [4242]
 
 
 @posix_proc

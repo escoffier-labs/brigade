@@ -283,14 +283,30 @@ def probe_evidence(host: str, port: int, deadline: float | None = None) -> dict[
     return evidence
 
 
+CENSUS_NEEDS_ROOT = "exemption needs a complete holder census; run the access check as root"
+VANISHED = (FileNotFoundError, ProcessLookupError)
+
+
+class CensusIncomplete(Exception):
+    """A process's fd table or fd link could not be read, so a holder may be hidden."""
+
+
+def effective_uid() -> int | None:
+    """The effective uid, or None where the platform has none (no exemption can apply there)."""
+    return os.geteuid() if hasattr(os, "geteuid") else None
+
+
 def loopback_holders(port: int, proc: Path | None = None) -> list[dict[str, Any]] | None:
     """The processes holding host LISTEN sockets on `port` that loopback reaches, or None.
 
     Reads the host's /proc/net/tcp and tcp6 for LISTEN sockets on loopback or
     the wildcard address, then maps each socket inode to the processes whose
     fds hold it. None when no socket is found, when any socket has no readable
-    holder (as for another account's process), or when any process found
-    holding a socket has an unreadable exe link, comm or cgroup.
+    holder, or when any process found holding a socket has an unreadable exe
+    link, comm or cgroup. Raises CensusIncomplete when any process's fd table
+    or fd link cannot be read for a reason other than the fd or process
+    vanishing, because then a holder may be hidden. Only a scan as root can be
+    complete.
     """
     root = proc or PROC
     inodes: set[str] = set()
@@ -312,18 +328,23 @@ def loopback_holders(port: int, proc: Path | None = None) -> list[dict[str, Any]
     for entry in root.iterdir():
         if not entry.name.isdigit():
             continue
+        # Every process's fd table must be read: one hidden co-holder (another
+        # account, a non-dumpable child) could be the hub. Only an fd or a
+        # process that vanished while scanning is skipped.
         try:
             fds = list((entry / "fd").iterdir())
-        except OSError:
-            # Another account's fd table: its sockets are invisible here, and
-            # an inode no readable process holds leaves the lookup unresolved.
+        except VANISHED:
             continue
+        except OSError as exc:
+            raise CensusIncomplete(f"pid {entry.name} fd table: {type(exc).__name__}") from exc
         links = []
         for fd in fds:
             try:
                 links.append(os.readlink(fd))
-            except OSError:
-                continue  # closed while scanning
+            except VANISHED:
+                continue
+            except OSError as exc:
+                raise CensusIncomplete(f"pid {entry.name} fd {fd.name}: {type(exc).__name__}") from exc
         held = {link[8:-1] for link in links if link.startswith("socket:[")} & inodes
         if not held:
             continue
@@ -718,8 +739,9 @@ def check_access(args: argparse.Namespace, result: Result) -> None:
     ).split()
     # Any reachable listener is a FAIL, as on any address. On host loopback an
     # operator exemption (--allow-loopback-listener PORT=EXE_REALPATH//REASON)
-    # turns it into INFO only when the netns container is not on host
-    # networking and publishes no port, every socket holder can be named, each
+    # turns it into INFO only when the check runs as root (so the holder census
+    # covers every process), the netns container is not on host networking
+    # and publishes no port, every socket holder can be named, each
     # holder's /proc/<pid>/exe realpath equals EXE_REALPATH exactly (a deleted
     # binary reads "... (deleted)" and never matches), and no holder is the
     # hub's binary or in a container of the hub's image. The probe
@@ -745,10 +767,22 @@ def check_access(args: argparse.Namespace, result: Result) -> None:
             used.add(port)
             expected_exe, reason = exemptions[port]
             detail["exemption"] = {"exe": expected_exe, "reason": reason}
-            holders = loopback_holders(port)
+            census = ""
+            holders = None
+            if effective_uid() == 0:
+                try:
+                    holders = loopback_holders(port)
+                    census = "complete (euid 0)"
+                except CensusIncomplete as exc:
+                    census = f"incomplete: {exc}"
+            detail["census"] = census or "not taken (not root)"
             detail["holders"] = [{key: h[key] for key in ("pid", "exe", "comm")} for h in holders or []]
             if not own_namespace or publishes_any_port(bindings):
                 detail["exemption_applied"] = "no: the netns container uses host networking or publishes a port"
+            elif not census:
+                detail["exemption_applied"] = "no: " + CENSUS_NEEDS_ROOT
+            elif census.startswith("incomplete"):
+                detail["exemption_applied"] = "no: the holder census is incomplete, so a holder may be hidden"
             elif holders is None:
                 detail["exemption_applied"] = "no: the socket's holder process could not be identified"
             elif any(h["exe"] != expected_exe for h in holders):
@@ -1540,7 +1574,7 @@ def parser() -> argparse.ArgumentParser:
                 action="append",
                 default=[],
                 metavar="PORT=EXE_REALPATH//REASON",
-                help="Exempt a host loopback listener on PORT held only by the program at EXE_REALPATH; repeat.",
+                help="Exempt a host loopback listener on PORT held only by the program at EXE_REALPATH; needs root; repeat.",
             )
         elif name == "hardening":
             q.add_argument("--volume", required=True)
