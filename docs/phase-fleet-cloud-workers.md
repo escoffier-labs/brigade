@@ -137,6 +137,11 @@ session inventory. Any future launch requires hub admission, a proved durable
 session ID, and a provider-supported status surface. Brigade must not automate
 claude.ai cookies or undocumented HTTP endpoints.
 
+Update 2026-11-10: the conductor now launches Claude cloud sessions through
+one-time routines and registers them with `brigade run cloud register`. Brigade
+still does not launch them or hold a hub lease for them. See
+[Claude cloud capabilities](claude-cloud-capabilities.md#routine-route-2026-11-10).
+
 The first slice inventories `claude agents --json --all` through a bounded
 subprocess parser and labels it as installed-CLI observation. It does not call
 `claude --cloud` while the provider limit is zero.

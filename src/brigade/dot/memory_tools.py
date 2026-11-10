@@ -28,6 +28,10 @@ if TYPE_CHECKING:
 
 CARD_CHUNK_CHARS = 30000
 HANDOFF_ID_WINDOW_MS = 600_000
+# Shown with `inbox_untrusted`. It names no local path.
+INBOX_UNTRUSTED_HINT = (
+    "remove group and world write from the handoff inbox and its parent folders (a umask of 0002 is the common cause)"
+)
 TOKEN_COPY_PREFIX = ".memory-token-"
 # Well over the 30 second child timeout, so a sweep during a call never removes a live copy.
 TOKEN_COPY_MAX_AGE_SECONDS = 300
@@ -691,7 +695,7 @@ class MemoryTools:
                 env=self.environment,
             )
         except OSError:
-            return None, {"error": "handoff_unavailable"}
+            return None, {"error": "handoff_unavailable", "reason": "lint_state_unavailable"}
         finally:
             if state_fd is not None:
                 if lint_written:
@@ -724,7 +728,14 @@ class MemoryTools:
         require(isinstance(moment, datetime) and moment.utcoffset() is not None, "clock_unavailable")
         prefix = self.profile.handoff_prefix
         filename = f"{moment.astimezone():%Y-%m-%d-%H%M}-{prefix}-{slug}.md"
-        inbox = trusted_directory(self.handoff_inbox, code="handoff_unavailable")
+        try:
+            inbox = trusted_directory(self.handoff_inbox, code="handoff_unavailable")
+        except DotError:
+            # Name the failing step: a bare code sent the last live failure to the wrong one.
+            if not os.path.isdir(self.handoff_inbox):
+                return {"error": "handoff_unavailable", "reason": "inbox_missing"}
+            # The hint names no local path. The trust rule itself stays fail-closed.
+            return {"error": "handoff_unavailable", "reason": "inbox_untrusted", "hint": INBOX_UNTRUSTED_HINT}
         temporary = f".{prefix}-{uuid4().hex}.tmp"
         temporary_written = False
         try:
@@ -737,7 +748,7 @@ class MemoryTools:
             # Lint a private copy before anything appears in the ingested inbox.
             entry, refusal = self._lint_handoff(encoded)
             if refusal is not None or entry is None:
-                return refusal or {"error": "handoff_unavailable"}
+                return refusal or {"error": "handoff_unavailable", "reason": "lint_unavailable"}
             # Publish atomically and never overwrite: write a hidden temp file, then
             # hard-link it to the final name (link fails if the name exists).
             descriptor = os.open(
@@ -767,7 +778,7 @@ class MemoryTools:
         except DotError:
             raise
         except OSError:
-            return {"error": "handoff_unavailable"}
+            return {"error": "handoff_unavailable", "reason": "inbox_write_failed"}
         finally:
             if temporary_written:
                 try:

@@ -2513,16 +2513,16 @@ class TestCodexCloudCli:
         payload = json.loads(capsys.readouterr().out)
         assert payload["tasks"] == [{"job_id": "grokbot-active", "role": "implementation-worker", "state": "running"}]
         assert (
-            cli.main(["run", "cloud", "doctor", "--provider", "claude-cloud", "--target", str(tmp_path), "--json"]) == 1
+            cli.main(["run", "cloud", "doctor", "--provider", "claude-cloud", "--target", str(tmp_path), "--json"]) == 0
         )
-        assert json.loads(capsys.readouterr().out)["reason"] == "disabled-by-policy"
+        assert json.loads(capsys.readouterr().out)["reason"] == "conductor-routed"
         with pytest.raises(SystemExit) as rejected_setup:
             cli.main(
                 ["run", "cloud", "setup", "--provider", "cursor-cloud", "--target", str(tmp_path), "--env-id", "env-1"]
             )
         assert rejected_setup.value.code == 2
 
-    def test_claude_cloud_doctor_is_static_disabled_policy(self, tmp_path, capsys, monkeypatch):
+    def test_claude_cloud_doctor_is_static_conductor_routed(self, tmp_path, capsys, monkeypatch):
         monkeypatch.setattr(
             cursor_cloud,
             "list_agents",
@@ -2552,10 +2552,12 @@ class TestCodexCloudCli:
                     "--json",
                 ]
             )
-            == 1
+            == 0
         )
         payload = json.loads(capsys.readouterr().out)
-        assert payload["reason"] == "disabled-by-policy"
+        assert payload["reason"] == "conductor-routed"
+        assert payload["launch"] == "conductor-routine"
+        assert payload["configured"] is False and payload["reachable"] is False
 
 
 @pytest.mark.parametrize("operation", ["launch", "register", "persist", "recover", "directory"])
