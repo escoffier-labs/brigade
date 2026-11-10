@@ -18,7 +18,6 @@ import pytest
 
 from brigade import cli
 from brigade.config import Config, write_config
-from brigade.dot.contracts import DotError
 from brigade.dot.memory_tools import MemoryTools
 from brigade.dot.process import CommandResult, CommandRunner
 from brigade.dot.profile import DOT, DUET, ConnectorProfile
@@ -204,8 +203,7 @@ def test_connector_without_a_writer_inbox_refuses_instead_of_writing_elsewhere(p
     memory, runner = connector(profile, workspace, dot_private_dir)
     inbox = workspace / profile.handoff_inbox
     inbox.rmdir()
-    with pytest.raises(DotError, match="^handoff_unavailable$"):
-        memory.handoff_write("write-path", HANDOFF)
+    assert memory.handoff_write("write-path", HANDOFF) == {"error": "handoff_unavailable", "reason": "inbox_missing"}
     assert not inbox.exists()
     assert runner.argvs == []
     assert search(workspace) == []

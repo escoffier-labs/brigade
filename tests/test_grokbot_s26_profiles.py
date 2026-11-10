@@ -652,7 +652,10 @@ class StateDirFailures(ReadHelpers):
 
     @requires_local_state
     def test_the_hub_handoff_path_maps_a_state_dir_oserror_like_the_file_path(self):
-        assert self.pinned().handoff_write("bridge-probe", HANDOFF) == {"error": "handoff_unavailable"}
+        assert self.pinned().handoff_write("bridge-probe", HANDOFF) == {
+            "error": "handoff_unavailable",
+            "reason": "lint_state_unavailable",
+        }
 
     @requires_local_state
     def test_the_read_path_maps_a_state_dir_oserror_to_memory_unavailable(self):

@@ -264,6 +264,13 @@ and skill names.
 - `handoff_write` goes through the handoff linter and lands under
   `.claude/memory-handoffs` with a `-duet-` filename, so ingested knowledge is
   attributable and reviewable.
+  A refusal answers `handoff_unavailable` with a `reason` naming the step that
+  failed: `inbox_untrusted`, `inbox_missing`, `lint_state_unavailable`,
+  `lint_unavailable` or `inbox_write_failed`. The inbox and its parent folders
+  must not be group-writable or world-writable. A umask of 0002 commonly
+  creates them as 0775, which answers `inbox_untrusted`. Fix it on the host
+  with `chmod go-w` on the inbox and its parent folders.
+
   The next `brigade ingest` on a workspace that selects the `claude` writer
   harness reads that inbox, and a promoted card is then found by
   `brigade memory search`. `docs/grokbot-dot.md` describes the steps.
