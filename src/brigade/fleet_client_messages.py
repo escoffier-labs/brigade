@@ -481,6 +481,37 @@ def sent(
     return payload
 
 
+def delivery_report(payload: dict[str, Any], *, deadline_minutes: float, now: datetime | None = None) -> dict[str, Any]:
+    """Mark each sent message acknowledged, pending or undelivered against an acknowledgement deadline.
+
+    A send that reached the hub is stored, not delivered: the recipient may never read it. A message
+    with no `acked_at` that is older than the deadline is reported as undelivered, so the sender can
+    use another route instead of waiting.
+    """
+    if isinstance(deadline_minutes, bool) or not isinstance(deadline_minutes, (int, float)):
+        raise fleet_client.FleetClientError("undelivered deadline must be a number of minutes")
+    if not math.isfinite(deadline_minutes) or deadline_minutes <= 0:
+        raise fleet_client.FleetClientError("undelivered deadline must be a positive number of minutes")
+    moment = datetime.now(timezone.utc) if now is None else now
+    cutoff = moment - timedelta(minutes=deadline_minutes)
+    messages = []
+    undelivered = []
+    for message in payload["messages"]:
+        state = "acknowledged"
+        if message.get("acked_at") is None:
+            try:
+                created = datetime.fromisoformat(message["created_at"])
+            except (KeyError, TypeError, ValueError):
+                raise fleet_client.FleetClientError("fleet hub returned an invalid message page") from None
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            state = "undelivered" if created <= cutoff else "pending"
+        if state == "undelivered":
+            undelivered.append(message["id"])
+        messages.append({**message, "delivery": state})
+    return {**payload, "messages": messages, "undelivered": undelivered, "undelivered_after_minutes": deadline_minutes}
+
+
 def flush_credential(
     token_file: str | None = None,
     *,

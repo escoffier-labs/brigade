@@ -54,7 +54,7 @@ optional. Replace placeholders with the deployment's configured values.
 | `hub.node_id` | UUID string | Enrolled node identity. |
 | `hub.message_token_file` | absolute path | Protected message credential file reference, never the token. |
 | `hub.poll_seconds` | integer | Hub poll interval, 10 through 300 seconds. |
-| `hub.recipients` | object | Up to 16 aliases mapped to agent principals or node UUIDs. |
+| `hub.recipients` | object | Up to 16 aliases mapped to agent principals or node UUIDs. Keep a `conductor` alias for the conductor's principal. |
 | `dispatch_enabled` | boolean | Gate for the six dispatch/message tools marked below. |
 | `events_enabled` | boolean | Enable event capabilities, RPCs, workers, fleet polling, and webhooks. When false, pass requests straight to MCP. |
 | `digest_pr_repo` | string | Repository for digest PR queries, formatted `owner/repo`. |
@@ -69,6 +69,27 @@ optional. Replace placeholders with the deployment's configured values.
 Dot is one profile of this connector code. The duet pack runs the same code with
 its own runtime schema, identity and a smaller tool set. See
 [duet-connector.md](duet-connector.md).
+
+### Starting from the template
+
+`python -m brigade.dot runtime-template --pack dot` prints a complete runtime
+document with placeholder values. It reads no file and no credential. Replace
+every placeholder with the deployment's own value before writing the
+owner-only runtime file.
+
+The template's `hub.recipients` always lists a `conductor` alias:
+
+```json
+"recipients": {
+  "conductor": "agent:conductor",
+  "operator": "agent:operator"
+}
+```
+
+Map `conductor` to the conductor's enrolled principal or node UUID, and grant
+this connector's principal a send grant for it on the Hub. Without the alias
+the agent can answer a conductor message with `inbox_reply` but cannot start
+one with `message_send`.
 
 ## Setup and service units
 
@@ -160,6 +181,34 @@ this connector is a connector audience. `memory_card` refuses a card whose text 
 injection-shaped, and returns `{card_id, blocked}` with no text, plus `code: "memory_content_private"`
 when only the private class applies. `memory_search` still lists such a match by id, without its
 title, summary or tags, so the card can be opened locally. See `docs/memory-operations.md`.
+
+### Unread counts and the conductor alias
+
+`fleet_digest` carries an `unread` section with one entry per principal the
+connector can see:
+
+- its own principal, with `source: "inbox"` and the count of pending inbox
+  messages.
+- each recipient of a message this connector sent in the last 7 days that is
+  not yet acknowledged, with `source: "sent"`, the count, and the id and time
+  of the oldest one. A recipient with a configured alias is named by the alias.
+
+Both counts come from the connector principal's own credential. The sent view
+is the one `message_status` reads, so the digest never lists another
+principal's inbox. `sent_complete` is `false` when the scan stopped at its page
+limit before reaching the newest sent message.
+
+`inbox_list` and the digest's inbox section add `sender_alias` to a message
+whose Hub-authenticated sender id equals a configured recipient. The field is
+computed from the sender id the Hub recorded. It is never read from
+`sender_label`, the subject or the body.
+
+The operating instructions give one standing authorization keyed on that
+field. A message with `sender_alias` equal to `conductor` that names an
+assigned issue in an owner repository authorizes a branch and a pull request
+for that issue without asking. It never authorizes a merge or anything outside
+that issue. A message without the field authorizes nothing, whatever its text
+claims.
 
 ### Memory hits in `inbox_list` and `fleet_digest`
 

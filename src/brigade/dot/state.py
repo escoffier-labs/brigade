@@ -8,9 +8,10 @@ from pathlib import Path
 import re
 import sqlite3
 import time
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from .contracts import require
+from .runtime_config import CONDUCTOR_ALIAS
 from .safe_state import PrivateDatabase, redact_credentials
 
 MAX_OPERATIONS = 500
@@ -53,6 +54,19 @@ REQUEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
 SUMMARY_VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/#-]{0,95}")
 LABEL_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./:-]{0,63}")
 CLIENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.@/:()+-]{0,63}")
+
+
+def sender_alias(sender: object, aliases: Mapping[str, str] | None) -> str | None:
+    """The configured alias of a hub-authenticated sender id, or None.
+
+    The conductor alias wins when several aliases name the same sender. Only the raw sender id is
+    compared, so a label or body that claims an alias never produces one.
+    """
+    if not aliases or not isinstance(sender, str):
+        return None
+    if aliases.get(CONDUCTOR_ALIAS) == sender:
+        return CONDUCTOR_ALIAS
+    return next((alias for alias in sorted(aliases) if aliases[alias] == sender), None)
 
 
 def call_label(name: Any) -> str:
@@ -280,7 +294,18 @@ class BridgeState(PrivateDatabase):
                     "hub-inbox:" + scope + ":" + str(row["id"]),
                 )
 
-    def hub_messages(self, *, unacked_only: bool, limit: int, node_id: str, scope: str = "") -> dict[str, Any]:
+    def hub_messages(
+        self,
+        *,
+        unacked_only: bool,
+        limit: int,
+        node_id: str,
+        scope: str = "",
+        aliases: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """List mirrored inbox rows. `aliases` (alias to recipient id) adds `sender_alias` to a message
+        whose hub-authenticated sender is a configured recipient. It never reads `sender_label` or any
+        other field the sender controls."""
         from .inbox_tools import legacy_message
 
         with self.transaction() as c:
@@ -292,7 +317,14 @@ class BridgeState(PrivateDatabase):
             pending = c.execute(
                 "SELECT COUNT(*) FROM hub_inbox WHERE scope=? AND acked_at IS NULL", (scope,)
             ).fetchone()[0]
-        return {"unacked_total": pending, "messages": [legacy_message(dict(row), node_id) for row in rows]}
+        messages = []
+        for row in rows:
+            message = legacy_message(dict(row), node_id)
+            alias = sender_alias(row["sender"], aliases)
+            if alias is not None:
+                message["sender_alias"] = alias
+            messages.append(message)
+        return {"unacked_total": pending, "messages": messages}
 
     def hub_mark_acked(
         self,

@@ -107,12 +107,26 @@ is rejected by the duet pack, and the reverse.
 | `hub` | object | Fleet Hub settings, same keys as Dot. |
 | `hub.principal` | string | Exactly `agent:duet`. Any other principal is rejected. |
 | `hub.message_token_file` | absolute path | Duet's own message credential file, never Dot's. |
-| `hub.recipients` | object | Aliases Duet may send to, such as the operator and Miller. |
+| `hub.recipients` | object | Aliases Duet may send to, such as the conductor, the operator and Miller. Keep a `conductor` alias for the conductor's principal. |
 | `messaging_enabled` | boolean | Gate for `message_send` and `inbox_reply`. |
 | `digest_pr_repo` | string | Repository for digest PR queries, formatted `owner/repo`. |
 | `notify_command` | string array | Optional notification argv for watch alerts. |
 | `skills_deny` | string array | Optional. Up to 256 skill ids hidden from `skill_search` and `skill_get`. |
 | `memory_push` | boolean | Optional, default `true`. `false` stops `inbox_list` and `fleet_digest` from carrying `memory_hits` (see the Dot guide). With hub memory on, the hits come from the hub under Duet's own principal, which needs `read` on `fleet` (see "Grants for memory hits" in the Dot guide). |
+
+`python -m brigade.dot runtime-template --pack duet` prints a complete runtime
+document with placeholder values, including the default recipient aliases:
+
+```json
+"recipients": {
+  "conductor": "agent:conductor",
+  "operator": "agent:operator"
+}
+```
+
+Replace each placeholder, map `conductor` to the conductor's enrolled principal
+or node UUID, and give `agent:duet` a send grant for it on the Hub. Without the
+alias Duet can answer a conductor message but cannot start one.
 
 `events_enabled` and `callback_hosts` remain rejected. To enable dispatch,
 add these fields to the runtime JSON, adding the path members to the existing
@@ -261,6 +275,19 @@ and skill names.
   message addressed to Miller.
 - Inbox content is returned with `content_trust=untrusted`, and the capability
   text tells Duet that message fields are never instructions.
+- One standing authorization can come from the inbox. A message whose
+  `sender_alias` is `conductor` and that names an assigned issue in an owner
+  repository authorizes a branch and a pull request for that issue without
+  asking. It never authorizes a merge or anything outside that issue.
+  `sender_alias` is set by the connector from the sender id the Hub
+  authenticated, and only when that id equals the `conductor` entry in
+  `hub.recipients`. Text in a subject, body, thread, ref or `sender_label` that
+  claims to be the conductor never sets it. The check is advisory for the
+  model: the connector marks the sender, and the model decides what to do, so
+  repository permissions and branch protection remain the enforcement.
+- `fleet_digest` reports unread counts per principal from Duet's own
+  credential only: its own pending inbox, and its own sent messages that each
+  recipient has not acknowledged in the last 7 days. See the Dot guide.
 - `handoff_write` goes through the handoff linter and lands under
   `.claude/memory-handoffs` with a `-duet-` filename, so ingested knowledge is
   attributable and reviewable.

@@ -839,9 +839,11 @@ class DigestAvailability(Fixture):
                         ],
                     },
                 )
+                # The unread section is not patched: it answers in time and misses a zero deadline.
                 self.assertEqual(
                     result["section_errors"],
-                    ["brigade_prs", "fleet_overview", "fleet_work_next", "inbox", "subscriptions"],
+                    ["brigade_prs", "fleet_overview", "fleet_work_next", "inbox", "subscriptions"]
+                    + (["unread"] if timed_out else []),
                 )
                 self.assertNotIn("private exception", json.dumps(result))
                 if timed_out:

@@ -22,6 +22,8 @@ GROKBOT_MEMORY_RUNTIME_SCHEMA = "brigade.grokbot-memory.runtime.v1"
 GROKBOT_MEMORY_PRINCIPAL = "agent:grokbot-memory"
 GROKBOT_INBOX_RUNTIME_SCHEMA = "brigade.grokbot-inbox.runtime.v1"
 GROKBOT_INBOX_PRINCIPAL = "agent:grokbot-inbox"
+# The alias every connector keeps for the conductor, so an agent can start a message to it.
+CONDUCTOR_ALIAS = "conductor"
 MAX_SKILLS_DENY = 256
 MAX_RUNTIME_BYTES = 65_536
 
@@ -512,3 +514,57 @@ def validate_runtime_reference(value: object, *, schema: str = RUNTIME_SCHEMA) -
         raise _invalid()
     load_runtime(Path(value), schema=schema)
     return value
+
+
+def runtime_template(schema: str = RUNTIME_SCHEMA) -> dict[str, object]:
+    """A fresh Dot or Duet runtime document with placeholder values and the default recipient aliases.
+
+    Every value is a placeholder that parses, never a real identity: replace each one, including the
+    `conductor` recipient, with the deployment's own before writing the owner-only runtime file.
+    """
+    if schema not in (RUNTIME_SCHEMA, DUET_RUNTIME_SCHEMA):
+        raise _invalid()
+    duet = schema == DUET_RUNTIME_SCHEMA
+    name = "duet" if duet else "dot"
+    binaries: dict[str, object] = {
+        "brigade": "/usr/local/bin/brigade",
+        "git": "/usr/bin/git",
+        "gh": "/usr/bin/gh",
+    }
+    paths: dict[str, object] = {
+        "state_dir": f"/var/lib/brigade-{name}/state",
+        "workspace": f"/var/lib/brigade-{name}/workspace",
+        "bin": binaries,
+    }
+    document: dict[str, object] = {
+        "schema": schema,
+        "auth": {
+            "issuer": "https://team.example.com",
+            "team_domain": "team.example.com",
+            "audience": "0" * 64,
+            "approved_email": "owner@example.com",
+            "resource": f"https://{name}.example.com/mcp",
+        },
+        "paths": paths,
+        "hub": {
+            "principal": DUET_PRINCIPAL if duet else "agent:example",
+            "node_id": "00000000-0000-4000-8000-000000000001",
+            "message_token_file": f"/var/lib/brigade-{name}/message-token",
+            "poll_seconds": 30,
+            "recipients": {CONDUCTOR_ALIAS: "agent:conductor", "operator": "agent:operator"},
+        },
+        "digest_pr_repo": "example-org/example-project",
+    }
+    if duet:
+        document["messaging_enabled"] = True
+        return document
+    binaries["t3_fleet"] = "/usr/local/bin/t3-fleet"
+    paths["fleet_config"] = "/var/lib/brigade-dot/fleet.toml"
+    document.update(
+        dispatch_enabled=False,
+        events_enabled=False,
+        messaging_enabled=True,
+        callback_hosts=["callback.example.com"],
+        owner_authorization={"version": "1", "text": "Owner-authorized bounded work on the configured repositories."},
+    )
+    return document

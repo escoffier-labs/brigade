@@ -125,7 +125,12 @@ class FakeMessages:
                 )
             return dict(message=deepcopy(row))
         if action == "sent":
-            return dict(messages=deepcopy([r for r in self.rows if r["sender"] == caller and r["id"] in kwargs["ids"]]))
+            mine = [r for r in self.rows if r["sender"] == caller]
+            if kwargs.get("ids") is not None:
+                return dict(messages=deepcopy([r for r in mine if r["id"] in kwargs["ids"]]))
+            after = kwargs["after"]
+            rows = [r for r in mine if r["id"] > after][: self.page_size]
+            return deepcopy(dict(messages=rows, next_cursor=rows[-1]["id"] if rows else after))
         if action == "flush_credential":
             return 1
         raise AssertionError(action)

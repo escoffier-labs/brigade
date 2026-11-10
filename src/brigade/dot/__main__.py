@@ -13,6 +13,7 @@ from .contracts import MAX_MESSAGE_BYTES, DotError
 from .hub_inbox import HubInbox, default_subject
 from .lifecycle import _load_config
 from .profile import PROFILES, profile_for
+from .runtime_config import runtime_template
 from .state import BridgeState
 from .watch import gaps, load, parse_time, run_watch_once
 
@@ -133,7 +134,13 @@ def main(argv=None):
     for command in (watch, notify, calls):
         command.add_argument("--target", type=Path, required=True)
         command.add_argument("--pack", choices=tuple(PROFILES), default="dot")
+    template = commands.add_parser("runtime-template", allow_abbrev=False)
+    template.add_argument("--pack", choices=("dot", "duet"), default="dot")
     args = parser.parse_args(argv)
+    if args.command == "runtime-template":
+        # Placeholders only: no target, no runtime file and no credential is read.
+        print(json.dumps(runtime_template(profile_for(args.pack).runtime_schema), indent=2, sort_keys=True))
+        return 0
     try:
         if args.command == "watch":
             extra = {} if args.pack == "dot" else {"pack_id": args.pack}

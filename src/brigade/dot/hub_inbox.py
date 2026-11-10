@@ -28,10 +28,14 @@ from brigade.hub_messages import (
 
 from .contracts import MESSAGE_BODY, THREAD, DotError, _text, require
 from .profile import DOT, ConnectorProfile
-from .runtime_config import HubConfig
+from .runtime_config import CONDUCTOR_ALIAS, HubConfig
 from .state import BridgeState, _iso, utc_now
 
 _UNCAPTURED = object()
+# fleet_digest counts a sent message as unread for this long, and reads at most this many pages per call.
+SENT_UNREAD_WINDOW = timedelta(days=7)
+SENT_UNREAD_PAGES = 3
+SENT_UNREAD_CURSOR = "sent_unread_cursor"
 
 
 def authenticated_authority(hub: HubConfig, *, authority: MessageAuthority | None = None) -> MessageAuthority:
@@ -289,10 +293,73 @@ class HubInbox(MessageOperations):
                 raise
         self.require_authority(authority)
         value = self.state.hub_messages(
-            unacked_only=unacked_only, limit=limit, node_id=self.config.node_id, scope=scope
+            unacked_only=unacked_only,
+            limit=limit,
+            node_id=self.config.node_id,
+            scope=scope,
+            aliases=self.recipients,
         )
         self.require_authority(authority)
         return value
+
+    def unread_by_principal(self) -> dict[str, Any]:
+        """Unread counts this principal may see: its own inbox, and its own sent messages per recipient.
+
+        Both come from this principal's credential. The sent view is the same one message_status
+        reads, so no other principal's inbox is listed. Only messages sent inside the window count.
+        """
+        authority = self.capture()
+        scope = authority.scope
+        own = self.state.hub_messages(unacked_only=True, limit=1, node_id=self.config.node_id, scope=scope)
+        cutoff = self.clock() - SENT_UNREAD_WINDOW
+        start = after = int(self.state.hub_get(SENT_UNREAD_CURSOR, "0", scope=scope) or "0")
+        first_pending: int | None = None
+        pending: dict[str, dict[str, Any]] = {}
+        complete = False
+        for _ in range(SENT_UNREAD_PAGES):
+            value = self._call("sent", after=after, authority=authority)
+            rows, cursor = value.get("messages"), value.get("next_cursor")
+            require(isinstance(rows, list) and type(cursor) is int and cursor >= after, "hub_unavailable")
+            if not rows:
+                complete = True
+                break
+            for row in rows:
+                recipient, created_at = row.get("recipient"), row.get("created_at")
+                require(isinstance(recipient, str) and isinstance(created_at, str), "hub_inconsistent")
+                try:
+                    recent = datetime.fromisoformat(created_at).astimezone(timezone.utc) >= cutoff
+                except ValueError:
+                    raise DotError("hub_inconsistent") from None
+                if row.get("acked_at") is not None or not recent:
+                    continue
+                if first_pending is None:
+                    first_pending = row["id"]
+                entry = pending.setdefault(
+                    recipient, {"unread": 0, "oldest_id": row["id"], "oldest_created_at": created_at}
+                )
+                entry["unread"] += 1
+            after = cursor
+        self.require_authority(authority)
+        # Everything at or below the resume point is acknowledged or outside the window.
+        resume = after if first_pending is None else first_pending - 1
+        if resume > start:
+            self.state.hub_set(SENT_UNREAD_CURSOR, resume, scope=scope)
+        names = {recipient: alias for alias, recipient in sorted(self.recipients.items(), reverse=True)}
+        if CONDUCTOR_ALIAS in self.recipients:
+            names[self.recipients[CONDUCTOR_ALIAS]] = CONDUCTOR_ALIAS
+        principals = [{"principal": self.config.principal, "source": "inbox", "unread": own["unacked_total"]}]
+        principals += sorted(
+            (
+                dict(principal=names.get(recipient, recipient), source="sent", **entry)
+                for recipient, entry in pending.items()
+            ),
+            key=lambda item: str(item["principal"]),
+        )
+        return {
+            "principals": principals,
+            "sent_window_days": SENT_UNREAD_WINDOW.days,
+            "sent_complete": complete,
+        }
 
     def ack(self, ids: builtins.list[int]) -> dict[str, Any]:
         authority = self.capture()
