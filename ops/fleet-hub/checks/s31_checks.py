@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import http.client
 import json
 import os
 import posixpath
 import secrets
+import signal
 import socket
 import sqlite3
 import ssl
@@ -672,9 +674,191 @@ def check_fdatasync(args: argparse.Namespace, result: Result) -> None:
             Path(args.writer, "s31-writer.bin").unlink(missing_ok=True)
 
 
-def check_setup(args: argparse.Namespace, result: Result) -> None:
-    """Setup on throwaway project copies: the paths this host offers, and that BM25 never creates an embedder."""
+# The container path setup writes for the embedder token, and the secrets/ file
+# behind it for each backend (bin/hub-setup.py, EMBED_TOKEN_FILES).
+EMBED_TOKEN_MOUNT = "/run/secrets/embed_token"
+EMBED_TOKEN_FILES = {"local": "embed-local-token", "remote": "embed-token"}
+HUB_START_SECONDS = 30.0
+DEGRADED_SECONDS = 20.0
+
+
+def hub_binary(explicit: str | None) -> str | None:
+    """The brigade-hub binary: --hub-binary, BRIGADE_HUB_BINARY, PATH, then this checkout's build."""
     import shutil
+
+    for candidate in (
+        explicit,
+        os.environ.get("BRIGADE_HUB_BINARY"),
+        shutil.which("brigade-hub"),
+        str(REPO / "engines" / "hub" / "target" / "release" / "brigade-hub"),
+        str(REPO / "engines" / "hub" / "target" / "debug" / "brigade-hub"),
+    ):
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+        if explicit and candidate == explicit:
+            return None
+    return None
+
+
+def hub_python_problem(python: str) -> str | None:
+    """Why `python` cannot run the hub's managed upstream, which starts with -I and imports brigade."""
+    done = run([python, "-I", "-c", "import brigade"], timeout=30)
+    if done.returncode != 0:
+        return f"{python} -I cannot import brigade; pass --hub-python with the interpreter of the brigade install"
+    return None
+
+
+def hub_memory_config(project: Path, state: Path) -> Path:
+    """Setup's config/hub.toml with the container token path pointed at the secrets/ file Compose mounts there."""
+    import tomllib
+
+    text = (project / "config" / "hub.toml").read_text(encoding="utf-8")
+    embedder = tomllib.loads(text).get("memory", {}).get("embedder", {})
+    if embedder.get("token_file") == EMBED_TOKEN_MOUNT:
+        secret = project / "secrets" / EMBED_TOKEN_FILES[str(embedder.get("backend"))]
+        text = text.replace(f"token_file = {json.dumps(EMBED_TOKEN_MOUNT)}", f"token_file = {json.dumps(str(secret))}")
+    config = state / "memory.toml"
+    config.write_text(text, encoding="utf-8")
+    return config
+
+
+def memory_request(port: int, token: str, body: dict[str, Any]) -> tuple[int, Any]:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/memory",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        return exc.code, None
+
+
+def event_id() -> str:
+    """A time-ordered client event id: 48 bits of Unix milliseconds, 80 random bits, Crockford base32."""
+    alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+    value = (int(time.time() * 1000) << 80) | secrets.randbits(80)
+    return "".join(alphabet[(value >> (5 * i)) & 31] for i in reversed(range(26)))
+
+
+def hub_on_setup_config(binary: str, python: str, project: Path, *, embed: bool) -> dict[str, Any]:
+    """Start brigade-hub on a throwaway database with setup's config named by --memory-config.
+
+    A named config that the hub's parser or embedder checks refuse stops startup,
+    so a hub that answers /ready accepted it. With `embed`, one card is written so
+    the embed scheduler calls the embedder, and status is read again until it
+    reports `degraded` or the wait ends. Returns `ready` (the /ready status),
+    `retrieval` (the status route's retrieval fields) or `error` with the log's tail.
+    """
+    with tempfile.TemporaryDirectory(prefix="s31-hub-") as directory:
+        state = Path(directory)
+        (state / "home").mkdir(mode=0o700)
+        token = secrets.token_urlsafe(24)
+        token_file = state / "admin-token"
+        token_file.write_text(token + "\n", encoding="utf-8")
+        token_file.chmod(0o600)
+        config = hub_memory_config(project, state)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = int(probe.getsockname()[1])
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("BRIGADE_", "XDG_"))}
+        env.update(HOME=str(state / "home"), BRIGADE_HUB_PYTHON=python, PYTHONUNBUFFERED="1")
+        argv = [binary, "--host", "127.0.0.1", "--port", str(port), "--db", str(state / "fleet-hub.db")]
+        argv += ["--token-file", str(token_file), "--route-mode", "memory=native", "--memory-config", str(config)]
+        log_path = state / "hub.log"
+        with open(log_path, "wb") as log:
+            hub = subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True
+            )
+        try:
+            ready = 0
+            deadline = time.monotonic() + HUB_START_SECONDS
+            while time.monotonic() < deadline and hub.poll() is None:
+                try:
+                    ready, _ = get(f"http://127.0.0.1:{port}/ready", timeout=2)
+                except OSError:
+                    ready = 0
+                if ready == 200:
+                    break
+                time.sleep(0.25)
+            if ready != 200:
+                tail = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-3:]
+                return {"ready": ready, "error": f"hub exit {hub.poll()}: " + " | ".join(tail)}
+            status, body = memory_request(port, token, {"action": "status"})
+            retrieval = (body or {}).get("retrieval", {}) if status == 200 else {}
+            if embed and status == 200:
+                card = {
+                    "action": "put",
+                    "scope": "fleet",
+                    "card_id": "s31-setup-check",
+                    "base_revision": None,
+                    "text": "S31 setup check card for the embed scheduler.",
+                    "client_event_id": event_id(),
+                }
+                memory_request(port, token, card)
+                deadline = time.monotonic() + DEGRADED_SECONDS
+                while time.monotonic() < deadline and retrieval.get("state") != "degraded":
+                    time.sleep(0.5)
+                    status, body = memory_request(port, token, {"action": "status"})
+                    retrieval = (body or {}).get("retrieval", {}) if status == 200 else {}
+            return {"ready": ready, "status": status, "retrieval": retrieval}
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(hub.pid, signal.SIGTERM)
+            try:
+                hub.wait(timeout=40)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(hub.pid, signal.SIGKILL)
+                hub.wait()
+
+
+def accept_hub(
+    result: Result, hub: tuple[str, str] | None, project: Path, label: str, mode: str, unreachable: bool
+) -> None:
+    """Require the hub to start on the project's config and report `mode` in status.
+
+    Lexical needs state `ok`. Hybrid whose embedder this host cannot reach (the
+    recipe's embedder service by name, from outside Compose) must start and report
+    `degraded` once the embed scheduler has tried it, never refuse the config.
+    """
+    name = f"hub accepts the config after {label}"
+    if hub is None:
+        result.add("FAIL", name, "no hub to start (see the hub binary line)")
+        return
+    seen = hub_on_setup_config(hub[0], hub[1], project, embed=mode == "hybrid" and unreachable)
+    retrieval = seen.get("retrieval", {})
+    detail = {key: seen[key] for key in ("ready", "error") if key in seen} | {
+        key: retrieval.get(key) for key in ("mode", "effective", "state", "reason")
+    }
+    if mode == "lexical":
+        good = seen.get("ready") == 200 and retrieval.get("mode") == "lexical" and retrieval.get("state") == "ok"
+    elif unreachable:
+        good = seen.get("ready") == 200 and retrieval.get("mode") == "hybrid" and retrieval.get("state") == "degraded"
+    else:
+        good = seen.get("ready") == 200 and retrieval.get("mode") == "hybrid"
+    result.ok(good, name, detail)
+
+
+def check_setup(args: argparse.Namespace, result: Result) -> None:
+    """Setup on throwaway project copies: each path this host offers, a hub started on the config after init and after
+    each switch direction, and that setup never creates a container."""
+    import shutil
+
+    binary = hub_binary(args.hub_binary)
+    problem = None if binary else "no brigade-hub binary: pass --hub-binary or build engines/hub"
+    if binary and not problem:
+        problem = hub_python_problem(args.hub_python)
+    if problem:
+        result.add("FAIL", "hub binary", problem)
+        hub = None
+    else:
+        result.add("INFO", "hub binary", {"binary": binary, "python": args.hub_python})
+        hub = (str(binary), args.hub_python)
+
+    def setup(project: Path, *argv: str) -> subprocess.CompletedProcess[str]:
+        return run([sys.executable, str(project / "bin" / "hub-setup.py"), "--project-dir", str(project), *argv])
 
     with tempfile.TemporaryDirectory(prefix="s31-setup-") as scratch:
         for name, extra in (("gpu", []), ("remote", ["--no-gpu", *args.remote]), ("neither", ["--no-gpu"])):
@@ -685,27 +869,15 @@ def check_setup(args: argparse.Namespace, result: Result) -> None:
             shutil.copytree(
                 RECIPE, project, ignore=shutil.ignore_patterns(".env", "config", "secrets", "compose.override.yaml")
             )
-            done = run(
-                [
-                    sys.executable,
-                    str(project / "bin" / "hub-setup.py"),
-                    "--project-dir",
-                    str(project),
-                    "init",
-                    "--project-name",
-                    f"s31-setup-{name}",
-                    "--backup-dir",
-                    str(Path(scratch) / name / "backups"),
-                    *extra,
-                ]
-            )
+            backups = str(Path(scratch) / name / "backups")
+            done = setup(project, "init", "--project-name", f"s31-setup-{name}", "--backup-dir", backups, *extra)
             toml = (project / "config" / "hub.toml").read_text(encoding="utf-8") if done.returncode == 0 else ""
             result.add("INFO", f"setup ({name})", done.stdout.strip())
+            hybrid = 'retrieval = "hybrid"' in toml
             if name == "gpu":
-                hybrid = 'backend = "local"' in toml
                 with_reason = 'retrieval = "lexical"' in toml and "R1" in done.stdout
                 result.ok(
-                    hybrid or with_reason,
+                    'backend = "local"' in toml or with_reason,
                     "GPU runtime: gpu profile, local backend and an R1 model, or BM25 with the reason",
                 )
             elif name == "remote":
@@ -719,24 +891,31 @@ def check_setup(args: argparse.Namespace, result: Result) -> None:
                     'retrieval = "lexical"' in toml and "did not pass" in done.stdout,
                     "neither: BM25 mode and the failed checks",
                 )
+            if done.returncode == 0:
+                # From the host, the local backend's endpoint names the recipe's embedder
+                # service, which only resolves inside Compose, so that hybrid hub must degrade.
+                unreachable = name == "gpu"
+                accept_hub(result, hub, project, f"init ({name})", "hybrid" if hybrid else "lexical", unreachable)
+                if hybrid:
+                    to_lexical = setup(project, "switch", "--to", "lexical")
+                    result.ok(to_lexical.returncode == 0, f"setup ({name}) switch to lexical")
+                    accept_hub(result, hub, project, f"switch to lexical ({name})", "lexical", unreachable)
+                    to_hybrid = setup(project, "switch", "--to", "hybrid", *extra)
+                    result.ok(to_hybrid.returncode == 0, f"setup ({name}) switch back to hybrid")
+                    accept_hub(result, hub, project, f"switch to hybrid ({name})", "hybrid", unreachable)
+                elif name == "neither":
+                    refused = setup(project, "switch", "--to", "hybrid", "--no-gpu")
+                    after = (project / "config" / "hub.toml").read_text(encoding="utf-8")
+                    result.ok(
+                        refused.returncode != 0 and after == toml,
+                        "neither: switch to hybrid refused with no probed embedder, mode unchanged",
+                    )
             leftovers = run(
                 ["docker", "ps", "-a", "-q", "--filter", f"label=com.docker.compose.project=s31-setup-{name}"]
             ).stdout
             result.ok(not leftovers.strip(), f"setup ({name}) created no container")
-    result.add(
-        "PENDING",
-        "status fields (mode, effective, state) per Retrieval modes",
-        "needs the memory status route from S15",
-    )
-    # engines/hub/tests/setup_config.py starts the hub binary on setup's hybrid output in CI.
-    # Starting the Compose hub here would not prove more: it reads hub.toml beside its
-    # database, not the mounted config/hub.toml, and the embed token must be owned by the
-    # hub's user with mode 0600 or 0400 while Compose mounts the operator's 0444 copy.
-    result.add(
-        "PENDING",
-        "the Compose hub reads setup's config/hub.toml and its embedder token",
-        "needs --memory-config through fleet serve and a hub-owned embed token in the recipe",
-    )
+    # The hub above runs on the host with --memory-config. The Compose hub does not load
+    # setup's config yet (#2469), so this check proves the config, not the Compose wiring.
 
 
 def check_access(args: argparse.Namespace, result: Result) -> None:
@@ -1566,8 +1745,17 @@ def parser() -> argparse.ArgumentParser:
             q.add_argument("--writer", default=None, help="Directory for a synthetic agent writer during the runs.")
             q.add_argument("--slice", default=None, help="Run only the probe in this slice, e.g. brigade-hub.slice.")
         elif name == "setup":
+            q.add_argument("--hub-binary", default=None, help="brigade-hub to start on each config (default: found).")
             q.add_argument(
-                "--remote", nargs=argparse.REMAINDER, default=[], help="--remote-url URL --remote-token-file FILE"
+                "--hub-python",
+                default=os.environ.get("BRIGADE_HUB_PYTHON", sys.executable),
+                help="Interpreter for the hub's managed upstream; it must import brigade with -I.",
+            )
+            q.add_argument(
+                "--remote",
+                nargs=argparse.REMAINDER,
+                default=[],
+                help="Last: --remote-url URL --remote-token-file FILE",
             )
         elif name == "load":
             q.add_argument("--concurrency", type=int, default=64)

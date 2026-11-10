@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import tomllib
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -649,6 +650,116 @@ def test_switch_from_local_to_remote_mounts_the_operator_token(project, tmp_path
     assert (project / "secrets" / "embed-local-token").read_bytes() == local
     assert setup.main(["--project-dir", str(project), "switch", "--to", "lexical"]) == 0
     assert not (project / "compose.override.yaml").exists()
+
+
+def _switch_remote(project, url, token, post=None):
+    argv = ["--project-dir", str(project), "switch", "--to", "hybrid", "--no-gpu"]
+    argv += ["--remote-url", url, "--remote-token-file", str(token)]
+    return setup.main(argv, run=no_gpu_host, post=post or endpoint())
+
+
+def _named_token(tmp_path, name, value):
+    token = tmp_path / name
+    token.write_text(value + "\n", encoding="utf-8")
+    return token
+
+
+def test_switch_between_remote_endpoints_replaces_the_token(project, tmp_path, capsys):
+    token_a = _named_token(tmp_path, "a.token", "token-for-endpoint-a")
+    rc = _init(project, tmp_path, "--remote-url", "https://a.example.test", "--remote-token-file", str(token_a))
+    assert rc == 0
+    post = endpoint()
+    assert (
+        _switch_remote(
+            project, "https://b.example.test", _named_token(tmp_path, "b.token", "token-for-endpoint-b"), post
+        )
+        == 0
+    )
+    secret = project / "secrets" / "embed-token"
+    # The hub sends this file to endpoint B, so it must hold B's token, never A's.
+    assert secret.read_text(encoding="utf-8").strip() == "token-for-endpoint-b"
+    scheme, sent = post.calls[0][2]["Authorization"].split(" ", 1)
+    assert (scheme, sent) == ("Bearer", "token-for-endpoint-b")
+    assert _embedder(project)["endpoint"] == "https://b.example.test/api/embed"
+    assert "embed-token (replaced)" in capsys.readouterr().out
+    assert not [p.name for p in (project / "secrets").iterdir() if p.name.startswith(".")]
+    if os.name == "posix":
+        assert stat.S_IMODE(secret.stat().st_mode) == 0o400
+
+
+@pytest.mark.parametrize("before", ["remote", "lexical"])
+def test_a_failed_apply_puts_the_previous_remote_token_back(project, tmp_path, monkeypatch, before):
+    if before == "remote":
+        token_a = _named_token(tmp_path, "a.token", "token-for-endpoint-a")
+        assert (
+            _init(project, tmp_path, "--remote-url", "https://a.example.test", "--remote-token-file", str(token_a)) == 0
+        )
+    else:
+        assert _init(project, tmp_path) == 0
+    secret = project / "secrets" / "embed-token"
+    before_bytes = secret.read_bytes() if secret.exists() else None
+
+    def broken_apply(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(setup, "apply", broken_apply)
+    assert _switch_remote(project, "https://b.example.test", _named_token(tmp_path, "b.token", "token-for-b")) == 1
+    assert (secret.read_bytes() if secret.exists() else None) == before_bytes
+    assert not [p.name for p in (project / "secrets").iterdir() if p.name.startswith(".")]
+
+
+def test_a_symlinked_remote_token_is_refused(project, tmp_path, capsys):
+    assert _init(project, tmp_path) == 0
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("untouched\n", encoding="utf-8")
+    _symlink_or_skip(project / "secrets" / "embed-token", elsewhere)
+    assert _switch_remote(project, "https://b.example.test", _named_token(tmp_path, "b.token", "token-for-b")) == 1
+    assert "symlink" in capsys.readouterr().err
+    assert elsewhere.read_text(encoding="utf-8") == "untouched\n"
+
+
+def test_probe_errors_never_quote_the_token(project, tmp_path, capsys):
+    token = _named_token(tmp_path, "t.token", "secret-token-text")
+
+    def leaky(url, request, headers):
+        raise ValueError(f"Invalid header value {headers['Authorization']!r}")
+
+    def refused(url, request, headers):
+        raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+
+    for post in (leaky, refused):
+        assert (
+            _init(
+                project,
+                tmp_path,
+                "--remote-url",
+                "https://a.example.test",
+                "--remote-token-file",
+                str(token),
+                post=post,
+            )
+            == 0
+        )
+    captured = capsys.readouterr()
+    assert "secret-token-text" not in captured.out + captured.err + _toml(project)
+    assert "failed: ValueError" in captured.out and "failed: Connection refused" in captured.out
+
+
+def test_a_token_with_an_inner_line_break_is_refused_before_any_request(project, tmp_path, capsys):
+    token = _named_token(tmp_path, "t.token", "first-half\nsecond-half")
+
+    def never(url, request, headers):
+        raise AssertionError("no request may carry this token")
+
+    assert (
+        _init(
+            project, tmp_path, "--remote-url", "https://a.example.test", "--remote-token-file", str(token), post=never
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "whitespace or control characters" in out and "first-half" not in out
+    assert 'retrieval = "lexical"' in _toml(project)
 
 
 def test_switch_to_hybrid_without_a_probed_embedder_changes_nothing(project, tmp_path, capsys):
@@ -2316,3 +2427,110 @@ def test_record_as_root_refuses_a_file_owned_by_another_account(monkeypatch, tmp
     monkeypatch.setenv("SUDO_UID", str(os.getuid()))
     assert _main_code(["--record", str(record), "gpu"]) == 0
     assert json.loads(record.read_text(encoding="utf-8"))["check"] == "gpu"
+
+
+# ------------------------------------------------------- S31 setup check (#2468)
+
+
+def _setup_check_fakes(monkeypatch, *, gpu=True, binary="/fake/brigade-hub", python_problem=None):
+    """Run check_setup with setup in process on fake probes, Docker faked, and the hub start recorded."""
+    import contextlib
+    import io
+    from types import SimpleNamespace
+
+    starts = []
+
+    def run(argv, **_):
+        if argv[:2] == ["docker", "ps"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        assert argv[1].endswith("hub-setup.py"), argv
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = setup.main(argv[2:], run=gpu_host() if gpu else no_gpu_host, post=endpoint())
+        return SimpleNamespace(returncode=code, stdout=out.getvalue(), stderr=err.getvalue())
+
+    def hub_on_setup_config(found, python, project, *, embed):
+        table = tomllib.loads((project / "config" / "hub.toml").read_text(encoding="utf-8"))["memory"]
+        mode = table["retrieval"]
+        starts.append((project.parents[1].name, mode, embed))
+        state = "degraded" if embed else "ok"
+        return {"ready": 200, "status": 200, "retrieval": {"mode": mode, "state": state}}
+
+    monkeypatch.setattr(checks, "run", run)
+    monkeypatch.setattr(checks, "hub_binary", lambda explicit: binary)
+    monkeypatch.setattr(checks, "hub_python_problem", lambda python: python_problem)
+    monkeypatch.setattr(checks, "hub_on_setup_config", hub_on_setup_config)
+    args = SimpleNamespace(hub_binary=None, hub_python=sys.executable, remote=[])
+    result = checks.Result("setup")
+    checks.check_setup(args, result)
+    return result, starts
+
+
+def test_setup_check_starts_a_hub_after_init_and_each_switch(monkeypatch):
+    result, starts = _setup_check_fakes(monkeypatch)
+    # gpu: init hybrid, switch to lexical, switch back to hybrid. neither: init lexical.
+    assert starts == [
+        ("gpu", "hybrid", True),
+        ("gpu", "lexical", False),
+        ("gpu", "hybrid", True),
+        ("neither", "lexical", False),
+    ]
+    names = [item["name"] for item in result.items if item["status"] == "PASS"]
+    assert "hub accepts the config after switch to lexical (gpu)" in names
+    assert "hub accepts the config after switch to hybrid (gpu)" in names
+    assert "neither: switch to hybrid refused with no probed embedder, mode unchanged" in names
+    # The remote path waits on its arguments. Nothing else is pending or failing.
+    assert [item["name"] for item in result.items if item["status"] != "PASS" and item["status"] != "INFO"] == [
+        "remote path"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("binary", "problem", "reason"),
+    [(None, None, "no brigade-hub binary"), ("/fake/brigade-hub", "cannot import brigade", "cannot import brigade")],
+)
+def test_setup_check_fails_closed_without_a_hub_to_start(monkeypatch, binary, problem, reason):
+    result, starts = _setup_check_fakes(monkeypatch, binary=binary, python_problem=problem)
+    assert starts == [] and result.status == "fail"
+    failed = {item["name"]: item["detail"] for item in result.items if item["status"] == "FAIL"}
+    assert reason in failed["hub binary"]
+    assert "hub accepts the config after init (gpu)" in failed
+    assert not [item for item in result.items if item["status"] == "PENDING" and item["name"] != "remote path"]
+
+
+@pytest.mark.parametrize(
+    ("seen", "mode", "unreachable", "passes"),
+    [
+        ({"ready": 200, "retrieval": {"mode": "hybrid", "state": "degraded"}}, "hybrid", True, True),
+        # Unreachable but not degraded means the embed scheduler never tried, or the mode is wrong.
+        ({"ready": 200, "retrieval": {"mode": "hybrid", "state": "ok"}}, "hybrid", True, False),
+        ({"ready": 200, "retrieval": {"mode": "lexical", "state": "ok"}}, "hybrid", True, False),
+        ({"ready": 0, "error": "hub exit 2: embedder allowlist is required"}, "hybrid", True, False),
+        ({"ready": 200, "retrieval": {"mode": "hybrid", "state": "switching"}}, "hybrid", False, True),
+        ({"ready": 200, "retrieval": {"mode": "lexical", "state": "ok"}}, "lexical", False, True),
+        ({"ready": 200, "retrieval": {"mode": "lexical", "state": "degraded"}}, "lexical", False, False),
+    ],
+)
+def test_accept_hub_requires_ready_and_the_expected_mode(monkeypatch, tmp_path, seen, mode, unreachable, passes):
+    monkeypatch.setattr(checks, "hub_on_setup_config", lambda *a, **k: seen)
+    result = checks.Result("setup")
+    checks.accept_hub(result, ("/fake/brigade-hub", sys.executable), tmp_path, "init (x)", mode, unreachable)
+    assert result.items[-1]["status"] == ("PASS" if passes else "FAIL")
+
+
+def test_hub_memory_config_points_the_token_at_the_secret_compose_mounts(project, tmp_path):
+    assert _init(project, tmp_path, run=gpu_host()) == 0
+    state = tmp_path / "state"
+    state.mkdir()
+    config = checks.hub_memory_config(project, state)
+    table = tomllib.loads(config.read_text(encoding="utf-8"))["memory"]["embedder"]
+    assert table["token_file"] == str(project / "secrets" / "embed-local-token")
+    assert {key: value for key, value in table.items() if key != "token_file"} == {
+        key: value for key, value in _embedder(project).items() if key != "token_file"
+    }
+    if os.name == "posix":
+        assert stat.S_IMODE((project / "secrets" / "embed-local-token").stat().st_mode) == 0o400
+
+
+def test_hub_binary_refuses_a_missing_explicit_path(tmp_path):
+    assert checks.hub_binary(str(tmp_path / "no-such-hub")) is None

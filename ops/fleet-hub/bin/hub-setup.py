@@ -127,6 +127,9 @@ class Decision:
     query_prefix_version: int | None = None
     profiles: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
+    # The remote token the probe passed with. Kept out of repr so no report or
+    # traceback prints it. install_probed_token writes it to secrets/embed-token.
+    probed_token: str | None = field(default=None, repr=False, compare=False)
 
 
 def load_r1(path: Path) -> list[dict[str, Any]]:
@@ -232,6 +235,10 @@ def probe_remote(
         return None, [f"remote: token file {token_file} is unreadable"]
     if not token:
         return None, [f"remote: token file {token_file} is empty"]
+    # A bearer token has no whitespace or control characters. One with a line break
+    # would also put the token into the HTTP library's error message.
+    if any(ord(char) < 0x21 or ord(char) == 0x7F for char in token):
+        return None, [f"remote: token file {token_file} holds whitespace or control characters inside the token"]
     failures = []
     endpoint = url.rstrip("/") + "/" + api
     for model in models:
@@ -239,7 +246,7 @@ def probe_remote(
         try:
             status, headers, payload = post(endpoint, body, {"Authorization": f"Bearer {token}"})
         except (OSError, ValueError) as exc:
-            failures.append(f"remote: probe of {model['name']} failed: {exc}")
+            failures.append(f"remote: probe of {model['name']} failed: {_probe_error(exc)}")
             continue
         if status != 200 or not isinstance(payload, dict):
             failures.append(f"remote: probe of {model['name']} answered HTTP {status}")
@@ -263,8 +270,23 @@ def probe_remote(
         if not digest or not isinstance(digest, str):
             failures.append("remote: the endpoint reports no model digest (model_digest or x-model-digest)")
             continue
-        return hybrid(model, backend="remote", endpoint=endpoint, api=api, model_digest=digest), []
+        decision = hybrid(model, backend="remote", endpoint=endpoint, api=api, model_digest=digest)
+        decision.probed_token = token
+        return decision, []
     return None, failures
+
+
+def _probe_error(exc: BaseException) -> str:
+    """Why a probe request failed, without the exception's own message.
+
+    That message can quote the request: http.client puts an invalid header value,
+    the Authorization header included, in its ValueError. Only the operating
+    system's or TLS library's reason text and the exception's type are reported.
+    """
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, OSError) and isinstance(reason.strerror, str) and reason.strerror:
+        return reason.strerror
+    return type(reason).__name__
 
 
 def decide(
@@ -375,14 +397,17 @@ def _private_dir(path: Path) -> None:
     os.chmod(path, 0o700)
 
 
-def write_secret(path: Path, data: bytes) -> bool:
-    """Create a secret once. Mode 0444 inside a 0700 directory: the container's own UID must read the bind mount."""
+def write_secret(path: Path, data: bytes, mode: int = 0o444) -> bool:
+    """Create a secret once. Mode 0444 inside a 0700 directory: the container's own UID must read the bind mount.
+
+    Embedder tokens take 0400, the mode the hub's token rule accepts.
+    """
     if path.exists():
         return False
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(data)
-    os.chmod(path, 0o444)
+    os.chmod(path, mode)
     return True
 
 
@@ -524,7 +549,7 @@ def _ensure_operator_token_by_path(folder: Path) -> str | None:
     return action
 
 
-def ensure_secrets(project: Path, *, remote_token: Path | None, local_token: bool = False) -> list[str]:
+def ensure_secrets(project: Path, *, local_token: bool = False) -> list[str]:
     folder = project / "secrets"
     # Checked before anything is created or chmodded under it, since both follow the path.
     #
@@ -549,15 +574,61 @@ def ensure_secrets(project: Path, *, remote_token: Path | None, local_token: boo
     # empty file keeps Compose valid; the front then waits for an interactive login.
     if write_secret(folder / "front-authkey", b""):
         created.append("front-authkey (empty: put the private network's auth key here before the first start)")
-    remote = EMBED_TOKEN_FILES["remote"]
-    if remote_token is not None and write_secret(folder / remote, remote_token.read_bytes()):
-        created.append(remote)
     # The hub sends a bearer token to every embedder endpoint and needs a token file
     # for it. The recipe's embedder ignores it, and an authenticating front would check it.
+    # Setup makes this one and it only ever goes to the recipe's own embedder, so unlike
+    # the remote token it never changes with the endpoint and is created once.
     local = EMBED_TOKEN_FILES["local"]
-    if local_token and write_secret(folder / local, (secrets.token_urlsafe(32) + "\n").encode("ascii")):
+    if local_token and write_secret(folder / local, (secrets.token_urlsafe(32) + "\n").encode("ascii"), 0o400):
         created.append(local)
     return created
+
+
+def _replace_secret(folder: Path, name: str, data: bytes) -> None:
+    """Write `data` beside secrets/<name>, mode 0400, and rename it over the old file."""
+    staging = folder / f".{name}.{secrets.token_hex(8)}"
+    fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        # The hub's token rule: mode 0600 or 0400, owned by the hub's user.
+        os.chmod(staging, 0o400)
+        os.replace(staging, folder / name)
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+def install_probed_token(project: Path, decision: Decision) -> tuple[str | None, Callable[[], None]]:
+    """Install the token the remote probe passed as secrets/embed-token.
+
+    Unlike the other secrets this one is replaced, never kept: a new endpoint
+    comes with its own token, and keeping the old file would send the old
+    endpoint's token to the new one. Returns what it did and a callable that puts
+    the previous file back, for an apply that fails afterwards. Same-UID races
+    stay the accepted residual described in ensure_secrets.
+    """
+    if decision.backend != "remote" or decision.probed_token is None:
+        return None, lambda: None
+    folder = project / "secrets"
+    name = EMBED_TOKEN_FILES["remote"]
+    target = folder / name
+    data = (decision.probed_token + "\n").encode("utf-8")
+    if folder.is_symlink() or not folder.is_dir():
+        raise SetupError("secrets/ is a symlink or not a directory; move it aside and rerun")
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise SetupError(f"secrets/{name} is a symlink or not a regular file; move it aside and rerun")
+    old = target.read_bytes() if target.exists() else None
+    if old is not None and secrets.compare_digest(old, data) and stat.S_IMODE(target.stat().st_mode) == 0o400:
+        return None, lambda: None
+    _replace_secret(folder, name, data)
+
+    def restore() -> None:
+        if old is None:
+            target.unlink(missing_ok=True)
+        else:
+            _replace_secret(folder, name, old)
+
+    return (f"{name} (replaced)" if old is not None else name), restore
 
 
 def _compose_override(project: Path, decision: Decision) -> None:
@@ -658,8 +729,7 @@ def cmd_init(args: argparse.Namespace, run: Runner, post: Poster) -> int:
         raise SetupError(f"{project} has no compose.yaml; point --project-dir at a copy of ops/fleet-hub")
     env_updates = _base_env(args)
     decision = _decide_from_args(args, run, post)
-    token = Path(args.remote_token_file).expanduser() if decision.backend == "remote" else None
-    created = ensure_secrets(project, remote_token=token, local_token=decision.backend == "local")
+    created = ensure_secrets(project, local_token=decision.backend == "local")
     backup_dir = Path(env_updates["BRIGADE_BACKUP_DIR"])
     _private_dir(backup_dir)
     # `brigade fleet restore` counts only a ledger file that exists, so a lost
@@ -667,7 +737,14 @@ def cmd_init(args: argparse.Namespace, run: Runner, post: Poster) -> int:
     ledger = backup_dir / "recovery-ledger.jsonl"
     if not ledger.exists():
         os.close(os.open(ledger, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-    apply(project, decision, env_updates)
+    installed, restore = install_probed_token(project, decision)
+    try:
+        apply(project, decision, env_updates)
+    except BaseException:
+        restore()
+        raise
+    if installed:
+        created.append(installed)
     print(report(decision))
     if created:
         print("secrets written: " + ", ".join(created))
@@ -687,10 +764,16 @@ def cmd_switch(args: argparse.Namespace, run: Runner, post: Poster) -> int:
         if decision.retrieval != "hybrid":
             print(report(decision))
             raise SetupError("refusing to write hybrid: no embedder passed its probe, so the mode is unchanged")
-        token = Path(args.remote_token_file).expanduser() if decision.backend == "remote" else None
-        ensure_secrets(project, remote_token=token, local_token=decision.backend == "local")
-    apply(project, decision, {})
+        ensure_secrets(project, local_token=decision.backend == "local")
+    installed, restore = install_probed_token(project, decision)
+    try:
+        apply(project, decision, {})
+    except BaseException:
+        restore()
+        raise
     print(report(decision))
+    if installed:
+        print(f"secrets written: {installed}")
     if args.to == "lexical":
         print(
             "next: docker compose --profile gpu rm -sf embedder, then docker compose up -d (runbook: Switch retrieval modes)"

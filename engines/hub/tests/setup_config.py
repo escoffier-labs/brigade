@@ -7,6 +7,12 @@ so the hub's own parser and embedder checks decide: a file they refuse stops
 startup with the reason. Only the token file path changes, because the
 container path setup names (/run/secrets/embed_token) does not exist here.
 No embedding request is answered, so status is hybrid and may be degraded.
+
+The second test drives the S31 `setup` check's hub start
+(ops/fleet-hub/checks/s31_checks.py) with this binary on setup's own secret
+files, after init and after each switch direction: a lexical config reports
+`ok`, and a hybrid one whose embedder cannot be reached starts and reports
+`degraded` once a card has been sent for embedding.
 """
 
 from __future__ import annotations
@@ -24,8 +30,8 @@ ROOT = Path(__file__).resolve().parents[3]
 RECIPE = ROOT / "ops" / "fleet-hub"
 
 
-def load_setup():
-    spec = importlib.util.spec_from_file_location("hub_setup_under_test", RECIPE / "bin" / "hub-setup.py")
+def load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     # The dataclasses in it resolve their annotations through sys.modules.
@@ -34,7 +40,8 @@ def load_setup():
     return module
 
 
-setup = load_setup()
+setup = load("hub_setup_under_test", RECIPE / "bin" / "hub-setup.py")
+s31 = load("s31_checks_under_test", RECIPE / "checks" / "s31_checks.py")
 MODELS = setup.load_r1(RECIPE / "r1-models.json")
 DIGEST = "sha256:" + "d" * 64
 
@@ -91,6 +98,36 @@ class SetupConfigStartsTheHub(unittest.TestCase):
                     self.assertEqual(response.json["retrieval"]["mode"], "hybrid", response.json)
                 finally:
                     fixture.hc.stop_hub(hub)
+
+    def install(self, project: Path, decision) -> None:
+        """What setup's init and switch do: secrets, the probed token, then the config."""
+        setup.ensure_secrets(project, local_token=decision.backend == "local")
+        setup.install_probed_token(project, decision)
+        setup.apply(project, decision, {})
+
+    def accepted(self, project: Path, mode: str) -> dict:
+        seen = s31.hub_on_setup_config(str(fixture.BINARY), sys.executable, project, embed=mode == "hybrid")
+        self.assertEqual(seen.get("ready"), 200, seen)
+        state = "degraded" if mode == "hybrid" else "ok"
+        self.assertEqual((seen["retrieval"].get("mode"), seen["retrieval"].get("state")), (mode, state), seen)
+        return seen
+
+    def test_the_s31_hub_start_accepts_setup_output_after_init_and_each_switch(self):
+        for case in ("local", "remote-tailnet"):
+            with self.subTest(case), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory)
+                token = state / "embed.token"
+                token.write_text("setup-config-test-token\n", encoding="utf-8")
+                project = state / "project"
+                project.mkdir()
+                hybrid = self.decide(case, token)
+                self.install(project, hybrid)
+                seen = self.accepted(project, "hybrid")
+                self.assertEqual(seen["retrieval"].get("reason"), "embedder-unavailable", seen)
+                self.install(project, setup.Decision(retrieval="lexical"))
+                self.accepted(project, "lexical")
+                self.install(project, self.decide(case, token))
+                self.accepted(project, "hybrid")
 
 
 if __name__ == "__main__":
