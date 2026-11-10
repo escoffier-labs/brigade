@@ -130,37 +130,58 @@ class HandoffChecks(Fixture):
         leaked = HANDOFF + "\n- token: ghp_" + "a" * 36 + "\n"
         self.assertEqual(self.call("handoff_write", slug="leaky", content=leaked)["error"], "content_rejected")
         self.runner.handler = lambda argv, stdin: CommandResult(None, b"", timed_out=True)
-        self.assertEqual(self.call("handoff_write", slug="slow-lint", content=HANDOFF)["error"], "handoff_unavailable")
+        self.assertEqual(
+            self.call("handoff_write", slug="slow-lint", content=HANDOFF),
+            {"error": "handoff_unavailable", "reason": "lint_unavailable"},
+        )
         self.assertEqual(list(self.inbox.iterdir()), [])
         self.assertEqual([path.name for path in self.private.iterdir() if "handoff-lint" in path.name], [])
+
+    def assert_inbox_untrusted(self):
+        result = self.call("handoff_write", slug="bridge-probe", content=HANDOFF)
+        self.assertEqual(result, {"error": "handoff_unavailable", "reason": "inbox_untrusted", "hint": result["hint"]})
+        self.assertIn("remove group and world write", result["hint"])
+        # The answer never names a local path.
+        self.assertNotIn(str(self.root), json.dumps(result))
+        self.assertNotIn("/", result["hint"])
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(list(self.inbox.iterdir()), [])
 
     @requires_local_state
     def test_untrusted_inbox_refused(self):
         os.chmod(self.inbox, 0o777)
-        refusal = {"error": "handoff_unavailable", "reason": "inbox_untrusted"}
-        self.assertEqual(self.call("handoff_write", slug="bridge-probe", content=HANDOFF), refusal)
-        self.assertEqual(self.runner.calls, [])
+        self.assert_inbox_untrusted()
 
     @requires_local_state
-    def test_inbox_made_under_umask_0002_is_written(self):
-        # A default umask of 0002 leaves the inbox and its parent 0775 in the user's own group.
-        self.runner.handler = lambda argv, stdin: CommandResult(0, lint_report(True))
-        for directory in (self.inbox.parent, self.inbox):
-            os.chmod(directory, 0o775)
-        result = self.call("handoff_write", slug="group-inbox", content=HANDOFF)
-        self.assertTrue(result.get("ok"), result)
-        self.assertEqual([path.name for path in self.inbox.iterdir()], [result["filename"]])
-
-    @requires_local_state
-    def test_world_writable_inbox_parent_refused_with_a_reason(self):
+    def test_group_writable_inbox_fails_closed_with_a_reason(self):
+        # A umask of 0002 leaves the inbox 0775. The trust rule still refuses it.
         os.chmod(self.inbox, 0o775)
-        os.chmod(self.inbox.parent, 0o777)
+        self.assert_inbox_untrusted()
+
+    @requires_local_state
+    def test_group_writable_inbox_parent_fails_closed_with_a_reason(self):
+        os.chmod(self.inbox.parent, 0o775)
         try:
-            refusal = {"error": "handoff_unavailable", "reason": "inbox_untrusted"}
-            self.assertEqual(self.call("handoff_write", slug="bridge-probe", content=HANDOFF), refusal)
+            self.assert_inbox_untrusted()
         finally:
             os.chmod(self.inbox.parent, 0o755)
-        self.assertEqual(self.runner.calls, [])
+
+    @requires_local_state
+    def test_inbox_write_failure_names_itself(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores directory write permission")
+
+        def lint_then_lock(argv, stdin):
+            os.chmod(self.inbox, 0o555)
+            return CommandResult(0, lint_report(True))
+
+        self.runner.handler = lint_then_lock
+        try:
+            result = self.call("handoff_write", slug="bridge-probe", content=HANDOFF)
+        finally:
+            os.chmod(self.inbox, 0o755)
+        self.assertEqual(result, {"error": "handoff_unavailable", "reason": "inbox_write_failed"})
+        self.assertEqual(list(self.inbox.iterdir()), [])
 
     @requires_local_state
     def test_missing_inbox_names_itself(self):

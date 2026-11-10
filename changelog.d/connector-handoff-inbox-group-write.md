@@ -1,2 +1,0 @@
-- The Dot and Duet connectors' `handoff_write` accepts a handoff inbox and inbox parent created under a umask of 0002 (mode 0775 in the user's own primary group). It refused them before, so the tool failed on a default Ubuntu host. A world-writable directory, another group or another owner is still refused.
-- Every `handoff_unavailable` answer from `handoff_write` now carries a `reason`: `inbox_untrusted`, `inbox_missing`, `lint_state_unavailable`, `lint_unavailable` or `inbox_write_failed`. An untrusted or missing inbox is returned as a result with its reason.

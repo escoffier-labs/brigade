@@ -28,6 +28,10 @@ if TYPE_CHECKING:
 
 CARD_CHUNK_CHARS = 30000
 HANDOFF_ID_WINDOW_MS = 600_000
+# Shown with `inbox_untrusted`. It names no local path.
+INBOX_UNTRUSTED_HINT = (
+    "remove group and world write from the handoff inbox and its parent folders (a umask of 0002 is the common cause)"
+)
 TOKEN_COPY_PREFIX = ".memory-token-"
 # Well over the 30 second child timeout, so a sweep during a call never removes a live copy.
 TOKEN_COPY_MAX_AGE_SECONDS = 300
@@ -725,17 +729,13 @@ class MemoryTools:
         prefix = self.profile.handoff_prefix
         filename = f"{moment.astimezone():%Y-%m-%d-%H%M}-{prefix}-{slug}.md"
         try:
-            # A umask of 0002 creates the inbox and its parent as 0775 in this user's own group.
-            inbox = trusted_directory(
-                self.handoff_inbox,
-                allow_group_write=True,
-                allow_group_write_ancestors=True,
-                code="handoff_unavailable",
-            )
+            inbox = trusted_directory(self.handoff_inbox, code="handoff_unavailable")
         except DotError:
             # Name the failing step: a bare code sent the last live failure to the wrong one.
-            reason = "inbox_untrusted" if os.path.isdir(self.handoff_inbox) else "inbox_missing"
-            return {"error": "handoff_unavailable", "reason": reason}
+            if not os.path.isdir(self.handoff_inbox):
+                return {"error": "handoff_unavailable", "reason": "inbox_missing"}
+            # The hint names no local path. The trust rule itself stays fail-closed.
+            return {"error": "handoff_unavailable", "reason": "inbox_untrusted", "hint": INBOX_UNTRUSTED_HINT}
         temporary = f".{prefix}-{uuid4().hex}.tmp"
         temporary_written = False
         try:
