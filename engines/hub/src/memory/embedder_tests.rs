@@ -1000,3 +1000,243 @@ async fn a_query_with_the_wrong_row_count_is_an_error_not_a_panic() {
         );
     }
 }
+
+/// A server shaped like a local `/api/embed` one: the embedding reply carries
+/// no digest unless `reply_digest` is set, and `GET /api/tags` lists the
+/// model with whatever `listed` holds now. Counts listing reads.
+struct Listing {
+    url: String,
+    listed: Arc<Mutex<serde_json::Value>>,
+    reads: Arc<Mutex<usize>>,
+    task: tokio::task::JoinHandle<()>,
+}
+fn tags(digest: &str) -> serde_json::Value {
+    json!({"models": [
+        {"name": "other-model:latest", "model": "other-model:latest", "digest": "other-digest"},
+        {"name": "test-model:latest", "model": "test-model:latest", "digest": digest},
+    ]})
+}
+async fn fake_with_listing(
+    reply_digest: Option<&'static str>,
+    listed: serde_json::Value,
+) -> Listing {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let listed = Arc::new(Mutex::new(listed));
+    let reads = Arc::new(Mutex::new(0));
+    let (state, count) = (listed.clone(), reads.clone());
+    let task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let (state, count) = (state.clone(), count.clone());
+            tokio::spawn(async move {
+                let service = hyper::service::service_fn(
+                    move |req: hyper::Request<hyper::body::Incoming>| {
+                        let (state, count) = (state.clone(), count.clone());
+                        async move {
+                            let reply = |status: u16, body: String| {
+                                Ok::<_, hyper::Error>(
+                                    hyper::Response::builder()
+                                        .status(status)
+                                        .body(Full::new(Bytes::from(body)))
+                                        .unwrap(),
+                                )
+                            };
+                            let authorized = req
+                                .headers()
+                                .get("Authorization")
+                                .is_some_and(|v| v == "Bearer fake-embed-token");
+                            if !authorized {
+                                return reply(401, String::new());
+                            }
+                            if req.method() == hyper::Method::GET {
+                                if req.uri().path() != "/api/tags" {
+                                    return reply(404, String::new());
+                                }
+                                *count.lock().unwrap() += 1;
+                                let listed = state.lock().unwrap().clone();
+                                return match listed {
+                                    serde_json::Value::Null => reply(404, String::new()),
+                                    listed => reply(200, listed.to_string()),
+                                };
+                            }
+                            let body = req.into_body().collect().await?.to_bytes();
+                            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            let n = value["input"].as_array().unwrap().len();
+                            let mut body = json!({"embeddings": vec![vec![3.0, 4.0]; n], "data": (0..n).map(|i| json!({"index": i, "embedding": [3.0, 4.0]})).collect::<Vec<_>>()});
+                            if let Some(digest) = reply_digest {
+                                body["model_digest"] = json!(digest);
+                            }
+                            reply(200, body.to_string())
+                        }
+                    },
+                );
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    Listing {
+        url: format!("http://{address}/api/embed"),
+        listed,
+        reads,
+        task,
+    }
+}
+async fn reason(endpoint: &Arc<HttpEmbedder>, kind: Kind) -> Option<&'static str> {
+    let deadline = if kind == Kind::Query {
+        QUERY_DEADLINE
+    } else {
+        PROBE_DEADLINE
+    };
+    endpoint
+        .embed(kind, vec!["ordinary text".into()], deadline)
+        .await
+        .err()
+        .map(|e| e.reason)
+}
+
+/// #2469: a local `/api/embed` server sends no digest in its reply. The hub
+/// takes the model's digest from the server's listing instead, and a later
+/// reading that reports another digest refuses every reply.
+#[tokio::test]
+async fn a_reply_without_a_digest_is_checked_against_the_model_listing() {
+    let server = fake_with_listing(None, tags("test-digest")).await;
+    let endpoint = HttpEmbedder::new(config(server.url.clone()), scan::bundled()).unwrap();
+    assert_eq!(
+        endpoint
+            .embed(Kind::Query, vec!["ordinary query".into()], QUERY_DEADLINE)
+            .await
+            .unwrap(),
+        vec![vec![0.6, 0.8]]
+    );
+    assert_eq!(*server.reads.lock().unwrap(), 1);
+    // A query inside the window reuses the reading.
+    assert_eq!(reason(&endpoint, Kind::Query).await, None);
+    assert_eq!(*server.reads.lock().unwrap(), 1);
+
+    // The model behind the name changes. The cached reading still answers a
+    // query, and a document batch reads the listing again and is refused.
+    *server.listed.lock().unwrap() = tags("swapped-digest");
+    assert_eq!(reason(&endpoint, Kind::Query).await, None);
+    assert_eq!(
+        reason(&endpoint, Kind::Document).await,
+        Some("digest-mismatch")
+    );
+    assert_eq!(*server.reads.lock().unwrap(), 2);
+    // From that reading on, queries are refused too, without another read.
+    assert_eq!(
+        reason(&endpoint, Kind::Query).await,
+        Some("digest-mismatch")
+    );
+    assert_eq!(*server.reads.lock().unwrap(), 2);
+    // The breaker's probe always reads again, and sees the same mismatch.
+    assert_eq!(
+        reason(&endpoint, Kind::Probe).await,
+        Some("digest-mismatch")
+    );
+    assert_eq!(*server.reads.lock().unwrap(), 3);
+
+    // The pinned model is back: the probe's reading clears the refusal.
+    *server.listed.lock().unwrap() = tags("test-digest");
+    assert_eq!(reason(&endpoint, Kind::Probe).await, None);
+    assert_eq!(reason(&endpoint, Kind::Query).await, None);
+    assert_eq!(*server.reads.lock().unwrap(), 4);
+    server.task.abort();
+}
+
+#[tokio::test]
+async fn a_listing_that_cannot_vouch_for_the_model_refuses_the_reply() {
+    for listed in [
+        // No listing route at all.
+        serde_json::Value::Null,
+        // The configured model is not listed.
+        json!({"models": [{"name": "other-model:latest", "digest": "test-digest"}]}),
+        // Listed without a digest.
+        json!({"models": [{"name": "test-model:latest"}]}),
+        // Two entries for the name that disagree.
+        json!({"models": [
+            {"name": "test-model:latest", "digest": "test-digest"},
+            {"model": "test-model", "digest": "swapped-digest"},
+        ]}),
+        json!({"models": "not a list"}),
+        json!("not an object"),
+    ] {
+        let server = fake_with_listing(None, listed.clone()).await;
+        let endpoint = HttpEmbedder::new(config(server.url.clone()), scan::bundled()).unwrap();
+        assert_eq!(
+            reason(&endpoint, Kind::Query).await,
+            Some("digest-mismatch"),
+            "{listed}"
+        );
+        assert_eq!(*server.reads.lock().unwrap(), 1, "{listed}");
+        server.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn a_digest_in_the_reply_decides_without_the_listing() {
+    // The listing agrees with the pin, and the reply reports another model.
+    let server = fake_with_listing(Some("different-digest"), tags("test-digest")).await;
+    let endpoint = HttpEmbedder::new(config(server.url.clone()), scan::bundled()).unwrap();
+    assert_eq!(
+        reason(&endpoint, Kind::Query).await,
+        Some("digest-mismatch")
+    );
+    server.task.abort();
+    // The reply reports the pin, and the listing reports another model.
+    let agreeing = fake_with_listing(Some("test-digest"), tags("swapped-digest")).await;
+    let endpoint = HttpEmbedder::new(config(agreeing.url.clone()), scan::bundled()).unwrap();
+    assert_eq!(reason(&endpoint, Kind::Document).await, None);
+    assert_eq!(
+        *server.reads.lock().unwrap() + *agreeing.reads.lock().unwrap(),
+        0
+    );
+    agreeing.task.abort();
+
+    // `v1/embeddings` has no listing, so a reply without a digest is refused
+    // as before and nothing else is requested.
+    let server = fake_with_listing(None, tags("test-digest")).await;
+    let mut other_shape = config(server.url.clone());
+    other_shape.shape = "v1/embeddings".into();
+    let endpoint = HttpEmbedder::new(other_shape, scan::bundled()).unwrap();
+    assert_eq!(
+        reason(&endpoint, Kind::Query).await,
+        Some("digest-mismatch")
+    );
+    assert_eq!(*server.reads.lock().unwrap(), 0);
+    server.task.abort();
+}
+
+#[test]
+fn the_listing_url_stays_on_the_endpoint_origin() {
+    let url = |s: &str| url::Url::parse(s).unwrap();
+    assert_eq!(
+        listing_url("api/embed", &url("http://embedder:11434/api/embed"))
+            .unwrap()
+            .as_str(),
+        "http://embedder:11434/api/tags"
+    );
+    assert_eq!(
+        listing_url("api/embed", &url("https://10.0.0.5:8443/front/api/embed"))
+            .unwrap()
+            .as_str(),
+        "https://10.0.0.5:8443/front/api/tags"
+    );
+    assert!(listing_url("v1/embeddings", &url("http://embedder:11434/api/embed")).is_none());
+    assert!(listing_url("api/embed", &url("http://embedder:11434/embed")).is_none());
+    // A name without a tag matches the listing's `:latest` entry, and a
+    // tagged name matches only itself.
+    let listing = json!({"models": [
+        {"name": "plain:latest", "digest": "a"},
+        {"name": "org/tagged:8b", "digest": "b"},
+        {"name": "org/tagged:4b", "digest": "c"},
+    ]});
+    assert_eq!(listed_digest(&listing, "plain").as_deref(), Some("a"));
+    assert_eq!(
+        listed_digest(&listing, "org/tagged:8b").as_deref(),
+        Some("b")
+    );
+    assert_eq!(listed_digest(&listing, "org/tagged"), None);
+    assert_eq!(listed_digest(&listing, "absent"), None);
+}

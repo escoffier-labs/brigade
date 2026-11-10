@@ -7,9 +7,11 @@ nothing.
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import os
+import posixpath
 import shutil
 import stat
 import subprocess
@@ -137,7 +139,7 @@ def test_supported_gpu_writes_gpu_profile_local_backend_and_an_r1_model(project,
         "backend": "local",
         "endpoint": "http://embedder:11434/api/embed",
         "allowlist": ["http://embedder:11434/api/embed"],
-        "token_file": "/run/secrets/embed_token",
+        "token_file": "/run/brigade/embed_token",
         "shape": "api/embed",
         "name": MODEL["name"],
         "model_digest": MODEL["model_digest"],
@@ -227,7 +229,7 @@ def test_remote_endpoint_without_gpu_writes_remote_and_no_embedder(project, tmp_
     assert env["COMPOSE_PROFILES"] == "" and env["BRIGADE_EMBED_BACKEND"] == "remote"
     table = _embedder(project)
     assert table["backend"] == "remote" and table["model_digest"] == "sha256:" + "a" * 64
-    assert table["token_file"] == "/run/secrets/embed_token"
+    assert table["token_file"] == "/run/brigade/embed_token"
     assert table["endpoint"] == "http://gpu-host.example.ts.net:11434/api/embed"
     assert table["allowlist"] == [table["endpoint"]]
     assert post.calls and post.calls[0][0] == table["endpoint"]
@@ -684,7 +686,9 @@ def test_switch_between_remote_endpoints_replaces_the_token(project, tmp_path, c
     assert "embed-token (replaced)" in capsys.readouterr().out
     assert not [p.name for p in (project / "secrets").iterdir() if p.name.startswith(".")]
     if os.name == "posix":
-        assert stat.S_IMODE(secret.stat().st_mode) == 0o400
+        # Readable through the bind mount by the hub container's UID, inside the 0700 directory.
+        assert stat.S_IMODE(secret.stat().st_mode) == 0o444
+        assert stat.S_IMODE((project / "secrets").stat().st_mode) == 0o700
 
 
 @pytest.mark.parametrize("before", ["remote", "lexical"])
@@ -1137,6 +1141,12 @@ def test_compose_config_holder_layout_no_ports_and_gpu_only_in_the_profile(proje
     assert hub["entrypoint"] == ["python", "/brigade/entry.py"]
     assert hub["environment"]["BRIGADE_HUB_WATCHDOG_NETNS"] == "1"
     assert hub["command"][hub["command"].index("--route-mode") + 1] == "memory=native"
+    # #2469: the hub is started on the file setup writes, and has a private tmpfs for its token copy.
+    assert hub["command"][hub["command"].index("--memory-config") + 1] == "/etc/brigade/hub.toml"
+    assert any(
+        (v.get("target") if isinstance(v, dict) else v.split(":")[1]) == "/etc/brigade/hub.toml" for v in hub["volumes"]
+    )
+    assert any(str(item).startswith("/run/brigade") for item in hub["tmpfs"])
     assert full["services"]["backup"]["entrypoint"] == ["python", "/brigade/backup.py"]
     assert "--db" not in full["services"]["backup"]["command"]
 
@@ -2793,19 +2803,195 @@ def test_accept_hub_requires_ready_and_the_expected_mode(monkeypatch, tmp_path, 
     assert result.items[-1]["status"] == ("PASS" if passes else "FAIL")
 
 
-def test_hub_memory_config_points_the_token_at_the_secret_compose_mounts(project, tmp_path):
+def test_hub_memory_config_points_the_token_at_a_private_copy_of_the_mounted_secret(project, tmp_path):
     assert _init(project, tmp_path, run=gpu_host()) == 0
     state = tmp_path / "state"
     state.mkdir()
     config = checks.hub_memory_config(project, state)
     table = tomllib.loads(config.read_text(encoding="utf-8"))["memory"]["embedder"]
-    assert table["token_file"] == str(project / "secrets" / "embed-local-token")
+    secret = project / "secrets" / "embed-local-token"
+    assert table["token_file"] == str(state / "embed_token")
+    assert (state / "embed_token").read_bytes() == secret.read_bytes()
     assert {key: value for key, value in table.items() if key != "token_file"} == {
         key: value for key, value in _embedder(project).items() if key != "token_file"
     }
     if os.name == "posix":
-        assert stat.S_IMODE((project / "secrets" / "embed-local-token").stat().st_mode) == 0o400
+        # The mounted file is 0444 for the container's UID. The hub's rule is met by the copy.
+        assert stat.S_IMODE(secret.stat().st_mode) == 0o444
+        assert stat.S_IMODE((state / "embed_token").stat().st_mode) == 0o400
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
+def test_setup_resets_a_local_token_an_earlier_setup_wrote_0400(project, tmp_path, capsys):
+    """#2469: the hub container's UID cannot read a 0400 file through the bind mount."""
+    assert _init(project, tmp_path, run=gpu_host()) == 0
+    secret = project / "secrets" / "embed-local-token"
+    before = secret.read_bytes()
+    secret.chmod(0o400)
+    capsys.readouterr()
+    assert setup.main(["--project-dir", str(project), "switch", "--to", "hybrid"], run=gpu_host()) == 0
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o444 and secret.read_bytes() == before
+    assert "embed-local-token (mode reset to 0444)" in capsys.readouterr().out
+    # A symlink under the name is refused, and the file it points at keeps its mode.
+    outside = tmp_path / "outside-token"
+    outside.write_bytes(before)
+    outside.chmod(0o400)
+    secret.unlink()
+    secret.symlink_to(outside)
+    assert setup.main(["--project-dir", str(project), "switch", "--to", "hybrid"], run=gpu_host()) != 0
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o400
 
 
 def test_hub_binary_refuses_a_missing_explicit_path(tmp_path):
     assert checks.hub_binary(str(tmp_path / "no-such-hub")) is None
+
+
+# ------------------------------------------- Compose hybrid wiring (#2469)
+
+
+def test_compose_starts_the_hub_on_setups_config_with_a_private_token_tmpfs():
+    """No Docker needed: the hub's command names the mounted hub.toml, and the tmpfs holds the token copy."""
+    compose = (RECIPE / "compose.yaml").read_text(encoding="utf-8")
+    hub = compose.split("\n  hub:\n", 1)[1].split("\n  front:\n", 1)[0]
+    settings = [line.strip() for line in hub.splitlines() if not line.strip().startswith("#")]
+    flag = settings.index("- --memory-config")
+    assert settings[flag + 1] == "- /etc/brigade/hub.toml"
+    assert "- ./config/hub.toml:/etc/brigade/hub.toml:ro" in settings
+    # Owned by the image's hub user and closed to everyone else, at the directory setup's token path is in.
+    folder = posixpath.dirname(setup.EMBED_TOKEN_COPY)
+    assert f"- {folder}:mode=0700,uid=10001,gid=10001" in settings
+    assert "useradd --uid 10001 --gid 10001" in (RECIPE / "Containerfile").read_text(encoding="utf-8")
+    # Setup, the entrypoint and the S31 check agree on both paths.
+    assert (entry.EMBED_TOKEN_MOUNT, entry.EMBED_TOKEN_COPY) == (setup.EMBED_TOKEN_MOUNT, setup.EMBED_TOKEN_COPY)
+    assert checks.EMBED_TOKEN_COPY == setup.EMBED_TOKEN_COPY
+
+
+def _token_folder(tmp_path):
+    folder = tmp_path / "run-brigade"
+    folder.mkdir(mode=0o700)
+    folder.chmod(0o700)
+    return folder
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and modes")
+def test_entry_copies_the_mounted_embedder_token_to_a_hub_owned_0400_file(tmp_path):
+    """The hub accepts only a token file its own user owns with mode 0400 or 0600 (token_file_permitted)."""
+    source = tmp_path / "embed_token"
+    source.write_text("mounted-embed-token\n", encoding="utf-8")
+    # As Compose mounts it: the operator's file, world-readable inside the 0700 secrets directory.
+    source.chmod(0o444)
+    target = _token_folder(tmp_path) / "embed_token"
+    assert entry.deliver_embed_token(str(source), str(target)) is None
+    info = target.lstat()
+    assert stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o400
+    assert info.st_uid == os.geteuid()
+    assert target.read_text(encoding="utf-8") == "mounted-embed-token\n"
+    # A later start with a rotated token replaces the copy, and leaves no staging file.
+    source.chmod(0o644)
+    source.write_text("rotated-embed-token\n", encoding="utf-8")
+    assert entry.deliver_embed_token(str(source), str(target)) is None
+    assert target.read_text(encoding="utf-8") == "rotated-embed-token\n"
+    assert stat.S_IMODE(target.lstat().st_mode) == 0o400
+    assert [p.name for p in target.parent.iterdir()] == ["embed_token"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlinks and modes")
+def test_entry_refuses_a_symlinked_or_irregular_token_and_never_copies_it(tmp_path):
+    real = tmp_path / "elsewhere"
+    real.write_text("some-other-secret\n", encoding="utf-8")
+    source = tmp_path / "embed_token"
+    source.symlink_to(real)
+    target = _token_folder(tmp_path) / "embed_token"
+    problem = entry.deliver_embed_token(str(source), str(target))
+    assert problem is not None and "is a symlink" in problem and "some-other-secret" not in problem
+    assert not target.exists()
+    source.unlink()
+    source.mkdir()
+    assert "not a regular file" in (entry.deliver_embed_token(str(source), str(target)) or "")
+    source.rmdir()
+    source.write_bytes(b"x" * (entry.EMBED_TOKEN_BYTES + 1))
+    assert "not a regular file" in (entry.deliver_embed_token(str(source), str(target)) or "")
+    assert list(target.parent.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlinks and modes")
+def test_entry_replaces_a_symlink_at_the_copy_and_needs_a_private_directory(tmp_path):
+    source = tmp_path / "embed_token"
+    source.write_text("mounted-embed-token\n", encoding="utf-8")
+    victim = tmp_path / "victim"
+    victim.write_text("unrelated\n", encoding="utf-8")
+    folder = _token_folder(tmp_path)
+    target = folder / "embed_token"
+    target.symlink_to(victim)
+    assert entry.deliver_embed_token(str(source), str(target)) is None
+    # The link itself was replaced. What it pointed at is untouched.
+    assert not target.is_symlink() and victim.read_text(encoding="utf-8") == "unrelated\n"
+    # A directory other users can enter is refused, and so is a missing one.
+    folder.chmod(0o755)
+    assert "mode 0700" in (entry.deliver_embed_token(str(source), str(target)) or "")
+    assert "is missing" in (entry.deliver_embed_token(str(source), str(tmp_path / "absent" / "embed_token")) or "")
+
+
+def test_entry_without_a_mounted_token_removes_an_earlier_copy(tmp_path):
+    """BM25 mode mounts no embedder token, so no copy from a hybrid start stays behind."""
+    target = _token_folder(tmp_path) / "embed_token"
+    target.write_text("stale\n", encoding="utf-8")
+    assert entry.deliver_embed_token(str(tmp_path / "not-mounted"), str(target)) is None
+    assert not target.exists()
+    # Nothing to remove, and no tmpfs at all (a host run of the wrapper), are both fine.
+    assert entry.deliver_embed_token(str(tmp_path / "not-mounted"), str(target)) is None
+    assert entry.deliver_embed_token(str(tmp_path / "not-mounted"), str(tmp_path / "absent" / "copy")) is None
+
+
+def test_entry_stops_before_starting_a_hub_when_the_token_cannot_be_delivered(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(entry, "deliver_embed_token", lambda: "embedder token is a symlink")
+    monkeypatch.setattr(entry.subprocess, "Popen", lambda *a, **k: pytest.fail("the hub started"))
+    monkeypatch.setattr(entry.os, "execv", lambda *a: pytest.fail("the hub started"))
+    assert entry.main(["--host", "127.0.0.1", "--port", "1"]) == 2
+    assert "error: embedder token is a symlink" in capsys.readouterr().err
+
+
+def test_entry_passes_memory_config_only_to_an_image_that_has_the_flag(capsys):
+    argv = ["--host", "127.0.0.1", "--memory-config", "/etc/brigade/hub.toml", "--route-mode", "memory=native"]
+    assert entry.supported_argv(argv, True) == argv
+    assert capsys.readouterr().err == ""
+    # An image whose Brigade predates the flag would refuse it and never start.
+    assert entry.supported_argv(argv, False) == ["--host", "127.0.0.1", "--route-mode", "memory=native"]
+    assert "predates --memory-config" in capsys.readouterr().err
+    assert entry.supported_argv(["--memory-config=/etc/brigade/hub.toml", "--port", "1"], False) == ["--port", "1"]
+    # This checkout's `fleet serve --engine rust` has the pass-through.
+    assert entry.engine_supports_memory_config() is True
+
+
+def test_entry_execs_fleet_serve_with_the_memory_config_compose_names(tmp_path, monkeypatch):
+    checksum = tmp_path / "brigade-hub.sha256"
+    checksum.write_text("a" * 64 + "  brigade-hub\n", encoding="utf-8")
+    monkeypatch.setattr(entry, "ENGINE_SUM", str(checksum))
+    monkeypatch.setattr(entry, "deliver_embed_token", lambda: None)
+    execs = []
+
+    class Execd(Exception):
+        pass
+
+    def execv(path, argv):
+        execs.append(argv)
+        raise Execd
+
+    monkeypatch.setattr(entry.os, "execv", execv)
+    compose = (RECIPE / "compose.yaml").read_text(encoding="utf-8")
+    hub = compose.split("\n  hub:\n", 1)[1].split("\n    environment:\n", 1)[0].split("\n    command:\n", 1)[1]
+    command = [line.strip()[2:].strip('"') for line in hub.splitlines() if line.strip().startswith("- ")]
+    with pytest.raises(Execd):
+        entry.main(command)
+    assert execs[0][execs[0].index("--memory-config") + 1] == "/etc/brigade/hub.toml"
+    # The whole command Compose passes is one `fleet serve` accepts.
+    parser = argparse.ArgumentParser()
+    from brigade.cli import fleet as fleet_cli
+
+    fleet_cli.register(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(execs[0][3:])
+    assert (args.engine, str(args.memory_config), args.route_mode) == (
+        "rust",
+        "/etc/brigade/hub.toml",
+        ["memory=native"],
+    )

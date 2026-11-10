@@ -1991,7 +1991,10 @@ trait Embedder {
 
 - `model_digest` is what the embedding server reports for the loaded model.
   If it changes, the id changes, and the hub never mixes vectors from two
-  models in one matrix.
+  models in one matrix. A server reports it in each reply, or, for the
+  `/api/embed` shape whose replies carry none, in its model listing on the
+  same origin, which the hub reads after the reply (#2469,
+  `docs/hub-memory-embedder.md`).
 - Document text for normalizer 1: title, summary and body, cut at the
   model's input limit.
 - Vectors are checked before storage: right dimension, all finite, nonzero

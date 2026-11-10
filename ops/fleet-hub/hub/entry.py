@@ -25,14 +25,33 @@ front took the port:
   and its log says which.
 
 Any other exit passes through unchanged, so the restart policy sees a crash as
-a crash. Stdlib only.
+a crash.
+
+Before either hub starts, two steps make setup's hybrid configuration usable:
+
+- The embedder token. Compose bind-mounts the operator's secrets/ file, which
+  keeps the operator's ownership, and the hub accepts only a token file its own
+  user owns with mode 0400 or 0600. `deliver_embed_token` copies the mount into
+  a hub-owned 0400 file on the container's private tmpfs, which is the path
+  setup writes into hub.toml. A symlink at the mount is refused. With no mount
+  (BM25 mode) nothing is copied.
+- `--memory-config`. compose.yaml names setup's hub.toml. An image whose
+  Brigade predates that flag would refuse it, so `supported_argv` drops it
+  there and says so. Such a hub runs on `hub.toml` beside its database, which
+  in this recipe means BM25 mode.
+
+Stdlib only.
 """
 
 from __future__ import annotations
 
+import errno
 import importlib.util
+import inspect
 import os
+import secrets
 import signal
+import stat
 import subprocess
 import sys
 import urllib.request
@@ -41,6 +60,11 @@ HUB = os.environ.get("BRIGADE_HUB_BIN", "brigade-hub")
 # Where the dogfood stage installs brigade-hub and the checksum it recorded.
 ENGINE_BINARY = "/usr/local/bin/brigade-hub"
 ENGINE_SUM = "/usr/local/share/brigade/brigade-hub.sha256"
+# Where Compose mounts the embedder token, and the hub-owned copy the hub reads
+# (bin/hub-setup.py, EMBED_TOKEN_MOUNT and EMBED_TOKEN_COPY).
+EMBED_TOKEN_MOUNT = "/run/secrets/embed_token"
+EMBED_TOKEN_COPY = "/run/brigade/embed_token"
+EMBED_TOKEN_BYTES = 8192
 STARTED = "brigade fleet hub listening on"
 STOPPED = "brigade fleet hub stopped cleanly"
 POLL_SECONDS = 0.25
@@ -76,6 +100,94 @@ def exit_code(returncode: int) -> int:
     return 128 - returncode if returncode < 0 else returncode
 
 
+def deliver_embed_token(source: str = EMBED_TOKEN_MOUNT, target: str = EMBED_TOKEN_COPY) -> str | None:
+    """Copy the mounted embedder token to a file this user owns with mode 0400. Returns what went wrong, or None.
+
+    The source is opened without following a symlink and must be a regular
+    file. The copy is written under a new name in a directory only this user can
+    write and renamed over the target, so the target is never a partial file and
+    a symlink planted at the target is replaced, never followed. With no mounted
+    token any earlier copy is removed. Never prints the token.
+    """
+    folder = os.path.dirname(target)
+    try:
+        fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        try:
+            os.unlink(target)
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError as exc:
+            return f"cannot remove the earlier embedder token copy {target}: {exc.strerror}"
+        return None
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            return f"embedder token {source} is a symlink; setup writes a regular file"
+        return f"cannot read embedder token {source}: {exc.strerror}; rerun bin/hub-setup.py, which writes it mode 0444"
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > EMBED_TOKEN_BYTES:
+            return f"embedder token {source} is not a regular file of at most {EMBED_TOKEN_BYTES} bytes"
+        token = os.read(fd, EMBED_TOKEN_BYTES + 1)
+    finally:
+        os.close(fd)
+    try:
+        held = os.lstat(folder)
+    except OSError:
+        return f"{folder} is missing; compose.yaml mounts it as a tmpfs owned by the hub's user"
+    if not stat.S_ISDIR(held.st_mode) or held.st_uid != os.geteuid() or stat.S_IMODE(held.st_mode) & 0o077:
+        return f"{folder} must be a directory owned by the hub's user with mode 0700"
+    staging = os.path.join(folder, f".embed_token.{secrets.token_hex(8)}")
+    try:
+        out = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
+        try:
+            # The umask cannot widen 0400, and fchmod keeps it exact.
+            os.fchmod(out, 0o400)
+            os.write(out, token)
+        finally:
+            os.close(out)
+        os.replace(staging, target)
+    except OSError as exc:
+        return f"cannot write the embedder token copy {target}: {exc.strerror}"
+    finally:
+        try:
+            os.unlink(staging)
+        except OSError:
+            pass
+    return None
+
+
+def engine_supports_memory_config() -> bool:
+    """Whether this image's `fleet serve --engine rust` passes `--memory-config` to brigade-hub."""
+    try:
+        from brigade import fleet_hub_engine
+    except Exception:  # noqa: BLE001 - any import failure means an image without it
+        return False
+    return "memory_config" in inspect.signature(fleet_hub_engine.hub_argv).parameters
+
+
+def supported_argv(argv: list[str], supported: bool) -> list[str]:
+    """`argv` as given, or without `--memory-config` for an image that predates it, with a line saying so."""
+    if supported or not any(item == "--memory-config" or item.startswith("--memory-config=") for item in argv):
+        return argv
+    kept: list[str] = []
+    skip = False
+    for item in argv:
+        if skip:
+            skip = False
+        elif item == "--memory-config":
+            skip = True
+        elif not item.startswith("--memory-config="):
+            kept.append(item)
+    print(
+        "warning: this image's Brigade predates --memory-config, so the hub reads hub.toml beside its "
+        "database and runs in BM25 mode. Build with a BRIGADE_REF that has it to use setup's config/hub.toml.",
+        file=sys.stderr,
+        flush=True,
+    )
+    return kept
+
+
 def engine_command(argv: list[str]) -> list[str] | None:
     """`fleet serve --engine rust` with these flags, when this image supports it."""
     if not os.path.isfile(ENGINE_SUM):
@@ -102,6 +214,11 @@ def engine_command(argv: list[str]) -> list[str] | None:
 
 
 def main(argv: list[str]) -> int:
+    problem = deliver_embed_token()
+    if problem is not None:
+        print(f"error: {problem}", file=sys.stderr, flush=True)
+        return 2
+    argv = supported_argv(argv, engine_supports_memory_config())
     command = engine_command(argv)
     if command is not None:
         # Same PID, so the init process's signals reach fleet serve directly.

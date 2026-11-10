@@ -43,18 +43,23 @@ Conventions:
 
 - Installs or changes: `ops/fleet-hub/secrets/` (mode 0700) with
   `admin-token.txt`, `findings-key` (32 random bytes) and `front-authkey`,
-  each mode 0444, plus `embed-token` (mode 0400, replaced when a probe
+  each mode 0444, plus `embed-token` (mode 0444, replaced when a probe
   passes with a new token) for a remote embedder or `embed-local-token`
-  (mode 0400) for the local one, and
+  (mode 0444) for the local one, and
   `operator-admin-token.txt` (mode 0600), the operator's copy of the admin
   token for `brigade memory rescan` and `reindex`. Also `.env`,
   `config/hub.toml`, the backup directory (mode 0700) and the empty recovery
   ledger in it (mode 0600). All ignored by Git or outside the checkout.
-- Hybrid retrieval under Compose is not supported yet (#2469). The Compose
-  hub does not load setup's `config/hub.toml`, so it runs in BM25 mode, and
-  the hub requires its embedder token to be owned by the hub's user with mode
-  0400 or 0600, while Compose mounts the operator's file. Setup still writes a
-  hybrid configuration the hub accepts when started with `--memory-config`.
+- Hybrid retrieval under Compose (#2469). `compose.yaml` starts the hub with
+  `--memory-config /etc/brigade/hub.toml`, the mount of setup's
+  `config/hub.toml`, and the hub's log names the file it read. The hub
+  requires its embedder token to be owned by the hub's user with mode 0400 or
+  0600, and a bind mount keeps the operator's ownership. So at each start
+  `hub/entry.py` copies the mounted token to `/run/brigade/embed_token`, mode
+  0400 and owned by the hub's user, on a tmpfs only that container has. It
+  refuses a symlink. This needs an image built from a `BRIGADE_REF` that has
+  `--memory-config` in `fleet serve --engine rust`. For an older image the
+  entrypoint drops the flag with a warning and the hub runs in BM25 mode.
 - Why: the recipe's two secrets. The admin token is a Docker secret, and the
   findings and recall-log HMAC key is a second secret off the state volume, so a
   volume copy alone cannot test guesses. The front needs its private-network

@@ -74,6 +74,12 @@ services:
       # fleet-hub.db. Every other family keeps its default.
       - --route-mode
       - memory=native
+      # The file bin/hub-setup.py writes, mounted below. A named file that
+      # cannot be read or does not validate stops startup, and the hub's log
+      # names the file it read. hub/entry.py drops this flag, with a warning,
+      # for an image whose Brigade predates it.
+      - --memory-config
+      - /etc/brigade/hub.toml
     environment:
       BRIGADE_FLEET_FINDINGS_KEY_FILE: /run/secrets/findings_key
       # With the Rust engine, its watchdog also exits when the holder
@@ -84,9 +90,15 @@ services:
       - findings_key
     volumes:
       - brigade-state:/var/lib/brigade
-      # For the planned `--config` (S15). Neither hub reads it yet.
+      # Setup's retrieval mode and embedder table, named by --memory-config.
       - ./config/hub.toml:/etc/brigade/hub.toml:ro
       - ./hub:/brigade:ro
+    # Private to this container and gone when it stops. hub/entry.py puts the
+    # hub's own mode-0400 copy of the embedder token here, because the hub
+    # refuses a token file another user owns and a secret bind mount keeps the
+    # operator's ownership. UID and GID 10001 are the image's hub user.
+    tmpfs:
+      - /run/brigade:mode=0700,uid=10001,gid=10001
     cap_drop: [ALL]
     # Covers brigade-hub's drain of at most 25 s and then up to 10 s for the
     # Python upstream's own shutdown after its SIGTERM.

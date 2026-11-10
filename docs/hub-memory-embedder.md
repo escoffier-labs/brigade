@@ -13,7 +13,10 @@ read or does not validate stops startup with the cause. The lookup has a
 10 s deadline covering the existence check and the Python child, so a FIFO
 or a stalled mount cannot hold startup. On timeout the child is killed. A
 `retrieval` key that is present must be a string. Only an absent key means
-lexical. Token values stay in the hub process.
+lexical. Token values stay in the hub process. At startup the hub logs one
+line naming the file it read, how the file was chosen and the retrieval mode.
+`brigade fleet serve --engine rust --memory-config PATH` passes the path
+through to the hub.
 
 ```toml
 [memory]
@@ -70,7 +73,29 @@ Choose `api/embed` or `v1/embeddings` for `shape`. Both send a JSON `model`
 and an `input` array. Every successful response must include the pinned
 `model_digest` JSON field or `x-model-digest` header. When both appear,
 both must match. A model name alone is insufficient. The embedding server
-or its authenticating front must provide the digest. Vectors must have the
+or its authenticating front must provide the digest.
+
+One server shape reports the digest somewhere else. A server that answers
+`/api/embed` without a digest lists its models at `/api/tags` on the same
+origin, each with a digest. For the `api/embed` shape, when a reply carries
+no digest, the hub reads that listing and compares the digest listed for
+`name` with the pinned `model_digest`. A name without a tag matches the
+listing's `name:latest` entry. The request goes to the same scheme, host and
+port as the endpoint, to the address the embedding reply came from on plain
+HTTP, with the same bearer token and no card or query text. The reply is
+refused with `digest-mismatch` when the listing does not answer 200, does
+not list the model, lists it without a digest, lists two digests for it, or
+lists a digest other than the pinned one. A document batch and the breaker's
+probe read the listing again every time, after the reply, so no vector is
+stored against an older reading. A query reuses a reading for up to 30 s.
+Once a reading shows another digest, every reply is refused until a later
+reading shows the pinned one again. A digest in the reply always decides on
+its own, and then the listing is never read. The `v1/embeddings` shape has no
+listing, so its replies must carry the digest. The listing check cannot see
+a model replaced between a reply and the reading that follows it. An
+endpoint that needs that guarantee must report the digest in each reply.
+
+Vectors must have the
 configured dimensions, finite values and a nonzero norm. The hub normalizes
 them before use.
 

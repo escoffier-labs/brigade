@@ -49,6 +49,7 @@ service manager restarts both.
 |---|---|---|
 | `--engine rust` | `ExecStart` | Run `brigade-hub` in front. Without it, the Python hub serves alone. |
 | `--route-mode FAMILY=MODE` | `ExecStart`, repeatable | `brigade-hub` route modes. Families `registration`, `heartbeat`, `claims`, `messages` and `memory` accept `native` or `proxy`. `cold` and `browser` accept `proxy` only until their slices land. Every family defaults to `proxy`. |
+| `--memory-config PATH` | `ExecStart` | The `hub.toml` that `brigade-hub` reads `[memory]` from, instead of the one beside the database. A file named here that cannot be read or does not validate stops startup. The hub log names the file it read. |
 | `--hub-binary PATH` with `--hub-sha256 HEX` or `--hub-sha256-file PATH` | `ExecStart` | Run this binary instead of the one `brigade setup --component brigade-hub` installed. The checksum file may be `sha256sum` output. |
 | `--port 0` | `ExecStart` | Any free port. The watchdog and the listening line use the address `brigade-hub` reports binding. |
 | `XDG_DATA_HOME` | unit `Environment=` and the setup command | Where `brigade setup` records the installed binary. Use the same value for both. |

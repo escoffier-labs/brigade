@@ -5,8 +5,9 @@ local GPU path and the remote path, and writes config/hub.toml with its own
 `apply`. The hub is then started with that file named by `--memory-config`,
 so the hub's own parser and embedder checks decide: a file they refuse stops
 startup with the reason. Only the token file path changes, because the
-container path setup names (/run/secrets/embed_token) does not exist here.
+container path setup names (/run/brigade/embed_token) does not exist here.
 No embedding request is answered, so status is hybrid and may be degraded.
+The hub's log must name the file it read (#2469).
 
 The second test drives the S31 `setup` check's hub start
 (ops/fleet-hub/checks/s31_checks.py) with this binary on setup's own secret
@@ -96,6 +97,10 @@ class SetupConfigStartsTheHub(unittest.TestCase):
                     response = fixture.status(hub)
                     self.assertEqual(response.status, 200, response)
                     self.assertEqual(response.json["retrieval"]["mode"], "hybrid", response.json)
+                    self.assertIn(
+                        f"memory configuration: {config} (named by --memory-config), retrieval hybrid",
+                        hub.log.read_text(encoding="utf-8", errors="replace"),
+                    )
                 finally:
                     fixture.hc.stop_hub(hub)
 

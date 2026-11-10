@@ -674,9 +674,10 @@ def check_fdatasync(args: argparse.Namespace, result: Result) -> None:
             Path(args.writer, "s31-writer.bin").unlink(missing_ok=True)
 
 
-# The container path setup writes for the embedder token, and the secrets/ file
-# behind it for each backend (bin/hub-setup.py, EMBED_TOKEN_FILES).
-EMBED_TOKEN_MOUNT = "/run/secrets/embed_token"
+# The container path setup writes for the embedder token (the hub-owned copy
+# hub/entry.py makes of the mounted secret), and the secrets/ file behind it for
+# each backend (bin/hub-setup.py, EMBED_TOKEN_COPY and EMBED_TOKEN_FILES).
+EMBED_TOKEN_COPY = "/run/brigade/embed_token"
 EMBED_TOKEN_FILES = {"local": "embed-local-token", "remote": "embed-token"}
 HUB_START_SECONDS = 30.0
 DEGRADED_SECONDS = 20.0
@@ -709,14 +710,23 @@ def hub_python_problem(python: str) -> str | None:
 
 
 def hub_memory_config(project: Path, state: Path) -> Path:
-    """Setup's config/hub.toml with the container token path pointed at the secrets/ file Compose mounts there."""
+    """Setup's config/hub.toml with the container token path pointed at a private copy of the secrets/ file.
+
+    The secrets/ file is mode 0444 for the container's bind mount, and the hub
+    accepts only mode 0400 or 0600. In the container hub/entry.py makes that
+    copy. Here it goes into `state`, the caller's throwaway directory.
+    """
     import tomllib
 
     text = (project / "config" / "hub.toml").read_text(encoding="utf-8")
     embedder = tomllib.loads(text).get("memory", {}).get("embedder", {})
-    if embedder.get("token_file") == EMBED_TOKEN_MOUNT:
+    if embedder.get("token_file") == EMBED_TOKEN_COPY:
         secret = project / "secrets" / EMBED_TOKEN_FILES[str(embedder.get("backend"))]
-        text = text.replace(f"token_file = {json.dumps(EMBED_TOKEN_MOUNT)}", f"token_file = {json.dumps(str(secret))}")
+        copy = state / "embed_token"
+        fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(secret.read_bytes())
+        text = text.replace(f"token_file = {json.dumps(EMBED_TOKEN_COPY)}", f"token_file = {json.dumps(str(copy))}")
     config = state / "memory.toml"
     config.write_text(text, encoding="utf-8")
     return config
@@ -914,8 +924,8 @@ def check_setup(args: argparse.Namespace, result: Result) -> None:
                 ["docker", "ps", "-a", "-q", "--filter", f"label=com.docker.compose.project=s31-setup-{name}"]
             ).stdout
             result.ok(not leftovers.strip(), f"setup ({name}) created no container")
-    # The hub above runs on the host with --memory-config. The Compose hub does not load
-    # setup's config yet (#2469), so this check proves the config, not the Compose wiring.
+    # The hub above runs on the host with --memory-config, so this check proves the config.
+    # The Compose hub is started on the same file by compose.yaml, which is not exercised here.
 
 
 def check_access(args: argparse.Namespace, result: Result) -> None:

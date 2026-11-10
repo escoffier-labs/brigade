@@ -79,6 +79,7 @@ def test_hub_argv_keeps_every_serve_flag_and_route_modes(tmp_path):
         trust_tailscale_identity=True,
         trust_forwarded_proto=True,
         route_modes=("claims=native", "memory=native"),
+        memory_config=tmp_path / "hub.toml",
     )
     assert argv == [
         str(Path("/opt/brigade-hub")),
@@ -92,6 +93,8 @@ def test_hub_argv_keeps_every_serve_flag_and_route_modes(tmp_path):
         str(tmp_path / "token"),
         "--deck-config",
         str(tmp_path / "deck.json"),
+        "--memory-config",
+        str(tmp_path / "hub.toml"),
         "--allow-admin-writes",
         "--require-sealed",
         "--trust-tailscale-identity",
@@ -506,6 +509,8 @@ def test_migrates_then_runs_the_hub_with_this_interpreter(tmp_path, capsys):
     assert lines[0] == (os.environ.get("BRIGADE_HUB_PYTHON") or sys.executable)
     assert lines[1:3] == ["--host", "127.0.0.1"]
     assert lines[-2:] == ["--route-mode", "claims=native"]
+    # With no memory config named, brigade-hub keeps its default beside the database.
+    assert "--memory-config" not in lines
     with sqlite3.connect(tmp_path / "hub.db") as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
     assert "brigade-hub exited with 3" in capsys.readouterr().err
@@ -623,6 +628,7 @@ def _serve_args(tmp_path: Path, **overrides) -> argparse.Namespace:
         trust_forwarded_proto=False,
         engine="python",
         route_mode=[],
+        memory_config=None,
         hub_binary=None,
         hub_sha256=None,
         hub_sha256_file=None,
@@ -635,6 +641,7 @@ def _serve_args(tmp_path: Path, **overrides) -> argparse.Namespace:
     ("flag", "value"),
     [
         ("route_mode", ["claims=native"]),
+        ("memory_config", Path("/etc/brigade/hub.toml")),
         ("hub_binary", Path("/opt/brigade-hub")),
         ("hub_sha256", "a" * 64),
         ("hub_sha256_file", Path("/opt/brigade-hub.sha256")),
@@ -654,16 +661,36 @@ def test_engine_rust_dispatches_every_flag(tmp_path, monkeypatch):
         tmp_path,
         engine="rust",
         route_mode=["claims=native"],
+        memory_config=tmp_path / "hub.toml",
         hub_binary=tmp_path / "hub",
         hub_sha256="a" * 64,
         require_sealed=True,
     )
     assert fleet_cli._dispatch_serve(args, environ={}) == 0
     assert captured["route_modes"] == ("claims=native",)
+    assert captured["memory_config"] == tmp_path / "hub.toml"
     assert captured["hub_binary"] == tmp_path / "hub"
     assert captured["hub_sha256"] == "a" * 64
     assert captured["require_sealed"] is True
     assert captured["db_path"] == tmp_path / "hub.db"
+
+
+@linux_only
+def test_the_memory_config_reaches_the_hub_and_the_parser_takes_the_flag(tmp_path):
+    """#2469: `fleet serve --engine rust --memory-config PATH` hands PATH to brigade-hub."""
+    seen = tmp_path / "seen"
+    hub, digest = _fake_hub(tmp_path, f"open({str(seen)!r}, 'w').write('\\n'.join(sys.argv[1:]))\nsys.exit(3)\n")
+    config = tmp_path / "config" / "hub.toml"
+    assert _run(tmp_path, hub, digest, route_modes=("memory=native",), memory_config=config) == 3
+    lines = seen.read_text().splitlines()
+    assert lines[lines.index("--memory-config") + 1] == str(config)
+
+    parser = argparse.ArgumentParser()
+    fleet_cli.register(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(
+        ["fleet", "serve", "--host", "127.0.0.1", "--engine", "rust", "--memory-config", str(config)]
+    )
+    assert args.memory_config == config
 
 
 def test_default_engine_is_python(tmp_path, monkeypatch):

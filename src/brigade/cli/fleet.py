@@ -175,6 +175,16 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="With --engine rust: a brigade-hub route mode such as claims=native (repeatable).",
     )
     p_serve.add_argument(
+        "--memory-config",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "With --engine rust: the hub.toml brigade-hub reads [memory] from, instead of the one beside "
+            "the database. A file named here that cannot be read or does not validate stops startup."
+        ),
+    )
+    p_serve.add_argument(
         "--hub-binary", type=Path, default=None, help="With --engine rust: run this brigade-hub instead."
     )
     p_serve.add_argument("--hub-sha256", default=None, help="With --hub-binary: the SHA-256 that binary must match.")
@@ -595,6 +605,7 @@ def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | No
         flag
         for flag, value in (
             ("--route-mode", getattr(args, "route_mode", None)),
+            ("--memory-config", getattr(args, "memory_config", None)),
             ("--hub-binary", getattr(args, "hub_binary", None)),
             ("--hub-sha256", getattr(args, "hub_sha256", None)),
             ("--hub-sha256-file", getattr(args, "hub_sha256_file", None)),
@@ -617,6 +628,7 @@ def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | No
             trust_tailscale_identity=bool(args.trust_tailscale_identity),
             trust_forwarded_proto=bool(getattr(args, "trust_forwarded_proto", False)),
             route_modes=tuple(args.route_mode),
+            memory_config=getattr(args, "memory_config", None),
             hub_binary=args.hub_binary,
             hub_sha256=args.hub_sha256,
             hub_sha256_file=getattr(args, "hub_sha256_file", None),

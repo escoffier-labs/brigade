@@ -1510,14 +1510,28 @@ async fn start_and_serve(
         .unwrap_or_else(|| path.with_file_name("hub.toml"));
     let memory = match modes.configured("memory") {
         None => None,
-        Some(brigade_hub::modes::Mode::Native) => Some(
-            match memory_config::load(
+        Some(brigade_hub::modes::Mode::Native) => Some({
+            let loaded = memory_config::load(
                 &std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()),
                 &memory_config_path,
                 config.memory_config.is_some(),
             )
-            .await?
-            {
+            .await?;
+            if let Ok(table) = &loaded {
+                // Names the file, so a hub reading another hub.toml than the
+                // one its setup wrote shows in the log.
+                eprintln!(
+                    "memory configuration: {} ({}), retrieval {}",
+                    memory_config_path.display(),
+                    if config.memory_config.is_some() {
+                        "named by --memory-config"
+                    } else {
+                        "default beside the database, lexical when absent"
+                    },
+                    table["retrieval"].as_str().unwrap_or("lexical"),
+                );
+            }
+            match loaded {
                 Err(reason) => {
                     eprintln!("memory unavailable: {reason}");
                     memory_route::MemoryRoute::Unavailable
@@ -1563,8 +1577,8 @@ async fn start_and_serve(
                         memory_route::MemoryRoute::Unavailable
                     }
                 },
-            },
-        ),
+            }
+        }),
         Some(_) => Some(memory_route::MemoryRoute::Unavailable),
     };
     let storage = if config.upstream.is_none() {

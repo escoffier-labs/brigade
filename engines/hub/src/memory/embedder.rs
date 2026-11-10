@@ -28,6 +28,10 @@ const POOL_IDLE: Duration = Duration::from_secs(30);
 const POOL_IDLE_PER_HOST: usize = 2;
 pub const BATCH_BYTES: usize = 32 * 1024;
 pub const BATCH_CARDS: usize = 4;
+/// How long one reading of the server's model listing answers for query
+/// replies that carry no digest. Document and probe replies read it again.
+pub const LISTING_TTL: Duration = Duration::from_secs(30);
+const LISTING_BYTES: usize = 1 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmbedderId {
@@ -189,6 +193,53 @@ pub struct HttpEmbedder {
     token: hyper::header::HeaderValue,
     client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
     scanner: Arc<dyn Scanner>,
+    /// The model listing beside an `/api/embed` endpoint, on the same origin.
+    listing: Option<Url>,
+    listed: Mutex<Option<Listed>>,
+}
+/// What the server's model listing last reported for the configured model.
+struct Listed {
+    digest: Option<String>,
+    at: Instant,
+}
+/// The listing URL for an `api/embed` endpoint: the same scheme, host, port
+/// and path prefix, with `/api/embed` replaced by `/api/tags`. No other shape
+/// and no other path has one, so such an endpoint must report the digest in
+/// its reply.
+pub(crate) fn listing_url(shape: &str, endpoint: &Url) -> Option<Url> {
+    let prefix = endpoint.path().strip_suffix("/api/embed")?;
+    if shape != "api/embed" {
+        return None;
+    }
+    let mut url = endpoint.clone();
+    url.set_path(&format!("{prefix}/api/tags"));
+    Some(url)
+}
+/// The digest a model listing reports for `name`. The listing names a model
+/// with its tag, so a configured name without one matches `name:latest`.
+/// Entries that disagree report nothing.
+pub(crate) fn listed_digest(listing: &Value, name: &str) -> Option<String> {
+    let tagged = match name.rsplit('/').next() {
+        Some(last) if !last.contains(':') => format!("{name}:latest"),
+        _ => name.to_string(),
+    };
+    let mut found: Option<&str> = None;
+    for model in listing["models"].as_array()? {
+        let named = |key: &str| {
+            model[key]
+                .as_str()
+                .is_some_and(|n| n == name || n == tagged)
+        };
+        if !(named("name") || named("model")) {
+            continue;
+        }
+        let digest = model["digest"].as_str().filter(|d| !d.is_empty())?;
+        if found.is_some_and(|d| d != digest) {
+            return None;
+        }
+        found = Some(digest);
+    }
+    found.map(String::from)
 }
 fn loopback_literal(url: &Url) -> bool {
     url.host_str().is_some_and(|h| {
@@ -331,12 +382,90 @@ impl HttpEmbedder {
             .pool_max_idle_per_host(POOL_IDLE_PER_HOST)
             .build(https);
         Ok(Arc::new(Self {
+            listing: listing_url(&config.shape, &url),
+            listed: Mutex::new(None),
             config,
             url,
             token,
             client,
             scanner,
         }))
+    }
+    /// Plain HTTP resolves once and pins the connect address, so DNS cannot
+    /// change between the policy check and the connection. HTTPS connects
+    /// through its own resolver and has no pinned address.
+    async fn pin(&self) -> Result<Option<IpAddr>, EmbedError> {
+        if self.url.scheme() != "http" {
+            return Ok(None);
+        }
+        let addresses: Vec<_> = tokio::net::lookup_host((
+            self.host().trim_matches(['[', ']']),
+            self.url.port_or_known_default().unwrap(),
+        ))
+        .await
+        .map_err(|_| EmbedError::new("embedder-unavailable"))?
+        .collect();
+        if addresses.is_empty() || addresses.iter().any(|a| !private(a.ip())) {
+            return Err(EmbedError::new("endpoint-refused"));
+        }
+        Ok(Some(addresses[0].ip()))
+    }
+    /// The digest the server's model listing reports for the configured
+    /// model, for a reply that carried none. `Ok(None)` when this endpoint
+    /// has no listing, the listing does not answer 200, or it does not name
+    /// the model. A query reuses a reading younger than [`LISTING_TTL`]. A
+    /// document batch and the breaker's probe always read again, so vectors
+    /// are stored only against a listing read after their reply, and a
+    /// digest that changed refuses every reply from the next reading on.
+    async fn listing_digest(
+        &self,
+        kind: Kind,
+        pinned: Option<IpAddr>,
+    ) -> Result<Option<String>, EmbedError> {
+        let Some(listing) = &self.listing else {
+            return Ok(None);
+        };
+        if kind == Kind::Query {
+            let listed = self.listed.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(listed) = listed.as_ref().filter(|l| l.at.elapsed() < LISTING_TTL) {
+                return Ok(listed.digest.clone());
+            }
+        }
+        let mut url = listing.clone();
+        if let Some(ip) = pinned {
+            // The address the embedding reply came from, already checked.
+            url.set_ip_host(ip)
+                .map_err(|_| EmbedError::new("endpoint-refused"))?;
+        }
+        // No card or query text goes into this request. The token goes only
+        // to the origin that already received it with the embedding request.
+        let req = hyper::Request::get(url.as_str())
+            .header("Host", self.url.authority())
+            .header("Authorization", self.token.clone())
+            .body(Full::new(Bytes::new()))
+            .map_err(|_| EmbedError::new("endpoint-refused"))?;
+        let response = self
+            .client
+            .request(req)
+            .await
+            .map_err(|_| EmbedError::new("embedder-unavailable"))?;
+        let digest = if response.status().as_u16() == 200 {
+            let bytes = Limited::new(response.into_body(), LISTING_BYTES)
+                .collect()
+                .await
+                .map_err(|_| EmbedError::new("embedder-response-invalid"))?
+                .to_bytes();
+            let value: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| EmbedError::new("embedder-response-invalid"))?;
+            listed_digest(&value, &self.config.id.name)
+        } else {
+            None
+        };
+        *self.listed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Listed {
+            digest: digest.clone(),
+            at: Instant::now(),
+        });
+        Ok(digest)
     }
     pub fn host(&self) -> &str {
         self.url.host_str().unwrap_or("")
@@ -377,26 +506,16 @@ impl HttpEmbedder {
             return Err(EmbedError::new("content-private"));
         }
         let mut url = self.url.clone();
-        if url.scheme() == "http" {
-            // Resolve once and pin the connect address. No DNS rebinding between policy and connect.
-            let addresses: Vec<_> = tokio::net::lookup_host((
-                self.host().trim_matches(['[', ']']),
-                url.port_or_known_default().unwrap(),
-            ))
-            .await
-            .map_err(|_| EmbedError::new("embedder-unavailable"))?
-            .collect();
-            if addresses.is_empty() || addresses.iter().any(|a| !private(a.ip())) {
-                return Err(EmbedError::new("endpoint-refused"));
-            }
-            if unscanned && !unscanned_permitted(&url, Some(addresses[0].ip())) {
+        let pinned = self.pin().await?;
+        if let Some(ip) = pinned {
+            if unscanned && !unscanned_permitted(&url, Some(ip)) {
                 return Err(EmbedError::new("scan-unavailable"));
             }
             // `localhost` mapped to a LAN host gets no private text.
-            if private_text && !private_permitted(&url, Some(addresses[0].ip())) {
+            if private_text && !private_permitted(&url, Some(ip)) {
                 return Err(EmbedError::new("content-private"));
             }
-            url.set_ip_host(addresses[0].ip())
+            url.set_ip_host(ip)
                 .map_err(|_| EmbedError::new("endpoint-refused"))?;
         }
         let payload = if self.config.shape == "api/embed" {
@@ -455,7 +574,16 @@ impl HttpEmbedder {
         .to_bytes();
         let value: Value = serde_json::from_slice(&bytes)
             .map_err(|_| EmbedError::new("embedder-response-invalid"))?;
-        let digest = value["model_digest"].as_str().or(header_digest.as_deref());
+        // A digest in the reply decides alone. Only a reply with none, from
+        // an endpoint with a model listing, is checked against that listing.
+        let listed;
+        let digest = match value["model_digest"].as_str().or(header_digest.as_deref()) {
+            Some(reported) => Some(reported),
+            None => {
+                listed = self.listing_digest(kind, pinned).await?;
+                listed.as_deref()
+            }
+        };
         if digest != Some(self.config.id.model_digest.as_str())
             || header_digest
                 .as_ref()
