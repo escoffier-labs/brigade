@@ -283,12 +283,23 @@ def probe_evidence(host: str, port: int, deadline: float | None = None) -> dict[
     return evidence
 
 
+# Threat model: the S31 access check detects exposure misconfiguration. It
+# does not defend against a privileged process that deliberately evades it
+# while it runs, because such a process could also edit the check. Accepted
+# residual: a privileged holder that forks, changes UID and exits mid-scan to
+# slip past the census. Any process or fd that vanishes during the scan
+# refuses every exemption instead, so a census only counts when nothing moved.
 CENSUS_NEEDS_ROOT = "exemption needs a complete holder census; run the access check as root"
+CENSUS_CHANGED = "processes changed during the census; rerun"
 VANISHED = (FileNotFoundError, ProcessLookupError)
 
 
 class CensusIncomplete(Exception):
     """A process's fd table or fd link could not be read, so a holder may be hidden."""
+
+
+class CensusChanged(CensusIncomplete):
+    """A process or fd vanished during the scan, so the census is not one consistent picture."""
 
 
 def effective_uid() -> int | None:
@@ -303,10 +314,11 @@ def loopback_holders(port: int, proc: Path | None = None) -> list[dict[str, Any]
     the wildcard address, then maps each socket inode to the processes whose
     fds hold it. None when no socket is found, when any socket has no readable
     holder, or when any process found holding a socket has an unreadable exe
-    link, comm or cgroup. Raises CensusIncomplete when any process's fd table
-    or fd link cannot be read for a reason other than the fd or process
-    vanishing, because then a holder may be hidden. Only a scan as root can be
-    complete.
+    link, comm or cgroup. Raises CensusChanged when any process or fd vanishes
+    during the scan, and CensusIncomplete when any process's fd table or fd
+    link cannot be read for another reason, because then a holder may be
+    hidden. The scanning process itself is skipped: listing its own fd table
+    opens and closes a directory fd. Only a scan as root can be complete.
     """
     root = proc or PROC
     inodes: set[str] = set()
@@ -325,24 +337,25 @@ def loopback_holders(port: int, proc: Path | None = None) -> list[dict[str, Any]
     if not inodes:
         return None
     found: dict[str, list[dict[str, Any]]] = {inode: [] for inode in inodes}
+    me = str(os.getpid())
     for entry in root.iterdir():
-        if not entry.name.isdigit():
+        if not entry.name.isdigit() or entry.name == me:
             continue
         # Every process's fd table must be read: one hidden co-holder (another
-        # account, a non-dumpable child) could be the hub. Only an fd or a
-        # process that vanished while scanning is skipped.
+        # account, a non-dumpable child) could be the hub, and a process or fd
+        # that vanished mid-scan could have been one.
         try:
             fds = list((entry / "fd").iterdir())
-        except VANISHED:
-            continue
+        except VANISHED as exc:
+            raise CensusChanged(f"pid {entry.name} vanished") from exc
         except OSError as exc:
             raise CensusIncomplete(f"pid {entry.name} fd table: {type(exc).__name__}") from exc
         links = []
         for fd in fds:
             try:
                 links.append(os.readlink(fd))
-            except VANISHED:
-                continue
+            except VANISHED as exc:
+                raise CensusChanged(f"pid {entry.name} fd {fd.name} vanished") from exc
             except OSError as exc:
                 raise CensusIncomplete(f"pid {entry.name} fd {fd.name}: {type(exc).__name__}") from exc
         held = {link[8:-1] for link in links if link.startswith("socket:[")} & inodes
@@ -358,6 +371,8 @@ def loopback_holders(port: int, proc: Path | None = None) -> list[dict[str, Any]
                 "comm": (entry / "comm").read_text(encoding="utf-8").strip(),
                 "cgroup": (entry / "cgroup").read_text(encoding="utf-8").strip(),
             }
+        except VANISHED as exc:
+            raise CensusChanged(f"holder pid {entry.name} vanished") from exc
         except OSError:
             return None
         for inode in held:
@@ -773,6 +788,8 @@ def check_access(args: argparse.Namespace, result: Result) -> None:
                 try:
                     holders = loopback_holders(port)
                     census = "complete (euid 0)"
+                except CensusChanged as exc:
+                    census = f"changed: {exc}"
                 except CensusIncomplete as exc:
                     census = f"incomplete: {exc}"
             detail["census"] = census or "not taken (not root)"
@@ -781,6 +798,8 @@ def check_access(args: argparse.Namespace, result: Result) -> None:
                 detail["exemption_applied"] = "no: the netns container uses host networking or publishes a port"
             elif not census:
                 detail["exemption_applied"] = "no: " + CENSUS_NEEDS_ROOT
+            elif census.startswith("changed"):
+                detail["exemption_applied"] = "no: " + CENSUS_CHANGED
             elif census.startswith("incomplete"):
                 detail["exemption_applied"] = "no: the holder census is incomplete, so a holder may be hidden"
             elif holders is None:
@@ -1583,6 +1602,36 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+def append_record(path: str, line: str) -> None:
+    """Append one record line without following a symlink or writing into a non-regular file.
+
+    As root (the exempted access check runs under sudo), the file must belong
+    to root or to the invoking SUDO_UID, so a file another account planted is
+    refused.
+    """
+    # O_NONBLOCK makes a FIFO without a reader fail instead of hanging the open.
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    for name in ("O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK"):
+        flags |= getattr(os, name, 0)
+    fd = os.open(path, flags, 0o644)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("not a regular file")
+        if effective_uid() == 0:
+            owners = {0}
+            sudo_uid = os.environ.get("SUDO_UID", "")
+            if sudo_uid.isdigit():
+                owners.add(int(sudo_uid))
+            if info.st_uid not in owners:
+                raise ValueError(f"owned by uid {info.st_uid}, not root or SUDO_UID")
+        data = line.encode("utf-8")
+        while data:
+            data = data[os.write(fd, data) :]
+    finally:
+        os.close(fd)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     result = Result(args.check)
@@ -1598,8 +1647,11 @@ def main(argv: list[str] | None = None) -> int:
         "items": result.items,
     }
     if args.check != "summary":
-        with open(args.record, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
+        try:
+            append_record(args.record, json.dumps(record, sort_keys=True) + "\n")
+        except (OSError, ValueError) as exc:
+            print(f"refusing --record {args.record}: {exc}", file=sys.stderr)
+            return 2
     print(f"{args.check}: {result.status.upper()}")
     return 0 if result.status != "fail" else 1
 

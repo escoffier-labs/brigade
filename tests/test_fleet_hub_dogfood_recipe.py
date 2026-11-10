@@ -586,11 +586,22 @@ def _program(tmp_path, name="app"):
     return os.path.realpath(path)
 
 
-def _fake_proc(tmp_path, port, *, holder_exe, comm="app", cgroup="0::/user.slice", resolvable=True, co_holder=None):
+def _fake_proc(
+    tmp_path,
+    port,
+    *,
+    holder_exe,
+    comm="app",
+    cgroup="0::/user.slice",
+    resolvable=True,
+    co_holder=None,
+    vanished_pid=False,
+):
     """A /proc tree with one LISTEN socket on 127.0.0.1:port held by pid 4242 running `holder_exe`.
 
     `co_holder` adds pid 4243 holding the same socket: a dict with `exe`,
-    `comm`, and `cgroup` (None leaves its cgroup file unreadable).
+    `comm`, and `cgroup` (None makes its cgroup unreadable, as a directory).
+    `vanished_pid` adds pid 4244 with no fd table, as a process gone mid-scan.
     """
     proc = tmp_path / "proc"
     (proc / "net").mkdir(parents=True)
@@ -615,6 +626,11 @@ def _fake_proc(tmp_path, port, *, holder_exe, comm="app", cgroup="0::/user.slice
         (other / "comm").write_text(co_holder["comm"] + "\n", encoding="utf-8")
         if co_holder["cgroup"] is not None:
             (other / "cgroup").write_text(co_holder["cgroup"] + "\n", encoding="utf-8")
+        else:
+            # Unreadable for a reason other than vanishing (IsADirectoryError).
+            (other / "cgroup").mkdir()
+    if vanished_pid:
+        (proc / "4244").mkdir()
     return proc
 
 
@@ -784,16 +800,27 @@ def test_access_refuses_an_exemption_when_a_co_holder_fd_table_is_unreadable(mon
     assert result.status == "fail" and "census is incomplete" in item["detail"]["exemption_applied"]
 
 
+CENSUS_CHANGED_REASON = "no: processes changed during the census; rerun"
+
+
 @posix_proc
-def test_access_skips_an_fd_that_vanished_during_the_census(monkeypatch, tmp_path):
+def test_access_refuses_an_exemption_when_an_fd_vanished_during_the_census(monkeypatch, tmp_path):
     app = _program(tmp_path)
     _readlink_failing_for(monkeypatch, f"{os.sep}4243{os.sep}fd{os.sep}", FileNotFoundError(2, "gone"))
     result, item = _exempted_access(
         monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, co_holder={"exe": app, **CO_HOLDER}
     )
-    assert result.status == "pass" and item["status"] == "INFO"
-    assert item["detail"].get("census") == "complete (euid 0)"
-    assert [holder["pid"] for holder in item["detail"]["holders"]] == [4242]
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert item["detail"]["exemption_applied"] == CENSUS_CHANGED_REASON
+
+
+@posix_proc
+def test_access_refuses_an_exemption_when_a_process_vanished_during_the_census(monkeypatch, tmp_path):
+    app = _program(tmp_path)
+    result, item = _exempted_access(monkeypatch, tmp_path, exempt_exe=app, holder_exe=app, vanished_pid=True)
+    assert result.status == "fail" and item["status"] == "FAIL"
+    assert item["detail"]["exemption_applied"] == CENSUS_CHANGED_REASON
+    assert item["detail"]["census"] == "changed: pid 4244 vanished"
 
 
 @posix_proc
@@ -1813,3 +1840,52 @@ def test_entry_execs_fleet_serve_with_the_rust_engine_when_the_image_has_it(tmp_
             ],
         )
     ]
+
+
+def _stand_in_check(monkeypatch):
+    def stand_in(_args, result):
+        """Stand-in check that records one INFO item."""
+        result.add("INFO", "stand-in")
+
+    monkeypatch.setitem(checks.CHECKS, "gpu", stand_in)
+
+
+def _main_code(argv):
+    try:
+        return checks.main(argv)
+    except OSError as exc:
+        return f"raised {type(exc).__name__}"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+def test_record_refuses_a_symlinked_path(monkeypatch, tmp_path):
+    _stand_in_check(monkeypatch)
+    target = tmp_path / "elsewhere.jsonl"
+    target.write_text("untouched\n", encoding="utf-8")
+    link = tmp_path / "s31-results.jsonl"
+    link.symlink_to(target)
+    assert _main_code(["--record", str(link), "gpu"]) == 2
+    assert target.read_text(encoding="utf-8") == "untouched\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX device file")
+@pytest.mark.parametrize("kind", ["device", "directory"])
+def test_record_refuses_a_non_regular_path(monkeypatch, tmp_path, kind):
+    _stand_in_check(monkeypatch)
+    path = os.devnull if kind == "device" else str(tmp_path)
+    assert _main_code(["--record", path, "gpu"]) == 2
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="needs a non-root test account")
+def test_record_as_root_refuses_a_file_owned_by_another_account(monkeypatch, tmp_path):
+    _stand_in_check(monkeypatch)
+    record = tmp_path / "s31-results.jsonl"
+    record.write_text("", encoding="utf-8")
+    monkeypatch.setattr(checks, "effective_uid", lambda: 0, raising=False)
+    monkeypatch.delenv("SUDO_UID", raising=False)
+    assert _main_code(["--record", str(record), "gpu"]) == 2
+    assert record.read_text(encoding="utf-8") == ""
+    # The invoking account's own file is accepted under sudo.
+    monkeypatch.setenv("SUDO_UID", str(os.getuid()))
+    assert _main_code(["--record", str(record), "gpu"]) == 0
+    assert json.loads(record.read_text(encoding="utf-8"))["check"] == "gpu"

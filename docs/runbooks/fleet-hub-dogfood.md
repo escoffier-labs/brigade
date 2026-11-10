@@ -460,7 +460,8 @@ find the canonical path of its executable and name it in the exemption:
 ```bash
 ss -ltnpH 'sport = :3774'              # the holder's pid
 readlink -f /proc/<PID>/exe            # EXE_REALPATH
-sudo --preserve-env=BRIGADE_S31_FRONT_URL python3 checks/s31_checks.py access \
+sudo --preserve-env=BRIGADE_S31_FRONT_URL python3 checks/s31_checks.py \
+  --record "$PWD/s31-results.jsonl" access \
   --allow-loopback-listener "3774=/opt/desktop-app/bin/app//desktop app on host loopback, verified not to forward to the hub"
 ```
 
@@ -477,15 +478,27 @@ under `sudo`, as above. Without root every exemption is refused with the reason
 `exemption needs a complete holder census; run the access check as root`, and
 the listener stays FAIL. The check without exemptions still runs unprivileged.
 
+Running it as root executes the checkout's `checks/s31_checks.py` as root. Run
+it only from a checkout that no other account can write to, and pass an
+absolute `--record` path. The check appends to the record without following a
+symlink, refuses anything that is not a regular file, and as root refuses a
+record file owned by any account other than root or the one that ran `sudo`.
+
+The check detects exposure misconfiguration. It does not defend against a
+privileged process that deliberately evades it while it runs, because such a
+process could also edit the check.
+
 The exemption turns that listener into INFO only when all of these hold:
 
 - The check runs as root.
 - The netns container does not use host networking and publishes no port at
   all, because a published container port can sit behind any host port number.
 - The census is complete: every process's fd table and fd links on the host
-  were read. Any read error other than an fd or process vanishing during the
-  scan, such as a non-dumpable child that inherited the socket, refuses the
-  exemption, because a hidden co-holder could be the hub.
+  were read while nothing changed. Any read error, such as a non-dumpable child
+  that inherited the socket, refuses the exemption, because a hidden co-holder
+  could be the hub. A process or fd that vanishes during the scan refuses it
+  too, with `processes changed during the census; rerun`. On a busy host, run
+  the check again.
 - The check can name every process holding a LISTEN socket on that port on
   loopback or the wildcard address, and can read each holder's executable link,
   command name and cgroup.
