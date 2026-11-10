@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "label": "downloads/month",
-  "message": "3,350",
+  "message": "3,359",
   "color": "blue",
-  "total": 3350,
+  "total": 3359,
   "sources": {
     "pypi": {
       "package": "brigade-cli",
-      "downloads": 3218,
+      "downloads": 3227,
       "mirrors": false
     },
     "npm": {
@@ -16,10 +16,10 @@
     }
   },
   "period": {
-    "start": "2026-10-10",
-    "end": "2026-11-08",
+    "start": "2026-10-11",
+    "end": "2026-11-09",
     "days": 30,
     "timezone": "UTC"
   },
-  "updatedAt": "2026-11-09T22:31:37Z"
+  "updatedAt": "2026-11-10T19:52:02Z"
 }
