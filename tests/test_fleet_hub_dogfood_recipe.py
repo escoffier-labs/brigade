@@ -866,6 +866,39 @@ def test_a_base_exception_inside_the_rollback_leaves_no_remote_token(project, tm
     assert _pair_matches(project) and "https://a.example.test/api/embed" in _toml(project)
 
 
+@pytest.mark.parametrize("command", ["switch", "re-init"])
+@pytest.mark.parametrize("raised", [OSError, KeyboardInterrupt])
+def test_a_token_that_cannot_be_removed_keeps_this_runs_config(project, tmp_path, monkeypatch, capsys, command, raised):
+    _remote_a(project, tmp_path)
+    # Endpoint B's token is installed, then the run fails and the rollback cannot remove that token.
+    real_install = setup.install_probed_token
+    real_remove = setup._remove_file
+    installed = []
+
+    def install(*args, **kwargs):
+        real_install(*args, **kwargs)
+        installed.append(True)
+        raise OSError("injected failure after install_probed_token")
+
+    def remove(path):
+        if installed and path.name == "embed-token":
+            raise raised("simulated unlink failure")
+        real_remove(path)
+
+    monkeypatch.setattr(setup, "install_probed_token", install)
+
+    monkeypatch.setattr(setup, "_remove_file", remove)
+    if raised is OSError:
+        assert _to_remote_b(project, tmp_path, command) == 1
+    else:
+        with pytest.raises(KeyboardInterrupt):
+            _to_remote_b(project, tmp_path, command)
+    # Endpoint B's token stays beside endpoint B's config, never beside endpoint A's.
+    assert (project / "secrets" / "embed-token").read_text(encoding="utf-8").strip() == "token-for-endpoint-b"
+    assert _pair_matches(project) and "https://b.example.test/api/embed" in _toml(project)
+    assert "left this run's files in place" in capsys.readouterr().err
+
+
 def test_leaving_the_remote_backend_removes_its_token(project, tmp_path, capsys):
     _remote_a(project, tmp_path)
     capsys.readouterr()

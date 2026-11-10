@@ -737,6 +737,18 @@ class SetupFiles:
 
         # First, so that nothing below can leave a token beside a config it does not match.
         token_gone = attempt(self._label(self.token), lambda: _remove_file(self.token))
+        if not token_gone:
+            # A token that cannot be removed is the one this run wrote or left alone, so it matches the
+            # files on disk now. Putting the old files back would pair it with the old endpoint.
+            print(
+                f"error: could not remove {self._label(self.token)}, so setup left this run's files in place "
+                "to keep that token beside the endpoint it was probed against. Fix the error, then rerun "
+                "bin/hub-setup.py",
+                file=sys.stderr,
+            )
+            if interrupt is not None:
+                raise interrupt
+            return
         for path, saved in self.files.items():
             if path == self.token:
                 continue
@@ -752,13 +764,7 @@ class SetupFiles:
         old_token = self.files.get(self.token)
         if not left and old_token is not None:
             attempt(self._label(self.token), lambda: _put_file(self.token, *old_token))
-        if not token_gone:
-            print(
-                f"error: could not remove {self._label(self.token)}; delete it before starting the hub, "
-                "then rerun bin/hub-setup.py",
-                file=sys.stderr,
-            )
-        elif left:
+        if left:
             print(
                 f"error: could not put back {', '.join(left)}. No remote embedder token is left on disk, so the hub "
                 "answers in BM25 mode until bin/hub-setup.py is rerun.",
