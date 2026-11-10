@@ -14,8 +14,15 @@ One run, in order (phase-memory-verify D3 to D6):
    in one atomic state write, every scope's read count snapshot whose
    `read_stats` pagination completed, with `counts_ms` from the program clock.
 5. Assemble evidence, call the seats and check the replies
-   (`memory_verify_contract.verify_card`). Commit expansions abstain until
-   slice 9a supplies the resolver (`commit_resolver`).
+   (`memory_verify_contract.verify_card`). Commit expansions go to slice
+   9a's hardened resolver (`memory_verify_resolver`). A non-dry run opens
+   one resolver `Run` and every card's resolver shares it, so the cards share
+   one fetch per repository. The run closes it exactly once when it ends,
+   whether it completed, failed, raised or returned early. A dry run opens no
+   `Run` and resolves nothing: it writes nothing, and the resolver's fetch
+   would update the workspace's remote-tracking refs. Where the platform
+   cannot run the resolver, a non-dry run reports its fixed reason once under
+   `skipped`, and every expansion abstains with `verify_commit_unresolved`.
 6. For each card with an op: build the review packet and the manifest, scan
    the manifest, then publish a stage record with the exact ops, manifest and
    packet (`memory_verify_packets`). Only then attach the manifest with
@@ -68,6 +75,7 @@ from . import memory_verify_config as config
 from . import memory_verify_contract as contract
 from . import memory_verify_evidence as ev
 from . import memory_verify_packets as packets
+from . import memory_verify_resolver as resolver
 from . import memory_verify_seat as seats
 from . import memory_verify_select as pick
 from . import memory_verify_state as vstate
@@ -126,21 +134,31 @@ def _archive() -> ev.Archive:
 ARCHIVE: Callable[[], ev.Archive] = _archive
 
 
-def commit_resolver(workspace: config.Workspace) -> contract.Resolver | None:
-    """The git commit resolver for one bound workspace. The single seam for slice 9a.
-
-    TODO(verify slice 9a): return the hardened resolver that follows the
-    "Commit resolver contract" in phase-memory-verify D3 rule by rule. Until
-    then this returns None, so `verify_card` abstains on every commit
-    expansion with `verify_commit_unresolved` and no `replace_block` is opened.
-    """
-    return None
+def commit_resolver(workspace: config.Workspace, commits: resolver.Run) -> contract.Resolver:
+    """The git commit resolver for one bound workspace: slice 9a's hardened resolver on this run's `Run`."""
+    return resolver.commit_resolver(workspace, commits)
 
 
-def _resolver(settings: config.VerifyConfig, scope: str) -> contract.Resolver | None:
+def _resolver(settings: config.VerifyConfig, scope: str, commits: resolver.Run | None) -> contract.Resolver | None:
+    """The resolver for one card's scope. A dry run (`commits` None) resolves nothing and never runs git."""
+    if commits is None:
+        return None
     bound = [workspace for workspace in settings.workspaces if workspace.scope == scope]
     # A scope with several roots has no single repository to ask, so nothing resolves.
-    return commit_resolver(bound[0]) if len(bound) == 1 else None
+    return commit_resolver(bound[0], commits) if len(bound) == 1 else None
+
+
+@contextlib.contextmanager
+def _commit_run(*, dry_run: bool) -> Iterator[resolver.Run | None]:
+    """One resolver `Run` for a non-dry run, closed exactly once when the run ends. A dry run gets None."""
+    if dry_run:
+        yield None
+        return
+    commits = resolver.Run()
+    try:
+        yield commits
+    finally:
+        commits.close()
 
 
 # --- Install and pre-run checks -------------------------------------------------------------
@@ -946,7 +964,15 @@ class Sender:
         return unresolved
 
 
-def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, now: int) -> dict[str, Any]:
+def _run(
+    target: Path,
+    state: dict[str, Any],
+    *,
+    dry_run: bool,
+    list_ids: bool,
+    now: int,
+    commits: resolver.Run | None,
+) -> dict[str, Any]:
     if reflect_folder(target):
         raise VerifyRunError("verify_reflect_folder", REFLECT_REFUSAL)
     settings = cmd.configured(target)
@@ -971,6 +997,9 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
     tally = Tally(skipped=picked.skipped)
     tally.skip("proposal_show_failed", unread)
     tally.skip(UNSETTLED_RECOVERED, recovered)
+    unavailable = resolver.unavailable_reason() if commits is not None else None
+    if unavailable is not None:
+        tally.skip(unavailable)  # Once per run. Every expansion then abstains with verify_commit_unresolved.
     tables: dict[str, dict[str, dict[str, Any]]] = {}
     unresolved: set[tuple[str, str]] = set()
     if not dry_run:
@@ -1037,7 +1066,7 @@ def _run(target: Path, state: dict[str, Any], *, dry_run: bool, list_ids: bool, 
                     assembly,
                     propose=calls.seat(pair[0]),
                     confirm=calls.seat(pair[1]),
-                    resolve_commit=_resolver(settings, card.scope),
+                    resolve_commit=_resolver(settings, card.scope, commits),
                 )
             except SeatStop as exc:
                 tally.made += calls.made
@@ -1226,13 +1255,15 @@ def run_payload(
     if not cmd.configured(target).enabled:
         raise VerifyRunError(DISABLED, DISABLED_REASON)
     now = int(time.time() * 1000) if now_ms is None else now_ms
-    with vstate.locked(target):
+    # The lock comes first, so a run refused by another holder never opens a resolver `Run`, and the
+    # `Run` is closed before the lock is released.
+    with vstate.locked(target), _commit_run(dry_run=dry_run) as commits:
         state = vstate.load(target)
         schedule = {key: state[key] for key in ("consecutive_failures", "paused")}
         if scheduled and not dry_run and state["paused"]:
             return {"status": "paused", "schedule": schedule}
         try:
-            payload = _run(target, state, dry_run=dry_run, list_ids=list_ids, now=now)
+            payload = _run(target, state, dry_run=dry_run, list_ids=list_ids, now=now, commits=commits)
         except (
             hubc.HubConfigError,
             hubc.HubUnavailable,

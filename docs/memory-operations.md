@@ -2543,9 +2543,13 @@ reply or a crash, is sent again unchanged under the same request id. Its card
 is not checked again and does not enter its cooldown until the request has a
 result (`submission_unresolved`).
 
-Commit-id expansions need a git resolver, which a later slice adds. Until
-then every expansion abstains with `verify_commit_unresolved`, so no
-`replace_block` is opened.
+Commit-id expansions go to the hardened git resolver described under
+`[[verify.workspace]]`. Each non-dry run opens one resolver run that every
+card shares, so the cards share one fetch per repository, and the run closes
+it when it ends, even after a failure. A scope bound to several roots
+resolves nothing. A dry run runs no git, because the fetch writes
+remote-tracking refs, so its commit expansions abstain with
+`verify_commit_unresolved` and it never previews a `replace_block`.
 
 What reaches the hub: the reads above, the manifest and the proposal ops. The
 manifest is `brigade.memory-verify-manifest.v1` JSON with the card, each
@@ -2589,6 +2593,7 @@ card, evidence or model text, and it is scanned before attachment
 | `verify_deferred_tombstones` | 512 tombstones are live, so no new proposal opens until one ages out. The card stays out of its cooldown |
 | `verify_deferred_cap`, `verify_deferred_quota` | The card's correction was not submitted because of the per-run cap or the pending ceiling, or after a quota stop. Nothing is staged and the card stays out of its cooldown, so the next run checks it again |
 | `proposal_show_failed` | A remembered proposal could not be read. It still counts as open this run |
+| `verify_resolver_unsupported_platform` | Reported once per non-dry run where the commit resolver cannot run git (Windows, or no held-descriptor execution). Every commit expansion abstains with `verify_commit_unresolved` |
 
 A run fails, and counts toward the pause, on a transport, configuration or
 authorization error, on a failed pre-run check, on a refused seat, on a seat
