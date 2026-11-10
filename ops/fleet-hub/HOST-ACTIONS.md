@@ -57,7 +57,13 @@ Conventions:
   0600, and a bind mount keeps the operator's ownership. So at each start
   `hub/entry.py` copies the mounted token to `/run/brigade/embed_token`, mode
   0400 and owned by the hub's user, on a tmpfs only that container has. It
-  refuses a symlink. This needs an image built from a `BRIGADE_REF` that has
+  refuses a symlink. The mounted files are mode 0444 because the container
+  runs as UID 10001 and cannot read an operator-owned 0400 file. The 0700
+  `secrets/` directory keeps other host users out, and setup refuses to write
+  a token into a `secrets/` that group or other users can enter. A token the
+  entrypoint cannot copy stops the hub only when `config/hub.toml` selects
+  hybrid retrieval and its embedder reads that copy. Otherwise the hub starts
+  and logs a warning that says to rerun `bin/hub-setup.py`. This needs an image built from a `BRIGADE_REF` that has
   `--memory-config` in `fleet serve --engine rust`. For an older image the
   entrypoint drops the flag with a warning and the hub runs in BM25 mode.
 - Why: the recipe's two secrets. The admin token is a Docker secret, and the

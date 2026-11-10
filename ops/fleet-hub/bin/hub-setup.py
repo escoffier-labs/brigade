@@ -401,6 +401,24 @@ def _private_dir(path: Path) -> None:
     os.chmod(path, 0o700)
 
 
+def _require_private(folder: Path) -> None:
+    """Refuse to put a container-readable secret in a secrets/ that group or other users can enter.
+
+    The mounted secrets are mode 0444 so the hub container's UID can read the
+    bind mount, which leaves the folder's mode 0700 as the only thing keeping
+    other host users out. `_private_dir` sets that mode. This is the check that
+    it held, for a filesystem that ignores the chmod or a folder widened since.
+    """
+    if os.name != "posix":
+        return
+    mode = _check_dir(folder, "secrets/")
+    if mode is not None and mode & 0o077:
+        raise SetupError(
+            f"secrets/ has mode {mode:04o}, which lets group or other users in, and the token files in it are "
+            "mode 0444 for the hub container. Run chmod 700 on it and rerun"
+        )
+
+
 def write_secret(path: Path, data: bytes, mode: int = 0o444) -> bool:
     """Create a secret once. Mode 0444 inside a 0700 directory: the container's own UID must read the bind mount.
 
@@ -567,6 +585,7 @@ def ensure_secrets(project: Path, *, local_token: bool = False) -> list[str]:
     if folder.is_symlink():
         raise SetupError("secrets/ is a symlink or not a directory; move it aside and rerun")
     _private_dir(folder)
+    _require_private(folder)
     created = []
     if write_secret(folder / "admin-token.txt", (secrets.token_urlsafe(32) + "\n").encode("ascii")):
         created.append("admin-token.txt")
@@ -862,7 +881,8 @@ def install_probed_token(project: Path, decision: Decision) -> str | None:
     folder = project / "secrets"
     target = folder / REMOTE_TOKEN
     data = (decision.probed_token + "\n").encode("utf-8")
-    _check_dir(folder, "secrets/")
+    # Checked again at the last step, right before the 0444 file is written.
+    _require_private(folder)
     if os.path.lexists(target) and (target.is_symlink() or not target.is_file()):
         raise SetupError(f"secrets/{REMOTE_TOKEN} is a symlink or not a regular file; move it aside and rerun")
     old = target.read_bytes() if target.exists() else None

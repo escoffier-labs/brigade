@@ -34,7 +34,9 @@ Before either hub starts, two steps make setup's hybrid configuration usable:
   user owns with mode 0400 or 0600. `deliver_embed_token` copies the mount into
   a hub-owned 0400 file on the container's private tmpfs, which is the path
   setup writes into hub.toml. A symlink at the mount is refused. With no mount
-  (BM25 mode) nothing is copied.
+  (BM25 mode) nothing is copied. A mount that cannot be copied stops the start
+  only when the memory config is hybrid and its embedder reads that copy
+  (`embed_token_use`). Otherwise the hub starts with a warning and no copy.
 - `--memory-config`. compose.yaml names setup's hub.toml. An image whose
   Brigade predates that flag would refuse it, so `supported_argv` drops it
   there and says so. Such a hub runs on `hub.toml` beside its database, which
@@ -54,6 +56,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tomllib
 import urllib.request
 
 HUB = os.environ.get("BRIGADE_HUB_BIN", "brigade-hub")
@@ -116,13 +119,7 @@ def deliver_embed_token(source: str = EMBED_TOKEN_MOUNT, target: str = EMBED_TOK
     try:
         fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except FileNotFoundError:
-        try:
-            os.unlink(target)
-        except (FileNotFoundError, NotADirectoryError):
-            pass
-        except OSError as exc:
-            return f"cannot remove the earlier embedder token copy {target}: {exc.strerror}"
-        return None
+        return remove_embed_token_copy(target)
     except OSError as exc:
         if exc.errno in (errno.ELOOP, errno.EMLINK):
             return f"embedder token {source} is a symlink; setup writes a regular file"
@@ -158,6 +155,56 @@ def deliver_embed_token(source: str = EMBED_TOKEN_MOUNT, target: str = EMBED_TOK
         except OSError:
             pass
     return None
+
+
+def remove_embed_token_copy(target: str = EMBED_TOKEN_COPY) -> str | None:
+    """Remove the hub's copy of the embedder token, if there is one. Returns what went wrong, or None."""
+    try:
+        os.unlink(target)
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    except OSError as exc:
+        return f"cannot remove the earlier embedder token copy {target}: {exc.strerror}"
+    return None
+
+
+def memory_config_path(argv: list[str]) -> str:
+    """The hub.toml this hub will read: the one `--memory-config` names, else the one beside its database."""
+    named = option(argv, "--memory-config", "")
+    if named:
+        return named
+    db = os.path.expanduser(option(argv, "--db", "~/.brigade/fleet-hub.db"))
+    return os.path.join(os.path.dirname(db), "hub.toml")
+
+
+def embed_token_use(config: str, copy: str = EMBED_TOKEN_COPY) -> tuple[bool, str]:
+    """Whether the hub started on `config` reads the token copy, and a clause saying why.
+
+    Only a hybrid config whose embedder posts to an endpoint with `token_file`
+    naming the copy needs it. A config that is absent, unreadable or not valid
+    TOML counts as not using it: the hub reads the same file next and reports
+    that itself, and a named config it refuses stops it.
+    """
+    try:
+        with open(config, "rb") as handle:
+            memory = tomllib.load(handle).get("memory")
+    except FileNotFoundError:
+        return False, f"there is no memory config at {config}, which means BM25 mode"
+    except (OSError, ValueError) as exc:
+        return (
+            False,
+            f"the memory config {config} cannot be read here ({type(exc).__name__}) and the hub checks it next",
+        )
+    if not isinstance(memory, dict) or memory.get("retrieval") != "hybrid":
+        return False, f"the memory config {config} does not select hybrid retrieval"
+    embedder = memory.get("embedder")
+    embedder = embedder if isinstance(embedder, dict) else {}
+    token_file = embedder.get("token_file")
+    posts = bool(embedder.get("query_endpoint") or embedder.get("endpoint"))
+    if posts and isinstance(token_file, str) and os.path.normpath(token_file) == os.path.normpath(copy):
+        backend = embedder.get("backend")
+        return True, f"the memory config {config} selects hybrid retrieval and its {backend} embedder reads {copy}"
+    return False, f"the embedder in the memory config {config} does not read {copy}"
 
 
 def engine_supports_memory_config() -> bool:
@@ -217,11 +264,22 @@ def engine_command(argv: list[str]) -> list[str] | None:
 
 
 def main(argv: list[str]) -> int:
+    # First, so the config looked at below is the one this image's hub will read.
+    argv = supported_argv(argv, engine_supports_memory_config())
     problem = deliver_embed_token()
     if problem is not None:
-        print(f"error: {problem}", file=sys.stderr, flush=True)
-        return 2
-    argv = supported_argv(argv, engine_supports_memory_config())
+        used, why = embed_token_use(memory_config_path(argv))
+        # Whatever went wrong, no copy from an earlier start stays behind for a later config to pick up.
+        leftover = None if used else remove_embed_token_copy()
+        if used or leftover is not None:
+            print(f"error: {leftover or problem} ({why})", file=sys.stderr, flush=True)
+            return 2
+        print(
+            f"warning: {problem}. The hub starts without the embedder token, since {why}. "
+            "Rerun bin/hub-setup.py to rewrite the token before switching to hybrid retrieval.",
+            file=sys.stderr,
+            flush=True,
+        )
     command = engine_command(argv)
     if command is not None:
         # Same PID, so the init process's signals reach fleet serve directly.

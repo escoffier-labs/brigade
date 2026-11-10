@@ -82,6 +82,19 @@ copies the mounted token to `/run/brigade/embed_token` with that owner and
 mode 0400, on a tmpfs private to the container, and refuses a symlink at the
 mount. `config/hub.toml` names that copy.
 
+Setup sets `secrets/` to mode 0700 on every run and refuses to write a token
+into a `secrets/` that group or other users can still enter. Run `chmod 700
+secrets` and rerun it.
+
+A mounted token the entrypoint cannot copy stops the hub only when
+`config/hub.toml` selects hybrid retrieval and its embedder reads
+`/run/brigade/embed_token`. The usual cause is a token file an earlier setup
+wrote with mode 0400, which the hub container's user (UID 10001) cannot read.
+The log then has one `error:` line that names the mount, and the fix is to
+rerun `bin/hub-setup.py` and start the hub again. With a lexical config, or an
+embedder that reads another token file, the same condition is a `warning:`
+line and the hub starts without a copy.
+
 The hub reads `config/hub.toml` because `compose.yaml` passes
 `--memory-config /etc/brigade/hub.toml`. Its log has one line naming the file
 and the retrieval mode, for example `memory configuration:

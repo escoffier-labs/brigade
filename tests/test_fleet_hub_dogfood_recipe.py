@@ -2948,7 +2948,14 @@ def test_entry_stops_before_starting_a_hub_when_the_token_cannot_be_delivered(tm
     monkeypatch.setattr(entry, "deliver_embed_token", lambda: "embedder token is a symlink")
     monkeypatch.setattr(entry.subprocess, "Popen", lambda *a, **k: pytest.fail("the hub started"))
     monkeypatch.setattr(entry.os, "execv", lambda *a: pytest.fail("the hub started"))
-    assert entry.main(["--host", "127.0.0.1", "--port", "1"]) == 2
+    config = tmp_path / "hub.toml"
+    config.write_text(
+        '[memory]\nretrieval = "hybrid"\n[memory.embedder]\nbackend = "remote"\n'
+        f'endpoint = "https://embed.example.test/v1"\ntoken_file = "{entry.EMBED_TOKEN_COPY}"\n',
+        encoding="utf-8",
+    )
+    # Fatal for the hybrid config that reads the copy (tests/test_fleet_hub_embed_token_modes.py has the other rows).
+    assert entry.main(["--host", "127.0.0.1", "--port", "1", "--memory-config", str(config)]) == 2
     assert "error: embedder token is a symlink" in capsys.readouterr().err
 
 
