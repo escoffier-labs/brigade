@@ -586,6 +586,22 @@ def test_delivery_report_marks_unacknowledged_messages_past_the_deadline():
         fleet_client_messages.delivery_report(broken, deadline_minutes=60, now=now)
 
 
+@pytest.mark.parametrize("minutes", [1e20, 999999999 * 1440])
+def test_delivery_report_rejects_deadline_overflow(minutes):
+    with pytest.raises(FleetClientError, match="undelivered deadline is too large"):
+        fleet_client_messages.delivery_report(
+            _page(), deadline_minutes=minutes, now=datetime(1, 1, 2, tzinfo=timezone.utc)
+        )
+
+
+def test_fleet_msg_sent_rejects_deadline_overflow(monkeypatch, capsys):
+    monkeypatch.setattr(fleet_client_messages, "sent", lambda **kwargs: _page())
+    assert cli.main(["fleet", "msg", "sent", "--after", "0", "--undelivered-after", "1e20"]) == 1
+    output = capsys.readouterr()
+    assert "undelivered deadline is too large" in output.out + output.err
+    assert "Traceback" not in output.out + output.err
+
+
 def test_fleet_msg_sent_reports_undelivered_past_a_deadline(monkeypatch, capsys):
     calls = []
 
