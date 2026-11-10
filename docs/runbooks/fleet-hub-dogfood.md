@@ -61,9 +61,26 @@ Secrets, in `ops/fleet-hub/secrets/` (mode 0700, ignored by Git):
   the state volume, so a volume copy alone cannot test guesses.
 - `front-authkey`: the private network's auth key for the front's first login.
 - `embed-token`: only for the `remote` embedder backend.
+- `operator-admin-token.txt`: the operator's copy of the admin token, mode
+  0600. No container mounts it.
 
-Each file is mode 0444. The containers run as other UIDs and must read the
-bind mount, so the 0700 directory protects the files from other host users.
+Each container's file is mode 0444. The containers run as other UIDs and must
+read the bind mount, so the 0700 directory protects the files from other host
+users.
+
+`brigade memory rescan` and `brigade memory reindex` accept only a mode-0600
+`--admin-token-file`, so they refuse the 0444 container copy. Pass the operator
+copy instead:
+
+```bash
+brigade memory rescan --target . --admin-token-file secrets/operator-admin-token.txt --limit 4 --until-done
+```
+
+`bin/hub-setup.py init` and `switch --to hybrid` keep the operator copy equal
+to `admin-token.txt`. They create it when it is missing, rewrite it after the
+admin token changes and reset its mode to 0600. To add it to an existing
+install without rerunning setup, run this from the recipe directory:
+`install -m 0600 secrets/admin-token.txt secrets/operator-admin-token.txt`.
 
 ## Prerequisites
 

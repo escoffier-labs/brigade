@@ -195,6 +195,130 @@ def test_secrets_are_private_and_never_overwritten(project, tmp_path):
     assert {name: (folder / name).read_bytes() for name in setup.SECRET_FILES} == first
 
 
+posix_modes = pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits are not enforced on Windows")
+
+
+def _mode(path):
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def test_setup_writes_an_owner_only_operator_copy_of_the_admin_token(project, tmp_path):
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    operator = folder / setup.OPERATOR_TOKEN
+    assert operator.read_bytes() == (folder / "admin-token.txt").read_bytes()
+    if os.name == "posix":
+        assert _mode(operator) == 0o600
+        # The container copy keeps the mode the hub's own UID needs to read the bind mount.
+        assert _mode(folder / "admin-token.txt") == 0o444
+    # Compose never mounts the operator copy into a container.
+    assert setup.OPERATOR_TOKEN not in (RECIPE / "compose.yaml").read_text(encoding="utf-8")
+    assert not [p.name for p in folder.iterdir() if p.name.startswith(f".{setup.OPERATOR_TOKEN}")]
+
+
+def _admin_cli(monkeypatch, tmp_path, command, token_file):
+    from brigade import memory_embed
+    from brigade.cli import main
+
+    settings = memory_embed.hubc.HubSettings(mode="read", hub_url="https://hub.example.com", token="fake-node-token")
+    monkeypatch.setattr(memory_embed.hubc, "load_settings", lambda _: settings)
+    seen = []
+
+    class AdminClient:
+        def __init__(self, url, credential):
+            seen.append(credential)
+
+        def call(self, action, **fields):
+            return {"action": action}
+
+    monkeypatch.setattr(memory_embed.hubc, "MemoryHubClient", AdminClient)
+    argv = ["memory", command, "--target", str(tmp_path), "--admin-token-file", str(token_file)]
+    return main(argv), seen
+
+
+@pytest.mark.parametrize("command", ["rescan", "reindex"])
+def test_memory_rescan_and_reindex_accept_the_operator_copy_setup_writes(project, tmp_path, monkeypatch, command):
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    expected = (folder / "admin-token.txt").read_text(encoding="ascii").strip()
+    code, seen = _admin_cli(monkeypatch, tmp_path, command, folder / setup.OPERATOR_TOKEN)
+    assert code == 0
+    assert len(seen) == 1 and seen[0] == expected
+
+
+@posix_modes
+@pytest.mark.parametrize("command", ["rescan", "reindex"])
+def test_memory_rescan_and_reindex_still_refuse_the_0444_container_copy(project, tmp_path, monkeypatch, command):
+    assert _init(project, tmp_path) == 0
+    code, seen = _admin_cli(monkeypatch, tmp_path, command, project / "secrets" / "admin-token.txt")
+    assert code == 1 and seen == []
+
+
+def test_rerunning_setup_adds_the_operator_copy_to_an_existing_install(project, tmp_path, capsys):
+    """An install from before the operator copy has only the 0444 container copy."""
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    (folder / setup.OPERATOR_TOKEN).unlink()
+    container = (folder / "admin-token.txt").read_bytes()
+    capsys.readouterr()
+    assert _init(project, tmp_path) == 0
+    out = capsys.readouterr().out
+    assert f"secrets written: {setup.OPERATOR_TOKEN} (mode 0600" in out
+    assert container.decode("ascii").strip() not in out
+    assert (folder / "admin-token.txt").read_bytes() == container
+    assert (folder / setup.OPERATOR_TOKEN).read_bytes() == container
+    if os.name == "posix":
+        assert _mode(folder / setup.OPERATOR_TOKEN) == 0o600
+        assert _mode(folder / "admin-token.txt") == 0o444
+
+
+@posix_modes
+def test_rerunning_setup_resets_a_drifted_operator_copy_mode(project, tmp_path, capsys):
+    assert _init(project, tmp_path) == 0
+    operator = project / "secrets" / setup.OPERATOR_TOKEN
+    operator.chmod(0o444)
+    capsys.readouterr()
+    assert _init(project, tmp_path) == 0
+    assert "(mode reset to 0600)" in capsys.readouterr().out
+    assert _mode(operator) == 0o600
+    capsys.readouterr()
+    assert _init(project, tmp_path) == 0
+    assert setup.OPERATOR_TOKEN not in capsys.readouterr().out
+
+
+def test_rotating_the_container_copy_refreshes_the_operator_copy(project, tmp_path, capsys):
+    """Deleting admin-token.txt and rerunning setup rotates the token. The operator copy follows."""
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    old = (folder / "admin-token.txt").read_bytes()
+    (folder / "admin-token.txt").chmod(0o600)
+    (folder / "admin-token.txt").unlink()
+    capsys.readouterr()
+    assert _init(project, tmp_path) == 0
+    out = capsys.readouterr().out
+    new = (folder / "admin-token.txt").read_bytes()
+    assert new != old
+    assert "(refreshed: admin-token.txt changed)" in out
+    assert old.decode("ascii").strip() not in out and new.decode("ascii").strip() not in out
+    assert (folder / setup.OPERATOR_TOKEN).read_bytes() == new
+    if os.name == "posix":
+        assert _mode(folder / setup.OPERATOR_TOKEN) == 0o600
+
+
+def test_setup_refuses_an_operator_copy_that_is_a_symlink(project, tmp_path):
+    assert _init(project, tmp_path) == 0
+    folder = project / "secrets"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("not the token\n", encoding="ascii")
+    (folder / setup.OPERATOR_TOKEN).unlink()
+    try:
+        (folder / setup.OPERATOR_TOKEN).symlink_to(elsewhere)
+    except OSError:
+        pytest.skip("symlinks are not available")
+    assert _init(project, tmp_path) == 1
+    assert elsewhere.read_text(encoding="ascii") == "not the token\n"
+
+
 def test_brigade_ref_needs_its_archive_digest_and_version(project, tmp_path):
     ref, digest = ("--brigade-ref", "0" * 40), ("--brigade-sha256", "f" * 64)
     assert _init(project, tmp_path, *ref) == 1

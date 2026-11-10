@@ -13,9 +13,10 @@
    says how to switch later.
 
 It never writes a hybrid configuration it could not probe and never overwrites
-an existing secret. `switch` changes the mode either way, and `units` renders
-the systemd templates for review. Nothing here installs a package, a unit or a
-container. Stdlib only.
+an existing secret. The one derived file, the operator's mode-0600 copy of the
+admin token, follows the container copy. `switch` changes the mode either way,
+and `units` renders the systemd templates for review. Nothing here installs a
+package, a unit or a container. Stdlib only.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import urllib.error
@@ -44,6 +46,9 @@ PROBE_TEXT = "brigade setup probe"
 TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
 TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
 SECRET_FILES = ("admin-token.txt", "findings-key", "front-authkey")
+# The operator's copy of the admin token for `brigade memory rescan` and `reindex`
+# (`--admin-token-file`), which accept only mode 0600. Compose never mounts it.
+OPERATOR_TOKEN = "operator-admin-token.txt"
 UNIT_TEMPLATES = (
     ("brigade-hub-compose.service.in", "brigade-hub-compose.service"),
     ("brigade-hub-watchdog.service.in", "brigade-hub-watchdog.service"),
@@ -311,12 +316,53 @@ def write_secret(path: Path, data: bytes) -> bool:
     return True
 
 
+def ensure_operator_token(folder: Path) -> str | None:
+    """Keep the operator's mode-0600 copy of the admin token in step with the container copy.
+
+    `brigade memory rescan` and `reindex` take `--admin-token-file` and accept only
+    a mode-0600 file, while the container copy must stay 0444 for the hub's UID.
+    Creates the copy when it is missing (an install from before this copy existed),
+    refreshes it when the container copy changed and resets a drifted mode. Returns
+    what it did, or None. Never prints either token.
+    """
+    source = folder / "admin-token.txt"
+    target = folder / OPERATOR_TOKEN
+    token = source.read_bytes()
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise SetupError(f"secrets/{OPERATOR_TOKEN} is not a regular file; move it aside and rerun")
+    if target.exists():
+        if secrets.compare_digest(target.read_bytes(), token):
+            if os.name != "posix" or stat.S_IMODE(target.stat().st_mode) == 0o600:
+                return None
+            try:
+                os.chmod(target, 0o600)
+            except PermissionError as exc:
+                raise SetupError(f"cannot reset secrets/{OPERATOR_TOKEN} to mode 0600; chmod it as its owner") from exc
+            return f"{OPERATOR_TOKEN} (mode reset to 0600)"
+        action = f"{OPERATOR_TOKEN} (refreshed: admin-token.txt changed)"
+    else:
+        action = f"{OPERATOR_TOKEN} (mode 0600, for --admin-token-file)"
+    # Write a new private file and swap it in, so the copy is never briefly wider than 0600.
+    staging = folder / f".{OPERATOR_TOKEN}.{secrets.token_hex(8)}"
+    fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(token)
+        os.replace(staging, target)
+    finally:
+        staging.unlink(missing_ok=True)
+    return action
+
+
 def ensure_secrets(project: Path, *, remote_token: Path | None) -> list[str]:
     folder = project / "secrets"
     _private_dir(folder)
     created = []
     if write_secret(folder / "admin-token.txt", (secrets.token_urlsafe(32) + "\n").encode("ascii")):
         created.append("admin-token.txt")
+    operator = ensure_operator_token(folder)
+    if operator:
+        created.append(operator)
     if write_secret(folder / "findings-key", secrets.token_bytes(32)):
         created.append("findings-key")
     # The front's auth key comes from the private network's admin console. An
@@ -438,7 +484,7 @@ def cmd_init(args: argparse.Namespace, run: Runner, post: Poster) -> int:
     apply(project, decision, env_updates)
     print(report(decision))
     if created:
-        print("secrets created: " + ", ".join(created))
+        print("secrets written: " + ", ".join(created))
     print(f"backup directory: {backup_dir} (mode 0700)")
     return 0
 

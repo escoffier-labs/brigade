@@ -148,6 +148,8 @@ def test_compose_runbook_pins_the_built_local_image_id():
     assert 'python3 -c \'import re,sys; m=re.fullmatch(r"(\\d+)\\.(\\d+)\\.(\\d+)", sys.argv[1])' in runbook
     assert 'generated_token="$(python3 -c' in runbook
     assert "printf '%s\\n' \"$generated_token\" > secrets/admin-token.txt" in runbook
+    # memory rescan and reindex accept only a mode-0600 --admin-token-file.
+    assert "install -m 0600 secrets/admin-token.txt secrets/operator-admin-token.txt" in runbook
     assert 're.match(r"^(\\d+)\\.(\\d+)\\.(\\d+)", sys.argv[1])' not in runbook
 
 
