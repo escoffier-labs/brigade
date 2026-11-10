@@ -708,6 +708,82 @@ def test_a_failed_apply_puts_the_previous_remote_token_back(project, tmp_path, m
     assert not [p.name for p in (project / "secrets").iterdir() if p.name.startswith(".")]
 
 
+def _tree(*roots):
+    """Every path under each root with its bytes and, on POSIX, its mode. A missing root maps to None."""
+    seen = {}
+    for root in roots:
+        if not root.exists():
+            seen[str(root)] = None
+            continue
+        for path in sorted(root.rglob("*")):
+            mode = stat.S_IMODE(path.lstat().st_mode) if os.name == "posix" else None
+            seen[str(path)] = ("dir", mode) if path.is_dir() else (path.read_bytes(), mode)
+    return seen
+
+
+# Each step setup writes at, as (module function, fail before or after its real work).
+WRITE_STEPS = [
+    ("write_secret", "after"),
+    ("ensure_operator_token", "after"),
+    ("_private_dir", "after"),
+    ("install_probed_token", "after"),
+    ("write_env", "before"),
+    ("write_env", "after"),
+    ("_compose_override", "after"),
+]
+
+
+def _fail_at(monkeypatch, name, when):
+    real = getattr(setup, name)
+    reached = []
+
+    def step(*args, **kwargs):
+        reached.append(name)
+        if when == "after":
+            real(*args, **kwargs)
+        raise OSError(f"injected failure at {name} ({when})")
+
+    monkeypatch.setattr(setup, name, step)
+    return reached
+
+
+@pytest.mark.parametrize(("name", "when"), WRITE_STEPS)
+@pytest.mark.parametrize("command", ["first-init", "re-init", "switch"])
+def test_a_failure_at_any_write_step_leaves_the_endpoint_and_token_as_they_were(
+    project, tmp_path, monkeypatch, capsys, command, name, when
+):
+    backups = tmp_path / "backups"
+    if command != "first-init":
+        token_a = _named_token(tmp_path, "a.token", "token-for-endpoint-a")
+        assert (
+            _init(project, tmp_path, "--remote-url", "https://a.example.test", "--remote-token-file", str(token_a)) == 0
+        )
+    before = _tree(project, backups)
+    reached = _fail_at(monkeypatch, name, when)
+    token_b = _named_token(tmp_path, "b.token", "token-for-endpoint-b")
+    if command == "switch":
+        rc = _switch_remote(project, "https://b.example.test", token_b)
+    else:
+        rc = _init(project, tmp_path, "--remote-url", "https://b.example.test", "--remote-token-file", str(token_b))
+    assert reached, f"{name} was never called, so nothing was injected"
+    assert rc == 1 and "injected failure" in capsys.readouterr().err
+    # Byte-identical files with the same modes, and nothing where nothing was.
+    assert _tree(project, backups) == before
+
+
+def test_setup_refuses_a_symlinked_generated_file_before_writing_anything(project, tmp_path, capsys):
+    assert _init(project, tmp_path) == 0
+    elsewhere = tmp_path / "elsewhere.env"
+    elsewhere.write_text("KEEP=1\n", encoding="utf-8")
+    (project / ".env").unlink()
+    _symlink_or_skip(project / ".env", elsewhere)
+    before = _tree(project)
+    token_b = _named_token(tmp_path, "b.token", "token-for-endpoint-b")
+    assert _init(project, tmp_path, "--remote-url", "https://b.example.test", "--remote-token-file", str(token_b)) == 1
+    assert ".env is a symlink" in capsys.readouterr().err
+    assert _tree(project) == before and elsewhere.read_text(encoding="utf-8") == "KEEP=1\n"
+
+
 def test_a_symlinked_remote_token_is_refused(project, tmp_path, capsys):
     assert _init(project, tmp_path) == 0
     elsewhere = tmp_path / "elsewhere"
