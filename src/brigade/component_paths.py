@@ -10,6 +10,12 @@ from pathlib import PurePosixPath, PureWindowsPath
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
+# Windows is detected from the interpreter, never from ``platform.system()``.
+# There the stdlib probe queries WMI and, when that query fails, runs the
+# ``ver`` shell command in a child process. Resolving a user path must not
+# spawn a process, so an offline refusal stays free of side effects.
+_HOST_IS_WINDOWS = os.name == "nt"
+
 
 def data_root(*, env: Mapping[str, str] | None = None, system: str | None = None) -> str:
     """Return the OS-specific user data root without admin rights."""
@@ -130,6 +136,8 @@ def cached_asset_path(cache_root_path: str, sha256: str, asset_name: str) -> str
 
 
 def _normalize_system(system: str | None) -> str:
+    if system is None and _HOST_IS_WINDOWS:
+        return "windows"
     raw = (system or host_platform.system()).lower()
     if raw in {"darwin", "macos", "mac os x"}:
         return "darwin"
