@@ -1917,6 +1917,14 @@ fn inherited_image() -> Option<libc::c_int> {
 }
 
 fn main() {
+    // An operator command on a stopped hub's memory file, not the server.
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(brigade_hub::memory::restore::COMMAND))
+    {
+        std::process::exit(brigade_hub::memory::restore::main(
+            std::env::args_os().skip(1),
+        ));
+    }
     // Before the runtime's threads exist, so none of them takes a stop signal
     // with the default action. `Stop::install` unblocks them in `run`.
     if let Err(e) = stop_signals(libc::SIG_BLOCK) {

@@ -335,13 +335,19 @@ committed after the copy is gone. Never put a copy back with a plain file
 copy: use the restore tool, which keeps ids, claim generations and revisions
 moving forward.
 
-The restore below replaces only `fleet-hub.db`. Leave the live
-`fleet-hub-memory.db` and its sidecars in place. No tool restores a memory
-copy yet: a restored memory file needs a new `log_epoch` before it is served,
-and nothing outside the Rust crate's tests sets one (#2292). If the memory
-file itself is lost, the hub creates an empty one on its next start, and the
-copies under `BRIGADE_BACKUP_DIR/memory` keep the lost cards for when #2292
-lands.
+The restore below replaces `fleet-hub.db`. Step 3 can also put back a copy
+of `fleet-hub-memory.db` from `BRIGADE_BACKUP_DIR/memory`, for example when
+the memory file was lost. Skip that part to keep the live memory file, and
+leave it and its sidecars in place. If the memory file is lost and not
+restored, the hub creates an empty one on its next start.
+
+A restored memory file needs a new `log_epoch` before the hub serves it.
+Revisions are unique only within one epoch, and the copy hands out revision
+numbers that clients saw before the loss. `brigade-hub memory-restore-epoch`
+starts the new epoch. After that, each client's next `memory hub pull`
+discards its replica and rebuilds it. A write based on a revision from before
+the restore is refused with `409 memory_epoch_changed`, and a spooled `sync`
+write of that kind becomes a local proposal.
 
 1. Fence the hub: `touch hub.fenced && docker compose stop hub front` in the
    project directory. Clients spool from here on, and the fence holds across
@@ -388,6 +394,27 @@ lands.
       install -o 10001 -g 10001 -m 0600 /restore/fleet-hub.db /var/lib/brigade/fleet-hub.db'
    ```
 
+   To restore the memory file too, put its copy in place the same way, then
+   start a new epoch on it. Both commands run while the hub is still stopped:
+
+   ```bash
+   docker compose run --rm --no-deps --user 0 --cap-add CHOWN --cap-add DAC_OVERRIDE \
+     -v "$HOME/brigade-hub-backups/memory/<STAMP>:/restore:ro" --entrypoint sh hub -c \
+     'rm -f /var/lib/brigade/fleet-hub-memory.db-wal /var/lib/brigade/fleet-hub-memory.db-shm /var/lib/brigade/fleet-hub-memory.db-journal &&
+      install -o 10001 -g 10001 -m 0600 /restore/fleet-hub-memory.db /var/lib/brigade/fleet-hub-memory.db'
+   docker compose run --rm --no-deps --entrypoint brigade-hub hub \
+     memory-restore-epoch --memory-db /var/lib/brigade/fleet-hub-memory.db
+   ```
+
+   The command prints one JSON line with `previous_log_epoch` and the new
+   `log_epoch`. Keep it with the restore record. It changes only the
+   `log_epoch` value and refuses, changing nothing, in these cases: the
+   path is a symbolic link, a process still holds the file, a non-empty `-wal` or any `-journal` sits
+   beside it, the file is not a memory file, its schema is newer than this
+   `brigade-hub`, or SQLite's `quick_check` fails. Running it again starts
+   another new epoch, which is safe. Never skip the command because an
+   earlier run seemed to cover this copy.
+
 4. Start the hub alone, still fenced, and bring it up to date before any
    client can reach it:
 
@@ -407,7 +434,10 @@ lands.
 
    Re-apply every credential revocation, roster change and policy edit made
    since the copy, from your own record, because the hub's audit rows for
-   that time are gone. Each mesh signer's newest membership, manifest and
+   that time are gone. If the memory file was restored, check
+   `verifier_generation.current` in the memory `status` and run
+   `verifier_resync` when it is false
+   ([memory operations](../memory-operations.md#recovery-after-restoring-either-database)). Each mesh signer's newest membership, manifest and
    revocation statements must be published again from the signer's own copy.
    Signers cannot reach a fenced hub, so bring their signed statements to the
    hub host and submit them through the same loopback path. If the hub
