@@ -13,7 +13,10 @@ use std::{
     net::IpAddr,
     path::PathBuf,
     pin::Pin,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::time::Instant;
@@ -33,6 +36,14 @@ pub const BATCH_CARDS: usize = 4;
 /// read it before the request and again after the reply.
 pub const LISTING_TTL: Duration = Duration::from_secs(30);
 const LISTING_BYTES: usize = 1 << 20;
+/// One reading of the model listing gets this share of the call's deadline,
+/// and never more than [`LISTING_CAP`]. A listing route that stalls costs a
+/// call this much per reading and never its whole deadline.
+const LISTING_SHARE: u32 = 5;
+const LISTING_CAP: Duration = Duration::from_secs(2);
+pub(crate) fn listing_budget(deadline: Duration) -> Duration {
+    (deadline / LISTING_SHARE).min(LISTING_CAP)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmbedderId {
@@ -197,6 +208,9 @@ pub struct HttpEmbedder {
     /// The model listing beside an `/api/embed` endpoint, on the same origin.
     listing: Option<Url>,
     listed: Mutex<Option<Listed>>,
+    /// Whether the last reply carried a digest of its own. Such an endpoint
+    /// needs no listing, so the reading before a request is skipped for it.
+    reply_digest: AtomicBool,
 }
 /// What the server's model listing last reported for the configured model.
 struct Listed {
@@ -384,6 +398,7 @@ impl HttpEmbedder {
             .build(https);
         Ok(Arc::new(Self {
             listing: listing_url(&config.shape, &url),
+            reply_digest: AtomicBool::new(false),
             listed: Mutex::new(None),
             config,
             url,
@@ -417,11 +432,13 @@ impl HttpEmbedder {
     /// the model. A query reuses a reading younger than [`LISTING_TTL`]. A
     /// document batch and the breaker's probe always read again, and `send`
     /// calls this on both sides of their request. A digest that changed
-    /// refuses every reply from the next reading on.
+    /// refuses every reply from the next reading on. One reading that does
+    /// not finish inside `budget` is `embedder-timeout`.
     async fn listing_digest(
         &self,
         kind: Kind,
         pinned: Option<IpAddr>,
+        budget: Duration,
     ) -> Result<Option<String>, EmbedError> {
         let Some(listing) = &self.listing else {
             return Ok(None);
@@ -445,12 +462,15 @@ impl HttpEmbedder {
             .header("Authorization", self.token.clone())
             .body(Full::new(Bytes::new()))
             .map_err(|_| EmbedError::new("endpoint-refused"))?;
-        let response = self
-            .client
-            .request(req)
-            .await
-            .map_err(|_| EmbedError::new("embedder-unavailable"))?;
-        let digest = if response.status().as_u16() == 200 {
+        let read = async {
+            let response = self
+                .client
+                .request(req)
+                .await
+                .map_err(|_| EmbedError::new("embedder-unavailable"))?;
+            if response.status().as_u16() != 200 {
+                return Ok(None);
+            }
             let bytes = Limited::new(response.into_body(), LISTING_BYTES)
                 .collect()
                 .await
@@ -458,10 +478,13 @@ impl HttpEmbedder {
                 .to_bytes();
             let value: Value = serde_json::from_slice(&bytes)
                 .map_err(|_| EmbedError::new("embedder-response-invalid"))?;
-            listed_digest(&value, &self.config.id.name)
-        } else {
-            None
+            Ok(listed_digest(&value, &self.config.id.name))
         };
+        // The headers and the body together, so a listing that stalls at
+        // either point gives the rest of the deadline back to the caller.
+        let digest = tokio::time::timeout(budget, read)
+            .await
+            .unwrap_or_else(|_| Err(EmbedError::new("embedder-timeout")))?;
         *self.listed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Listed {
             digest: digest.clone(),
             at: Instant::now(),
@@ -471,7 +494,12 @@ impl HttpEmbedder {
     pub fn host(&self) -> &str {
         self.url.host_str().unwrap_or("")
     }
-    async fn send(&self, kind: Kind, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedError> {
+    async fn send(
+        &self,
+        kind: Kind,
+        texts: Vec<String>,
+        deadline: Duration,
+    ) -> Result<Vec<Vec<f32>>, EmbedError> {
         if texts.is_empty()
             || texts.len()
                 > if kind == Kind::Document {
@@ -525,11 +553,19 @@ impl HttpEmbedder {
         // second route, and one reading after the reply cannot tell a reply
         // computed by another model that was replaced just before that
         // reading. The outcome counts only for a reply that carries no
-        // digest, so a failure here does not refuse a reply that does. Both
-        // readings run inside the caller's deadline. A query is not stored
-        // and keeps its single reading.
-        let before = if kind != Kind::Query && self.listing.is_some() {
-            Some(self.listing_digest(kind, pinned).await)
+        // digest, so a failure or a stall here does not refuse a reply that
+        // does. Each reading has its own share of the caller's deadline. A
+        // query is not stored and keeps its single reading.
+        //
+        // An endpoint whose last reply carried a digest is not read here at
+        // all: its replies identify the model themselves, as they did
+        // before the listing existed. If such an endpoint then answers
+        // without a digest, that reply has no reading before it and is
+        // refused below, and the next call is bracketed again.
+        let budget = listing_budget(deadline);
+        let bracketed = kind != Kind::Query && self.listing.is_some();
+        let before = if bracketed && !self.reply_digest.load(Ordering::Relaxed) {
+            Some(self.listing_digest(kind, pinned, budget).await)
         } else {
             None
         };
@@ -591,18 +627,24 @@ impl HttpEmbedder {
             .map_err(|_| EmbedError::new("embedder-response-invalid"))?;
         // A digest in the reply decides alone. Only a reply with none, from
         // an endpoint with a model listing, is checked against that listing.
-        // For a bracketed call both readings must succeed and report the
-        // pin, or the vectors are dropped here and nothing is stored.
+        // For a bracketed call both readings must succeed inside their
+        // budgets and report the pin, or the vectors are dropped here and
+        // nothing is stored.
         let listed;
-        let digest = match value["model_digest"].as_str().or(header_digest.as_deref()) {
+        let reported = value["model_digest"].as_str().or(header_digest.as_deref());
+        self.reply_digest
+            .store(reported.is_some(), Ordering::Relaxed);
+        let digest = match reported {
             Some(reported) => Some(reported),
             None => {
-                if let Some(before) = before {
+                if bracketed {
+                    // No reading before the request is no evidence for it.
+                    let before = before.ok_or_else(|| EmbedError::new("digest-mismatch"))?;
                     if before?.as_deref() != Some(self.config.id.model_digest.as_str()) {
                         return Err(EmbedError::new("digest-mismatch"));
                     }
                 }
-                listed = self.listing_digest(kind, pinned).await?;
+                listed = self.listing_digest(kind, pinned, budget).await?;
                 listed.as_deref()
             }
         };
@@ -655,7 +697,7 @@ impl Embedder for Arc<HttpEmbedder> {
     fn embed(&self, kind: Kind, texts: Vec<String>, deadline: Duration) -> Embedding {
         let this = self.clone();
         Box::pin(async move {
-            tokio::time::timeout(deadline, this.send(kind, texts))
+            tokio::time::timeout(deadline, this.send(kind, texts, deadline))
                 .await
                 .unwrap_or_else(|_| Err(EmbedError::new("embedder-timeout")))
         })

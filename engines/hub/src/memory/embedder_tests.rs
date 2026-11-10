@@ -1013,6 +1013,8 @@ pub(super) struct Listing {
     pub(super) on_embed: Arc<Mutex<Option<serde_json::Value>>>,
     pub(super) reads: Arc<Mutex<usize>>,
     pub(super) embeds: Arc<Mutex<usize>>,
+    /// The digest each embedding reply carries, if any.
+    pub(super) reply: Arc<Mutex<Option<&'static str>>>,
     pub(super) task: tokio::task::JoinHandle<()>,
 }
 fn tags(digest: &str) -> serde_json::Value {
@@ -1035,17 +1037,21 @@ pub(super) async fn fake_with_listing(
     let reads = Arc::new(Mutex::new(0));
     let on_embed = Arc::new(Mutex::new(None::<serde_json::Value>));
     let embeds = Arc::new(Mutex::new(0));
+    let reply_digest = Arc::new(Mutex::new(reply_digest));
+    let carried = reply_digest.clone();
     let (state, count) = (listed.clone(), reads.clone());
     let (swap, sent) = (on_embed.clone(), embeds.clone());
     let task = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let (state, count) = (state.clone(), count.clone());
             let (swap, sent) = (swap.clone(), sent.clone());
+            let carried = carried.clone();
             tokio::spawn(async move {
                 let service = hyper::service::service_fn(
                     move |req: hyper::Request<hyper::body::Incoming>| {
                         let (state, count) = (state.clone(), count.clone());
                         let (swap, sent) = (swap.clone(), sent.clone());
+                        let carried = carried.clone();
                         async move {
                             let reply = |status: u16, body: String| {
                                 Ok::<_, hyper::Error>(
@@ -1068,6 +1074,10 @@ pub(super) async fn fake_with_listing(
                                 }
                                 *count.lock().unwrap() += 1;
                                 let listed = state.lock().unwrap().clone();
+                                if listed == "stall" {
+                                    // Accepts the request and never answers.
+                                    std::future::pending::<()>().await;
+                                }
                                 return match listed {
                                     serde_json::Value::Null => reply(404, String::new()),
                                     listed => reply(200, listed.to_string()),
@@ -1081,7 +1091,8 @@ pub(super) async fn fake_with_listing(
                                 *state.lock().unwrap() = next;
                             }
                             let mut body = json!({"embeddings": vec![vec![3.0, 4.0]; n], "data": (0..n).map(|i| json!({"index": i, "embedding": [3.0, 4.0]})).collect::<Vec<_>>()});
-                            if let Some(digest) = reply_digest {
+                            let digest = *carried.lock().unwrap();
+                            if let Some(digest) = digest {
                                 body["model_digest"] = json!(digest);
                             }
                             reply(200, body.to_string())
@@ -1100,6 +1111,7 @@ pub(super) async fn fake_with_listing(
         on_embed,
         reads,
         embeds,
+        reply: reply_digest,
         task,
     }
 }
@@ -1207,19 +1219,36 @@ async fn a_digest_in_the_reply_decides_without_the_listing() {
     );
     server.task.abort();
     assert_eq!(*server.reads.lock().unwrap(), 0);
-    // The reply reports the pin, and the listing reports another model. A
-    // document batch takes its reading before the request, since the hub
-    // cannot know yet whether the reply will carry a digest. That reading
-    // does not count against a reply that does, and no second one is taken.
+    // The reply reports the pin, and the listing reports another model. The
+    // first document batch takes its reading before the request, since the
+    // hub cannot know yet whether the reply will carry a digest. That
+    // reading does not count against a reply that does, and no second one
+    // is taken.
     let agreeing = fake_with_listing(Some("test-digest"), tags("swapped-digest")).await;
     let endpoint = HttpEmbedder::new(config(agreeing.url.clone()), scan::bundled()).unwrap();
     assert_eq!(reason(&endpoint, Kind::Document).await, None);
     assert_eq!(*agreeing.reads.lock().unwrap(), 1);
-    // A listing that does not answer does not refuse such a reply either.
+    // Once a reply has carried a digest the listing is not read at all, so
+    // a listing that does not answer does not refuse such a reply either.
     *agreeing.listed.lock().unwrap() = serde_json::Value::Null;
     assert_eq!(reason(&endpoint, Kind::Document).await, None);
+    assert_eq!(reason(&endpoint, Kind::Probe).await, None);
     assert_eq!(reason(&endpoint, Kind::Query).await, None);
-    assert_eq!(*agreeing.reads.lock().unwrap(), 2);
+    assert_eq!(*agreeing.reads.lock().unwrap(), 1);
+    // The same endpoint stops sending its digest. That reply had no reading
+    // before its request, so it is refused, whatever the listing says now.
+    *agreeing.listed.lock().unwrap() = tags("test-digest");
+    for kind in [Kind::Document, Kind::Probe] {
+        *agreeing.reply.lock().unwrap() = Some("test-digest");
+        assert_eq!(reason(&endpoint, kind).await, None);
+        *agreeing.reply.lock().unwrap() = None;
+        let reads = *agreeing.reads.lock().unwrap();
+        assert_eq!(reason(&endpoint, kind).await, Some("digest-mismatch"));
+        assert_eq!(*agreeing.reads.lock().unwrap(), reads, "{kind:?}");
+        // The next call is bracketed again and accepted on two readings.
+        assert_eq!(reason(&endpoint, kind).await, None);
+        assert_eq!(*agreeing.reads.lock().unwrap(), reads + 2, "{kind:?}");
+    }
     agreeing.task.abort();
 
     // `v1/embeddings` has no listing, so a reply without a digest is refused
@@ -1314,6 +1343,111 @@ async fn a_stored_embedding_is_bracketed_by_two_listing_reads() {
         bracketed(Kind::Query, other.clone(), pin.clone()).await,
         (None, 1, 1)
     );
+}
+
+/// Codex review of #2479: the listing route may accept a request and never
+/// answer. One reading has a bounded share of the call's deadline, so an
+/// endpoint whose replies carry the pinned digest still embeds, as it did
+/// before the listing existed.
+#[tokio::test]
+async fn a_stalled_listing_does_not_block_a_reply_that_carries_its_digest() {
+    let deadline = Duration::from_secs(2);
+    let budget = listing_budget(deadline);
+    for kind in [Kind::Document, Kind::Probe] {
+        let server = fake_with_listing(Some("test-digest"), json!("stall")).await;
+        let endpoint = HttpEmbedder::new(config(server.url.clone()), scan::bundled()).unwrap();
+        let started = std::time::Instant::now();
+        let rows = endpoint
+            .embed(kind, vec!["ordinary text".into()], deadline)
+            .await
+            .map_err(|e| e.reason);
+        let first = started.elapsed();
+        assert_eq!(rows, Ok(vec![vec![0.6, 0.8]]), "{kind:?}");
+        // One stalled reading, then the request. Far short of the deadline.
+        assert!(
+            first >= budget && first < deadline / 2,
+            "{kind:?} {first:?}"
+        );
+        assert_eq!(*server.reads.lock().unwrap(), 1);
+        // The reply carried its digest, so later calls skip the reading.
+        let started = std::time::Instant::now();
+        assert_eq!(
+            endpoint
+                .embed(kind, vec!["ordinary text".into()], deadline)
+                .await
+                .map_err(|e| e.reason),
+            Ok(vec![vec![0.6, 0.8]]),
+            "{kind:?}"
+        );
+        assert!(started.elapsed() < budget, "{kind:?}");
+        assert_eq!(*server.reads.lock().unwrap(), 1);
+        assert_eq!(*server.embeds.lock().unwrap(), 2);
+        server.task.abort();
+    }
+}
+
+/// A reply with no digest has only the listing to vouch for it. A reading
+/// that stalls on either side of the request is no evidence, so the call is
+/// refused, and it is refused long before its deadline.
+#[tokio::test]
+async fn a_stalled_listing_refuses_a_reply_without_a_digest_inside_its_budget() {
+    let deadline = Duration::from_secs(2);
+    for kind in [Kind::Document, Kind::Probe] {
+        for stall_first in [true, false] {
+            let (first, second) = if stall_first {
+                (json!("stall"), tags("test-digest"))
+            } else {
+                (tags("test-digest"), json!("stall"))
+            };
+            let server = fake_with_listing(None, first).await;
+            *server.on_embed.lock().unwrap() = Some(second);
+            let endpoint = HttpEmbedder::new(config(server.url.clone()), scan::bundled()).unwrap();
+            let started = std::time::Instant::now();
+            let refused = endpoint
+                .embed(kind, vec!["ordinary text".into()], deadline)
+                .await
+                .err()
+                .map(|e| e.reason);
+            let elapsed = started.elapsed();
+            assert_eq!(
+                refused,
+                Some("embedder-timeout"),
+                "{kind:?} first {stall_first}"
+            );
+            assert!(
+                elapsed < deadline / 2,
+                "{kind:?} first {stall_first} {elapsed:?}"
+            );
+            assert_eq!(*server.embeds.lock().unwrap(), 1);
+            server.task.abort();
+        }
+    }
+    // A query's single reading is bounded the same way.
+    let server = fake_with_listing(None, json!("stall")).await;
+    let endpoint = HttpEmbedder::new(config(server.url.clone()), scan::bundled()).unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        endpoint
+            .embed(Kind::Query, vec!["ordinary text".into()], deadline)
+            .await
+            .err()
+            .map(|e| e.reason),
+        Some("embedder-timeout")
+    );
+    assert!(started.elapsed() < deadline / 2);
+    server.task.abort();
+}
+
+/// Both readings together stay under half of any deadline the hub uses.
+#[test]
+fn a_listing_reading_takes_a_small_share_of_the_deadline() {
+    for deadline in [QUERY_DEADLINE, PROBE_DEADLINE, DOCUMENT_DEADLINE] {
+        let budget = listing_budget(deadline);
+        assert!(budget * 2 < deadline / 2, "{deadline:?}");
+        assert!(budget <= Duration::from_secs(2), "{deadline:?}");
+    }
+    assert_eq!(listing_budget(QUERY_DEADLINE), Duration::from_millis(50));
+    assert_eq!(listing_budget(DOCUMENT_DEADLINE), Duration::from_secs(2));
 }
 
 /// A listing read that fails outright, not only one that reports another

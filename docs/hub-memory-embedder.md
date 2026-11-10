@@ -106,12 +106,29 @@ whose result is kept:
   to 30 s, which keeps it inside the 250 ms deadline.
 
 Both readings go to the same allowlisted origin with the same token, pinned
-address and 1 MiB size limit as before, and both count against the call's
-own deadline (30 s for a document batch, 10 s for the probe). The reading
-before the request is taken on every bracketed call, since the hub cannot
-know yet whether the reply will carry a digest. It does not count against a
-reply that does. Once a reading shows another digest, queries are refused
-too until a later reading shows the pinned one again.
+address and 1 MiB size limit as before. Each reading has its own time
+limit, one fifth of the call's deadline and never more than 2 s: 2 s for a
+document batch and for the probe, 50 ms for a query. A listing route that
+accepts a request and never answers therefore costs a call one such limit
+per reading, never its whole deadline. A reading that runs out of time is
+no evidence. For a reply without a digest that refuses the call with
+`embedder-timeout` and stores nothing, whichever of the two readings
+stalled.
+
+The reading before the request is taken while the hub does not know
+whether the reply will carry a digest: on the first call, and after any
+reply that carried none. It does not count against a reply that carries
+one, so a stalled or failing listing does not refuse such a reply. Once a
+reply has carried a digest the hub stops reading the listing for that
+endpoint, and an endpoint that reports its digest embeds without a working
+`/api/tags` route. If that endpoint later answers without a digest, the
+reply has no reading before its request and is refused with
+`digest-mismatch`, and the next call is bracketed again. Vectors are stored
+only with evidence tied to their own reply: the digest in it, or both
+readings around it.
+
+Once a reading shows another digest, queries are refused too until a later
+reading shows the pinned one again.
 
 One case remains. A model swapped away and back again inside a single embed
 request, pinned to another and back to pinned, shows the pinned digest at
