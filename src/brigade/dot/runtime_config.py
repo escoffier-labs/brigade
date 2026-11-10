@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
@@ -22,6 +22,11 @@ GROKBOT_MEMORY_RUNTIME_SCHEMA = "brigade.grokbot-memory.runtime.v1"
 GROKBOT_MEMORY_PRINCIPAL = "agent:grokbot-memory"
 GROKBOT_INBOX_RUNTIME_SCHEMA = "brigade.grokbot-inbox.runtime.v1"
 GROKBOT_INBOX_PRINCIPAL = "agent:grokbot-inbox"
+# The alias every connector keeps for the conductor, so an agent can start a message to it.
+CONDUCTOR_ALIAS = "conductor"
+# What a connector-computed assignment permits. Nothing else is ever authorized by an inbox message.
+ASSIGNMENT_ACTIONS = ("create_branch", "commit", "push_branch", "open_pull_request")
+MAX_ASSIGNMENT_REPOSITORIES = 64
 MAX_SKILLS_DENY = 256
 MAX_RUNTIME_BYTES = 65_536
 
@@ -70,6 +75,8 @@ class HubConfig:
     message_token_file: Path = field(repr=False)
     poll_seconds: int
     recipients: Mapping[str, str]
+    # `assignments.repositories` from the runtime file. Empty means no inbox message is ever an assignment.
+    assignment_repositories: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -211,6 +218,20 @@ def _parse_repo(value: object) -> str:
     return digest_pr_repo
 
 
+def _with_assignments(hub: HubConfig, root: Mapping[str, object]) -> HubConfig:
+    """Attach the optional `assignments.repositories` allowlist of exact `owner/repo` names."""
+    if "assignments" not in root:
+        return hub
+    data = _object(root["assignments"], {"repositories"})
+    raw = data["repositories"]
+    if not isinstance(raw, list) or len(raw) > MAX_ASSIGNMENT_REPOSITORIES:
+        raise _invalid()
+    names = [_parse_repo(item) for item in raw]
+    if len(set(names)) != len(names):
+        raise _invalid()
+    return replace(hub, assignment_repositories=frozenset(names))
+
+
 def _parse_notify(root: Mapping[str, object]) -> tuple[str, ...] | None:
     if "notify_command" not in root:
         return None
@@ -252,7 +273,7 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
             "callback_hosts",
             "owner_authorization",
         },
-        optional={"notify_command", "messaging_enabled", "memory_push"},
+        optional={"notify_command", "messaging_enabled", "memory_push", "assignments"},
     )
     if root["schema"] != RUNTIME_SCHEMA:
         raise _invalid()
@@ -261,7 +282,7 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
 
     paths = _parse_dispatch_paths(root["paths"])
 
-    hub = _parse_hub(root["hub"])
+    hub = _with_assignments(_parse_hub(root["hub"]), root)
 
     dispatch_enabled = _boolean(root["dispatch_enabled"])
     events_enabled = _boolean(root["events_enabled"])
@@ -373,6 +394,7 @@ def _parse_duet_runtime(payload: object) -> Runtime:
             "dispatch_enabled",
             "owner_authorization",
             "dispatch_limits",
+            "assignments",
         },
     )
     if root["schema"] != DUET_RUNTIME_SCHEMA:
@@ -389,7 +411,7 @@ def _parse_duet_runtime(payload: object) -> Runtime:
         if "owner_authorization" in root or "dispatch_limits" in root:
             raise _invalid()
         paths = _parse_hosted_paths(root["paths"])
-    hub = _parse_hub(root["hub"])
+    hub = _with_assignments(_parse_hub(root["hub"]), root)
     # Duet never shares another agent's Hub principal, inbox or acknowledgement state.
     if hub.principal != DUET_PRINCIPAL:
         raise _invalid()
@@ -512,3 +534,59 @@ def validate_runtime_reference(value: object, *, schema: str = RUNTIME_SCHEMA) -
         raise _invalid()
     load_runtime(Path(value), schema=schema)
     return value
+
+
+def runtime_template(schema: str = RUNTIME_SCHEMA) -> dict[str, object]:
+    """A fresh Dot or Duet runtime document with placeholder values and the default recipient aliases.
+
+    Every value is a placeholder that parses, never a real identity: replace each one, including the
+    `conductor` recipient, with the deployment's own before writing the owner-only runtime file.
+    """
+    if schema not in (RUNTIME_SCHEMA, DUET_RUNTIME_SCHEMA):
+        raise _invalid()
+    duet = schema == DUET_RUNTIME_SCHEMA
+    name = "duet" if duet else "dot"
+    binaries: dict[str, object] = {
+        "brigade": "/usr/local/bin/brigade",
+        "git": "/usr/bin/git",
+        "gh": "/usr/bin/gh",
+    }
+    paths: dict[str, object] = {
+        "state_dir": f"/var/lib/brigade-{name}/state",
+        "workspace": f"/var/lib/brigade-{name}/workspace",
+        "bin": binaries,
+    }
+    document: dict[str, object] = {
+        "schema": schema,
+        "auth": {
+            "issuer": "https://team.example.com",
+            "team_domain": "team.example.com",
+            "audience": "0" * 64,
+            "approved_email": "owner@example.com",
+            "resource": f"https://{name}.example.com/mcp",
+        },
+        "paths": paths,
+        "hub": {
+            "principal": DUET_PRINCIPAL if duet else "agent:example",
+            "node_id": "00000000-0000-4000-8000-000000000001",
+            "message_token_file": f"/var/lib/brigade-{name}/message-token",
+            "poll_seconds": 30,
+            "recipients": {CONDUCTOR_ALIAS: "agent:conductor", "operator": "agent:operator"},
+        },
+        "digest_pr_repo": "example-org/example-project",
+        # Empty on purpose: no inbox message is an assignment until the owner lists a repository here.
+        "assignments": {"repositories": []},
+    }
+    if duet:
+        document["messaging_enabled"] = True
+        return document
+    binaries["t3_fleet"] = "/usr/local/bin/t3-fleet"
+    paths["fleet_config"] = "/var/lib/brigade-dot/fleet.toml"
+    document.update(
+        dispatch_enabled=False,
+        events_enabled=False,
+        messaging_enabled=True,
+        callback_hosts=["callback.example.com"],
+        owner_authorization={"version": "1", "text": "Owner-authorized bounded work on the configured repositories."},
+    )
+    return document

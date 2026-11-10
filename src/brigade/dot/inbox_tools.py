@@ -26,6 +26,9 @@ class InboxTools:
         result["content_trust"] = "untrusted"
         return result
 
+    def unread_by_principal(self) -> dict[str, Any]:
+        return self.hub.unread_by_principal()
+
     def inbox_ack(self, ids: list[int]) -> dict[str, Any]:
         return self.hub.ack(ids)
 

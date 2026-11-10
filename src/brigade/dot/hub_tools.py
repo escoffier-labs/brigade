@@ -382,6 +382,7 @@ class HubTools:
             "fleet_overview": self._digest_overview,
             "fleet_work_next": self._digest_work_next,
             "inbox": self._digest_inbox,
+            "unread": self.inbox.unread_by_principal,
             "subscriptions": lambda: {"count": self.state.subscription_count(owner)},
             "brigade_prs": self._digest_prs,
         }
@@ -400,6 +401,13 @@ class HubTools:
                     digest[name] = {"error": str(error)}
                 except Exception:
                     digest[name] = {"error": "section_unavailable"}
+            # The inbox section syncs with the hub while the unread section runs, so its count is the
+            # fresher one. Both read the same principal's mirror.
+            unread, inbox = digest["unread"], digest["inbox"]
+            fresh = inbox.get("unacked") if isinstance(inbox, dict) else None
+            principals = unread.get("principals") if isinstance(unread, dict) else None
+            if type(fresh) is int and isinstance(principals, list) and principals:
+                principals[0]["unread"] = fresh
             digest["section_errors"] = sorted(
                 name for name in sections if isinstance(digest[name], dict) and "error" in digest[name]
             )
@@ -482,10 +490,15 @@ class HubTools:
     def _digest_inbox(self) -> dict[str, Any]:
         listing = self.inbox.inbox_list(unacked_only=True, limit=5)
         keys = ("id", "created_at", "sender", "subject", "kind", "priority")
-        return {
-            "unacked": listing["unacked_total"],
-            "oldest": [self._pick(message, keys) for message in listing["messages"]],
-        }
+        oldest = []
+        for message in listing["messages"]:
+            picked = self._pick(message, keys)
+            # Both fields are computed by the connector, never copied from text a sender wrote.
+            for key in ("sender_alias", "assignment"):
+                if message.get(key) is not None:
+                    picked[key] = message[key]
+            oldest.append(picked)
+        return {"unacked": listing["unacked_total"], "oldest": oldest}
 
     def _github_cli(self) -> str:
         """("octopool", argv0, env) when `octopool whoami` works (cached), else plain gh."""

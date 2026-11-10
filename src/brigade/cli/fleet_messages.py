@@ -82,8 +82,15 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
 
     sent = sub.add_parser("sent", help="Read this principal's sent messages and acknowledgement status.")
     filters = sent.add_mutually_exclusive_group(required=True)
-    filters.add_argument("--after", type=int, default=0)
+    # No default: argparse treats `--after 0` as absent when 0 is also the default, and then refuses it.
+    filters.add_argument("--after", type=int)
     filters.add_argument("--id", type=int, action="append", dest="ids")
+    sent.add_argument(
+        "--undelivered-after",
+        type=float,
+        metavar="MINUTES",
+        help="Report each message with no acknowledgement after MINUTES as undelivered.",
+    )
     sent.add_argument("--json", action="store_true")
     _message_options(sent)
     sent.set_defaults(func=_sent)
@@ -320,7 +327,34 @@ def _principal_revoke(args: argparse.Namespace) -> int:
 def _sent(args: argparse.Namespace) -> int:
     from .. import fleet_client_messages
 
-    return _result(args, lambda: fleet_client_messages.sent(after=args.after, ids=args.ids, **_token_kwargs(args)))
+    def operation() -> dict[str, Any]:
+        deadline = getattr(args, "undelivered_after", None)
+        if deadline is not None and (not math.isfinite(deadline) or deadline <= 0):
+            raise ValueError("--undelivered-after must be a positive number of minutes")
+        payload = fleet_client_messages.sent(after=args.after or 0, ids=args.ids, **_token_kwargs(args))
+        if deadline is None:
+            return payload
+        report = fleet_client_messages.delivery_report(payload, deadline_minutes=deadline)
+        if not args.json:
+            from .fleet import _safe_table_cell
+
+            for message in report["messages"]:
+                if message["delivery"] == "undelivered":
+                    print(
+                        f"undelivered {_safe_table_cell(message.get('id'))} "
+                        f"{_safe_table_cell(message.get('recipient'))} {_safe_table_cell(message.get('subject'))} "
+                        f"sent {_safe_table_cell(message.get('created_at'))}"
+                    )
+            # The text summary carries counts only; --json returns the full page.
+            return {
+                "checked": len(report["messages"]),
+                "undelivered": report["undelivered"],
+                "undelivered_after_minutes": deadline,
+                "next_cursor": report["next_cursor"],
+            }
+        return report
+
+    return _result(args, operation)
 
 
 def _flush(args: argparse.Namespace) -> int:
