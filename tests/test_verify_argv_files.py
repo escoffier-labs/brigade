@@ -107,15 +107,85 @@ def test_unhashable_argument_disables_reuse(verify_target, tmp_path, monkeypatch
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="executable shebang requires POSIX")
-def test_changed_script_on_path_executes_again(verify_target, tmp_path, monkeypatch):
+def test_changed_explicit_script_path_executes_again(verify_target, tmp_path, monkeypatch):
     script = tmp_path / "verify-probe"
     script.write_text(f"#!{sys.executable}\nprint('before')\n")
     script.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
-    commands = [[script.name]]
+    commands = [[str(script)]]
     assert verification.verify_run(target=verify_target, commands=commands) == 0
     script.write_text(f"#!{sys.executable}\nprint('after')\n")
     assert verification.verify_run(target=verify_target, commands=commands) == 0
     receipt = verification._verify_receipts(verify_target)[0]
     assert "reused_from" not in receipt
     assert receipt["commands"][0]["stdout_summary"] == "after"
+
+
+@pytest.mark.parametrize("argument", [".", "tests/"])
+def test_in_tree_directory_reuses(verify_target, tmp_path, argument):
+    (verify_target / "tests").mkdir()
+    script = tmp_path / "verify.py"
+    script.write_text("print('ok')\n")
+    commands = [[sys.executable, str(script), argument]]
+    assert verification.verify_run(target=verify_target, commands=commands) == 0
+    first = verification._verify_receipts(verify_target)[0]
+    assert verification.verify_run(target=verify_target, commands=commands) == 0
+    assert verification._verify_receipts(verify_target)[0]["reused_from"] == first["run_id"]
+
+
+@pytest.mark.parametrize("kind", ["external", "ignored", "symlink_external"])
+def test_uncovered_directory_does_not_reuse(verify_target, tmp_path, kind):
+    directory = tmp_path / "inputs" if kind != "ignored" else verify_target / "inputs"
+    directory.mkdir()
+    if kind == "ignored":
+        (verify_target / ".gitignore").write_text(".brigade/\ninputs/\n")
+    if kind == "symlink_external":
+        link = verify_target / "linked"
+        link.symlink_to(directory, target_is_directory=True)
+        directory = link
+    script = tmp_path / "verify.py"
+    script.write_text("print('ok')\n")
+    commands = [[sys.executable, str(script), str(directory)]]
+    assert verification.verify_run(target=verify_target, commands=commands) == 0
+    assert verification.verify_run(target=verify_target, commands=commands) == 0
+    assert "reused_from" not in verification._verify_receipts(verify_target)[0]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="executable shebang requires POSIX")
+def test_oversized_bare_program_reuses(verify_target, tmp_path, monkeypatch):
+    from brigade.work_cmd import verify_argv_files
+
+    script = tmp_path / "verify-probe"
+    script.write_text(f"#!{sys.executable}\nprint('ok')\n")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(verify_argv_files, "MAX_ARGV_FILE_BYTES", 2)
+    commands = [[script.name]]
+    assert verification.verify_run(target=verify_target, commands=commands) == 0
+    first = verification._verify_receipts(verify_target)[0]
+    assert verification.verify_run(target=verify_target, commands=commands) == 0
+    assert verification._verify_receipts(verify_target)[0]["reused_from"] == first["run_id"]
+
+
+@pytest.mark.parametrize("command", [["missing-verify-probe"], "MODE=test missing-verify-probe"])
+def test_missing_bare_program_does_not_block_reuse(verify_target, monkeypatch, command):
+    import shutil
+
+    from brigade.work_cmd import verify_argv_files
+
+    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
+    latest = {
+        "status": "completed",
+        "tree_fingerprint": "unchanged",
+        "planned_commands": ["probe"],
+        "argv_file_hashes": {},
+    }
+    assert verify_argv_files.reusable_receipt(verify_target, [command], ["probe"], "unchanged", latest)
+
+
+def test_directory_ignore_check_failure_disables_reuse(verify_target, monkeypatch):
+    from brigade import localio
+    from brigade.work_cmd import verify_argv_files
+
+    monkeypatch.setattr(localio.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args, 128))
+    assert verify_argv_files.argv_file_hashes(verify_target, [[sys.executable, "."]]) is None

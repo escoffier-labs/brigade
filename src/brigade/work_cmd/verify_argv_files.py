@@ -3,17 +3,21 @@
 Hash all existing file arguments, even when Git also covers them. This avoids
 assuming that containment means coverage (ignored paths and symlink targets do
 not necessarily contribute bytes to the Git tree). Reads are capped at 16 MiB
-per file. Non-regular, unreadable or larger inputs disable reuse for that run.
+per file. Uncovered directories, other non-regular files, unreadable files and
+larger inputs disable reuse. Non-ignored in-tree directories use the tree
+fingerprint. Bare program names use PATH and are not file bindings.
 This covers direct argv paths, not files loaded transitively by a script.
 """
 
 from __future__ import annotations
 
 import hashlib
-import shutil
+import re
 import stat
 from pathlib import Path
 from typing import Any
+
+from ..localio import check_git_ignored
 
 MAX_ARGV_FILE_BYTES = 16 * 1024 * 1024
 
@@ -25,25 +29,29 @@ def argv_file_hashes(target: Path, commands: list[str | list[str]]) -> dict[str,
     hashes: dict[str, str] = {}
     try:
         for command in commands:
-            argv, env, error = (
-                verification._verify_parse_argv(command, target)
-                if isinstance(command, list)
-                else verification._verify_parse_command(command, target)
-            )
-            if error or argv is None:
+            # Execution validation belongs to verification's preflight. Binding
+            # inputs must not depend on the current PATH or program version.
+            argv = list(command) if isinstance(command, list) else verification._verification_split_command(command)
+            if isinstance(command, str):
+                while argv and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[0]):
+                    argv.pop(0)
+            if not argv:
                 return None
             for index, arg in enumerate(argv):
                 if index == 0 and not verification._verify_token_is_path(arg):
-                    resolved = shutil.which(arg, path=env.get("PATH"))
-                    if resolved is None:
-                        return None
-                    arg = resolved
+                    continue
                 path = Path(arg).expanduser()
                 if not path.is_absolute():
                     path = target / path
                 try:
                     info = path.stat()
                 except FileNotFoundError:
+                    if index == 0:
+                        return None
+                    continue
+                if stat.S_ISDIR(info.st_mode):
+                    if check_git_ignored(target.resolve(), path.resolve()) != "no":
+                        return None
                     continue
                 if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_ARGV_FILE_BYTES:
                     return None
