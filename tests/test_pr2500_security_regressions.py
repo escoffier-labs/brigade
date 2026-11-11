@@ -11,7 +11,7 @@ from brigade import care_cmd, care_windows
 from brigade import memory_hub_replica_limits as limits
 from brigade import memory_hub_store as store
 from brigade import memory_hub_sync as sync
-from tests.test_memory_reflect_hub import run, setup as setup
+from tests.test_memory_reflect_hub import pytestmark as reflect_requirements, run, setup as setup
 
 
 def test_churn_event_limit_names_preseed_recovery(tmp_path, monkeypatch):
@@ -143,6 +143,8 @@ def test_native_post_create_com_failure_restores_working_task(tmp_path):
         subprocess.run([care_windows.SCHTASKS_EXE, "/Delete", "/TN", name, "/F"], capture_output=True, timeout=15)
 
 
+# Reflect needs safe directory descriptors, so skip where the reflect suite skips.
+@reflect_requirements
 def test_reflect_report_names_event_limit_and_recovery(setup, capsys, monkeypatch):
     target, _, _ = setup
     monkeypatch.setattr(limits, "REPLAY_MAX_EVENTS", 0, raising=False)
