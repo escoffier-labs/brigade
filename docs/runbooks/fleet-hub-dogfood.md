@@ -187,7 +187,7 @@ Setup picks the retrieval mode and the backend (D30), in order:
    shape). The endpoint must be HTTPS, or plain HTTP to a tailnet name or
    address. Setup sends one probe embedding and checks the dimensions and the
    reported model digest. It writes the `remote` backend,
-   `retrieval = "hybrid"` and a `compose.override.yaml` that mounts the token.
+   `retrieval = "hybrid"` and a setup-owned `compose.hybrid.yaml` that mounts the token.
    The embedder container is never created.
 3. Otherwise BM25 mode. Setup names each check that failed, writes
    `retrieval = "lexical"` and prints how to switch later.
@@ -259,7 +259,44 @@ hub's `command` in `compose.override.yaml`.
 
 ## Switch retrieval modes
 
-Both directions keep search answering.
+Both directions keep search answering. Setup leaves the operator's
+`compose.override.yaml` unchanged, including image pins, the trusted-identity
+command flag and state-volume binds. Hybrid writes its token mount to
+`compose.hybrid.yaml` and uses exactly this default selection in `.env`:
+
+```dotenv
+COMPOSE_FILE=compose.yaml:compose.override.yaml:compose.hybrid.yaml
+COMPOSE_PATH_SEPARATOR=:
+```
+
+Setup creates an absent override with an operator-ownership comment and
+`services: {}`, a valid empty Compose services mapping. The stub belongs to the
+operator immediately. Setup never rewrites it, so later edits load without
+rerunning setup. Lexical removes the hybrid file and removes `COMPOSE_FILE`
+and `COMPOSE_PATH_SEPARATOR` only when the list matches the default above
+and the separator is unset or exactly `:`. Other values
+stay unchanged with a warning. Remove any hybrid entry from a custom selection
+before using Compose in lexical mode.
+
+Hybrid refuses an existing operator `COMPOSE_FILE` or non-default separator
+before writing anything. Setup never parses or appends to an operator list,
+including quoted values and absolute paths. Review the selection yourself:
+add `compose.hybrid.yaml` using your separator for manual Compose operation,
+or use the exact default above (the separator may also be unset) before
+rerunning setup. Refusal leaves the mode and every file unchanged.
+
+Windows operators using their own file selection must use their own separator
+(`;` by default on Windows). Setup explicitly selects `:` for its own list.
+
+Legacy overrides migrate only when their bytes exactly match a document old
+setup generated, including its final newline and backend token file. An exact
+legacy override becomes the setup mount, and hybrid creates the operator stub.
+A file retaining `# Written by bin/hub-setup.py` with any other content is mixed.
+Setup refuses either mode switch without writes. Remove the `embed_token`
+service-secret entry, its top-level secret definition and the setup header,
+or move the file aside, then rerun. Preserve any image pin, command or state
+bind you added. On a write failure the transaction restores `.env`, the hybrid
+file and an exact legacy file, and removes a newly created stub.
 
 Hybrid to BM25:
 

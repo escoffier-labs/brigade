@@ -31,6 +31,7 @@ import ipaddress
 import json
 import os
 import re
+import runpy
 import secrets
 import shutil
 import stat
@@ -47,7 +48,7 @@ from typing import Any
 RECIPE = Path(__file__).resolve().parents[1]
 DEFAULT_EMBED_IMAGE = "ollama/ollama:0.18.0@sha256:e23e6499890325d31f3454cdc83f7a613a2423c8a9e167bbafea0b0e3c27d7c6"
 LOCAL_ENDPOINT = "http://embedder:11434"
-# Where Compose mounts the embedder token in the hub container (compose.override.yaml).
+# Where Compose mounts the embedder token in the hub container (compose.hybrid.yaml).
 EMBED_TOKEN_MOUNT = "/run/secrets/embed_token"
 # Where hub/entry.py puts the hub's own copy of that mount, and what hub.toml names.
 # The hub accepts only a token file its own user owns with mode 0400 or 0600, and a
@@ -382,8 +383,14 @@ def hub_toml(decision: Decision) -> str:
 
 def read_env(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
+    # Same no-follow, nonblocking regular-file read as the transaction, so a FIFO
+    # or symlinked .env is refused here instead of blocking before any check runs.
+    try:
+        found = _compose_helper("read_file", path, ".env")
+    except ValueError as exc:
+        raise SetupError(str(exc)) from exc
+    if found is not None:
+        for line in found[0].decode("utf-8").splitlines():
             if line.strip() and not line.lstrip().startswith("#") and "=" in line:
                 key, _, value = line.partition("=")
                 values[key.strip()] = value.strip()
@@ -770,11 +777,24 @@ class SetupFiles:
         dirs = [project / "config", folder] + ([backup_dir] if backup_dir is not None else [])
         self.dirs = {path: _check_dir(path, self._label(path) + "/") for path in dirs}
         names = (*SECRET_FILES, OPERATOR_TOKEN, *EMBED_TOKEN_FILES.values())
-        files = [project / "config" / "hub.toml", project / ".env", project / "compose.override.yaml"]
+        files = [
+            project / "config" / "hub.toml",
+            project / ".env",
+            project / "compose.override.yaml",
+            project / "compose.hybrid.yaml",
+        ]
         files += [folder / name for name in names]
         if backup_dir is not None:
             files.append(backup_dir / "recovery-ledger.jsonl")
         self.files = {path: self._read(path) for path in files}
+        managed = self.files[project / "compose.hybrid.yaml"]
+        if managed is not None and not managed[0].startswith(b"# Written by bin/hub-setup.py"):
+            raise SetupError("compose.hybrid.yaml is not setup-owned; move it aside and rerun")
+        override = project / "compose.override.yaml"
+        if self.files[override] is not None and not _compose_helper(
+            "legacy_owned", self.files[override][0], EMBED_TOKEN_FILES
+        ):
+            del self.files[override]  # Operator content is never written, even during rollback.
         self.token = folder / REMOTE_TOKEN
 
     def _label(self, path: Path) -> str:
@@ -785,19 +805,9 @@ class SetupFiles:
 
     def _read(self, path: Path) -> tuple[bytes, int] | None:
         try:
-            info = os.lstat(path)
-        except FileNotFoundError:
-            return None
-        if stat.S_ISLNK(info.st_mode):
-            raise SetupError(f"{self._label(path)} is a symlink; move it aside and rerun")
-        if not stat.S_ISREG(info.st_mode):
-            raise SetupError(f"{self._label(path)} is not a regular file; move it aside and rerun")
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
-        fd = os.open(path, flags)
-        try:
-            return _read_fd(fd), stat.S_IMODE(info.st_mode)
-        finally:
-            os.close(fd)
+            return _compose_helper("read_file", path, self._label(path))
+        except ValueError as exc:
+            raise SetupError(str(exc)) from exc
 
     def restore(self) -> None:
         """Put everything back, the remote token last and only if everything else went back.
@@ -905,18 +915,12 @@ def _drop_remote_token(project: Path, decision: Decision) -> bool:
 
 
 def install_probed_token(project: Path, decision: Decision) -> str | None:
-    """Forward step (c): install the token the remote probe passed as secrets/embed-token, mode 0444.
-
-    Runs after config/hub.toml names the endpoint it was probed against. Unlike
-    the other secrets it is replaced, never kept: a new endpoint comes with its
-    own token. Returns what it did.
-    """
+    """Install the probed remote token, mode 0444, after config names its endpoint."""
     if decision.backend != "remote" or decision.probed_token is None:
         return None
     folder = project / "secrets"
     target = folder / REMOTE_TOKEN
     data = (decision.probed_token + "\n").encode("utf-8")
-    # Checked again at the last step, right before the 0444 file is written.
     _require_private(folder)
     if os.path.lexists(target) and (target.is_symlink() or not target.is_file()):
         raise SetupError(f"secrets/{REMOTE_TOKEN} is a symlink or not a regular file; move it aside and rerun")
@@ -937,14 +941,12 @@ def write_install(
     with_secrets: bool,
     backup_dir: Path | None = None,
 ) -> list[str]:
-    """Everything init and switch write, in the order SetupFiles describes, as one transaction.
-
-    Returns what changed under secrets/, for the report.
-    """
+    """Everything init and switch write, in the order SetupFiles describes, as one transaction."""
     if with_secrets and _check_dir(project / "secrets", "secrets/") is not None:
         # An existing secrets/ is judged before SetupFiles reads anything in it, so a refusal
         # leaves its files exactly as they were. An absent one is made inside the transaction.
         _require_private(project / "secrets")
+    _compose_helper("preflight", project, decision.retrieval, EMBED_TOKEN_FILES, read_env(project / ".env"))
     with all_or_nothing(project, backup_dir):
         created = ensure_secrets(project, local_token=decision.backend == "local") if with_secrets else []
         if backup_dir is not None:
@@ -964,18 +966,12 @@ def write_install(
     return created
 
 
-def _compose_override(project: Path, decision: Decision) -> None:
-    """Mount the embedder token only in hybrid mode, so BM25 mode needs no such file."""
-    override = project / "compose.override.yaml"
-    if decision.retrieval == "hybrid":
-        override.write_text(
-            f"# Written by bin/hub-setup.py for the {decision.backend} embedder backend.\n"
-            "services:\n  hub:\n    secrets:\n      - admin_token\n      - findings_key\n      - embed_token\n"
-            f"secrets:\n  embed_token:\n    file: ./secrets/{EMBED_TOKEN_FILES[str(decision.backend)]}\n",
-            encoding="utf-8",
-        )
-    elif override.exists() and override.read_text(encoding="utf-8").startswith("# Written by bin/hub-setup.py"):
-        override.unlink()
+def _compose_override(project: Path, decision: Decision, env: dict[str, str]) -> None:
+    _compose_helper("compose_override", project, decision.retrieval, decision.backend, EMBED_TOKEN_FILES, env)
+
+
+def _compose_helper(name: str, *args: Any) -> Any:
+    return runpy.run_path(str(Path(__file__).with_name("hub_setup_compose.py")))[name](*args)
 
 
 def apply(project: Path, decision: Decision, env_updates: dict[str, str]) -> None:
@@ -990,8 +986,8 @@ def apply(project: Path, decision: Decision, env_updates: dict[str, str]) -> Non
         env["BRIGADE_EMBED_MODEL"] = decision.model
     else:
         env.pop("BRIGADE_EMBED_MODEL", None)
+    _compose_override(project, decision, env)
     write_env(project / ".env", env)
-    _compose_override(project, decision)
 
 
 def report(decision: Decision) -> str:

@@ -152,7 +152,7 @@ def test_supported_gpu_writes_gpu_profile_local_backend_and_an_r1_model(project,
     # The hub needs a token file for every endpoint, so the local backend gets its own.
     assert len((project / "secrets" / "embed-local-token").read_text(encoding="utf-8").strip()) >= 32
     assert not (project / "secrets" / "embed-token").exists()
-    assert "file: ./secrets/embed-local-token" in (project / "compose.override.yaml").read_text(encoding="utf-8")
+    assert "file: ./secrets/embed-local-token" in (project / "compose.hybrid.yaml").read_text(encoding="utf-8")
 
 
 def test_hybrid_embedder_table_has_exactly_the_parser_keys(project, tmp_path):
@@ -236,7 +236,7 @@ def test_remote_endpoint_without_gpu_writes_remote_and_no_embedder(project, tmp_
     # The probe sends the request the hub sends.
     assert post.calls[0][1] == {"model": MODEL["name"], "input": [setup.PROBE_TEXT], "truncate": False}
     assert (project / "secrets" / "embed-token").read_text(encoding="utf-8").strip() == "fake-remote-embed-token"
-    assert "file: ./secrets/embed-token" in (project / "compose.override.yaml").read_text(encoding="utf-8")
+    assert "file: ./secrets/embed-token" in (project / "compose.hybrid.yaml").read_text(encoding="utf-8")
     assert not (project / "secrets" / "embed-local-token").exists()
 
 
@@ -642,16 +642,17 @@ def test_switch_hybrid_to_lexical_and_back(project, tmp_path):
 
 def test_switch_from_local_to_remote_mounts_the_operator_token(project, tmp_path):
     assert _init(project, tmp_path, run=gpu_host()) == 0
+    operator_stub = (project / "compose.override.yaml").read_bytes()
     local = (project / "secrets" / "embed-local-token").read_bytes()
     argv = ["--project-dir", str(project), "switch", "--to", "hybrid", "--no-gpu"]
     argv += ["--remote-url", "https://embed.example.test", "--remote-token-file", str(_token(tmp_path))]
     assert setup.main(argv, run=no_gpu_host, post=endpoint()) == 0
     assert _embedder(project)["backend"] == "remote"
     assert (project / "secrets" / "embed-token").read_text(encoding="utf-8").strip() == "fake-remote-embed-token"
-    assert "file: ./secrets/embed-token" in (project / "compose.override.yaml").read_text(encoding="utf-8")
+    assert "file: ./secrets/embed-token" in (project / "compose.hybrid.yaml").read_text(encoding="utf-8")
     assert (project / "secrets" / "embed-local-token").read_bytes() == local
     assert setup.main(["--project-dir", str(project), "switch", "--to", "lexical"]) == 0
-    assert not (project / "compose.override.yaml").exists()
+    assert (project / "compose.override.yaml").read_bytes() == operator_stub
 
 
 def _switch_remote(project, url, token, post=None):
@@ -2766,6 +2767,18 @@ def test_setup_check_starts_a_hub_after_init_and_each_switch(monkeypatch):
     names = [item["name"] for item in result.items if item["status"] == "PASS"]
     assert "hub accepts the config after switch to lexical (gpu)" in names
     assert "hub accepts the config after switch to hybrid (gpu)" in names
+    if shutil.which("docker"):
+        for label in ("init (gpu)", "lexical (gpu)", "hybrid (gpu)"):
+            for item in (
+                "Compose config resolves",
+                "operator image is active",
+                "operator command is active",
+                "operator state bind is active",
+                "embed token mount matches mode",
+                "embed secret matches mode",
+            ):
+                assert f"{label} {item}" in names
+        assert "lexical (gpu) no hybrid Compose reference remains" in names
     assert "neither: switch to hybrid refused with no probed embedder, mode unchanged" in names
     # The remote path waits on its arguments. Nothing else is pending or failing.
     assert [item["name"] for item in result.items if item["status"] != "PASS" and item["status"] != "INFO"] == [

@@ -103,7 +103,20 @@ removes the temporary file, so a failure leaves no stray copy of the token.
 After rotating the token, rerun the subshell so the two copies match.
 
 Before starting the service, record the built image's immutable local image ID
-in an ignored Compose override. The base Compose file uses a version tag for
+in an ignored Compose override. Keep operator image pins, command flags and
+state-volume binds in `compose.override.yaml`. Retrieval setup owns
+`compose.hybrid.yaml` for its token mount and includes both files through
+`COMPOSE_FILE=compose.yaml:compose.override.yaml:compose.hybrid.yaml` and
+`COMPOSE_PATH_SEPARATOR=:` in `.env`.
+An absent override gets an operator-owned `services: {}` stub, so edits made
+after init load immediately. Hybrid refuses custom file lists and non-default
+separators before any write. Lexical removes only the exact setup selection,
+and its `:` separator, leaving custom combinations with a warning. Windows
+operators using their own selection must use their own separator (`;` by default). Legacy files migrate only on an
+exact byte match. A setup header with operator edits requires manual cleanup
+before switching. See [Switch retrieval modes](fleet-hub-dogfood.md#switch-retrieval-modes)
+for custom-list and mixed-legacy recovery instructions.
+The base Compose file uses a version tag for
 the build. Use the recorded ID for every start or recreation:
 
 ```bash

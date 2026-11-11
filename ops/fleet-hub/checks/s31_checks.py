@@ -851,6 +851,43 @@ def accept_hub(
     result.ok(good, name, detail)
 
 
+def check_setup_merge(project: Path, result: Result, label: str, hybrid: bool) -> None:
+    """Resolve the actual Compose merge without starting containers."""
+    import shutil
+
+    if not shutil.which("docker"):
+        result.add("PENDING", f"{label} Compose merge", "docker is unavailable")
+        return
+    done = subprocess.run(
+        compose("config", "--format", "json", project=project),
+        cwd=project,
+        env={**os.environ, "COMPOSE_PATH_SEPARATOR": ":"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if not result.ok(done.returncode == 0, f"{label} Compose config resolves", done.stderr.strip()[:400]):
+        return
+    config = json.loads(done.stdout)
+    service = config["services"]["hub"]
+    result.ok(service["image"] == "sha256:" + "a" * 64, f"{label} operator image is active")
+    result.ok(service["command"] == ["--trust-tailscale-identity"], f"{label} operator command is active")
+    result.ok(
+        config["volumes"]["brigade-state"]["driver_opts"]["device"] == "/srv/example-hub-state",
+        f"{label} operator state bind is active",
+    )
+    mounted = {item["source"] for item in service["secrets"]}
+    result.ok(("embed_token" in mounted) == hybrid, f"{label} embed token mount matches mode")
+    result.ok(("embed_token" in config.get("secrets", {})) == hybrid, f"{label} embed secret matches mode")
+    if not hybrid:
+        result.ok(
+            not (project / "compose.hybrid.yaml").exists()
+            and "compose.hybrid.yaml" not in (project / ".env").read_text()
+            and "compose.hybrid.yaml" not in done.stdout,
+            f"{label} no hybrid Compose reference remains",
+        )
+
+
 def check_setup(args: argparse.Namespace, result: Result) -> None:
     """Setup on throwaway project copies: each path this host offers, a hub started on the config after init and after
     each switch direction, and that setup never creates a container."""
@@ -877,12 +914,26 @@ def check_setup(args: argparse.Namespace, result: Result) -> None:
                 continue
             project = Path(scratch) / name / "ops" / "fleet-hub"
             shutil.copytree(
-                RECIPE, project, ignore=shutil.ignore_patterns(".env", "config", "secrets", "compose.override.yaml")
+                RECIPE,
+                project,
+                ignore=shutil.ignore_patterns(
+                    ".env", "config", "secrets", "compose.override.yaml", "compose.hybrid.yaml"
+                ),
             )
+            override = project / "compose.override.yaml"
+            operator = (
+                "services:\n  hub:\n    image: sha256:"
+                + "a" * 64
+                + '\n    command: ["--trust-tailscale-identity"]\n'
+                + "volumes:\n  brigade-state:\n    driver_opts:\n      type: none\n      o: bind\n"
+                + "      device: /srv/example-hub-state\n"
+            ).encode()
+            override.write_bytes(operator)
             backups = str(Path(scratch) / name / "backups")
             done = setup(project, "init", "--project-name", f"s31-setup-{name}", "--backup-dir", backups, *extra)
             toml = (project / "config" / "hub.toml").read_text(encoding="utf-8") if done.returncode == 0 else ""
             result.add("INFO", f"setup ({name})", done.stdout.strip())
+            result.ok(override.read_bytes() == operator, f"init ({name}) preserves operator override")
             hybrid = 'retrieval = "hybrid"' in toml
             if name == "gpu":
                 with_reason = 'retrieval = "lexical"' in toml and "R1" in done.stdout
@@ -902,6 +953,7 @@ def check_setup(args: argparse.Namespace, result: Result) -> None:
                     "neither: BM25 mode and the failed checks",
                 )
             if done.returncode == 0:
+                check_setup_merge(project, result, f"init ({name})", hybrid)
                 # From the host, the local backend's endpoint names the recipe's embedder
                 # service, which only resolves inside Compose, so that hybrid hub must degrade.
                 unreachable = name == "gpu"
@@ -909,9 +961,13 @@ def check_setup(args: argparse.Namespace, result: Result) -> None:
                 if hybrid:
                     to_lexical = setup(project, "switch", "--to", "lexical")
                     result.ok(to_lexical.returncode == 0, f"setup ({name}) switch to lexical")
+                    result.ok(override.read_bytes() == operator, f"lexical ({name}) preserves operator override")
+                    check_setup_merge(project, result, f"lexical ({name})", False)
                     accept_hub(result, hub, project, f"switch to lexical ({name})", "lexical", unreachable)
                     to_hybrid = setup(project, "switch", "--to", "hybrid", *extra)
                     result.ok(to_hybrid.returncode == 0, f"setup ({name}) switch back to hybrid")
+                    result.ok(override.read_bytes() == operator, f"hybrid ({name}) preserves operator override")
+                    check_setup_merge(project, result, f"hybrid ({name})", True)
                     accept_hub(result, hub, project, f"switch to hybrid ({name})", "hybrid", unreachable)
                 elif name == "neither":
                     refused = setup(project, "switch", "--to", "hybrid", "--no-gpu")
@@ -925,7 +981,7 @@ def check_setup(args: argparse.Namespace, result: Result) -> None:
             ).stdout
             result.ok(not leftovers.strip(), f"setup ({name}) created no container")
     # The hub above runs on the host with --memory-config, so this check proves the config.
-    # The Compose hub is started on the same file by compose.yaml, which is not exercised here.
+    # Compose config above verifies the merged mounts and operator settings without starting a container.
 
 
 def check_access(args: argparse.Namespace, result: Result) -> None:

@@ -3,3 +3,4 @@
 config/
 compose.override.yaml
 secrets/
+compose.hybrid.yaml
