@@ -20,6 +20,7 @@ from . import memory_hub_sync as sync
 from . import memory_proposal_io as io
 from . import memory_proposal_v2_ops as delta
 from . import memory_reflect_candidates as derive
+from . import memory_reflect_ledger as ledger
 from . import memory_reflect_links as links
 from . import memory_reflect_near as near
 from .inbox_lock import held_file_lock
@@ -71,8 +72,9 @@ def _code(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value) is not None
 
 
-# Optional ledger fields another job may keep beside the request id. Reflect keeps none.
+# Optional ledger fields kept beside the request id by reflection and other jobs.
 LEDGER_FIELDS = {
+    "pins": ledger.valid_pins,
     "ops_sha256": _digest,
     "duplicate": lambda value: value is True,
     "expired": lambda value: value is True,
@@ -115,7 +117,7 @@ def schedule_status(target: Path) -> dict[str, Any]:
         submissions = state.get("submissions", {})
         if not isinstance(submissions, dict) or (submissions and "binding" not in state):
             raise ValueError(STATE_ERROR)
-        if not all(valid_submission(digest, pending) for digest, pending in submissions.items()):
+        if not all(valid_submission(digest, pending, frozenset({"pins"})) for digest, pending in submissions.items()):
             raise ValueError(STATE_ERROR)
         for lane in LANES:
             schedule = state.get(lane, {})
@@ -526,6 +528,9 @@ def _reflect(
     )
     previous = dict(state.get("submissions", {})) if state.get("binding") == binding else {}
 
+    live = {(head["scope"], head["card_id"]): head["revision"] for head in heads}
+    previous = {d: p for d, p in previous.items() if ledger.current(p, live, _now_ms(), settings.read_scopes)}
+
     def unremembered(submissions: list[list[dict[str, Any]]]) -> list[tuple[str, list[dict[str, Any]]]]:
         fresh = []
         for ops in submissions:
@@ -608,7 +613,13 @@ def _reflect(
 
         for position, (digest, ops) in enumerate(selected):
             sent = submit(
-                client, previous, digest, ops, base_epoch=report["log_epoch"], save=lambda: _save(target, state)
+                client,
+                previous,
+                digest,
+                ops,
+                base_epoch=report["log_epoch"],
+                save=lambda: _save(target, state),
+                fields={"pins": ledger.pins(ops)},
             )
             refused.extend({"op_digest": digest, "code": code} for code in sent.refusals)
             if sent.outcome == QUOTA:
