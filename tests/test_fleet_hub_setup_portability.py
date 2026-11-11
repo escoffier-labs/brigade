@@ -152,7 +152,16 @@ def test_lexical_preserves_operator_separator_combination(project, tmp_path, cap
 @pytest.mark.parametrize("mode", ["hybrid", "lexical"])
 @pytest.mark.parametrize("failure", ["write_env", "install_probed_token"])
 def test_separator_pair_rollback_is_byte_identical(project, tmp_path, monkeypatch, mode, failure):
-    assert _init(project, tmp_path, run=gpu_host() if mode == "lexical" else no_gpu_host) == 0
+    assert (
+        _init(
+            project,
+            tmp_path,
+            "--retrieval",
+            "hybrid" if mode == "lexical" else "lexical",
+            run=gpu_host() if mode == "lexical" else no_gpu_host,
+        )
+        == 0
+    )
     before = _tree(project)
     _fail_at(monkeypatch, failure, "after")
     assert switch(project, mode) == 1

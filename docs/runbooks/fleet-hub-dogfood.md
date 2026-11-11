@@ -175,7 +175,12 @@ bin/hub-setup.py init \
   --backup-dir "$HOME/brigade-hub-backups"
 ```
 
-Setup picks the retrieval mode and the backend (D30), in order:
+Setup defaults to BM25 mode (`lexical`) and runs no embedder probes. Hybrid is
+opt-in for 0.31.0 because the local GPU branch missed its latency targets under
+host load in the 0.31 dogfood measurement (#2507). Enable it with
+`init --retrieval hybrid` or `switch --to hybrid`. The remote branch is not yet measured.
+
+Explicit hybrid setup picks the backend (D30), in order:
 
 1. A supported local GPU. The GPU container runtime is registered with Docker,
    a probe container with one GPU and no network sees the GPU, and the card
@@ -189,8 +194,7 @@ Setup picks the retrieval mode and the backend (D30), in order:
    reported model digest. It writes the `remote` backend,
    `retrieval = "hybrid"` and a setup-owned `compose.hybrid.yaml` that mounts the token.
    The embedder container is never created.
-3. Otherwise BM25 mode. Setup names each check that failed, writes
-   `retrieval = "lexical"` and prints how to switch later.
+3. Otherwise refuse with a nonzero exit, name every failed check, and write nothing.
 
 To skip the GPU on purpose, pass `--no-gpu`. Setup never writes a hybrid
 configuration it could not probe, offers only R1 models, and never

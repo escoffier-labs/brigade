@@ -61,7 +61,16 @@ def _post(url, request, headers):
 def _init_remote(project, tmp_path):
     token = tmp_path / "embed.token"
     token.write_text("fake-remote-embed-token\n", encoding="utf-8")
-    argv = ["--project-dir", str(project), "init", "--backup-dir", str(tmp_path / "backups"), "--no-gpu"]
+    argv = [
+        "--project-dir",
+        str(project),
+        "init",
+        "--retrieval",
+        "hybrid",
+        "--backup-dir",
+        str(tmp_path / "backups"),
+        "--no-gpu",
+    ]
     argv += ["--remote-url", "https://embed.example.test", "--remote-token-file", str(token)]
     return setup.main(argv, run=_no_gpu, post=_post)
 
@@ -103,7 +112,7 @@ def test_setup_resets_a_remote_token_an_earlier_setup_wrote_0400_and_then_leaves
 def _init_backend(project, tmp_path, backend):
     if backend == "remote":
         return _init_remote(project, tmp_path)
-    argv = ["--project-dir", str(project), "init", "--backup-dir", str(tmp_path / "backups")]
+    argv = ["--project-dir", str(project), "init", "--retrieval", "hybrid", "--backup-dir", str(tmp_path / "backups")]
     return setup.main(argv, run=_gpu, post=_post)
 
 
