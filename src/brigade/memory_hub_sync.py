@@ -373,6 +373,8 @@ def _follow(
             raise _EpochMoved
         latest: dict[str, dict[str, Any]] = {}
         for event in page.get("events") or []:
+            if deferred is not None:
+                deferred.examine()
             if not (
                 isinstance(event, dict)
                 and event.get("kind") in HEAD_KINDS
@@ -454,6 +456,12 @@ class _Deferred:
         self.replica = replica
         self.events: dict[str, dict[str, Any]] = {}
         self.used = 0
+        self.examined = 0
+
+    def examine(self) -> None:
+        """Charge every log event, including entries superseded during replay."""
+        self.examined += store.limits.REPLAY_ENTRY_OVERHEAD
+        store.limits.check_replay(self.examined)
 
     @staticmethod
     def _cost(key: str) -> int:

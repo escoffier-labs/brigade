@@ -310,11 +310,10 @@ namespace BrigadeAcceptance {
     $cwdLiteral = "'" + (Split-Path -Parent $Initializer).Replace("'", "''") + "'"
     # Exact script grammar rejects extra commands/options, elevated/noninteractive
     # principals, executable lookup, or a live action during schtasks creation.
-    $expected = "`$ErrorActionPreference='Stop'; & 'C:\Windows\System32\schtasks.exe' /Create /TN '$TaskName' " +
+    $expected = "`$ErrorActionPreference='Stop'; `$service=New-Object -ComObject Schedule.Service; `$service.Connect(); " +
+        "`$folder=`$service.GetFolder('\'); & 'C:\Windows\System32\schtasks.exe' /Create /TN '$TaskName' " +
         "/TR 'C:\Windows\System32\cmd.exe /d /c exit 1' $Schedule /RU `$env:USERNAME /IT /F; " +
         'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; ' +
-        '$service=New-Object -ComObject Schedule.Service; $service.Connect(); ' +
-        '$folder=$service.GetFolder(''\''); ' +
         "`$definition=`$folder.GetTask('$TaskName').Definition; " +
         '$action=$definition.Actions.Item(1); ' +
         "`$action.Path=$pythonLiteral; `$action.Arguments=$rawArguments; `$action.WorkingDirectory=$cwdLiteral; " +

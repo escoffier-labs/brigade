@@ -136,7 +136,7 @@ def create_command(entry: CareEntry, *, command: str, name: str, schedule: str, 
     else:
         # The exact grammar scripts/windows-native-acceptance.ps1 checks: one
         # literal argument assignment and no statements beyond these.
-        body = create + connect + replace(literal(arguments))
+        body = connect + create + replace(literal(arguments))
     script = "$ErrorActionPreference='Stop'; " + body
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
     # A bare absolute executable path parses in both cmd and PowerShell 5.1.

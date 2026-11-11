@@ -151,11 +151,11 @@ def test_printed_windows_plan_matches_acceptance_grammar(tmp_path, monkeypatch, 
     name = care_cmd._schtasks_task_name(entry)
     schedule = care_cmd._schtasks_schedule_flags(entry.schedule)
     expected = (
-        f"$ErrorActionPreference='Stop'; & 'C:\\Windows\\System32\\schtasks.exe' /Create /TN '{name}' "
+        "$ErrorActionPreference='Stop'; $service=New-Object -ComObject Schedule.Service; $service.Connect(); "
+        "$folder=$service.GetFolder('\\'); "
+        f"& 'C:\\Windows\\System32\\schtasks.exe' /Create /TN '{name}' "
         f"/TR 'C:\\Windows\\System32\\cmd.exe /d /c exit 1' {schedule} /RU $env:USERNAME /IT /F; "
         "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
-        "$service=New-Object -ComObject Schedule.Service; $service.Connect(); "
-        "$folder=$service.GetFolder('\\'); "
         f"$definition=$folder.GetTask('{name}').Definition; "
         "$action=$definition.Actions.Item(1); "
         f"$action.Path={literal(sys.executable)}; $action.Arguments={raw}; "
