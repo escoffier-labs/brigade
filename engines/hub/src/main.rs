@@ -164,13 +164,18 @@ impl Stop {
 }
 
 /// SIGTERM the managed upstream so its own shutdown runs, then kill it if it
-/// is still running after `UPSTREAM_STOP`. Ok only when it exited 0.
+/// is still running after `UPSTREAM_STOP`. Accept exit 0 or termination by the
+/// SIGTERM we sent.
 async fn stop_upstream(child: &mut Child) -> Result<(), String> {
-    if let Some(pid) = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+    use std::os::unix::process::ExitStatusExt;
+    let sent_sigterm = if let Some(pid) = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok())
+    {
         // SAFETY: `pid` is this process's own unreaped child, so it names no
         // other process.
-        unsafe { libc::kill(pid, libc::SIGTERM) };
-    }
+        (unsafe { libc::kill(pid, libc::SIGTERM) }) == 0
+    } else {
+        false
+    };
     let status = match tokio::time::timeout(UPSTREAM_STOP, child.wait()).await {
         Ok(status) => status.map_err(|e| e.to_string())?,
         Err(_) => {
@@ -184,6 +189,9 @@ async fn stop_upstream(child: &mut Child) -> Result<(), String> {
     };
     if status.success() {
         eprintln!("managed upstream stopped cleanly after SIGTERM");
+        Ok(())
+    } else if sent_sigterm && status.signal() == Some(libc::SIGTERM) {
+        eprintln!("managed upstream stopped by SIGTERM");
         Ok(())
     } else {
         eprintln!("managed upstream exited with {status} after SIGTERM");
@@ -1356,8 +1364,7 @@ fn parse_upstream_key(key: &str, managed: bool) -> Result<axum::http::HeaderValu
 }
 
 /// Exits Ok only after a stop signal, once the drain is over and a managed
-/// upstream has exited 0 after its SIGTERM, so exit status 0 means both hubs
-/// shut down cleanly.
+/// upstream has exited 0 or stopped by the SIGTERM we sent.
 async fn run(mut config: Config) -> Result<(), String> {
     let mut signals = Stop::install()?;
     config.validate()?;
@@ -2068,6 +2075,66 @@ fn main() {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+    // Wait for the shell to install its disposition before sending the stop.
+    async fn stop_test_child(disposition: &str) -> Child {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                &format!("{disposition}; printf 'ready\\n'; while read -r line; do :; done"),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let parent = unsafe { libc::getpid() };
+        // SAFETY: use the same async-signal-safe setup as the managed child.
+        unsafe { command.pre_exec(move || upstream_child(parent)) };
+        let mut child = command.spawn().unwrap();
+        let mut ready = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            BufReader::new(child.stdout.take().unwrap()).read_line(&mut ready),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(ready, "ready\n");
+        child
+    }
+
+    #[tokio::test]
+    async fn stop_upstream_accepts_exit_zero() {
+        let mut child = stop_test_child("trap 'exit 0' TERM").await;
+        assert_eq!(stop_upstream(&mut child).await, Ok(()));
+        assert_eq!(child.wait().await.unwrap().code(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn stop_upstream_accepts_sigterm() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = stop_test_child("trap - TERM").await;
+        assert_eq!(stop_upstream(&mut child).await, Ok(()));
+        assert_eq!(child.wait().await.unwrap().signal(), Some(libc::SIGTERM));
+    }
+
+    #[tokio::test]
+    async fn stop_upstream_rejects_exit_three() {
+        let mut child = stop_test_child("trap 'exit 3' TERM").await;
+        let error = stop_upstream(&mut child).await.unwrap_err();
+        assert!(error.contains("exit status: 3"), "{error}");
+        assert_eq!(child.wait().await.unwrap().code(), Some(3));
+    }
+
+    #[tokio::test]
+    async fn stop_upstream_rejects_other_signal() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = stop_test_child("trap 'kill -KILL $$' TERM").await;
+        let error = stop_upstream(&mut child).await.unwrap_err();
+        assert!(error.contains("SIGKILL"), "{error}");
+        assert_eq!(child.wait().await.unwrap().signal(), Some(libc::SIGKILL));
+    }
+
     #[test]
     fn restart_backoff_doubles_to_its_cap() {
         let mut delay = RESTART_MIN;
