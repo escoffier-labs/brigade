@@ -62,7 +62,7 @@ def snapshot(project):
     return result
 
 
-@pytest.mark.parametrize("name", ["compose.override.yaml", "compose.hybrid.yaml"])
+@pytest.mark.parametrize("name", ["compose.override.yaml", "compose.hybrid.yaml", ".env"])
 @pytest.mark.parametrize("kind", ["fifo", "symlink", "symlink-fifo"])
 @pytest.mark.parametrize("action", ["init", "switch"])
 def test_unsafe_compose_path_refused_before_writes(project, tmp_path, name, kind, action):

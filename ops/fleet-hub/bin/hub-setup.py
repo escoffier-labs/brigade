@@ -383,8 +383,14 @@ def hub_toml(decision: Decision) -> str:
 
 def read_env(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
+    # Same no-follow, nonblocking regular-file read as the transaction, so a FIFO
+    # or symlinked .env is refused here instead of blocking before any check runs.
+    try:
+        found = _compose_helper("read_file", path, ".env")
+    except ValueError as exc:
+        raise SetupError(str(exc)) from exc
+    if found is not None:
+        for line in found[0].decode("utf-8").splitlines():
             if line.strip() and not line.lstrip().startswith("#") and "=" in line:
                 key, _, value = line.partition("=")
                 values[key.strip()] = value.strip()
