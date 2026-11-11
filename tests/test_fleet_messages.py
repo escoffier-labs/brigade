@@ -4886,3 +4886,66 @@ def test_principal_client_preserves_epoch_failure_code_and_transaction(message_h
         assert exc.value.code == "message_authorization_unavailable"
     finally:
         conn.close()
+
+
+def test_unread_count_old_hub_explains_upgrade(identity_authority, monkeypatch):
+    calls = []
+    payload = {
+        "error": "action must be send, list, sent, ack, reply, who, or claims",
+        "detail": "untrusted upstream detail",
+    }
+
+    def reject(request, **_kwargs):
+        calls.append(json.loads(request.data))
+        raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, BytesIO(json.dumps(payload).encode()))
+
+    monkeypatch.setattr(fleet_client, "_hub_open", reject)
+    with pytest.raises(credentials.FleetMessageHubError) as caught:
+        fleet_client_messages.unread_count(authority=identity_authority)
+
+    assert str(caught.value) == "Fleet hub does not support unread counts; upgrade the Hub."
+    assert caught.value.code == "message_unread_count_unsupported"
+    assert caught.value.status == 400
+    assert "untrusted upstream detail" not in str(caught.value)
+    assert calls == [{"action": "count"}]
+
+
+@pytest.mark.parametrize(
+    ("status", "payload", "message", "code"),
+    [
+        (400, {"error": "untrusted upstream detail"}, "fleet hub message rejected", None),
+        (400, {}, "fleet hub message rejected", None),
+        (400, {"error": "invalid count arguments"}, "fleet hub message rejected", None),
+        (400, {"code": "message_sender_inactive"}, "sender is not an active hub principal", "message_sender_inactive"),
+        (401, {"error": "untrusted upstream detail"}, "unauthorized", None),
+        (403, {"code": "message_sender_inactive"}, "sender is not an active hub principal", "message_sender_inactive"),
+        (302, {}, "fleet hub request redirected", None),
+    ],
+)
+def test_unread_count_preserves_other_rejections(identity_authority, monkeypatch, status, payload, message, code):
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (status, payload))
+    with pytest.raises(credentials.FleetMessageHubError) as caught:
+        fleet_client_messages.unread_count(authority=identity_authority)
+    assert str(caught.value) == message
+    assert caught.value.code == code
+    assert caught.value.status == status
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "code", "message"),
+    [
+        ({"action": "count"}, 400, "invalid_argument", "fleet hub message rejected"),
+        ({"action": "count"}, 400, "future_code", "fleet hub message rejected"),
+        ({"action": "count"}, 401, None, "unauthorized"),
+        ({"action": "count"}, 302, None, "fleet hub request redirected"),
+        ({"action": "list"}, 400, None, "fleet hub message rejected"),
+        ({"action": "count", "extra": True}, 400, None, "fleet hub message rejected"),
+    ],
+)
+def test_old_hub_count_hint_is_narrow(identity_authority, monkeypatch, body, status, code, message):
+    payload = {"error": "action must be send, list, sent, ack, reply, who, or claims", "code": code}
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (status, payload))
+    with pytest.raises(credentials.FleetMessageHubError) as caught:
+        fleet_client_messages._online(body, authority=identity_authority)
+    assert str(caught.value) == message
+    assert caught.value.code == (code if code in credentials.MESSAGE_CODES else None)

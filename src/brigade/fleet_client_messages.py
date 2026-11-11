@@ -249,6 +249,17 @@ def _online(body: dict[str, Any], *, authority: MessageAuthority, timeout: float
                 "Fleet hub does not support directory continuation.", code="paging_continuation_unsupported"
             )
         return legacy
+    if (
+        status == 400
+        and body == {"action": "count"}
+        and payload.get("code") is None
+        and payload.get("error") == "action must be send, list, sent, ack, reply, who, or claims"
+    ):
+        raise FleetMessageHubError(
+            "Fleet hub does not support unread counts; upgrade the Hub.",
+            status=400,
+            code="message_unread_count_unsupported",
+        )
     if not 200 <= status < 300:
         raise FleetMessageHubError(
             _rejection(status, payload),
