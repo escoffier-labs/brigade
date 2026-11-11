@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import partial
 import json
+import os
 import platform
 import sys
 
@@ -179,6 +180,11 @@ def test_observer_retains_explicit_refs_and_scopes_branch_evidence(tmp_path, mon
 
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
+    # Windows runs ver through subprocess on first use, then caches the result.
+    platform.uname()
+    if os.name == "nt":
+        platform.win32_ver()
+
     def forbidden(operation, *args, **kwargs):
         pytest.fail(f"adoption/status/doctor invoked {operation}: args={args!r}, kwargs={kwargs!r}")
 
