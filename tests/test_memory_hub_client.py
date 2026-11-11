@@ -787,6 +787,38 @@ def test_search_cli_labels_a_degraded_answer(hub, tmp_path, capsys):
     assert "[local]" in out
 
 
+def test_search_cli_json_preserves_hub_lineage_and_ranking(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="read")
+    lineage = [{"scope": "fleet", "card_id": "ancestor", "revision": 1}]
+    hub.search_reply = (
+        200,
+        {
+            "matches": [
+                {
+                    "scope": "fleet",
+                    "card_id": "current",
+                    "title": "Current",
+                    "content_hash": "hash-current",
+                    "lineage": lineage,
+                    "source_demoted": True,
+                    "ranks": {"lexical": 2, "dense": 1},
+                }
+            ],
+            "match_count": 1,
+            "retrieval": {"mode": "hybrid", "stale": False},
+        },
+    )
+
+    code, out, err = run(["memory", "search", "--target", str(target), "--json", "current"], capsys)
+
+    assert code == 0 and err == ""
+    [match] = json.loads(out)["matches"]
+    assert match["lineage"] == lineage
+    assert match["source_demoted"] is True
+    assert match["ranks"] == {"hub": 1}
+    assert match["hub_ranks"] == {"dense": 1, "lexical": 2}
+
+
 def test_off_mode_output_is_byte_identical(hub, tmp_path, capsys):
     cards = {"alpha": "---\ntitle: Alpha\n---\nhub memory words\n", "beta": "# Beta\nwords\n"}
     plain = workspace(tmp_path / "plain", mode=None, **cards)

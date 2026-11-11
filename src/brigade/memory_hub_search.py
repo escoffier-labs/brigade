@@ -161,6 +161,8 @@ def fuse(lists: dict[str, list[dict[str, Any]]], limit: int, *, home_scope: str 
                     if isinstance(alias, str)
                 )
             )
+            if source == "hub":
+                entry["hub_ranks"] = dict(match.get("ranks") or {})
             entry["ranks"][source] = rank
             entry["rrf"] += 1.0 / (RRF_K + rank)
             scope = entry.get("scope") or match.get("scope")
