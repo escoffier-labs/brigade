@@ -2224,8 +2224,8 @@ def test_containerfile_stage_defaults_match_the_compose_pin():
         assert f"ARG BRIGADE_REF={pins['BRIGADE_REF']}\n" in body, stage
         assert f"ARG BRIGADE_SHA256={pins['BRIGADE_SHA256']}\n" in body, stage
     assert f"ARG BRIGADE_VERSION={pins['BRIGADE_VERSION']}\n" in _stage_body(text, "python-hub")
-    assert pins["BRIGADE_REF"] == "d3b38d4b6d380f01c21bbaaa66d4a1c857250a1d"
-    assert pins["BRIGADE_SHA256"] == "1106c7c75299720c04e34214535638afd551c13b4ac6803a57bba3fa8dd41061"
+    assert pins["BRIGADE_REF"] == "a7746b6da2eec257890674de30635ca5036a2115"
+    assert pins["BRIGADE_SHA256"] == "5a0cd597e970d17eedf3597cfd33d1a909c1e8f33f9077184abb421cedf3e67f"
 
 
 backup_job = _load("brigade_hub_backup_job", RECIPE / "hub" / "backup.py")

@@ -3,15 +3,13 @@
 
 When the image's Brigade has the Rust engine (S10) and the image recorded the
 binary's checksum, this execs `brigade fleet serve --engine rust`, which checks
-the binary, supervises it and runs the watchdog. The recipe's default
-BRIGADE_REF predates that engine, so otherwise it falls back to the S31
-wrapper below. Bump the pin past S10 at the next release and the fallback
-goes unused.
+the binary, supervises it and runs the watchdog. For older refs without the
+engine, it falls back to the S31 wrapper below.
 
 `brigade-hub` runs in managed mode. It starts `python3 -m brigade fleet serve`
 as its child on an ephemeral loopback port, gives it a per-start key, and
 exits non-zero if that child dies. This wrapper is the interim stand-in for the
-planned `fleet serve --engine rust` (S10): it starts `brigade-hub` as its only
+`fleet serve --engine rust` (S10): it starts `brigade-hub` as its only
 child, forwards SIGTERM and SIGINT to it, and writes the two lines the S31
 checks read from the container log, which the Python hub wrote before the Rust
 front took the port:

@@ -56,12 +56,12 @@ def test_hub_image_is_non_root_and_has_a_single_writable_state_directory():
 
     # Both stages default to the dogfood recipe's pin; the Quadlet build and
     # the smoke pass the reviewed e6009f6 pin as a whole.
-    assert text.count("ARG BRIGADE_REF=d3b38d4b6d380f01c21bbaaa66d4a1c857250a1d\n") == 2
+    assert text.count("ARG BRIGADE_REF=a7746b6da2eec257890674de30635ca5036a2115\n") == 2
     assert (
         "FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e"
         in text
     )
-    assert text.count("ARG BRIGADE_SHA256=1106c7c75299720c04e34214535638afd551c13b4ac6803a57bba3fa8dd41061\n") == 2
+    assert text.count("ARG BRIGADE_SHA256=5a0cd597e970d17eedf3597cfd33d1a909c1e8f33f9077184abb421cedf3e67f\n") == 2
     assert "ARG BRIGADE_VERSION=0.31.0\n" in text
     assert 'org.opencontainers.image.version="${BRIGADE_VERSION}"' in text
     pin = (

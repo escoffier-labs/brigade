@@ -43,8 +43,8 @@ services:
       # The Python hub plus the brigade-hub binary, both from BRIGADE_REF.
       target: dogfood
       args:
-        BRIGADE_REF: ${BRIGADE_REF:-d3b38d4b6d380f01c21bbaaa66d4a1c857250a1d}
-        BRIGADE_SHA256: ${BRIGADE_SHA256:-1106c7c75299720c04e34214535638afd551c13b4ac6803a57bba3fa8dd41061}
+        BRIGADE_REF: ${BRIGADE_REF:-a7746b6da2eec257890674de30635ca5036a2115}
+        BRIGADE_SHA256: ${BRIGADE_SHA256:-5a0cd597e970d17eedf3597cfd33d1a909c1e8f33f9077184abb421cedf3e67f}
         BRIGADE_VERSION: ${BRIGADE_VERSION:-0.31.0}
     image: ${BRIGADE_HUB_IMAGE:-localhost/brigade-fleet-hub:dogfood}
     network_mode: "service:netns"
@@ -57,8 +57,7 @@ services:
     # brigade-hub against the checksum the image recorded, forwards stop
     # signals, writes the listening and clean-exit lines the S31 checks read,
     # and exits non-zero when /health fails or the namespace keeps only
-    # loopback. The default BRIGADE_REF predates S10, so entry.py runs its
-    # S31 wrapper for it instead.
+    # loopback. For older refs without S10, entry.py runs its S31 wrapper.
     entrypoint: ["python", "/brigade/entry.py"]
     command:
       - --host
