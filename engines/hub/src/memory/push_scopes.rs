@@ -1,7 +1,23 @@
 //! Bounded push scope discovery. A scope-less read inspects at most 64 copies.
 //! The 65th slot detects overflow, which fails closed. Name a scope to read
 //! ids with more copies. Every scope-less query joins 65 real or stand-in heads, even
-//! for an absent id, so revision and scan work cannot grow with copy count.
+//! for an absent id, so revision and scan joins cannot grow with copy count.
+//!
+//! Threat model: this bounds work; it is not a constant-time SQLite program.
+//! On bundled SQLite the warmed discovery takes 12,507 / 12,509 / 12,517 /
+//! 12,634 / 12,637 VM instructions for 0 / 1 / 5 / 64 / 70 withheld copies:
+//! about two extra instructions per copy up to the 65-slot cap (130 total).
+//! The regression allows at most 160 instructions of spread. An aggregate-min
+//! probe increased the spread, so retain the simpler ordered seek. Do not pad
+//! SQLite opcodes or impose a response delay to simulate constant-time behavior.
+//! Two interleaved HTTP runs of 500 reads per case on a local test hub measured
+//! negative-path p99-minus-p50 jitter of 569-1,658 microseconds, versus 47-55
+//! microseconds between absent and 70-copy medians. This residual is below the
+//! noise of individual HTTP reads in that experiment, before remote network
+//! jitter. Repeated sampling can reduce noise: these measurements do not prove
+//! resistance to a statistical remote timing attack and require security review.
+//! Without memory_cards_id the planner can fall back to a scan for correctness;
+//! the indexed-work bound applies to the normal schema, not a damaged database.
 use super::{Credential, ReadTx, Value, num, search, text};
 
 const SLOTS: usize = 65;
@@ -25,7 +41,7 @@ pub(super) fn push_scopes<T: ReadTx + ?Sized>(
     let rows = tx.query(
         &format!(
             "WITH RECURSIVE walk(n,cursor) AS (VALUES(0,'') UNION ALL \
-             SELECT n+1,COALESCE((SELECT scope FROM memory_cards INDEXED BY memory_cards_id \
+             SELECT n+1,COALESCE((SELECT scope FROM memory_cards \
              WHERE card_id=?1 AND scope>walk.cursor ORDER BY scope LIMIT 1),cursor) \
              FROM walk WHERE n<{SLOTS}), \
              heads AS MATERIALIZED (SELECT n,cursor,cursor!=lag(cursor,1,'') OVER (ORDER BY n) AS real FROM walk), \
