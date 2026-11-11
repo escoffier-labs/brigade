@@ -81,9 +81,13 @@ mod proposal_review_tests;
 #[cfg(test)]
 mod proposal_tests;
 #[cfg(test)]
+mod push_budget_tests;
+mod push_scopes;
+#[cfg(test)]
 mod push_tests;
 #[cfg(test)]
 mod push_withheld_tests;
+use push_scopes::push_scopes;
 #[cfg(test)]
 mod tests;
 
@@ -1875,53 +1879,6 @@ fn push_head_where(ruleset: usize, writer: usize) -> String {
         "c.state='live' AND {} AND r.scan_state='clean' AND s.ruleset_version=?{ruleset} AND s.state='clean'",
         search::push_trust_sql(writer)
     )
-}
-
-/// The scopes holding a push-eligible head of `card_id`, in scope order,
-/// limited to `scope` when given. When no card has that id, a decoy head
-/// (the first card in the table) stands in and its row is dropped. Every
-/// picked head takes the same three lookups, and the push predicate is a
-/// result column rather than a filter, so the store does the same work for
-/// an eligible, withheld or decoy head. A 404 then costs the same whether
-/// the id is absent or every copy is withheld, and its timing does not tell
-/// them apart (#2410). Parameters: 1 card id, 2 rule set, 3 and 4 the
-/// writer, 5 the scope.
-fn push_scopes<T: ReadTx + ?Sized>(
-    tx: &T,
-    credential: &Credential,
-    card_id: &str,
-    scope: Option<&str>,
-    ruleset: &str,
-) -> rusqlite::Result<Vec<String>> {
-    let mut params = vec![
-        Value::Text(card_id.into()),
-        Value::Text(ruleset.into()),
-        Value::Text(credential.principal().into()),
-        Value::Text(credential.class().into()),
-    ];
-    let hit = match scope {
-        Some(scope) => {
-            params.push(Value::Text(scope.into()));
-            "SELECT scope,card_id,1 AS real FROM memory_cards WHERE scope=?5 AND card_id=?1"
-        }
-        None => "SELECT scope,card_id,1 AS real FROM memory_cards WHERE card_id=?1",
-    };
-    let rows = tx.query(
-        &format!(
-            "WITH hit AS ({hit}), pick AS (SELECT scope,card_id,real FROM hit UNION ALL SELECT scope,card_id,0 FROM (SELECT scope,card_id FROM memory_cards LIMIT 1) WHERE NOT EXISTS (SELECT 1 FROM hit)) \
-             SELECT c.scope,pick.real,COALESCE(c.state='live' AND {} AND r.scan_state='clean' AND s.state='clean',0) \
-             FROM pick JOIN memory_cards c ON c.scope=pick.scope AND c.card_id=pick.card_id \
-             LEFT JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision \
-             LEFT JOIN memory_scans s ON s.content_hash=c.content_hash AND s.ruleset_version=?2 ORDER BY c.scope",
-            search::push_trust_sql(3)
-        ),
-        &params,
-    )?;
-    Ok(rows
-        .into_iter()
-        .filter(|r| num(&r[1]) == Some(1) && num(&r[2]) == Some(1))
-        .map(|r| text(&r[0]))
-        .collect())
 }
 
 fn reads<T: ReadTx + ?Sized>(
