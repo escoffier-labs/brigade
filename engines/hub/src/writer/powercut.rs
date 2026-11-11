@@ -338,27 +338,25 @@ static METHODS: sqlite3_io_methods = sqlite3_io_methods {
     xFetch: None,
     xUnfetch: None,
 };
-pub(crate) struct Registration(*mut sqlite3_vfs);
+pub(crate) struct Registration;
 impl Registration {
     pub(crate) unsafe fn new() -> Self {
-        let parent = sqlite3_vfs_find(ptr::null());
-        let mut v = Box::new(ptr::read(parent));
-        v.zName = c"hub-powercut".as_ptr();
-        v.szOsFile = std::mem::size_of::<File>() as c_int;
-        v.pAppData = parent.cast();
-        v.xOpen = Some(open);
-        v.xDelete = Some(delete);
-        let v = Box::into_raw(v);
-        assert_eq!(sqlite3_vfs_register(v, 0), SQLITE_OK);
-        Self(v)
-    }
-}
-impl Drop for Registration {
-    fn drop(&mut self) {
-        unsafe {
-            sqlite3_vfs_unregister(self.0);
-            drop(Box::from_raw(self.0));
-        }
+        static REGISTER: std::sync::Once = std::sync::Once::new();
+        REGISTER.call_once(|| {
+            let parent = sqlite3_vfs_find(ptr::null());
+            let mut v = Box::new(ptr::read(parent));
+            v.zName = c"hub-powercut".as_ptr();
+            v.szOsFile = std::mem::size_of::<File>() as c_int;
+            v.pAppData = parent.cast();
+            v.xOpen = Some(open);
+            v.xDelete = Some(delete);
+            // SQLite retains this pointer in every connection opened with the
+            // shim. Detached hub writers can close after the test scope ends,
+            // so keep one registration alive for the process, not one per test.
+            let v = Box::into_raw(v);
+            assert_eq!(sqlite3_vfs_register(v, 0), SQLITE_OK);
+        });
+        Self
     }
 }
 
@@ -1117,3 +1115,5 @@ fn message_writes_short_schedule() {
     );
     std::fs::remove_dir_all(template.parent().unwrap()).unwrap();
 }
+
+mod lifetime_tests;
