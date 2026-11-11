@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import stat
 import sys
@@ -18,7 +19,10 @@ class LandError(ValueError):
 
 def _run(argv: list[str], cwd: Path, reason: str, *, stdin: bytes | None = None) -> str:
     try:
-        result = proc.run(argv, cwd=cwd, timeout=240, stdin=stdin)
+        # Anchor relative search paths before subprocess cwd enters the task tree.
+        environment = dict(os.environ)
+        environment["PATH"] = os.pathsep.join(str(Path(part or ".").resolve()) for part in os.get_exec_path())
+        result = proc.run(argv, cwd=cwd, timeout=240, stdin=stdin, env=environment)
     except (OSError, TimeoutError) as exc:
         raise LandError(reason) from exc
     if result.code or result.output_limit_exceeded or result.decode_failed or result.incomplete_process_group:
@@ -35,10 +39,37 @@ def _check_path(value: str, tree: Path, hooks: tuple[Path, ...]) -> None:
         raise LandError("protected-policy-path")
     # Refuse credential stores and files, including common dotfiles and key formats.
     if any(
-        part in {".git", ".ssh", ".aws", ".azure", ".config", ".codex", ".claude", ".brigade", ".gnupg"}
-        or re.search(r"secret|credential|token|password", part)
+        part
+        in {
+            ".git",
+            ".ssh",
+            ".aws",
+            ".azure",
+            ".config",
+            ".codex",
+            ".claude",
+            ".brigade",
+            ".gnupg",
+            ".kube",
+            ".docker",
+            ".pki",
+        }
+        or re.search(r"secret|credential|token|password|service[-_]account", part)
         or part.startswith(".env")
-        or part in {"auth.json", ".netrc", ".npmrc", ".pypirc", "id_rsa", "id_ed25519"}
+        or part
+        in {
+            "auth.json",
+            "auth.toml",
+            "auth.yaml",
+            "auth.yml",
+            ".netrc",
+            ".npmrc",
+            ".pypirc",
+            "id_rsa",
+            "id_ed25519",
+            "id_ecdsa",
+            "id_dsa",
+        }
         or part.endswith((".pem", ".key", ".p12", ".pfx"))
         for part in parts
     ):

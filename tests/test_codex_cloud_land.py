@@ -57,6 +57,8 @@ def landing(tmp_path, monkeypatch):
                 path = kwargs["cwd"] / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content)
+                if name in state.get("executable_files", []):
+                    path.chmod(0o700)
             return proc.Result(0, "", "")
         if argv[0] == "brigade" and state.get("execute_guard"):
             script = argv[argv.index("--command") + 1]
@@ -115,6 +117,11 @@ def test_land_isolated_and_registered(landing):
         ".ssh/config",
         "client.pem",
         "hooks/pre-push",
+        ".kube/config",
+        ".docker/config.json",
+        "service-account.json",
+        "auth.toml",
+        "id_ecdsa",
     ],
 )
 def test_refuse_sensitive_diff_before_apply(landing, path):
@@ -206,6 +213,18 @@ def test_guard_wrapper_ignores_task_pythonpath(landing, tmp_path):
     }
     state["guard_env"] = {"BRIGADE_TEST_MARKER": str(marker)}
     state["execute_guard"] = True
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert result["pr_url"].endswith("/123")
+    assert not marker.exists()
+
+
+def test_task_executable_cannot_shadow_git_via_relative_path(landing, tmp_path, monkeypatch):
+    caller, state, _ = landing
+    marker = tmp_path / "executed"
+    state["extra_files"] = {"git": '#!/bin/sh\n: > "$BRIGADE_TEST_MARKER"\nexit 1\n'}
+    state["executable_files"] = ["git"]
+    monkeypatch.setenv("BRIGADE_TEST_MARKER", str(marker))
+    monkeypatch.setenv("PATH", "." + os.pathsep + os.environ["PATH"])
     result = codex_cloud_land.land(caller, "task_example", 2473)
     assert result["pr_url"].endswith("/123")
     assert not marker.exists()
