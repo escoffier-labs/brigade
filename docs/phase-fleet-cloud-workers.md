@@ -116,7 +116,26 @@ immediately after submission, and release the lease only after a terminal
 provider observation. Submission errors and timeouts become terminal safe events
 without applying a diff. Inventory is bounded through `codex cloud list
 --json` and `codex cloud status TASK_ID`. The adapter never calls `codex cloud
-apply` automatically; applying patches remains a human decision.
+apply` automatically during dispatch. Explicitly promote a registered ready task:
+
+```bash
+brigade run cloud land --provider codex-cloud --task-id task_example --issue 123
+```
+
+`land` fetches origin and applies with `codex cloud apply` in a fresh temporary
+worktree based on `origin/main`. The caller checkout stays untouched. It refuses
+workflow, CODEOWNERS, credential, hook, and non-regular file paths, plus patches
+that do not apply cleanly. It runs the installed content guard through Brigade
+verification, preserves push hooks, and checks the PR body with Vale. It commits
+with the Codex trailer, pushes a new branch, opens a PR referencing the issue and
+task, and records the branch and PR URL for `status` and `sync`. It never merges
+or enables auto-merge. The conductor reviews and merges.
+
+Named refusals include `task-not-ready`, `protected-policy-path`, `credential-path`,
+`apply-conflict`, `guard-failed`, and `pr-body-lint-failed`. Failed worktrees are
+removed. Local branches remain for inspection. A push or PR creation failure
+may leave a remote branch. Inspect that branch before retrying. Repeating a
+successful land returns its registered PR without opening another one.
 
 ### Claude Code Cloud
 

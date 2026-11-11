@@ -60,6 +60,13 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     )
     p_launch.add_argument("--json", action="store_true", help="Emit the public launch JSON contract.")
 
+    p_land = cloud_sub.add_parser("land", help="Apply a ready Codex Cloud task in isolation and open a PR for review.")
+    p_land.add_argument("--target", type=Path, default=Path("."))
+    p_land.add_argument("--provider", required=True, choices=("codex-cloud",))
+    p_land.add_argument("--task-id", required=True)
+    p_land.add_argument("--issue", required=True, type=int)
+    p_land.add_argument("--json", action="store_true")
+
     p_register = cloud_sub.add_parser("register", help="Register a dispatched cloud task.")
     p_register.add_argument("--target", type=Path, default=Path("."))
     p_register.add_argument(
@@ -532,6 +539,17 @@ def dispatch(args) -> int:
 
     from .. import cloud_tracker
 
+    if command == "land":
+        from .. import codex_cloud_land
+
+        try:
+            result = codex_cloud_land.land(target, args.task_id, args.issue)
+        except codex_cloud_land.LandError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(result) if args.json else result["pr_url"])
+        return 0
+
     if command == "launch":
         return _dispatch_launch(args, target)
 
@@ -653,6 +671,8 @@ def dispatch(args) -> int:
         print(
             f"active: {payload['counts']['active']} released: {payload['counts']['released']} needs_you: {payload['counts']['needs_you']}"
         )
+        for row in payload.get("prs", []):
+            print(f"  pr: task={row.get('task_id')} {row['pr_url']}")
         for row in payload.get("needs_you", []):
             print(f"  needs-you: {row.get('detail')}")
         return 0
@@ -685,7 +705,8 @@ def dispatch(args) -> int:
         counts = payload.get("counts") or {}
         print("counts: " + ", ".join(f"{k}={counts.get(k, 0)}" for k in cloud_tracker.CLASSIFICATIONS))
         for row in payload.get("entries", []):
-            extra = f" url={row['url']}" if row.get("url") else ""
+            url = row.get("pr_url") or row.get("url")
+            extra = f" url={url}" if url else ""
             print(
                 f"  - [{row.get('classification')}] {row.get('label')} "
                 f"provider={row.get('provider')} task={row.get('task_id')} branch={row.get('branch')}{extra}"

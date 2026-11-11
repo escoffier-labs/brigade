@@ -667,6 +667,7 @@ def _classify_entry(
         "source": entry.get("source"),
         "evidence": evidence,
         "pr": prs[0] if prs else None,
+        "pr_url": entry.get("pr_url"),
     }
     if claude_lifecycle is not None:
         row["provider_lifecycle"] = claude_lifecycle
@@ -1165,6 +1166,11 @@ def sync_payload(
         "observed_at": status.get("observed_at"),
         "stale_ready_hours": status.get("stale_ready_hours"),
         "sources": status.get("sources"),
+        "prs": [
+            {"task_id": row.get("task_id"), "pr_url": row["pr_url"]}
+            for row in status.get("entries", [])
+            if row.get("pr_url")
+        ],
         "active": active[:100],
         "renewed": renewed[:100],
         "released": released[:100],

@@ -1,0 +1,1 @@
+- Add `brigade run cloud land --provider codex-cloud --task-id ID --issue N` to apply a ready task in an isolated worktree and open a PR for conductor review. Refuse protected paths and apply conflicts, run content guard, and record the PR in cloud status and sync (#2473).
