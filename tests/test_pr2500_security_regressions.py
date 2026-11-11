@@ -76,11 +76,37 @@ def _script(tmp_path):
 
 def test_care_replacement_restores_original_xml_on_post_create_failure(tmp_path):
     script = _script(tmp_path)
-    assert script.index("$xml=$old.Xml") < script.index("/Create")
+    assert script.index("$x=$o.Xml") < script.index("/Create")
     assert script.index("try { &") < script.index("/Create") < script.index("$d=$f.GetTask")
-    assert "catch { if ($null -ne $xml)" in script
-    assert "$f.RegisterTask(" in script and ",$xml,6,$null,$null,3,$null)" in script
-    assert script.endswith("; throw }")
+    assert "try { if ($x)" in script
+    assert "$f.RegisterTask(" in script and ",$x,6,$null,$null,3,$null)" in script
+    assert script.endswith("$c.Message,$b) }")
+
+
+def test_care_restore_failure_preserves_initiating_error(tmp_path):
+    script = _script(tmp_path)
+    handler = script.split("; } catch {", 1)[1]
+    assert handler.startswith(" $c=$_.Exception; $b='none';")
+    assert "catch { $b=$_.Exception.Message;" in handler
+    assert handler.endswith("throw ('care task {0}: {1}; rollback: {2}' -f $n,$c.Message,$b) }")
+
+
+def test_care_restore_failure_removes_placeholder(tmp_path):
+    handler = _script(tmp_path).split("; } catch {", 1)[1]
+    assert "$m={ try { $null=$f.GetTask($n); " in handler
+    assert "$f.DeleteTask($n,0)" in handler
+    assert "catch { $b=$_.Exception.Message; try { & $m } catch {" in handler
+    assert "$b+='; cleanup: '+$_.Exception.Message" in handler
+
+
+def test_care_pre_create_failure_ignores_absent_task(tmp_path):
+    handler = _script(tmp_path).split("; } catch {", 1)[1]
+    lookup = handler.index("$null=$f.GetTask(")
+    delete = handler.index("$f.DeleteTask(")
+    assert lookup < delete < handler.index("if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw }")
+    assert "catch { if ($_.Exception.GetBaseException().HResult" in handler
+    assert " } else { & $m } } catch {" in handler
+    assert "$c.Message,$b) }" in handler
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows Task Scheduler")

@@ -95,35 +95,44 @@ def create_command(entry: CareEntry, *, command: str, name: str, schedule: str, 
     def literal(value: str) -> str:
         return "'" + value.replace("'", "''") + "'"
 
+    task = "$n"
     account = account.replace('"%USERNAME%"', "$env:USERNAME")
     create = (
-        f"& {literal(SCHTASKS_EXE)} /Create /TN {literal(name)} "
+        f"& {literal(SCHTASKS_EXE)} /Create /TN {task} "
         f"/TR {literal(CMD_EXE + ' /d /c exit 1')} {schedule} {account} /F; "
         "if ($LASTEXITCODE -ne 0) { throw 'cannot create care task' }; "
     )
-    connect = "$s=New-Object -ComObject Schedule.Service; $s.Connect(); $f=$s.GetFolder('\\'); "
+    connect = (
+        f"$n={literal(name)}; " + "$s=New-Object -ComObject Schedule.Service; $s.Connect(); $f=$s.GetFolder('\\'); "
+    )
 
     def replace(value: str) -> str:
         return (
-            f"$d=$f.GetTask({literal(name)}).Definition; "
+            f"$d=$f.GetTask({task}).Definition; "
             "$action=$d.Actions.Item(1); "
             f"$action.Path={literal(executable)}; $action.Arguments={value}; "
             f"$action.WorkingDirectory={literal(str(trusted_cwd()))}; "
-            f"$f.RegisterTaskDefinition({literal(name)},$d,6,$null,$null,3,$null) | Out-Null"
+            f"$null=$f.RegisterTaskDefinition({task},$d,6,$null,$null,3,$null)"
         )
 
     snapshot = (
-        "$old=$null; $xml=$null; "
-        f"try {{ $old=$f.GetTask({literal(name)}) }} "
-        "catch { $err=$_.Exception; "
-        "while ($null -ne $err.InnerException) { $err=$err.InnerException }; "
-        "if ($err.HResult -ne -2147024894) { throw } }; "
-        "if ($null -ne $old) { $xml=$old.Xml }; "
+        "$o=$x=$null; "
+        f"try {{ $o=$f.GetTask({task}) }} "
+        "catch { "
+        "if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw } }; "
+        "if ($o) { $x=$o.Xml }; "
     )
     rollback = (
-        "; } catch { if ($null -ne $xml) { "
-        f"$f.RegisterTask({literal(name)},$xml,6,$null,$null,3,$null) | Out-Null"
-        f" }} else {{ $f.DeleteTask({literal(name)},0) }}; throw }}"
+        "; } catch { $c=$_.Exception; $b='none'; "
+        "$m={ try { "
+        f"$null=$f.GetTask({task}); $f.DeleteTask({task},0)"
+        " } catch { "
+        "if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw } } }; "
+        "try { if ($x) { "
+        f"$null=$f.RegisterTask({task},$x,6,$null,$null,3,$null)"
+        " } else { & $m } } catch { $b=$_.Exception.Message; "
+        "try { & $m } catch { $b+='; cleanup: '+$_.Exception.Message } }; "
+        f"throw ('care task {{0}}: {{1}}; rollback: {{2}}' -f {task},$c.Message,$b) }}"
     )
     if entry.kind == "reflect" and entry.reflect_scope is None:
         # Only an unscoped reflect reinstall reads the existing task, before
@@ -131,24 +140,17 @@ def create_command(entry: CareEntry, *, command: str, name: str, schedule: str, 
         helper = module_argv("brigade.care_windows")
         invocation = "& " + " ".join(literal(arg) for arg in helper)
         prepare = (
-            "if ($null -ne $old) { "
-            "$as=$old.Definition.Actions; "
-            "if ($as.Count -ne 1 -or $as.Item(1).Type -ne 0) { throw 'invalid existing reflect action' }; "
-            "$j=ConvertTo-Json -InputObject @($argv,($as.Item(1).Arguments)) -Compress; "
+            "if ($o) { "
+            "$a=$o.Definition.Actions; "
+            "if ($a.Count -ne 1 -or $a.Item(1).Type -ne 0) { throw 'invalid existing reflect action' }; "
+            "$j=ConvertTo-Json -InputObject @($v,($a.Item(1).Arguments)) -Compress; "
             "$p=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j)); "
             f"$r=$p | {invocation}; "
             "if ($LASTEXITCODE -ne 0) { throw 'cannot preserve existing reflect scope' }; "
-            "$argv=($r | ConvertFrom-Json) }; "
+            "$v=($r | ConvertFrom-Json) }; "
         )
         body = (
-            connect
-            + snapshot
-            + f"$argv={literal(arguments)}; "
-            + prepare
-            + "try { "
-            + create
-            + replace("$argv")
-            + rollback
+            connect + snapshot + f"$v={literal(arguments)}; " + prepare + "try { " + create + replace("$v") + rollback
         )
     else:
         # The exact grammar scripts/windows-native-acceptance.ps1 checks: one

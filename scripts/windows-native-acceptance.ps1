@@ -310,24 +310,30 @@ namespace BrigadeAcceptance {
     $cwdLiteral = "'" + (Split-Path -Parent $Initializer).Replace("'", "''") + "'"
     # Exact script grammar rejects extra commands/options, elevated/noninteractive
     # principals, executable lookup, or a live action during schtasks creation.
-    $expected = "`$ErrorActionPreference='Stop'; `$s=New-Object -ComObject Schedule.Service; `$s.Connect(); " +
+    $expected = "`$ErrorActionPreference='Stop'; `$n='$TaskName'; `$s=New-Object -ComObject Schedule.Service; `$s.Connect(); " +
         "`$f=`$s.GetFolder('\'); " +
-        '$old=$null; $xml=$null; ' +
-        "try { `$old=`$f.GetTask('$TaskName') } " +
-        'catch { $err=$_.Exception; ' +
-        'while ($null -ne $err.InnerException) { $err=$err.InnerException }; ' +
-        'if ($err.HResult -ne -2147024894) { throw } }; ' +
-        'if ($null -ne $old) { $xml=$old.Xml }; ' +
-        "try { & 'C:\Windows\System32\schtasks.exe' /Create /TN '$TaskName' " +
+        '$o=$x=$null; ' +
+        "try { `$o=`$f.GetTask(`$n) } " +
+        'catch { ' +
+        'if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw } }; ' +
+        'if ($o) { $x=$o.Xml }; ' +
+        "try { & 'C:\Windows\System32\schtasks.exe' /Create /TN `$n " +
         "/TR 'C:\Windows\System32\cmd.exe /d /c exit 1' $Schedule /RU `$env:USERNAME /IT /F; " +
         "if (`$LASTEXITCODE -ne 0) { throw 'cannot create care task' }; " +
-        "`$d=`$f.GetTask('$TaskName').Definition; " +
+        "`$d=`$f.GetTask(`$n).Definition; " +
         '$action=$d.Actions.Item(1); ' +
         "`$action.Path=$pythonLiteral; `$action.Arguments=$rawArguments; `$action.WorkingDirectory=$cwdLiteral; " +
-        "`$f.RegisterTaskDefinition('$TaskName',`$d,6,`$null,`$null,3,`$null) | Out-Null" +
-        '; } catch { if ($null -ne $xml) { ' +
-        "`$f.RegisterTask('$TaskName',`$xml,6,`$null,`$null,3,`$null) | Out-Null" +
-        " } else { `$f.DeleteTask('$TaskName',0) }; throw }"
+        "`$null=`$f.RegisterTaskDefinition(`$n,`$d,6,`$null,`$null,3,`$null)" +
+        "; } catch { `$c=`$_.Exception; `$b='none'; " +
+        '$m={ try { ' +
+        "`$null=`$f.GetTask(`$n); `$f.DeleteTask(`$n,0)" +
+        ' } catch { ' +
+        'if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw } } }; ' +
+        'try { if ($x) { ' +
+        "`$null=`$f.RegisterTask(`$n,`$x,6,`$null,`$null,3,`$null)" +
+        ' } else { & $m } } catch { $b=$_.Exception.Message; ' +
+        "try { & `$m } catch { `$b+='; cleanup: '+`$_.Exception.Message } }; " +
+        "throw ('care task {0}: {1}; rollback: {2}' -f `$n,`$c.Message,`$b) }"
     if ($Script -cne $expected) { throw "unexpected encoded care creation/action for $TaskName" }
     $bootstrap = 'import importlib.util as u,os,pathlib as p,runpy as r,sys as s;' +
         'i,m=s.argv.pop(1),s.argv.pop(1);' +
@@ -364,6 +370,44 @@ function Test-CareReplacementRollback {
     if ($exit -eq 0) { throw 'injected post-create COM failure must report failure' }
     if ($f.GetTask($TaskName).Xml -cne $before) { throw 'post-create failure changed the original care task XML' }
     Write-Host 'care post-create COM failure restored the original task XML'
+
+    # Reuse the post-create injection, but refuse XML restoration too.
+    $failed = $script.Replace('$d=$f.GetTask', "throw 'injected post-create failure'; `$d=`$f.GetTask")
+    $failed = $failed.Replace('$null=$f.RegisterTask(', "throw 'injected restore failure'; `$null=`$f.RegisterTask(")
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($failed))
+    Set-Content -LiteralPath $batch -Value ($prefix + $encoded) -Encoding ascii
+    try {
+        $exit = Invoke-PrintedSchtasksBatch -BatchPath $batch `
+            -StdoutPath (Join-Path $Root 'care-restore.out') -StderrPath (Join-Path $Root 'care-restore.err')
+        $errorText = Get-Content -Raw (Join-Path $Root 'care-restore.err')
+        if ($exit -eq 0 -or $errorText -notmatch 'injected post-create failure' -or
+            $errorText -notmatch 'injected restore failure' -or $errorText -notmatch $TaskName) {
+            throw 'restore failure must report the task, initiating error and rollback error'
+        }
+        $remaining = @($f.GetTasks(1) | Where-Object { $_.Name -ceq $TaskName })
+        if ($remaining.Count -ne 0) { throw 'restore failure left the placeholder installed' }
+    } finally {
+        $f.RegisterTask($TaskName,$before,6,$null,$null,3,$null) | Out-Null
+    }
+    Write-Host 'care restore failure preserved both errors and removed the placeholder'
+
+    # A separate absent task proves a failure before /Create stays absent.
+    $freshName = $TaskName + '-precreate-probe'
+    $remaining = @($f.GetTasks(1) | Where-Object { $_.Name -ceq $freshName })
+    if ($remaining.Count -ne 0) { throw 'pre-create probe task already exists' }
+    $failed = $script.Replace($TaskName, $freshName).Replace('try { &', "try { throw 'injected pre-create failure'; &")
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($failed))
+    Set-Content -LiteralPath $batch -Value ($prefix + $encoded) -Encoding ascii
+    $exit = Invoke-PrintedSchtasksBatch -BatchPath $batch `
+        -StdoutPath (Join-Path $Root 'care-precreate.out') -StderrPath (Join-Path $Root 'care-precreate.err')
+    $errorText = Get-Content -Raw (Join-Path $Root 'care-precreate.err')
+    if ($exit -eq 0 -or $errorText -notmatch 'injected pre-create failure' -or
+        $errorText -notmatch 'rollback: none' -or $errorText -notmatch $freshName) {
+        throw 'pre-create failure must preserve the initiating error without a missing-task rollback error'
+    }
+    $remaining = @($f.GetTasks(1) | Where-Object { $_.Name -ceq $freshName })
+    if ($remaining.Count -ne 0) { throw 'pre-create failure installed a task' }
+    Write-Host 'care fresh pre-create failure preserved the error and left no task'
 }
 
 function Assert-CarePlanSet {
