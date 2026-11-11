@@ -154,6 +154,56 @@ def test_repeat_does_not_open_duplicate_proposals(setup, capsys):
     assert len(writes(hub)) == 1
 
 
+def test_run_prunes_submissions_that_are_no_longer_candidates(setup, capsys):
+    target, hub, _ = setup
+    assert run(target, capsys, "run")[0] == 0
+    path = target / ".brigade/memory/reflect/schedule.json"
+    state = json.loads(path.read_text())
+    [(active_digest, active)] = state["submissions"].items()
+    state["submissions"].update(
+        {
+            "1" * 64: {"client_event_id": hubc.event_id(), "proposal_id": hubc.event_id()},
+            "2" * 64: {"client_event_id": hubc.event_id(), "refused": "memory_proposal_invalid"},
+            "3" * 64: {"client_event_id": hubc.event_id()},
+        }
+    )
+    path.write_text(json.dumps(state))
+
+    assert run(target, capsys, "run")[0] == 0
+    assert json.loads(path.read_text())["submissions"] == {active_digest: active}
+    assert len(writes(hub)) == 1
+
+
+def test_near_limit_ledger_is_pruned_before_new_submission(setup, capsys):
+    from brigade import memory_proposal_io as io
+    from brigade import memory_reflect_hub as reflect
+
+    target, hub, _ = setup
+    assert run(target, capsys, "run")[0] == 0
+    path = target / reflect.STATE
+    state = json.loads(path.read_text())
+    terminal = {"client_event_id": hubc.event_id(), "proposal_id": hubc.event_id()}
+    # Each additional digest has a fixed serialized cost, including its comma.
+    entry_bytes = len(io.json_bytes({"0" * 64: terminal})) - 2
+    count = (io.MAX_STATE_BYTES - len(io.json_bytes(state))) // entry_bytes
+    state["submissions"].update({f"{index:064x}": terminal for index in range(count)})
+    before = io.json_bytes(state)
+    assert io.MAX_STATE_BYTES - entry_bytes < len(before) <= io.MAX_STATE_BYTES
+    path.write_bytes(before)
+    # A new pinned revision produces a fresh digest that would overflow the old ledger.
+    text = hub.cards[("fleet", "a")]["text"]
+    hub._commit("card.put", "fleet", "a", text, "live", hubc.event_id())
+
+    code, report = run(target, capsys, "run")
+    assert code == 0
+    assert len(report["proposals"]) == 1
+    assert len(writes(hub)) == 2
+    after = json.loads(path.read_text())
+    assert len(after["submissions"]) == 1
+    assert len(path.read_bytes()) < 1024
+    assert "state_error" not in reflect.schedule_status(target)
+
+
 def test_lost_response_replays_the_same_event(setup, capsys, monkeypatch):
     target, hub, _ = setup
     original = hub.do_propose

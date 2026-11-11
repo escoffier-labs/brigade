@@ -526,6 +526,13 @@ def _reflect(
     )
     previous = dict(state.get("submissions", {})) if state.get("binding") == binding else {}
 
+    # The ledger only needs to remember requests that the current replica can
+    # still derive.  Revisions and removed cards change or remove their digest;
+    # retaining those terminal and interrupted requests forever would let this
+    # bounded state file grow on every changing reflection run.
+    active_digests = {_submission_digest(ops) for ops in (*exact, *similar, *relinked)}
+    previous = {digest: pending for digest, pending in previous.items() if digest in active_digests}
+
     def unremembered(submissions: list[list[dict[str, Any]]]) -> list[tuple[str, list[dict[str, Any]]]]:
         fresh = []
         for ops in submissions:
