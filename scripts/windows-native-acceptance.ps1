@@ -317,23 +317,27 @@ namespace BrigadeAcceptance {
         'catch { ' +
         'if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw } }; ' +
         'if ($o) { $x=$o.Xml }; ' +
-        "try { & 'C:\Windows\System32\schtasks.exe' /Create /TN `$n " +
+        "`$z=`$false; try { & 'C:\Windows\System32\schtasks.exe' /Create /TN `$n " +
         "/TR 'C:\Windows\System32\cmd.exe /d /c exit 1' $Schedule /RU `$env:USERNAME /IT /F; " +
-        "if (`$LASTEXITCODE -ne 0) { throw 'cannot create care task' }; " +
+        "if (`$LASTEXITCODE -ne 0) { throw 'cannot create care task' }; `$z=`$true; " +
         "`$d=`$f.GetTask(`$n).Definition; " +
         '$action=$d.Actions.Item(1); ' +
         "`$action.Path=$pythonLiteral; `$action.Arguments=$rawArguments; `$action.WorkingDirectory=$cwdLiteral; " +
         "`$null=`$f.RegisterTaskDefinition(`$n,`$d,6,`$null,`$null,3,`$null)" +
-        "; } catch { `$c=`$_.Exception; `$b='none'; " +
+        "; } catch { `$c=`$_.Exception; `$b='not needed: task unchanged'; `$k='not needed'; if (`$z) { `$b='none'; " +
         '$m={ try { ' +
-        "`$null=`$f.GetTask(`$n); `$f.DeleteTask(`$n,0)" +
+        '$a=$f.GetTask($n).Definition.Actions; ' +
+        'if ($a.Count -ne 1 -or $a.Item(1).Type -ne 0 -or ' +
+        "`$a.Item(1).Path -ine 'C:\Windows\System32\cmd.exe' -or `$a.Item(1).Arguments -cne '/d /c exit 1') " +
+        "{ return 'cleanup skipped: task changed concurrently' }; " +
+        "`$f.DeleteTask(`$n,0); 'none'" +
         ' } catch { ' +
-        'if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw } } }; ' +
+        "if (`$_.Exception.GetBaseException().HResult -ne -2147024894) { throw }; 'none' } }; " +
         'try { if ($x) { ' +
         "`$null=`$f.RegisterTask(`$n,`$x,6,`$null,`$null,3,`$null)" +
-        ' } else { & $m } } catch { $b=$_.Exception.Message; ' +
-        "try { & `$m } catch { `$b+='; cleanup: '+`$_.Exception.Message } }; " +
-        "throw ('care task {0}: {1}; rollback: {2}' -f `$n,`$c.Message,`$b) }"
+        ' } else { $k=& $m } } catch { $b=$_.Exception.Message; ' +
+        'try { $k=& $m } catch { $k=$_.Exception.Message } } }; ' +
+        "throw ('care task {0}: {1}; rollback: {2}; cleanup: {3}' -f `$n,`$c.Message,`$b,`$k) }"
     if ($Script -cne $expected) { throw "unexpected encoded care creation/action for $TaskName" }
     $bootstrap = 'import importlib.util as u,os,pathlib as p,runpy as r,sys as s;' +
         'i,m=s.argv.pop(1),s.argv.pop(1);' +
@@ -372,7 +376,11 @@ function Test-CareReplacementRollback {
     Write-Host 'care post-create COM failure restored the original task XML'
 
     # Reuse the post-create injection, but refuse XML restoration too.
-    $failed = $script.Replace('$d=$f.GetTask', "throw 'injected post-create failure'; `$d=`$f.GetTask")
+    $probe = '$a=$f.GetTask($n).Definition.Actions; ' +
+        "if (`$a.Count -ne 1 -or `$a.Item(1).Type -ne 0 -or " +
+        "`$a.Item(1).Path -ine 'C:\Windows\System32\cmd.exe' -or `$a.Item(1).Arguments -cne '/d /c exit 1') " +
+        "{ throw 'unexpected native placeholder action' }; throw 'injected post-create failure'; "
+    $failed = $script.Replace('$d=$f.GetTask', $probe + '$d=$f.GetTask')
     $failed = $failed.Replace('$null=$f.RegisterTask(', "throw 'injected restore failure'; `$null=`$f.RegisterTask(")
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($failed))
     Set-Content -LiteralPath $batch -Value ($prefix + $encoded) -Encoding ascii
@@ -391,6 +399,44 @@ function Test-CareReplacementRollback {
     }
     Write-Host 'care restore failure preserved both errors and removed the placeholder'
 
+    # Invalid schedule fails /Create before replacing an existing task. Poison
+    # restore/delete too: either attempted rollback would fail this assertion.
+    $failed = $script.Replace('/SC DAILY', '/SC INVALID')
+    if ($failed -ceq $script) { throw 'invalid-schedule injection did not match' }
+    $failed = $failed.Replace('$null=$f.RegisterTask(', "throw 'unexpected restore'; `$null=`$f.RegisterTask(")
+    $failed = $failed.Replace('$f.DeleteTask(', "throw 'unexpected delete'; `$f.DeleteTask(")
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($failed))
+    Set-Content -LiteralPath $batch -Value ($prefix + $encoded) -Encoding ascii
+    $exit = Invoke-PrintedSchtasksBatch -BatchPath $batch `
+        -StdoutPath (Join-Path $Root 'care-existing-precreate.out') -StderrPath (Join-Path $Root 'care-existing-precreate.err')
+    $errorText = Get-Content -Raw (Join-Path $Root 'care-existing-precreate.err')
+    if ($exit -eq 0 -or $errorText -notmatch 'cannot create care task' -or
+        $errorText -notmatch 'rollback: not needed: task unchanged' -or $errorText -notmatch $TaskName -or
+        $errorText -match 'unexpected restore|unexpected delete') {
+        throw 'existing-task pre-create failure attempted rollback or lost the initiating error'
+    }
+    if ($f.GetTask($TaskName).Xml -cne $before) { throw 'pre-create failure changed the existing task' }
+    Write-Host 'care existing-task pre-create failure left the task unchanged'
+
+    # Simulate another writer restoring the original action just before cleanup.
+    $failed = $script.Replace('$d=$f.GetTask', "throw 'injected post-create failure'; `$d=`$f.GetTask")
+    $failed = $failed.Replace('$null=$f.RegisterTask(', "throw 'injected restore failure'; `$null=`$f.RegisterTask(")
+    $failed = $failed.Replace('$m={ try { ', '$m={ try { $null=$f.RegisterTask($n,$x,6,$null,$null,3,$null); ')
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($failed))
+    Set-Content -LiteralPath $batch -Value ($prefix + $encoded) -Encoding ascii
+    try {
+        $exit = Invoke-PrintedSchtasksBatch -BatchPath $batch `
+            -StdoutPath (Join-Path $Root 'care-concurrent.out') -StderrPath (Join-Path $Root 'care-concurrent.err')
+        $errorText = Get-Content -Raw (Join-Path $Root 'care-concurrent.err')
+        if ($exit -eq 0 -or $errorText -notmatch 'cleanup skipped: task changed concurrently' -or
+            $errorText -notmatch 'injected post-create failure' -or $errorText -notmatch 'injected restore failure' -or
+            $errorText -notmatch $TaskName) { throw 'concurrent replacement must be preserved and reported' }
+        if ($f.GetTask($TaskName).Xml -cne $before) { throw 'cleanup deleted or changed concurrent replacement' }
+    } finally {
+        $f.RegisterTask($TaskName,$before,6,$null,$null,3,$null) | Out-Null
+    }
+    Write-Host 'care cleanup preserved a concurrently changed task'
+
     # A separate absent task proves a failure before /Create stays absent.
     $freshName = $TaskName + '-precreate-probe'
     $remaining = @($f.GetTasks(1) | Where-Object { $_.Name -ceq $freshName })
@@ -402,7 +448,7 @@ function Test-CareReplacementRollback {
         -StdoutPath (Join-Path $Root 'care-precreate.out') -StderrPath (Join-Path $Root 'care-precreate.err')
     $errorText = Get-Content -Raw (Join-Path $Root 'care-precreate.err')
     if ($exit -eq 0 -or $errorText -notmatch 'injected pre-create failure' -or
-        $errorText -notmatch 'rollback: none' -or $errorText -notmatch $freshName) {
+        $errorText -notmatch 'rollback: not needed: task unchanged' -or $errorText -notmatch $freshName) {
         throw 'pre-create failure must preserve the initiating error without a missing-task rollback error'
     }
     $remaining = @($f.GetTasks(1) | Where-Object { $_.Name -ceq $freshName })

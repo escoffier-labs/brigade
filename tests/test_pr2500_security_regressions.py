@@ -80,33 +80,44 @@ def test_care_replacement_restores_original_xml_on_post_create_failure(tmp_path)
     assert script.index("try { &") < script.index("/Create") < script.index("$d=$f.GetTask")
     assert "try { if ($x)" in script
     assert "$f.RegisterTask(" in script and ",$x,6,$null,$null,3,$null)" in script
-    assert script.endswith("$c.Message,$b) }")
+    assert script.endswith("$c.Message,$b,$k) }")
 
 
 def test_care_restore_failure_preserves_initiating_error(tmp_path):
     script = _script(tmp_path)
     handler = script.split("; } catch {", 1)[1]
-    assert handler.startswith(" $c=$_.Exception; $b='none';")
+    assert handler.startswith(" $c=$_.Exception; $b='not needed: task unchanged';")
     assert "catch { $b=$_.Exception.Message;" in handler
-    assert handler.endswith("throw ('care task {0}: {1}; rollback: {2}' -f $n,$c.Message,$b) }")
+    assert handler.endswith("throw ('care task {0}: {1}; rollback: {2}; cleanup: {3}' -f $n,$c.Message,$b,$k) }")
 
 
-def test_care_restore_failure_removes_placeholder(tmp_path):
+def test_care_existing_task_pre_create_failure_leaves_task_unchanged(tmp_path):
+    script = _script(tmp_path)
+    assert script.index("$x=$o.Xml") < script.index("$z=$false; try { &")
+    assert "if ($LASTEXITCODE -ne 0) { throw 'cannot create care task' }; $z=$true;" in script
+    handler = script.split("; } catch {", 1)[1]
+    assert handler.startswith(" $c=$_.Exception; $b='not needed: task unchanged'; $k='not needed'; if ($z) {")
+    assert handler.index("if ($z) {") < handler.index("$m={") < handler.index("$f.RegisterTask(")
+    assert handler.endswith("throw ('care task {0}: {1}; rollback: {2}; cleanup: {3}' -f $n,$c.Message,$b,$k) }")
+
+
+def test_care_restore_failure_deletes_only_matching_placeholder(tmp_path):
     handler = _script(tmp_path).split("; } catch {", 1)[1]
-    assert "$m={ try { $null=$f.GetTask($n); " in handler
-    assert "$f.DeleteTask($n,0)" in handler
-    assert "catch { $b=$_.Exception.Message; try { & $m } catch {" in handler
-    assert "$b+='; cleanup: '+$_.Exception.Message" in handler
+    cleanup = handler.split("$m={ try { ", 1)[1].split(" }; try { if ($x)", 1)[0]
+    assert "$a=$f.GetTask($n).Definition.Actions;" in cleanup
+    assert "$a.Count -ne 1 -or $a.Item(1).Type -ne 0" in cleanup
+    assert "$a.Item(1).Path -ine 'C:\\Windows\\System32\\cmd.exe'" in cleanup
+    assert "$a.Item(1).Arguments -cne '/d /c exit 1'" in cleanup
+    assert cleanup.index("$a.Item(1).Arguments") < cleanup.index("$f.DeleteTask($n,0)")
+    assert "catch { $b=$_.Exception.Message; try { $k=& $m } catch { $k=$_.Exception.Message }" in handler
 
 
-def test_care_pre_create_failure_ignores_absent_task(tmp_path):
+def test_care_identity_mismatch_skips_cleanup_and_reports_it(tmp_path):
     handler = _script(tmp_path).split("; } catch {", 1)[1]
-    lookup = handler.index("$null=$f.GetTask(")
-    delete = handler.index("$f.DeleteTask(")
-    assert lookup < delete < handler.index("if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw }")
-    assert "catch { if ($_.Exception.GetBaseException().HResult" in handler
-    assert " } else { & $m } } catch {" in handler
-    assert "$c.Message,$b) }" in handler
+    mismatch = "{ return 'cleanup skipped: task changed concurrently' }; $f.DeleteTask($n,0)"
+    assert mismatch in handler
+    assert " } else { $k=& $m }" in handler
+    assert "cleanup: {3}' -f $n,$c.Message,$b,$k) }" in handler
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows Task Scheduler")

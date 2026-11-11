@@ -100,7 +100,7 @@ def create_command(entry: CareEntry, *, command: str, name: str, schedule: str, 
     create = (
         f"& {literal(SCHTASKS_EXE)} /Create /TN {task} "
         f"/TR {literal(CMD_EXE + ' /d /c exit 1')} {schedule} {account} /F; "
-        "if ($LASTEXITCODE -ne 0) { throw 'cannot create care task' }; "
+        "if ($LASTEXITCODE -ne 0) { throw 'cannot create care task' }; $z=$true; "
     )
     connect = (
         f"$n={literal(name)}; " + "$s=New-Object -ComObject Schedule.Service; $s.Connect(); $f=$s.GetFolder('\\'); "
@@ -122,23 +122,39 @@ def create_command(entry: CareEntry, *, command: str, name: str, schedule: str, 
         "if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw } }; "
         "if ($o) { $x=$o.Xml }; "
     )
+    # schtasks splits /TR into Exec.Path and Exec.Arguments, without path quotes.
     rollback = (
-        "; } catch { $c=$_.Exception; $b='none'; "
+        "; } catch { $c=$_.Exception; $b='not needed: task unchanged'; $k='not needed'; if ($z) { $b='none'; "
         "$m={ try { "
-        f"$null=$f.GetTask({task}); $f.DeleteTask({task},0)"
+        f"$a=$f.GetTask({task}).Definition.Actions; "
+        "if ($a.Count -ne 1 -or $a.Item(1).Type -ne 0 -or "
+        f"$a.Item(1).Path -ine {literal(CMD_EXE)} -or $a.Item(1).Arguments -cne '/d /c exit 1') "
+        "{ return 'cleanup skipped: task changed concurrently' }; "
+        f"$f.DeleteTask({task},0); 'none'"
         " } catch { "
-        "if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw } } }; "
+        "if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw }; 'none' } }; "
         "try { if ($x) { "
         f"$null=$f.RegisterTask({task},$x,6,$null,$null,3,$null)"
-        " } else { & $m } } catch { $b=$_.Exception.Message; "
-        "try { & $m } catch { $b+='; cleanup: '+$_.Exception.Message } }; "
-        f"throw ('care task {{0}}: {{1}}; rollback: {{2}}' -f {task},$c.Message,$b) }}"
+        " } else { $k=& $m } } catch { $b=$_.Exception.Message; "
+        "try { $k=& $m } catch { $k=$_.Exception.Message } } }; "
+        f"throw ('care task {{0}}: {{1}}; rollback: {{2}}; cleanup: {{3}}' -f {task},$c.Message,$b,$k) }}"
     )
     if entry.kind == "reflect" and entry.reflect_scope is None:
         # Only an unscoped reflect reinstall reads the existing task, before
         # /Create /F replaces it, to carry its validated --scope forward.
         helper = module_argv("brigade.care_windows")
-        invocation = "& " + " ".join(literal(arg) for arg in helper)
+        # Share the isolated bootstrap between the helper and desired argv so
+        # the encoded plan stays below cmd.exe's command-line limit.
+        bootstrap = helper[3]
+        desired = literal(arguments)
+        shared = ""
+        if bootstrap in arguments:
+            before, after = arguments.split(bootstrap, 1)
+            shared = f"$h={literal(bootstrap)}; "
+            desired = f"({literal(before)}+$h+{literal(after)})"
+        invocation = "& " + " ".join(
+            "$h" if shared and index == 3 else literal(arg) for index, arg in enumerate(helper)
+        )
         prepare = (
             "if ($o) { "
             "$a=$o.Definition.Actions; "
@@ -150,12 +166,20 @@ def create_command(entry: CareEntry, *, command: str, name: str, schedule: str, 
             "$v=($r | ConvertFrom-Json) }; "
         )
         body = (
-            connect + snapshot + f"$v={literal(arguments)}; " + prepare + "try { " + create + replace("$v") + rollback
+            connect
+            + snapshot
+            + shared
+            + f"$v={desired}; "
+            + prepare
+            + "$z=$false; try { "
+            + create
+            + replace("$v")
+            + rollback
         )
     else:
         # The exact grammar scripts/windows-native-acceptance.ps1 checks: one
         # literal argument assignment and no statements beyond these.
-        body = connect + snapshot + "try { " + create + replace(literal(arguments)) + rollback
+        body = connect + snapshot + "$z=$false; try { " + create + replace(literal(arguments)) + rollback
     script = "$ErrorActionPreference='Stop'; " + body
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
     # A bare absolute executable path parses in both cmd and PowerShell 5.1.
