@@ -197,8 +197,13 @@ configuration it could not probe, offers only R1 models, and never
 overwrites an existing secret. It writes `.env`, `config/hub.toml` and the
 secrets, and creates the backup directory with mode 0700.
 
-`config/hub.toml` is mounted into the hub for the planned `--config` (S15). Neither hub reads it yet, so on this hub both modes answer from BM25. The mode switch below already works on the files and the
-containers, and S15 adds the status fields.
+Docker mounts `config/hub.toml` and passes it to the Rust hub with
+`--memory-config` when the pinned Brigade ref supports that flag. Lexical mode
+uses BM25. Hybrid mode uses the configured embedder endpoint and token, with
+BM25 fallback if the token or embedder is unavailable. Memory status reports
+the configured and effective retrieval modes. On older refs the entry wrapper
+drops the flag and the hub reads the config beside its database instead, which
+is BM25 in this setup.
 
 Put the private network's auth key in `secrets/front-authkey` (tagged, not
 reusable, and expiring is enough: the front keeps its state in its volume
@@ -613,7 +618,5 @@ and command name. An exemption that matches no reachable listener is recorded
 as unused. A program that runs from a per-launch mount path needs the path
 updated after each launch.
 
-The status fields of [Retrieval modes](../phase-v2-hub-architecture.md#retrieval-modes)
-(`lexical` and `ok` for BM25 chosen, `degraded` for a hybrid project whose
-embedder is stopped) need S15's status route. `checks/s31_checks.py setup`
-reports them as pending until then.
+The memory status reports retrieval mode and state. `checks/s31_checks.py setup`
+checks these fields against the selected mode.
