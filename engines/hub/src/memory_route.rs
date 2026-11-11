@@ -19,18 +19,12 @@ pub enum MemoryRoute {
     Unavailable,
 }
 
+#[path = "memory_response.rs"]
+mod response;
 pub fn respond(reply: Reply) -> Response<Body> {
-    let body = reply.body.to_string();
-    Response::builder()
-        .status(reply.status)
-        .header("content-type", "application/json")
-        .header("server", "brigade-fleet-hub/1")
-        .header("cache-control", "no-store")
-        .header("referrer-policy", "no-referrer")
-        .header("content-length", body.len())
-        .body(Body::from(body))
-        .unwrap()
+    response::respond(reply.status, reply.body)
 }
+
 fn refuse(status: u16, error: &str, code: Option<&str>) -> Response<Body> {
     let mut body = serde_json::json!({ "error": error });
     if let Some(code) = code {
