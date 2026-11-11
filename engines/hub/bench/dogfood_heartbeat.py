@@ -29,65 +29,116 @@ def request(url, token, body):
         client.close()
 
 
-def probes(url, token, recipient_token, stop, records):
-    after = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        while not stop.is_set():
-            wake = pool.submit(request, url, recipient_token, {"action": "list", "after": after, "wait_ms": 2000})
-            time.sleep(0.1)
-            started = time.monotonic()
-            sent_status, sent = request(
-                url,
-                token,
+def claim_probe(url, token, node_id, records):
+    """Acquire then release one claim under a fresh holder, so no probe meets stale-holder."""
+    holder = "s6-probe-" + str(time.time_ns())
+    target = "s6-deployment-probe"
+    client = load.Client(url, token, "close", 10)
+    try:
+        started = time.monotonic()
+        status, raw, _ = client.request(
+            "POST",
+            "/claims",
+            json.dumps(
+                {"action": "acquire", "target": target, "node_id": node_id, "holder": holder, "ttl_seconds": 60}
+            ).encode(),
+        )
+        records.append(
+            {
+                "kind": "claim",
+                "status": status,
+                "latency_ms": (time.monotonic() - started) * 1000,
+                "error": raw.decode("utf-8") if status != 200 else None,
+            }
+        )
+        if status != 200:
+            return
+        generation = claim_generation(raw)
+        if generation is None:
+            records.append({"kind": "claim-release", "status": None, "error": "acquire reply carried no generation"})
+            return
+        status, raw, _ = client.request(
+            "POST",
+            "/claims",
+            json.dumps(
                 {
-                    "action": "send",
-                    "to": "bench-receiver",
-                    "subject": "S6 deployment probe",
-                    "body": "synthetic probe",
-                    "client_id": "s6-" + str(time.time_ns()),
-                },
-            )
-            status, answer = wake.result()
-            messages = answer.get("messages", [])
-            matched = sent.get("message", {}).get("id")
-            records.append(
-                {
-                    "kind": "wake",
-                    "send_status": sent_status,
-                    "status": status,
-                    "latency_ms": (time.monotonic() - started) * 1000,
-                    "delivered": any(m["id"] == matched for m in messages),
+                    "action": "release",
+                    "target": target,
+                    "node_id": node_id,
+                    "holder": holder,
+                    "generation": generation,
                 }
-            )
-            if messages:
-                after = max(m["id"] for m in messages)
-            client = load.Client(url, token, "close", 10)
-            try:
-                started = time.monotonic()
-                status, raw, _ = client.request(
-                    "POST",
-                    "/claims",
-                    json.dumps(
-                        {
-                            "action": "acquire",
-                            "target": "s6-deployment-probe",
-                            "node_id": "bench-node",
-                            "holder": "s6-deployment-holder",
-                            "ttl_seconds": 900,
-                        }
-                    ).encode(),
-                )
-                records.append(
-                    {
-                        "kind": "claim",
-                        "status": status,
-                        "latency_ms": (time.monotonic() - started) * 1000,
-                        "error": raw.decode("utf-8") if status != 200 else None,
-                    }
-                )
-            finally:
-                client.close()
-            stop.wait(0.1)
+            ).encode(),
+        )
+        if status != 200:
+            records.append({"kind": "claim-release", "status": status, "error": raw.decode("utf-8")})
+    finally:
+        client.close()
+
+
+def claim_generation(raw):
+    """The generation lives in the nested claim object of an acquire reply."""
+    try:
+        claim = json.loads(raw).get("claim")
+    except (ValueError, AttributeError):
+        return None
+    return claim.get("generation") if isinstance(claim, dict) else None
+
+
+def wake_probe(url, token, recipient_token, after, records):
+    """Opt-in send-to-wake probe. Returns the next cursor."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        wake = pool.submit(request, url, recipient_token, {"action": "list", "after": after, "wait_ms": 2000})
+        time.sleep(0.1)
+        started = time.monotonic()
+        sent_status, sent = request(
+            url,
+            token,
+            {
+                "action": "send",
+                "to": "bench-receiver",
+                "subject": "S6 deployment probe",
+                "body": "synthetic probe",
+                "client_id": "s6-" + str(time.time_ns()),
+            },
+        )
+        status, answer = wake.result()
+    messages = answer.get("messages", [])
+    matched = sent.get("message", {}).get("id")
+    records.append(
+        {
+            "kind": "wake",
+            "send_status": sent_status,
+            "status": status,
+            "latency_ms": (time.monotonic() - started) * 1000,
+            "delivered": any(m["id"] == matched for m in messages),
+        }
+    )
+    return max([after, *(m["id"] for m in messages)])
+
+
+def probes(url, token, node_id, stop, records, wake=None):
+    """Latency probes use their own credential, never the event clients' one.
+
+    `wake` is None or a (sender token, receiver token) pair for the opt-in wake probe.
+    """
+    after = 0
+    while not stop.is_set():
+        if wake:
+            after = wake_probe(url, wake[0], wake[1], after, records)
+        claim_probe(url, token, node_id, records)
+        stop.wait(0.1)
+
+
+def probe_errors(records):
+    """Error count per probe kind. Latencies count only when the count is near zero."""
+    counts = {}
+    for r in records:
+        kind = r["kind"]
+        counts.setdefault(kind, 0)
+        if r["status"] != 200 or r.get("delivered") is False:
+            counts[kind] += 1
+    return counts
 
 
 def main():
@@ -112,13 +163,25 @@ def main():
         default=1,
         help="Heartbeat nodes recorded in the summary. The default 1 matches bench-node, which signs every post",
     )
+    p.add_argument(
+        "--probe-token-env",
+        default="BRIGADE_BENCH_PROBE_TOKEN",
+        help="Environment variable holding the probes' own credential, separate from BRIGADE_BENCH_TOKEN",
+    )
+    p.add_argument("--probe-node", default="bench-probe", help="Node identity of the probe credential")
+    p.add_argument(
+        "--wake-probe",
+        action="store_true",
+        help="Opt in to the send-to-wake probe. It needs BRIGADE_BENCH_RECEIVER_TOKEN and fills the receiver's quota",
+    )
     args = p.parse_args()
     if not 1 <= args.batch_events <= 1000:
         p.error("batch-events must be between 1 and 1000")
     if args.nodes < 1:
         p.error("nodes must be at least 1")
     token = os.environ["BRIGADE_BENCH_TOKEN"]
-    recipient_token = os.environ["BRIGADE_BENCH_RECEIVER_TOKEN"]
+    probe_token = os.environ[args.probe_token_env]
+    wake = (token, os.environ["BRIGADE_BENCH_RECEIVER_TOKEN"]) if args.wake_probe else None
     # Require the telemetry credential before starting the synthetic fan-out.
     os.environ["BRIGADE_BENCH_METRICS_TOKEN"]
     args.output.mkdir(parents=True, exist_ok=False)
@@ -147,7 +210,7 @@ def main():
 
         def probe_job():
             try:
-                probes(args.url, token, recipient_token, stop, records)
+                probes(args.url, probe_token, args.probe_node, stop, records, wake)
             except Exception as exc:
                 records.append({"kind": "probe-error", "status": None, "error": type(exc).__name__})
 
@@ -172,7 +235,10 @@ def main():
         summary = {
             "events": event_summary,
             "claim_ms": load.percentiles([r["latency_ms"] for r in records if r["kind"] == "claim"]),
-            "wake_ms": load.percentiles([r["latency_ms"] for r in records if r["kind"] == "wake"]),
+            "wake_ms": load.percentiles([r["latency_ms"] for r in records if r["kind"] == "wake"])
+            if args.wake_probe
+            else None,
+            "probe_error_counts": probe_errors(records),
             "errors": [r for r in records if r["status"] != 200 or r.get("delivered") is False],
             "end_load": os.getloadavg(),
             "commit_p99_bucket_upper_ms": commit_p99(first_metrics, last_metrics),

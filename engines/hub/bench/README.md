@@ -189,8 +189,14 @@ to exchange unsealed messages. Choose a disposable run window with no earlier
 messages in the receiver's inbox. Stream their tokens into
 `BRIGADE_BENCH_TOKEN` and `BRIGADE_BENCH_RECEIVER_TOKEN` from the approved secret
 store. Stream the dogfood admin token into `BRIGADE_BENCH_METRICS_TOKEN`.
+Enroll a third node, `bench-probe`, and stream its token into
+`BRIGADE_BENCH_PROBE_TOKEN` (or name another variable with `--probe-token-env`,
+and the node with `--probe-node`). The latency probes use this credential and
+never the event credential, whose in-flight limit the 64 event clients fill, so
+a shared credential would measure `credential-inflight-full` refusals. The
+receiver token is needed only with the opt-in `--wake-probe`.
 Do not put tokens in arguments or reports. The event generator binds its
-payload to `bench-node`, and the claim probe uses that identity too.
+payload to `bench-node`.
 
 Record the hub slice's `cpuset.cpus.effective`, `cpu.max`, `memory.min` and
 `memory.max`, the database filesystem and device, effective I/O controls, the
@@ -210,16 +216,21 @@ not supplied.
 
 The script starts 170 bounded-lifetime CPU workers on the specified agent CPUs,
 waits up to ten minutes for the one-minute load average to enter 150 through
-190, then measures events with 64 clients in four S6a processes. Claims and
-message send-to-wake probes run concurrently. It terminates its workers in a
+190, then measures events with 64 clients in four S6a processes. Claim probes
+run concurrently. Each probe mints a fresh holder, acquires, then releases with
+the generation read from the nested `claim` object of the acquire reply. The
+send-to-wake probe is off by default because wake latency is not an S6 target and
+it fills the receiver's message quota. Pass `--wake-probe` to opt in. It terminates its workers in a
 `finally` block. Stop the script with SIGINT to use that cleanup path. The
 conductor must record any host load outside the requested range during the
 measurement and any failed probe, rather than treating the run as a pass.
 
 Keep the raw event attempts and probes. Report OK writes/s against 4,600/s,
 event p99 against 250 ms, claim p99 against 50 ms, native wake p99 against
-50 ms, and the `FULL` commit p99 histogram upper bound. Inspect errors before
-using latency percentiles. A missing commit histogram is unavailable evidence.
+50 ms when `--wake-probe` ran, and the `FULL` commit p99 histogram upper bound. Inspect errors before
+using latency percentiles. A probe's numbers count only when its error rate is
+near zero. `summary.json` reports each probe's error count under
+`probe_error_counts`, so check it before quoting any probe percentile. A missing commit histogram is unavailable evidence.
 It is not zero latency. Record a miss without failing S6, and keep the production
 move gated under S32. Release the synthetic claim and retire the two dedicated
-test credentials after collecting the private report.
+test credentials, including `bench-probe`, after collecting the private report.
