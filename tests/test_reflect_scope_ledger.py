@@ -3,7 +3,7 @@
 import json
 
 from brigade import memory_hub_client as hubc
-from tests.test_memory_reflect_hub import run, setup as reflect_setup, writes  # noqa: F401
+from tests.test_memory_reflect_hub import pytestmark, run, setup as reflect_setup, writes  # noqa: F401
 
 
 def test_scoped_run_preserves_other_scope_submissions(reflect_setup, capsys):  # noqa: F811
