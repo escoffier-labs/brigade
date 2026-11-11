@@ -849,27 +849,8 @@ fn the_sweep_stays_within_its_row_budget_and_finishes_over_several_ticks() {
     assert_eq!(counts.stats.budget("sweep_ms"), 0);
 }
 
-#[test]
-fn the_sweep_stops_at_its_time_budget() {
-    let counts = ReadCounts::new(limits(|l| {
-        l.sweep_ms = 0;
-        l.sweep_rows = 100_000;
-    }));
-    let now = 1_800_000_000_000;
-    let db = memory_db();
-    seed_days(&db, &[day(now) - 100], 1_000);
-    let mut cursor = SweepCursor::default();
-    let first = sweep(&db, &counts, now, &mut cursor, &idle).unwrap();
-    assert_eq!((first.days, first.more), (0, true));
-    assert_eq!(counts.stats.budget("sweep_ms"), 1);
-    assert_eq!(count(&db, "SELECT count(*) FROM memory_read_days"), 1_000);
-    assert_eq!(meta(&db, "read_days_rows"), Some("1000".into()));
-
-    let resumed = ReadCounts::new(limits(|l| l.sweep_ms = 3_600_000));
-    let next = sweep(&db, &resumed, now, &mut cursor, &idle).unwrap();
-    assert_eq!((next.days, next.more), (1_000, false));
-    assert_eq!(meta(&db, "read_days_rows"), Some("0".into()));
-}
+#[path = "sweep_time_tests.rs"]
+mod sweep_time_tests;
 
 #[test]
 fn the_sweep_removes_totals_of_retired_cards_resuming_across_ticks() {

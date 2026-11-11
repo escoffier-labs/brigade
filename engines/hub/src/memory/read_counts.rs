@@ -29,6 +29,8 @@ pub const DAY_MAX: i64 = 4_294_967_295;
 pub const FLUSH_INTERVAL_MS: i64 = 60_000;
 /// Deletes run in statements of at most this many rows, so the time budget
 /// is checked between them.
+#[path = "sweep_clock.rs"]
+pub(super) mod sweep_clock;
 const SWEEP_CHUNK: usize = 256;
 /// How long past its time budget one stalled statement may run before the
 /// progress handler stops it, which rolls the whole transaction back. Four
@@ -768,9 +770,7 @@ pub struct Swept {
 
 /// One bounded retention transaction: expired day rows oldest first, then
 /// the totals rows of retired or vanished cards, resuming from `cursor`.
-/// Day rows and examined totals rows together stay within `sweep_rows`.
 /// Like a flush, it rolls back and yields when `waiting` turns true. Its
-/// deletes are idempotent, so the next tick redoes them.
 pub fn sweep(
     db: &Connection,
     counts: &ReadCounts,
@@ -802,7 +802,7 @@ pub fn sweep(
                 gave_way = true;
                 return Ok(());
             }
-            if Instant::now() >= deadline {
+            if sweep_clock::expired(deadline) {
                 timed_out = true;
                 return Ok(());
             }
