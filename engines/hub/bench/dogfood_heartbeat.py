@@ -40,7 +40,7 @@ def claim_probe(url, token, node_id, records):
             "POST",
             "/claims",
             json.dumps(
-                {"action": "acquire", "target": target, "node_id": node_id, "holder": holder, "ttl_seconds": 900}
+                {"action": "acquire", "target": target, "node_id": node_id, "holder": holder, "ttl_seconds": 60}
             ).encode(),
         )
         records.append(
@@ -54,6 +54,9 @@ def claim_probe(url, token, node_id, records):
         if status != 200:
             return
         generation = claim_generation(raw)
+        if generation is None:
+            records.append({"kind": "claim-release", "status": None, "error": "acquire reply carried no generation"})
+            return
         status, raw, _ = client.request(
             "POST",
             "/claims",
@@ -75,7 +78,11 @@ def claim_probe(url, token, node_id, records):
 
 def claim_generation(raw):
     """The generation lives in the nested claim object of an acquire reply."""
-    return json.loads(raw).get("claim", {}).get("generation")
+    try:
+        claim = json.loads(raw).get("claim")
+    except (ValueError, AttributeError):
+        return None
+    return claim.get("generation") if isinstance(claim, dict) else None
 
 
 def wake_probe(url, token, recipient_token, after, records):

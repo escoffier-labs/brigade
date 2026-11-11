@@ -155,6 +155,19 @@ class ProbeBehavior(unittest.TestCase):
         self.assertEqual(release["holder"], acquire["holder"])
         self.assertEqual(dogfood_heartbeat.claim_generation(b'{"generation": 3, "claim": {"generation": 9}}'), 9)
 
+    def test_missing_generation_records_error_and_skips_release(self):
+        class NoGeneration(FakeClient):
+            def request(self, method, path, body):
+                FakeClient.log.append((self.token, json.loads(body)))
+                return 200, b'{"granted": true, "generation": 4}', {}
+
+        records = []
+        with mock.patch.object(dogfood_heartbeat.load, "Client", NoGeneration):
+            dogfood_heartbeat.claim_probe("http://hub.invalid", "t", "n", records)
+        self.assertEqual([p["action"] for _, p in FakeClient.log], ["acquire"])
+        self.assertEqual(FakeClient.log[0][1]["ttl_seconds"], 60)
+        self.assertEqual(dogfood_heartbeat.probe_errors(records), {"claim": 0, "claim-release": 1})
+
     def test_failed_acquire_skips_release(self):
         class Refusing(FakeClient):
             def request(self, method, path, body):
