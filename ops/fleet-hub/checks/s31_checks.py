@@ -908,7 +908,7 @@ def check_setup(args: argparse.Namespace, result: Result) -> None:
         return run([sys.executable, str(project / "bin" / "hub-setup.py"), "--project-dir", str(project), *argv])
 
     with tempfile.TemporaryDirectory(prefix="s31-setup-") as scratch:
-        for name, extra in (("gpu", []), ("remote", ["--no-gpu", *args.remote]), ("neither", ["--no-gpu"])):
+        for name, extra in (("gpu", []), ("remote", ["--no-gpu", *args.remote]), ("neither", [])):
             if name == "remote" and not args.remote:
                 result.add("PENDING", "remote path", "pass --remote --remote-url URL --remote-token-file FILE")
                 continue
@@ -930,16 +930,25 @@ def check_setup(args: argparse.Namespace, result: Result) -> None:
             ).encode()
             override.write_bytes(operator)
             backups = str(Path(scratch) / name / "backups")
-            done = setup(project, "init", "--project-name", f"s31-setup-{name}", "--backup-dir", backups, *extra)
+            retrieval = ["--retrieval", "hybrid"] if name != "neither" else []
+            done = setup(
+                project, "init", *retrieval, "--project-name", f"s31-setup-{name}", "--backup-dir", backups, *extra
+            )
             toml = (project / "config" / "hub.toml").read_text(encoding="utf-8") if done.returncode == 0 else ""
             result.add("INFO", f"setup ({name})", done.stdout.strip())
             result.ok(override.read_bytes() == operator, f"init ({name}) preserves operator override")
             hybrid = 'retrieval = "hybrid"' in toml
             if name == "gpu":
-                with_reason = 'retrieval = "lexical"' in toml and "R1" in done.stdout
+                with_reason = (
+                    done.returncode != 0
+                    and "no embedding model has passed R1" in done.stdout
+                    and not (project / ".env").exists()
+                    and not (project / "config").exists()
+                    and not (project / "secrets").exists()
+                )
                 result.ok(
                     'backend = "local"' in toml or with_reason,
-                    "GPU runtime: gpu profile, local backend and an R1 model, or BM25 with the reason",
+                    "GPU opt-in: local backend and an R1 model, or refusal without writes",
                 )
             elif name == "remote":
                 result.ok(
@@ -949,8 +958,8 @@ def check_setup(args: argparse.Namespace, result: Result) -> None:
                 )
             else:
                 result.ok(
-                    'retrieval = "lexical"' in toml and "did not pass" in done.stdout,
-                    "neither: BM25 mode and the failed checks",
+                    'retrieval = "lexical"' in toml and "Hybrid is opt-in" in done.stdout,
+                    "neither: default BM25 mode without embedder probes",
                 )
             if done.returncode == 0:
                 check_setup_merge(project, result, f"init ({name})", hybrid)

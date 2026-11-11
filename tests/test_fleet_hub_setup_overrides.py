@@ -45,14 +45,18 @@ def test_operator_override_survives_each_setup_command(project, tmp_path, action
         assert _init(project, tmp_path) == 0
     override = project / "compose.override.yaml"
     override.write_bytes(OPERATOR)
-    rc = _init(project, tmp_path, run=gpu_host()) if action == "init" else switch(project, action)
+    rc = (
+        _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host())
+        if action == "init"
+        else switch(project, action)
+    )
     assert rc == 0
     assert override.read_bytes() == OPERATOR
 
 
 def test_compose_file_list_includes_operator_and_mount_and_cleans_up(project, tmp_path):
     (project / "compose.override.yaml").write_bytes(OPERATOR)
-    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host()) == 0
     assert _env(project)["COMPOSE_FILE"].split(":") == ["compose.yaml", "compose.override.yaml", "compose.hybrid.yaml"]
     assert _env(project)["COMPOSE_PATH_SEPARATOR"] == ":"
     assert "file: ./secrets/embed-local-token" in (project / "compose.hybrid.yaml").read_text()
@@ -84,7 +88,7 @@ def test_compose_file_list_includes_operator_and_mount_and_cleans_up(project, tm
 
 @pytest.mark.parametrize("backend,token", [("local", "embed-local-token"), ("remote", "embed-token")])
 def test_legacy_setup_override_migrates(project, tmp_path, backend, token):
-    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host()) == 0
     managed = project / "compose.hybrid.yaml"
     old = project / "compose.override.yaml"
     # Build the old installation without calling any new helper API.
@@ -107,7 +111,7 @@ def test_legacy_setup_override_migrates(project, tmp_path, backend, token):
 @pytest.mark.parametrize("mode", ["hybrid", "lexical"])
 @pytest.mark.parametrize("failure", ["managed-write", "legacy-delete", "env-write", "token-install"])
 def test_new_compose_write_steps_roll_back_bytes(project, tmp_path, monkeypatch, mode, failure):
-    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host()) == 0
     if failure == "legacy-delete":
         (project / "compose.hybrid.yaml").replace(project / "compose.override.yaml")
     else:
@@ -162,7 +166,11 @@ def test_operator_compose_file_refuses_hybrid_without_writes(
         pytest.fail("hybrid refusal wrote installation files")
 
     monkeypatch.setattr(setup, "ensure_secrets", no_writes)
-    rc = _init(project, tmp_path, run=gpu_host()) if action == "init" else switch(project, "hybrid")
+    rc = (
+        _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host())
+        if action == "init"
+        else switch(project, "hybrid")
+    )
     assert rc == 1
     assert _tree(project, tmp_path / "backups") == before
     output = capsys.readouterr().err
@@ -171,7 +179,7 @@ def test_operator_compose_file_refuses_hybrid_without_writes(
 
 
 def test_lexical_keeps_explicit_operator_file_list(project, tmp_path, capsys):
-    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host()) == 0
     env = _env(project)
     env["COMPOSE_FILE"] = '"compose.yaml;custom.yaml"'
     env["COMPOSE_PATH_SEPARATOR"] = "';'"
@@ -183,7 +191,7 @@ def test_lexical_keeps_explicit_operator_file_list(project, tmp_path, capsys):
 
 @pytest.mark.parametrize("mode", ["hybrid", "lexical"])
 def test_mixed_legacy_refused_byte_identical(project, tmp_path, mode):
-    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host()) == 0
     legacy = (project / "compose.hybrid.yaml").read_bytes() + OPERATOR
     (project / "compose.override.yaml").write_bytes(legacy)
     before = _tree(project, tmp_path / "backups")
@@ -192,7 +200,7 @@ def test_mixed_legacy_refused_byte_identical(project, tmp_path, mode):
 
 
 def test_late_operator_override_loads_without_setup_rerun(project, tmp_path):
-    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host()) == 0
     override = project / "compose.override.yaml"
     assert override.read_text().endswith("services: {}\n")
     assert _env(project)["COMPOSE_FILE"] == "compose.yaml:compose.override.yaml:compose.hybrid.yaml"
@@ -247,7 +255,7 @@ def test_created_stub_rolled_back(project, tmp_path, monkeypatch, failure):
 
 @pytest.mark.parametrize("failure", ["env-write", "token-install"])
 def test_exact_legacy_restored_after_later_failure(project, tmp_path, monkeypatch, failure):
-    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host()) == 0
     (project / "compose.hybrid.yaml").replace(project / "compose.override.yaml")
     before = _tree(project, tmp_path / "backups")
     _fail_at(monkeypatch, "write_env" if failure == "env-write" else "install_probed_token", "after")
@@ -257,7 +265,7 @@ def test_exact_legacy_restored_after_later_failure(project, tmp_path, monkeypatc
 
 @pytest.mark.parametrize("quote", ["'", '"'])
 def test_setup_selection_recognized_after_dotenv_unquoting(project, tmp_path, quote):
-    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host()) == 0
     env = _env(project)
     env["COMPOSE_FILE"] = quote + env["COMPOSE_FILE"] + quote
     setup.write_env(project / ".env", env)

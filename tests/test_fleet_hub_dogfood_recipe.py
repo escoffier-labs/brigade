@@ -128,8 +128,36 @@ def _embedder(project):
     return tomllib.loads(_toml(project))["memory"]["embedder"]
 
 
+@pytest.mark.parametrize("retrieval", [[], ["--retrieval", "lexical"]])
+def test_default_init_writes_lexical_without_any_probe(project, tmp_path, capsys, retrieval):
+    def no_probe(*args, **kwargs):
+        pytest.fail("lexical init must not probe a GPU or remote endpoint")
+
+    assert (
+        _init(
+            project,
+            tmp_path,
+            *retrieval,
+            "--remote-url",
+            "https://embed.example.test",
+            "--remote-token-file",
+            str(tmp_path / "absent-token"),
+            run=no_probe,
+            post=no_probe,
+        )
+        == 0
+    )
+    assert _env(project)["BRIGADE_RETRIEVAL"] == "lexical"
+    assert _env(project)["COMPOSE_PROFILES"] == ""
+    assert 'retrieval = "lexical"' in _toml(project)
+    assert not (project / "compose.hybrid.yaml").exists()
+    out = capsys.readouterr().out
+    assert "latency targets under host load" in out
+    assert "init --retrieval hybrid" in out and "switch --to hybrid" in out
+
+
 def test_supported_gpu_writes_gpu_profile_local_backend_and_an_r1_model(project, tmp_path, capsys):
-    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host()) == 0
     env = _env(project)
     assert env["COMPOSE_PROFILES"] == "gpu" and env["BRIGADE_RETRIEVAL"] == "hybrid"
     assert env["BRIGADE_EMBED_BACKEND"] == "local" and env["BRIGADE_EMBED_MODEL"] == MODEL["name"]
@@ -156,7 +184,7 @@ def test_supported_gpu_writes_gpu_profile_local_backend_and_an_r1_model(project,
 
 
 def test_hybrid_embedder_table_has_exactly_the_parser_keys(project, tmp_path):
-    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host()) == 0
     assert set(_embedder(project)) == PARSER_KEYS
     project_remote = tmp_path / "remote" / "ops" / "fleet-hub"
     shutil.copytree(
@@ -165,6 +193,8 @@ def test_hybrid_embedder_table_has_exactly_the_parser_keys(project, tmp_path):
     rc = _init(
         project_remote,
         tmp_path,
+        "--retrieval",
+        "hybrid",
         "--no-gpu",
         "--remote-url",
         "https://embed.example.test/",
@@ -184,15 +214,16 @@ def test_r1_file_without_the_schema_2_values_is_refused(project, tmp_path, capsy
     r1 = tmp_path / "r1.json"
     old = {key: value for key, value in MODEL.items() if key not in ("input_chars", "query_prefix")}
     r1.write_text(json.dumps({"schema": 1, "models": [old]}), encoding="utf-8")
-    assert _init(project, tmp_path, run=gpu_host(), r1=r1) == 1
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host(), r1=r1) == 1
     assert "lacks input_chars, query_prefix" in capsys.readouterr().err
 
 
-def test_gpu_with_no_r1_model_starts_in_bm25_mode_and_says_why(project, tmp_path, capsys):
+def test_gpu_with_no_r1_model_refuses_without_writes(project, tmp_path, capsys):
     r1 = tmp_path / "r1.json"
     r1.write_text(json.dumps({"schema": 1, "models": [{**MODEL, "r1": "pending"}]}), encoding="utf-8")
-    assert _init(project, tmp_path, run=gpu_host(), r1=r1) == 0
-    assert _env(project)["COMPOSE_PROFILES"] == "" and 'retrieval = "lexical"' in _toml(project)
+    before = _tree(project, tmp_path / "backups")
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host(), r1=r1) == 1
+    assert _tree(project, tmp_path / "backups") == before
     assert "no embedding model has passed R1" in capsys.readouterr().out
 
 
@@ -201,6 +232,8 @@ def test_card_without_room_falls_through_to_the_remote_endpoint(project, tmp_pat
     rc = _init(
         project,
         tmp_path,
+        "--retrieval",
+        "hybrid",
         "--remote-url",
         "https://embed.example.test",
         "--remote-token-file",
@@ -218,6 +251,8 @@ def test_remote_endpoint_without_gpu_writes_remote_and_no_embedder(project, tmp_
     rc = _init(
         project,
         tmp_path,
+        "--retrieval",
+        "hybrid",
         "--remote-url",
         "http://gpu-host.example.ts.net:11434",
         "--remote-token-file",
@@ -245,6 +280,8 @@ def test_remote_digest_in_the_body_is_accepted(project, tmp_path):
     rc = _init(
         project,
         tmp_path,
+        "--retrieval",
+        "hybrid",
         "--remote-url",
         "https://embed.example.test",
         "--remote-token-file",
@@ -266,21 +303,32 @@ def test_remote_digest_in_the_body_is_accepted(project, tmp_path):
         ("http://192.0.2.10:11434", endpoint(), "must be HTTPS, or HTTP to a tailnet"),
     ],
 )
-def test_remote_probe_failure_starts_in_bm25_mode(project, tmp_path, capsys, url, post, reason):
-    rc = _init(project, tmp_path, "--remote-url", url, "--remote-token-file", str(_token(tmp_path)), post=post)
-    assert rc == 0 and 'retrieval = "lexical"' in _toml(project)
+def test_remote_probe_failure_refuses_without_writes(project, tmp_path, capsys, url, post, reason):
+    before = _tree(project, tmp_path / "backups")
+    rc = _init(
+        project,
+        tmp_path,
+        "--retrieval",
+        "hybrid",
+        "--remote-url",
+        url,
+        "--remote-token-file",
+        str(_token(tmp_path)),
+        post=post,
+    )
+    assert rc == 1
+    assert _tree(project, tmp_path / "backups") == before
     assert reason in capsys.readouterr().out
     assert not (project / "compose.override.yaml").exists()
 
 
-def test_neither_prints_each_failed_check_and_never_creates_the_embedder(project, tmp_path, capsys):
-    assert _init(project, tmp_path) == 0
-    out = capsys.readouterr().out
-    assert "BM25 mode (lexical)" in out and "supported configuration" in out
-    assert "no GPU container runtime" in out and "no remote endpoint given" in out
-    assert "bin/hub-setup.py switch --to hybrid" in out
-    assert _env(project)["COMPOSE_PROFILES"] == ""
-    assert "[memory.embedder]" not in _toml(project)
+def test_hybrid_opt_in_names_every_failed_check_and_writes_nothing(project, tmp_path, capsys):
+    before = _tree(project, tmp_path / "backups")
+    assert _init(project, tmp_path, "--retrieval", "hybrid") == 1
+    captured = capsys.readouterr()
+    assert "no GPU container runtime" in captured.out and "no remote endpoint given" in captured.out
+    assert "refusing to write hybrid" in captured.err
+    assert _tree(project, tmp_path / "backups") == before
 
 
 def test_secrets_are_private_and_never_overwritten(project, tmp_path):
@@ -630,7 +678,7 @@ def test_brigade_ref_needs_its_archive_digest_and_version(project, tmp_path):
 
 
 def test_switch_hybrid_to_lexical_and_back(project, tmp_path):
-    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host()) == 0
     secrets_before = (project / "secrets" / "admin-token.txt").read_bytes()
     assert setup.main(["--project-dir", str(project), "switch", "--to", "lexical"], run=gpu_host()) == 0
     assert _env(project)["COMPOSE_PROFILES"] == "" and 'retrieval = "lexical"' in _toml(project)
@@ -641,7 +689,7 @@ def test_switch_hybrid_to_lexical_and_back(project, tmp_path):
 
 
 def test_switch_from_local_to_remote_mounts_the_operator_token(project, tmp_path):
-    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host()) == 0
     operator_stub = (project / "compose.override.yaml").read_bytes()
     local = (project / "secrets" / "embed-local-token").read_bytes()
     argv = ["--project-dir", str(project), "switch", "--to", "hybrid", "--no-gpu"]
@@ -669,7 +717,16 @@ def _named_token(tmp_path, name, value):
 
 def test_switch_between_remote_endpoints_replaces_the_token(project, tmp_path, capsys):
     token_a = _named_token(tmp_path, "a.token", "token-for-endpoint-a")
-    rc = _init(project, tmp_path, "--remote-url", "https://a.example.test", "--remote-token-file", str(token_a))
+    rc = _init(
+        project,
+        tmp_path,
+        "--retrieval",
+        "hybrid",
+        "--remote-url",
+        "https://a.example.test",
+        "--remote-token-file",
+        str(token_a),
+    )
     assert rc == 0
     post = endpoint()
     assert (
@@ -697,7 +754,17 @@ def test_a_failed_apply_puts_the_previous_remote_token_back(project, tmp_path, m
     if before == "remote":
         token_a = _named_token(tmp_path, "a.token", "token-for-endpoint-a")
         assert (
-            _init(project, tmp_path, "--remote-url", "https://a.example.test", "--remote-token-file", str(token_a)) == 0
+            _init(
+                project,
+                tmp_path,
+                "--retrieval",
+                "hybrid",
+                "--remote-url",
+                "https://a.example.test",
+                "--remote-token-file",
+                str(token_a),
+            )
+            == 0
         )
     else:
         assert _init(project, tmp_path) == 0
@@ -765,7 +832,17 @@ def test_a_failure_at_any_write_step_leaves_the_endpoint_and_token_as_they_were(
     if command != "first-init":
         token_a = _named_token(tmp_path, "a.token", "token-for-endpoint-a")
         assert (
-            _init(project, tmp_path, "--remote-url", "https://a.example.test", "--remote-token-file", str(token_a)) == 0
+            _init(
+                project,
+                tmp_path,
+                "--retrieval",
+                "hybrid",
+                "--remote-url",
+                "https://a.example.test",
+                "--remote-token-file",
+                str(token_a),
+            )
+            == 0
         )
     before = _tree(project, backups)
     reached = _fail_at(monkeypatch, name, when)
@@ -773,7 +850,16 @@ def test_a_failure_at_any_write_step_leaves_the_endpoint_and_token_as_they_were(
     if command == "switch":
         rc = _switch_remote(project, "https://b.example.test", token_b)
     else:
-        rc = _init(project, tmp_path, "--remote-url", "https://b.example.test", "--remote-token-file", str(token_b))
+        rc = _init(
+            project,
+            tmp_path,
+            "--retrieval",
+            "hybrid",
+            "--remote-url",
+            "https://b.example.test",
+            "--remote-token-file",
+            str(token_b),
+        )
     assert reached, f"{name} was never called, so nothing was injected"
     assert rc == 1 and "injected failure" in capsys.readouterr().err
     # Byte-identical files with the same modes, and nothing where nothing was.
@@ -800,7 +886,19 @@ def _pair_matches(project):
 
 def _remote_a(project, tmp_path):
     token_a = _named_token(tmp_path, "a.token", "token-for-endpoint-a")
-    assert _init(project, tmp_path, "--remote-url", "https://a.example.test", "--remote-token-file", str(token_a)) == 0
+    assert (
+        _init(
+            project,
+            tmp_path,
+            "--retrieval",
+            "hybrid",
+            "--remote-url",
+            "https://a.example.test",
+            "--remote-token-file",
+            str(token_a),
+        )
+        == 0
+    )
     assert _pair_matches(project) and (project / "secrets" / "embed-token").exists()
 
 
@@ -808,7 +906,16 @@ def _to_remote_b(project, tmp_path, command):
     token_b = _named_token(tmp_path, "b.token", "token-for-endpoint-b")
     if command == "switch":
         return _switch_remote(project, "https://b.example.test", token_b)
-    return _init(project, tmp_path, "--remote-url", "https://b.example.test", "--remote-token-file", str(token_b))
+    return _init(
+        project,
+        tmp_path,
+        "--retrieval",
+        "hybrid",
+        "--remote-url",
+        "https://b.example.test",
+        "--remote-token-file",
+        str(token_b),
+    )
 
 
 @pytest.mark.parametrize("command", ["switch", "re-init"])
@@ -986,7 +1093,19 @@ def test_setup_refuses_a_symlinked_generated_file_before_writing_anything(projec
     _symlink_or_skip(project / ".env", elsewhere)
     before = _tree(project)
     token_b = _named_token(tmp_path, "b.token", "token-for-endpoint-b")
-    assert _init(project, tmp_path, "--remote-url", "https://b.example.test", "--remote-token-file", str(token_b)) == 1
+    assert (
+        _init(
+            project,
+            tmp_path,
+            "--retrieval",
+            "hybrid",
+            "--remote-url",
+            "https://b.example.test",
+            "--remote-token-file",
+            str(token_b),
+        )
+        == 1
+    )
     assert ".env is a symlink" in capsys.readouterr().err
     assert _tree(project) == before and elsewhere.read_text(encoding="utf-8") == "KEEP=1\n"
 
@@ -1015,16 +1134,18 @@ def test_probe_errors_never_quote_the_token(project, tmp_path, capsys):
             _init(
                 project,
                 tmp_path,
+                "--retrieval",
+                "hybrid",
                 "--remote-url",
                 "https://a.example.test",
                 "--remote-token-file",
                 str(token),
                 post=post,
             )
-            == 0
+            == 1
         )
     captured = capsys.readouterr()
-    assert "secret-token-text" not in captured.out + captured.err + _toml(project)
+    assert "secret-token-text" not in captured.out + captured.err
     assert "failed: ValueError" in captured.out and "failed: Connection refused" in captured.out
 
 
@@ -1036,13 +1157,21 @@ def test_a_token_with_an_inner_line_break_is_refused_before_any_request(project,
 
     assert (
         _init(
-            project, tmp_path, "--remote-url", "https://a.example.test", "--remote-token-file", str(token), post=never
+            project,
+            tmp_path,
+            "--retrieval",
+            "hybrid",
+            "--remote-url",
+            "https://a.example.test",
+            "--remote-token-file",
+            str(token),
+            post=never,
         )
-        == 0
+        == 1
     )
     out = capsys.readouterr().out
     assert "whitespace or control characters" in out and "first-half" not in out
-    assert 'retrieval = "lexical"' in _toml(project)
+    assert not (project / "config").exists()
 
 
 def test_switch_to_hybrid_without_a_probed_embedder_changes_nothing(project, tmp_path, capsys):
@@ -2820,7 +2949,7 @@ def test_accept_hub_requires_ready_and_the_expected_mode(monkeypatch, tmp_path, 
 
 
 def test_hub_memory_config_points_the_token_at_a_private_copy_of_the_mounted_secret(project, tmp_path):
-    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host()) == 0
     state = tmp_path / "state"
     state.mkdir()
     config = checks.hub_memory_config(project, state)
@@ -2840,7 +2969,7 @@ def test_hub_memory_config_points_the_token_at_a_private_copy_of_the_mounted_sec
 @pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
 def test_setup_resets_a_local_token_an_earlier_setup_wrote_0400(project, tmp_path, capsys):
     """#2469: the hub container's UID cannot read a 0400 file through the bind mount."""
-    assert _init(project, tmp_path, run=gpu_host()) == 0
+    assert _init(project, tmp_path, "--retrieval", "hybrid", run=gpu_host()) == 0
     secret = project / "secrets" / "embed-local-token"
     before = secret.read_bytes()
     secret.chmod(0o400)

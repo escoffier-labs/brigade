@@ -44,7 +44,8 @@ rollback constraints. The baseline smoke results above do not verify those featu
 The Compose recipe now uses the holder layout: a holder container owns the
 network namespace, the hub and the private network's HTTPS front join it, the
 hub binds `127.0.0.1:3774` inside that namespace, and no service publishes a
-port. Its setup script picks the retrieval mode, writes the secrets and the
+port. Its setup script defaults to lexical retrieval, offers hybrid through
+`init --retrieval hybrid`, and writes the secrets and the
 `.env` file, and the GPU embedder runs only under the `gpu` profile. Set it up
 with [Dogfood hub from the Compose recipe](fleet-hub-dogfood.md), which
 replaces the token and start steps below. The image pinning, backup and

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Setup for the Fleet Hub Compose recipe: retrieval mode, backend, config and secrets (D30).
 
-`init` picks the retrieval mode and backend, in order:
+`init` defaults to BM25 mode (`lexical`) without probing an embedder.
+`init --retrieval hybrid` opts into the D30 backend probe order:
 
 1. A supported local GPU: the GPU vendor's container runtime is present, a probe
    container sees the GPU, and the card has free memory for a model that passed
@@ -9,8 +10,7 @@
 2. Otherwise a remote endpoint the operator supplied (URL and token file). One
    probe embedding checks the dimensions and the reported model digest. Writes
    the `remote` backend and `hybrid`. The embedder container is never created.
-3. Otherwise BM25 mode (`lexical`). Setup names every check that failed and
-   says how to switch later.
+3. Otherwise refuse with every failed check and write nothing.
 
 Either hybrid path writes the `[memory.embedder]` table the Rust hub parses
 (docs/hub-memory-embedder.md): the request URL and its allowlist entry, the
@@ -1060,10 +1060,21 @@ def cmd_init(args: argparse.Namespace, run: Runner, post: Poster) -> int:
     # The directory as given: _base_env resolves it, which would follow a symlink there.
     given = Path(args.backup_dir).expanduser().absolute()
     _check_dir(given, f"backup directory {given}")
-    decision = _decide_from_args(args, run, post)
+    decision = Decision(retrieval="lexical")
+    if args.retrieval == "hybrid":
+        decision = _decide_from_args(args, run, post)
+        if decision.retrieval != "hybrid":
+            print(report(decision))
+            raise SetupError("refusing to write hybrid: no embedder passed its probe, so nothing was written")
     backup_dir = Path(env_updates["BRIGADE_BACKUP_DIR"])
     created = write_install(project, decision, env_updates, with_secrets=True, backup_dir=backup_dir)
     print(report(decision))
+    if args.retrieval == "lexical":
+        print(
+            "Hybrid is opt-in because the local GPU branch missed its latency targets under host load "
+            "in the 0.31 dogfood measurement."
+        )
+        print("To enable it: init --retrieval hybrid or switch --to hybrid.")
     if created:
         print("secrets written: " + ", ".join(created))
     print(f"backup directory: {backup_dir} (mode 0700)")
@@ -1144,6 +1155,12 @@ def parser() -> argparse.ArgumentParser:
 
     init = sub.add_parser("init", help="Pick the retrieval mode and write .env, config/hub.toml and secrets.")
     mode_args(init)
+    init.add_argument(
+        "--retrieval",
+        choices=("lexical", "hybrid"),
+        default="lexical",
+        help="Retrieval mode (default: lexical). Hybrid probes an embedder before writing.",
+    )
     init.add_argument("--project-name", default="brigade-hub")
     init.add_argument("--hub-image", default="localhost/brigade-fleet-hub:dogfood")
     init.add_argument("--front-hostname", default="brigade-hub-dogfood")
