@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -38,14 +39,14 @@ def landing(tmp_path, monkeypatch):
     (caller / "file.txt").write_text("caller dirty\n")
     cloud_tracker.register(caller, provider="codex-cloud", task_id="task_example", label="example")
     monkeypatch.setattr(codex_cloud, "_repo_from_cwd", lambda _: "example/repo")
-    original_which = codex_cloud_land.shutil.which
+    original_which = shutil.which
 
     def trusted_tool(name, **kwargs):
         if name in {"codex", "gh", "brigade", "vale"}:
             return "/opt/trusted-tools/" + name
         return original_which(name, **kwargs)
 
-    monkeypatch.setattr(codex_cloud_land.shutil, "which", trusted_tool)
+    monkeypatch.setattr(shutil, "which", trusted_tool)
     home = tmp_path / "home"
     home.mkdir()
     trusted_hooks = home / "hooks"
@@ -65,6 +66,8 @@ def landing(tmp_path, monkeypatch):
         if argv[0] == "git":
             while argv[1:2] == ["-c"]:
                 del argv[1:3]
+            if argv[1:2] == ["--no-pager"]:
+                del argv[1]
         calls.append((argv, kwargs.get("cwd")))
         if argv[:3] == ["codex", "cloud", "status"]:
             if callback := state.get("during_status"):
@@ -598,3 +601,51 @@ def test_r1_land_help_explains_ci_boundary(capsys):
     assert "no secrets" in output and "write token or trusted caches" in output
     assert "#2512" in output
     assert "--closes" in output
+
+
+def test_r1_task_modified_signer_never_executes(landing, tmp_path):
+    caller, state, _ = landing
+    remote = caller.parent / "remote"
+    signer = remote / "signer"
+    signer.write_text("#!/bin/sh\nexit 1\n")
+    signer.chmod(0o700)
+    git(remote, "add", "signer")
+    git(remote, "commit", "-m", "test: signer")
+    marker = tmp_path / "executed"
+    state["diff"] = (
+        "diff --git a/signer b/signer\n--- a/signer\n+++ b/signer\n@@ -1,2 +1,3 @@\n"
+        f' #!/bin/sh\n+touch "{marker}"\n exit 1\n'
+    )
+    git(caller, "config", "commit.gpgsign", "true")
+    git(caller, "config", "gpg.program", "./signer")
+    try:
+        result = codex_cloud_land.land(caller, "task_example", 2473)
+    finally:
+        assert not marker.exists()
+    assert result["pr_url"].endswith("/123")
+
+
+def test_r1_other_executable_config_neutralized(landing):
+    caller, state, _ = landing
+    keys = (
+        "core.editor",
+        "core.pager",
+        "core.sshCommand",
+        "sequence.editor",
+        "merge.example.driver",
+        "filter.example.process",
+        "diff.example.command",
+        "credential.helper",
+        "credential.https://github.com.helper",
+        "gpg.program",
+        "gpg.ssh.program",
+        "gpg.x509.program",
+    )
+    for key in keys:
+        git(caller, "config", key, "./task-program")
+    codex_cloud_land.land(caller, "task_example", 2473)
+    commit = next(argv for argv, _ in state["raw_calls"] if Path(argv[0]).name == "git" and "commit" in argv)
+    for key in keys:
+        assert key + "=" in commit
+    assert "commit.gpgsign=false" in commit and "tag.gpgsign=false" in commit
+    assert any(argument.startswith("credential.helper=!") and "auth git-credential" in argument for argument in commit)

@@ -141,8 +141,10 @@ main branch. The caller checkout stays untouched. It refuses control characters
 in paths, all `.github/` changes, Git attributes and submodules, CODEOWNERS,
 credentials, hook framework configuration and non-regular files. Git commands
 use absolute tool paths, sanitized control variables, disabled filters,
-textconv and fsmonitor, and an isolated hooks directory containing only the
-operator-installed content-guard pre-push guard. That guard must be configured
+textconv, signing and fsmonitor, and an isolated hooks directory containing only the
+operator-installed content-guard pre-push guard. Git credentials use only the trusted `gh auth git-credential` helper.
+Editors, pagers, SSH commands, merge drivers and configured filter commands are
+neutralized. That guard must be configured
 in an absolute global `core.hooksPath` outside the target repository.
 
 The installed content guard runs through Brigade verification with receipts

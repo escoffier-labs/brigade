@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -888,9 +889,16 @@ def test_r1_staged_newline_filename_is_scanned(tmp_path, monkeypatch):
     from brigade.guard import git_scan
 
     subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
-    path = tmp_path / "line\nbreak.txt"
+    path = tmp_path / ("line\nbreak.txt" if os.name != "nt" else "portable.txt")
     path.write_text("AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n")  # content-guard: allow secret/aws-access-key
     subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    if os.name == "nt":
+        # Win32 cannot create control-character filenames. Exercise Git's raw path
+        # protocol and the scanner with the same bytes on that platform.
+        monkeypatch.setattr(
+            git_scan.subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a[0], 0, b"line\nbreak.txt\0", b"")
+        )
+        monkeypatch.setattr(git_scan, "_read_text", lambda _: path.read_text())
     monkeypatch.chdir(tmp_path)
     assert git_scan.main(["--staged"]) == 1
 
@@ -911,13 +919,38 @@ def test_r1_staged_unreadable_fails_closed(tmp_path, monkeypatch):
 
 def test_r1_staged_undecodable_path_fails_closed(tmp_path, monkeypatch):
     from brigade.guard import git_scan
-    import os
 
     subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
-    with open(os.fsencode(tmp_path) + b"/bad-\xff.txt", "wb") as stream:
-        stream.write(b"content\n")
-    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    if os.name == "nt":
+        monkeypatch.setattr(
+            git_scan.subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a[0], 0, b"bad-\xff.txt\0", b"")
+        )
+    else:
+        with open(os.fsencode(tmp_path) + b"/bad-\xff.txt", "wb") as stream:
+            stream.write(b"content\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
     monkeypatch.chdir(tmp_path)
     with __import__("pytest").raises(SystemExit) as error:
         git_scan.main(["--staged"])
     assert error.value.code == 2
+
+
+def test_r1_history_disables_textconv(tmp_path, monkeypatch):
+    from brigade.guard import git_scan
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-c", "core.hooksPath=/dev/null", *args],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+        )
+
+    git("init", "-b", "main")
+    (tmp_path / ".gitattributes").write_text("*.txt diff=example\n")
+    (tmp_path / "file.txt").write_text("ordinary content\n")
+    git("add", ".")
+    git("-c", "user.name=Example", "-c", "user.email=dev@example.invalid", "commit", "-m", "test: example")
+    git("config", "diff.example.textconv", "")
+    monkeypatch.chdir(tmp_path)
+    assert git_scan.main(["--history", "--all"]) == 0

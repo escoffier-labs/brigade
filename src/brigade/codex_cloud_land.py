@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import stat
 import sys
 import tempfile
@@ -88,8 +89,26 @@ class _LandingGit:
         tools_dir = root / "tools"
         tools_dir.mkdir(mode=0o700)
         for name, executable in self.tools.items():
-            (tools_dir / name).symlink_to(executable)
+            if name != "brigade":
+                (tools_dir / name).symlink_to(executable)
+        # Hooks use the same trusted package as landing, in isolated Python mode.
+        # The final bootstrap operand is the Git working directory at invocation time.
+        brigade = tools_dir / "brigade"
+        brigade.write_text(
+            f"#!{sys.executable} -I\nimport os, subprocess, sys\nargv = "
+            + repr(
+                isolated_exec.package_argv(
+                    isolated_exec.trusted_cwd() / "__init__.py", "brigade", cwd_after_load=target
+                )
+            )
+            + "\nargv[-1] = os.getcwd()\nraise SystemExit(subprocess.call(argv + sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        brigade.chmod(0o700)
+        self.tools["brigade"] = str(brigade)
         environment["PATH"] = os.pathsep.join([str(tools_dir), *directories])
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+        environment["GH_PROMPT_DISABLED"] = "1"
         self.environment = environment
         self.hooks = root / "hooks"
         self.hooks.mkdir(mode=0o700)
@@ -99,6 +118,22 @@ class _LandingGit:
             "protocol.allow=never",
             "protocol.https.allow=always",
             "diff.external=",
+            "commit.gpgsign=false",
+            "tag.gpgsign=false",
+            "gpg.program=",
+            "gpg.ssh.program=",
+            "gpg.x509.program=",
+            "core.editor=",
+            "core.pager=",
+            "core.sshCommand=",
+            "core.askPass=",
+            "core.gitProxy=",
+            "core.alternateRefsCommand=",
+            "sequence.editor=",
+            "interactive.diffFilter=",
+            "credential.helper=",
+            "fetch.recurseSubmodules=false",
+            "submodule.recurse=false",
             "core.attributesFile=/dev/null",
             "core.autocrlf=false",
             "apply.whitespace=nowarn",
@@ -109,16 +144,29 @@ class _LandingGit:
         names = self.git(
             [
                 "config",
+                "--null",
                 "--name-only",
                 "--get-regexp",
-                r"^(filter\..*\.(clean|smudge|process|required)|diff\..*\.textconv)$",
+                r"^(filter\..*|merge\..*\.driver|diff\..*\.(textconv|command)|credential(\..*)?\.helper|pager\..*|difftool\..*\.cmd|mergetool\..*\.cmd|submodule\..*\.update)$",
             ],
             target,
             "git-config-failed",
             optional=True,
         )
-        for name in names.splitlines():
-            self.config.append(name + ("=false" if name.endswith(".required") else "="))
+        for name in filter(None, names.split("\0")):
+            value = (
+                "false"
+                if name.endswith(".required") or name.startswith("pager.")
+                else "none"
+                if name.startswith("submodule.")
+                else ""
+            )
+            self.config.append(f"{name}={value}")
+        # Empty helper entries reset all prior helpers, including URL-scoped ones.
+        # Retain exactly the trusted GitHub credential path after those resets.
+        self.config.extend(
+            ["credential.helper=", f"credential.helper=!{shlex.quote(self.tools['gh'])} auth git-credential"]
+        )
         raw = self.git(
             ["config", "--global", "--path", "--get", "core.hooksPath"], target, "trusted-hook-required"
         ).strip()
@@ -160,7 +208,12 @@ class _LandingGit:
     ) -> str:
         options = [arg for value in self.config for arg in ("-c", value)]
         return _run(
-            [self.tools["git"], *options, *args], cwd, reason, stdin=stdin, environment=self.env(), optional=optional
+            [self.tools["git"], *options, "--no-pager", *args],
+            cwd,
+            reason,
+            stdin=stdin,
+            environment=self.env(),
+            optional=optional,
         )
 
     def tool(self, name: str, args: list[str], cwd: Path, reason: str) -> str:
@@ -519,7 +572,7 @@ def _prepare(
         if git.git(["write-tree"], tree, "inspect-failed").strip() != expected_tree:
             raise LandError("guard-tree-mismatch")
         message = f"{title}\n\nCo-Authored-By: Codex <codex@openai.com>"  # content-guard: allow pii/email
-        git.git(["commit", "-m", message], tree, "commit-failed")
+        git.git(["commit", "--no-gpg-sign", "-m", message], tree, "commit-failed")
         if git.git(["rev-parse", "HEAD^{tree}"], tree, "inspect-failed").strip() != expected_tree:
             raise LandError("commit-tree-mismatch")
         commit = git.git(["rev-parse", "HEAD"], tree, "inspect-failed").strip()

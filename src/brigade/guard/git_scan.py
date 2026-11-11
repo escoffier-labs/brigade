@@ -207,7 +207,17 @@ def _history_revs(args: argparse.Namespace) -> list[str]:
 
 def _added_lines(rev: str) -> str:
     proc = subprocess.run(
-        ["git", "show", "--no-color", "--first-parent", "--format=", "--unified=0", rev],
+        [
+            "git",
+            "show",
+            "--no-color",
+            "--no-textconv",
+            "--no-ext-diff",
+            "--first-parent",
+            "--format=",
+            "--unified=0",
+            rev,
+        ],
         capture_output=True,
         text=True,
         check=False,
