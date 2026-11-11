@@ -680,6 +680,33 @@ def _scanner_import_output(tmp_path, import_path: str):
     )
 
 
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (FileNotFoundError("missing output"), "import file not found"),
+        (OSError("scanner import file changed while reading"), "cannot read import file"),
+        (UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), "import file is not valid UTF-8"),
+    ],
+)
+def test_scanner_import_output_reports_distinct_read_errors(tmp_path, monkeypatch, error, message):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    def fail_read(_target, _scanner):
+        raise error
+
+    monkeypatch.setattr(scanners_mod, "_scanner_read_import_jsonl", fail_read)
+
+    path, records, errors = _scanner_import_output(tmp_path, "imports/output.jsonl")
+
+    assert path == tmp_path / "imports/output.jsonl"
+    assert records == []
+    assert len(errors) == 1
+    assert errors[0].startswith(f"output-import: {message}: {path}")
+    if not isinstance(error, FileNotFoundError):
+        assert str(error) in errors[0]
+        assert "import file not found" not in errors[0]
+
+
 def test_scanner_import_output_rejects_symlinked_leaf_outside_target(tmp_path):
     outside = tmp_path.parent / f"{tmp_path.name}-outside-import.jsonl"
     outside.write_text('{"text":"Outside scanner import"}\n')

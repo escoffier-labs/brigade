@@ -1,0 +1,1 @@
+- Scanner imports distinguish missing files, read failures, and invalid UTF-8, preserving the cause of non-missing read failures.

@@ -21,7 +21,7 @@ from .. import dogfood_cmd
 from .. import proc as proc_mod
 from .. import dirfd as dirfd_mod
 from ..install import apply_gitignore
-from . import constants, helpers, inbox_lock, ledger as ledger_mod, config as config_mod
+from . import constants, helpers, inbox_lock, ledger as ledger_mod, config as config_mod, scanner_errors
 from . import sweeps as sweeps_mod
 from .inbox_lock import inbox_writer_lock as _scanner_inbox_writer_lock
 from .inbox_lock import scanner_inbox_run_lock as _scanner_inbox_run_lock
@@ -1877,8 +1877,8 @@ def _scanner_validate_import_output(
         return import_path, [], [f"{scanner.get('id')}: import_format must be jsonl"]
     try:
         records, errors = _scanner_read_import_jsonl(target, scanner)
-    except (OSError, UnicodeDecodeError):
-        return import_path, [], [f"{scanner.get('id')}: import file not found: {import_path}"]
+    except (OSError, UnicodeDecodeError) as exc:
+        return import_path, [], [scanner_errors.import_read_error(scanner.get("id"), import_path, exc)]
     return import_path, records, [f"{scanner.get('id')}: {error}" for error in errors]
 
 
