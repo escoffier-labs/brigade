@@ -861,6 +861,7 @@ def check_setup_merge(project: Path, result: Result, label: str, hybrid: bool) -
     done = subprocess.run(
         compose("config", "--format", "json", project=project),
         cwd=project,
+        env={**os.environ, "COMPOSE_PATH_SEPARATOR": ":"},
         capture_output=True,
         text=True,
         timeout=120,

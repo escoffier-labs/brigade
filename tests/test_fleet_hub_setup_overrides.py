@@ -104,7 +104,7 @@ def test_legacy_setup_override_migrates(project, tmp_path, backend, token):
 def test_new_compose_write_steps_roll_back_bytes(project, tmp_path, monkeypatch, mode, failure):
     assert _init(project, tmp_path, run=gpu_host()) == 0
     if failure == "legacy-delete":
-        (project / "compose.hybrid.yaml").rename(project / "compose.override.yaml")
+        (project / "compose.hybrid.yaml").replace(project / "compose.override.yaml")
     else:
         (project / "compose.override.yaml").write_bytes(OPERATOR)
     before = _tree(project, tmp_path / "backups")
@@ -197,6 +197,7 @@ def test_late_operator_override_loads_without_setup_rerun(project, tmp_path):
             capture_output=True,
             text=True,
             cwd=project,
+            env={**os.environ, "COMPOSE_PATH_SEPARATOR": ":"},
         )
         assert done.returncode == 0, done.stderr
     override.write_bytes(OPERATOR)
@@ -206,6 +207,7 @@ def test_late_operator_override_loads_without_setup_rerun(project, tmp_path):
             capture_output=True,
             text=True,
             cwd=project,
+            env={**os.environ, "COMPOSE_PATH_SEPARATOR": ":"},
         )
         assert done.returncode == 0, done.stderr
         assert "--trust-tailscale-identity" in done.stdout
