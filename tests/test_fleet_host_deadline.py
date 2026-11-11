@@ -1,6 +1,7 @@
 """Host lookup must finish before the Rust hub starts."""
 
 import hashlib
+import sys
 import threading
 import time
 
@@ -14,6 +15,8 @@ except ImportError:  # Exercise the same regression against the base revision.
     fleet_host_resolver = fleet_hub_engine
 
 
+# run() refuses --engine rust off Linux before it resolves --host.
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="--engine rust runs on Linux only")
 @pytest.mark.parametrize("failure", ["timeout", "error"])
 def test_host_lookup_failure_stops_startup(tmp_path, monkeypatch, capsys, failure):
     deadline = 0.1
