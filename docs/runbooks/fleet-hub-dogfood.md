@@ -266,13 +266,15 @@ command flag and state-volume binds. Hybrid writes its token mount to
 
 ```dotenv
 COMPOSE_FILE=compose.yaml:compose.override.yaml:compose.hybrid.yaml
+COMPOSE_PATH_SEPARATOR=:
 ```
 
 Setup creates an absent override with an operator-ownership comment and
 `services: {}`, a valid empty Compose services mapping. The stub belongs to the
 operator immediately. Setup never rewrites it, so later edits load without
 rerunning setup. Lexical removes the hybrid file and removes `COMPOSE_FILE`
-only when its unquoted value exactly matches the default above. Other values
+and `COMPOSE_PATH_SEPARATOR` only when the list matches the default above
+and the separator is unset or exactly `:`. Other values
 stay unchanged with a warning. Remove any hybrid entry from a custom selection
 before using Compose in lexical mode.
 
@@ -280,8 +282,11 @@ Hybrid refuses an existing operator `COMPOSE_FILE` or non-default separator
 before writing anything. Setup never parses or appends to an operator list,
 including quoted values and absolute paths. Review the selection yourself:
 add `compose.hybrid.yaml` using your separator for manual Compose operation,
-or unset `COMPOSE_PATH_SEPARATOR` and use the exact default above before
+or use the exact default above (the separator may also be unset) before
 rerunning setup. Refusal leaves the mode and every file unchanged.
+
+Windows operators using their own file selection must use their own separator
+(`;` by default on Windows). Setup explicitly selects `:` for its own list.
 
 Legacy overrides migrate only when their bytes exactly match a document old
 setup generated, including its final newline and backend token file. An exact

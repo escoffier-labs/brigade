@@ -54,14 +54,18 @@ def test_compose_file_list_includes_operator_and_mount_and_cleans_up(project, tm
     (project / "compose.override.yaml").write_bytes(OPERATOR)
     assert _init(project, tmp_path, run=gpu_host()) == 0
     assert _env(project)["COMPOSE_FILE"].split(":") == ["compose.yaml", "compose.override.yaml", "compose.hybrid.yaml"]
+    assert _env(project)["COMPOSE_PATH_SEPARATOR"] == ":"
     assert "file: ./secrets/embed-local-token" in (project / "compose.hybrid.yaml").read_text()
-    if shutil.which("docker") and os.name != "nt":
+    if shutil.which("docker"):
         done = subprocess.run(
             ["docker", "compose", "--project-directory", str(project), "config", "--format", "json"],
             cwd=project,
             capture_output=True,
             text=True,
             timeout=60,
+            env={
+                key: value for key, value in os.environ.items() if key not in ("COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR")
+            },
         )
         assert done.returncode == 0, done.stderr
         import json
@@ -74,6 +78,7 @@ def test_compose_file_list_includes_operator_and_mount_and_cleans_up(project, tm
     assert switch(project, "lexical") == 0
     assert not (project / "compose.hybrid.yaml").exists()
     assert "COMPOSE_FILE" not in _env(project)
+    assert "COMPOSE_PATH_SEPARATOR" not in _env(project)
     assert (project / "compose.override.yaml").read_bytes() == OPERATOR
 
 
@@ -259,3 +264,4 @@ def test_setup_selection_recognized_after_dotenv_unquoting(project, tmp_path, qu
     assert switch(project, "hybrid") == 0
     assert switch(project, "lexical") == 0
     assert "COMPOSE_FILE" not in _env(project)
+    assert "COMPOSE_PATH_SEPARATOR" not in _env(project)

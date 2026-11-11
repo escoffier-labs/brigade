@@ -799,19 +799,9 @@ class SetupFiles:
 
     def _read(self, path: Path) -> tuple[bytes, int] | None:
         try:
-            info = os.lstat(path)
-        except FileNotFoundError:
-            return None
-        if stat.S_ISLNK(info.st_mode):
-            raise SetupError(f"{self._label(path)} is a symlink; move it aside and rerun")
-        if not stat.S_ISREG(info.st_mode):
-            raise SetupError(f"{self._label(path)} is not a regular file; move it aside and rerun")
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
-        fd = os.open(path, flags)
-        try:
-            return _read_fd(fd), stat.S_IMODE(info.st_mode)
-        finally:
-            os.close(fd)
+            return _compose_helper("read_file", path, self._label(path))
+        except ValueError as exc:
+            raise SetupError(str(exc)) from exc
 
     def restore(self) -> None:
         """Put everything back, the remote token last and only if everything else went back.
