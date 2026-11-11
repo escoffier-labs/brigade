@@ -138,10 +138,6 @@ def test_default_init_writes_lexical_without_any_probe(project, tmp_path, capsys
             project,
             tmp_path,
             *retrieval,
-            "--remote-url",
-            "https://embed.example.test",
-            "--remote-token-file",
-            str(tmp_path / "absent-token"),
             run=no_probe,
             post=no_probe,
         )
@@ -329,6 +325,15 @@ def test_hybrid_opt_in_names_every_failed_check_and_writes_nothing(project, tmp_
     assert "no GPU container runtime" in captured.out and "no remote endpoint given" in captured.out
     assert "refusing to write hybrid" in captured.err
     assert _tree(project, tmp_path / "backups") == before
+
+
+def test_remote_flags_without_hybrid_opt_in_refuse_and_write_nothing(project, tmp_path, capsys):
+    before = _tree(project, tmp_path / "backups")
+    rc = _init(project, tmp_path, "--remote-url", "https://embed.invalid", "--remote-token-file", str(_token(tmp_path)))
+    assert rc == 1
+    assert "need --retrieval hybrid" in capsys.readouterr().err
+    assert _tree(project, tmp_path / "backups") == before
+    assert not (project / ".env").exists()
 
 
 def test_secrets_are_private_and_never_overwritten(project, tmp_path):

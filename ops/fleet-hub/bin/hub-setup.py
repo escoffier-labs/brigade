@@ -1060,6 +1060,9 @@ def cmd_init(args: argparse.Namespace, run: Runner, post: Poster) -> int:
     # The directory as given: _base_env resolves it, which would follow a symlink there.
     given = Path(args.backup_dir).expanduser().absolute()
     _check_dir(given, f"backup directory {given}")
+    if args.retrieval == "lexical" and (args.remote_url or args.remote_token_file):
+        # A remote endpoint is a hybrid choice, so a lexical install never drops it silently.
+        raise SetupError("--remote-url and --remote-token-file need --retrieval hybrid; nothing was written")
     decision = Decision(retrieval="lexical")
     if args.retrieval == "hybrid":
         decision = _decide_from_args(args, run, post)
