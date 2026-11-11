@@ -877,12 +877,26 @@ def check_setup(args: argparse.Namespace, result: Result) -> None:
                 continue
             project = Path(scratch) / name / "ops" / "fleet-hub"
             shutil.copytree(
-                RECIPE, project, ignore=shutil.ignore_patterns(".env", "config", "secrets", "compose.override.yaml")
+                RECIPE,
+                project,
+                ignore=shutil.ignore_patterns(
+                    ".env", "config", "secrets", "compose.override.yaml", "compose.hybrid.yaml"
+                ),
             )
+            override = project / "compose.override.yaml"
+            operator = (
+                "services:\n  hub:\n    image: sha256:"
+                + "a" * 64
+                + '\n    command: ["--trust-tailscale-identity"]\n'
+                + "volumes:\n  brigade-state:\n    driver_opts:\n      type: none\n      o: bind\n"
+                + "      device: /srv/example-hub-state\n"
+            ).encode()
+            override.write_bytes(operator)
             backups = str(Path(scratch) / name / "backups")
             done = setup(project, "init", "--project-name", f"s31-setup-{name}", "--backup-dir", backups, *extra)
             toml = (project / "config" / "hub.toml").read_text(encoding="utf-8") if done.returncode == 0 else ""
             result.add("INFO", f"setup ({name})", done.stdout.strip())
+            result.ok(override.read_bytes() == operator, f"init ({name}) preserves operator override")
             hybrid = 'retrieval = "hybrid"' in toml
             if name == "gpu":
                 with_reason = 'retrieval = "lexical"' in toml and "R1" in done.stdout
@@ -909,9 +923,11 @@ def check_setup(args: argparse.Namespace, result: Result) -> None:
                 if hybrid:
                     to_lexical = setup(project, "switch", "--to", "lexical")
                     result.ok(to_lexical.returncode == 0, f"setup ({name}) switch to lexical")
+                    result.ok(override.read_bytes() == operator, f"lexical ({name}) preserves operator override")
                     accept_hub(result, hub, project, f"switch to lexical ({name})", "lexical", unreachable)
                     to_hybrid = setup(project, "switch", "--to", "hybrid", *extra)
                     result.ok(to_hybrid.returncode == 0, f"setup ({name}) switch back to hybrid")
+                    result.ok(override.read_bytes() == operator, f"hybrid ({name}) preserves operator override")
                     accept_hub(result, hub, project, f"switch to hybrid ({name})", "hybrid", unreachable)
                 elif name == "neither":
                     refused = setup(project, "switch", "--to", "hybrid", "--no-gpu")

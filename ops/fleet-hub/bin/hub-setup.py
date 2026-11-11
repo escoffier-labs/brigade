@@ -31,6 +31,7 @@ import ipaddress
 import json
 import os
 import re
+import runpy
 import secrets
 import shutil
 import stat
@@ -47,7 +48,7 @@ from typing import Any
 RECIPE = Path(__file__).resolve().parents[1]
 DEFAULT_EMBED_IMAGE = "ollama/ollama:0.18.0@sha256:e23e6499890325d31f3454cdc83f7a613a2423c8a9e167bbafea0b0e3c27d7c6"
 LOCAL_ENDPOINT = "http://embedder:11434"
-# Where Compose mounts the embedder token in the hub container (compose.override.yaml).
+# Where Compose mounts the embedder token in the hub container (compose.hybrid.yaml).
 EMBED_TOKEN_MOUNT = "/run/secrets/embed_token"
 # Where hub/entry.py puts the hub's own copy of that mount, and what hub.toml names.
 # The hub accepts only a token file its own user owns with mode 0400 or 0600, and a
@@ -770,11 +771,22 @@ class SetupFiles:
         dirs = [project / "config", folder] + ([backup_dir] if backup_dir is not None else [])
         self.dirs = {path: _check_dir(path, self._label(path) + "/") for path in dirs}
         names = (*SECRET_FILES, OPERATOR_TOKEN, *EMBED_TOKEN_FILES.values())
-        files = [project / "config" / "hub.toml", project / ".env", project / "compose.override.yaml"]
+        files = [
+            project / "config" / "hub.toml",
+            project / ".env",
+            project / "compose.override.yaml",
+            project / "compose.hybrid.yaml",
+        ]
         files += [folder / name for name in names]
         if backup_dir is not None:
             files.append(backup_dir / "recovery-ledger.jsonl")
         self.files = {path: self._read(path) for path in files}
+        managed = self.files[project / "compose.hybrid.yaml"]
+        if managed is not None and not managed[0].startswith(b"# Written by bin/hub-setup.py"):
+            raise SetupError("compose.hybrid.yaml is not setup-owned; move it aside and rerun")
+        override = project / "compose.override.yaml"
+        if self.files[override] is None or not self.files[override][0].startswith(b"# Written by bin/hub-setup.py"):
+            del self.files[override]  # Operator content is never written, even during rollback.
         self.token = folder / REMOTE_TOKEN
 
     def _label(self, path: Path) -> str:
@@ -964,18 +976,9 @@ def write_install(
     return created
 
 
-def _compose_override(project: Path, decision: Decision) -> None:
-    """Mount the embedder token only in hybrid mode, so BM25 mode needs no such file."""
-    override = project / "compose.override.yaml"
-    if decision.retrieval == "hybrid":
-        override.write_text(
-            f"# Written by bin/hub-setup.py for the {decision.backend} embedder backend.\n"
-            "services:\n  hub:\n    secrets:\n      - admin_token\n      - findings_key\n      - embed_token\n"
-            f"secrets:\n  embed_token:\n    file: ./secrets/{EMBED_TOKEN_FILES[str(decision.backend)]}\n",
-            encoding="utf-8",
-        )
-    elif override.exists() and override.read_text(encoding="utf-8").startswith("# Written by bin/hub-setup.py"):
-        override.unlink()
+def _compose_override(project: Path, decision: Decision, env: dict[str, str]) -> None:
+    helper = runpy.run_path(str(Path(__file__).with_name("hub_setup_compose.py")))
+    helper["compose_override"](project, decision.retrieval, decision.backend, EMBED_TOKEN_FILES, env)
 
 
 def apply(project: Path, decision: Decision, env_updates: dict[str, str]) -> None:
@@ -990,8 +993,8 @@ def apply(project: Path, decision: Decision, env_updates: dict[str, str]) -> Non
         env["BRIGADE_EMBED_MODEL"] = decision.model
     else:
         env.pop("BRIGADE_EMBED_MODEL", None)
+    _compose_override(project, decision, env)
     write_env(project / ".env", env)
-    _compose_override(project, decision)
 
 
 def report(decision: Decision) -> str:

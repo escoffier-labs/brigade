@@ -103,7 +103,11 @@ removes the temporary file, so a failure leaves no stray copy of the token.
 After rotating the token, rerun the subshell so the two copies match.
 
 Before starting the service, record the built image's immutable local image ID
-in an ignored Compose override. The base Compose file uses a version tag for
+in an ignored Compose override. Keep operator image pins, command flags and
+state-volume binds in `compose.override.yaml`. Retrieval setup owns
+`compose.hybrid.yaml` for its token mount and includes both files through
+`COMPOSE_FILE` in `.env`. Switching modes preserves the operator override.
+The base Compose file uses a version tag for
 the build. Use the recorded ID for every start or recreation:
 
 ```bash

@@ -152,7 +152,7 @@ def test_supported_gpu_writes_gpu_profile_local_backend_and_an_r1_model(project,
     # The hub needs a token file for every endpoint, so the local backend gets its own.
     assert len((project / "secrets" / "embed-local-token").read_text(encoding="utf-8").strip()) >= 32
     assert not (project / "secrets" / "embed-token").exists()
-    assert "file: ./secrets/embed-local-token" in (project / "compose.override.yaml").read_text(encoding="utf-8")
+    assert "file: ./secrets/embed-local-token" in (project / "compose.hybrid.yaml").read_text(encoding="utf-8")
 
 
 def test_hybrid_embedder_table_has_exactly_the_parser_keys(project, tmp_path):
@@ -236,7 +236,7 @@ def test_remote_endpoint_without_gpu_writes_remote_and_no_embedder(project, tmp_
     # The probe sends the request the hub sends.
     assert post.calls[0][1] == {"model": MODEL["name"], "input": [setup.PROBE_TEXT], "truncate": False}
     assert (project / "secrets" / "embed-token").read_text(encoding="utf-8").strip() == "fake-remote-embed-token"
-    assert "file: ./secrets/embed-token" in (project / "compose.override.yaml").read_text(encoding="utf-8")
+    assert "file: ./secrets/embed-token" in (project / "compose.hybrid.yaml").read_text(encoding="utf-8")
     assert not (project / "secrets" / "embed-local-token").exists()
 
 
@@ -648,7 +648,7 @@ def test_switch_from_local_to_remote_mounts_the_operator_token(project, tmp_path
     assert setup.main(argv, run=no_gpu_host, post=endpoint()) == 0
     assert _embedder(project)["backend"] == "remote"
     assert (project / "secrets" / "embed-token").read_text(encoding="utf-8").strip() == "fake-remote-embed-token"
-    assert "file: ./secrets/embed-token" in (project / "compose.override.yaml").read_text(encoding="utf-8")
+    assert "file: ./secrets/embed-token" in (project / "compose.hybrid.yaml").read_text(encoding="utf-8")
     assert (project / "secrets" / "embed-local-token").read_bytes() == local
     assert setup.main(["--project-dir", str(project), "switch", "--to", "lexical"]) == 0
     assert not (project / "compose.override.yaml").exists()

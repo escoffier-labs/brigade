@@ -187,7 +187,7 @@ Setup picks the retrieval mode and the backend (D30), in order:
    shape). The endpoint must be HTTPS, or plain HTTP to a tailnet name or
    address. Setup sends one probe embedding and checks the dimensions and the
    reported model digest. It writes the `remote` backend,
-   `retrieval = "hybrid"` and a `compose.override.yaml` that mounts the token.
+   `retrieval = "hybrid"` and a setup-owned `compose.hybrid.yaml` that mounts the token.
    The embedder container is never created.
 3. Otherwise BM25 mode. Setup names each check that failed, writes
    `retrieval = "lexical"` and prints how to switch later.
@@ -259,7 +259,16 @@ hub's `command` in `compose.override.yaml`.
 
 ## Switch retrieval modes
 
-Both directions keep search answering.
+Both directions keep search answering. Setup leaves the operator's
+`compose.override.yaml` unchanged, including image pins, the trusted-identity
+command flag and state-volume binds. Hybrid writes its token mount to
+`compose.hybrid.yaml` and sets `COMPOSE_FILE` in `.env` to load `compose.yaml`,
+`compose.override.yaml` when it exists, and `compose.hybrid.yaml` in that order.
+An explicit operator file list is retained with the setup file appended.
+Lexical removes only the setup file and its entry, restoring Compose's default
+file discovery when no custom file list remains. Setup migrates an old override
+starting with `# Written by bin/hub-setup.py` to the setup-owned file.
+The transaction restores both files and `.env` if any write fails.
 
 Hybrid to BM25:
 
