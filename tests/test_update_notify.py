@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from pathlib import Path
 
 import pytest
@@ -152,17 +155,92 @@ def test_fresh_cache_does_not_spawn(tmp_path):
     update_notify.maybe_notify(["work"], 0, env=_env(tmp_path), now=1_000_000.0, stderr=_Tty(), spawn=_no_spawn)
 
 
-def test_missing_and_malformed_cache_spawns(tmp_path):
+@pytest.mark.parametrize("malformed", [False, True])
+def test_missing_and_malformed_cache_spawns(tmp_path, malformed):
     calls: list[str] = []
+    if malformed:
+        path = _write_state(tmp_path, checked_at="soon")
+        path.write_text("{not json")
 
-    def spawn() -> None:
-        calls.append("x")
+    update_notify.maybe_notify(["work"], 0, env=_env(tmp_path), now=1.0, stderr=_Tty(), spawn=lambda: calls.append("x"))
+    assert calls == ["x"]
 
-    update_notify.maybe_notify(["work"], 0, env=_env(tmp_path), now=1.0, stderr=_Tty(), spawn=spawn)
-    path = _write_state(tmp_path, checked_at="soon")
-    path.write_text("{not json")
-    update_notify.maybe_notify(["work"], 0, env=_env(tmp_path), now=1.0, stderr=_Tty(), spawn=spawn)
-    assert calls == ["x", "x"]
+
+@pytest.mark.parametrize("concurrent", [False, True])
+def test_stale_cache_refresh_is_claimed_once(tmp_path, concurrent):
+    path = _write_state(tmp_path, checked_at=0.0)
+    calls = []
+    barrier = Barrier(16) if concurrent else None
+
+    def notify(_):
+        if barrier is not None:
+            barrier.wait(timeout=10)
+        update_notify.maybe_notify(
+            ["work"],
+            0,
+            env=_env(tmp_path),
+            now=1_000_000.0,
+            stderr=io.StringIO(),
+            spawn=lambda: calls.append("spawned"),
+        )
+
+    if concurrent:
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            list(pool.map(notify, range(16)))
+    else:
+        for i in range(16):
+            notify(i)
+    assert calls == ["spawned"]
+    assert path.with_suffix(".claim").is_file()
+    assert json.loads(path.read_text()) == {"checked_at": 0.0}
+
+
+@pytest.mark.parametrize("age,expected", [(3599, []), (3600, ["spawned"]), (3601, ["spawned"])])
+def test_refresh_claim_window(tmp_path, age, expected):
+    path = _write_state(tmp_path, checked_at=0.0)
+    claim = path.with_suffix(".claim")
+    claim.touch()
+    now = 1_000_000.0
+    os.utime(claim, (now - age, now - age))
+    calls = []
+    for _ in range(2):
+        update_notify.maybe_notify(
+            ["work"],
+            0,
+            env=_env(tmp_path),
+            now=now,
+            stderr=io.StringIO(),
+            spawn=lambda: calls.append("spawned"),
+        )
+    assert calls == expected
+    assert claim.stat().st_mtime == (now if expected else now - age)
+
+
+@pytest.mark.parametrize("operation", ["mkdir", "open", "stat", "utime"])
+def test_unwritable_refresh_claim_skips_spawn(tmp_path, monkeypatch, operation):
+    path = _write_state(tmp_path, checked_at=0.0)
+    if operation in {"stat", "utime"}:
+        claim = path.with_suffix(".claim")
+        claim.touch()
+        os.utime(claim, (0, 0))
+    calls = []
+
+    def denied(*args, **kwargs):
+        raise PermissionError("cache is unwritable")
+
+    if operation in {"mkdir", "stat"}:
+        monkeypatch.setattr(Path, operation, denied)
+    else:
+        monkeypatch.setattr(update_notify.os, operation, denied)
+    update_notify.maybe_notify(
+        ["work"],
+        0,
+        env=_env(tmp_path),
+        now=1_000_000.0,
+        stderr=io.StringIO(),
+        spawn=lambda: calls.append("spawned"),
+    )
+    assert calls == []
 
 
 def test_maybe_notify_swallows_exceptions(tmp_path, monkeypatch):

@@ -31,6 +31,7 @@ from .isolated_exec import module_argv, trusted_cwd
 
 CHECK_URL = "https://check.brigade.tools/v1/version"
 CHECK_INTERVAL_SECONDS = 24 * 60 * 60
+REFRESH_CLAIM_SECONDS = 60 * 60
 NOTIFY_INTERVAL_SECONDS = 24 * 60 * 60
 _SKIP_COMMANDS = frozenset({"update", "completions"})
 
@@ -118,6 +119,25 @@ def _spawn_refresh(env: Mapping[str, str]) -> None:
     )
 
 
+def _claim_refresh(path: Path, now: float) -> bool:
+    """Claim a refresh without waiting. An unwritable cache disables refreshes."""
+    claim = path.with_suffix(".claim")
+    try:
+        claim.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            if now - claim.stat().st_mtime < REFRESH_CLAIM_SECONDS:
+                return False
+            # Stale takeover accepts a small race between simultaneous claimants.
+        else:
+            os.close(fd)
+        os.utime(claim, (now, now))
+        return True
+    except OSError:
+        return False
+
+
 def maybe_notify(
     argv: list[str],
     exit_code: int,
@@ -171,7 +191,7 @@ def maybe_notify(
             stale = (
                 not isinstance(checked_at, (int, float)) or current_time - float(checked_at) >= CHECK_INTERVAL_SECONDS
             )
-            if stale:
+            if stale and _claim_refresh(path, current_time):
                 spawn_refresh()
     except Exception:
         return

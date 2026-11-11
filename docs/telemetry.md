@@ -52,8 +52,11 @@ are not a count of people or installations.
 
 A weekly server purge deletes version observations older than 90 days. The
 local version cache at `<cache_root>/brigade/update-notify.json` stores the latest
-version and check/notice timestamps. It has no automatic expiry and can be
-deleted at any time. There is no local payload history or usage receipt because
+version and check/notice timestamps. The adjacent `update-notify.claim` file
+uses its modification time to throttle refresh launches for one hour, including
+while a detached refresh is still running. If the claim cannot be written, no
+automatic refresh is launched. Both files can be deleted at any time and have
+no automatic expiry. There is no local payload history or usage receipt because
 Tier 1 is not enabled.
 
 The controller is Solomon Neas (Escoffier Labs), reachable at the contact in
