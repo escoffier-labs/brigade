@@ -460,8 +460,8 @@ class _Deferred:
 
     def examine(self) -> None:
         """Charge every log event, including entries superseded during replay."""
-        self.examined += store.limits.REPLAY_ENTRY_OVERHEAD
-        store.limits.check_replay(self.examined)
+        self.examined += 1
+        store.limits.check_examined(self.examined)
 
     @staticmethod
     def _cost(key: str) -> int:

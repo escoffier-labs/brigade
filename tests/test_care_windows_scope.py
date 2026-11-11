@@ -151,16 +151,25 @@ def test_printed_windows_plan_matches_acceptance_grammar(tmp_path, monkeypatch, 
     name = care_cmd._schtasks_task_name(entry)
     schedule = care_cmd._schtasks_schedule_flags(entry.schedule)
     expected = (
-        "$ErrorActionPreference='Stop'; $service=New-Object -ComObject Schedule.Service; $service.Connect(); "
-        "$folder=$service.GetFolder('\\'); "
-        f"& 'C:\\Windows\\System32\\schtasks.exe' /Create /TN '{name}' "
+        "$ErrorActionPreference='Stop'; $s=New-Object -ComObject Schedule.Service; $s.Connect(); "
+        "$f=$s.GetFolder('\\'); "
+        "$old=$null; $xml=$null; "
+        f"try {{ $old=$f.GetTask('{name}') }} "
+        "catch { $err=$_.Exception; "
+        "while ($null -ne $err.InnerException) { $err=$err.InnerException }; "
+        "if ($err.HResult -ne -2147024894) { throw } }; "
+        "if ($null -ne $old) { $xml=$old.Xml }; "
+        f"try {{ & 'C:\\Windows\\System32\\schtasks.exe' /Create /TN '{name}' "
         f"/TR 'C:\\Windows\\System32\\cmd.exe /d /c exit 1' {schedule} /RU $env:USERNAME /IT /F; "
-        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
-        f"$definition=$folder.GetTask('{name}').Definition; "
-        "$action=$definition.Actions.Item(1); "
+        "if ($LASTEXITCODE -ne 0) { throw 'cannot create care task' }; "
+        f"$d=$f.GetTask('{name}').Definition; "
+        "$action=$d.Actions.Item(1); "
         f"$action.Path={literal(sys.executable)}; $action.Arguments={raw}; "
         f"$action.WorkingDirectory={literal(str(trusted_cwd()))}; "
-        f"$folder.RegisterTaskDefinition('{name}',$definition,6,$null,$null,3,$null) | Out-Null"
+        f"$f.RegisterTaskDefinition('{name}',$d,6,$null,$null,3,$null) | Out-Null"
+        "; } catch { if ($null -ne $xml) { "
+        f"$f.RegisterTask('{name}',$xml,6,$null,$null,3,$null) | Out-Null"
+        f" }} else {{ $f.DeleteTask('{name}',0) }}; throw }}"
     )
     assert script == expected
     arguments = care_windows.split_windows_argv(raw[1:-1].replace("''", "'"))

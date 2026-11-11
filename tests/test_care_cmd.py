@@ -514,7 +514,7 @@ def test_care_windows_printed_schtasks_match_each_schedule_hint(tmp_path, monkey
         assert "/NP" not in line
         assert "/RL" not in line
         assert "/F:String" not in line
-        assert "/IT /F; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }" in line
+        assert "/IT /F; if ($LASTEXITCODE -ne 0) { throw 'cannot create care task' }" in line
         assert "& 'C:\\Windows\\System32\\schtasks.exe' /Create " in line
         assert r"/TR 'C:\Windows\System32\cmd.exe /d /c exit 1'" in line
 
@@ -536,7 +536,7 @@ def test_schtasks_create_command_is_well_formed_for_every_catalog_entry(tmp_path
         assert "/RL" not in command
         assert "/F:String" not in command
         assert "& 'C:\\Windows\\System32\\schtasks.exe' /Create " in command
-        assert "/IT /F; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }" in command
+        assert "/IT /F; if ($LASTEXITCODE -ne 0) { throw 'cannot create care task' }" in command
 
 
 def test_care_windows_printed_path_uses_single_backslashes(tmp_path):

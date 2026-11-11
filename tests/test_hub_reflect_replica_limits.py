@@ -63,17 +63,18 @@ def test_save_refuses_excess_count_before_writing(tmp_path):
     assert not list(replica.directory.glob("heads*.json"))
 
 
-def test_deferred_replay_bounds_examined_superseded_events(tmp_path):
+def test_deferred_replay_bounds_examined_superseded_events(tmp_path, monkeypatch):
     from brigade import memory_hub_replica_limits as limits
 
+    monkeypatch.setattr(limits, "REPLAY_MAX_EVENTS", 2)
     deferred = sync._Deferred(store.Replica(tmp_path / "replica"))
     event = {"kind": "card.put", "scope": "fleet", "card_id": "same", "revision": 1}
-    with limits.bounded(max_cards=10, max_bytes=limits.REPLAY_ENTRY_OVERHEAD * 2):
+    with limits.bounded(max_cards=10, max_bytes=4096):
         for revision in range(2):
             deferred.examine()
             event["revision"] = revision + 1
             deferred.add("fleet\nsame", event)
-        with pytest.raises(limits.ReplicaLimitError, match="replay"):
+        with pytest.raises(limits.ReplicaLimitError, match="examined-event"):
             deferred.examine()
 
 

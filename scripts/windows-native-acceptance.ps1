@@ -310,14 +310,24 @@ namespace BrigadeAcceptance {
     $cwdLiteral = "'" + (Split-Path -Parent $Initializer).Replace("'", "''") + "'"
     # Exact script grammar rejects extra commands/options, elevated/noninteractive
     # principals, executable lookup, or a live action during schtasks creation.
-    $expected = "`$ErrorActionPreference='Stop'; `$service=New-Object -ComObject Schedule.Service; `$service.Connect(); " +
-        "`$folder=`$service.GetFolder('\'); & 'C:\Windows\System32\schtasks.exe' /Create /TN '$TaskName' " +
+    $expected = "`$ErrorActionPreference='Stop'; `$s=New-Object -ComObject Schedule.Service; `$s.Connect(); " +
+        "`$f=`$s.GetFolder('\'); " +
+        '$old=$null; $xml=$null; ' +
+        "try { `$old=`$f.GetTask('$TaskName') } " +
+        'catch { $err=$_.Exception; ' +
+        'while ($null -ne $err.InnerException) { $err=$err.InnerException }; ' +
+        'if ($err.HResult -ne -2147024894) { throw } }; ' +
+        'if ($null -ne $old) { $xml=$old.Xml }; ' +
+        "try { & 'C:\Windows\System32\schtasks.exe' /Create /TN '$TaskName' " +
         "/TR 'C:\Windows\System32\cmd.exe /d /c exit 1' $Schedule /RU `$env:USERNAME /IT /F; " +
-        'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; ' +
-        "`$definition=`$folder.GetTask('$TaskName').Definition; " +
-        '$action=$definition.Actions.Item(1); ' +
+        "if (`$LASTEXITCODE -ne 0) { throw 'cannot create care task' }; " +
+        "`$d=`$f.GetTask('$TaskName').Definition; " +
+        '$action=$d.Actions.Item(1); ' +
         "`$action.Path=$pythonLiteral; `$action.Arguments=$rawArguments; `$action.WorkingDirectory=$cwdLiteral; " +
-        "`$folder.RegisterTaskDefinition('$TaskName',`$definition,6,`$null,`$null,3,`$null) | Out-Null"
+        "`$f.RegisterTaskDefinition('$TaskName',`$d,6,`$null,`$null,3,`$null) | Out-Null" +
+        '; } catch { if ($null -ne $xml) { ' +
+        "`$f.RegisterTask('$TaskName',`$xml,6,`$null,`$null,3,`$null) | Out-Null" +
+        " } else { `$f.DeleteTask('$TaskName',0) }; throw }"
     if ($Script -cne $expected) { throw "unexpected encoded care creation/action for $TaskName" }
     $bootstrap = 'import importlib.util as u,os,pathlib as p,runpy as r,sys as s;' +
         'i,m=s.argv.pop(1),s.argv.pop(1);' +
@@ -332,6 +342,28 @@ namespace BrigadeAcceptance {
     for ($index = 0; $index -lt $expectedArgv.Count; $index++) {
         if ($actualArgv[$index] -cne $expectedArgv[$index]) { throw "wrong care argv[$index] for $TaskName" }
     }
+}
+
+function Test-CareReplacementRollback {
+    param([string]$Command, [string]$TaskName, [string]$Root)
+    $s = New-Object -ComObject Schedule.Service
+    $s.Connect()
+    $f = $s.GetFolder('\')
+    $before = $f.GetTask($TaskName).Xml
+    $script = Read-EncodedCarePlan -Line $Command
+    # Fail the first COM lookup after /Create has installed the placeholder.
+    $failed = $script.Replace('$d=$f.GetTask',
+        "`$f.GetTask('BrigadeCare-nonexistent-injected'); `$d=`$f.GetTask")
+    if ($failed -ceq $script) { throw 'rollback injection did not match' }
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($failed))
+    $batch = Join-Path $Root 'care-rollback-failure.cmd'
+    $prefix = $Command.Substring(0, $Command.LastIndexOf(' ') + 1)
+    Set-Content -LiteralPath $batch -Value ($prefix + $encoded) -Encoding ascii
+    $exit = Invoke-PrintedSchtasksBatch -BatchPath $batch `
+        -StdoutPath (Join-Path $Root 'care-rollback.out') -StderrPath (Join-Path $Root 'care-rollback.err')
+    if ($exit -eq 0) { throw 'injected post-create COM failure must report failure' }
+    if ($f.GetTask($TaskName).Xml -cne $before) { throw 'post-create failure changed the original care task XML' }
+    Write-Host 'care post-create COM failure restored the original task XML'
 }
 
 function Assert-CarePlanSet {
@@ -1594,6 +1626,7 @@ finally:
                 $createStderr = Read-AcceptanceFileText -Path $createErr
                 throw "printed schtasks command was rejected (exit $createExit, elevated=$elevated): $createDaily`nstdout: $createStdout`nstderr: $createStderr"
             }
+            Test-CareReplacementRollback -Command $createDaily -TaskName 'BrigadeCare-daily-care' -Root $acceptRoot
             $queryOut = Join-Path $acceptRoot "schtasks-query.out"
             $queryErr = Join-Path $acceptRoot "schtasks-query.err"
             cmd.exe /c "schtasks /Query /TN `"BrigadeCare-daily-care`" > `"$queryOut`" 2> `"$queryErr`""

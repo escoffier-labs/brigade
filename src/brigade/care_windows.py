@@ -87,8 +87,8 @@ def create_command(entry: CareEntry, *, command: str, name: str, schedule: str, 
         return f'schtasks /Create /TN "{name}" /TR "{command}" {schedule} {account} /F'
 
     # schtasks /TR is limited to 261 characters and passes through cmd quoting.
-    # Keep its schedule/account translation, then replace the inert action via
-    # COM's separate executable, arguments, and working-directory fields.
+    # Keep its schedule/account translation and restore the original XML if
+    # replacing the inert action through COM fails.
     executable = sys.executable
     arguments = command.removeprefix(subprocess.list2cmdline([executable])).lstrip()
 
@@ -99,44 +99,61 @@ def create_command(entry: CareEntry, *, command: str, name: str, schedule: str, 
     create = (
         f"& {literal(SCHTASKS_EXE)} /Create /TN {literal(name)} "
         f"/TR {literal(CMD_EXE + ' /d /c exit 1')} {schedule} {account} /F; "
-        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
+        "if ($LASTEXITCODE -ne 0) { throw 'cannot create care task' }; "
     )
-    connect = "$service=New-Object -ComObject Schedule.Service; $service.Connect(); $folder=$service.GetFolder('\\'); "
+    connect = "$s=New-Object -ComObject Schedule.Service; $s.Connect(); $f=$s.GetFolder('\\'); "
 
     def replace(value: str) -> str:
         return (
-            f"$definition=$folder.GetTask({literal(name)}).Definition; "
-            "$action=$definition.Actions.Item(1); "
+            f"$d=$f.GetTask({literal(name)}).Definition; "
+            "$action=$d.Actions.Item(1); "
             f"$action.Path={literal(executable)}; $action.Arguments={value}; "
             f"$action.WorkingDirectory={literal(str(trusted_cwd()))}; "
-            f"$folder.RegisterTaskDefinition({literal(name)},$definition,6,$null,$null,3,$null) | Out-Null"
+            f"$f.RegisterTaskDefinition({literal(name)},$d,6,$null,$null,3,$null) | Out-Null"
         )
 
+    snapshot = (
+        "$old=$null; $xml=$null; "
+        f"try {{ $old=$f.GetTask({literal(name)}) }} "
+        "catch { $err=$_.Exception; "
+        "while ($null -ne $err.InnerException) { $err=$err.InnerException }; "
+        "if ($err.HResult -ne -2147024894) { throw } }; "
+        "if ($null -ne $old) { $xml=$old.Xml }; "
+    )
+    rollback = (
+        "; } catch { if ($null -ne $xml) { "
+        f"$f.RegisterTask({literal(name)},$xml,6,$null,$null,3,$null) | Out-Null"
+        f" }} else {{ $f.DeleteTask({literal(name)},0) }}; throw }}"
+    )
     if entry.kind == "reflect" and entry.reflect_scope is None:
         # Only an unscoped reflect reinstall reads the existing task, before
         # /Create /F replaces it, to carry its validated --scope forward.
         helper = module_argv("brigade.care_windows")
         invocation = "& " + " ".join(literal(arg) for arg in helper)
         prepare = (
-            "$existing=$null; "
-            f"try {{ $existing=$folder.GetTask({literal(name)}) }} "
-            "catch { $failure=$_.Exception; "
-            "while ($null -ne $failure.InnerException) { $failure=$failure.InnerException }; "
-            "if ($failure.HResult -ne -2147024894) { throw } }; "
-            "if ($null -ne $existing) { "
-            "$actions=$existing.Definition.Actions; "
-            "if ($actions.Count -ne 1 -or $actions.Item(1).Type -ne 0) { throw 'invalid existing reflect action' }; "
-            "$payload=ConvertTo-Json -InputObject @($newArguments,($actions.Item(1).Arguments)) -Compress; "
-            "$payload64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload)); "
-            f"$result=$payload64 | {invocation}; "
+            "if ($null -ne $old) { "
+            "$as=$old.Definition.Actions; "
+            "if ($as.Count -ne 1 -or $as.Item(1).Type -ne 0) { throw 'invalid existing reflect action' }; "
+            "$j=ConvertTo-Json -InputObject @($argv,($as.Item(1).Arguments)) -Compress; "
+            "$p=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j)); "
+            f"$r=$p | {invocation}; "
             "if ($LASTEXITCODE -ne 0) { throw 'cannot preserve existing reflect scope' }; "
-            "$newArguments=($result | ConvertFrom-Json) }; "
+            "$argv=($r | ConvertFrom-Json) }; "
         )
-        body = connect + f"$newArguments={literal(arguments)}; " + prepare + create + replace("$newArguments")
+        body = (
+            connect
+            + snapshot
+            + f"$argv={literal(arguments)}; "
+            + prepare
+            + "try { "
+            + create
+            + replace("$argv")
+            + rollback
+        )
     else:
         # The exact grammar scripts/windows-native-acceptance.ps1 checks: one
         # literal argument assignment and no statements beyond these.
-        body = connect + create + replace(literal(arguments))
+        body = connect + snapshot + "try { " + create + replace(literal(arguments)) + rollback
     script = "$ErrorActionPreference='Stop'; " + body
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
     # A bare absolute executable path parses in both cmd and PowerShell 5.1.
