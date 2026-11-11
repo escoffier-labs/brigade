@@ -200,8 +200,9 @@ secrets, and creates the backup directory with mode 0700.
 Docker mounts `config/hub.toml` and passes it to the Rust hub with
 `--memory-config` when the pinned Brigade ref supports that flag. Lexical mode
 uses BM25. Hybrid mode uses the configured embedder endpoint and token, with
-BM25 fallback if the token or embedder is unavailable. Memory status reports
-the configured and effective retrieval modes. On older refs the entry wrapper
+BM25 fallback if the embedder is unavailable. A missing or invalid token
+stops startup with the named config. Memory status reports the configured and
+effective retrieval modes. On older refs the entry wrapper
 drops the flag and the hub reads the config beside its database instead, which
 is BM25 in this setup.
 
