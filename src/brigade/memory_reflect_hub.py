@@ -680,7 +680,11 @@ def run_payload(*, target: Path, scope: str | None, limit: int, dry_run: bool, s
             # Never retain hub-supplied text, card bytes or credential-bearing errors.
             if isinstance(exc, store.limits.ReplicaLimitError):
                 code = "hub_reflect_scope_limit" if exc.kind == "cards" else "hub_reflect_replica_limit"
-                reason = f"hub reflect per-replica {exc.kind} bound exceeded before snapshot decoding or saving"
+                reason = (
+                    str(exc)
+                    if exc.kind == "events"
+                    else f"hub reflect per-replica {exc.kind} bound exceeded before snapshot decoding or saving"
+                )
             elif isinstance(exc, ReflectError):
                 code, reason = exc.code, str(exc)
             elif isinstance(exc, ReflectConfigError):

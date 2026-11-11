@@ -14,6 +14,7 @@ from typing import Any, Iterator
 MAX_META_BYTES = 8 * 1024 * 1024
 # Nominal memory per deferred log entry beside its key: the compact event and dict slot.
 REPLAY_ENTRY_OVERHEAD = 512
+REPLAY_MAX_EVENTS = 5_000_000
 _LIMITS: ContextVar[tuple[int, int] | None] = ContextVar("hub_replica_limits", default=None)
 
 
@@ -21,7 +22,14 @@ class ReplicaLimitError(OSError):
     """A fixed diagnostic, without snapshot or credential bytes."""
 
     def __init__(self, kind: str) -> None:
-        super().__init__(f"hub reflect replica {kind} limit exceeded")
+        message = f"hub reflect replica {kind} limit exceeded"
+        if kind == "events":
+            message = (
+                f"hub reflect examined-event limit of {REPLAY_MAX_EVENTS:,} exceeded; "
+                "preseed the replica with an ordinary brigade memory hub pull, "
+                "which performs unbounded replay without reflect's event and decoding safeguards"
+            )
+        super().__init__(message)
         self.kind = kind
 
 
@@ -49,6 +57,12 @@ def check_replay(used: int) -> None:
     limits = _LIMITS.get()
     if limits is not None and used > limits[1]:
         raise ReplicaLimitError("replay")
+
+
+def check_examined(count: int) -> None:
+    """Bound replay work independently from retained metadata bytes."""
+    if active() and count > REPLAY_MAX_EVENTS:
+        raise ReplicaLimitError("events")
 
 
 def active() -> bool:

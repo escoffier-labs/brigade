@@ -454,7 +454,7 @@ def test_care_windows_install_prints_schtasks_and_does_not_claim_success(tmp_pat
 
 
 def _create_line_for(out: str, entry_id: str) -> str:
-    marker = f"/TN 'BrigadeCare-{entry_id}'"
+    marker = f"$n='BrigadeCare-{entry_id}';"
     for line in out.splitlines():
         if "-EncodedCommand " in line:
             script = base64.b64decode(line.split("-EncodedCommand ")[1]).decode("utf-16le")
@@ -514,7 +514,7 @@ def test_care_windows_printed_schtasks_match_each_schedule_hint(tmp_path, monkey
         assert "/NP" not in line
         assert "/RL" not in line
         assert "/F:String" not in line
-        assert "/IT /F; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }" in line
+        assert "/IT /F; if ($LASTEXITCODE -ne 0) { throw 'cannot create care task' }" in line
         assert "& 'C:\\Windows\\System32\\schtasks.exe' /Create " in line
         assert r"/TR 'C:\Windows\System32\cmd.exe /d /c exit 1'" in line
 
@@ -528,7 +528,8 @@ def test_schtasks_create_command_is_well_formed_for_every_catalog_entry(tmp_path
         assert printed.startswith(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe ")
         command = base64.b64decode(printed.split("-EncodedCommand ")[1]).decode("utf-16le")
         flags = EXPECTED_SCHTASKS_FLAGS[entry.schedule]
-        assert f"/TN 'BrigadeCare-{entry.entry_id}'" in command
+        assert f"$n='BrigadeCare-{entry.entry_id}';" in command
+        assert "/TN $n " in command
         assert flags in command
         assert r"/TR 'C:\Windows\System32\cmd.exe /d /c exit 1'" in command
         assert "/RU $env:USERNAME /IT /F" in command
@@ -536,7 +537,7 @@ def test_schtasks_create_command_is_well_formed_for_every_catalog_entry(tmp_path
         assert "/RL" not in command
         assert "/F:String" not in command
         assert "& 'C:\\Windows\\System32\\schtasks.exe' /Create " in command
-        assert "/IT /F; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }" in command
+        assert "/IT /F; if ($LASTEXITCODE -ne 0) { throw 'cannot create care task' }" in command
 
 
 def test_care_windows_printed_path_uses_single_backslashes(tmp_path):

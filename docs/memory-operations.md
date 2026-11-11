@@ -1505,6 +1505,15 @@ time. The replica also stays within the smaller of `[hub] replica_max_mb`
 tens of thousands of ordinary cards while bounding the snapshot and derived
 candidate memory. They do not load an unbounded hub corpus.
 `hub_reflect_scope_limit` names the per-scope card or text limit.
+Bounded reflection examines at most 5,000,000 log events per pull, independently
+of retained-entry bytes. At 1,000 events per day this allows about 13.7 years
+of replay. Superseded and ignored events count toward this ceiling. Retained
+metadata still costs its UTF-8 key bytes plus 512 bytes per entry against the
+replica byte bound. If the examined-event limit is reached, preseed the replica
+with an ordinary `brigade memory hub pull`, which performs unbounded replay
+without reflect's event and decoding safeguards. Use this recovery only for a
+hub whose log and replica size you trust.
+
 `hub_reflect_replica_limit` names the replica byte cap. Both fail closed before
 submitting proposals. Narrow the configured read scopes for a dedicated run.
 Before loading an existing replica or an interrupted rebuild, reflection

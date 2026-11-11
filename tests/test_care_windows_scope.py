@@ -121,6 +121,30 @@ def test_reflect_replacement_command_fits_cmd_limit(tmp_path):
     assert len(command) <= 8191
 
 
+def test_unscoped_reflect_shares_bootstrap_without_changing_arguments(tmp_path):
+    import base64
+
+    from brigade import care_cmd
+    from brigade.isolated_exec import module_argv
+
+    entry = care_cmd.MEMORY_REFLECT_ENTRY
+    command = care_windows.task_run(entry, workspace=tmp_path)
+    arguments = command.removeprefix(subprocess.list2cmdline([sys.executable])).lstrip()
+    encoded = care_cmd._schtasks_create_command(entry, workspace=tmp_path).split("-EncodedCommand ")[1]
+    script = base64.b64decode(encoded).decode("utf-16le")
+    bootstrap = module_argv("brigade.care_windows")[3]
+    before, after = arguments.split(bootstrap, 1)
+
+    def literal(value):
+        return "'" + value.replace("'", "''") + "'"
+
+    assert script.count(literal(bootstrap)) == 1
+    assert f"$h={literal(bootstrap)}; $v=({literal(before)}+$h+{literal(after)});" in script
+    helper = module_argv("brigade.care_windows")
+    expected = "& " + " ".join("$h" if index == 3 else literal(arg) for index, arg in enumerate(helper))
+    assert f"$r=$p | {expected};" in script
+
+
 @pytest.mark.parametrize("entry_id", ["daily-care", "scoped-memory-reflect"])
 def test_printed_windows_plan_matches_acceptance_grammar(tmp_path, monkeypatch, entry_id):
     """Mirror Assert-EncodedCarePlan in scripts/windows-native-acceptance.ps1."""
@@ -151,16 +175,35 @@ def test_printed_windows_plan_matches_acceptance_grammar(tmp_path, monkeypatch, 
     name = care_cmd._schtasks_task_name(entry)
     schedule = care_cmd._schtasks_schedule_flags(entry.schedule)
     expected = (
-        f"$ErrorActionPreference='Stop'; & 'C:\\Windows\\System32\\schtasks.exe' /Create /TN '{name}' "
+        f"$ErrorActionPreference='Stop'; $n={literal(name)}; $s=New-Object -ComObject Schedule.Service; $s.Connect(); "
+        "$f=$s.GetFolder('\\'); "
+        "$o=$x=$null; "
+        f"try {{ $o=$f.GetTask($n) }} "
+        "catch { "
+        "if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw } }; "
+        "if ($o) { $x=$o.Xml }; "
+        f"$z=$false; try {{ & 'C:\\Windows\\System32\\schtasks.exe' /Create /TN $n "
         f"/TR 'C:\\Windows\\System32\\cmd.exe /d /c exit 1' {schedule} /RU $env:USERNAME /IT /F; "
-        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
-        "$service=New-Object -ComObject Schedule.Service; $service.Connect(); "
-        "$folder=$service.GetFolder('\\'); "
-        f"$definition=$folder.GetTask('{name}').Definition; "
-        "$action=$definition.Actions.Item(1); "
+        "if ($LASTEXITCODE -ne 0) { throw 'cannot create care task' }; $z=$true; "
+        "$d=$f.GetTask($n).Definition; "
+        "$action=$d.Actions.Item(1); "
         f"$action.Path={literal(sys.executable)}; $action.Arguments={raw}; "
         f"$action.WorkingDirectory={literal(str(trusted_cwd()))}; "
-        f"$folder.RegisterTaskDefinition('{name}',$definition,6,$null,$null,3,$null) | Out-Null"
+        "$null=$f.RegisterTaskDefinition($n,$d,6,$null,$null,3,$null)"
+        "; } catch { $c=$_.Exception; $b='not needed: task unchanged'; $k='not needed'; if ($z) { $b='none'; "
+        "$m={ try { "
+        f"$a=$f.GetTask($n).Definition.Actions; "
+        "if ($a.Count -ne 1 -or $a.Item(1).Type -ne 0 -or "
+        f"$a.Item(1).Path -ine 'C:\\Windows\\System32\\cmd.exe' -or $a.Item(1).Arguments -cne '/d /c exit 1') "
+        "{ return 'cleanup skipped: task changed concurrently' }; "
+        f"$f.DeleteTask($n,0); 'none'"
+        " } catch { "
+        "if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw }; 'none' } }; "
+        "try { if ($x) { "
+        f"$null=$f.RegisterTask($n,$x,6,$null,$null,3,$null)"
+        " } else { $k=& $m } } catch { $b=$_.Exception.Message; "
+        "try { $k=& $m } catch { $k=$_.Exception.Message } } }; "
+        f"throw ('care task {{0}}: {{1}}; rollback: {{2}}; cleanup: {{3}}' -f $n,$c.Message,$b,$k) }}"
     )
     assert script == expected
     arguments = care_windows.split_windows_argv(raw[1:-1].replace("''", "'"))
