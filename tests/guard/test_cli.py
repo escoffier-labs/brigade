@@ -907,13 +907,16 @@ def test_r1_staged_newline_filename_is_scanned(tmp_path, monkeypatch):
     assert git_scan.main(["--staged"]) == 1
 
 
-def test_r1_staged_unreadable_fails_closed(tmp_path, monkeypatch):
+@__import__("pytest").mark.parametrize("executable", [False, True])
+def test_r1_staged_unreadable_fails_closed(tmp_path, monkeypatch, executable):
     from brigade.guard import git_scan
 
     subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
     path = tmp_path / "missing.txt"
     path.write_text("content\n")
     subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    if executable:
+        subprocess.run(["git", "-C", str(tmp_path), "update-index", "--chmod=+x", "missing.txt"], check=True)
     path.unlink()
     monkeypatch.chdir(tmp_path)
     with __import__("pytest").raises(SystemExit) as error:
@@ -984,3 +987,145 @@ def test_r2_gitlinks_are_not_file_content(tmp_path, monkeypatch, initialized, mo
         assert publish_check.main(["--all-tracked"]) == 0
     else:
         assert git_scan.main([mode]) == 0
+
+
+def _symlink_scan_repo(tmp_path, kind, target_text=None):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args, stdin=None):
+        return subprocess.check_output(["git", *args], cwd=repo, input=stdin).decode().strip()
+
+    git("init", "-b", "main")
+    (repo / "README.md").write_text("Example project\n")
+    git("add", "README.md")
+    git("-c", "user.name=Example", "-c", "user.email=dev@example.invalid", "commit", "-m", "test: initial")
+    sample = "AKIAIOSFODNN7EXAMPLE"  # content-guard: allow bare-token-prefix
+    if kind == "directory":
+        (tmp_path / "assets").mkdir()
+        (tmp_path / "assets" / "payload.txt").write_text(sample)
+        target = "../assets"
+    elif kind == "dangling":
+        target = "../missing"
+    else:
+        (tmp_path / "target.txt").write_text(sample)
+        target = "../target.txt"
+    target = target_text or target
+    oid = git("hash-object", "-w", "--stdin", stdin=target.encode())
+    git("update-index", "--add", "--cacheinfo", f"120000,{oid},linked-assets")
+    link = repo / "linked-assets"
+    if os.name == "nt":
+        # Git's core.symlinks=false checkout stores link text as a regular file.
+        link.write_text(target)
+    else:
+        link.symlink_to(target, target_is_directory=kind == "directory")
+    if kind != "staged":
+        git("-c", "user.name=Example", "-c", "user.email=dev@example.invalid", "commit", "-m", "test: link")
+    return repo
+
+
+@__import__("pytest").mark.parametrize("kind", ["directory", "dangling", "staged"])
+@__import__("pytest").mark.parametrize("scanner", ["git", "publish", "audit", "baseline"])
+def test_r2_indexed_symlinks_never_follow_targets(tmp_path, monkeypatch, kind, scanner):
+    from brigade.guard import git_scan, publish_check
+    from brigade.guard.audit import run_audit
+    from brigade.guard.baseline import init_baseline
+    from brigade.guard.policy import default_policy, load_policy
+
+    repo = _symlink_scan_repo(tmp_path, kind)
+    policy = load_policy(default_policy("public-repo.json"))
+    monkeypatch.chdir(repo if scanner in {"git", "publish"} else tmp_path)
+    if scanner == "git":
+        assert git_scan.main(["--staged" if kind == "staged" else "--all-tracked"]) == 0
+    elif scanner == "publish":
+        assert publish_check.main(["--all-tracked"]) == 0
+    elif scanner == "audit":
+        assert not run_audit(repo, policy=policy).blocked
+    else:
+        assert not init_baseline(repo, policy=policy, scope="tracked").entries
+
+
+@__import__("pytest").mark.parametrize("scanner", ["git", "publish", "audit", "baseline"])
+def test_r2_symlink_target_text_is_scanned(tmp_path, monkeypatch, scanner):
+    from brigade.guard import git_scan, publish_check
+    from brigade.guard.audit import run_audit
+    from brigade.guard.baseline import init_baseline
+    from brigade.guard.policy import default_policy, load_policy
+
+    sample = "AKIAIOSFODNN7EXAMPLE"  # content-guard: allow bare-token-prefix
+    repo = _symlink_scan_repo(tmp_path, "staged", target_text=sample)
+    policy = load_policy(default_policy("public-repo.json"))
+    monkeypatch.chdir(repo if scanner in {"git", "publish"} else tmp_path)
+    if scanner == "git":
+        assert git_scan.main(["--staged"]) == 1
+    elif scanner == "publish":
+        assert publish_check.main(["--all-tracked"]) == 1
+    elif scanner == "audit":
+        assert run_audit(repo, policy=policy).blocked
+    else:
+        assert any(
+            entry.path == "linked-assets" for entry in init_baseline(repo, policy=policy, scope="tracked").entries
+        )
+
+
+def test_r2_unknown_index_mode_fails_closed(tmp_path, monkeypatch, capsys):
+    from brigade.guard import git_scan
+
+    repo = _symlink_scan_repo(tmp_path, "directory")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(
+        git_scan.subprocess,
+        "run",
+        lambda argv, **kw: subprocess.CompletedProcess(argv, 0, b"040000 " + b"a" * 40 + b" 0\tREADME.md\0", b""),
+    )
+    with __import__("pytest").raises(SystemExit) as error:
+        git_scan.main(["--all-tracked"])
+    assert error.value.code == 2
+    assert "unsupported-index-mode" in capsys.readouterr().err
+
+
+def test_r2_audit_does_not_skip_symlink_to_baseline(tmp_path):
+    from brigade.guard.audit import run_audit
+    from brigade.guard.baseline import Baseline, save_baseline
+    from brigade.guard.policy import default_policy, load_policy
+
+    sample = "AKIAIOSFODNN7EXAMPLE"  # content-guard: allow bare-token-prefix
+    repo = _symlink_scan_repo(tmp_path, "staged", target_text=sample)
+    baseline = Baseline(entries=[], created_at="2026-01-01T00:00:00+00:00")
+    path = repo / sample
+    save_baseline(baseline, path)
+    report = run_audit(
+        repo, policy=load_policy(default_policy("public-repo.json")), baseline=baseline, baseline_path=path
+    )
+    assert report.blocked
+
+
+def test_r2_symlink_reads_original_index_blob(tmp_path, monkeypatch):
+    from brigade.guard import git_scan
+
+    sample = "AKIAIOSFODNN7EXAMPLE"  # content-guard: allow bare-token-prefix
+    repo = _symlink_scan_repo(tmp_path, "staged", target_text=sample)
+    original = subprocess.check_output(["git", "rev-parse", ":linked-assets"], cwd=repo).decode().strip()
+    replacement = (
+        subprocess.check_output(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=b"../safe").decode().strip()
+    )
+    subprocess.check_call(["git", "replace", original, replacement], cwd=repo)
+    monkeypatch.chdir(repo)
+    assert git_scan.main(["--staged"]) == 1
+
+
+def test_r2_staged_symlink_from_subdirectory(tmp_path, monkeypatch):
+    from brigade.guard import git_scan
+
+    repo = _symlink_scan_repo(tmp_path, "staged")
+    nested = repo / "nested"
+    nested.mkdir()
+    sample = "AKIAIOSFODNN7EXAMPLE"  # content-guard: allow bare-token-prefix
+    oid = (
+        subprocess.check_output(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=sample.encode())
+        .decode()
+        .strip()
+    )
+    subprocess.check_call(["git", "update-index", "--add", "--cacheinfo", f"120000,{oid},nested/nested-link"], cwd=repo)
+    monkeypatch.chdir(nested)
+    assert git_scan.main(["--staged"]) == 1
