@@ -28,7 +28,7 @@ import ipaddress
 import os
 import re
 import signal
-import socket
+import socket as socket
 import stat
 import subprocess
 import sys
@@ -40,6 +40,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import brigade
+
+from .fleet_host_resolver import resolve_host as resolve_host
+from .fleet_host_resolver import resolve_with_deadline
 
 COMPONENT = "brigade-hub"
 STARTED = "brigade fleet hub listening on"
@@ -194,27 +197,6 @@ def health_url(host: str, port: int) -> str:
 _LISTENING = re.compile(rb"^listening on (\S+?)\r?\n?$")
 
 
-def resolve_host(host: str) -> frozenset[str]:
-    """The numeric addresses the configured `--host` resolves to.
-
-    brigade-hub binds the first address `getaddrinfo` gives for that name,
-    with no family preference, so it reports one of these. Resolved once at
-    startup. An unresolvable name gives the empty set, and then only loopback
-    and wildcard reports are accepted.
-    """
-    try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except (OSError, UnicodeError):
-        return frozenset()
-    resolved = set()
-    for *_, sockaddr in infos:
-        try:
-            resolved.add(ipaddress.ip_address(str(sockaddr[0]).split("%", 1)[0]).compressed)
-        except ValueError:
-            continue
-    return frozenset(resolved)
-
-
 def probe_url(reported: tuple[str, int], resolved: frozenset[str]) -> str | None:
     """The `/health` URL for the address brigade-hub reported, or None to refuse it.
 
@@ -365,9 +347,13 @@ def run(
             route_modes=route_modes,
             memory_config=memory_config,
         )
+        resolved, error = resolve_with_deadline(host)
+        if error:
+            print(f"error: --host lookup {error}", file=sys.stderr)
+            return 2
         return _supervise(
             argv,
-            resolved=resolve_host(host),
+            resolved=resolved,
             image=image,
             detail=(
                 f"brigade-hub front, managed Python upstream; db {db_path}; "
