@@ -31,7 +31,7 @@ from .. import verification_contract, verify_manifest, verify_trial
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
-from . import verify_ranking, verify_runtime
+from . import verify_argv_files, verify_ranking, verify_runtime
 from .verify_scoreability import _print_graph_impact, _print_scoreability_notice, _scoreability_notice
 
 
@@ -1568,6 +1568,7 @@ def _run_verify_commands(
             "evidence": _verification_evidence_payload(target),
             "commands": [],
             "planned_commands": _planned_commands_display(commands),
+            "argv_file_hashes": verify_argv_files.argv_file_hashes(target, commands),
         }
         receipt.update(identity)
         state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
@@ -1723,6 +1724,7 @@ def _write_reused_receipt(
         "path": str(run_dir),
         "commands": copy.deepcopy(latest.get("commands", [])),
         "planned_commands": planned_display,
+        "argv_file_hashes": copy.deepcopy(latest.get("argv_file_hashes", {})),
     }
     receipt.update(identity)
     state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
@@ -2021,16 +2023,10 @@ def verify_run(
             if reuse and manifest is None:
                 fingerprint = localio.tree_fingerprint(target)
                 latest = _latest_verify_receipt(target)
-                if (
-                    fingerprint is not None
-                    and latest is not None
-                    and latest.get("status") == "completed"
-                    and latest.get("tree_fingerprint") == fingerprint
-                    and latest.get("planned_commands") == planned_display
-                ):
+                if verify_argv_files.reusable_receipt(target, planned, planned_display, fingerprint, latest):
                     receipt, rc = _write_reused_receipt(
                         target,
-                        latest,
+                        latest or {},
                         planned_display,
                         timeout,
                         capture=capture,
@@ -2098,6 +2094,10 @@ def verify_run(
             verify_runtime._print_verify_console(f"work verify run: {target}")
             verify_runtime._print_verify_console(f"run: {receipt['run_id']}")
             verify_runtime._print_verify_console(f"status: {receipt['status']}")
+            if receipt.get("reused_from"):
+                verify_runtime._print_verify_console(
+                    f"reused from: {receipt['reused_from']}. Use --no-reuse to execute again."
+                )
             verify_runtime._print_verify_console(f"commands: {len(receipt['commands'])}")
             for command in receipt["commands"]:
                 if isinstance(command, dict):
