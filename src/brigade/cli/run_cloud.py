@@ -60,11 +60,19 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     )
     p_launch.add_argument("--json", action="store_true", help="Emit the public launch JSON contract.")
 
-    p_land = cloud_sub.add_parser("land", help="Apply a ready Codex Cloud task in isolation and open a PR for review.")
+    p_land = cloud_sub.add_parser(
+        "land",
+        help="Apply a ready Codex Cloud task in isolation and open a PR for review.",
+        description=(
+            "Apply one pinned task attempt for review. Target PR CI must give proposal code no secrets, "
+            "write token or trusted caches. Staging-fork mode is tracked in #2512."
+        ),
+    )
     p_land.add_argument("--target", type=Path, default=Path("."))
     p_land.add_argument("--provider", required=True, choices=("codex-cloud",))
     p_land.add_argument("--task-id", required=True)
     p_land.add_argument("--issue", required=True, type=int)
+    p_land.add_argument("--closes", action="store_true", help="Use Closes #N instead of Refs #N in the PR body.")
     p_land.add_argument("--json", action="store_true")
 
     p_register = cloud_sub.add_parser("register", help="Register a dispatched cloud task.")
@@ -543,7 +551,11 @@ def dispatch(args) -> int:
         from .. import codex_cloud_land
 
         try:
-            result = codex_cloud_land.land(target, args.task_id, args.issue)
+            result = (
+                codex_cloud_land.land(target, args.task_id, args.issue, closes=True)
+                if args.closes
+                else codex_cloud_land.land(target, args.task_id, args.issue)
+            )
         except codex_cloud_land.LandError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
@@ -673,6 +685,10 @@ def dispatch(args) -> int:
         )
         for row in payload.get("prs", []):
             print(f"  pr: task={row.get('task_id')} {row['pr_url']}")
+        for row in payload.get("pending_landings", []):
+            print(
+                f"  landing: task={row.get('task_id')} state={row.get('landing_state')} commit={row.get('landing_commit')}"
+            )
         for row in payload.get("needs_you", []):
             print(f"  needs-you: {row.get('detail')}")
         return 0
@@ -707,6 +723,8 @@ def dispatch(args) -> int:
         for row in payload.get("entries", []):
             url = row.get("pr_url") or row.get("url")
             extra = f" url={url}" if url else ""
+            if row.get("landing_state"):
+                extra += f" landing={row['landing_state']} commit={row.get('landing_commit')}"
             print(
                 f"  - [{row.get('classification')}] {row.get('label')} "
                 f"provider={row.get('provider')} task={row.get('task_id')} branch={row.get('branch')}{extra}"

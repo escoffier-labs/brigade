@@ -183,11 +183,15 @@ def _lease_recovery_path(target: Path, lease_id: str) -> Path:
     return cloud_tracker.registry_path(target).parent / "codex-leases" / f"{digest}.json"
 
 
+class WorkspaceNotPrivate(OSError):
+    """Recovery storage is writable by another user."""
+
+
 def _validate_recovery_directory(info: os.stat_result, *, private: bool) -> None:
     if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
         raise OSError("unsafe lease recovery directory")
     if os.name == "posix" and (info.st_uid != os.getuid() or info.st_mode & (0o077 if private else 0o022)):
-        raise OSError("lease recovery directory must be owned and private")
+        raise WorkspaceNotPrivate("lease recovery directory must be owned and private")
 
 
 @contextmanager
@@ -377,6 +381,9 @@ def launch_task(prompt: str, *, target: Path, repo: str, label: str) -> dict[str
         holder = admission.holder
         try:
             _persist_lease_holder(target, lease_id, holder)
+        except WorkspaceNotPrivate:
+            fleet_client.release_cloud(lease_id, state="submit-failed", holder=holder)
+            return {"ok": False, "reason": "workspace-not-private"}
         except Exception:  # noqa: BLE001 - no provider work exists yet
             fleet_client.release_cloud(lease_id, state="submit-failed", holder=holder)
             return {"ok": False, "reason": "lease-recovery-unwritable"}

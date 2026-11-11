@@ -279,29 +279,34 @@ def _load_repo_policy(raw: str | None) -> Policy:
 
 def _tracked_paths(*, all_tracked: bool, cwd: Path | None = None) -> list[Path]:
     if all_tracked:
-        cmd = ["git", "ls-files"]
+        cmd = ["git", "ls-files", "-z"]
     else:
-        cmd = ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"]
+        cmd = ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"]
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, cwd=cwd)
+    proc = subprocess.run(cmd, capture_output=True, check=False, cwd=cwd)
     if proc.returncode != 0:
-        print((proc.stderr or proc.stdout or "git command failed").strip(), file=sys.stderr)
+        print("content-guard: Git path enumeration failed", file=sys.stderr)
         raise SystemExit(2)
-
-    return [Path(line) for line in proc.stdout.splitlines() if line.strip()]
+    try:
+        return [Path(name.decode("utf-8", errors="strict")) for name in proc.stdout.split(b"\0") if name]
+    except UnicodeDecodeError:
+        print("content-guard: Git path cannot be decoded", file=sys.stderr)
+        raise SystemExit(2) from None
 
 
 def _read_text(path: Path) -> str | None:
     try:
         raw = path.read_bytes()
     except OSError:
-        return None
+        print("content-guard: Git file cannot be read", file=sys.stderr)
+        raise SystemExit(2) from None
     if b"\0" in raw:
         return None
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
-        return None
+        print("content-guard: Git file cannot be decoded", file=sys.stderr)
+        raise SystemExit(2) from None
 
 
 if __name__ == "__main__":

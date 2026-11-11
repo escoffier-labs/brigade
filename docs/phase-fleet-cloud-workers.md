@@ -34,7 +34,7 @@ Cloud capacity is separate from physical-machine capacity:
 |---|---:|---|
 | Cursor Cloud | 3 | Cursor subscription and spend controls |
 | Codex Cloud | 2 | ChatGPT/Codex subscription pool |
-| Claude Code Cloud | 0 | Claude Max is available; cloud launch stays disabled until sessions have a structured bindable status surface |
+| Claude Code Cloud | 0 | Claude Max is available. Cloud launch stays disabled until sessions have a structured bindable status surface |
 | All hosted cloud providers | 4 | Brigade fleet policy |
 | Grok Bot | tracked, not hosted | Local/self-hosted seat policy |
 | workstation | 10 | Existing physical station configuration |
@@ -67,7 +67,7 @@ offers a safe workload-identity exchange with the private hub.
 ### Cursor Cloud
 
 Use the public beta Cloud Agents API v1 with the existing `CURSOR_API_KEY`
-secret. The v1 surface separates durable agents from per-prompt runs; execution
+secret. The v1 surface separates durable agents from per-prompt runs. Execution
 state comes from runs, not from the durable agent's ACTIVE or IDLE state.
 Official documentation and schema references are at
 https://cursor.com/docs/cloud-agent/api/endpoints,
@@ -108,8 +108,8 @@ adapter slice.
 Keep the existing `codex_cloud.py` adapter. The installed codex-cli 0.149.1
 has the experimental `codex cloud` subcommand with `exec`, `list`, `status`,
 `diff`, and `apply`. The official reference is at
-https://developers.openai.com/codex/cli/reference. The adapter is already valid;
-this slice only gates it on the hub lease.
+https://developers.openai.com/codex/cli/reference. The adapter is already valid.
+This slice only gates it on the hub lease.
 
 Register a lease before `codex cloud exec`, bind the provider task ID
 immediately after submission, and release the lease only after a terminal
@@ -125,23 +125,45 @@ brigade run cloud land --provider codex-cloud --task-id task_example --issue 123
 `land` requires Git, an authenticated Codex CLI and `gh`, Brigade, and Vale
 with the repository writing rules configured. Missing Vale blocks publication.
 
-`land` fetches origin and applies with `codex cloud apply` in a fresh temporary
-worktree based on `origin/main`. The caller checkout stays untouched. It refuses
-workflow, CODEOWNERS, credential, hook, and non-regular file paths, plus patches
-that do not apply cleanly. It runs the installed content guard through Brigade
-verification, preserves push hooks, and checks the PR body with Vale. It commits
-with the Codex trailer, pushes a new branch, opens a PR referencing the issue and
-task, and records the branch and PR URL for `status` and `sync`. It never merges
-or enables auto-merge. The conductor reviews and merges.
+The dispatch workspace and its `.brigade/cloud` path must be owned by the
+operator and have permissions of 0755 or tighter. The lease recovery directory
+requires 0700. Group- or world-writable recovery storage reports
+`workspace-not-private`. Use a full clone. A shallow target refuses landing
+up front with `shallow-target`.
+
+The target repository's PR CI must give proposal code no secrets, write token
+or trusted caches. Landing publishes unreviewed code for CI to execute.
+Staging-fork mode is tracked in #2512.
+
+`land` pins attempt 1, hashes its diff and applies exactly those bytes with
+`git apply --index` in a temporary worktree from the canonical repository's
+main branch. The caller checkout stays untouched. It refuses control characters
+in paths, all `.github/` changes, Git attributes and submodules, CODEOWNERS,
+credentials, hook framework configuration and non-regular files. Git commands
+use absolute tool paths, sanitized control variables, disabled filters,
+textconv and fsmonitor, and an isolated hooks directory containing only the
+operator-installed content-guard pre-push guard. That guard must be configured
+in an absolute global `core.hooksPath` outside the target repository.
+
+The installed content guard runs through Brigade verification with receipts
+outside the proposal worktree. The staged tree must match the guarded tree and
+the final commit tree. Vale checks the PR body before publication. The PR title
+comes from the task title in conventional `fix:` or `feat:` form. The body uses
+`Refs #N`, or `Closes #N` with `--closes`. Landing never merges or enables
+auto-merge. The conductor reviews and merges.
+
+The registry records `prepared`, `branch-pushed` and `pr-created` states with
+the commit SHA. `status` and `sync` show pending landings. Retries compare local
+and remote refs with that commit and reuse an existing branch or PR. A
+conflicting ref refuses publication. Failed preparations remove their temporary
+worktree and unpublished branch. Push and PR creation failures preserve the
+prepared commit for retry. Registry updates compare the entry id and revision
+under a short lock, while a task-specific lock prevents concurrent landings.
 
 Named refusals include `task-not-ready`, `protected-policy-path`, `credential-path`,
-`apply-conflict`, `guard-failed`, and `pr-body-lint-failed`. Failed worktrees are
-removed, along with unpublished local branches. A push or PR creation failure
-may leave a branch for inspection. The publication branch is saved before external
-operations. Retrying first recovers any existing PR for that branch. Repeating a
-successful land returns its registered PR without opening another one. Landing
-uses a task-specific lock, so other tasks can still register. If a commit hook
-changes the guarded tree, `commit-tree-mismatch` refuses publication.
+`apply-conflict`, `guard-failed` and `pr-body-lint-failed`. A `push-failed` refusal
+includes one reason class: `guard-refused`, `auth`, `network` or `rejected`.
+Hook output and proposal content are never included in that refusal.
 
 ### Claude Code Cloud
 
@@ -188,7 +210,7 @@ response body is stored.
 
 Admission is atomic at the fleet authority. It checks the provider limit and the
 global cloud limit in the same transaction. The Fleet Hub Task 2
-implementation already includes the model/provider policy table; the global hosted cap remains 4. A launch that
+implementation already includes the model/provider policy table. The global hosted cap remains 4. A launch that
 cannot acquire a lease does not call the provider. A lease without a provider task
 ID has a short submission TTL. Active leases renew from provider observations.
 Terminal and expired leases stop consuming capacity but remain queryable as
@@ -219,7 +241,7 @@ families such as `.failed`, `.completed`, `.interrupted`, `.cancelled`,
 `.canceled`, `.timed_out`, and `.timeout`. Terminal rows never count as busy.
 Non-terminal rows older than `stale_after_seconds` do not count as busy or remain
 in station tiles. They may produce one bounded Needs You item. Historical events
-remain in SQLite; this change fixes projections, not audit retention.
+remain in SQLite. This change fixes projections and preserves audit retention.
 
 GitHub branch inference remains recovery evidence only. It never creates an
 active cloud worker or consumes a cloud slot without a provider observation or an

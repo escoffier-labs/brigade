@@ -882,3 +882,42 @@ class CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_r1_staged_newline_filename_is_scanned(tmp_path, monkeypatch):
+    from brigade.guard import git_scan
+
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    path = tmp_path / "line\nbreak.txt"
+    path.write_text("AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n")  # content-guard: allow secret/aws-access-key
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    monkeypatch.chdir(tmp_path)
+    assert git_scan.main(["--staged"]) == 1
+
+
+def test_r1_staged_unreadable_fails_closed(tmp_path, monkeypatch):
+    from brigade.guard import git_scan
+
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    path = tmp_path / "missing.txt"
+    path.write_text("content\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    path.unlink()
+    monkeypatch.chdir(tmp_path)
+    with __import__("pytest").raises(SystemExit) as error:
+        git_scan.main(["--staged"])
+    assert error.value.code == 2
+
+
+def test_r1_staged_undecodable_path_fails_closed(tmp_path, monkeypatch):
+    from brigade.guard import git_scan
+    import os
+
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    with open(os.fsencode(tmp_path) + b"/bad-\xff.txt", "wb") as stream:
+        stream.write(b"content\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    monkeypatch.chdir(tmp_path)
+    with __import__("pytest").raises(SystemExit) as error:
+        git_scan.main(["--staged"])
+    assert error.value.code == 2

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -37,21 +38,54 @@ def landing(tmp_path, monkeypatch):
     (caller / "file.txt").write_text("caller dirty\n")
     cloud_tracker.register(caller, provider="codex-cloud", task_id="task_example", label="example")
     monkeypatch.setattr(codex_cloud, "_repo_from_cwd", lambda _: "example/repo")
+    original_which = codex_cloud_land.shutil.which
+
+    def trusted_tool(name, **kwargs):
+        if name in {"codex", "gh", "brigade", "vale"}:
+            return "/opt/trusted-tools/" + name
+        return original_which(name, **kwargs)
+
+    monkeypatch.setattr(codex_cloud_land.shutil, "which", trusted_tool)
+    home = tmp_path / "home"
+    home.mkdir()
+    trusted_hooks = home / "hooks"
+    trusted_hooks.mkdir()
+    (trusted_hooks / "pre-push").write_text("#!/bin/sh\nexit 0\n")
+    (trusted_hooks / "pre-push").chmod(0o700)
+    (home / ".gitconfig").write_text(f"[core]\n hooksPath = {trusted_hooks}\n")
+    monkeypatch.setenv("HOME", str(home))
     original = proc.run
     calls = []
     state = {"status": "[READY] example", "failure": None, "path": "file.txt"}
 
     def run(argv, **kwargs):
+        actual_argv = argv
+        state.setdefault("raw_calls", []).append((list(argv), kwargs.get("env")))
+        argv = [Path(argv[0]).name.removesuffix(".js"), *argv[1:]]
+        if argv[0] == "git":
+            while argv[1:2] == ["-c"]:
+                del argv[1:3]
         calls.append((argv, kwargs.get("cwd")))
         if argv[:3] == ["codex", "cloud", "status"]:
             if callback := state.get("during_status"):
                 callback()
             return proc.Result(0, state["status"], "")
         if argv[:3] == ["codex", "cloud", "diff"]:
+            if state.get("diff"):
+                return proc.Result(0, state["diff"], "")
+            if callback := state.get("during_diff"):
+                callback(kwargs["cwd"])
             path = state["path"]
-            return proc.Result(
-                0, f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-before\n+after\n", ""
-            )
+            patch = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-before\n+after\n"
+            for name, content in state.get("extra_files", {}).items():
+                lines = content.splitlines()
+                mode = "100755" if name in state.get("executable_files", []) else "100644"
+                patch += (
+                    f"diff --git a/{name} b/{name}\nnew file mode {mode}\n--- /dev/null\n+++ b/{name}\n@@ -0,0 +1,{len(lines)} @@\n"
+                    + "".join("+" + line + "\n" for line in lines)
+                )
+            state["last_diff"] = patch.encode()
+            return proc.Result(0, patch, "")
         if argv[:3] == ["codex", "cloud", "apply"]:
             assert kwargs["cwd"] != caller
             if state["failure"] == "apply":
@@ -67,6 +101,9 @@ def landing(tmp_path, monkeypatch):
         if argv[0] == "brigade" and state.get("execute_guard"):
             script = argv[argv.index("--command") + 1]
             guard_cwd = Path(argv[argv.index("--target") + 1])
+            receipt_directory = guard_cwd / ".brigade"
+            receipt_directory.mkdir(exist_ok=True)
+            (receipt_directory / "receipt-test").touch()
             assert Path(script).read_text().splitlines()[0] == f"#!{sys.executable} -I"
             return original(
                 [sys.executable, "-I", script],
@@ -76,17 +113,34 @@ def landing(tmp_path, monkeypatch):
         if argv[0] in {"brigade", "vale"}:
             return proc.Result(int(state["failure"] == argv[0]), "", "")
         if argv[:2] == ["git", "push"]:
+            if state["failure"] == "push":
+                return proc.Result(1, "", state.get("push_error", "network timeout"))
+            state["remote_sha"] = git(caller, "rev-parse", argv[-1].split(":")[0])
             return proc.Result(0, "", "")
+        if argv[:2] == ["git", "ls-remote"]:
+            return proc.Result(0, state.get("remote_sha", "") + "\t" + argv[-1] if state.get("remote_sha") else "", "")
+        if argv[:4] == ["git", "config", "--get", "remote.origin.url"]:
+            return proc.Result(0, "https://github.com/example/repo.git\n", "")
+        if argv[:2] == ["git", "fetch"] and "https://github.com/example/repo.git" in argv:
+            return original(["git", "-c", "protocol.file.allow=always", "fetch", "origin"], **kwargs)
+        if argv[:2] == ["git", "apply"] and "--index" in argv:
+            state["applied_diff"] = kwargs["stdin"]
+            if state["failure"] == "apply":
+                return proc.Result(1, "", "")
         if argv[:3] == ["gh", "pr", "list"]:
             return proc.Result(0, json.dumps([{"url": state["published"]}] if state.get("published") else []), "")
         if argv[:3] == ["gh", "pr", "create"]:
             body = Path(argv[argv.index("--body-file") + 1]).read_text()
             assert "task_example" in body and "#2473" in body
+            state["body"] = body
+            state["title"] = argv[argv.index("--title") + 1]
+            if state["failure"] == "pr":
+                return proc.Result(1, "", "")
             state["published"] = "https://github.com/example/repo/pull/123"
             if state.get("lose_pr_response"):
                 return proc.Result(1, "", "")
             return proc.Result(0, state["published"] + "\n", "")
-        return original(argv, **kwargs)
+        return original(actual_argv, **kwargs)
 
     monkeypatch.setattr(proc, "run", run)
     return caller, state, calls
@@ -263,7 +317,7 @@ def test_created_pr_recovered_without_duplicate(landing, monkeypatch, failure):
     assert result["pr_url"] == state["published"]
     assert result["branch"] == branch
     assert sum(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls) == 1
-    assert sum(argv[:3] == ["codex", "cloud", "apply"] for argv, _ in calls) == 1
+    assert sum(argv[:3] == ["codex", "cloud", "diff"] for argv, _ in calls) == 1
 
 
 def test_external_calls_leave_registry_available(landing):
@@ -298,6 +352,249 @@ def test_hook_cannot_publish_a_tree_that_guard_did_not_check(landing, tmp_path):
     hook.write_text('#!/bin/sh\nprintf "hook change\\n" > file.txt\ngit add file.txt\n')
     hook.chmod(0o700)
     git(caller, "config", "core.hooksPath", str(hooks))
-    with pytest.raises(codex_cloud_land.LandError, match="commit-tree-mismatch"):
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert git(caller, "show", result["branch"] + ":file.txt") == "after"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".github/actions/test.yml",
+        ".gitattributes",
+        ".gitmodules",
+        ".pre-commit-config.yaml",
+        ".husky/pre-push",
+        "lefthook.yml",
+        ".lefthook.yaml",
+        ".overcommit.yml",
+        ".pre-commit-hooks.yaml",
+        ".simple-git-hooks.json",
+    ],
+)
+def test_r1_refuse_execution_policy_paths(landing, path):
+    caller, state, _ = landing
+    state["path"] = path
+    with pytest.raises(codex_cloud_land.LandError, match="protected-"):
         codex_cloud_land.land(caller, "task_example", 2473)
-    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+
+
+@pytest.mark.parametrize("value", ["line\nname.txt", "tab\tname.txt", "escape\x1bname.txt", "delete\x7fname.txt"])
+def test_r1_control_paths_refused(value, tmp_path):
+    with pytest.raises(codex_cloud_land.LandError, match="unsafe-path"):
+        codex_cloud_land._check_path(value, tmp_path, ())
+
+
+def test_r1_caller_and_worktree_hooks_never_execute(landing, tmp_path):
+    caller, state, _ = landing
+    hooks = tmp_path / "caller-hooks"
+    hooks.mkdir()
+    marker = tmp_path / "executed"
+    for name in ("pre-commit", "post-checkout", "pre-push"):
+        hook = hooks / name
+        hook.write_text(f'#!/bin/sh\ntouch "{marker}"\n')
+        hook.chmod(0o700)
+    git(caller, "config", "core.hooksPath", str(hooks))
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert not marker.exists()
+
+
+def test_r1_exact_pinned_patch_and_hash(landing):
+    caller, state, calls = landing
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    entry = cloud_tracker.load_registry(caller)["entries"][0]
+    assert state["applied_diff"] == state["last_diff"]
+    assert entry["landing_diff_sha256"] == hashlib.sha256(state["last_diff"]).hexdigest()
+    assert entry["landing_attempt"] == 1
+    assert len(entry["landing_diff_sha256"]) == hashlib.sha256().digest_size * 2
+    assert entry["landing_commit"] == git(caller, "rev-parse", result["branch"])
+    assert not any(argv[:3] == ["codex", "cloud", "apply"] for argv, _ in calls)
+    assert any(argv[:3] == ["codex", "cloud", "diff"] and "--attempt" in argv for argv, _ in calls)
+    assert any(
+        argv[:2] == ["git", "push"]
+        and argv[-2] == "https://github.com/example/repo.git"
+        and argv[-1].endswith(":refs/heads/" + result["branch"])
+        for argv, _ in calls
+    )
+
+
+def test_r1_receipts_outside_applied_tree(landing, tmp_path):
+    caller, _, calls = landing
+    codex_cloud_land.land(caller, "task_example", 2473)
+    verification = next((argv, cwd) for argv, cwd in calls if argv[0] == "brigade")
+    argv, _ = verification
+    receipt_target = Path(argv[argv.index("--target") + 1])
+    tree = next(cwd for argv, cwd in calls if argv[:2] == ["git", "commit"])
+    assert receipt_target != tree and tree not in receipt_target.parents
+
+
+@pytest.mark.parametrize("failure,reason", [("push", "push-failed"), ("pr", "pr-create-failed")])
+def test_r1_publication_retry_reuses_commit(landing, failure, reason):
+    caller, state, calls = landing
+    state["failure"] = failure
+    with pytest.raises(codex_cloud_land.LandError, match=reason):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    entry = cloud_tracker.load_registry(caller)["entries"][0]
+    sha = git(caller, "rev-parse", entry["landing_branch"])
+    assert entry.get("landing_state") == ("prepared" if failure == "push" else "branch-pushed")
+    assert entry["landing_commit"] == sha
+    assert cloud_tracker.status_payload(caller)["entries"][0]["landing_state"] == entry["landing_state"]
+    assert cloud_tracker.sync_payload(caller, hub_leases=[])["pending_landings"][0]["landing_commit"] == sha
+    state["failure"] = None
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert git(caller, "rev-parse", result["branch"]) == sha
+    assert sum(argv[:3] == ["codex", "cloud", "diff"] for argv, _ in calls) == 1
+    assert cloud_tracker.load_registry(caller)["entries"][0]["landing_state"] == "pr-created"
+
+
+def test_r1_duplicate_registration_reuses_entry(landing):
+    caller, _, _ = landing
+    original = cloud_tracker.load_registry(caller)["entries"][0]
+    repeated = cloud_tracker.register(caller, provider="codex-cloud", task_id="task_example", label="duplicate")
+    assert repeated == original
+    assert cloud_tracker.load_registry(caller)["entries"] == [original]
+
+
+def test_r1_registry_revision_conflict(landing):
+    caller, state, _ = landing
+
+    def replace_entry():
+        with cloud_tracker.registry_lock(caller):
+            registry = cloud_tracker.load_registry(caller)
+            registry["entries"][0]["id"] = "cloud-replaced"
+            cloud_tracker.save_registry(caller, registry)
+
+    state["during_status"] = replace_entry
+    with pytest.raises(codex_cloud_land.LandError, match="registry-conflict"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not cloud_tracker.load_registry(caller)["entries"][0].get("pr_url")
+
+
+def test_r1_shallow_refused_up_front(landing):
+    caller, _, calls = landing
+    (caller / ".git" / "shallow").write_text(git(caller, "rev-parse", "HEAD") + "\n")
+    with pytest.raises(codex_cloud_land.LandError, match="shallow-target"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] == ["git", "fetch"] for argv, _ in calls)
+
+
+@pytest.mark.parametrize(
+    "message,reason",
+    [
+        ("pre-push: content-guard refused secret", "guard-refused"),
+        ("Authentication failed secret", "auth"),
+        ("Could not resolve host secret", "network"),
+        ("rejected non-fast-forward secret", "rejected"),
+    ],
+)
+def test_r1_push_failure_classified_without_output(landing, message, reason):
+    caller, state, _ = landing
+    state.update(failure="push", push_error=message)
+    with pytest.raises(codex_cloud_land.LandError) as error:
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert str(error.value) == "push-failed:" + reason
+
+
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        ("Repair cloud retry", "fix: Repair cloud retry"),
+        ("feat: add cloud support", "feat: add cloud support"),
+        ("", "fix: address #2473"),
+    ],
+)
+def test_r1_task_title(landing, title, expected):
+    caller, state, _ = landing
+    state["status"] = "[READY] " + title
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert state["title"] == expected
+
+
+def test_r1_closes_issue(landing):
+    caller, state, _ = landing
+    codex_cloud_land.land(caller, "task_example", 2473, closes=True)
+    assert "Closes #2473" in state["body"]
+
+
+def test_r1_git_environment_and_absolute_tools(landing, monkeypatch):
+    caller, state, _ = landing
+    monkeypatch.setenv("GIT_EXTERNAL_DIFF", "untrusted-command")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.fsmonitor")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "untrusted-command")
+    codex_cloud_land.land(caller, "task_example", 2473)
+    for argv, environment in state["raw_calls"]:
+        assert Path(argv[0]).is_absolute()
+        assert "GIT_EXTERNAL_DIFF" not in environment
+        if Path(argv[0]).name == "git":
+            assert "core.fsmonitor=false" in argv
+            assert "protocol.allow=never" in argv
+            assert "protocol.https.allow=always" in argv
+            hooks = Path(next(arg.split("=", 1)[1] for arg in argv if arg.startswith("core.hooksPath=")))
+            assert not hooks.is_relative_to(caller)
+
+
+def test_r1_filters_do_not_execute(landing, tmp_path):
+    caller, state, _ = landing
+    remote = caller.parent / "remote"
+    (remote / ".gitattributes").write_text("*.txt filter=hostile diff=hostile\n")
+    git(remote, "add", ".gitattributes")
+    git(remote, "commit", "-m", "test: attributes")
+    marker = tmp_path / "executed"
+    for key in ("filter.hostile.smudge", "filter.hostile.clean", "diff.hostile.textconv", "core.fsmonitor"):
+        git(caller, "config", key, f'touch "{marker}"')
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert not marker.exists()
+
+
+def test_r1_worktree_local_hook_never_executes(landing, tmp_path):
+    caller, state, _ = landing
+    marker = tmp_path / "executed"
+    hooks = tmp_path / "worktree-hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text(f'#!/bin/sh\ntouch "{marker}"\n')
+    hook.chmod(0o700)
+    git(caller, "config", "extensions.worktreeConfig", "true")
+
+    def inject(_):
+        inventory = git(caller, "worktree", "list", "--porcelain").splitlines()
+        tree = Path(next(line[9:] for line in inventory if line.startswith("worktree ") and line[9:] != str(caller)))
+        git(tree, "config", "--worktree", "core.hooksPath", str(hooks))
+
+    state["during_diff"] = inject
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert not marker.exists()
+
+
+def test_r1_guard_receipt_ignores_base_symlinks(landing, tmp_path):
+    caller, state, _ = landing
+    remote = caller.parent / "remote"
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (remote / ".brigade").symlink_to(victim, target_is_directory=True)
+    (remote / "memory").symlink_to(victim, target_is_directory=True)
+    git(remote, "add", ".brigade", "memory")
+    git(remote, "commit", "-m", "test: base symlinks")
+    state["execute_guard"] = True
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert list(victim.iterdir()) == []
+
+
+def test_r1_remote_ref_conflict_never_overwritten(landing):
+    caller, state, _ = landing
+    state["failure"] = "push"
+    with pytest.raises(codex_cloud_land.LandError, match="push-failed"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    state.update(failure=None, remote_sha="a" * 40)
+    with pytest.raises(codex_cloud_land.LandError, match="landing-ref-mismatch"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+
+
+def test_r1_land_help_explains_ci_boundary(capsys):
+    with pytest.raises(SystemExit) as error:
+        cli.main(["run", "cloud", "land", "--help"])
+    assert error.value.code == 0
+    output = " ".join(capsys.readouterr().out.split())
+    assert "no secrets" in output and "write token or trusted caches" in output
+    assert "#2512" in output
+    assert "--closes" in output

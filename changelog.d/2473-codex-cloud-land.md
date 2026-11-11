@@ -1,1 +1,2 @@
 - Add `brigade run cloud land --provider codex-cloud --task-id ID --issue N` to apply a ready task in an isolated worktree and open a PR for conductor review. Refuse protected paths and apply conflicts, run content guard, and record the PR in cloud status and sync (#2473).
+- Isolate landing Git hooks and drivers, apply one hashed task attempt, reject unsafe paths and shallow targets, and resume publication from the recorded commit after push or PR failures. Keep guard receipts outside proposal trees and expose pending landing states.
