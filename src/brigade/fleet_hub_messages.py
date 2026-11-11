@@ -21,6 +21,26 @@ from .fleet_hub_server import MAX_HANDLER_THREADS, is_loopback_address
 if TYPE_CHECKING:
     from .fleet_hub_sealed import StoragePolicy
 
+ADDITIVE_COLUMNS = (
+    ("fleet_messages", "is_reply", "ALTER TABLE fleet_messages ADD COLUMN is_reply INTEGER NOT NULL DEFAULT 0"),
+    ("fleet_messages", "envelope", "ALTER TABLE fleet_messages ADD COLUMN envelope TEXT"),
+    ("fleet_messages", "envelope_bytes", "ALTER TABLE fleet_messages ADD COLUMN envelope_bytes INTEGER"),
+    ("fleet_messages", "content_state", "ALTER TABLE fleet_messages ADD COLUMN content_state TEXT"),
+)
+
+
+def missing_reply_backfills(conn: sqlite3.Connection) -> list[str]:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(fleet_messages)")}
+    missing = []
+    if "sealed_reply_to" not in columns:
+        missing.append(
+            "UPDATE fleet_messages SET sealed_reply_to=reply_to WHERE envelope IS NOT NULL AND reply_to IS NOT NULL"
+        )
+    if "is_reply" not in columns:
+        missing.append("UPDATE fleet_messages SET is_reply=1 WHERE reply_to IS NOT NULL OR sealed_reply_to IS NOT NULL")
+    return missing
+
+
 SUBJECT_LIMIT = 200
 BODY_LIMIT = 64 * 1024
 REF_LIMIT = 256

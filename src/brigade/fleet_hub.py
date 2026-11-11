@@ -107,6 +107,7 @@ from .fleet_hub_upstream import configure_connection
 from . import (
     fleet_command_deck,
     fleet_hub_events,
+    fleet_hub_messages,
     fleet_hub_preference,
     fleet_hub_sealed,
     worklore_campaigns,
@@ -287,14 +288,7 @@ _ADDITIVE_COLUMNS = (
     ),
     ("fleet_message_principals", "person", "ALTER TABLE fleet_message_principals ADD COLUMN person TEXT"),
     ("fleet_messages", "sealed_reply_to", "ALTER TABLE fleet_messages ADD COLUMN sealed_reply_to INTEGER"),
-    (
-        "fleet_messages",
-        "is_reply",
-        "ALTER TABLE fleet_messages ADD COLUMN is_reply INTEGER NOT NULL DEFAULT 0",
-    ),
-    ("fleet_messages", "envelope", "ALTER TABLE fleet_messages ADD COLUMN envelope TEXT"),
-    ("fleet_messages", "envelope_bytes", "ALTER TABLE fleet_messages ADD COLUMN envelope_bytes INTEGER"),
-    ("fleet_messages", "content_state", "ALTER TABLE fleet_messages ADD COLUMN content_state TEXT"),
+    *fleet_hub_messages.ADDITIVE_COLUMNS,
     ("events", "context", "ALTER TABLE events ADD COLUMN context TEXT"),
     ("model_policy", "t3_model", "ALTER TABLE model_policy ADD COLUMN t3_model TEXT NOT NULL DEFAULT ''"),
     ("fleet_events", "producer", fleet_hub_events.PRODUCER_COLUMN_DDL),
@@ -321,12 +315,7 @@ def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
         for table, column, ddl in _ADDITIVE_COLUMNS
         if table not in created and column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
     )
-    if "sealed_reply_to" not in {row[1] for row in conn.execute("PRAGMA table_info(fleet_messages)")}:
-        missing.append(
-            "UPDATE fleet_messages SET sealed_reply_to=reply_to WHERE envelope IS NOT NULL AND reply_to IS NOT NULL"
-        )
-    if "is_reply" not in {row[1] for row in conn.execute("PRAGMA table_info(fleet_messages)")}:
-        missing.append("UPDATE fleet_messages SET is_reply=1 WHERE reply_to IS NOT NULL OR sealed_reply_to IS NOT NULL")
+    missing.extend(fleet_hub_messages.missing_reply_backfills(conn))
     missing.extend(ddl for kind, ddl in absent if kind == "index")
     # Index repair shares the current-version self-heal transaction and its
     # read-only fast path. Claim fencing tables retain their strict validation.

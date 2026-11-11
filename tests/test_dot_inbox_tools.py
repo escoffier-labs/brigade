@@ -23,7 +23,19 @@ from brigade.dot.state import BridgeState
 from tests.test_dot_runtime import _document
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
-LEGACY_KEYS = {"id", "created_at", "sender", "thread", "body", "acked_at", "priority", "subject", "ref", "kind"}
+LEGACY_KEYS = {
+    "id",
+    "created_at",
+    "sender",
+    "thread",
+    "body",
+    "acked_at",
+    "priority",
+    "subject",
+    "ref",
+    "kind",
+    "is_reply",
+}
 
 
 class FakeMessages:

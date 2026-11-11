@@ -319,6 +319,7 @@ MESSAGE = {
     "sender_label": OPT_STR,
     "client_id": NonEmpty(),
     "reply_to": OPT_INT,
+    "is_reply": bool,
     "created_at": NonEmpty(),
     "acked_at": OPT_STR,
     "acked_by": OPT_STR,
