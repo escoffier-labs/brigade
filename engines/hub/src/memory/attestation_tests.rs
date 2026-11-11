@@ -133,6 +133,20 @@ pub(super) async fn ready() -> (Hub, Json) {
 pub(super) async fn auto_request(h: &Hub, id: &Json) -> Json {
     json!({"action":"auto_apply","proposal_id":id,"base_epoch":h.epoch().await,"client_event_id":h.id()})
 }
+async fn auto_apply_after_backpressure(h: &Hub, request: &Json) -> Reply {
+    let mut reply = h.call(ADMIN_TOKEN, request.clone()).await;
+    // The full parallel suite can briefly exhaust a bounded reader or writer
+    // wait. Preserve the idempotency key and wait for the gate result rather
+    // than mistaking an expected 503 backpressure reply for that result.
+    for _ in 0..40 {
+        if reply.status != 503 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        reply = h.call(ADMIN_TOKEN, request.clone()).await;
+    }
+    reply
+}
 #[tokio::test]
 async fn retrieval_is_last_hold_and_recorded_path_is_exactly_once_audited_and_reversible() {
     let (h, id) = ready().await;
@@ -417,8 +431,9 @@ async fn each_auto_apply_gate_independently_holds_without_card_or_vector_changes
             _ => unreachable!(),
         }
         let before = bytes_snapshot(&h);
-        let r = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
-        assert_eq!(r.body["state"], "pending", "{mutation}");
+        let request = auto_request(&h, &id).await;
+        let r = auto_apply_after_backpressure(&h, &request).await;
+        assert_eq!(r.body["state"], "pending", "{mutation}: {r:?}");
         if mutation == "tier1" {
             assert_eq!(r.body["tier"], 1);
         }
