@@ -793,3 +793,69 @@ def test_r2_all_git_calls_use_private_repository(landing):
             assert cwd.parent.name.startswith("brigade-cloud-land-")
     assert git(caller, "branch", "--list", "codex/*") == ""
     assert state["published_file"] == "after\n"
+
+
+@pytest.fixture
+def interrupted_publication(landing, monkeypatch):
+    caller, state, calls = landing
+    original = codex_cloud_land._LandingGit.git
+    interrupted = False
+
+    def git_with_interrupt(self, args, *argv, **kwargs):
+        nonlocal interrupted
+        result = original(self, args, *argv, **kwargs)
+        if args[:2] == ["worktree", "add"] and Path(args[-2]).name == "publication" and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return result
+
+    monkeypatch.setattr(codex_cloud_land._LandingGit, "git", git_with_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    entry = cloud_tracker.load_registry(caller)["entries"][0]
+    publication = Path(entry["landing_workspace"]) / "publication"
+    assert publication.is_dir()
+    assert git(publication, "rev-parse", "HEAD") == entry["landing_commit"]
+    return caller, state, calls, entry, publication
+
+
+def test_r2_interrupted_publication_worktree_is_reused(interrupted_publication):
+    caller, state, calls, entry, publication = interrupted_publication
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert result["pr_url"].endswith("/123")
+    assert state["remote_sha"] == entry["landing_commit"]
+    assert sum(argv[:2] == ["git", "commit"] for argv, _ in calls) == 1
+    assert sum(argv[:2] == ["git", "worktree"] and "add" in argv and str(publication) in argv for argv, _ in calls) == 1
+
+
+@pytest.mark.parametrize("damage", ["branch", "head", "local-ref", "unregistered", "missing", "symlink", "file"])
+def test_r2_invalid_publication_worktree_is_recreated(interrupted_publication, tmp_path, damage):
+    caller, state, calls, entry, publication = interrupted_publication
+    repository = publication.parent / "repository"
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("keep\n")
+    if damage == "branch":
+        git(publication, "checkout", "-b", "other")
+    elif damage == "head":
+        git(publication, "checkout", "--detach", "HEAD^")
+    elif damage == "local-ref":
+        git(publication, "update-ref", "refs/heads/" + entry["landing_branch"], "HEAD^")
+    elif damage in {"unregistered", "file"}:
+        git(repository, "worktree", "remove", "--force", str(publication))
+        if damage == "file":
+            publication.write_text("stale\n")
+        else:
+            publication.mkdir()
+            (publication / "stale.txt").write_text("stale\n")
+            (publication / "linked-directory").symlink_to(victim, target_is_directory=True)
+    else:
+        shutil.rmtree(publication)
+        if damage == "symlink":
+            publication.symlink_to(victim, target_is_directory=True)
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert result["pr_url"].endswith("/123")
+    assert state["remote_sha"] == entry["landing_commit"]
+    assert (victim / "keep.txt").read_text() == "keep\n"
+    assert sum(argv[:2] == ["git", "commit"] for argv, _ in calls) == 1
+    assert sum(argv[:2] == ["git", "worktree"] and "add" in argv and str(publication) in argv for argv, _ in calls) == 2

@@ -540,7 +540,7 @@ def _land_locked(
         optional=True,
     ).strip()
     if commit:
-        if (local and local != commit) or (remote_sha and remote_sha != commit):
+        if remote_sha and remote_sha != commit:
             raise LandError("landing-ref-mismatch")
         if not local and not remote_sha:
             _update(target, entry, landing_commit=None, landing_state=None)
@@ -590,13 +590,11 @@ def _land_locked(
             "ref-inspection-failed",
             optional=True,
         ).strip()
-    if local:
-        git.git(["worktree", "add", str(publish_tree), branch], git.repository, "worktree-failed")
-    else:
+    if not local:
         git.git(["fetch", "--no-tags", canonical, f"refs/heads/{branch}"], git.repository, "fetch-failed")
         if git.git(["rev-parse", "FETCH_HEAD"], git.repository, "inspect-failed").strip() != commit:
             raise LandError("landing-ref-mismatch")
-        git.git(["worktree", "add", "--detach", str(publish_tree), commit], git.repository, "worktree-failed")
+    _publication_worktree(git, publish_tree, branch, commit)
     try:
         if git.git(["rev-parse", "HEAD^{tree}"], publish_tree, "inspect-failed").strip() != entry["landing_tree"]:
             raise LandError("commit-tree-mismatch")
@@ -626,6 +624,51 @@ def _land_locked(
         git.git(["worktree", "remove", "--force", str(publish_tree)], git.repository, "worktree-cleanup-failed")
     _validate_pr_url(url, repo)
     return _record_pr(target, entry, url)
+
+
+def _publication_worktree(git: _LandingGit, tree: Path, branch: str, commit: str) -> None:
+    """Reuse the pinned publication checkout or replace stale private state."""
+    inventory = git.git(["worktree", "list", "--porcelain", "-z"], git.repository, "inspect-failed")
+    registered = False
+    matching = False
+    for record in inventory.split("\0\0"):
+        fields = record.split("\0")
+        if f"worktree {tree}" in fields:
+            registered = True
+            matching = f"HEAD {commit}" in fields and f"branch refs/heads/{branch}" in fields
+            break
+    if matching and not tree.is_symlink() and tree.is_dir():
+        try:
+            common = git.git(["rev-parse", "--git-common-dir"], tree, "inspect-failed").strip()
+            if (
+                (tree / common).resolve() == (git.repository / ".git").resolve()
+                and git.git(["symbolic-ref", "--quiet", "HEAD"], tree, "inspect-failed", optional=True).strip()
+                == f"refs/heads/{branch}"
+                and git.git(["rev-parse", "HEAD"], tree, "inspect-failed").strip() == commit
+            ):
+                return
+        except LandError as exc:
+            if str(exc) != "inspect-failed":
+                raise
+    if registered or tree.exists() or tree.is_symlink():
+        # Unlink the leaf before Git can interpret a stale path through a symlink.
+        if tree.is_symlink():
+            tree.unlink()
+        try:
+            git.git(["worktree", "remove", "--force", str(tree)], git.repository, "worktree-cleanup-failed")
+        except LandError as exc:
+            if str(exc) != "worktree-cleanup-failed" or (registered and tree.is_dir()):
+                raise
+        git.git(["worktree", "prune", "--expire", "now"], git.repository, "worktree-cleanup-failed")
+        if tree.is_symlink():
+            tree.unlink()
+        elif tree.is_dir():
+            shutil.rmtree(tree)
+        else:
+            tree.unlink(missing_ok=True)
+    # -B restores only the private branch to the recorded commit. Git still
+    # refuses a branch checked out elsewhere, and no remote ref is overwritten.
+    git.git(["worktree", "add", "-B", branch, str(tree), commit], git.repository, "worktree-failed")
 
 
 def _validate_pr_url(url: str, repo: str) -> None:
