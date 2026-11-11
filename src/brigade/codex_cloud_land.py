@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
-from . import cloud_tracker, codex_cloud, proc
+from . import cloud_tracker, codex_cloud, isolated_exec, proc
 
 
 class LandError(ValueError):
@@ -26,7 +26,7 @@ def _run(argv: list[str], cwd: Path, reason: str, *, stdin: bytes | None = None)
     return result.stdout
 
 
-def _check_path(value: str) -> None:
+def _check_path(value: str, tree: Path, hooks: tuple[Path, ...]) -> None:
     path = PurePosixPath(value)
     parts = tuple(part.lower() for part in path.parts)
     if not parts or path.is_absolute() or ".." in parts or "\\" in value:
@@ -43,11 +43,18 @@ def _check_path(value: str) -> None:
         for part in parts
     ):
         raise LandError("credential-path")
+    candidate = tree / value
+    if any(
+        hook == checked or hook in checked.parents or checked in hook.parents
+        for hook in hooks
+        for checked in (candidate, candidate.resolve())
+    ):
+        raise LandError("protected-hook-path")
     if parts[0] in {"hooks", ".githooks"}:
         raise LandError("protected-hook-path")
 
 
-def _diff_paths(diff: str, cwd: Path) -> None:
+def _diff_paths(diff: str, cwd: Path, hooks: tuple[Path, ...]) -> None:
     raw = _run(["git", "apply", "--numstat", "-z", "-"], cwd, "invalid-diff", stdin=diff.encode())
     records = iter(raw.split("\0"))
     count = 0
@@ -59,7 +66,7 @@ def _diff_paths(diff: str, cwd: Path) -> None:
             raise LandError("invalid-diff")
         paths = [columns[2]] if columns[2] else [next(records, ""), next(records, "")]
         for path in paths:
-            _check_path(path)
+            _check_path(path, cwd, hooks)
             count += 1
     if not count:
         raise LandError("empty-diff")
@@ -93,8 +100,11 @@ def land(target: Path, task_id: str, issue: int) -> dict[str, str]:
             tree = root / "worktree"
             _run(["git", "worktree", "add", "-b", branch, str(tree), "origin/main"], target, "worktree-failed")
             try:
+                hook_path = Path(_run(["git", "rev-parse", "--git-path", "hooks"], tree, "hook-config-failed").strip())
+                hook_path = hook_path if hook_path.is_absolute() else tree / hook_path
+                hooks = (hook_path, hook_path.resolve())
                 diff = _run(["codex", "cloud", "diff", task_id], tree, "diff-failed")
-                _diff_paths(diff, tree)
+                _diff_paths(diff, tree, hooks)
                 _run(["git", "apply", "--check", "-"], tree, "apply-conflict", stdin=diff.encode())
                 _run(["codex", "cloud", "apply", task_id], tree, "apply-conflict")
                 _run(["git", "add", "--all"], tree, "stage-failed")
@@ -104,7 +114,7 @@ def land(target: Path, task_id: str, issue: int) -> dict[str, str]:
                 if not any(paths):
                     raise LandError("empty-diff")
                 for name in filter(None, paths):
-                    _check_path(name)
+                    _check_path(name, tree, hooks)
                     path = tree / name
                     if path.is_symlink() or (path.exists() and not stat.S_ISREG(path.lstat().st_mode)):
                         raise LandError("unsafe-file-type")
@@ -112,8 +122,17 @@ def land(target: Path, task_id: str, issue: int) -> dict[str, str]:
                 # A script keeps verification argv shell-free and produces a Brigade receipt.
                 check = root / "guard-check"
                 check.write_text(
-                    f"#!{sys.executable}\nimport subprocess\nraise SystemExit(subprocess.call("
-                    + repr([sys.executable, "-I", "-m", "brigade", "guard", "git", "--staged"])
+                    f"#!{sys.executable} -I\nimport subprocess\nraise SystemExit(subprocess.call("
+                    + repr(
+                        isolated_exec.package_argv(
+                            isolated_exec.trusted_cwd() / "__init__.py",
+                            "brigade",
+                            "guard",
+                            "git",
+                            "--staged",
+                            cwd_after_load=tree,
+                        )
+                    )
                     + "))\n",
                     encoding="utf-8",
                 )

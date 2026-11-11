@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -51,7 +53,20 @@ def landing(tmp_path, monkeypatch):
             if state["failure"] == "apply":
                 return proc.Result(1, "private failure", "")
             (kwargs["cwd"] / "file.txt").write_text("after\n")
+            for name, content in state.get("extra_files", {}).items():
+                path = kwargs["cwd"] / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
             return proc.Result(0, "", "")
+        if argv[0] == "brigade" and state.get("execute_guard"):
+            script = argv[argv.index("--command") + 1]
+            guard_cwd = Path(argv[argv.index("--target") + 1])
+            assert Path(script).read_text().splitlines()[0] == f"#!{sys.executable} -I"
+            return original(
+                [sys.executable, "-I", script],
+                cwd=guard_cwd,
+                env={**os.environ, "PYTHONPATH": "src", **state.get("guard_env", {})},
+            )
         if argv[0] in {"brigade", "vale"}:
             return proc.Result(int(state["failure"] == argv[0]), "", "")
         if argv[:2] == ["git", "push"]:
@@ -170,3 +185,27 @@ def test_unregistered_task_refused(landing):
     with pytest.raises(codex_cloud_land.LandError, match="task-not-uniquely-registered"):
         codex_cloud_land.land(caller, "task_unregistered", 2473)
     assert calls == []
+
+
+@pytest.mark.parametrize("hooks_path", [".husky", "custom/hooks"])
+def test_effective_hooks_directory_refused(landing, hooks_path):
+    caller, state, calls = landing
+    git(caller, "config", "core.hooksPath", hooks_path)
+    state["path"] = hooks_path + "/pre-commit"
+    with pytest.raises(codex_cloud_land.LandError, match="protected-hook-path"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:3] == ["codex", "cloud", "apply"] for argv, _ in calls)
+
+
+def test_guard_wrapper_ignores_task_pythonpath(landing, tmp_path):
+    caller, state, _ = landing
+    marker = tmp_path / "executed"
+    state["extra_files"] = {
+        "src/subprocess.py": 'import os\nfrom pathlib import Path\nPath(os.environ["BRIGADE_TEST_MARKER"]).touch()\nraise SystemExit(0)\n',
+        "src/brigade/__init__.py": 'import os\nfrom pathlib import Path\nPath(os.environ["BRIGADE_TEST_MARKER"]).touch()\nraise SystemExit(0)\n',
+    }
+    state["guard_env"] = {"BRIGADE_TEST_MARKER": str(marker)}
+    state["execute_guard"] = True
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert result["pr_url"].endswith("/123")
+    assert not marker.exists()
