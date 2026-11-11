@@ -9,19 +9,26 @@ import shutil
 import subprocess
 import sys
 import threading
+import types
 from pathlib import Path
 
 import pytest
 
 from brigade import cli, cloud_tracker, codex_cloud, codex_cloud_land, proc
+from tests._home import set_home
+
+
+GIT_EXECUTABLE = shutil.which("git")
 
 
 def git(root, *args):
-    return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+    return subprocess.check_output([GIT_EXECUTABLE, *args], cwd=root, text=True).strip()
 
 
 @pytest.fixture
 def landing(tmp_path, monkeypatch):
+    if os.name != "posix":
+        pytest.skip("Landing private-directory and descriptor guarantees require POSIX")
     remote = tmp_path / "remote"
     remote.mkdir()
     git(remote, "init", "-b", "main")
@@ -36,12 +43,19 @@ def landing(tmp_path, monkeypatch):
     git(caller, "config", "user.email", "dev@example.invalid")
     git(caller, "config", "user.name", "Example")
     git(caller, "config", "core.hooksPath", "/dev/null")
+    git(caller, "remote", "set-url", "origin", "https://github.com/example/repo.git")
     (caller / "file.txt").write_text("caller dirty\n")
     cloud_tracker.register(caller, provider="codex-cloud", task_id="task_example", label="example")
     monkeypatch.setattr(codex_cloud, "_repo_from_cwd", lambda _: "example/repo")
     original_which = shutil.which
 
+    gh = tmp_path / "gh"
+    gh.write_text("#!/bin/sh\nexit 1\n")
+    gh.chmod(0o700)
+
     def trusted_tool(name, **kwargs):
+        if name == "gh":
+            return str(gh)
         if name in {"codex", "gh", "brigade", "vale"}:
             return "/opt/trusted-tools/" + name
         return original_which(name, **kwargs)
@@ -53,11 +67,21 @@ def landing(tmp_path, monkeypatch):
     trusted_hooks.mkdir()
     (trusted_hooks / "pre-push").write_text("#!/bin/sh\nexit 0\n")
     (trusted_hooks / "pre-push").chmod(0o700)
-    (home / ".gitconfig").write_text(f"[core]\n hooksPath = {trusted_hooks}\n")
-    monkeypatch.setenv("HOME", str(home))
+    (home / ".gitconfig").write_text(
+        f"[core]\n hooksPath = {trusted_hooks}\n[user]\n name = Example\n email = dev@example.invalid\n"
+        f'[credential "https://github.com"]\n helper = !{gh} auth git-credential\n'
+    )
+    set_home(monkeypatch, home)
     original = proc.run
     calls = []
     state = {"status": "[READY] example", "failure": None, "path": "file.txt"}
+
+    def probe_transport(argv, kwargs):
+        # Replace HTTPS at the transport boundary, after real Git resolves its config.
+        safe = state["https_marker"]
+        safe.unlink(missing_ok=True)
+        result = original(argv, **{**kwargs, "env": {**kwargs["env"], "GIT_EXEC_PATH": str(state["exec_path"])}})
+        return None if safe.exists() else result
 
     def run(argv, **kwargs):
         actual_argv = argv
@@ -116,16 +140,36 @@ def landing(tmp_path, monkeypatch):
         if argv[0] in {"brigade", "vale"}:
             return proc.Result(int(state["failure"] == argv[0]), "", "")
         if argv[:2] == ["git", "push"]:
+            if state.get("probe_rewrite"):
+                result = probe_transport(actual_argv, kwargs)
+                if result is not None:
+                    return result
+            if state.get("probe_proxy"):
+                effective = original(
+                    [actual_argv[0], "config", "--get-urlmatch", "http", "https://github.com/example/repo.git"],
+                    cwd=kwargs["cwd"],
+                    env=kwargs["env"],
+                )
+                state["push_http"] = effective.stdout.lower()
             if state["failure"] == "push":
                 return proc.Result(1, "", state.get("push_error", "network timeout"))
-            state["remote_sha"] = git(caller, "rev-parse", argv[-1].split(":")[0])
+            state["remote_sha"] = git(kwargs["cwd"], "rev-parse", argv[-1].split(":")[0])
+            state["commit_message"] = git(kwargs["cwd"], "log", "-1", "--format=%B")
+            state["published_file"] = (kwargs["cwd"] / "file.txt").read_text()
             return proc.Result(0, "", "")
         if argv[:2] == ["git", "ls-remote"]:
+            if state.get("probe_rewrite"):
+                result = probe_transport(actual_argv, kwargs)
+                if result is not None:
+                    return result
             return proc.Result(0, state.get("remote_sha", "") + "\t" + argv[-1] if state.get("remote_sha") else "", "")
         if argv[:4] == ["git", "config", "--get", "remote.origin.url"]:
             return proc.Result(0, "https://github.com/example/repo.git\n", "")
         if argv[:2] == ["git", "fetch"] and "https://github.com/example/repo.git" in argv:
-            return original(["git", "-c", "protocol.file.allow=always", "fetch", "origin"], **kwargs)
+            return original(
+                ["git", "-c", "protocol.file.allow=always", "fetch", "--no-tags", str(remote), "refs/heads/main"],
+                **kwargs,
+            )
         if argv[:2] == ["git", "apply"] and "--index" in argv:
             state["applied_diff"] = kwargs["stdin"]
             if state["failure"] == "apply":
@@ -150,14 +194,14 @@ def landing(tmp_path, monkeypatch):
 
 
 def test_land_isolated_and_registered(landing):
-    caller, _, calls = landing
+    caller, state, calls = landing
     head = git(caller, "rev-parse", "HEAD")
     result = codex_cloud_land.land(caller, "task_example", 2473)
     assert result["pr_url"] == "https://github.com/example/repo/pull/123"
     assert git(caller, "rev-parse", "HEAD") == head
     assert (caller / "file.txt").read_text() == "caller dirty\n"
     assert len(git(caller, "worktree", "list").splitlines()) == 1
-    commit = git(caller, "log", "-1", "--format=%B", result["branch"])
+    commit = state["commit_message"]
     assert commit.endswith("Co-Authored-By: Codex <codex@openai.com>")  # content-guard: allow pii/email
     entry = cloud_tracker.load_registry(caller)["entries"][0]
     assert entry["pr_url"] == result["pr_url"]
@@ -348,15 +392,15 @@ def test_external_calls_leave_registry_available(landing):
 
 
 def test_hook_cannot_publish_a_tree_that_guard_did_not_check(landing, tmp_path):
-    caller, _, calls = landing
+    caller, state, calls = landing
     hooks = tmp_path / "trusted-hooks"
     hooks.mkdir()
     hook = hooks / "pre-commit"
     hook.write_text('#!/bin/sh\nprintf "hook change\\n" > file.txt\ngit add file.txt\n')
     hook.chmod(0o700)
     git(caller, "config", "core.hooksPath", str(hooks))
-    result = codex_cloud_land.land(caller, "task_example", 2473)
-    assert git(caller, "show", result["branch"] + ":file.txt") == "after"
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert state["published_file"] == "after\n"
 
 
 @pytest.mark.parametrize(
@@ -409,7 +453,7 @@ def test_r1_exact_pinned_patch_and_hash(landing):
     assert entry["landing_diff_sha256"] == hashlib.sha256(state["last_diff"]).hexdigest()
     assert entry["landing_attempt"] == 1
     assert len(entry["landing_diff_sha256"]) == hashlib.sha256().digest_size * 2
-    assert entry["landing_commit"] == git(caller, "rev-parse", result["branch"])
+    assert entry["landing_commit"] == state["remote_sha"]
     assert not any(argv[:3] == ["codex", "cloud", "apply"] for argv, _ in calls)
     assert any(argv[:3] == ["codex", "cloud", "diff"] and "--attempt" in argv for argv, _ in calls)
     assert any(
@@ -437,14 +481,16 @@ def test_r1_publication_retry_reuses_commit(landing, failure, reason):
     with pytest.raises(codex_cloud_land.LandError, match=reason):
         codex_cloud_land.land(caller, "task_example", 2473)
     entry = cloud_tracker.load_registry(caller)["entries"][0]
-    sha = git(caller, "rev-parse", entry["landing_branch"])
+    sha = entry["landing_commit"]
     assert entry.get("landing_state") == ("prepared" if failure == "push" else "branch-pushed")
-    assert entry["landing_commit"] == sha
+    private = Path(entry["landing_workspace"]) / "repository"
+    assert git(private, "rev-parse", entry["landing_branch"]) == sha
+    assert git(caller, "branch", "--list", entry["landing_branch"]) == ""
     assert cloud_tracker.status_payload(caller)["entries"][0]["landing_state"] == entry["landing_state"]
     assert cloud_tracker.sync_payload(caller, hub_leases=[])["pending_landings"][0]["landing_commit"] == sha
     state["failure"] = None
-    result = codex_cloud_land.land(caller, "task_example", 2473)
-    assert git(caller, "rev-parse", result["branch"]) == sha
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert state["remote_sha"] == sha
     assert sum(argv[:3] == ["codex", "cloud", "diff"] for argv, _ in calls) == 1
     assert cloud_tracker.load_registry(caller)["entries"][0]["landing_state"] == "pr-created"
 
@@ -528,12 +574,10 @@ def test_r1_git_environment_and_absolute_tools(landing, monkeypatch):
     for argv, environment in state["raw_calls"]:
         assert Path(argv[0]).is_absolute()
         assert "GIT_EXTERNAL_DIFF" not in environment
-        if Path(argv[0]).name == "git":
-            assert "core.fsmonitor=false" in argv
-            assert "protocol.allow=never" in argv
-            assert "protocol.https.allow=always" in argv
-            hooks = Path(next(arg.split("=", 1)[1] for arg in argv if arg.startswith("core.hooksPath=")))
-            assert not hooks.is_relative_to(caller)
+        if Path(argv[0]).name == "git" and "commit" in argv:
+            assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
+            assert Path(environment["GIT_CONFIG_GLOBAL"]).name == "gitconfig"
+            assert not Path(environment["GIT_CONFIG_GLOBAL"]).is_relative_to(caller)
 
 
 def test_r1_filters_do_not_execute(landing, tmp_path):
@@ -560,9 +604,8 @@ def test_r1_worktree_local_hook_never_executes(landing, tmp_path):
     git(caller, "config", "extensions.worktreeConfig", "true")
 
     def inject(_):
-        inventory = git(caller, "worktree", "list", "--porcelain").splitlines()
-        tree = Path(next(line[9:] for line in inventory if line.startswith("worktree ") and line[9:] != str(caller)))
-        git(tree, "config", "--worktree", "core.hooksPath", str(hooks))
+        # Caller worktree config remains outside the landing repository.
+        git(caller, "config", "--worktree", "core.hooksPath", str(hooks))
 
     state["during_diff"] = inject
     codex_cloud_land.land(caller, "task_example", 2473)
@@ -644,8 +687,109 @@ def test_r1_other_executable_config_neutralized(landing):
     for key in keys:
         git(caller, "config", key, "./task-program")
     codex_cloud_land.land(caller, "task_example", 2473)
-    commit = next(argv for argv, _ in state["raw_calls"] if Path(argv[0]).name == "git" and "commit" in argv)
-    for key in keys:
-        assert key + "=" in commit
-    assert "commit.gpgsign=false" in commit and "tag.gpgsign=false" in commit
-    assert any(argument.startswith("credential.helper=!") and "auth git-credential" in argument for argument in commit)
+    # Caller executable settings never enter the private repository.
+    assert state["remote_sha"]
+    assert state["published_file"] == "after\n"
+
+
+@pytest.mark.parametrize("included", [False, True])
+@pytest.mark.parametrize("rewrite", ["insteadOf", "pushInsteadOf"])
+def test_r2_caller_rewrite_cannot_run_helper(landing, tmp_path, included, rewrite):
+    caller, state, _ = landing
+    marker = tmp_path / "executed"
+    helper = tmp_path / "probe"
+    helper.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 1\n')
+    helper.chmod(0o700)
+    config = caller / ".git" / "config"
+    if included:
+        config = tmp_path / "included.gitconfig"
+        git(caller, "config", "include.path", str(config))
+    subprocess.check_call(
+        ["git", "config", "--file", str(config), f"url.ext::{helper}.{rewrite}", "https://github.com/example/repo.git"]
+    )
+    subprocess.check_call(["git", "config", "--file", str(config), "protocol.ext.allow", "always"])
+    executables = tmp_path / "git-exec"
+    executables.mkdir()
+    safe = tmp_path / "https-executed"
+    https = executables / "git-remote-https"
+    https.write_text(f'#!/bin/sh\ntouch "{safe}"\nexit 1\n')
+    https.chmod(0o700)
+    (executables / "git-remote-ext").symlink_to(Path(git(caller, "--exec-path")) / "git-remote-ext")
+    state.update(exec_path=executables, https_marker=safe)
+    state["probe_rewrite"] = True
+    try:
+        result = codex_cloud_land.land(caller, "task_example", 2473)
+    finally:
+        assert not marker.exists()
+    assert result["pr_url"].endswith("/123")
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_r2_caller_proxy_cannot_affect_push(landing, scoped):
+    caller, state, _ = landing
+    prefix = "http.https://github.com." if scoped else "http."
+    git(caller, "config", prefix + "proxy", "http://proxy.example.invalid:8080")
+    git(caller, "config", prefix + "sslVerify", "false")
+    state["probe_proxy"] = True
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert "proxy" not in state["push_http"]
+    assert "http.sslverify true" in state["push_http"]
+
+
+def test_r2_non_posix_refused_before_work(tmp_path, monkeypatch):
+    monkeypatch.setattr(codex_cloud_land, "os", types.SimpleNamespace(**{**vars(os), "name": "nt"}))
+    with pytest.raises(codex_cloud_land.LandError, match="^unsupported-platform$"):
+        codex_cloud_land.land(tmp_path, "task_example", 2473)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("url.ext::probe.insteadOf", "https://github.com/"),
+        ("url.ext::probe.pushInsteadOf", "https://github.com/"),
+        ("protocol.ext.allow", "always"),
+        ("protocol.https.allow", "never"),
+        ("http.proxy", "http://proxy.example.invalid:8080"),
+        ("http.https://github.com.proxy", "http://proxy.example.invalid:8080"),
+        ("http.sslVerify", "false"),
+        ("http.https://github.com.sslVerify", "false"),
+        ("include.path", "missing.gitconfig"),
+        ("includeIf.gitdir:/.path", "missing.gitconfig"),
+    ],
+)
+def test_r2_unsafe_effective_config_refused_before_transport(landing, key, value):
+    caller, state, calls = landing
+
+    def inject(cwd):
+        git(cwd, "config", key, value)
+
+    state["during_diff"] = inject
+    with pytest.raises(codex_cloud_land.LandError, match="^unsafe-git-config$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    injected = next(index for index, (argv, _) in enumerate(calls) if argv[:3] == ["codex", "cloud", "diff"])
+    assert not any(
+        argv[:2] in (["git", "fetch"], ["git", "push"], ["git", "ls-remote"]) for argv, _ in calls[injected + 1 :]
+    )
+
+
+@pytest.mark.parametrize(
+    "helper", ["store", "!gh auth git-credential extra", "/nonexistent/credential", "!touch probe"]
+)
+def test_r2_untrusted_operator_helper_refused(landing, helper):
+    caller, _, calls = landing
+    git(caller, "config", "--global", "credential.https://github.com.helper", helper)
+    with pytest.raises(codex_cloud_land.LandError, match="^unsafe-git-config$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] in (["git", "fetch"], ["git", "push"], ["git", "ls-remote"]) for argv, _ in calls)
+
+
+def test_r2_all_git_calls_use_private_repository(landing):
+    caller, state, calls = landing
+    codex_cloud_land.land(caller, "task_example", 2473)
+    for argv, cwd in calls:
+        if argv[0] == "git":
+            assert not cwd.is_relative_to(caller)
+            assert cwd.parent.name.startswith("brigade-cloud-land-")
+    assert git(caller, "branch", "--list", "codex/*") == ""
+    assert state["published_file"] == "after\n"

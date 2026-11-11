@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import configparser
 import hashlib
 import json
 import os
@@ -29,7 +30,23 @@ def _environment() -> dict[str, str]:
         key: value
         for key, value in os.environ.items()
         if not key.upper().startswith(("GIT_", "PYTHON", "LD_", "DYLD_"))
-        and key not in {"BASH_ENV", "ENV", "CDPATH", "NODE_OPTIONS", "NODE_PATH"}
+        and key.upper()
+        not in {
+            "BASH_ENV",
+            "ENV",
+            "CDPATH",
+            "NODE_OPTIONS",
+            "NODE_PATH",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "CURL_CA_BUNDLE",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "SSH_ASKPASS",
+            "SSH_ASKPASS_REQUIRE",
+        }
     }
 
 
@@ -73,6 +90,8 @@ class _LandingGit:
 
     def __init__(self, target: Path, root: Path):
         self.target = target
+        self.repository = root / "repository"
+        self.repository.mkdir(mode=0o700, exist_ok=True)
         environment = _environment()
         directories = [
             str(Path(part).resolve())
@@ -87,9 +106,10 @@ class _LandingGit:
             self.tools[name] = str(Path(resolved).resolve())
         # Hooks invoke tools by name. Pin those names before any ambient PATH entry.
         tools_dir = root / "tools"
-        tools_dir.mkdir(mode=0o700)
+        tools_dir.mkdir(mode=0o700, exist_ok=True)
         for name, executable in self.tools.items():
             if name != "brigade":
+                (tools_dir / name).unlink(missing_ok=True)
                 (tools_dir / name).symlink_to(executable)
         # Hooks use the same trusted package as landing, in isolated Python mode.
         # The final bootstrap operand is the Git working directory at invocation time.
@@ -109,106 +129,143 @@ class _LandingGit:
         environment["PATH"] = os.pathsep.join([str(tools_dir), *directories])
         environment["GIT_TERMINAL_PROMPT"] = "0"
         environment["GH_PROMPT_DISABLED"] = "1"
+        environment["GIT_CONFIG_NOSYSTEM"] = "1"
+        environment["GIT_CEILING_DIRECTORIES"] = str(root)
         self.environment = environment
-        self.hooks = root / "hooks"
-        self.hooks.mkdir(mode=0o700)
-        self.config = [
-            f"core.hooksPath={self.hooks}",
-            "core.fsmonitor=false",
-            "protocol.allow=never",
-            "protocol.https.allow=always",
-            "diff.external=",
-            "commit.gpgsign=false",
-            "tag.gpgsign=false",
-            "gpg.program=",
-            "gpg.ssh.program=",
-            "gpg.x509.program=",
-            "core.editor=",
-            "core.pager=",
-            "core.sshCommand=",
-            "core.askPass=",
-            "core.gitProxy=",
-            "core.alternateRefsCommand=",
-            "sequence.editor=",
-            "interactive.diffFilter=",
-            "credential.helper=",
-            "fetch.recurseSubmodules=false",
-            "submodule.recurse=false",
-            "core.attributesFile=/dev/null",
-            "core.autocrlf=false",
-            "apply.whitespace=nowarn",
-            "apply.ignoreWhitespace=no",
-        ]
-        # Discovery commands cannot execute filters or textconv. Disable every configured driver
-        # before checkout, apply, diff or publication, including drivers selected by base attributes.
-        names = self.git(
-            [
-                "config",
-                "--null",
-                "--name-only",
-                "--get-regexp",
-                r"^(filter\..*|merge\..*\.driver|diff\..*\.(textconv|command)|credential(\..*)?\.helper|pager\..*|difftool\..*\.cmd|mergetool\..*\.cmd|submodule\..*\.update)$",
-            ],
-            target,
-            "git-config-failed",
-            optional=True,
-        )
-        for name in filter(None, names.split("\0")):
-            value = (
-                "false"
-                if name.endswith(".required") or name.startswith("pager.")
-                else "none"
-                if name.startswith("submodule.")
-                else ""
+
+        if not (self.repository / ".git").exists():
+            _run(
+                [self.tools["git"], "init", "--template=", "--initial-branch=main", "."],
+                self.repository,
+                "git-init-failed",
+                environment={**environment, "GIT_CONFIG_GLOBAL": os.devnull},
             )
-            self.config.append(f"{name}={value}")
-        # Empty helper entries reset all prior helpers, including URL-scoped ones.
-        # Retain exactly the trusted GitHub credential path after those resets.
-        self.config.extend(
-            ["credential.helper=", f"credential.helper=!{shlex.quote(self.tools['gh'])} auth git-credential"]
-        )
-        raw = self.git(
-            ["config", "--global", "--path", "--get", "core.hooksPath"], target, "trusted-hook-required"
-        ).strip()
-        configured = Path(raw).expanduser()
-        if not configured.is_absolute():
-            raise LandError("trusted-hook-required")
+
+        # Read only operator global settings, including its trusted includes.
+        def operator(*args: str, optional: bool = False) -> str:
+            return _run(
+                [self.tools["git"], "config", "--global", "--includes", *args],
+                self.repository,
+                "unsafe-git-config",
+                environment=environment,
+                optional=optional,
+            ).strip()
+
+        identity = {name: operator("--get", name) for name in ("user.name", "user.email")}
+        helper = operator("--get-urlmatch", "credential.helper", "https://github.com")
+        try:
+            words = shlex.split(helper.removeprefix("!"))
+        except ValueError as exc:
+            raise LandError("unsafe-git-config") from exc
+        if words and words[0] in {"gh", self.tools["gh"]} and words[1:] == ["auth", "git-credential"]:
+            credential_executable = Path(self.tools["gh"])
+            arguments = " auth git-credential"
+        elif len(words) == 1 and Path(words[0]).is_absolute() and not helper.startswith("!"):
+            credential_executable = Path(words[0])
+            arguments = ""
+        else:
+            raise LandError("unsafe-git-config")
+        try:
+            metadata = credential_executable.stat()
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or not os.access(credential_executable, os.X_OK)
+                or metadata.st_uid not in {0, os.getuid()}
+            ):
+                raise LandError("unsafe-git-config")
+        except OSError as exc:
+            raise LandError("unsafe-git-config") from exc
+        helper = "!" + shlex.quote(str(credential_executable.resolve())) + arguments
+        configured = Path(operator("--path", "--get", "core.hooksPath")).expanduser()
         guard = (configured / "pre-push").resolve()
-        common = Path(self.git(["rev-parse", "--git-common-dir"], target, "git-config-failed").strip())
-        common = (target / common).resolve() if not common.is_absolute() else common.resolve()
-        worktrees = self.git(["worktree", "list", "--porcelain", "-z"], target, "git-config-failed")
-        roots = [
-            Path(record.removeprefix("worktree ")).resolve()
-            for record in worktrees.split("\0")
-            if record.startswith("worktree ")
-        ]
+        common = _caller_git_dir(target)
+        roots = [target, common]
+        for gitdir in (common / "worktrees").glob("*/gitdir"):
+            roots.append(Path(gitdir.read_text(encoding="utf-8").strip()).parent.resolve())
         if (
-            any(guard.is_relative_to(worktree) for worktree in roots)
-            or guard.is_relative_to(target)
-            or guard.is_relative_to(common)
+            not configured.is_absolute()
+            or any(guard.is_relative_to(worktree) for worktree in roots)
             or not guard.is_file()
             or not os.access(guard, os.X_OK)
         ):
             raise LandError("trusted-hook-required")
-        # Only the operator-installed pre-push guard is retained. No commit or checkout hook runs.
+        self.hooks = root / "hooks"
+        if self.hooks.exists():
+            shutil.rmtree(self.hooks)
+        self.hooks.mkdir(mode=0o700)
         shutil.copyfile(guard, self.hooks / "pre-push")
         (self.hooks / "pre-push").chmod(0o700)
+        self.config = [
+            *(f"{key}={value}" for key, value in identity.items()),
+            f"core.hooksPath={self.hooks}",
+            "protocol.allow=never",
+            "protocol.https.allow=always",
+            "http.sslVerify=true",
+            "commit.gpgsign=false",
+            "tag.gpgsign=false",
+            f"credential.helper={helper}",
+        ]
+        # Git writes this file, so identity and paths receive Git's own escaping.
+        global_config = root / "gitconfig"
+        global_config.unlink(missing_ok=True)
+        global_config.touch(mode=0o600)
+        environment["GIT_CONFIG_GLOBAL"] = str(global_config)
+        for setting in self.config:
+            key, value = setting.split("=", 1)
+            _run(
+                [self.tools["git"], "config", "--file", str(global_config), key, value],
+                self.repository,
+                "unsafe-git-config",
+                environment=environment,
+            )
+        self._assert_config(self.repository)
+
+    def _assert_config(self, cwd: Path) -> None:
+        raw = _run(
+            [self.tools["git"], "config", "--no-includes", "--null", "--list", "--show-origin"],
+            cwd,
+            "unsafe-git-config",
+            environment=self.env(),
+        )
+        records = raw.split("\0")
+        if records[-1] != "" or len(records) % 2 != 1:
+            raise LandError("unsafe-git-config")
+        pinned = {key.lower(): value for key, value in (setting.split("=", 1) for setting in self.config)}
+        metadata = {
+            "core.repositoryformatversion": {"0"},
+            "core.filemode": {"true", "false"},
+            "core.bare": {"false"},
+            "core.logallrefupdates": {"true"},
+            "core.ignorecase": {"true", "false"},
+            "core.precomposeunicode": {"true", "false"},
+        }
+        seen = set()
+        for record in records[1::2]:
+            key, separator, value = record.partition("\n")
+            key = key.lower()
+            # Only the synthesized settings and Git's repository metadata may exist.
+            # --no-includes lists include directives without opening their targets.
+            if (
+                not separator
+                or key in seen
+                or (value != pinned[key] if key in pinned else value not in metadata.get(key, set()))
+            ):
+                raise LandError("unsafe-git-config")
+            seen.add(key)
+        if not pinned.keys() <= seen:
+            raise LandError("unsafe-git-config")
 
     def env(self) -> dict[str, str]:
-        environment = dict(self.environment)
-        environment["GIT_CONFIG_COUNT"] = str(len(self.config))
-        for index, value in enumerate(self.config):
-            key, setting = value.split("=", 1)
-            environment[f"GIT_CONFIG_KEY_{index}"] = key
-            environment[f"GIT_CONFIG_VALUE_{index}"] = setting
-        return environment
+        return dict(self.environment)
 
     def git(
         self, args: list[str], cwd: Path, reason: str, *, stdin: bytes | None = None, optional: bool = False
     ) -> str:
-        options = [arg for value in self.config for arg in ("-c", value)]
+        if not cwd.resolve().is_relative_to(self.repository.parent):
+            raise LandError("unsafe-git-config")
+        self._assert_config(cwd)
         return _run(
-            [self.tools["git"], *options, "--no-pager", *args],
+            [self.tools["git"], "--no-pager", *args],
             cwd,
             reason,
             stdin=stdin,
@@ -217,6 +274,8 @@ class _LandingGit:
         )
 
     def tool(self, name: str, args: list[str], cwd: Path, reason: str) -> str:
+        if not cwd.resolve().is_relative_to(self.repository.parent):
+            raise LandError("unsafe-git-config")
         return _run([self.tools[name], *args], cwd, reason, environment=self.env())
 
 
@@ -361,8 +420,49 @@ def _record_pr(target: Path, entry: dict[str, Any], url: str) -> dict[str, str]:
     return {"task_id": entry["task_id"], "branch": entry["landing_branch"], "pr_url": url}
 
 
+def _caller_git_dir(target: Path) -> Path:
+    """Read caller metadata as data without evaluating its Git configuration."""
+    try:
+        marker = target / ".git"
+        directory = marker
+        if marker.is_file():
+            text = marker.read_text(encoding="utf-8").strip()
+            if not text.startswith("gitdir: "):
+                raise LandError("github-origin-required")
+            directory = target / text[8:]
+        directory = directory.resolve()
+        if (directory / "commondir").is_file():
+            directory = (directory / (directory / "commondir").read_text(encoding="utf-8").strip()).resolve()
+        return directory
+    except (OSError, UnicodeError) as exc:
+        raise LandError("github-origin-required") from exc
+
+
+def _private_root(saved: str | None) -> Path:
+    if not saved:
+        return Path(tempfile.mkdtemp(prefix="brigade-cloud-land-")).resolve()
+    root = Path(saved)
+    try:
+        metadata = root.lstat()
+        if (
+            not root.is_absolute()
+            or root.parent != Path(tempfile.gettempdir()).resolve()
+            or not root.name.startswith("brigade-cloud-land-")
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+            or root.resolve() != root
+        ):
+            raise LandError("unsafe-git-config")
+    except OSError as exc:
+        raise LandError("unsafe-git-config") from exc
+    return root
+
+
 def land(target: Path, task_id: str, issue: int, *, closes: bool = False) -> dict[str, str]:
     """Apply one pinned attempt in isolation, then publish its verified commit for review."""
+    if os.name != "posix":
+        raise LandError("unsupported-platform")
     if not re.fullmatch(r"task_[A-Za-z0-9_-]{3,160}", task_id) or issue < 1:
         raise LandError("invalid-task-or-issue")
     target = target.resolve()
@@ -380,20 +480,36 @@ def land(target: Path, task_id: str, issue: int, *, closes: bool = False) -> dic
                 entry = dict(entries[0])
             if entry.get("pr_url"):
                 return {"task_id": task_id, "branch": entry["branch"], "pr_url": entry["pr_url"]}
-            with tempfile.TemporaryDirectory(prefix="brigade-cloud-land-") as temporary:
-                root = Path(temporary)
+            common = _caller_git_dir(target)
+            if (common / "shallow").exists():
+                raise LandError("shallow-target")
+            try:
+                config = configparser.RawConfigParser(strict=False)
+                config.read_string((common / "config").read_text(encoding="utf-8"))
+                origin = config.get('remote "origin"', "url").strip().strip('"')
+            except (OSError, configparser.Error, UnicodeError) as exc:
+                raise LandError("github-origin-required") from exc
+            match = re.fullmatch(
+                r"(?:https://github\.com/|git@github\.com:)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?", origin
+            )
+            if not match:
+                raise LandError("github-origin-required")
+            repo = match[1]
+            canonical = f"https://github.com/{repo}.git"
+            root = _private_root(entry.get("landing_workspace"))
+            _update(target, entry, landing_workspace=str(root))
+            try:
                 git = _LandingGit(target, root)
-                if git.git(["rev-parse", "--is-shallow-repository"], target, "inspect-failed").strip() != "false":
-                    raise LandError("shallow-target")
-                origin = git.git(["config", "--get", "remote.origin.url"], target, "github-origin-required").strip()
-                match = re.fullmatch(
-                    r"(?:https://github\.com/|git@github\.com:)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?", origin
-                )
-                if not match:
-                    raise LandError("github-origin-required")
-                repo = match[1]
-                canonical = f"https://github.com/{repo}.git"
-                return _land_locked(target, entry, issue, closes, git, root, repo, canonical)
+                result = _land_locked(target, entry, issue, closes, git, root, repo, canonical)
+            except BaseException:
+                # Keep a prepared commit for a retry without borrowing the caller's object store.
+                if not entry.get("landing_commit"):
+                    shutil.rmtree(root)
+                    _update(target, entry, landing_workspace=None)
+                raise
+            shutil.rmtree(root)
+            _update(target, entry, landing_workspace=None)
+            return result
     except InboxLockTimeout as exc:
         raise LandError("landing-busy") from exc
 
@@ -414,11 +530,14 @@ def _land_locked(
     _update(target, entry, landing_branch=branch)
     commit = entry.get("landing_commit")
     remote = git.git(
-        ["ls-remote", "--refs", canonical, f"refs/heads/{branch}"], target, "ref-inspection-failed"
+        ["ls-remote", "--refs", canonical, f"refs/heads/{branch}"], git.repository, "ref-inspection-failed"
     ).split()
     remote_sha = remote[0] if remote else None
     local = git.git(
-        ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], target, "ref-inspection-failed", optional=True
+        ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        git.repository,
+        "ref-inspection-failed",
+        optional=True,
     ).strip()
     if commit:
         if (local and local != commit) or (remote_sha and remote_sha != commit):
@@ -430,7 +549,7 @@ def _land_locked(
             found = git.tool(
                 "gh",
                 ["pr", "list", "--repo", repo, "--head", branch, "--state", "all", "--json", "url", "--limit", "1"],
-                target,
+                git.repository,
                 "pr-recovery-failed",
             )
             try:
@@ -449,7 +568,7 @@ def _land_locked(
         # An interrupted preparation may have left the base branch behind.
         if remote_sha or not entry.get("landing_base") or local != entry["landing_base"]:
             raise LandError("landing-ref-mismatch")
-        git.git(["branch", "-D", branch], target, "branch-cleanup-failed")
+        git.git(["branch", "-D", branch], git.repository, "branch-cleanup-failed")
     body = root / "pr-body.md"
     body.write_text(
         f"{'Closes' if closes else 'Refs'} #{issue}.\n\nCodex Cloud task {entry['task_id']}.\n\n"
@@ -457,7 +576,7 @@ def _land_locked(
         "Conductor review and merge required.\n",
         encoding="utf-8",
     )
-    git.tool("vale", [str(body)], target, "pr-body-lint-failed")
+    git.tool("vale", [str(body)], git.repository, "pr-body-lint-failed")
     if not commit:
         commit = _prepare(target, entry, issue, git, root, branch, canonical)
     # Recheck the entry revision immediately before publication.
@@ -466,15 +585,18 @@ def _land_locked(
     # The push guard must inspect the preserved commit, never the caller's dirty checkout.
     if not local:
         local = git.git(
-            ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], target, "ref-inspection-failed", optional=True
+            ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+            git.repository,
+            "ref-inspection-failed",
+            optional=True,
         ).strip()
     if local:
-        git.git(["worktree", "add", str(publish_tree), branch], target, "worktree-failed")
+        git.git(["worktree", "add", str(publish_tree), branch], git.repository, "worktree-failed")
     else:
-        git.git(["fetch", "--no-tags", canonical, f"refs/heads/{branch}"], target, "fetch-failed")
-        if git.git(["rev-parse", "FETCH_HEAD"], target, "inspect-failed").strip() != commit:
+        git.git(["fetch", "--no-tags", canonical, f"refs/heads/{branch}"], git.repository, "fetch-failed")
+        if git.git(["rev-parse", "FETCH_HEAD"], git.repository, "inspect-failed").strip() != commit:
             raise LandError("landing-ref-mismatch")
-        git.git(["worktree", "add", "--detach", str(publish_tree), commit], target, "worktree-failed")
+        git.git(["worktree", "add", "--detach", str(publish_tree), commit], git.repository, "worktree-failed")
     try:
         if git.git(["rev-parse", "HEAD^{tree}"], publish_tree, "inspect-failed").strip() != entry["landing_tree"]:
             raise LandError("commit-tree-mismatch")
@@ -501,7 +623,7 @@ def _land_locked(
             "pr-create-failed",
         ).strip()
     finally:
-        git.git(["worktree", "remove", "--force", str(publish_tree)], target, "worktree-cleanup-failed")
+        git.git(["worktree", "remove", "--force", str(publish_tree)], git.repository, "worktree-cleanup-failed")
     _validate_pr_url(url, repo)
     return _record_pr(target, entry, url)
 
@@ -514,7 +636,7 @@ def _validate_pr_url(url: str, repo: str) -> None:
 def _prepare(
     target: Path, entry: dict[str, Any], issue: int, git: _LandingGit, root: Path, branch: str, canonical: str
 ) -> str:
-    status = git.tool("codex", ["cloud", "status", entry["task_id"]], target, "status-failed")
+    status = git.tool("codex", ["cloud", "status", entry["task_id"]], git.repository, "status-failed")
     if codex_cloud._verified_status(status) not in codex_cloud.TERMINAL_OK:
         raise LandError("task-not-ready")
     title_match = re.match(r"\s*\[[A-Z_]+\]\s*([^\r\n]*)", status)
@@ -522,16 +644,16 @@ def _prepare(
     title = "".join(c for c in title if ord(c) >= 32 and not 127 <= ord(c) <= 159)[:200]
     if not re.match(r"^(fix|feat)(\([^)]+\))?:\s", title):
         title = "fix: " + re.sub(r"^[a-z]+(?:\([^)]+\))?:\s*", "", title) if title else f"fix: address #{issue}"
-    git.git(["fetch", "--no-tags", canonical, "refs/heads/main"], target, "fetch-failed")
-    base = git.git(["rev-parse", "FETCH_HEAD"], target, "inspect-failed").strip()
+    git.git(["fetch", "--no-tags", canonical, "refs/heads/main"], git.repository, "fetch-failed")
+    base = git.git(["rev-parse", "FETCH_HEAD"], git.repository, "inspect-failed").strip()
     _update(target, entry, landing_base=base, landing_title=title, landing_attempt=1)
     tree = root / "worktree"
-    git.git(["worktree", "add", "-b", branch, str(tree), base], target, "worktree-failed")
+    git.git(["worktree", "add", "-b", branch, str(tree), base], git.repository, "worktree-failed")
     prepared = False
     try:
-        diff = git.tool("codex", ["cloud", "diff", "--attempt", "1", entry["task_id"]], target, "diff-failed").encode(
-            "utf-8"
-        )
+        diff = git.tool(
+            "codex", ["cloud", "diff", "--attempt", "1", entry["task_id"]], git.repository, "diff-failed"
+        ).encode("utf-8")
         _diff_paths(diff, tree, git)
         git.git(["apply", "--index", "-"], tree, "apply-conflict", stdin=diff)
         expected_tree = git.git(["write-tree"], tree, "inspect-failed").strip()
@@ -566,7 +688,7 @@ def _prepare(
         git.tool(
             "brigade",
             ["work", "verify", "run", "--target", str(receipts), "--command", str(check), "--capture", "brigade-work"],
-            target,
+            git.repository,
             "guard-failed",
         )
         if git.git(["write-tree"], tree, "inspect-failed").strip() != expected_tree:
@@ -587,9 +709,9 @@ def _prepare(
         prepared = True
         return commit
     finally:
-        git.git(["worktree", "remove", "--force", str(tree)], target, "worktree-cleanup-failed")
+        git.git(["worktree", "remove", "--force", str(tree)], git.repository, "worktree-cleanup-failed")
         if not prepared:
-            git.git(["branch", "-D", branch], target, "branch-cleanup-failed")
+            git.git(["branch", "-D", branch], git.repository, "branch-cleanup-failed")
             # A concurrent entry replacement must never be overwritten during cleanup.
             try:
                 _update(target, entry, landing_branch=None, landing_commit=None, landing_state=None)

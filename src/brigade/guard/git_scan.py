@@ -288,18 +288,31 @@ def _load_repo_policy(raw: str | None) -> Policy:
 
 
 def _tracked_paths(*, all_tracked: bool, cwd: Path | None = None) -> list[Path]:
-    if all_tracked:
-        cmd = ["git", "ls-files", "-z"]
-    else:
-        cmd = ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"]
+    def output(cmd: list[str]) -> bytes:
+        proc = subprocess.run(cmd, capture_output=True, check=False, cwd=cwd)
+        if proc.returncode != 0:
+            print("content-guard: Git path enumeration failed", file=sys.stderr)
+            raise SystemExit(2)
+        return proc.stdout
 
-    proc = subprocess.run(cmd, capture_output=True, check=False, cwd=cwd)
-    if proc.returncode != 0:
-        print("content-guard: Git path enumeration failed", file=sys.stderr)
-        raise SystemExit(2)
     try:
-        return [Path(name.decode("utf-8", errors="strict")) for name in proc.stdout.split(b"\0") if name]
-    except UnicodeDecodeError:
+        # Gitlinks name submodules, not readable files in this worktree.
+        records = output(["git", "ls-files", "--stage", "-z"]).split(b"\0")
+        paths = []
+        for record in filter(None, records):
+            metadata, name = record.split(b"\t", 1)
+            mode, _oid, _stage = metadata.split(b" ")
+            if mode != b"160000":
+                paths.append(Path(name.decode("utf-8", errors="strict")))
+        if all_tracked:
+            return paths
+        staged = {
+            Path(name.decode("utf-8", errors="strict"))
+            for name in output(["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"]).split(b"\0")
+            if name
+        }
+        return [path for path in paths if path in staged]
+    except (UnicodeDecodeError, ValueError):
         print("content-guard: Git path cannot be decoded", file=sys.stderr)
         raise SystemExit(2) from None
 

@@ -896,7 +896,11 @@ def test_r1_staged_newline_filename_is_scanned(tmp_path, monkeypatch):
         # Win32 cannot create control-character filenames. Exercise Git's raw path
         # protocol and the scanner with the same bytes on that platform.
         monkeypatch.setattr(
-            git_scan.subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a[0], 0, b"line\nbreak.txt\0", b"")
+            git_scan.subprocess,
+            "run",
+            lambda *a, **kw: subprocess.CompletedProcess(
+                a[0], 0, (b"100644 " + b"a" * 40 + b" 0\t" if "--stage" in a[0] else b"") + b"line\nbreak.txt\0", b""
+            ),
         )
         monkeypatch.setattr(git_scan, "_read_text", lambda _: path.read_text())
     monkeypatch.chdir(tmp_path)
@@ -954,3 +958,29 @@ def test_r1_history_disables_textconv(tmp_path, monkeypatch):
     git("config", "diff.example.textconv", "")
     monkeypatch.chdir(tmp_path)
     assert git_scan.main(["--history", "--all"]) == 0
+
+
+@__import__("pytest").mark.parametrize("initialized", [False, True])
+@__import__("pytest").mark.parametrize("mode", ["--staged", "--all-tracked", "publish-check"])
+def test_r2_gitlinks_are_not_file_content(tmp_path, monkeypatch, initialized, mode):
+    from brigade.guard import git_scan, publish_check
+
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path, text=True).strip()
+
+    git("init", "-b", "main")
+    (tmp_path / "README.md").write_text("Example project\n")
+    git("add", "README.md")
+    git("-c", "user.name=Example", "-c", "user.email=dev@example.invalid", "commit", "-m", "test: initial")
+    sha = git("rev-parse", "HEAD")
+    git("update-index", "--add", "--cacheinfo", f"160000,{sha},module")
+    if initialized:
+        module = tmp_path / "module"
+        module.mkdir()
+        subprocess.check_call(["git", "init", str(module)], stdout=subprocess.DEVNULL)
+        (module / "README.md").write_text("Example submodule\n")
+    monkeypatch.chdir(tmp_path)
+    if mode == "publish-check":
+        assert publish_check.main(["--all-tracked"]) == 0
+    else:
+        assert git_scan.main([mode]) == 0
