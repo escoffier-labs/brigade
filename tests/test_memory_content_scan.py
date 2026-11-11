@@ -345,10 +345,13 @@ def test_s18_round4_adversarial_rule_corpus(name, position):
 
     program = r"""
 import json
+import os
 from pathlib import Path
 import runpy
 import sys
-from time import perf_counter
+from time import perf_counter, process_time
+# Windows process_time is too coarse for the small timing sample.
+clock = perf_counter if os.name == "nt" else process_time
 from brigade.dot.prompt_scan import blocked_rule
 helper = Path(sys.argv[1])
 vectors = runpy.run_path(str(helper))["vectors"]
@@ -356,9 +359,9 @@ name, position = sys.argv[2:]
 expected = json.loads((helper.parent / "fixtures/memory-scan-adversarial.json").read_text())[name]["expected"][position.removesuffix("-fullwidth")]
 inputs = {size: dict(vectors(name, size))[position] for size in (128 * 1024, 512 * 1024)}
 def measure(size):
-    start = perf_counter()
+    start = clock()
     result = blocked_rule([inputs[size]])
-    elapsed = perf_counter() - start
+    elapsed = clock() - start
     assert result == expected, (name, position, result, expected)
     return elapsed
 measure(128 * 1024)
