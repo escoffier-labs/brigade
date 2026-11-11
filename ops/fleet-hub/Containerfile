@@ -14,8 +14,8 @@
 
 FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS source
 
-ARG BRIGADE_REF=d3b38d4b6d380f01c21bbaaa66d4a1c857250a1d
-ARG BRIGADE_SHA256=1106c7c75299720c04e34214535638afd551c13b4ac6803a57bba3fa8dd41061
+ARG BRIGADE_REF=a7746b6da2eec257890674de30635ca5036a2115
+ARG BRIGADE_SHA256=5a0cd597e970d17eedf3597cfd33d1a909c1e8f33f9077184abb421cedf3e67f
 
 RUN python -c "import hashlib, urllib.request; data = urllib.request.urlopen('https://github.com/escoffier-labs/brigade/archive/${BRIGADE_REF}.tar.gz').read(); assert hashlib.sha256(data).hexdigest() == '${BRIGADE_SHA256}', 'Brigade source archive checksum mismatch'; open('/tmp/brigade.tar.gz', 'wb').write(data)" \
     && mkdir /src \
@@ -34,8 +34,8 @@ RUN cargo build --locked --release --bin brigade-hub \
 
 FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS python-hub
 
-ARG BRIGADE_REF=d3b38d4b6d380f01c21bbaaa66d4a1c857250a1d
-ARG BRIGADE_SHA256=1106c7c75299720c04e34214535638afd551c13b4ac6803a57bba3fa8dd41061
+ARG BRIGADE_REF=a7746b6da2eec257890674de30635ca5036a2115
+ARG BRIGADE_SHA256=5a0cd597e970d17eedf3597cfd33d1a909c1e8f33f9077184abb421cedf3e67f
 # The CLI version at BRIGADE_REF.
 ARG BRIGADE_VERSION=0.31.0
 LABEL org.opencontainers.image.source="https://github.com/escoffier-labs/brigade" \
