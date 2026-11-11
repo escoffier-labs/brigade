@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import time
 
 import pytest
 
@@ -162,9 +163,15 @@ def test_run_prunes_submissions_that_are_no_longer_candidates(setup, capsys):
     [(active_digest, active)] = state["submissions"].items()
     state["submissions"].update(
         {
-            "1" * 64: {"client_event_id": hubc.event_id(), "proposal_id": hubc.event_id()},
-            "2" * 64: {"client_event_id": hubc.event_id(), "refused": "memory_proposal_invalid"},
-            "3" * 64: {"client_event_id": hubc.event_id()},
+            "1" * 64: {
+                "client_event_id": hubc.event_id(int(time.time() * 1000) - 31 * 86400000),
+                "proposal_id": hubc.event_id(),
+            },
+            "2" * 64: {
+                "client_event_id": hubc.event_id(int(time.time() * 1000) - 31 * 86400000),
+                "refused": "memory_proposal_invalid",
+            },
+            "3" * 64: {"client_event_id": hubc.event_id(int(time.time() * 1000) - 31 * 86400000)},
         }
     )
     path.write_text(json.dumps(state))
@@ -182,7 +189,10 @@ def test_near_limit_ledger_is_pruned_before_new_submission(setup, capsys):
     assert run(target, capsys, "run")[0] == 0
     path = target / reflect.STATE
     state = json.loads(path.read_text())
-    terminal = {"client_event_id": hubc.event_id(), "proposal_id": hubc.event_id()}
+    terminal = {
+        "client_event_id": hubc.event_id(int(time.time() * 1000) - 31 * 86400000),
+        "proposal_id": hubc.event_id(),
+    }
     # Each additional digest has a fixed serialized cost, including its comma.
     entry_bytes = len(io.json_bytes({"0" * 64: terminal})) - 2
     count = (io.MAX_STATE_BYTES - len(io.json_bytes(state))) // entry_bytes
@@ -609,7 +619,8 @@ def test_permanent_refusal_is_skipped_on_later_runs(setup, capsys, monkeypatch, 
     state = json.loads((target / ".brigade/memory/reflect/schedule.json").read_text())
     saved = [entry for entry in state["submissions"].values() if "refused" in entry]
     assert len(saved) == 1 and saved[0]["refused"] == code
-    assert set(saved[0]) == {"client_event_id", "refused"}
+    assert set(saved[0]) == {"client_event_id", "refused", "pins"}
+    assert saved[0]["pins"] == [["fleet", "a", 1], ["fleet", "b", 2]]
     assert "do not retain" not in json.dumps(state)
     for _ in range(3):
         result, report = run(target, capsys, "run")
@@ -827,3 +838,39 @@ def test_conflicting_terminal_submission_state_is_invalid(setup, capsys):
     assert "state_error" in run(target, capsys, "status")[1]["schedule"]
     assert run(target, capsys, "run")[0] == 2
     assert hub.calls == []
+
+
+def test_displaced_candidate_returns_without_resubmission(setup, capsys):
+    target, hub, _ = setup
+    assert run(target, capsys, "run")[0] == 0
+    original = writes(hub)[0]
+    text = hub.cards[("fleet", "a")]["text"]
+    hub._commit("card.put", "fleet", "0", text, "live", hubc.event_id())
+    assert run(target, capsys, "run")[0] == 0
+    hub._commit("card.retire", "fleet", "0", text, "retired", hubc.event_id())
+    assert run(target, capsys, "run")[0] == 0
+    assert sum(call["ops"] == original["ops"] for call in writes(hub)) == 1
+
+
+def test_fresh_legacy_submission_is_retained(setup, capsys):
+    target, _, _ = setup
+    assert run(target, capsys, "run")[0] == 0
+    path = target / ".brigade/memory/reflect/schedule.json"
+    state = json.loads(path.read_text())
+    entry = {"client_event_id": hubc.event_id(), "refused": "memory_proposal_invalid"}
+    state["submissions"]["f" * 64] = entry
+    path.write_text(json.dumps(state))
+    assert run(target, capsys, "run")[0] == 0
+    assert json.loads(path.read_text())["submissions"]["f" * 64] == entry
+
+
+@pytest.mark.parametrize("state", ["live", "retired"])
+def test_changed_or_retired_card_prunes_submission(setup, capsys, state):
+    target, hub, _ = setup
+    assert run(target, capsys, "run")[0] == 0
+    path = target / ".brigade/memory/reflect/schedule.json"
+    original = next(iter(json.loads(path.read_text())["submissions"]))
+    text = hub.cards[("fleet", "a")]["text"]
+    hub._commit("card.put", "fleet", "a", text, state, hubc.event_id())
+    assert run(target, capsys, "run")[0] == 0
+    assert original not in json.loads(path.read_text())["submissions"]
