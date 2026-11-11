@@ -185,3 +185,47 @@ def test_private_directory_rejects_overflow_uid_ancestor(dot_private_dir, monkey
     with pytest.raises(DotError, match="^unsafe_state$"):
         private_directory(dot_private_dir)
     assert len(ancestors) == 1
+
+
+@requires_local_state
+def test_pruned_reply_marker_survives_hub_mirror(dot_private_dir: Path) -> None:
+    with BridgeState(dot_private_dir) as state:
+        state.hub_upsert(
+            [
+                dict(
+                    id=1,
+                    sender="agent:conductor",
+                    body="reply",
+                    ref="example/repo#1",
+                    kind="message",
+                    reply_to=None,
+                    is_reply=True,
+                    created_at=NOW.isoformat(),
+                )
+            ],
+            node_id="node-example",
+        )
+        message = state.hub_messages(
+            unacked_only=True,
+            limit=10,
+            node_id="node-example",
+            aliases={"conductor": "agent:conductor"},
+            assignment_repositories=["example/repo"],
+        )["messages"][0]
+        assert "assignment" not in message
+        assert message["is_reply"] is True
+
+
+@requires_local_state
+def test_hub_reply_marker_migration_preserves_rows(dot_private_dir: Path) -> None:
+    with BridgeState(dot_private_dir) as state:
+        with state.transaction() as connection:
+            connection.execute("ALTER TABLE hub_inbox DROP COLUMN is_reply")
+            connection.execute(
+                "INSERT INTO hub_inbox(scope,id,sender,body,created_at,synced_at) VALUES (?,?,?,?,?,?)",
+                ("", 1, "agent:conductor", "existing", NOW.isoformat(), NOW.isoformat()),
+            )
+    with BridgeState(dot_private_dir) as state:
+        with state.transaction() as connection:
+            row = connection.execute("SELECT body,is_reply FROM hub_inbox WHERE id=1").fetchone()
+            assert tuple(row) == ("existing", 0)

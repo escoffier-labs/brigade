@@ -98,6 +98,22 @@ def test_nodes_send_list_ack_and_reply(message_hub):
     assert status == 201
     assert reply["message"]["recipient"] == NODE_A
     assert reply["message"]["reply_to"] == sent["message"]["id"]
+    assert reply["message"]["is_reply"] is True
+
+
+def test_reply_marker_survives_parent_retention_pruning(message_hub):
+    base, token_a, token_b, db = message_hub
+    sent = _request(base, token_a, {"action": "send", "to": NODE_B, "subject": "Task", "body": "Review"})[1]
+    reply = _request(base, token_b, {"action": "reply", "id": sent["message"]["id"], "body": "Done"})[1]
+    expired = (datetime.now(timezone.utc) - timedelta(days=fleet_hub_messages.RETENTION_DAYS + 1)).isoformat()
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE fleet_messages SET created_at=? WHERE id=?", (expired, sent["message"]["id"]))
+
+    status, inbox = _request(base, token_a, {"action": "list", "after": 0})
+
+    assert status == 200
+    assert inbox["messages"] == [{**reply["message"], "reply_to": None}]
+    assert inbox["messages"][0]["is_reply"] is True
 
 
 def test_future_message_timestamp_returns_retryable_error_code(message_hub):

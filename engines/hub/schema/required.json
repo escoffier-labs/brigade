@@ -5222,6 +5222,7 @@
         "client_id",
         "payload_hash",
         "reply_to",
+        "is_reply",
         "created_at",
         "received_at",
         "acked_at",
@@ -5305,6 +5306,14 @@
           0,
           null,
           1,
+          0
+        ],
+        [
+          "is_reply",
+          "INTEGER",
+          1,
+          "0",
+          0,
           0
         ],
         [
@@ -5600,7 +5609,7 @@
           "unique": 0
         }
       },
-      "sql": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
+      "sql": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), is_reply INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
     },
     "fleet_policy_acknowledged": {
       "autoincrement": false,
@@ -12359,7 +12368,7 @@
     "fleet_read_visibility_nodes_insert": "CREATE TRIGGER fleet_read_visibility_nodes_insert AFTER INSERT ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=(((caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))) AND (kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)))) WHERE (recipient=NEW.node_id OR caller=NEW.node_id) AND 1; END",
     "fleet_read_visibility_nodes_update": "CREATE TRIGGER fleet_read_visibility_nodes_update AFTER UPDATE OF revoked_at ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=(((caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))) AND (kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)))) WHERE (recipient=OLD.node_id OR recipient=NEW.node_id OR caller=OLD.node_id OR caller=NEW.node_id) AND 1; END"
   },
-  "user_version": 50,
+  "user_version": 51,
   "variants": {
     "action_broker_grants": [
       {
@@ -19358,6 +19367,7 @@
           "client_id",
           "payload_hash",
           "reply_to",
+          "is_reply",
           "created_at",
           "received_at",
           "acked_at",
@@ -19441,6 +19451,14 @@
             0,
             null,
             1,
+            0
+          ],
+          [
+            "is_reply",
+            "INTEGER",
+            1,
+            "0",
+            0,
             0
           ],
           [
@@ -19736,7 +19754,410 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
+        "sql": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), is_reply INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
+      },
+      {
+        "autoincrement": true,
+        "checks": [],
+        "column_order": [
+          "id",
+          "sender",
+          "recipient",
+          "subject",
+          "body",
+          "reference",
+          "priority",
+          "client_id",
+          "payload_hash",
+          "reply_to",
+          "created_at",
+          "received_at",
+          "acked_at",
+          "acked_by",
+          "sender_label",
+          "thread",
+          "kind",
+          "envelope",
+          "content_state",
+          "envelope_bytes",
+          "sealed_reply_to",
+          "is_reply"
+        ],
+        "columns": [
+          [
+            "acked_at",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "acked_by",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "body",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "client_id",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "content_state",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "created_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "envelope",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "envelope_bytes",
+            "INTEGER",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "id",
+            "INTEGER",
+            0,
+            null,
+            1,
+            0
+          ],
+          [
+            "is_reply",
+            "INTEGER",
+            1,
+            "0",
+            0,
+            0
+          ],
+          [
+            "kind",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "payload_hash",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "priority",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "received_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "recipient",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "reference",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "reply_to",
+            "INTEGER",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "sealed_reply_to",
+            "INTEGER",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "sender",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "sender_label",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "subject",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "thread",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ]
+        ],
+        "foreign_keys": [
+          [
+            0,
+            0,
+            "fleet_messages",
+            "reply_to",
+            "id",
+            "NO ACTION",
+            "NO ACTION",
+            "NONE"
+          ]
+        ],
+        "indexes": {
+          "fleet_messages_created_at": {
+            "columns": [
+              [
+                0,
+                "created_at",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 0,
+            "sql": "CREATE INDEX fleet_messages_created_at ON fleet_messages (created_at)",
+            "unique": 0
+          },
+          "fleet_messages_inbox": {
+            "columns": [
+              [
+                0,
+                "recipient",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                "id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                2,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 0,
+            "sql": "CREATE INDEX fleet_messages_inbox ON fleet_messages (recipient, id)",
+            "unique": 0
+          },
+          "fleet_messages_reply_to": {
+            "columns": [
+              [
+                0,
+                "reply_to",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 0,
+            "sql": "CREATE INDEX fleet_messages_reply_to ON fleet_messages (reply_to)",
+            "unique": 0
+          },
+          "fleet_messages_sealed_acked": {
+            "columns": [
+              [
+                0,
+                "acked_at",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                "id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                2,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 1,
+            "sql": "CREATE INDEX fleet_messages_sealed_acked ON fleet_messages (acked_at,id) WHERE content_state='sealed'",
+            "unique": 0
+          },
+          "fleet_messages_sender": {
+            "columns": [
+              [
+                0,
+                "sender",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                "id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                2,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 0,
+            "sql": "CREATE INDEX fleet_messages_sender ON fleet_messages (sender, id)",
+            "unique": 0
+          },
+          "fleet_messages_sender_client": {
+            "columns": [
+              [
+                0,
+                "sender",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                "client_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                2,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 0,
+            "sql": "CREATE UNIQUE INDEX fleet_messages_sender_client ON fleet_messages (sender, client_id)",
+            "unique": 1
+          },
+          "fleet_messages_unacked_recipient": {
+            "columns": [
+              [
+                0,
+                "recipient",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 1,
+            "sql": "CREATE INDEX fleet_messages_unacked_recipient ON fleet_messages (recipient) WHERE acked_at IS NULL",
+            "unique": 0
+          }
+        },
+        "sql": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER, is_reply INTEGER NOT NULL DEFAULT 0)"
       },
       {
         "autoincrement": true,
@@ -19762,7 +20183,8 @@
           "envelope",
           "content_state",
           "envelope_bytes",
-          "sealed_reply_to"
+          "sealed_reply_to",
+          "is_reply"
         ],
         "columns": [
           [
@@ -19835,6 +20257,14 @@
             0,
             null,
             1,
+            0
+          ],
+          [
+            "is_reply",
+            "INTEGER",
+            1,
+            "0",
+            0,
             0
           ],
           [
@@ -20119,7 +20549,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, reply_to INTEGER, created_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, client_id TEXT, payload_hash TEXT, received_at TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
+        "sql": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, reply_to INTEGER, created_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, client_id TEXT, payload_hash TEXT, received_at TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER, is_reply INTEGER NOT NULL DEFAULT 0)"
       },
       {
         "autoincrement": true,
@@ -20135,6 +20565,7 @@
           "client_id",
           "payload_hash",
           "reply_to",
+          "is_reply",
           "created_at",
           "received_at",
           "acked_at",
@@ -20218,6 +20649,14 @@
             0,
             null,
             1,
+            0
+          ],
+          [
+            "is_reply",
+            "INTEGER",
+            1,
+            "0",
+            0,
             0
           ],
           [
@@ -20513,7 +20952,7 @@
             "unique": 0
           }
         },
-        "sql": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, sealed_reply_to INTEGER, envelope TEXT, content_state TEXT, envelope_bytes INTEGER)"
+        "sql": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), is_reply INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, sealed_reply_to INTEGER, envelope TEXT, content_state TEXT, envelope_bytes INTEGER)"
       }
     ],
     "fleet_model_inventory_aliases": [

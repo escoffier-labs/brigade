@@ -98,6 +98,7 @@ fn rows_project_expired_parents_and_sealed_tombstones() {
         t("c1"),
         Value::Null,
         Value::Integer(3),
+        Value::Integer(1),
         t("2026-03-02T00:00:00+00:00"),
         t("2026-03-02T00:00:01+00:00"),
         t("node-b"),
@@ -112,14 +113,15 @@ fn rows_project_expired_parents_and_sealed_tombstones() {
     let (id, shown) = message(&row, "2026-03-02T00:00:00+00:00");
     assert_eq!(id, 7);
     assert!(shown.contains(r#""reply_to": null"#), "{shown}");
+    assert!(shown.contains(r#""is_reply": true"#), "{shown}");
     assert!(shown.contains(r#""content_state": "sealed""#), "{shown}");
     let (_, shown) = message(&row, "2026-03-09T00:00:01+00:00");
     assert!(
         shown.ends_with(r#""envelope": "{\"from\":\"a\",\"v\":1}", "envelope_bytes": 18, "content_state": "content_expired"}"#),
         "{shown}"
     );
-    row[19] = Value::Integer(0);
-    row[16] = Value::Null;
+    row[20] = Value::Integer(0);
+    row[17] = Value::Null;
     let (_, shown) = message(&row, "");
     assert!(
         shown.contains(r#""reply_to": 3"#) && !shown.contains("envelope"),
@@ -132,7 +134,14 @@ fn page_stops_at_the_response_budget() {
     let row = |id: i64, body: &str| -> Vec<Value> {
         let mut r = vec![Value::Integer(id), t("a"), t("b"), t("s"), t(body)];
         r.extend([Value::Null, t("normal"), t("c")]);
-        r.extend([Value::Null, Value::Null, t("x"), Value::Null, Value::Null]);
+        r.extend([
+            Value::Null,
+            Value::Null,
+            Value::Integer(0),
+            t("x"),
+            Value::Null,
+            Value::Null,
+        ]);
         r.extend([
             Value::Null,
             Value::Null,
@@ -218,7 +227,7 @@ fn retention_deletes_a_bounded_batch_per_command_and_drains_the_backlog() {
     let tx = Memory(rusqlite::Connection::open_in_memory().unwrap());
     tx.0.execute_batch(
         "CREATE TABLE fleet_messages(id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, \
-         reply_to INTEGER, acked_at TEXT, envelope TEXT, envelope_bytes INTEGER, content_state TEXT); \
+         reply_to INTEGER, is_reply INTEGER NOT NULL DEFAULT 0, acked_at TEXT, envelope TEXT, envelope_bytes INTEGER, content_state TEXT); \
          CREATE INDEX fleet_messages_created_at ON fleet_messages (created_at); \
          CREATE TABLE fleet_message_sends(id INTEGER PRIMARY KEY, sender TEXT, received_at TEXT);",
     )
@@ -240,7 +249,7 @@ fn retention_deletes_a_bounded_batch_per_command_and_drains_the_backlog() {
     }
     for parent in 1..=10 {
         tx.execute(
-            "INSERT INTO fleet_messages(created_at,reply_to) VALUES(?,?)",
+            "INSERT INTO fleet_messages(created_at,reply_to,is_reply) VALUES(?,?,1)",
             &[t(&fresh), Value::Integer(parent)],
         )
         .unwrap();
@@ -268,6 +277,10 @@ fn retention_deletes_a_bounded_batch_per_command_and_drains_the_backlog() {
         count("SELECT COUNT(*) FROM fleet_messages WHERE reply_to IS NULL"),
         10
     );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM fleet_messages WHERE is_reply=1"),
+        10
+    );
 }
 
 #[test]
@@ -283,6 +296,7 @@ fn an_expired_row_without_a_tombstone_never_returns_its_ciphertext() {
         t("c1"),
         Value::Null,
         Value::Null,
+        Value::Integer(0),
         t("2026-03-02T00:00:00+00:00"),
         t("2026-03-02T00:00:01+00:00"),
         t("node-b"),
@@ -301,7 +315,7 @@ fn an_expired_row_without_a_tombstone_never_returns_its_ciphertext() {
     );
     assert!(!shown.contains("not an envelope"), "{shown}");
     // Before its lifetime ends the stored bytes are returned as they are.
-    row[11] = t("2026-03-09T00:00:02+00:00");
+    row[12] = t("2026-03-09T00:00:02+00:00");
     let (_, shown) = message(&row, "2026-03-09T00:00:01+00:00");
     assert!(shown.contains(r#""content_state": "sealed""#), "{shown}");
 }

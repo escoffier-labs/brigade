@@ -101,7 +101,12 @@ def assignment(
         return None
     if sender != conductor or sender in frozenset(own):
         return None
-    if (row.get("kind") or "message") != "message" or row.get("reply_to") is not None or row.get("thread"):
+    if (
+        (row.get("kind") or "message") != "message"
+        or bool(row.get("is_reply"))
+        or row.get("reply_to") is not None
+        or row.get("thread")
+    ):
         return None
     match = _ASSIGNMENT_REF_RE.fullmatch(ref) if isinstance(ref, str) else None
     if match is None or match.group(1) not in allowed:
@@ -230,8 +235,10 @@ class BridgeState(PrivateDatabase):
         connection.execute("""CREATE TABLE IF NOT EXISTS hub_inbox (
             scope TEXT NOT NULL DEFAULT '', id INTEGER NOT NULL, sender TEXT NOT NULL, sender_label TEXT,
             subject TEXT, body TEXT NOT NULL, ref TEXT, thread TEXT, kind TEXT,
-            priority TEXT, reply_to INTEGER, created_at TEXT NOT NULL,
+            priority TEXT, reply_to INTEGER, is_reply INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
             acked_at TEXT, synced_at TEXT NOT NULL, PRIMARY KEY(scope,id))""")
+        if "is_reply" not in {row[1] for row in connection.execute("PRAGMA table_info(hub_inbox)")}:
+            connection.execute("ALTER TABLE hub_inbox ADD COLUMN is_reply INTEGER NOT NULL DEFAULT 0")
         connection.execute("CREATE INDEX IF NOT EXISTS hub_inbox_pending ON hub_inbox(scope,acked_at,id)")
         connection.execute("CREATE TABLE IF NOT EXISTS hub_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         # Recover submitted handles from the existing journal without touching inbox rows.
@@ -291,6 +298,7 @@ class BridgeState(PrivateDatabase):
             "kind",
             "priority",
             "reply_to",
+            "is_reply",
             "created_at",
             "acked_at",
         )
@@ -302,7 +310,9 @@ class BridgeState(PrivateDatabase):
                 + ",synced_at) VALUES ("
                 + ",".join("?" for _ in range(len(fields) + 2))
                 + ")",
-                (scope,) + tuple(row.get(key) for key in fields) + (now,),
+                (scope,)
+                + tuple(int(bool(row.get(key))) if key == "is_reply" else row.get(key) for key in fields)
+                + (now,),
             )
             if fetched_at is not None and row.get("acked_at") is None:
                 local = connection.execute(
@@ -312,8 +322,8 @@ class BridgeState(PrivateDatabase):
                     continue
             connection.execute(
                 "UPDATE hub_inbox SET acked_at=CASE WHEN ? IS NULL THEN NULL "
-                "ELSE COALESCE(acked_at, ?) END, synced_at=? WHERE scope=? AND id=?",
-                (row.get("acked_at"), row.get("acked_at"), now, scope, row["id"]),
+                "ELSE COALESCE(acked_at, ?) END, is_reply=MAX(is_reply, ?), synced_at=? WHERE scope=? AND id=?",
+                (row.get("acked_at"), row.get("acked_at"), int(bool(row.get("is_reply"))), now, scope, row["id"]),
             )
             if (
                 cursor.rowcount
@@ -364,6 +374,7 @@ class BridgeState(PrivateDatabase):
         for stored in rows:
             row = dict(stored)
             message = legacy_message(row, node_id)
+            message["is_reply"] = bool(row["is_reply"])
             alias = sender_alias(row["sender"], aliases)
             if alias is not None:
                 message["sender_alias"] = alias
