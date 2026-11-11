@@ -124,7 +124,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 50  # v50: claim recovery floor (fleet_hub_claims.recovery_floor), no DDL
+SCHEMA_VERSION = 51  # v51: immutable fleet_messages.is_reply marker
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -287,6 +287,11 @@ _ADDITIVE_COLUMNS = (
     ),
     ("fleet_message_principals", "person", "ALTER TABLE fleet_message_principals ADD COLUMN person TEXT"),
     ("fleet_messages", "sealed_reply_to", "ALTER TABLE fleet_messages ADD COLUMN sealed_reply_to INTEGER"),
+    (
+        "fleet_messages",
+        "is_reply",
+        "ALTER TABLE fleet_messages ADD COLUMN is_reply INTEGER NOT NULL DEFAULT 0",
+    ),
     ("fleet_messages", "envelope", "ALTER TABLE fleet_messages ADD COLUMN envelope TEXT"),
     ("fleet_messages", "envelope_bytes", "ALTER TABLE fleet_messages ADD COLUMN envelope_bytes INTEGER"),
     ("fleet_messages", "content_state", "ALTER TABLE fleet_messages ADD COLUMN content_state TEXT"),
@@ -320,6 +325,8 @@ def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
         missing.append(
             "UPDATE fleet_messages SET sealed_reply_to=reply_to WHERE envelope IS NOT NULL AND reply_to IS NOT NULL"
         )
+    if "is_reply" not in {row[1] for row in conn.execute("PRAGMA table_info(fleet_messages)")}:
+        missing.append("UPDATE fleet_messages SET is_reply=1 WHERE reply_to IS NOT NULL OR sealed_reply_to IS NOT NULL")
     missing.extend(ddl for kind, ddl in absent if kind == "index")
     # Index repair shares the current-version self-heal transaction and its
     # read-only fast path. Claim fencing tables retain their strict validation.

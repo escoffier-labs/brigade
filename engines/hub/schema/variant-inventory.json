@@ -1121,6 +1121,88 @@
             "client_id",
             "payload_hash",
             "reply_to",
+            "is_reply",
+            "created_at",
+            "received_at",
+            "acked_at",
+            "acked_by",
+            "sender_label",
+            "thread",
+            "kind",
+            "envelope",
+            "content_state",
+            "envelope_bytes",
+            "sealed_reply_to"
+          ],
+          "upgraded": [
+            "id",
+            "sender",
+            "recipient",
+            "subject",
+            "body",
+            "reference",
+            "priority",
+            "client_id",
+            "payload_hash",
+            "reply_to",
+            "created_at",
+            "received_at",
+            "acked_at",
+            "acked_by",
+            "sender_label",
+            "thread",
+            "kind",
+            "envelope",
+            "content_state",
+            "envelope_bytes",
+            "sealed_reply_to",
+            "is_reply"
+          ]
+        },
+        "sql": {
+          "fresh": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), is_reply INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)",
+          "upgraded": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER, is_reply INTEGER NOT NULL DEFAULT 0)"
+        }
+      },
+      "sources": [
+        "user-version-34",
+        "schema-30",
+        "schema-31",
+        "schema-32",
+        "schema-34",
+        "schema-36",
+        "schema-37",
+        "schema-38",
+        "schema-39",
+        "schema-40",
+        "schema-42",
+        "schema-43",
+        "schema-44",
+        "schema-45",
+        "schema-46",
+        "schema-47",
+        "schema-48",
+        "v0.28.0",
+        "v0.29.0",
+        "v0.30.0",
+        "test_fleet_message_grants"
+      ]
+    },
+    {
+      "differences": {
+        "column_order": {
+          "fresh": [
+            "id",
+            "sender",
+            "recipient",
+            "subject",
+            "body",
+            "reference",
+            "priority",
+            "client_id",
+            "payload_hash",
+            "reply_to",
+            "is_reply",
             "created_at",
             "received_at",
             "acked_at",
@@ -1154,7 +1236,8 @@
             "envelope",
             "content_state",
             "envelope_bytes",
-            "sealed_reply_to"
+            "sealed_reply_to",
+            "is_reply"
           ]
         },
         "columns": {
@@ -1229,6 +1312,14 @@
               0,
               null,
               1,
+              0
+            ],
+            [
+              "is_reply",
+              "INTEGER",
+              1,
+              "0",
+              0,
               0
             ],
             [
@@ -1399,6 +1490,14 @@
               0,
               null,
               1,
+              0
+            ],
+            [
+              "is_reply",
+              "INTEGER",
+              1,
+              "0",
+              0,
               0
             ],
             [
@@ -1515,8 +1614,8 @@
           "upgraded": []
         },
         "sql": {
-          "fresh": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)",
-          "upgraded": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, reply_to INTEGER, created_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, client_id TEXT, payload_hash TEXT, received_at TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)"
+          "fresh": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), is_reply INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)",
+          "upgraded": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, reply_to INTEGER, created_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, client_id TEXT, payload_hash TEXT, received_at TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER, is_reply INTEGER NOT NULL DEFAULT 0)"
         }
       },
       "sources": [
@@ -1538,6 +1637,7 @@
             "client_id",
             "payload_hash",
             "reply_to",
+            "is_reply",
             "created_at",
             "received_at",
             "acked_at",
@@ -1561,6 +1661,7 @@
             "client_id",
             "payload_hash",
             "reply_to",
+            "is_reply",
             "created_at",
             "received_at",
             "acked_at",
@@ -1575,8 +1676,8 @@
           ]
         },
         "sql": {
-          "fresh": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)",
-          "upgraded": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, sealed_reply_to INTEGER, envelope TEXT, content_state TEXT, envelope_bytes INTEGER)"
+          "fresh": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), is_reply INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER)",
+          "upgraded": "CREATE TABLE fleet_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), is_reply INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, sealed_reply_to INTEGER, envelope TEXT, content_state TEXT, envelope_bytes INTEGER)"
         }
       },
       "sources": [

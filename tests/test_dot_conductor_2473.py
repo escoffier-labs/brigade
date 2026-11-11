@@ -163,6 +163,7 @@ def test_assignment_needs_the_conductor_sender_a_plain_kind_and_an_allowlisted_r
         dict(ref=7),
         # A reply, a threaded message and the other kinds.
         dict(reply_to=3),
+        dict(is_reply=True),
         dict(thread="example-org/example-project#7"),
         dict(kind="question"),
         dict(kind="completion"),

@@ -101,7 +101,12 @@ def assignment(
         return None
     if sender != conductor or sender in frozenset(own):
         return None
-    if (row.get("kind") or "message") != "message" or row.get("reply_to") is not None or row.get("thread"):
+    if (
+        (row.get("kind") or "message") != "message"
+        or bool(row.get("is_reply"))
+        or row.get("reply_to") is not None
+        or row.get("thread")
+    ):
         return None
     match = _ASSIGNMENT_REF_RE.fullmatch(ref) if isinstance(ref, str) else None
     if match is None or match.group(1) not in allowed:

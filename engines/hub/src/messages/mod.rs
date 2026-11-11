@@ -44,7 +44,7 @@ pub const SWEEP_BATCH: i64 = 256;
 pub const RETENTION_BATCH: i64 = 1024;
 const SECOND_US: i64 = 1_000_000;
 const DAY_US: i64 = 86_400 * SECOND_US;
-const SENT_COLUMNS: &str = "m.id,m.sender,m.recipient,m.subject,m.body,m.reference,m.priority,m.client_id,m.sealed_reply_to,m.reply_to,m.created_at,m.acked_at,m.acked_by,m.sender_label,m.thread,m.kind,m.envelope,m.envelope_bytes,m.content_state,(SELECT p.created_at<?1 FROM fleet_messages AS p WHERE p.id=m.reply_to)";
+const SENT_COLUMNS: &str = "m.id,m.sender,m.recipient,m.subject,m.body,m.reference,m.priority,m.client_id,m.sealed_reply_to,m.reply_to,m.is_reply,m.created_at,m.acked_at,m.acked_by,m.sender_label,m.thread,m.kind,m.envelope,m.envelope_bytes,m.content_state,(SELECT p.created_at<?1 FROM fleet_messages AS p WHERE p.id=m.reply_to)";
 
 /// A finished answer: status and Python's exact body.
 pub type Reply = (u16, String);
@@ -403,12 +403,12 @@ fn message(row: &[Value], purge_cutoff: &str) -> (i64, String) {
         Value::Integer(i) => i,
         _ => 0,
     };
-    let reply_to = match (&row[8], &row[19]) {
+    let reply_to = match (&row[8], &row[20]) {
         (Value::Null, Value::Integer(1)) => Value::Null,
         (Value::Null, _) => row[9].clone(),
         (sealed, _) => sealed.clone(),
     };
-    let kind = match text_of(&row[15]) {
+    let kind = match text_of(&row[16]) {
         Some(k) if !k.is_empty() => quote(k),
         _ => quote("message"),
     };
@@ -428,6 +428,15 @@ fn message(row: &[Value], purge_cutoff: &str) -> (i64, String) {
         .map(|(k, v)| (*k, json_value(v)))
         .collect();
     fields.push(("reply_to", json_value(&reply_to)));
+    fields.push((
+        "is_reply",
+        if row[10] == Value::Integer(1) {
+            "true"
+        } else {
+            "false"
+        }
+        .into(),
+    ));
     for (k, v) in [
         "created_at",
         "acked_at",
@@ -436,14 +445,14 @@ fn message(row: &[Value], purge_cutoff: &str) -> (i64, String) {
         "thread",
     ]
     .iter()
-    .zip(&row[10..15])
+    .zip(&row[11..16])
     {
         fields.push((k, json_value(v)));
     }
     fields.push(("kind", kind));
-    if let Some(envelope) = text_of(&row[16]) {
-        let expired = text_of(&row[18]) == Some("sealed")
-            && text_of(&row[11]).is_some_and(|acked| acked <= purge_cutoff);
+    if let Some(envelope) = text_of(&row[17]) {
+        let expired = text_of(&row[19]) == Some("sealed")
+            && text_of(&row[12]).is_some_and(|acked| acked <= purge_cutoff);
         match expired.then(|| sealed::tombstone(envelope)) {
             Some(Some(tombstone)) => {
                 fields.push(("envelope", quote(&tombstone)));
@@ -454,9 +463,9 @@ fn message(row: &[Value], purge_cutoff: &str) -> (i64, String) {
             // closed: report the content as expired and never return its bytes.
             Some(None) => fields.push(("content_state", quote("content_expired"))),
             None => {
-                fields.push(("envelope", json_value(&row[16])));
-                fields.push(("envelope_bytes", json_value(&row[17])));
-                fields.push(("content_state", json_value(&row[18])));
+                fields.push(("envelope", json_value(&row[17])));
+                fields.push(("envelope_bytes", json_value(&row[18])));
+                fields.push(("content_state", json_value(&row[19])));
             }
         }
     }
@@ -1370,10 +1379,10 @@ impl Op<'_> {
         let purge = purge_cutoff(self.now);
         Ok(rows.first().map(|row| {
             let owned = |i: usize| text_of(&row[i]).map(String::from);
-            let content_state = owned(18).map(|state| {
+            let content_state = owned(19).map(|state| {
                 let expired = state == "sealed"
-                    && text_of(&row[11]).is_some_and(|acked| acked <= purge.as_str());
-                if expired && owned(16).as_deref().and_then(sealed::tombstone).is_some() {
+                    && text_of(&row[12]).is_some_and(|acked| acked <= purge.as_str());
+                if expired && owned(17).as_deref().and_then(sealed::tombstone).is_some() {
                     "content_expired".to_string()
                 } else {
                     state
@@ -1385,8 +1394,8 @@ impl Op<'_> {
                 subject: owned(3).unwrap_or_default(),
                 reference: owned(5),
                 client_id: owned(7).unwrap_or_default(),
-                thread: owned(14),
-                kind: owned(15)
+                thread: owned(15),
+                kind: owned(16)
                     .filter(|k| !k.is_empty())
                     .unwrap_or_else(|| "message".into()),
                 content_state,
@@ -1609,8 +1618,8 @@ impl Op<'_> {
         let envelope_text = envelope.as_ref().map(|_| raw["envelope"].as_str().unwrap());
         let reply_id = reply_to.and_then(|v| integer(Some(v), false));
         self.tx.execute(
-            "INSERT INTO fleet_messages(sender,recipient,subject,body,reference,priority,client_id,payload_hash,reply_to,created_at,received_at,sender_label,thread,kind,envelope,envelope_bytes,content_state,sealed_reply_to) \
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO fleet_messages(sender,recipient,subject,body,reference,priority,client_id,payload_hash,reply_to,is_reply,created_at,received_at,sender_label,thread,kind,envelope,envelope_bytes,content_state,sealed_reply_to) \
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             &[
                 t(&sender),
                 t(&recipient),
@@ -1621,6 +1630,7 @@ impl Op<'_> {
                 t(&client_id),
                 t(&hash),
                 reply_id.map_or(Value::Null, Value::Integer),
+                Value::Integer(i64::from(reply_id.is_some())),
                 t(&enqueued),
                 t(&received),
                 extra("sender_label"),

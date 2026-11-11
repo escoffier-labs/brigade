@@ -173,6 +173,7 @@ def ensure_schema(
             client_id TEXT NOT NULL,
             payload_hash TEXT NOT NULL,
             reply_to INTEGER REFERENCES fleet_messages(id),
+            is_reply INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             received_at TEXT NOT NULL,
             acked_at TEXT,
@@ -193,6 +194,9 @@ def ensure_schema(
         conn.execute("ALTER TABLE fleet_messages ADD COLUMN envelope_bytes INTEGER")
     if "sealed_reply_to" not in columns:
         conn.execute("ALTER TABLE fleet_messages ADD COLUMN sealed_reply_to INTEGER")
+    if "is_reply" not in columns:
+        conn.execute("ALTER TABLE fleet_messages ADD COLUMN is_reply INTEGER NOT NULL DEFAULT 0")
+        conn.execute("UPDATE fleet_messages SET is_reply=1 WHERE reply_to IS NOT NULL OR sealed_reply_to IS NOT NULL")
     conn.execute(
         "UPDATE fleet_messages SET sealed_reply_to=reply_to WHERE envelope IS NOT NULL AND sealed_reply_to IS NULL AND reply_to IS NOT NULL"
     )
@@ -381,6 +385,7 @@ def _row(row: tuple[Any, ...]) -> dict[str, Any]:
         "priority",
         "client_id",
         "reply_to",
+        "is_reply",
         "created_at",
         "acked_at",
         "acked_by",
@@ -392,6 +397,7 @@ def _row(row: tuple[Any, ...]) -> dict[str, Any]:
         "content_state",
     )
     result = dict(zip(keys, row, strict=True))
+    result["is_reply"] = bool(result["is_reply"])
     if result["envelope"] is None:
         for key in ("envelope", "envelope_bytes", "content_state"):
             result.pop(key)
@@ -403,7 +409,7 @@ def _fetch(
     conn: sqlite3.Connection, message_id: int, *, storage_policy: StoragePolicy | None = None
 ) -> dict[str, Any] | None:
     row = conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),is_reply,created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
         "FROM fleet_messages WHERE id=? AND created_at>=?",
         (message_id, _expiry_cutoff(storage_policy)),
     ).fetchone()
@@ -856,8 +862,8 @@ def _send(
             raise MessageQuotaError("sender message quota exceeded", code="message_sender_quota")
         created_at = enqueued_at
         cursor = conn.execute(
-            "INSERT INTO fleet_messages(sender,recipient,subject,body,reference,priority,client_id,payload_hash,reply_to,created_at,received_at,sender_label,thread,kind,envelope,envelope_bytes,content_state,sealed_reply_to) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO fleet_messages(sender,recipient,subject,body,reference,priority,client_id,payload_hash,reply_to,is_reply,created_at,received_at,sender_label,thread,kind,envelope,envelope_bytes,content_state,sealed_reply_to) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 sender,
                 recipient,
@@ -868,6 +874,7 @@ def _send(
                 client_id,
                 message_hash,
                 reply_to,
+                reply_to is not None,
                 created_at,
                 now.isoformat(),
                 extras.get("sender_label"),
@@ -931,7 +938,7 @@ def _query_inbox_rows(
 ) -> list[tuple[Any, ...]]:
     _prune_expired(conn, storage_policy=storage_policy)
     return conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),is_reply,created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
         "FROM fleet_messages WHERE recipient=? AND id>? AND created_at>=? "
         + ("AND acked_at IS NULL " if unacked else "")
         + "ORDER BY id LIMIT 100",
@@ -960,7 +967,7 @@ def list_messages(
     wait_ms = _validate_wait_ms(raw.get("wait_ms", 0))
     wake_epoch = _wake_epoch(recipient) if wait_ms > 0 else 0
     rows = conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),is_reply,created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
         "FROM fleet_messages WHERE recipient=? AND id>? AND created_at>=? "
         + ("AND acked_at IS NULL " if unacked else "")
         + "ORDER BY id LIMIT 100",
@@ -1071,7 +1078,7 @@ def sent(
         condition = "id>?"
         params.append(after)
     rows = conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),created_at,acked_at,acked_by,"
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),is_reply,created_at,acked_at,acked_by,"
         "sender_label,thread,kind,envelope,envelope_bytes,content_state FROM fleet_messages WHERE sender=? AND created_at>=? AND "
         + condition
         + " ORDER BY id LIMIT 100",
