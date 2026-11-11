@@ -529,7 +529,7 @@ def _reflect(
     previous = dict(state.get("submissions", {})) if state.get("binding") == binding else {}
 
     live = {(head["scope"], head["card_id"]): head["revision"] for head in heads}
-    previous = {digest: pending for digest, pending in previous.items() if ledger.current(pending, live, _now_ms())}
+    previous = {d: p for d, p in previous.items() if ledger.current(p, live, _now_ms(), settings.read_scopes)}
 
     def unremembered(submissions: list[list[dict[str, Any]]]) -> list[tuple[str, list[dict[str, Any]]]]:
         fresh = []

@@ -32,8 +32,13 @@ def valid_pins(value: object) -> bool:
     )
 
 
-def current(entry: dict[str, Any], heads: dict[tuple[str, str], int], now: int) -> bool:
+def current(
+    entry: dict[str, Any], heads: dict[tuple[str, str], int], now: int, inspected_scopes: tuple[str, ...]
+) -> bool:
     if "pins" in entry:
-        return all(heads.get((scope, card_id)) == revision for scope, card_id, revision in entry["pins"])
+        return all(
+            scope not in inspected_scopes or heads.get((scope, card_id)) == revision
+            for scope, card_id, revision in entry["pins"]
+        )
     timestamp = hubc.event_id_ms(entry["client_event_id"])
     return timestamp is not None and now - timestamp < RETENTION_MS
