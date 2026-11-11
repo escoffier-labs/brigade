@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -42,6 +44,8 @@ def landing(tmp_path, monkeypatch):
     def run(argv, **kwargs):
         calls.append((argv, kwargs.get("cwd")))
         if argv[:3] == ["codex", "cloud", "status"]:
+            if callback := state.get("during_status"):
+                callback()
             return proc.Result(0, state["status"], "")
         if argv[:3] == ["codex", "cloud", "diff"]:
             path = state["path"]
@@ -73,10 +77,15 @@ def landing(tmp_path, monkeypatch):
             return proc.Result(int(state["failure"] == argv[0]), "", "")
         if argv[:2] == ["git", "push"]:
             return proc.Result(0, "", "")
+        if argv[:3] == ["gh", "pr", "list"]:
+            return proc.Result(0, json.dumps([{"url": state["published"]}] if state.get("published") else []), "")
         if argv[:3] == ["gh", "pr", "create"]:
             body = Path(argv[argv.index("--body-file") + 1]).read_text()
             assert "task_example" in body and "#2473" in body
-            return proc.Result(0, "https://github.com/example/repo/pull/123\n", "")
+            state["published"] = "https://github.com/example/repo/pull/123"
+            if state.get("lose_pr_response"):
+                return proc.Result(1, "", "")
+            return proc.Result(0, state["published"] + "\n", "")
         return original(argv, **kwargs)
 
     monkeypatch.setattr(proc, "run", run)
@@ -143,6 +152,7 @@ def test_failure_never_publishes(landing, failure, reason):
         codex_cloud_land.land(caller, "task_example", 2473)
     assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
     assert cloud_tracker.load_registry(caller)["entries"][0].get("pr_url") is None
+    assert git(caller, "branch", "--list", "codex/*") == ""
     assert len(git(caller, "worktree", "list").splitlines()) == 1
 
 
@@ -228,3 +238,66 @@ def test_task_executable_cannot_shadow_git_via_relative_path(landing, tmp_path, 
     result = codex_cloud_land.land(caller, "task_example", 2473)
     assert result["pr_url"].endswith("/123")
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("failure", ["response", "registry"])
+def test_created_pr_recovered_without_duplicate(landing, monkeypatch, failure):
+    caller, state, calls = landing
+    original = cloud_tracker.save_registry
+    fail_once = failure == "registry"
+
+    def save(target, registry):
+        nonlocal fail_once
+        if fail_once and any(row.get("pr_url") for row in registry["entries"]):
+            fail_once = False
+            raise OSError("simulated registry write failure")
+        return original(target, registry)
+
+    monkeypatch.setattr(cloud_tracker, "save_registry", save)
+    state["lose_pr_response"] = failure == "response"
+    with pytest.raises(codex_cloud_land.LandError, match="pr-create-failed|registry-update-failed"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    branch = cloud_tracker.load_registry(caller)["entries"][0]["landing_branch"]
+    assert branch
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert result["pr_url"] == state["published"]
+    assert result["branch"] == branch
+    assert sum(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls) == 1
+    assert sum(argv[:3] == ["codex", "cloud", "apply"] for argv, _ in calls) == 1
+
+
+def test_external_calls_leave_registry_available(landing):
+    caller, state, _ = landing
+    errors = []
+
+    def register():
+        try:
+            cloud_tracker.register(caller, provider="codex-cloud", task_id="task_other", label="other")
+        except Exception as exc:
+            errors.append(exc)
+
+    def during_status():
+        thread = threading.Thread(target=register)
+        thread.start()
+        thread.join(2)
+        blocked = thread.is_alive()
+        thread.join(5)
+        assert not blocked
+        assert not errors
+
+    state["during_status"] = during_status
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert {row["task_id"] for row in cloud_tracker.load_registry(caller)["entries"]} == {"task_example", "task_other"}
+
+
+def test_hook_cannot_publish_a_tree_that_guard_did_not_check(landing, tmp_path):
+    caller, _, calls = landing
+    hooks = tmp_path / "trusted-hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text('#!/bin/sh\nprintf "hook change\\n" > file.txt\ngit add file.txt\n')
+    hook.chmod(0o700)
+    git(caller, "config", "core.hooksPath", str(hooks))
+    with pytest.raises(codex_cloud_land.LandError, match="commit-tree-mismatch"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)

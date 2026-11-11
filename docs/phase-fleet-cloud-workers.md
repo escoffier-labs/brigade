@@ -122,6 +122,9 @@ apply` automatically during dispatch. Explicitly promote a registered ready task
 brigade run cloud land --provider codex-cloud --task-id task_example --issue 123
 ```
 
+`land` requires Git, an authenticated Codex CLI and `gh`, Brigade, and Vale
+with the repository writing rules configured. Missing Vale blocks publication.
+
 `land` fetches origin and applies with `codex cloud apply` in a fresh temporary
 worktree based on `origin/main`. The caller checkout stays untouched. It refuses
 workflow, CODEOWNERS, credential, hook, and non-regular file paths, plus patches
@@ -133,9 +136,12 @@ or enables auto-merge. The conductor reviews and merges.
 
 Named refusals include `task-not-ready`, `protected-policy-path`, `credential-path`,
 `apply-conflict`, `guard-failed`, and `pr-body-lint-failed`. Failed worktrees are
-removed. Local branches remain for inspection. A push or PR creation failure
-may leave a remote branch. Inspect that branch before retrying. Repeating a
-successful land returns its registered PR without opening another one.
+removed, along with unpublished local branches. A push or PR creation failure
+may leave a branch for inspection. The publication branch is saved before external
+operations. Retrying first recovers any existing PR for that branch. Repeating a
+successful land returns its registered PR without opening another one. Landing
+uses a task-specific lock, so other tasks can still register. If a commit hook
+changes the guarded tree, `commit-tree-mismatch` refuses publication.
 
 ### Claude Code Cloud
 
