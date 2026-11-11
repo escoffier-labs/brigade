@@ -27,6 +27,8 @@ pub const DAY_MS: i64 = 86_400_000;
 pub const DAY_MAX: i64 = 4_294_967_295;
 /// The writer asks for a flush this often.
 pub const FLUSH_INTERVAL_MS: i64 = 60_000;
+#[path = "sweep_clock.rs"]
+pub(super) mod sweep_clock;
 /// Deletes run in statements of at most this many rows, so the time budget
 /// is checked between them.
 const SWEEP_CHUNK: usize = 256;
@@ -802,7 +804,7 @@ pub fn sweep(
                 gave_way = true;
                 return Ok(());
             }
-            if Instant::now() >= deadline {
+            if sweep_clock::expired(deadline) {
                 timed_out = true;
                 return Ok(());
             }
