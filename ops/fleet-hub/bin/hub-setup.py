@@ -785,7 +785,9 @@ class SetupFiles:
         if managed is not None and not managed[0].startswith(b"# Written by bin/hub-setup.py"):
             raise SetupError("compose.hybrid.yaml is not setup-owned; move it aside and rerun")
         override = project / "compose.override.yaml"
-        if self.files[override] is None or not self.files[override][0].startswith(b"# Written by bin/hub-setup.py"):
+        if self.files[override] is not None and not _compose_helper(
+            "legacy_owned", self.files[override][0], EMBED_TOKEN_FILES
+        ):
             del self.files[override]  # Operator content is never written, even during rollback.
         self.token = folder / REMOTE_TOKEN
 
@@ -917,18 +919,12 @@ def _drop_remote_token(project: Path, decision: Decision) -> bool:
 
 
 def install_probed_token(project: Path, decision: Decision) -> str | None:
-    """Forward step (c): install the token the remote probe passed as secrets/embed-token, mode 0444.
-
-    Runs after config/hub.toml names the endpoint it was probed against. Unlike
-    the other secrets it is replaced, never kept: a new endpoint comes with its
-    own token. Returns what it did.
-    """
+    """Install the probed remote token, mode 0444, after config names its endpoint."""
     if decision.backend != "remote" or decision.probed_token is None:
         return None
     folder = project / "secrets"
     target = folder / REMOTE_TOKEN
     data = (decision.probed_token + "\n").encode("utf-8")
-    # Checked again at the last step, right before the 0444 file is written.
     _require_private(folder)
     if os.path.lexists(target) and (target.is_symlink() or not target.is_file()):
         raise SetupError(f"secrets/{REMOTE_TOKEN} is a symlink or not a regular file; move it aside and rerun")
@@ -949,14 +945,12 @@ def write_install(
     with_secrets: bool,
     backup_dir: Path | None = None,
 ) -> list[str]:
-    """Everything init and switch write, in the order SetupFiles describes, as one transaction.
-
-    Returns what changed under secrets/, for the report.
-    """
+    """Everything init and switch write, in the order SetupFiles describes, as one transaction."""
     if with_secrets and _check_dir(project / "secrets", "secrets/") is not None:
         # An existing secrets/ is judged before SetupFiles reads anything in it, so a refusal
         # leaves its files exactly as they were. An absent one is made inside the transaction.
         _require_private(project / "secrets")
+    _compose_helper("preflight", project, decision.retrieval, EMBED_TOKEN_FILES, read_env(project / ".env"))
     with all_or_nothing(project, backup_dir):
         created = ensure_secrets(project, local_token=decision.backend == "local") if with_secrets else []
         if backup_dir is not None:
@@ -977,8 +971,11 @@ def write_install(
 
 
 def _compose_override(project: Path, decision: Decision, env: dict[str, str]) -> None:
-    helper = runpy.run_path(str(Path(__file__).with_name("hub_setup_compose.py")))
-    helper["compose_override"](project, decision.retrieval, decision.backend, EMBED_TOKEN_FILES, env)
+    _compose_helper("compose_override", project, decision.retrieval, decision.backend, EMBED_TOKEN_FILES, env)
+
+
+def _compose_helper(name: str, *args: Any) -> Any:
+    return runpy.run_path(str(Path(__file__).with_name("hub_setup_compose.py")))[name](*args)
 
 
 def apply(project: Path, decision: Decision, env_updates: dict[str, str]) -> None:

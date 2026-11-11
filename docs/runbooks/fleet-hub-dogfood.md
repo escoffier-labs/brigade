@@ -262,13 +262,36 @@ hub's `command` in `compose.override.yaml`.
 Both directions keep search answering. Setup leaves the operator's
 `compose.override.yaml` unchanged, including image pins, the trusted-identity
 command flag and state-volume binds. Hybrid writes its token mount to
-`compose.hybrid.yaml` and sets `COMPOSE_FILE` in `.env` to load `compose.yaml`,
-`compose.override.yaml` when it exists, and `compose.hybrid.yaml` in that order.
-An explicit operator file list is retained with the setup file appended.
-Lexical removes only the setup file and its entry, restoring Compose's default
-file discovery when no custom file list remains. Setup migrates an old override
-starting with `# Written by bin/hub-setup.py` to the setup-owned file.
-The transaction restores both files and `.env` if any write fails.
+`compose.hybrid.yaml` and uses exactly this default selection in `.env`:
+
+```dotenv
+COMPOSE_FILE=compose.yaml:compose.override.yaml:compose.hybrid.yaml
+```
+
+Setup creates an absent override with an operator-ownership comment and
+`services: {}`, a valid empty Compose services mapping. The stub belongs to the
+operator immediately. Setup never rewrites it, so later edits load without
+rerunning setup. Lexical removes the hybrid file and removes `COMPOSE_FILE`
+only when its unquoted value exactly matches the default above. Other values
+stay unchanged with a warning. Remove any hybrid entry from a custom selection
+before using Compose in lexical mode.
+
+Hybrid refuses an existing operator `COMPOSE_FILE` or non-default separator
+before writing anything. Setup never parses or appends to an operator list,
+including quoted values and absolute paths. Review the selection yourself:
+add `compose.hybrid.yaml` using your separator for manual Compose operation,
+or unset `COMPOSE_PATH_SEPARATOR` and use the exact default above before
+rerunning setup. Refusal leaves the mode and every file unchanged.
+
+Legacy overrides migrate only when their bytes exactly match a document old
+setup generated, including its final newline and backend token file. An exact
+legacy override becomes the setup mount, and hybrid creates the operator stub.
+A file retaining `# Written by bin/hub-setup.py` with any other content is mixed.
+Setup refuses either mode switch without writes. Remove the `embed_token`
+service-secret entry, its top-level secret definition and the setup header,
+or move the file aside, then rerun. Preserve any image pin, command or state
+bind you added. On a write failure the transaction restores `.env`, the hybrid
+file and an exact legacy file, and removes a newly created stub.
 
 Hybrid to BM25:
 
