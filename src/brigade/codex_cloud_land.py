@@ -134,7 +134,7 @@ def land(target: Path, task_id: str, issue: int) -> dict[str, str]:
                     target,
                     "guard-failed",
                 )
-                message = f"fix: address #{issue}\n\nCo-Authored-By: Codex <codex@openai.com>"
+                message = f"fix: address #{issue}\n\nCo-Authored-By: Codex <codex@openai.com>"  # content-guard: allow pii/email
                 _run(["git", "commit", "-m", message], tree, "commit-failed")
                 body = root / "pr-body.md"
                 body.write_text(

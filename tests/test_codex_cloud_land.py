@@ -75,7 +75,7 @@ def test_land_isolated_and_registered(landing):
     assert (caller / "file.txt").read_text() == "caller dirty\n"
     assert len(git(caller, "worktree", "list").splitlines()) == 1
     commit = git(caller, "log", "-1", "--format=%B", result["branch"])
-    assert commit.endswith("Co-Authored-By: Codex <codex@openai.com>")
+    assert commit.endswith("Co-Authored-By: Codex <codex@openai.com>")  # content-guard: allow pii/email
     entry = cloud_tracker.load_registry(caller)["entries"][0]
     assert entry["pr_url"] == result["pr_url"]
     payload = cloud_tracker.status_payload(caller)
