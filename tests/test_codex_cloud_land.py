@@ -1101,6 +1101,23 @@ def test_r2_private_policy_applies_to_title(landing):
     assert not any(argv[:2] == ["git", "commit"] for argv, _ in calls)
 
 
+@pytest.mark.parametrize("approved", [True, False])
+def test_r3_staged_guard_uses_pinned_policies(landing, approved):
+    caller, state, _ = landing
+    literal = ".".join(map(str, (10, 42, 7, 9)))
+    policy = caller.parent / "home" / ".config" / "content-guard" / "internal.json"
+    policy.parent.mkdir(parents=True)
+    policy.write_text(json.dumps({"allow_values": [literal] if approved else []}))
+    state["extra_files"] = {"notes.txt": f"endpoint {literal}\n"}
+    state["execute_guard"] = True
+    if approved:
+        result = codex_cloud_land.land(caller, "task_example", 2473)
+        assert result["pr_url"].endswith("/123")
+    else:
+        with pytest.raises(codex_cloud_land.LandError, match="guard-failed"):
+            codex_cloud_land.land(caller, "task_example", 2473)
+
+
 def test_r2_all_publication_text_is_scanned(landing):
     caller, state, _ = landing
     codex_cloud_land.land(caller, "task_example", 2473)

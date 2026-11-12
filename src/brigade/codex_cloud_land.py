@@ -855,20 +855,26 @@ def _prepare(
             if path.is_symlink() or (path.exists() and not stat.S_ISREG(path.lstat().st_mode)):
                 raise LandError("unsafe-file-type")
         check = root / "guard-check"
+        # Scan staged content with each pinned policy, as the pre-push hook and the
+        # publication-text scan do, so operator allow_values apply consistently.
+        scans = [
+            isolated_exec.package_argv(
+                isolated_exec.trusted_cwd() / "__init__.py",
+                "brigade",
+                "guard",
+                "git",
+                "--staged",
+                "--policy",
+                str(policy),
+                cwd_after_load=tree,
+            )
+            for policy in git.policies
+        ]
         check.write_text(
             _python_wrapper(
-                "import subprocess\nraise SystemExit(subprocess.call("
-                + repr(
-                    isolated_exec.package_argv(
-                        isolated_exec.trusted_cwd() / "__init__.py",
-                        "brigade",
-                        "guard",
-                        "git",
-                        "--staged",
-                        cwd_after_load=tree,
-                    )
-                )
-                + "))\n"
+                "import subprocess\nfor argv in "
+                + repr(scans)
+                + ":\n    code = subprocess.call(argv)\n    if code:\n        raise SystemExit(code)\n"
             ),
             encoding="utf-8",
         )
