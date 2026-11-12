@@ -1101,6 +1101,32 @@ def test_r2_private_policy_applies_to_title(landing):
     assert not any(argv[:2] == ["git", "commit"] for argv, _ in calls)
 
 
+@pytest.mark.parametrize("hide", ["plain", "plus-prefix"])
+def test_r3_proposal_cannot_add_guard_directive(landing, hide):
+    caller, state, calls = landing
+    directive = "content-" + "guard: allow all"
+    blocked = ".".join(map(str, (10, 42, 7, 9)))
+    line = f"endpoint {blocked} # {directive}\n"
+    state["extra_files"] = {"notes.txt": ("++ " if hide == "plus-prefix" else "") + line}
+    state["execute_guard"] = True
+    with pytest.raises(codex_cloud_land.LandError, match="^guard-directive-added$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+    assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
+
+
+def test_r3_existing_guard_directive_is_not_a_new_one(landing):
+    caller, state, _ = landing
+    directive = "content-" + "guard: allow all"
+    remote = caller.parent / "remote"
+    (remote / "kept.txt").write_text(f"example # {directive}\n")
+    git(remote, "add", "kept.txt")
+    git(remote, "commit", "-m", "test: keep an existing directive")
+    state["extra_files"] = {"other.txt": "plain change\n"}
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert result["pr_url"].endswith("/123")
+
+
 @pytest.mark.parametrize("approved", [True, False])
 def test_r3_staged_guard_uses_pinned_policies(landing, approved):
     caller, state, _ = landing

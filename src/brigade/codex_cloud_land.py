@@ -492,6 +492,36 @@ def _diff_paths(diff: bytes, cwd: Path, git: _LandingGit) -> None:
         raise LandError("empty-diff")
 
 
+_GUARD_DIRECTIVE = "content-guard:"
+
+
+def _directive_count(source: list[str], name: str, tree: Path, git: _LandingGit) -> int:
+    """Count directive occurrences in one path of the index (``--cached``) or a commit."""
+    output = git.git(
+        ["grep", "-c", "-a", "-F", *(["--cached"] if source == ["--cached"] else []), "-e", _GUARD_DIRECTIVE]
+        + ([] if source == ["--cached"] else source)
+        + ["--", name],
+        tree,
+        "inspect-failed",
+        optional=True,
+    )
+    return sum(int(line.rsplit(":", 1)[1]) for line in output.splitlines() if line.rsplit(":", 1)[-1].isdigit())
+
+
+def _refuse_added_guard_directives(name: str, tree: Path, git: _LandingGit) -> None:
+    """Unreviewed task content never grants itself a guard exception.
+
+    The staged, tip and history scans all honor allow directives, so a proposal
+    that adds one could publish blocked content before conductor review. Count
+    whole-file occurrences rather than diff lines, which a line starting with
+    ``++`` can hide. A needed exception is added by the operator during review.
+    """
+    staged = _directive_count(["--cached"], name, tree, git)
+    base = _directive_count(["HEAD"], name, tree, git)
+    if staged > base:
+        raise LandError("guard-directive-added")
+
+
 def _update(target: Path, entry: dict[str, Any], **updates: Any) -> None:
     """Compare the entry identity and revision before every short registry transition."""
     try:
@@ -855,6 +885,7 @@ def _prepare(
             path = tree / name
             if path.is_symlink() or (path.exists() and not stat.S_ISREG(path.lstat().st_mode)):
                 raise LandError("unsafe-file-type")
+            _refuse_added_guard_directives(name, tree, git)
         check = root / "guard-check"
         # Scan staged content with each pinned policy, as the pre-push hook and the
         # publication-text scan do, so operator allow_values apply consistently.
