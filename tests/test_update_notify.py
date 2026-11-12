@@ -248,6 +248,48 @@ def test_stale_claim_owned_by_another_user_is_replaced(tmp_path, monkeypatch):
     assert claim.stat().st_mtime == now
 
 
+def test_stale_takeover_lost_to_another_claimant_skips_spawn(tmp_path, monkeypatch):
+    path = _write_state(tmp_path, checked_at=0.0)
+    claim = path.with_suffix(".claim")
+    claim.touch()
+    now = 1_000_000.0
+    os.utime(claim, (now - 7200, now - 7200))
+    real_open = os.open
+
+    def racing_open(target, flags, *args, **kwargs):
+        # Another claimant recreates the claim between our unlink and our create.
+        if Path(target) == claim and not claim.exists():
+            claim.touch()
+        return real_open(target, flags, *args, **kwargs)
+
+    monkeypatch.setattr(update_notify.os, "open", racing_open)
+    calls = []
+    update_notify.maybe_notify(
+        ["work"], 0, env=_env(tmp_path), now=now, stderr=io.StringIO(), spawn=lambda: calls.append("spawned")
+    )
+    assert calls == []
+
+
+def test_stale_claim_that_cannot_be_removed_skips_spawn(tmp_path, monkeypatch):
+    path = _write_state(tmp_path, checked_at=0.0)
+    claim = path.with_suffix(".claim")
+    claim.touch()
+    now = 1_000_000.0
+    os.utime(claim, (now - 7200, now - 7200))
+
+    def denied(self, missing_ok=False):
+        raise PermissionError("sticky directory, foreign owner")
+
+    monkeypatch.setattr(Path, "unlink", denied)
+    calls = []
+    update_notify.maybe_notify(
+        ["work"], 0, env=_env(tmp_path), now=now, stderr=io.StringIO(), spawn=lambda: calls.append("spawned")
+    )
+    monkeypatch.undo()
+    assert calls == []
+    assert claim.stat().st_mtime == now - 7200
+
+
 @pytest.mark.parametrize("operation", ["mkdir", "open", "stat", "utime"])
 def test_unwritable_refresh_claim_skips_spawn(tmp_path, monkeypatch, operation):
     path = _write_state(tmp_path, checked_at=0.0)
