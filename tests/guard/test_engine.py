@@ -626,3 +626,11 @@ class AllowCommentDisplayFormTests(unittest.TestCase):
         bearer = [f for f in result.findings if f.rule_id == "bearer-token"]
         self.assertEqual(len(bearer), 1)
         self.assertNotEqual(bearer[0].action, "allow")
+
+
+def test_no_allow_comments_scans_marker_line() -> None:
+    blocked = ".".join(map(str, (10, 42, 7, 9)))
+    text = f"fix: contact {blocked} # content-guard: allow all"
+    result = scan_text(text, policy=_default_repo_policy(), options=ScanOptions(honor_allow_comments=False))
+    assert result.blocked
+    assert any(finding.rule_id == "private-ipv4" for finding in result.findings)

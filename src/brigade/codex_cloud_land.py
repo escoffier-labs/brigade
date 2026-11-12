@@ -17,6 +17,7 @@ from typing import Any
 from uuid import uuid4
 
 from . import cloud_tracker, codex_cloud, isolated_exec, proc
+from .guard.policy import default_policy
 from .inbox_lock import InboxLockTimeout, held_file_lock
 
 
@@ -29,7 +30,19 @@ def _environment() -> dict[str, str]:
     return {
         key: value
         for key, value in os.environ.items()
-        if not key.upper().startswith(("GIT_", "PYTHON", "LD_", "DYLD_"))
+        if not key.upper().startswith(
+            (
+                "GIT_",
+                "PYTHON",
+                "CONTENT_GUARD_",
+                "BRIGADE_",
+                "MISELEDGER_",
+                "GRAPHTRAIL_",
+                "SESSIONFIND_",
+                "LD_",
+                "DYLD_",
+            )
+        )
         and key.upper()
         not in {
             "BASH_ENV",
@@ -46,6 +59,9 @@ def _environment() -> dict[str, str]:
             "SSL_CERT_DIR",
             "SSH_ASKPASS",
             "SSH_ASKPASS_REQUIRE",
+            "VIRTUAL_ENV",
+            "__PYVENV_LAUNCHER__",
+            "AGENT_NOTIFY_BIN",
         }
     }
 
@@ -93,10 +109,28 @@ class _LandingGit:
         self.repository = root / "repository"
         self.repository.mkdir(mode=0o700, exist_ok=True)
         environment = _environment()
+        common = _caller_git_dir(target)
+        roots = [target, common, root]
+        for gitdir in (common / "worktrees").glob("*/gitdir"):
+            roots.append(Path(gitdir.read_text(encoding="utf-8").strip()).parent.resolve())
+        try:
+            home = Path(environment.get("HOME", str(Path.home())))
+            if not home.is_absolute():
+                raise LandError("unsafe-git-config")
+            home = home.resolve(strict=True)
+            if (
+                not home.is_dir()
+                or home.stat().st_uid not in {0, os.getuid()}
+                or any(home.is_relative_to(proposal) for proposal in roots)
+            ):
+                raise LandError("unsafe-git-config")
+        except (OSError, RuntimeError) as exc:
+            raise LandError("unsafe-git-config") from exc
+        environment["HOME"] = str(home)
         directories = [
             str(Path(part).resolve())
             for part in os.get_exec_path(environment)
-            if part and Path(part).is_absolute() and not Path(part).resolve().is_relative_to(target)
+            if part and Path(part).is_absolute() and not any(Path(part).resolve().is_relative_to(p) for p in roots)
         ]
         self.tools = {}
         for name in ("git", "gh", "codex", "brigade", "vale"):
@@ -131,6 +165,9 @@ class _LandingGit:
         environment["GH_PROMPT_DISABLED"] = "1"
         environment["GIT_CONFIG_NOSYSTEM"] = "1"
         environment["GIT_CEILING_DIRECTORIES"] = str(root)
+        environment["BRIGADE_GUARD_BACKEND"] = "python"
+        # Receipt indexing is outside landing's guard operation.
+        environment["BRIGADE_EVIDENCE_BIN"] = os.devnull
         self.environment = environment
 
         if not (self.repository / ".git").exists():
@@ -184,10 +221,6 @@ class _LandingGit:
         helper = "!" + shlex.quote(str(credential_executable.resolve())) + arguments
         configured = Path(operator("--path", "--get", "core.hooksPath")).expanduser()
         guard = (configured / "pre-push").resolve()
-        common = _caller_git_dir(target)
-        roots = [target, common]
-        for gitdir in (common / "worktrees").glob("*/gitdir"):
-            roots.append(Path(gitdir.read_text(encoding="utf-8").strip()).parent.resolve())
         if (
             not configured.is_absolute()
             or any(guard.is_relative_to(worktree) for worktree in roots)
@@ -201,6 +234,37 @@ class _LandingGit:
         self.hooks.mkdir(mode=0o700)
         shutil.copyfile(guard, self.hooks / "pre-push")
         (self.hooks / "pre-push").chmod(0o700)
+        # The hook and metadata scans share trusted, pinned policy bytes.
+        try:
+            public = json.loads(default_policy("public-repo.json").read_text())
+            private = home / ".config" / "content-guard" / "internal.json"
+            extra = tools_dir / "private-policy.json"
+            extra.unlink(missing_ok=True)
+            self.policies = [tools_dir / "public-repo.json"]
+            if private.exists():
+                private = private.resolve(strict=True)
+                if (
+                    not private.is_file()
+                    or private.stat().st_uid not in {0, os.getuid()}
+                    or any(private.is_relative_to(proposal) for proposal in roots)
+                ):
+                    raise LandError("unsafe-git-config")
+                private_policy = json.loads(private.read_text(encoding="utf-8"))
+                private_policy["allow_agent_coauthors"] = True
+                allowed = private_policy.get("allow_values", [])
+                if not isinstance(allowed, list) or not all(isinstance(value, str) for value in allowed):
+                    raise LandError("unsafe-git-config")
+                public["allow_values"] = [*public.get("allow_values", []), *allowed]
+                extra.write_text(json.dumps(private_policy), encoding="utf-8")
+                extra.chmod(0o600)
+                self.policies.append(extra)
+            public["allow_agent_coauthors"] = True
+            self.policies[0].write_text(json.dumps(public), encoding="utf-8")
+            self.policies[0].chmod(0o600)
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
+            raise LandError("unsafe-git-config") from exc
+        environment["CONTENT_GUARD_POLICY"] = str(self.policies[0])
+        environment["CONTENT_GUARD_EXTRA_POLICY"] = str(extra)
         self.config = [
             *(f"{key}={value}" for key, value in identity.items()),
             f"core.hooksPath={self.hooks}",
@@ -283,6 +347,25 @@ class _LandingGit:
         if not cwd.resolve().is_relative_to(self.repository.parent):
             raise LandError("unsafe-git-config")
         return _run([self.tools[name], *args], cwd, reason, environment=self.env())
+
+    def scan_publication_text(self, *texts: str) -> None:
+        for text in texts:
+            for policy in self.policies:
+                _run(
+                    isolated_exec.module_argv(
+                        "brigade.guard",
+                        "scan",
+                        "-",
+                        "--policy",
+                        str(policy),
+                        "--no-allow-comments",
+                        "--scan-frontmatter",
+                    ),
+                    self.repository,
+                    "title-refused",
+                    stdin=text.encode("utf-8"),
+                    environment=self.env(),
+                )
 
 
 def _check_path(value: str, tree: Path, hooks: tuple[Path, ...]) -> None:
@@ -587,6 +670,12 @@ def _land_locked(
     git.tool("vale", [str(body)], git.repository, "pr-body-lint-failed")
     if not commit:
         commit = _prepare(target, entry, issue, git, root, branch, canonical)
+    else:
+        git.scan_publication_text(
+            entry["landing_title"],
+            git.git(["show", "-s", "--format=%B", commit], git.repository, "inspect-failed").strip(),
+            body.read_text(encoding="utf-8"),
+        )
     # Recheck the entry revision immediately before publication.
     _update(target, entry, landing_commit=commit)
     publish_tree = checkout or root / "publication"
@@ -722,6 +811,8 @@ def _prepare(
     title = "".join(c for c in title if ord(c) >= 32 and not 127 <= ord(c) <= 159)[:200]
     if not re.match(r"^(fix|feat)(\([^)]+\))?:\s", title):
         title = "fix: " + re.sub(r"^[a-z]+(?:\([^)]+\))?:\s*", "", title) if title else f"fix: address #{issue}"
+    message = f"{title}\n\nCo-Authored-By: Codex <codex@openai.com>"  # content-guard: allow pii/email
+    git.scan_publication_text(title, message, (root / "pr-body.md").read_text(encoding="utf-8"))
     git.git(["fetch", "--no-tags", canonical, "refs/heads/main"], git.repository, "fetch-failed")
     base = git.git(["rev-parse", "FETCH_HEAD"], git.repository, "inspect-failed").strip()
     _update(target, entry, landing_base=base, landing_title=title, landing_attempt=1)
@@ -771,7 +862,6 @@ def _prepare(
         )
         if git.git(["write-tree"], tree, "inspect-failed").strip() != expected_tree:
             raise LandError("guard-tree-mismatch")
-        message = f"{title}\n\nCo-Authored-By: Codex <codex@openai.com>"  # content-guard: allow pii/email
         git.git(["commit", "--no-gpg-sign", "-m", message], tree, "commit-failed")
         if git.git(["rev-parse", "HEAD^{tree}"], tree, "inspect-failed").strip() != expected_tree:
             raise LandError("commit-tree-mismatch")

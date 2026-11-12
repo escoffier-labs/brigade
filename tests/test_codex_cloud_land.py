@@ -74,7 +74,7 @@ def landing(tmp_path, monkeypatch):
     set_home(monkeypatch, home)
     original = proc.run
     calls = []
-    state = {"status": "[READY] example", "failure": None, "path": "file.txt"}
+    state = {"status": "[READY] example", "failure": None, "path": "file.txt", "text_scans": []}
 
     def probe_transport(argv, kwargs):
         # Replace HTTPS at the transport boundary, after real Git resolves its config.
@@ -86,6 +86,8 @@ def landing(tmp_path, monkeypatch):
     def run(argv, **kwargs):
         actual_argv = argv
         state.setdefault("raw_calls", []).append((list(argv), kwargs.get("env")))
+        if "brigade.guard" in argv and "--no-allow-comments" in argv:
+            state["text_scans"].append((list(argv), kwargs["stdin"].decode()))
         name = "gh" if Path(argv[0]).resolve() == gh.resolve() else Path(argv[0]).name.removesuffix(".js")
         argv = [name, *argv[1:]]
         if argv[0] == "git":
@@ -994,3 +996,140 @@ def test_r2_reconcile_preserves_trusted_tools(interrupted_publication):
     with pytest.raises(codex_cloud_land.LandError, match="^unsafe-git-config$"):
         codex_cloud_land.land(caller, "task_example", 2473)
     assert (tools / "brigade").is_file()
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "CONTENT_GUARD_DIR",
+        "CONTENT_GUARD_POLICY",
+        "CONTENT_GUARD_EXTRA_POLICY",
+        "CONTENT_GUARD_PRIVATE_POLICY",
+        "CONTENT_GUARD_OPF_BIN",
+        "BRIGADE_GUARD_BIN",
+        "BRIGADE_GUARD_BACKEND",
+        "BRIGADE_HOME",
+        "BRIGADE_USER_DIR",
+        "BRIGADE_EVIDENCE_BIN",
+        "BRIGADE_CODE_GRAPH_BIN",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONSTARTUP",
+        "PYTHONUSERBASE",
+        "VIRTUAL_ENV",
+    ],
+)
+def test_r2_guard_path_overrides_are_discarded(monkeypatch, key):
+    monkeypatch.setenv(key, "compat")
+    assert key not in codex_cloud_land._environment()
+
+
+@pytest.mark.parametrize("override", ["compat", "native"])
+def test_r2_relative_guard_override_never_executes(landing, tmp_path, monkeypatch, override):
+    caller, state, _ = landing
+    marker = tmp_path / "executed"
+    state["extra_files"] = {
+        "compat/src/content_guard/__init__.py": (
+            "import os\nfrom pathlib import Path\nPath(os.environ['LAND_TEST_MARKER']).touch()\n"
+        ),
+        "compat/src/content_guard/__main__.py": "raise SystemExit(0)\n",
+        "compat/policies/public-repo.json": "{}\n",
+        "compat/scanner": '#!/bin/sh\ntouch "$LAND_TEST_MARKER"\nexit 1\n',
+    }
+    state["executable_files"] = {"compat/scanner"}
+    hook = caller.parent / "home" / "hooks" / "pre-push"
+    hook.write_text("#!/bin/sh\nexec brigade scrub --target . --policy public-repo --no-receipt\n")
+    if override == "compat":
+        monkeypatch.setenv("CONTENT_GUARD_DIR", "compat")
+    else:
+        scanner = caller / "compat" / "scanner"
+        scanner.parent.mkdir()
+        scanner.write_text(state["extra_files"]["compat/scanner"])
+        scanner.chmod(0o700)
+        monkeypatch.setenv("BRIGADE_GUARD_BACKEND", "native")
+        monkeypatch.setenv("BRIGADE_GUARD_BIN", str(scanner))
+
+    def during_push(cwd):
+        environment = state["raw_calls"][-1][1]
+        result = subprocess.run(
+            [str(cwd.parent / "hooks" / "pre-push")],
+            cwd=cwd,
+            env={**environment, "LAND_TEST_MARKER": str(marker)},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert not marker.exists()
+        assert result.returncode == 0
+        if override == "native":
+            assert "BRIGADE_GUARD_BIN" not in environment
+            assert environment["BRIGADE_GUARD_BACKEND"] == "python"
+
+    state["during_push"] = during_push
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("allow_marker", [False, True])
+def test_r2_blocked_title_refused_before_commit(landing, capsys, allow_marker):
+    caller, state, calls = landing
+    blocked = ".".join(map(str, (10, 42, 7, 9)))
+    suffix = " # content-guard: allow all" if allow_marker else ""
+    state["status"] = f"[READY] fix: contact {blocked}{suffix}"
+    with pytest.raises(codex_cloud_land.LandError, match="^title-refused$") as error:
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] in (["git", "commit"], ["git", "push"]) for argv, _ in calls)
+    assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
+    captured = capsys.readouterr()
+    assert blocked not in captured.out + captured.err + str(error.value)
+    assert "landing_title" not in cloud_tracker.load_registry(caller)["entries"][0]
+
+
+def test_r2_private_policy_applies_to_title(landing):
+    caller, state, calls = landing
+    policy = caller.parent / "home" / ".config" / "content-guard" / "internal.json"
+    policy.parent.mkdir(parents=True)
+    policy.write_text(json.dumps({"known_hosts": ["guard-only.example.invalid"]}))
+    state["status"] = "[READY] fix: contact guard-only.example.invalid"
+    with pytest.raises(codex_cloud_land.LandError, match="^title-refused$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] == ["git", "commit"] for argv, _ in calls)
+
+
+def test_r2_all_publication_text_is_scanned(landing):
+    caller, state, _ = landing
+    codex_cloud_land.land(caller, "task_example", 2473)
+    scanned = [text for _, text in state["text_scans"]]
+    assert state["title"] in scanned
+    assert state["commit_message"] in scanned
+    assert state["body"] in scanned
+    push_environment = next(environment for argv, environment in state["raw_calls"] if "push" in argv)
+    assert all(
+        argv[argv.index("--policy") + 1] == push_environment["CONTENT_GUARD_POLICY"] for argv, _ in state["text_scans"]
+    )
+
+
+def test_r2_retry_refuses_unsafe_saved_title(landing):
+    caller, state, calls = landing
+    state["failure"] = "push"
+    with pytest.raises(codex_cloud_land.LandError, match="^push-failed:network$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    with cloud_tracker.registry_lock(caller):
+        registry = cloud_tracker.load_registry(caller)
+        registry["entries"][0]["landing_title"] = "fix: contact " + ".".join(map(str, (10, 42, 7, 9)))
+        cloud_tracker.save_registry(caller, registry)
+    calls.clear()
+    state["failure"] = None
+    with pytest.raises(codex_cloud_land.LandError, match="^title-refused$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+    assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
+
+
+@pytest.mark.parametrize("kind", ["relative", "proposal"])
+def test_r2_guard_home_must_be_external_and_absolute(landing, monkeypatch, kind):
+    caller, _, calls = landing
+    set_home(monkeypatch, Path("compat") if kind == "relative" else caller)
+    with pytest.raises(codex_cloud_land.LandError, match="^unsafe-git-config$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not calls
