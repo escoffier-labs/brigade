@@ -47,6 +47,11 @@ def landing(tmp_path, monkeypatch):
     (caller / "file.txt").write_text("caller dirty\n")
     cloud_tracker.register(caller, provider="codex-cloud", task_id="task_example", label="example")
     monkeypatch.setattr(codex_cloud, "_repo_from_cwd", lambda _: "example/repo")
+    # Pin an external private runtime base so placement assertions hold on hosts
+    # without XDG_RUNTIME_DIR. test_r3_private_root_ignores_tmpdir covers the fallback.
+    runtime = (tmp_path / "xdg-runtime").resolve()
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
     original_which = shutil.which
 
     gh = tmp_path / "gh"
