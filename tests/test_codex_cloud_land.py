@@ -1133,3 +1133,26 @@ def test_r2_guard_home_must_be_external_and_absolute(landing, monkeypatch, kind)
     with pytest.raises(codex_cloud_land.LandError, match="^unsafe-git-config$"):
         codex_cloud_land.land(caller, "task_example", 2473)
     assert not calls
+
+
+def test_r2_trusted_tool_symlink_cannot_enter_private_checkout(interrupted_publication, tmp_path, monkeypatch):
+    caller, _, _, _, publication = interrupted_publication
+    marker = tmp_path / "executed"
+    probe = publication / "tool-probe"
+    probe.write_text('#!/bin/sh\ntouch "$LAND_TEST_MARKER"\n')
+    probe.chmod(0o700)
+    alias = tmp_path / "operator-tools" / "vale"
+    alias.parent.mkdir()
+    alias.symlink_to(probe)
+    previous = shutil.which
+
+    def which(name, **kwargs):
+        return str(alias) if name == "vale" else previous(name, **kwargs)
+
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setenv("LAND_TEST_MARKER", str(marker))
+    try:
+        with pytest.raises(codex_cloud_land.LandError, match="^trusted-tool-unavailable$"):
+            codex_cloud_land.land(caller, "task_example", 2473)
+    finally:
+        assert not marker.exists()

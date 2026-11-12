@@ -6,3 +6,4 @@
 - Accept a credential helper through an absolute symlink to the pinned trusted `gh` executable while retaining the exact `auth git-credential` arguments.
 - Read tracked symlink target text from its index blob across Git, publish, audit, and baseline scans without following the link. Keep unreadable regular and executable files fatal and reject unsupported index modes with `unsupported-index-mode`.
 - Discard inherited guard, Brigade, Python, and legacy engine path overrides during landing. Use the embedded Python scanner and pinned policy copies for hooks and publication text. Scan the title, final commit message, and PR body before committing, recheck saved publication text on retry, and refuse blocked text with `title-refused`. Guard directory overrides are unsupported. Strict text scans include lines containing allow markers.
+- Refuse trusted-tool symlinks that resolve into any caller checkout or the private landing root.

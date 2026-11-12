@@ -135,7 +135,7 @@ class _LandingGit:
         self.tools = {}
         for name in ("git", "gh", "codex", "brigade", "vale"):
             resolved = shutil.which(name, path=os.pathsep.join(directories))
-            if not resolved or Path(resolved).resolve().is_relative_to(target):
+            if not resolved or any(Path(resolved).resolve().is_relative_to(proposal) for proposal in roots):
                 raise LandError("trusted-tool-unavailable")
             self.tools[name] = str(Path(resolved).resolve())
         # Hooks invoke tools by name. Pin those names before any ambient PATH entry.
