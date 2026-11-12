@@ -656,8 +656,11 @@ def test_r1_land_help_explains_ci_boundary(capsys):
     assert "--closes" in output
 
 
-def test_r1_task_modified_signer_never_executes(landing, tmp_path):
+def test_r1_task_modified_signer_never_executes(landing, tmp_path, monkeypatch):
     caller, state, _ = landing
+    # This test covers signer isolation. Its marker is a host path that the
+    # added-line content scan rightly flags on some hosts, so skip that scan here.
+    monkeypatch.setattr(codex_cloud_land, "_refuse_unreviewed_exceptions", lambda *args: None)
     remote = caller.parent / "remote"
     signer = remote / "signer"
     signer.write_text("#!/bin/sh\nexit 1\n")
@@ -1110,6 +1113,42 @@ def test_r3_proposal_cannot_add_guard_directive(landing, hide):
     state["extra_files"] = {"notes.txt": ("++ " if hide == "plus-prefix" else "") + line}
     state["execute_guard"] = True
     with pytest.raises(codex_cloud_land.LandError, match="^guard-directive-added$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+    assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
+
+
+def _base_file(caller, name, content):
+    remote = caller.parent / "remote"
+    (remote / name).write_text(content)
+    git(remote, "add", name)
+    git(remote, "commit", "-m", "test: base file")
+
+
+@pytest.mark.parametrize("case", ["broaden", "beside-line", "file-scope"])
+def test_r3_existing_exception_cannot_cover_new_content(landing, case):
+    caller, state, calls = landing
+    narrow = "content-" + "guard: allow pii/email"
+    blocked = ".".join(map(str, (10, 42, 7, 9)))
+    if case == "broaden":
+        base = f"contact # {narrow}\n"
+        patch = f"-contact # {narrow}\n+contact {blocked} # content-" + "guard: allow all file\n"
+        header = "@@ -1 +1 @@\n"
+    elif case == "beside-line":
+        base = f"# {narrow}\nend\n"
+        patch = f" # {narrow}\n+endpoint {blocked}\n end\n"
+        header = "@@ -1,2 +1,3 @@\n"
+    else:
+        base = "# content-" + "guard: allow private-ip file\nend\n"
+        patch = f"+endpoint {blocked}\n"
+        header = "@@ -2,0 +3 @@\n"
+    _base_file(caller, "kept.txt", base)
+    state["diff"] = (
+        "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n"
+        "diff --git a/kept.txt b/kept.txt\n--- a/kept.txt\n+++ b/kept.txt\n" + header + patch
+    )
+    reason = "^guard-directive-added$" if case == "broaden" else "^guard-failed$"
+    with pytest.raises(codex_cloud_land.LandError, match=reason):
         codex_cloud_land.land(caller, "task_example", 2473)
     assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
     assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)

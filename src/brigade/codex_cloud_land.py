@@ -361,22 +361,26 @@ class _LandingGit:
 
     def scan_publication_text(self, *texts: str) -> None:
         for text in texts:
-            for policy in self.policies:
-                _run(
-                    isolated_exec.module_argv(
-                        "brigade.guard",
-                        "scan",
-                        "-",
-                        "--policy",
-                        str(policy),
-                        "--no-allow-comments",
-                        "--scan-frontmatter",
-                    ),
-                    self.repository,
-                    "title-refused",
-                    stdin=text.encode("utf-8"),
-                    environment=self.env(),
-                )
+            self.scan_text(text, "title-refused")
+
+    def scan_text(self, text: str, reason: str) -> None:
+        """Scan text under every pinned policy with allow comments ignored."""
+        for policy in self.policies:
+            _run(
+                isolated_exec.module_argv(
+                    "brigade.guard",
+                    "scan",
+                    "-",
+                    "--policy",
+                    str(policy),
+                    "--no-allow-comments",
+                    "--scan-frontmatter",
+                ),
+                self.repository,
+                reason,
+                stdin=text.encode("utf-8"),
+                environment=self.env(),
+            )
 
 
 def _check_path(value: str, tree: Path, hooks: tuple[Path, ...]) -> None:
@@ -493,33 +497,69 @@ def _diff_paths(diff: bytes, cwd: Path, git: _LandingGit) -> None:
 
 
 _GUARD_DIRECTIVE = "content-guard:"
+_HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
 
 
-def _directive_count(source: list[str], name: str, tree: Path, git: _LandingGit) -> int:
-    """Count directive occurrences in one path of the index (``--cached``) or a commit."""
-    output = git.git(
-        ["grep", "-c", "-a", "-F", *(["--cached"] if source == ["--cached"] else []), "-e", _GUARD_DIRECTIVE]
-        + ([] if source == ["--cached"] else source)
-        + ["--", name],
+def _added_lines(name: str, tree: Path, git: _LandingGit) -> list[str]:
+    """Return the lines a proposal adds to one path, read by hunk line counts.
+
+    Counting from the ``@@`` headers keeps an added line that starts with ``++``
+    from being mistaken for a file header.
+    """
+    diff = git.git(
+        [
+            "diff",
+            "--cached",
+            "--unified=0",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--text",
+            "HEAD",
+            "--",
+            name,
+        ],
         tree,
         "inspect-failed",
-        optional=True,
     )
-    return sum(int(line.rsplit(":", 1)[1]) for line in output.splitlines() if line.rsplit(":", 1)[-1].isdigit())
+    added: list[str] = []
+    old = new = 0
+    for line in diff.split("\n"):
+        if old or new:
+            if line.startswith("\\"):
+                continue
+            if line.startswith("-") and old:
+                old -= 1
+            elif line.startswith("+") and new:
+                new -= 1
+                added.append(line[1:])
+            else:
+                raise LandError("invalid-diff")
+            continue
+        if match := _HUNK.match(line):
+            old = int(match.group(1) or "1")
+            new = int(match.group(2) or "1")
+    if old or new:
+        raise LandError("invalid-diff")
+    return added
 
 
-def _refuse_added_guard_directives(name: str, tree: Path, git: _LandingGit) -> None:
-    """Unreviewed task content never grants itself a guard exception.
+def _refuse_unreviewed_exceptions(names: list[str], tree: Path, git: _LandingGit) -> None:
+    """Unreviewed task content never relies on a guard exception.
 
-    The staged, tip and history scans all honor allow directives, so a proposal
-    that adds one could publish blocked content before conductor review. Count
-    whole-file occurrences rather than diff lines, which a line starting with
-    ``++`` can hide. A needed exception is added by the operator during review.
+    The staged, tip and history scans all honor allow directives, and a
+    line-scoped directive also covers the next line while a file-scoped one
+    covers the whole file. So a proposal could add, broaden, or sit beside a
+    reviewed exception and publish blocked content before conductor review.
+    Refuse any added directive, then scan every added line with allow comments
+    ignored under each pinned policy. A needed exception is added by the
+    operator during review.
     """
-    staged = _directive_count(["--cached"], name, tree, git)
-    base = _directive_count(["HEAD"], name, tree, git)
-    if staged > base:
+    added = [line for name in names for line in _added_lines(name, tree, git)]
+    if any(_GUARD_DIRECTIVE in line for line in added):
         raise LandError("guard-directive-added")
+    if added:
+        git.scan_text("\n".join(added) + "\n", "guard-failed")
 
 
 def _update(target: Path, entry: dict[str, Any], **updates: Any) -> None:
@@ -885,7 +925,7 @@ def _prepare(
             path = tree / name
             if path.is_symlink() or (path.exists() and not stat.S_ISREG(path.lstat().st_mode)):
                 raise LandError("unsafe-file-type")
-            _refuse_added_guard_directives(name, tree, git)
+        _refuse_unreviewed_exceptions(list(filter(None, paths)), tree, git)
         check = root / "guard-check"
         # Scan staged content with each pinned policy, as the pre-push hook and the
         # publication-text scan do, so operator allow_values apply consistently.
