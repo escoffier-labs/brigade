@@ -419,6 +419,9 @@ class _LandingGit:
                 )
             except (ValueError, KeyError, TypeError) as exc:
                 raise LandError("guard-failed") from exc
+            # A scanner backend that could not run never counts as a clean scan.
+            if any(str(item.get("rule_id")) in _SCANNER_FAILURES for item in findings):
+                raise LandError("guard-failed")
             if result.code == 1 and not any(item.get("action") == "block" for item in findings):
                 raise LandError("guard-failed")
         return found
@@ -557,6 +560,7 @@ def _diff_paths(diff: bytes, cwd: Path, git: _LandingGit) -> None:
 
 
 _GUARD_DIRECTIVE = "content-guard:"
+_SCANNER_FAILURES = frozenset({"opf-error", "opf-unavailable"})
 _HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
 
 

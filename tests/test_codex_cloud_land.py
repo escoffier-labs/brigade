@@ -1187,6 +1187,23 @@ def test_r3_env_interpreter_parsing(tmp_path, first_line, expected):
     assert codex_cloud_land._env_interpreter(script) == expected
 
 
+@pytest.mark.parametrize("rule_id", ["opf-error", "opf-unavailable"])
+def test_r3_scanner_backend_failure_fails_closed(landing, monkeypatch, rule_id):
+    caller, state, calls = landing
+    run = codex_cloud_land.proc.run
+
+    def failing_backend(argv, **kwargs):
+        if "brigade.guard" in argv and "--json" in argv:
+            finding = {"action": "warn", "rule_id": rule_id, "match": ""}
+            return proc.Result(0, json.dumps({"findings": [finding]}), "")
+        return run(argv, **kwargs)
+
+    monkeypatch.setattr(codex_cloud_land.proc, "run", failing_backend)
+    with pytest.raises(codex_cloud_land.LandError, match="^guard-failed$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+
+
 def _base_file(caller, name, content):
     remote = caller.parent / "remote"
     (remote / name).write_text(content)
