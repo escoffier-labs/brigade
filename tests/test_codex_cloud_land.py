@@ -1156,3 +1156,26 @@ def test_r2_trusted_tool_symlink_cannot_enter_private_checkout(interrupted_publi
             codex_cloud_land.land(caller, "task_example", 2473)
     finally:
         assert not marker.exists()
+
+
+def test_r2_exported_guard_function_never_executes(landing, monkeypatch):
+    caller, state, _ = landing
+    state["extra_files"] = {"compat/probe.py": "from pathlib import Path\nPath('guard-executed').touch()\n"}
+    hook = caller.parent / "home" / "hooks" / "pre-push"
+    hook.write_text("#!/usr/bin/env bash\nbrigade scrub --target . --policy public-repo --no-receipt\n")
+    monkeypatch.setenv("BASH_FUNC_brigade%%", "() { python3 compat/probe.py; }")
+
+    def during_push(cwd):
+        result = subprocess.run(
+            [str(cwd.parent / "hooks" / "pre-push")],
+            cwd=cwd,
+            env=state["raw_calls"][-1][1],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert not (cwd / "guard-executed").exists()
+        assert result.returncode == 0
+
+    state["during_push"] = during_push
+    codex_cloud_land.land(caller, "task_example", 2473)

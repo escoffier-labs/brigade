@@ -39,6 +39,7 @@ def _environment() -> dict[str, str]:
                 "MISELEDGER_",
                 "GRAPHTRAIL_",
                 "SESSIONFIND_",
+                "BASH_FUNC_",
                 "LD_",
                 "DYLD_",
             )
