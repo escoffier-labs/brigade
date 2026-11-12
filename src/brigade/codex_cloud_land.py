@@ -28,7 +28,8 @@ class LandError(ValueError):
 _CREDENTIALS = {
     "git": {"GH_TOKEN", "GITHUB_TOKEN"},
     "gh": {"GH_TOKEN", "GITHUB_TOKEN"},
-    "codex": {"OPENAI_API_KEY", "CODEX_API_KEY"},
+    # Codex authenticates through the pinned CODEX_HOME login. No provider API key passes through.
+    "codex": set(),
     "vale": set(),
     "brigade": {"GH_TOKEN", "GITHUB_TOKEN"},
 }

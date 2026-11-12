@@ -1288,7 +1288,8 @@ def test_r3_tool_environments_are_allowlisted_and_pinned(landing, tmp_path, monk
         assert str(extra) not in environment["PATH"].split(os.pathsep)
         assert "UNRELATED_PROFILE" not in environment
         name = Path(argv[0]).name
-        assert ("OPENAI_API_KEY" in environment) == (name == "codex")
+        assert "OPENAI_API_KEY" not in environment
+        assert "CODEX_API_KEY" not in environment
         assert ("GH_TOKEN" in environment) == (name in {"git", "gh", "brigade", "python", "python3"})
 
 
