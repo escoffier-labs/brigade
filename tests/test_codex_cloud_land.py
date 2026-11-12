@@ -1118,6 +1118,17 @@ def test_r3_proposal_cannot_add_guard_directive(landing, hide):
     assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
 
 
+@pytest.mark.parametrize("name", [":(literal)decoy.md", ":(glob)*.md", ":!other.md", "-dash.md"])
+def test_r3_pathspec_magic_names_are_literal(landing, name):
+    caller, state, calls = landing
+    directive = "content-" + "guard: allow all"
+    blocked = ".".join(map(str, (10, 42, 7, 9)))
+    state["extra_files"] = {name: f"endpoint {blocked} # {directive}\n"}
+    with pytest.raises(codex_cloud_land.LandError, match="^guard-directive-added$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+
+
 def _base_file(caller, name, content):
     remote = caller.parent / "remote"
     (remote / name).write_text(content)

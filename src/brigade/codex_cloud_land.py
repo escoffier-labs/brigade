@@ -345,12 +345,13 @@ class _LandingGit:
         if not cwd.resolve().is_relative_to(self.repository.parent):
             raise LandError("unsafe-git-config")
         self._assert_config(cwd)
+        # Proposal file names reach pathspecs, so Git magic such as ":(literal)x" must not apply.
         return _run(
             [self.tools["git"], "--no-pager", *args],
             cwd,
             reason,
             stdin=stdin,
-            environment=self.env(),
+            environment={**self.env(), "GIT_LITERAL_PATHSPECS": "1"},
             optional=optional,
         )
 
