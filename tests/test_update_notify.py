@@ -5,9 +5,10 @@ from __future__ import annotations
 import io
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -171,6 +172,10 @@ def test_stale_cache_refresh_is_claimed_once(tmp_path, concurrent):
     path = _write_state(tmp_path, checked_at=0.0)
     calls = []
     barrier = Barrier(16) if concurrent else None
+    # Real time: a claim created by one thread carries the wall-clock mtime
+    # until its owner resets it, and a 1970 "now" would read it as decades
+    # in the future (stale) rather than freshly claimed.
+    now = time.time()
 
     def notify(_):
         if barrier is not None:
@@ -179,7 +184,7 @@ def test_stale_cache_refresh_is_claimed_once(tmp_path, concurrent):
             ["work"],
             0,
             env=_env(tmp_path),
-            now=1_000_000.0,
+            now=now,
             stderr=io.StringIO(),
             spawn=lambda: calls.append("spawned"),
         )
@@ -195,7 +200,10 @@ def test_stale_cache_refresh_is_claimed_once(tmp_path, concurrent):
     assert json.loads(path.read_text()) == {"checked_at": 0.0}
 
 
-@pytest.mark.parametrize("age,expected", [(3599, []), (3600, ["spawned"]), (3601, ["spawned"])])
+@pytest.mark.parametrize(
+    "age,expected",
+    [(3599, []), (3600, ["spawned"]), (3601, ["spawned"]), (-5, []), (-3599, []), (-3600, ["spawned"])],
+)
 def test_refresh_claim_window(tmp_path, age, expected):
     path = _write_state(tmp_path, checked_at=0.0)
     claim = path.with_suffix(".claim")
@@ -214,6 +222,30 @@ def test_refresh_claim_window(tmp_path, age, expected):
         )
     assert calls == expected
     assert claim.stat().st_mtime == (now if expected else now - age)
+
+
+def test_stale_claim_owned_by_another_user_is_replaced(tmp_path, monkeypatch):
+    path = _write_state(tmp_path, checked_at=0.0)
+    claim = path.with_suffix(".claim")
+    claim.write_text("foreign")
+    now = 1_000_000.0
+    os.utime(claim, (now - 7200, now - 7200))
+    real_utime = os.utime
+
+    def utime(target, times=None, **kwargs):
+        # Only the owner may set explicit times on the foreign claim; a fresh
+        # claim this process creates is empty and its own.
+        if Path(target) == claim and claim.read_text() == "foreign":
+            raise PermissionError("not the owner")
+        return real_utime(target, times, **kwargs)
+
+    monkeypatch.setattr(update_notify.os, "utime", utime)
+    calls = []
+    update_notify.maybe_notify(
+        ["work"], 0, env=_env(tmp_path), now=now, stderr=io.StringIO(), spawn=lambda: calls.append("spawned")
+    )
+    assert calls == ["spawned"]
+    assert claim.stat().st_mtime == now
 
 
 @pytest.mark.parametrize("operation", ["mkdir", "open", "stat", "utime"])
@@ -241,6 +273,14 @@ def test_unwritable_refresh_claim_skips_spawn(tmp_path, monkeypatch, operation):
         spawn=lambda: calls.append("spawned"),
     )
     assert calls == []
+    monkeypatch.undo()
+    claim = path.with_suffix(".claim")
+    if operation in {"mkdir", "open"}:
+        assert not claim.exists()
+    elif operation == "stat":
+        assert claim.stat().st_mtime == 0
+    else:
+        assert claim.exists() and claim.stat().st_mtime != 1_000_000.0
 
 
 def test_maybe_notify_swallows_exceptions(tmp_path, monkeypatch):
