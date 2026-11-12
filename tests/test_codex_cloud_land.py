@@ -1138,6 +1138,55 @@ def test_r3_blocked_file_name_refused(landing):
     assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
 
 
+def test_r3_launcher_interpreter_is_pinned(landing, tmp_path, monkeypatch):
+    caller, state, _ = landing
+    launcher = tmp_path / "pkg" / "codex"
+    launcher.parent.mkdir()
+    launcher.write_text("#!/usr/bin/env fakenode\n")
+    launcher.chmod(0o700)
+    interpreter = tmp_path / "interp" / "fakenode"
+    interpreter.parent.mkdir()
+    interpreter.write_text("#!/bin/sh\nexit 0\n")
+    interpreter.chmod(0o700)
+    current = shutil.which
+
+    def which(name, **kwargs):
+        if name == "codex":
+            return str(launcher)
+        if name == "fakenode":
+            return str(interpreter)
+        return current(name, **kwargs)
+
+    monkeypatch.setattr(shutil, "which", which)
+    seen = []
+    run = codex_cloud_land.proc.run
+
+    def spy(argv, **kwargs):
+        if Path(argv[0]).name == "codex":
+            first = Path(kwargs["env"]["PATH"].split(os.pathsep)[0])
+            seen.append((first / "fakenode").resolve())
+        return run(argv, **kwargs)
+
+    monkeypatch.setattr(codex_cloud_land.proc, "run", spy)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert seen and all(path == interpreter.resolve() for path in seen)
+
+
+@pytest.mark.parametrize(
+    ("first_line", "expected"),
+    [
+        ("#!/usr/bin/env node", "node"),
+        ("#!/usr/bin/env -S node --flag", "node"),
+        ("#!/bin/sh", None),
+        ("#!/usr/bin/env ../evil", None),
+    ],
+)
+def test_r3_env_interpreter_parsing(tmp_path, first_line, expected):
+    script = tmp_path / "tool"
+    script.write_text(first_line + "\n")
+    assert codex_cloud_land._env_interpreter(script) == expected
+
+
 def _base_file(caller, name, content):
     remote = caller.parent / "remote"
     (remote / name).write_text(content)

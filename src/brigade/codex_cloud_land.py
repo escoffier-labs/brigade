@@ -61,6 +61,20 @@ def _operator_directory(value: str, roots: list[Path]) -> Path:
         raise LandError("unsafe-git-config") from exc
 
 
+def _env_interpreter(executable: Path) -> str | None:
+    """Return the interpreter name a ``#!/usr/bin/env NAME`` launcher needs, if any."""
+    try:
+        with executable.open("rb") as handle:
+            first = handle.readline(256)
+    except OSError:
+        return None
+    parts = first.decode("ascii", "replace").strip().split()
+    if len(parts) < 2 or parts[0] not in {"#!/usr/bin/env", "#!/bin/env"}:
+        return None
+    name = next((part for part in parts[1:] if not part.startswith("-")), None)
+    return name if name and re.fullmatch(r"[A-Za-z0-9._+-]+", name) else None
+
+
 def _python_wrapper(code: str) -> str:
     return f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -I -c {shlex.quote(code)} "$@"\n'
 
@@ -138,7 +152,17 @@ class _LandingGit:
         # Hooks invoke tools by name. Pin those names before the tool directories.
         tools_dir = root / "tools"
         tools_dir.mkdir(mode=0o700, exist_ok=True)
-        for name, executable in self.tools.items():
+        pinned_names = dict(self.tools)
+        # A launcher such as `#!/usr/bin/env node` needs its interpreter, which may
+        # live outside the tool directories. Pin it from the same trusted search.
+        for executable in list(self.tools.values()):
+            interpreter = _env_interpreter(Path(executable))
+            if interpreter and interpreter not in pinned_names:
+                resolved = shutil.which(interpreter, path=os.pathsep.join(directories))
+                if not resolved or any(Path(resolved).resolve().is_relative_to(p) for p in roots):
+                    raise LandError("trusted-tool-unavailable")
+                pinned_names[interpreter] = str(Path(resolved).resolve())
+        for name, executable in pinned_names.items():
             if name != "brigade":
                 (tools_dir / name).unlink(missing_ok=True)
                 (tools_dir / name).symlink_to(executable)
