@@ -262,7 +262,7 @@ def test_codex_cloud_setup_creates_durable_secure_ancestors(monkeypatch, tmp_pat
 
 
 @pytest.mark.skipif(codex_cloud.os.name != "posix", reason="POSIX ownership and mode checks")
-@pytest.mark.parametrize("unsafe_component", [".brigade", ".brigade/cloud"])
+@pytest.mark.parametrize("unsafe_component", [".", ".brigade", ".brigade/cloud"])
 def test_codex_cloud_setup_preserves_refusal_of_unsafe_existing_ancestors(monkeypatch, tmp_path, unsafe_component):
     _make_recovery_cloud_directory(tmp_path)
     unsafe = tmp_path / unsafe_component
@@ -280,7 +280,7 @@ def test_codex_cloud_setup_preserves_refusal_of_unsafe_existing_ancestors(monkey
 
     launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
 
-    assert launched == {"ok": False, "reason": "lease-recovery-unwritable"}
+    assert launched == {"ok": False, "reason": "workspace-not-private"}
     assert codex_cloud._recover_lease_holder(tmp_path, "lease-1") is None
     after = unsafe.stat()
     assert (after.st_dev, after.st_ino, after.st_mode) == (before.st_dev, before.st_ino, before.st_mode)

@@ -1402,7 +1402,7 @@ def _skipped_ranges(text: str, options: ScanOptions) -> list[tuple[int, int]]:
 
     current = 0
     for line in lines:
-        if "content-guard:" in line:
+        if options.honor_allow_comments and "content-guard:" in line:
             ranges.append((current, current + len(line)))
         current += len(line)
 

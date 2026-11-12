@@ -16,13 +16,13 @@ Two enumeration modes:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
 from .baseline import Baseline, filter_findings
 from .engine import scan_text
-from .git_scan import _read_text, _tracked_paths
+from .git_scan import _ScanFile, _read_text, _tracked_files
 from .policy import Policy
 from .types import GuardResult, ScanOptions
 
@@ -123,10 +123,12 @@ def run_audit(
     skip = baseline_path.resolve() if baseline_path else None
 
     baseline_index = baseline._index() if baseline is not None else None
-    for path in paths:
-        if skip is not None and path.resolve() == skip:
+    for file in paths:
+        path = file.path
+        # Exclude the baseline file itself without resolving a symlink leaf.
+        if skip is not None and path.parent.resolve() / path.name == skip:
             continue
-        text = _read_text(path)
+        text = _read_text(file)
         if text is None:
             continue
 
@@ -143,15 +145,17 @@ def run_audit(
     return report
 
 
-def _enumerate(target: Path, *, scope: str, exclude_dirs: frozenset[str]) -> list[Path]:
+def _enumerate(target: Path, *, scope: str, exclude_dirs: frozenset[str]) -> list[_ScanFile]:
     if scope == "tracked":
-        rel_paths = _tracked_paths(all_tracked=True, cwd=target)
-        return [target / rel for rel in rel_paths if not exclude_dirs.intersection(rel.parts)]
+        files = _tracked_files(all_tracked=True, cwd=target)
+        return [
+            replace(file, path=target / file.path) for file in files if not exclude_dirs.intersection(file.path.parts)
+        ]
 
     # scope == "tree"
-    paths: list[Path] = []
+    paths: list[_ScanFile] = []
     for entry in sorted(target.rglob("*")):
-        if not entry.is_file():
+        if not entry.is_symlink() and not entry.is_file():
             continue
         try:
             rel_parts = entry.relative_to(target).parts
@@ -159,7 +163,7 @@ def _enumerate(target: Path, *, scope: str, exclude_dirs: frozenset[str]) -> lis
             rel_parts = entry.parts
         if any(part in exclude_dirs for part in rel_parts):
             continue
-        paths.append(entry)
+        paths.append(_ScanFile(entry))
     return paths
 
 

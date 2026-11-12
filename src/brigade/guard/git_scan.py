@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import stat
+from dataclasses import dataclass
 import re
 import subprocess
 import sys
@@ -11,6 +14,14 @@ from .engine import scan_text
 from .policy import Policy, default_policy, load_policy
 from .report import to_text
 from .rev_range import git_has_head, validate_rev_range_operand
+
+
+@dataclass(frozen=True)
+class _ScanFile:
+    path: Path
+    mode: bytes | None = None
+    object_id: str | None = None
+    root: Path | None = None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -70,14 +81,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.history:
         return _scan_history(policy, args)
 
-    paths = _tracked_paths(all_tracked=args.all_tracked)
+    paths = _tracked_files(all_tracked=args.all_tracked)
     if args.include_git_config and Path(".git/config").is_file():
-        paths.append(Path(".git/config"))
+        paths.append(_ScanFile(Path(".git/config")))
 
     results = []
     blocked = False
-    for path in paths:
-        text = _read_text(path)
+    for file in paths:
+        path = file.path
+        text = _read_text(file)
         if text is None:
             continue
         result = scan_text(text, policy=policy)
@@ -207,7 +219,17 @@ def _history_revs(args: argparse.Namespace) -> list[str]:
 
 def _added_lines(rev: str) -> str:
     proc = subprocess.run(
-        ["git", "show", "--no-color", "--first-parent", "--format=", "--unified=0", rev],
+        [
+            "git",
+            "show",
+            "--no-color",
+            "--no-textconv",
+            "--no-ext-diff",
+            "--first-parent",
+            "--format=",
+            "--unified=0",
+            rev,
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -277,31 +299,86 @@ def _load_repo_policy(raw: str | None) -> Policy:
     return load_policy(default_policy(name))
 
 
-def _tracked_paths(*, all_tracked: bool, cwd: Path | None = None) -> list[Path]:
-    if all_tracked:
-        cmd = ["git", "ls-files"]
-    else:
-        cmd = ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"]
+def _tracked_files(*, all_tracked: bool, cwd: Path | None = None) -> list[_ScanFile]:
+    def output(cmd: list[str]) -> bytes:
+        proc = subprocess.run(cmd, capture_output=True, check=False, cwd=cwd)
+        if proc.returncode != 0:
+            print("content-guard: Git path enumeration failed", file=sys.stderr)
+            raise SystemExit(2)
+        return proc.stdout
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, cwd=cwd)
-    if proc.returncode != 0:
-        print((proc.stderr or proc.stdout or "git command failed").strip(), file=sys.stderr)
-        raise SystemExit(2)
-
-    return [Path(line) for line in proc.stdout.splitlines() if line.strip()]
-
-
-def _read_text(path: Path) -> str | None:
     try:
-        raw = path.read_bytes()
+        # Gitlinks name submodules, not readable files in this worktree.
+        records = output(["git", "ls-files", "--stage", "-z"]).split(b"\0")
+        root = (cwd or Path.cwd()).resolve()
+        paths = []
+        for record in filter(None, records):
+            metadata, name = record.split(b"\t", 1)
+            mode, oid, _stage = metadata.split(b" ")
+            if mode == b"160000":
+                continue
+            if mode not in {b"100644", b"100755", b"120000"}:
+                print("content-guard: unsupported-index-mode", file=sys.stderr)
+                raise SystemExit(2)
+            if not re.fullmatch(rb"[0-9a-f]{40}|[0-9a-f]{64}", oid):
+                raise ValueError("invalid index object id")
+            paths.append(_ScanFile(Path(name.decode("utf-8", errors="strict")), mode, oid.decode("ascii"), root))
+        if all_tracked:
+            return paths
+        staged = {
+            Path(name.decode("utf-8", errors="strict"))
+            for name in output(
+                ["git", "diff", "--cached", "--relative", "--name-only", "--diff-filter=ACMR", "-z"]
+            ).split(b"\0")
+            if name
+        }
+        return [file for file in paths if file.path in staged]
+    except (UnicodeDecodeError, ValueError):
+        print("content-guard: Git path cannot be decoded", file=sys.stderr)
+        raise SystemExit(2) from None
+
+
+def _read_text(file: _ScanFile | Path) -> str | None:
+    file = _ScanFile(file) if isinstance(file, Path) else file
+    try:
+        if file.mode == b"120000":
+            # The index records the target text even when checkout cannot create symlinks.
+            result = subprocess.run(
+                ["git", "--no-replace-objects", "cat-file", "blob", str(file.object_id)],
+                cwd=file.root,
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0 or b"\0" in result.stdout:
+                print("content-guard: tracked-link-read-failed", file=sys.stderr)
+                raise SystemExit(2)
+            raw = result.stdout
+        elif file.path.is_symlink():
+            if file.mode is not None:
+                raise OSError("indexed regular file is a symlink")
+            raw = os.fsencode(os.readlink(file.path))
+        else:
+            flags = (
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+            )
+            fd = os.open(file.path, flags)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise OSError("not a regular file")
+                with os.fdopen(fd, "rb", closefd=False) as stream:
+                    raw = stream.read()
+            finally:
+                os.close(fd)
     except OSError:
-        return None
+        print("content-guard: Git file cannot be read", file=sys.stderr)
+        raise SystemExit(2) from None
     if b"\0" in raw:
         return None
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
-        return None
+        print("content-guard: Git file cannot be decoded", file=sys.stderr)
+        raise SystemExit(2) from None
 
 
 if __name__ == "__main__":

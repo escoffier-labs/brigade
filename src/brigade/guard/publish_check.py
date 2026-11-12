@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .git_commits import _commit_revs, _git, _subject
-from .git_scan import _read_text, _tracked_paths
+from .git_scan import _ScanFile, _read_text, _tracked_files
 from .engine import scan_text
 from .policy import default_policy, load_policy
 from .pr_prepare import prepare_pr_body
@@ -162,15 +162,16 @@ def _prepare_pr_check(
 
 
 def _scan_file_check(*, policy: Any, all_tracked: bool, include_git_config: bool) -> tuple[dict[str, Any], list[str]]:
-    paths = _tracked_paths(all_tracked=all_tracked)
+    paths = _tracked_files(all_tracked=all_tracked)
     if include_git_config and Path(".git/config").is_file():
-        paths.append(Path(".git/config"))
+        paths.append(_ScanFile(Path(".git/config")))
 
     files = []
     blocked = False
     lines: list[str] = []
-    for path in paths:
-        text = _read_text(path)
+    for file in paths:
+        path = file.path
+        text = _read_text(file)
         if text is None:
             continue
         result = scan_text(text, policy=policy)

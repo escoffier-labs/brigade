@@ -125,21 +125,22 @@ def init_baseline(
 
     # Deferred: audit imports this module, so a module-level import would cycle.
     from .audit import DEFAULT_EXCLUDE_DIR_NAMES, _enumerate
-    from .git_scan import _read_text
+    from .git_scan import _ScanFile, _read_text
 
     active_policy = policy or Policy()
     entries: list[BaselineEntry] = []
 
     target_dir = Path(target_dir)
     if target_dir.is_file():
-        files = [target_dir]
+        files = [_ScanFile(target_dir)]
     else:
         files = _enumerate(target_dir, scope=scope, exclude_dirs=frozenset(DEFAULT_EXCLUDE_DIR_NAMES))
 
-    for file_path in files:
+    for file in files:
+        file_path = file.path
         if _DEFAULT_EXCLUDE_DIR_NAMES.intersection(file_path.parts):
             continue
-        text = _read_text(file_path)
+        text = _read_text(file)
         if text is None:
             continue
 
