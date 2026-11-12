@@ -86,7 +86,8 @@ def landing(tmp_path, monkeypatch):
     def run(argv, **kwargs):
         actual_argv = argv
         state.setdefault("raw_calls", []).append((list(argv), kwargs.get("env")))
-        argv = [Path(argv[0]).name.removesuffix(".js"), *argv[1:]]
+        name = "gh" if Path(argv[0]).resolve() == gh.resolve() else Path(argv[0]).name.removesuffix(".js")
+        argv = [name, *argv[1:]]
         if argv[0] == "git":
             while argv[1:2] == ["-c"]:
                 del argv[1:3]
@@ -153,6 +154,8 @@ def landing(tmp_path, monkeypatch):
                 state["push_http"] = effective.stdout.lower()
             if state["failure"] == "push":
                 return proc.Result(1, "", state.get("push_error", "network timeout"))
+            if callback := state.get("during_push"):
+                callback(kwargs["cwd"])
             state["remote_sha"] = git(kwargs["cwd"], "rev-parse", argv[-1].split(":")[0])
             state["commit_message"] = git(kwargs["cwd"], "log", "-1", "--format=%B")
             state["published_file"] = (kwargs["cwd"] / "file.txt").read_text()
@@ -859,3 +862,135 @@ def test_r2_invalid_publication_worktree_is_recreated(interrupted_publication, t
     assert (victim / "keep.txt").read_text() == "keep\n"
     assert sum(argv[:2] == ["git", "commit"] for argv, _ in calls) == 1
     assert sum(argv[:2] == ["git", "worktree"] and "add" in argv and str(publication) in argv for argv, _ in calls) == 2
+
+
+def test_r2_symlinked_gh_helper_uses_pinned_executable(landing, tmp_path):
+    caller, state, _ = landing
+    alias = tmp_path / "gh"
+    executable = tmp_path / "gh-versioned"
+    alias.rename(executable)
+    alias.symlink_to(executable)
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert result["pr_url"].endswith("/123")
+    assert any(Path(argv[0]) == executable for argv, _ in state["raw_calls"] if argv[1:3] == ["pr", "create"])
+
+
+@pytest.mark.parametrize("operation", ["prepare-add", "prepare-remove", "publication-add", "publication-remove"])
+@pytest.mark.parametrize("point", ["before", "after"])
+def test_r2_retry_reconciles_every_checkout_transition(landing, monkeypatch, operation, point):
+    caller, state, calls = landing
+    codex_cloud_land.land(caller, "task_example", 2473)
+    reference = cloud_tracker.load_registry(caller)["entries"][0]
+    fields = (
+        "landing_state",
+        "landing_tree",
+        "landing_base",
+        "landing_diff_sha256",
+        "landing_attempt",
+        "landing_title",
+        "expected_artifact",
+        "pr_url",
+        "landing_workspace",
+    )
+    expected = {name: reference[name] for name in fields}
+    with cloud_tracker.registry_lock(caller):
+        registry = cloud_tracker.load_registry(caller)
+        registry["entries"] = []
+        cloud_tracker.save_registry(caller, registry)
+    cloud_tracker.register(caller, provider="codex-cloud", task_id="task_example", label="example")
+    for name in ("remote_sha", "published"):
+        state.pop(name, None)
+    calls.clear()
+    original = codex_cloud_land._LandingGit.git
+    interrupted = False
+
+    def git_with_interrupt(self, args, *argv, **kwargs):
+        nonlocal interrupted
+        current = None
+        if args[:2] == ["worktree", "add"]:
+            current = ("prepare" if Path(args[-2]).name == "worktree" else "publication") + "-add"
+        elif args[:2] == ["worktree", "remove"]:
+            current = ("prepare" if Path(args[-1]).name == "worktree" else "publication") + "-remove"
+        trigger = current == operation and not interrupted
+        if trigger and point == "before":
+            interrupted = True
+            raise KeyboardInterrupt
+        result = original(self, args, *argv, **kwargs)
+        if trigger and point == "after":
+            interrupted = True
+            raise KeyboardInterrupt
+        return result
+
+    monkeypatch.setattr(codex_cloud_land._LandingGit, "git", git_with_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    partial = cloud_tracker.load_registry(caller)["entries"][0]
+    pinned = partial.get("landing_commit")
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    final = cloud_tracker.load_registry(caller)["entries"][0]
+    assert {name: final[name] for name in fields} == expected
+    assert result["branch"] == final["landing_branch"]
+    assert state["remote_sha"] == final["landing_commit"]
+    if pinned:
+        assert final["landing_commit"] == pinned
+    assert sum(argv[:2] == ["git", "commit"] for argv, _ in calls) == 1
+    assert sum(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls) == 1
+    assert git(caller, "branch", "--list", "codex/*") == ""
+
+
+@pytest.mark.parametrize("state_kind", ["moved", "stray", "stray-symlink", "stray-parent-symlink"])
+def test_r2_reconcile_all_owned_checkouts(interrupted_publication, tmp_path, state_kind):
+    caller, state, _, entry, publication = interrupted_publication
+    repository = publication.parent / "repository"
+    other = publication.parent / "another-checkout"
+    if state_kind == "stray-parent-symlink":
+        other = publication.parent / "nested" / "another-checkout"
+        other.parent.mkdir()
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("keep\n")
+    if state_kind == "moved":
+        git(repository, "worktree", "move", str(publication), str(other))
+    else:
+        git(repository, "worktree", "add", "--detach", str(other), entry["landing_base"])
+        if state_kind in {"stray-symlink", "stray-parent-symlink"}:
+            linked = other.parent if state_kind == "stray-parent-symlink" else other
+            shutil.rmtree(linked)
+            linked.symlink_to(victim, target_is_directory=True)
+
+    def during_push(cwd):
+        if state_kind == "moved":
+            assert cwd == other
+        else:
+            assert not other.exists() and not other.is_symlink()
+            assert str(other) not in git(repository, "worktree", "list", "--porcelain")
+        assert (victim / "keep.txt").read_text() == "keep\n"
+
+    state["during_push"] = during_push
+    assert codex_cloud_land.land(caller, "task_example", 2473)["pr_url"].endswith("/123")
+    assert state["remote_sha"] == entry["landing_commit"]
+    assert (victim / "keep.txt").read_text() == "keep\n"
+
+
+def test_r2_gh_alias_to_other_executable_is_refused(landing, tmp_path):
+    caller, _, calls = landing
+    other = tmp_path / "other-executable"
+    other.write_text("#!/bin/sh\nexit 0\n")
+    other.chmod(0o700)
+    alias = tmp_path / "other-gh"
+    alias.symlink_to(other)
+    git(caller, "config", "--global", "credential.https://github.com.helper", f"!{alias} auth git-credential")
+    with pytest.raises(codex_cloud_land.LandError, match="^unsafe-git-config$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] in (["git", "fetch"], ["git", "push"], ["git", "ls-remote"]) for argv, _ in calls)
+
+
+def test_r2_reconcile_preserves_trusted_tools(interrupted_publication):
+    caller, _, _, entry, publication = interrupted_publication
+    root = publication.parent
+    tools = root / "tools"
+    shutil.rmtree(tools)
+    git(root / "repository", "worktree", "add", "--detach", str(tools), entry["landing_base"])
+    with pytest.raises(codex_cloud_land.LandError, match="^unsafe-git-config$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert (tools / "brigade").is_file()

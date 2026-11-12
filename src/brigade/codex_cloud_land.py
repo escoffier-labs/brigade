@@ -157,7 +157,13 @@ class _LandingGit:
             words = shlex.split(helper.removeprefix("!"))
         except ValueError as exc:
             raise LandError("unsafe-git-config") from exc
-        if words and words[0] in {"gh", self.tools["gh"]} and words[1:] == ["auth", "git-credential"]:
+        if words and words[1:] == ["auth", "git-credential"]:
+            configured_gh = Path(self.tools["gh"]) if words[0] == "gh" else Path(words[0])
+            try:
+                if not configured_gh.is_absolute() or configured_gh.resolve(strict=True) != Path(self.tools["gh"]):
+                    raise LandError("unsafe-git-config")
+            except (OSError, RuntimeError) as exc:
+                raise LandError("unsafe-git-config") from exc
             credential_executable = Path(self.tools["gh"])
             arguments = " auth git-credential"
         elif len(words) == 1 and Path(words[0]).is_absolute() and not helper.startswith("!"):
@@ -529,6 +535,7 @@ def _land_locked(
         raise LandError("invalid-landing-branch")
     _update(target, entry, landing_branch=branch)
     commit = entry.get("landing_commit")
+    checkout = _reconcile_checkouts(git, root, branch, commit)
     remote = git.git(
         ["ls-remote", "--refs", canonical, f"refs/heads/{branch}"], git.repository, "ref-inspection-failed"
     ).split()
@@ -545,6 +552,7 @@ def _land_locked(
         if not local and not remote_sha:
             _update(target, entry, landing_commit=None, landing_state=None)
             commit = None
+            checkout = None
         else:
             found = git.tool(
                 "gh",
@@ -565,9 +573,9 @@ def _land_locked(
             except (ValueError, KeyError, TypeError) as exc:
                 raise LandError("pr-recovery-failed") from exc
     elif local or remote_sha:
-        # An interrupted preparation may have left the base branch behind.
-        if remote_sha or not entry.get("landing_base") or local != entry["landing_base"]:
+        if remote_sha:
             raise LandError("landing-ref-mismatch")
+        # Unrecorded preparation refs belong only to this private repository.
         git.git(["branch", "-D", branch], git.repository, "branch-cleanup-failed")
     body = root / "pr-body.md"
     body.write_text(
@@ -581,7 +589,7 @@ def _land_locked(
         commit = _prepare(target, entry, issue, git, root, branch, canonical)
     # Recheck the entry revision immediately before publication.
     _update(target, entry, landing_commit=commit)
-    publish_tree = root / "publication"
+    publish_tree = checkout or root / "publication"
     # The push guard must inspect the preserved commit, never the caller's dirty checkout.
     if not local:
         local = git.git(
@@ -594,7 +602,8 @@ def _land_locked(
         git.git(["fetch", "--no-tags", canonical, f"refs/heads/{branch}"], git.repository, "fetch-failed")
         if git.git(["rev-parse", "FETCH_HEAD"], git.repository, "inspect-failed").strip() != commit:
             raise LandError("landing-ref-mismatch")
-    _publication_worktree(git, publish_tree, branch, commit)
+    if checkout is None:
+        git.git(["worktree", "add", "-B", branch, str(publish_tree), commit], git.repository, "worktree-failed")
     try:
         if git.git(["rev-parse", "HEAD^{tree}"], publish_tree, "inspect-failed").strip() != entry["landing_tree"]:
             raise LandError("commit-tree-mismatch")
@@ -626,49 +635,75 @@ def _land_locked(
     return _record_pr(target, entry, url)
 
 
-def _publication_worktree(git: _LandingGit, tree: Path, branch: str, commit: str) -> None:
-    """Reuse the pinned publication checkout or replace stale private state."""
+def _reconcile_checkouts(git: _LandingGit, root: Path, branch: str, commit: str | None) -> Path | None:
+    """Reconcile private checkouts before resuming the next pending landing step."""
     inventory = git.git(["worktree", "list", "--porcelain", "-z"], git.repository, "inspect-failed")
-    registered = False
-    matching = False
+    registered: dict[Path, set[str]] = {}
     for record in inventory.split("\0\0"):
-        fields = record.split("\0")
-        if f"worktree {tree}" in fields:
-            registered = True
-            matching = f"HEAD {commit}" in fields and f"branch refs/heads/{branch}" in fields
-            break
-    if matching and not tree.is_symlink() and tree.is_dir():
-        try:
-            common = git.git(["rev-parse", "--git-common-dir"], tree, "inspect-failed").strip()
-            if (
-                (tree / common).resolve() == (git.repository / ".git").resolve()
-                and git.git(["symbolic-ref", "--quiet", "HEAD"], tree, "inspect-failed", optional=True).strip()
-                == f"refs/heads/{branch}"
-                and git.git(["rev-parse", "HEAD"], tree, "inspect-failed").strip() == commit
+        fields = set(record.split("\0"))
+        for field in fields:
+            if not field.startswith("worktree "):
+                continue
+            tree = Path(field[9:])
+            # The primary repository owns the object store, not a transient checkout.
+            if tree == git.repository or not tree.is_relative_to(root):
+                continue
+            if any(
+                tree.is_relative_to(protected) or protected.is_relative_to(tree)
+                for protected in (git.repository, git.hooks, root / "tools")
             ):
-                return
-        except LandError as exc:
-            if str(exc) != "inspect-failed":
-                raise
-    if registered or tree.exists() or tree.is_symlink():
-        # Unlink the leaf before Git can interpret a stale path through a symlink.
-        if tree.is_symlink():
-            tree.unlink()
-        try:
-            git.git(["worktree", "remove", "--force", str(tree)], git.repository, "worktree-cleanup-failed")
-        except LandError as exc:
-            if str(exc) != "worktree-cleanup-failed" or (registered and tree.is_dir()):
-                raise
-        git.git(["worktree", "prune", "--expire", "now"], git.repository, "worktree-cleanup-failed")
-        if tree.is_symlink():
-            tree.unlink()
-        elif tree.is_dir():
-            shutil.rmtree(tree)
-        else:
-            tree.unlink(missing_ok=True)
-    # -B restores only the private branch to the recorded commit. Git still
-    # refuses a branch checked out elsewhere, and no remote ref is overwritten.
-    git.git(["worktree", "add", "-B", branch, str(tree), commit], git.repository, "worktree-failed")
+                raise LandError("unsafe-git-config")
+            relative = tree.relative_to(root)
+            if not relative.parts or ".." in relative.parts:
+                raise LandError("unsafe-git-config")
+            registered[tree] = fields
+    # Known step paths may remain after Git has dropped their registration.
+    candidates = {*registered, root / "worktree", root / "publication"}
+    checkout = None
+    for tree in sorted(candidates):
+        checkout_fields = registered.get(tree)
+        # Remove a symlink component itself before Git can traverse that path.
+        component = root
+        for part in tree.relative_to(root).parts:
+            component = component / part
+            if component.is_symlink():
+                component.unlink()
+                break
+        # A recorded commit makes publication the next step. Preparation without
+        # a recorded commit is rebuilt, so partially applied state is never reused.
+        matching = (
+            checkout_fields is not None
+            and f"HEAD {commit}" in checkout_fields
+            and f"branch refs/heads/{branch}" in checkout_fields
+        )
+        if checkout is None and commit and matching and tree.is_dir():
+            try:
+                common = git.git(["rev-parse", "--git-common-dir"], tree, "inspect-failed").strip()
+                if (
+                    (tree / common).resolve() == (git.repository / ".git").resolve()
+                    and git.git(["symbolic-ref", "--quiet", "HEAD"], tree, "inspect-failed", optional=True).strip()
+                    == f"refs/heads/{branch}"
+                    and git.git(["rev-parse", "HEAD"], tree, "inspect-failed").strip() == commit
+                ):
+                    checkout = tree
+                    continue
+            except LandError as exc:
+                if str(exc) != "inspect-failed":
+                    raise
+        if checkout_fields is not None or tree.is_symlink() or tree.exists():
+            try:
+                git.git(["worktree", "remove", "--force", str(tree)], git.repository, "worktree-cleanup-failed")
+            except LandError as exc:
+                if str(exc) != "worktree-cleanup-failed" or (checkout_fields is not None and tree.is_dir()):
+                    raise
+            if tree.is_symlink():
+                tree.unlink()
+            elif tree.is_dir():
+                shutil.rmtree(tree)
+            else:
+                tree.unlink(missing_ok=True)
+    git.git(["worktree", "prune", "--expire", "now"], git.repository, "worktree-cleanup-failed")
+    return checkout
 
 
 def _validate_pr_url(url: str, repo: str) -> None:
