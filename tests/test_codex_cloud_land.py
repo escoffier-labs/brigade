@@ -134,9 +134,9 @@ def landing(tmp_path, monkeypatch):
             receipt_directory = guard_cwd / ".brigade"
             receipt_directory.mkdir(exist_ok=True)
             (receipt_directory / "receipt-test").touch()
-            assert Path(script).read_text().splitlines()[0] == f"#!{sys.executable} -I"
+            assert Path(script).read_text().splitlines()[0] == "#!/bin/sh"
             return original(
-                [sys.executable, "-I", script],
+                [script],
                 cwd=guard_cwd,
                 env={**os.environ, "PYTHONPATH": "src", **state.get("guard_env", {})},
             )
@@ -1179,3 +1179,159 @@ def test_r2_exported_guard_function_never_executes(landing, monkeypatch):
 
     state["during_push"] = during_push
     codex_cloud_land.land(caller, "task_example", 2473)
+
+
+@pytest.mark.parametrize(
+    "key,value", [("GH_HOST", "other.example.invalid"), ("OPENAI_BASE_URL", "https://other.example.invalid")]
+)
+def test_r3_endpoint_overrides_never_reach_tools(landing, monkeypatch, key, value):
+    caller, state, _ = landing
+    monkeypatch.setenv(key, value)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert all(environment.get(key) != value for _, environment in state["raw_calls"])
+
+
+def test_r3_relative_config_home_refused(landing, monkeypatch):
+    caller, state, _ = landing
+    monkeypatch.setenv("XDG_CONFIG_HOME", "relative-config")
+    with pytest.raises(codex_cloud_land.LandError, match="unsafe-git-config"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not state.get("raw_calls")
+
+
+@pytest.mark.parametrize("kind", ["tool", "helper"])
+def test_r3_primary_worktree_excluded(landing, tmp_path, monkeypatch, kind):
+    primary, _, _ = landing
+    linked = tmp_path / "linked"
+    git(primary, "worktree", "add", "--detach", str(linked), "HEAD")
+    cloud_tracker.register(linked, provider="codex-cloud", task_id="task_example", label="example")
+    executable = primary / "bin" / "probe"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    if kind == "tool":
+        previous = shutil.which
+        monkeypatch.setattr(
+            shutil, "which", lambda name, **kw: str(executable) if name == "vale" else previous(name, **kw)
+        )
+        monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
+    else:
+        git(primary, "config", "--global", "credential.https://github.com.helper", str(executable))
+    with pytest.raises(codex_cloud_land.LandError, match="trusted-tool-unavailable|unsafe-git-config"):
+        codex_cloud_land.land(linked, "task_example", 2473)
+
+
+def test_r3_first_registry_write_failure_removes_root(landing, monkeypatch):
+    caller, _, _ = landing
+    roots = []
+    original = codex_cloud_land._private_root
+
+    def create(*args):
+        root = original(*args)
+        roots.append(root)
+        return root
+
+    def fail(*args, **kwargs):
+        raise OSError("simulated registry failure")
+
+    monkeypatch.setattr(codex_cloud_land, "_private_root", create)
+    monkeypatch.setattr(cloud_tracker, "save_registry", fail)
+    with pytest.raises(codex_cloud_land.LandError, match="registry-update-failed"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    try:
+        assert roots and not roots[0].exists()
+    finally:
+        for root in roots:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def test_r3_tool_environments_are_allowlisted_and_pinned(landing, tmp_path, monkeypatch):
+    caller, state, _ = landing
+    extra = tmp_path / "ambient-bin"
+    extra.mkdir()
+    monkeypatch.setenv("PATH", str(extra) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("GH_TOKEN", "fixture-github-token")
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-openai-key")
+    monkeypatch.setenv("UNRELATED_PROFILE", "fixture-profile")
+    configured = {}
+    for key in ("GH_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME"):
+        path = tmp_path / key.lower()
+        path.mkdir()
+        monkeypatch.setenv(key, str(path))
+        configured[key] = str(path.resolve())
+    codex_cloud_land.land(caller, "task_example", 2473)
+    for argv, environment in state["raw_calls"]:
+        assert environment["GH_HOST"] == "github.com"
+        assert all(environment[key] == value for key, value in configured.items())
+        assert str(extra) not in environment["PATH"].split(os.pathsep)
+        assert "UNRELATED_PROFILE" not in environment
+        name = Path(argv[0]).name
+        assert ("OPENAI_API_KEY" in environment) == (name == "codex")
+        assert ("GH_TOKEN" in environment) == (name in {"git", "gh", "brigade", "python", "python3"})
+
+
+@pytest.mark.parametrize("runtime_valid", [True, False])
+def test_r3_private_root_ignores_tmpdir(landing, tmp_path, monkeypatch, runtime_valid):
+    caller, state, _ = landing
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700 if runtime_valid else 0o755)
+    ambient = tmp_path / "ambient-temp"
+    ambient.mkdir()
+    monkeypatch.setenv("TMPDIR", str(ambient))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    # tempfile caches TMPDIR. Reset it to ensure the baseline exercises the override.
+    monkeypatch.setattr(codex_cloud_land.tempfile, "tempdir", None)
+    state["failure"] = "push"
+    with pytest.raises(codex_cloud_land.LandError, match="push-failed"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    entry = cloud_tracker.load_registry(caller)["entries"][0]
+    root = Path(entry["landing_workspace"])
+    try:
+        assert root.parent == (runtime if runtime_valid else caller / ".brigade" / "cloud" / "landing")
+        assert root.stat().st_uid == os.getuid()
+        assert root.stat().st_mode & 0o777 == 0o700
+    finally:
+        shutil.rmtree(root)
+
+
+def test_r3_writable_helper_ancestor_refused(landing, tmp_path):
+    caller, _, _ = landing
+    directory = tmp_path / "writable-helper"
+    directory.mkdir(mode=0o777)
+    directory.chmod(0o777)
+    helper = directory / "credential"
+    helper.write_text("#!/bin/sh\nexit 0\n")
+    helper.chmod(0o700)
+    git(caller, "config", "--global", "credential.https://github.com.helper", str(helper))
+    with pytest.raises(codex_cloud_land.LandError, match="unsafe-git-config"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+
+
+@pytest.mark.parametrize("wrapper", ["brigade", "guard-check"])
+def test_r3_wrapper_supports_interpreter_path_with_spaces(landing, tmp_path, monkeypatch, wrapper):
+    caller, state, _ = landing
+    interpreter = tmp_path / "python space" / "python"
+    interpreter.parent.mkdir()
+    interpreter.symlink_to(sys.executable)
+    monkeypatch.setattr(sys, "executable", str(interpreter))
+    original = proc.run
+    executed = []
+
+    def run(argv, **kwargs):
+        if Path(argv[0]).name == "brigade":
+            script = argv[argv.index("--command") + 1] if wrapper == "guard-check" else argv[0]
+            result = subprocess.run(
+                [script, *(["--version"] if wrapper == "brigade" else [])],
+                cwd=kwargs["cwd"],
+                env=kwargs["env"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            assert result.returncode == 0, result.stderr
+            executed.append(script)
+        return original(argv, **kwargs)
+
+    monkeypatch.setattr(proc, "run", run)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert executed

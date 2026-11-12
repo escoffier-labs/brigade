@@ -25,46 +25,42 @@ class LandError(ValueError):
     """A safe named refusal, without provider output or diff content."""
 
 
-def _environment() -> dict[str, str]:
-    # Git control variables can redirect even discovery and cleanup commands.
-    return {
-        key: value
-        for key, value in os.environ.items()
-        if not key.upper().startswith(
-            (
-                "GIT_",
-                "PYTHON",
-                "CONTENT_GUARD_",
-                "BRIGADE_",
-                "MISELEDGER_",
-                "GRAPHTRAIL_",
-                "SESSIONFIND_",
-                "BASH_FUNC_",
-                "LD_",
-                "DYLD_",
-            )
-        )
-        and key.upper()
-        not in {
-            "BASH_ENV",
-            "ENV",
-            "CDPATH",
-            "NODE_OPTIONS",
-            "NODE_PATH",
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "NO_PROXY",
-            "CURL_CA_BUNDLE",
-            "SSL_CERT_FILE",
-            "SSL_CERT_DIR",
-            "SSH_ASKPASS",
-            "SSH_ASKPASS_REQUIRE",
-            "VIRTUAL_ENV",
-            "__PYVENV_LAUNCHER__",
-            "AGENT_NOTIFY_BIN",
-        }
-    }
+_CREDENTIALS = {
+    "git": {"GH_TOKEN", "GITHUB_TOKEN"},
+    "gh": {"GH_TOKEN", "GITHUB_TOKEN"},
+    "codex": {"OPENAI_API_KEY", "CODEX_API_KEY"},
+    "vale": set(),
+    "brigade": {"GH_TOKEN", "GITHUB_TOKEN"},
+}
+
+
+def _environment(tool: str = "git") -> dict[str, str]:
+    allowed = {"HOME", "PATH", "LANG"} | _CREDENTIALS[tool]
+    return {key: value for key, value in os.environ.items() if key in allowed or re.fullmatch(r"LC_[A-Z_]+", key)}
+
+
+def _operator_directory(value: str, roots: list[Path]) -> Path:
+    try:
+        path = Path(value)
+        if not path.is_absolute():
+            raise LandError("unsafe-git-config")
+        path = path.resolve()
+        existing = path
+        while not existing.exists():
+            existing = existing.parent
+        if (
+            not existing.is_dir()
+            or existing.stat().st_uid != os.getuid()
+            or any(path.is_relative_to(root) for root in roots)
+        ):
+            raise LandError("unsafe-git-config")
+        return path
+    except (OSError, RuntimeError) as exc:
+        raise LandError("unsafe-git-config") from exc
+
+
+def _python_wrapper(code: str) -> str:
+    return f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -I -c {shlex.quote(code)} "$@"\n'
 
 
 def _run(
@@ -111,23 +107,20 @@ class _LandingGit:
         self.repository.mkdir(mode=0o700, exist_ok=True)
         environment = _environment()
         common = _caller_git_dir(target)
-        roots = [target, common, root]
+        roots = [target, common, common.parent, root]
         for gitdir in (common / "worktrees").glob("*/gitdir"):
             roots.append(Path(gitdir.read_text(encoding="utf-8").strip()).parent.resolve())
-        try:
-            home = Path(environment.get("HOME", str(Path.home())))
-            if not home.is_absolute():
-                raise LandError("unsafe-git-config")
-            home = home.resolve(strict=True)
-            if (
-                not home.is_dir()
-                or home.stat().st_uid not in {0, os.getuid()}
-                or any(home.is_relative_to(proposal) for proposal in roots)
-            ):
-                raise LandError("unsafe-git-config")
-        except (OSError, RuntimeError) as exc:
-            raise LandError("unsafe-git-config") from exc
-        environment["HOME"] = str(home)
+        home = _operator_directory(environment.get("HOME", str(Path.home())), roots)
+        xdg = _operator_directory(os.environ.get("XDG_CONFIG_HOME", str(home / ".config")), roots)
+        pinned = {
+            "HOME": str(home),
+            "XDG_CONFIG_HOME": str(xdg),
+            "GH_CONFIG_DIR": str(_operator_directory(os.environ.get("GH_CONFIG_DIR", str(xdg / "gh")), roots)),
+            "CODEX_HOME": str(_operator_directory(os.environ.get("CODEX_HOME", str(home / ".codex")), roots)),
+            "GH_HOST": "github.com",
+        }
+        environment.update(pinned)
+        self.environments = {name: {**_environment(name), **pinned} for name in _CREDENTIALS}
         directories = [
             str(Path(part).resolve())
             for part in os.get_exec_path(environment)
@@ -139,7 +132,8 @@ class _LandingGit:
             if not resolved or any(Path(resolved).resolve().is_relative_to(proposal) for proposal in roots):
                 raise LandError("trusted-tool-unavailable")
             self.tools[name] = str(Path(resolved).resolve())
-        # Hooks invoke tools by name. Pin those names before any ambient PATH entry.
+        tool_directories = [str(Path(tool).parent) for tool in self.tools.values()]
+        # Hooks invoke tools by name. Pin those names before the tool directories.
         tools_dir = root / "tools"
         tools_dir.mkdir(mode=0o700, exist_ok=True)
         for name, executable in self.tools.items():
@@ -150,18 +144,20 @@ class _LandingGit:
         # The final bootstrap operand is the Git working directory at invocation time.
         brigade = tools_dir / "brigade"
         brigade.write_text(
-            f"#!{sys.executable} -I\nimport os, subprocess, sys\nargv = "
-            + repr(
-                isolated_exec.package_argv(
-                    isolated_exec.trusted_cwd() / "__init__.py", "brigade", cwd_after_load=target
+            _python_wrapper(
+                "import os, subprocess, sys\nargv = "
+                + repr(
+                    isolated_exec.package_argv(
+                        isolated_exec.trusted_cwd() / "__init__.py", "brigade", cwd_after_load=target
+                    )
                 )
-            )
-            + "\nargv[-1] = os.getcwd()\nraise SystemExit(subprocess.call(argv + sys.argv[1:]))\n",
+                + "\nargv[-1] = os.getcwd()\nraise SystemExit(subprocess.call(argv + sys.argv[1:]))\n"
+            ),
             encoding="utf-8",
         )
         brigade.chmod(0o700)
         self.tools["brigade"] = str(brigade)
-        environment["PATH"] = os.pathsep.join([str(tools_dir), *directories])
+        environment["PATH"] = os.pathsep.join(dict.fromkeys([str(tools_dir), *tool_directories, "/usr/bin", "/bin"]))
         environment["GIT_TERMINAL_PROMPT"] = "0"
         environment["GH_PROMPT_DISABLED"] = "1"
         environment["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -205,7 +201,16 @@ class _LandingGit:
             credential_executable = Path(self.tools["gh"])
             arguments = " auth git-credential"
         elif len(words) == 1 and Path(words[0]).is_absolute() and not helper.startswith("!"):
-            credential_executable = Path(words[0])
+            try:
+                credential_executable = Path(words[0]).resolve(strict=True)
+                if any(credential_executable.is_relative_to(protected) for protected in roots):
+                    raise LandError("unsafe-git-config")
+                for ancestor in (credential_executable, *credential_executable.parents):
+                    metadata = ancestor.stat()
+                    if metadata.st_uid not in {0, os.getuid()} or metadata.st_mode & 0o022:
+                        raise LandError("unsafe-git-config")
+            except (OSError, RuntimeError) as exc:
+                raise LandError("unsafe-git-config") from exc
             arguments = ""
         else:
             raise LandError("unsafe-git-config")
@@ -326,8 +331,12 @@ class _LandingGit:
         if not pinned.keys() <= seen:
             raise LandError("unsafe-git-config")
 
-    def env(self) -> dict[str, str]:
-        return dict(self.environment)
+    def env(self, tool: str = "git") -> dict[str, str]:
+        environment = self.environments[tool].copy()
+        environment["PATH"] = self.environment["PATH"]
+        if tool in {"git", "brigade"}:
+            environment.update(self.environment)
+        return environment
 
     def git(
         self, args: list[str], cwd: Path, reason: str, *, stdin: bytes | None = None, optional: bool = False
@@ -347,7 +356,7 @@ class _LandingGit:
     def tool(self, name: str, args: list[str], cwd: Path, reason: str) -> str:
         if not cwd.resolve().is_relative_to(self.repository.parent):
             raise LandError("unsafe-git-config")
-        return _run([self.tools[name], *args], cwd, reason, environment=self.env())
+        return _run([self.tools[name], *args], cwd, reason, environment=self.env(name))
 
     def scan_publication_text(self, *texts: str) -> None:
         for text in texts:
@@ -528,24 +537,31 @@ def _caller_git_dir(target: Path) -> Path:
         raise LandError("github-origin-required") from exc
 
 
-def _private_root(saved: str | None) -> Path:
+def _private_root(saved: str | None, target: Path) -> Path:
+    def valid_base(path: Path) -> bool:
+        try:
+            metadata = path.lstat()
+            return (
+                path.is_absolute()
+                and path.resolve() == path
+                and stat.S_ISDIR(metadata.st_mode)
+                and metadata.st_uid == os.getuid()
+                and stat.S_IMODE(metadata.st_mode) == 0o700
+            )
+        except OSError:
+            return False
+
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", ""))
+    base = runtime if valid_base(runtime) else target / ".brigade" / "cloud" / "landing"
+    if base != runtime:
+        base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not valid_base(base):
+        raise LandError("unsafe-git-config")
     if not saved:
-        return Path(tempfile.mkdtemp(prefix="brigade-cloud-land-")).resolve()
+        return Path(tempfile.mkdtemp(prefix="brigade-cloud-land-", dir=base)).resolve()
     root = Path(saved)
-    try:
-        metadata = root.lstat()
-        if (
-            not root.is_absolute()
-            or root.parent != Path(tempfile.gettempdir()).resolve()
-            or not root.name.startswith("brigade-cloud-land-")
-            or not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid != os.getuid()
-            or stat.S_IMODE(metadata.st_mode) != 0o700
-            or root.resolve() != root
-        ):
-            raise LandError("unsafe-git-config")
-    except OSError as exc:
-        raise LandError("unsafe-git-config") from exc
+    if root.parent != base or not root.name.startswith("brigade-cloud-land-") or not valid_base(root):
+        raise LandError("unsafe-git-config")
     return root
 
 
@@ -586,16 +602,19 @@ def land(target: Path, task_id: str, issue: int, *, closes: bool = False) -> dic
                 raise LandError("github-origin-required")
             repo = match[1]
             canonical = f"https://github.com/{repo}.git"
-            root = _private_root(entry.get("landing_workspace"))
-            _update(target, entry, landing_workspace=str(root))
+            root = _private_root(entry.get("landing_workspace"), target)
             try:
+                _update(target, entry, landing_workspace=str(root))
                 git = _LandingGit(target, root)
                 result = _land_locked(target, entry, issue, closes, git, root, repo, canonical)
             except BaseException:
                 # Keep a prepared commit for a retry without borrowing the caller's object store.
                 if not entry.get("landing_commit"):
                     shutil.rmtree(root)
-                    _update(target, entry, landing_workspace=None)
+                    try:
+                        _update(target, entry, landing_workspace=None)
+                    except LandError:
+                        pass
                 raise
             shutil.rmtree(root)
             _update(target, entry, landing_workspace=None)
@@ -837,18 +856,20 @@ def _prepare(
                 raise LandError("unsafe-file-type")
         check = root / "guard-check"
         check.write_text(
-            f"#!{sys.executable} -I\nimport subprocess\nraise SystemExit(subprocess.call("
-            + repr(
-                isolated_exec.package_argv(
-                    isolated_exec.trusted_cwd() / "__init__.py",
-                    "brigade",
-                    "guard",
-                    "git",
-                    "--staged",
-                    cwd_after_load=tree,
+            _python_wrapper(
+                "import subprocess\nraise SystemExit(subprocess.call("
+                + repr(
+                    isolated_exec.package_argv(
+                        isolated_exec.trusted_cwd() / "__init__.py",
+                        "brigade",
+                        "guard",
+                        "git",
+                        "--staged",
+                        cwd_after_load=tree,
+                    )
                 )
-            )
-            + "))\n",
+                + "))\n"
+            ),
             encoding="utf-8",
         )
         check.chmod(0o700)
