@@ -206,6 +206,7 @@ for extra in ({},{'DO_NOT_TRACK':'1'},{'BRIGADE_TELEMETRY':'0'}):
  os.environ.clear(); os.environ.update(base); os.environ.update(extra)
  p=n.cache_path(os.environ); p.parent.mkdir(parents=True,exist_ok=True)
  p.write_text(json.dumps({'latest':'99.0.0','checked_at':0})); before=p.read_bytes()
+ p.with_suffix('.claim').unlink(missing_ok=True)
  requests.clear(); spawns.clear(); err=TTY()
  n.maybe_notify(['work','brief'],0,now=1000000,stderr=err)
  assert err.getvalue()=='' and n.available_update() is None
