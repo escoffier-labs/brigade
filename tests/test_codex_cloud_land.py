@@ -1174,6 +1174,46 @@ def test_r3_existing_exception_cannot_cover_new_content(landing, case):
     assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
 
 
+@pytest.mark.parametrize("case", ["cross-line", "deletion", "frontmatter"])
+def test_r3_full_file_findings_compared_before_and_after(landing, case):
+    caller, state, calls = landing
+    token = "ab" * 20
+    allow = "content-" + "guard: allow bearer-token"
+    if case == "cross-line":
+        base = f"x # {allow}\nAuthorization: Bearer\nend\n"
+        hunk = "@@ -2,2 +2,3 @@\n Authorization: Bearer\n+" + token + "\n end\n"
+    elif case == "deletion":
+        base = f"Authorization: Bearer\n#\n{token}\n"
+        hunk = f"@@ -1,3 +1,2 @@\n Authorization: Bearer\n-#\n {token}\n"
+    else:
+        base = "---\ntitle: example\n---\nbody\n"
+        blocked = ".".join(map(str, (10, 42, 7, 9)))
+        hunk = f"@@ -1,3 +1,4 @@\n ---\n title: example\n+host: {blocked}\n ---\n"
+    _base_file(caller, "kept.md", base)
+    state["diff"] = (
+        "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n"
+        "diff --git a/kept.md b/kept.md\n--- a/kept.md\n+++ b/kept.md\n" + hunk
+    )
+    with pytest.raises(codex_cloud_land.LandError, match="^guard-failed$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+    assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
+
+
+def test_r3_unchanged_base_finding_is_not_new(landing):
+    caller, state, _ = landing
+    blocked = ".".join(map(str, (10, 42, 7, 9)))
+    _base_file(caller, "kept.md", f"legacy {blocked}\nend\n")
+    state["diff"] = (
+        "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n"
+        "diff --git a/kept.md b/kept.md\n--- a/kept.md\n+++ b/kept.md\n@@ -1,2 +1,2 @@\n legacy "
+        + blocked
+        + "\n-end\n+done\n"
+    )
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert result["pr_url"].endswith("/123")
+
+
 def test_r3_existing_guard_directive_is_not_a_new_one(landing):
     caller, state, _ = landing
     directive = "content-" + "guard: allow all"

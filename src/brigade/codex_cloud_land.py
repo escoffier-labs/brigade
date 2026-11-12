@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import configparser
+from collections import Counter
 import hashlib
 import json
 import os
@@ -364,6 +365,40 @@ class _LandingGit:
         for text in texts:
             self.scan_text(text, "title-refused")
 
+    def blocking_findings(self, text: str) -> Counter[tuple[int, str, str]]:
+        """Blocking findings in full text under every pinned policy, allows and frontmatter included."""
+        found: Counter[tuple[int, str, str]] = Counter()
+        for index, policy in enumerate(self.policies):
+            argv = isolated_exec.module_argv(
+                "brigade.guard",
+                "scan",
+                "-",
+                "--policy",
+                str(policy),
+                "--no-allow-comments",
+                "--scan-frontmatter",
+                "--json",
+            )
+            try:
+                result = proc.run(argv, cwd=self.repository, timeout=240, stdin=text.encode("utf-8"), env=self.env())
+            except (OSError, TimeoutError) as exc:
+                raise LandError("guard-failed") from exc
+            if result.code not in (0, 1) or result.output_limit_exceeded or result.decode_failed:
+                raise LandError("guard-failed")
+            try:
+                report = json.loads(result.stdout)
+                findings = report["findings"]
+                found.update(
+                    (index, str(item["rule_id"]), str(item["match"]))
+                    for item in findings
+                    if item.get("action") == "block"
+                )
+            except (ValueError, KeyError, TypeError) as exc:
+                raise LandError("guard-failed") from exc
+            if result.code == 1 and not any(item.get("action") == "block" for item in findings):
+                raise LandError("guard-failed")
+        return found
+
     def scan_text(self, text: str, reason: str) -> None:
         """Scan text under every pinned policy with allow comments ignored."""
         for policy in self.policies:
@@ -545,22 +580,43 @@ def _added_lines(name: str, tree: Path, git: _LandingGit) -> list[str]:
     return added
 
 
-def _refuse_unreviewed_exceptions(names: list[str], tree: Path, git: _LandingGit) -> None:
-    """Unreviewed task content never relies on a guard exception.
+def _blob_text(spec: str, name: str, tree: Path, git: _LandingGit) -> str | None:
+    """Return one path's text from the index (``:``) or HEAD, or None when absent."""
+    listing = (
+        ["ls-files", "--cached", "-z", "--", name]
+        if spec == ":"
+        else ["ls-tree", "-z", "--name-only", "HEAD", "--", name]
+    )
+    if not git.git(listing, tree, "inspect-failed").strip("\0"):
+        return None
+    return git.git(["cat-file", "blob", f"{spec}{name}" if spec == ":" else f"HEAD:{name}"], tree, "inspect-failed")
 
-    The staged, tip and history scans all honor allow directives, and a
-    line-scoped directive also covers the next line while a file-scoped one
-    covers the whole file. So a proposal could add, broaden, or sit beside a
-    reviewed exception and publish blocked content before conductor review.
-    Refuse any added directive, then scan every changed path name and added
-    line with allow comments ignored under each pinned policy, since names are
-    published too and the content scans never read them. A needed exception is
-    added by the operator during review.
+
+def _refuse_unreviewed_exceptions(names: list[str], tree: Path, git: _LandingGit) -> None:
+    """Unreviewed task content never publishes a new guard finding.
+
+    The staged, tip and history scans honor allow directives and skip YAML
+    frontmatter, and several rules span lines. A proposal could add, broaden
+    or sit beside a reviewed exception, finish a finding on an unchanged line,
+    or create one by deleting text. So each changed file is scanned whole,
+    before and after, with allow comments ignored and frontmatter included,
+    under each pinned policy, and any new blocking finding is refused. Path
+    names are published too and are scanned the same way. Added directives
+    are refused outright. A needed exception is added by the operator during
+    review.
     """
     added = [line for name in names for line in _added_lines(name, tree, git)]
     if any(_GUARD_DIRECTIVE in line for line in [*names, *added]):
         raise LandError("guard-directive-added")
-    git.scan_text("\n".join([*names, *added]) + "\n", "guard-failed")
+    git.scan_text("\n".join(names) + "\n", "guard-failed")
+    for name in names:
+        after = _blob_text(":", name, tree, git)
+        if after is None:
+            continue
+        before = _blob_text("HEAD", name, tree, git)
+        new = git.blocking_findings(after) - (git.blocking_findings(before) if before is not None else Counter())
+        if new:
+            raise LandError("guard-failed")
 
 
 def _update(target: Path, entry: dict[str, Any], **updates: Any) -> None:
