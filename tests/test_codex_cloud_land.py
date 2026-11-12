@@ -1129,6 +1129,15 @@ def test_r3_pathspec_magic_names_are_literal(landing, name):
     assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
 
 
+def test_r3_blocked_file_name_refused(landing):
+    caller, state, calls = landing
+    blocked = ".".join(map(str, (10, 42, 7, 9)))
+    state["extra_files"] = {f"notes/{blocked}.txt": "ordinary text\n"}
+    with pytest.raises(codex_cloud_land.LandError, match="^guard-failed$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+
+
 def _base_file(caller, name, content):
     remote = caller.parent / "remote"
     (remote / name).write_text(content)

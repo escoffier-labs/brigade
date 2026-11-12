@@ -552,15 +552,15 @@ def _refuse_unreviewed_exceptions(names: list[str], tree: Path, git: _LandingGit
     line-scoped directive also covers the next line while a file-scoped one
     covers the whole file. So a proposal could add, broaden, or sit beside a
     reviewed exception and publish blocked content before conductor review.
-    Refuse any added directive, then scan every added line with allow comments
-    ignored under each pinned policy. A needed exception is added by the
-    operator during review.
+    Refuse any added directive, then scan every changed path name and added
+    line with allow comments ignored under each pinned policy, since names are
+    published too and the content scans never read them. A needed exception is
+    added by the operator during review.
     """
     added = [line for name in names for line in _added_lines(name, tree, git)]
-    if any(_GUARD_DIRECTIVE in line for line in added):
+    if any(_GUARD_DIRECTIVE in line for line in [*names, *added]):
         raise LandError("guard-directive-added")
-    if added:
-        git.scan_text("\n".join(added) + "\n", "guard-failed")
+    git.scan_text("\n".join([*names, *added]) + "\n", "guard-failed")
 
 
 def _update(target: Path, entry: dict[str, Any], **updates: Any) -> None:
