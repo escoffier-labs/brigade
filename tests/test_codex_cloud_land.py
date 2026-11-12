@@ -1188,12 +1188,14 @@ def test_r3_env_interpreter_parsing(tmp_path, first_line, expected):
 
 
 @pytest.mark.parametrize("rule_id", ["opf-error", "opf-unavailable"])
-def test_r3_scanner_backend_failure_fails_closed(landing, monkeypatch, rule_id):
+@pytest.mark.parametrize("scan", ["publication-text", "file-content"])
+def test_r3_scanner_backend_failure_fails_closed(landing, monkeypatch, rule_id, scan):
     caller, state, calls = landing
     run = codex_cloud_land.proc.run
+    marker = "file.txt" if scan == "file-content" else state["status"].split("] ", 1)[1]
 
     def failing_backend(argv, **kwargs):
-        if "brigade.guard" in argv and "--json" in argv:
+        if "brigade.guard" in argv and marker in (kwargs.get("stdin") or b"").decode():
             finding = {"action": "warn", "rule_id": rule_id, "match": ""}
             return proc.Result(0, json.dumps({"findings": [finding]}), "")
         return run(argv, **kwargs)

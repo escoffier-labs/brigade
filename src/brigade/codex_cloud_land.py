@@ -427,23 +427,9 @@ class _LandingGit:
         return found
 
     def scan_text(self, text: str, reason: str) -> None:
-        """Scan text under every pinned policy with allow comments ignored."""
-        for policy in self.policies:
-            _run(
-                isolated_exec.module_argv(
-                    "brigade.guard",
-                    "scan",
-                    "-",
-                    "--policy",
-                    str(policy),
-                    "--no-allow-comments",
-                    "--scan-frontmatter",
-                ),
-                self.repository,
-                reason,
-                stdin=text.encode("utf-8"),
-                environment=self.env(),
-            )
+        """Refuse text with any blocking finding under every pinned policy, allows ignored."""
+        if self.blocking_findings(text):
+            raise LandError(reason)
 
 
 def _check_path(value: str, tree: Path, hooks: tuple[Path, ...]) -> None:
