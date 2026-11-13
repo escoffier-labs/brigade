@@ -19,6 +19,9 @@ jobs:
     # so the limits live here. Measured 2026-11-05 to 11-09: max 15.2 min.
     timeout-minutes: 45
     strategy:
+      # The nightly is the only run of the suite on 1.85.0. A failure on
+      # stable must not cancel that leg.
+      fail-fast: false
       matrix:
         toolchain: ${{ fromJSON(inputs.msrv_full && '["stable", "1.85.0"]' || '["stable"]') }}
     defaults:

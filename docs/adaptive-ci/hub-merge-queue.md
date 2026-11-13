@@ -143,8 +143,9 @@ promise that the source still compiles on the oldest supported toolchain.
   test target and the binary (`cargo test --locked --no-run`) and checks the
   build without the memory scanner (`cargo check --no-default-features`).
 - `hub-nightly.yml` passes `msrv_full: true`. The `hub` job then runs the
-  whole suite on both toolchains and `hub-msrv` is skipped, so the nightly is
-  unchanged.
+  whole suite on both toolchains and `hub-msrv` is skipped. The matrix sets
+  `fail-fast: false`, so a failure on stable does not cancel the 1.85.0 leg,
+  which is now the only run of the suite on that toolchain.
 
 ```mermaid
 flowchart TD

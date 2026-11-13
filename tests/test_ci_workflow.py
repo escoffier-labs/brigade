@@ -2315,12 +2315,15 @@ def _assert_hub_msrv_split(reusable):
     suite = _workflow_job_section(reusable, "hub")
     assert 'toolchain: ${{ fromJSON(inputs.msrv_full && \'["stable", "1.85.0"]\' || \'["stable"]\') }}' in suite
     assert "\n    if:" not in suite
+    # A stable failure in the nightly must not cancel the only 1.85.0 suite run.
+    assert "    strategy:\n" in suite and "      fail-fast: false\n" in suite
     msrv = _workflow_job_section(reusable, "hub-msrv")
     assert "    if: ${{ !inputs.msrv_full }}\n" in msrv
     assert "          toolchain: '1.85.0'\n" in msrv
     assert "- run: cargo clippy --locked --all-targets -- -D warnings\n" in msrv
     assert "- run: cargo test --locked --no-run\n" in msrv
     assert "run: cargo check --locked --no-default-features\n" in msrv
+    assert "        if:" not in msrv
     assert "continue-on-error" not in reusable
 
 
