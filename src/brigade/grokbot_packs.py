@@ -219,12 +219,6 @@ def preview_setup(
     ledger_path: str | Path | None = None,
     action_state_path: str | Path | None = None,
     approval_dir: str | Path | None = None,
-    staging_dir: str | Path | None = None,
-    excalidraw_bin: str | Path | None = None,
-    upstream_url: str | None = None,
-    upstream_key_env: str | None = None,
-    upstream_key_file: Path | None = None,
-    upstream_key: dict[str, Any] | None = None,
     owner_workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     return _setup(
@@ -241,12 +235,6 @@ def preview_setup(
         ledger_path=ledger_path,
         action_state_path=action_state_path,
         approval_dir=approval_dir,
-        staging_dir=staging_dir,
-        excalidraw_bin=excalidraw_bin,
-        upstream_url=upstream_url,
-        upstream_key_env=upstream_key_env,
-        upstream_key_file=upstream_key_file,
-        upstream_key=upstream_key,
         owner_workspace=owner_workspace,
     )
 
@@ -265,12 +253,6 @@ def apply_setup(
     ledger_path: str | Path | None = None,
     action_state_path: str | Path | None = None,
     approval_dir: str | Path | None = None,
-    staging_dir: str | Path | None = None,
-    excalidraw_bin: str | Path | None = None,
-    upstream_url: str | None = None,
-    upstream_key_env: str | None = None,
-    upstream_key_file: Path | None = None,
-    upstream_key: dict[str, Any] | None = None,
     owner_workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     return _setup(
@@ -287,12 +269,6 @@ def apply_setup(
         ledger_path=ledger_path,
         action_state_path=action_state_path,
         approval_dir=approval_dir,
-        staging_dir=staging_dir,
-        excalidraw_bin=excalidraw_bin,
-        upstream_url=upstream_url,
-        upstream_key_env=upstream_key_env,
-        upstream_key_file=upstream_key_file,
-        upstream_key=upstream_key,
         owner_workspace=owner_workspace,
     )
 
@@ -431,12 +407,6 @@ def _setup(
     ledger_path: str | Path | None = None,
     action_state_path: str | Path | None = None,
     approval_dir: str | Path | None = None,
-    staging_dir: str | Path | None = None,
-    excalidraw_bin: str | Path | None = None,
-    upstream_url: str | None = None,
-    upstream_key_env: str | None = None,
-    upstream_key_file: Path | None = None,
-    upstream_key: dict[str, Any] | None = None,
     owner_workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     pack = show_pack(pack_id)
@@ -463,22 +433,11 @@ def _setup(
     if reference is not None:
         payload["bearer"] = reference
     fleet_paths = (runtime_path, ledger_path, action_state_path, approval_dir)
-    obsidian_paths = (staging_dir, excalidraw_bin)
-    upstream_fields = (upstream_url, upstream_key_env, upstream_key_file, upstream_key)
     if pack["kind"] == "queue-role":
-        if (
-            owner_workspace is not None
-            or any(path is not None for path in fleet_paths)
-            or any(path is not None for path in obsidian_paths)
-            or any(field is not None for field in upstream_fields)
-        ):
+        if owner_workspace is not None or any(path is not None for path in fleet_paths):
             raise PackError("unexpected-key")
     elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
-        if (
-            any(path is not None for path in fleet_paths)
-            or any(path is not None for path in obsidian_paths)
-            or any(field is not None for field in upstream_fields)
-        ):
+        if any(path is not None for path in fleet_paths):
             raise PackError("unexpected-key")
         payload["owner_workspace"] = _operations_relay_owner_reference(owner_workspace)
     elif pack["id"] in DOT_FAMILY_PACK_IDS:
@@ -487,8 +446,6 @@ def _setup(
             or ledger_path is not None
             or action_state_path is not None
             or approval_dir is not None
-            or any(path is not None for path in obsidian_paths)
-            or any(field is not None for field in upstream_fields)
         ):
             raise PackError("unexpected-key")
         payload["runtime_path"] = _dot_runtime_reference(runtime_path, pack_id)

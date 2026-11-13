@@ -97,9 +97,13 @@ def test_retired_module_flags_reach_tombstone(profile, capsys):
     assert f"this was removed in {REMOVED_IN}." in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("abbreviated", [False, True])
+@pytest.mark.parametrize("attached", [False, True])
 @pytest.mark.parametrize("profile", ["fleet-steward", "obsidian-operator", "t3-dispatch"])
 @pytest.mark.parametrize("command", ["setup", "doctor", "canary", "update", "install-service", "remove", "show"])
-def test_retired_steward_commands_preserve_user_files(tmp_path, monkeypatch, capsys, profile, command):
+def test_retired_steward_commands_preserve_user_files(
+    tmp_path, monkeypatch, capsys, profile, command, abbreviated, attached
+):
     from tests._home import set_home
 
     set_home(monkeypatch, tmp_path / "home")
@@ -114,7 +118,10 @@ def test_retired_steward_commands_preserve_user_files(tmp_path, monkeypatch, cap
         (["hub", "connector", command], "--id"),
         (["dot", "watch"], "--pack"),
     ):
-        assert cli.main([*prefix, flag, profile, "--target", str(target), "--obsolete", "--apply"]) == 2
+        if abbreviated:
+            flag = "--pac" if flag == "--pack" else "--i"
+        selection = [f"{flag}={profile}"] if attached else [flag, profile]
+        assert cli.main([*prefix, *selection, "--target", str(target), "--obsolete", "--apply"]) == 2
         error = capsys.readouterr().err
         assert f"this was removed in {REMOVED_IN}." in error
         assert "hub connector setup --id cloud-agent" in error

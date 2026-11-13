@@ -29,10 +29,10 @@ def compatibility(argv: list[str]) -> int | None:
             continue
         tail = argv[len(prefix) :]
         for index, item in enumerate(tail):
+            option, separator, attached = item.partition("=")
+            matches = option.startswith("--") and len(option) > 2 and flag.startswith(option)
             value = (
-                item[len(flag) + 1 :]
-                if item.startswith(flag + "=")
-                else (tail[index + 1] if item == flag and index + 1 < len(tail) else None)
+                attached if matches and separator else (tail[index + 1] if matches and index + 1 < len(tail) else None)
             )
             if value in RETIRED_PACKS:
                 return removed_profile(value, " ".join((*prefix, value)))

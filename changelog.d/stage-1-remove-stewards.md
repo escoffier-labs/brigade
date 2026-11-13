@@ -1,1 +1,2 @@
 - Remove fleet-steward, obsidian-operator and t3-dispatch packs and their dedicated helpers and plugin. Historical command selections report removal in 0.32.0 and retain user files. Dot, Duet and cloud-agent keep their connector behavior.
+- Remove retired pack flags from listener help while preserving migration guidance for abbreviated historical selections. Retained instance files reserve their configured ports until manually deleted from `.brigade/grokbot/packs/`. Retired default ports remain reserved regardless.

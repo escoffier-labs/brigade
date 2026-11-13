@@ -475,3 +475,16 @@ def test_write_relay_units_rejects_service_symlink_with_force_before_either_writ
     assert service.readlink() == victim
     assert victim.read_text(encoding="utf-8") == original_target
     assert timer.read_text(encoding="utf-8") == original_timer
+
+
+def test_relay_refuses_retained_fleet_overlapping_paths(tmp_path, monkeypatch):
+    from brigade import grokbot_pack_relay
+
+    target, owner, _ledger = _setup_stewards(tmp_path, monkeypatch)
+    instance = grokbot_packs.instance_config_path(target, "fleet-steward")
+    payload = json.loads(instance.read_text())
+    payload["ledger_path"] = payload["runtime_path"]
+    instance.write_text(json.dumps(payload))
+    with pytest.raises(grokbot_pack_relay.PackRelayError) as caught:
+        grokbot_pack_relay.preview_relay(target, owner)
+    assert caught.value.reason == "unsafe-path"

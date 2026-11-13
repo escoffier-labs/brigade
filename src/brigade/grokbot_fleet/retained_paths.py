@@ -37,26 +37,22 @@ def assert_disjoint_paths(paths: list[str]) -> None:
                 _environment_error()
 
 
-def _environment_invalid() -> NoReturn:
-    raise FleetError("invalid_request", "Fleet environment is invalid")
-
-
 def _reject_windows_network_or_device_root(path_text: str) -> None:
     if not grokbot_paths.has_allowed_absolute_root(path_text, windows=os.name == "nt"):
-        _environment_invalid()
+        _environment_error()
 
 
 def validate_absolute_reference(path_text: object) -> str:
     if not isinstance(path_text, str) or not path_text or "\0" in path_text:
-        _environment_invalid()
+        _environment_error()
     _reject_windows_network_or_device_root(path_text)
     candidate = Path(path_text)
     if any(part in {".", ".."} for part in candidate.parts):
-        _environment_invalid()
+        _environment_error()
     if any(segment in {".", ".."} for segment in path_text.replace("\\", "/").split("/")):
-        _environment_invalid()
+        _environment_error()
     if any(seg and (seg.endswith(".") or seg.endswith(" ")) for seg in path_text.replace("\\", "/").split("/")):
-        _environment_invalid()
+        _environment_error()
     return normalize_absolute_path(path_text)
 
 
