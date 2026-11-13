@@ -1729,6 +1729,11 @@ def _record_search_log(
     ts: str | None = None,
 ) -> None:
     """Append one search event; fail-open so logging never breaks search."""
+    from .memory_card_reads import record
+
+    # The read ledger counts every returned card, whatever the search log caps or skips.
+    shown = [m for m in matches if isinstance(m, dict)] if isinstance(matches, list) else []
+    record(target, _search_log_card_ids(shown, top_k=len(shown)) + _search_log_aliases(shown, top_k=len(shown)))
     if not _should_log_search(query):
         return
     entry = {
@@ -1737,9 +1742,6 @@ def _record_search_log(
         "card_ids": _search_log_card_ids(matches if isinstance(matches, list) else []),
         "card_aliases": _search_log_aliases(matches if isinstance(matches, list) else []),
     }
-    from .memory_card_reads import record
-
-    record(target, list(entry["card_ids"]) + list(entry["card_aliases"]))
     _append_search_log_entry(target, entry)
 
 

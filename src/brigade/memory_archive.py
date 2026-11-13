@@ -47,8 +47,11 @@ def frontmatter_refusal(text: str) -> str | None:
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         match = _ARCHIVE_LINE.match(line)
-        if match and match[2].strip().lstrip("\"'").lower().startswith("never"):
-            return "archive: never"
+        if match:
+            pin = match[2].split("#", 1)[0].strip().strip("\"'").lower()
+            # An empty or block-scalar value continues on later lines; treat it as a pin, never as a guess.
+            if pin.startswith("never") or pin in ("", "|", ">", "|-", ">-", "|+", ">+"):
+                return "archive: never"
         if line[0].isspace() and have_key:
             continue
         key, sep, value = line.partition(":")

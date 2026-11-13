@@ -88,3 +88,15 @@ def test_undo_never_revives_over_the_owning_card(tmp_path, monkeypatch):
     assert not any(action == "put" for action, _ in fake.calls)
     with store.locked(tmp_path):
         assert store.published(tmp_path)[fake.identity]["fleet"]["old"]["path"] == "memory/cards/active.md"
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["archive:\n  never", "archive: |\n  never", "archive: >-\n  never", "Archive:\n    never", "archive:"],
+)
+def test_continued_archive_pin_is_honoured(header):
+    assert archive.frontmatter_refusal(f"---\ntitle: kept\n{header}\n---\nbody\n") == "archive: never"
+
+
+def test_other_continued_values_still_archive():
+    assert archive.frontmatter_refusal("---\ntags:\n  - one\nsummary: >-\n  folded text\n---\nbody\n") is None
