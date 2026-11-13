@@ -297,6 +297,21 @@ course the user has finished, are archived without being asked.
 - Self-editing of instructions and skills follows later, after stage 3,
   because it needs trustworthy measurement.
 
+Measured on the operator's main machine on 2026-11-12:
+
+- 363 handoffs sit in the review inbox, the oldest about 201 days old, and
+  300 more drafts are unprocessed.
+- The scheduled memory refresh job only writes a plan, the closeout job
+  records a deferral every day, and the outcome job is disabled and would
+  only preview.
+- Retiring a stale card has no apply path at all. It is a read-only list.
+- Card verification is off by default and can never correct a card itself.
+
+So the jobs exist and report success while the loop stays open. The stage
+closes these specific loops before adding anything new. It also updates the
+written rules that require review queues: `GOVERNANCE.md`,
+`docs/memory-care.md` and `docs/phase-memory-verify.md`.
+
 **(decided)** The background work may spend the user's subscription quota
 without asking each time, under a cap the user sets once.
 
