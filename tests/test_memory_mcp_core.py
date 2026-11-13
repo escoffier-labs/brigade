@@ -438,3 +438,50 @@ def test_card_refs_keep_literal_backslashes_where_they_are_filename_characters(m
     monkeypatch.setattr(memory_mcp_core, "_NATIVE_SEP", "/")
     assert memory_mcp_core.card_ref("repo", "memory/cards/a\\b.md") == "repo:memory/cards/a\\b.md"
     assert memory_mcp_core.card_uri("user", "memory/cards/a\\b.md") == "user-card://memory/cards/a%5Cb.md"
+
+
+def test_mcp_reads_and_searches_count_as_use(stores):
+    from datetime import date
+
+    from brigade import memory_card_reads as reads
+
+    repo, user = stores
+    _card(repo, "fetched.md", "Fetched", "alpha repo text")
+    _card(repo, "found.md", "Found", "zebra unique word")
+    _card(repo, "untouched.md", "Untouched", "nothing asks for this")
+    _card(user, "mine.md", "Mine", "zebra in the user store")
+    tools = _tools(repo)
+    assert "alpha repo text" in tools.call("get_card", {"path": "memory/cards/fetched.md"})[0]
+    assert tools.call("search_cards", {"query": "zebra"})[1] is False
+    repo_ledger = reads.load(repo.resolve())
+    assert reads.last_read(repo_ledger, ["memory/cards/fetched.md"]) == date.today()
+    assert reads.last_read(repo_ledger, ["memory/cards/found.md"]) == date.today()
+    assert reads.last_read(repo_ledger, ["memory/cards/untouched.md"]) is None
+    # A card from the user store is counted in the user store's ledger, not the repo's.
+    assert reads.last_read(repo_ledger, ["memory/cards/mine.md"]) is None
+    assert reads.last_read(reads.load(user.resolve()), ["memory/cards/mine.md"]) == date.today()
+
+
+def test_a_failed_read_records_nothing(stores):
+    from brigade import memory_card_reads as reads
+
+    repo, _ = stores
+    _card(repo, "real.md", "Real", "body")
+    tools = _tools(repo)
+    assert tools.call("get_card", {"path": "memory/cards/missing.md"})[1] is True
+    assert reads.last_read(reads.load(repo.resolve()), ["memory/cards/missing.md"]) is None
+
+
+def test_a_broken_read_ledger_never_fails_a_memory_tool(stores, monkeypatch):
+    from brigade import memory_card_reads as reads
+
+    repo, _ = stores
+    _card(repo, "real.md", "Real", "body text")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("ledger broken")
+
+    monkeypatch.setattr(reads, "record", boom)
+    tools = _tools(repo)
+    assert "body text" in tools.call("get_card", {"path": "memory/cards/real.md"})[0]
+    assert tools.call("search_cards", {"query": "body"})[1] is False
