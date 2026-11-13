@@ -361,13 +361,13 @@ once. `[tend] enabled = false` disables automatic care for the workspace. Ingest
 takes the care lock and finishes or abandons pending care decisions. Library ingest
 keeps its existing behavior.
 
-| Disposition | Reason codes | Action |
-|---|---|---|
-| Resolve | `document-content-present`, `document-anchor-present` | Record already-applied and move to `memory/handoff-inbox/resolved/` |
-| Retry | `expected-sha-stale`, `expected-sha-mismatch`, `card-publication-changed`, `card-publication-busy`, `document-destination-unwritable` | Recheck with the original promotion and routing flags, once per run |
-| Retain | Injection, content-scan, contradiction, identity migration, collisions and unsafe destinations | Record a trust or security hold and leave the draft untouched |
-| Hold | Proposal notifications, near matches, invalid or missing fields, unapplied knowledge and unknown codes | Leave untouched with a separate hold count and reason |
-| Expire | No current ingest codes qualify | The deadline mechanism remains available for future codes that prove knowledge is represented elsewhere or carry nothing durable |
+| Disposition | Reason codes | Needs evidence-log proof | Action |
+|---|---|---|---|
+| Resolve | `document-content-present`, `document-anchor-present` | No. Read the destination to prove representation | Record already-applied and move to `memory/handoff-inbox/resolved/` |
+| Retry | `expected-sha-stale`, `expected-sha-mismatch`, `card-publication-changed`, `card-publication-busy`, `document-destination-unwritable` | Use the fresh outcome's per-code flag | Recheck with the original promotion and routing flags, once per run |
+| Retain | Injection, content-scan, contradiction, identity migration, collisions and unsafe destinations | Yes for contradiction candidates, otherwise no | Record a trust or security hold and leave the draft untouched |
+| Hold | Proposal notifications, near matches, invalid or missing fields, unapplied knowledge and unknown codes | Yes for near matches, reinforcement records and unknown codes, otherwise no | Leave untouched with a separate hold count and reason |
+| Expire | No current ingest codes qualify | No current codes | The deadline mechanism remains available for future codes that prove knowledge is represented elsewhere or carry nothing durable |
 
 An unsuccessful retry stays held when it contains unapplied knowledge. A later pull
 request in this plan will add background model judgment for held drafts. Every inspected
@@ -378,9 +378,11 @@ routing timestamp are skipped and reported. Malformed writer folders are inspect
 within the target. Quarantine is never read. External writer roots are reported and
 skipped because the local journal cannot undo writes outside its target.
 
+An already-applied draft resolves only after a fresh read proves all proposed content is present in the destination. This proof works on any platform and does not depend on the evidence log. Review holds remain held even when evidence is available.
+
 A draft cited by the evidence log stays at its original path. A journaled row in
 `.brigade/memory-care/inbox-ledger.jsonl` removes it from pending work. If the evidence
-log cannot be read completely, evidence-dependent resolutions are held. Undo restores
+log cannot be read completely, outcomes needing evidence-log proof are held. Independent resolutions retain potentially cited drafts in place through the ledger. Undo restores
 the draft's pending state and any changed card or document. Card replacements require
 unchanged destination bytes. Appended blocks require an unchanged exact match. Machine
 logs stay append-only: undo appends a digest-addressed retraction, and readers omit

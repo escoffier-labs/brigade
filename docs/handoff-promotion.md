@@ -130,7 +130,7 @@ This receipt surface is observability only. It does not run the ingestor, edit c
 
 ## Automatic review-inbox drain
 
-Memory care resolves already-applied drafts and retries transient ingest failures.
+Memory care verifies already-applied drafts by reading their destinations and retries transient ingest failures.
 Unapplied knowledge, explicit review items and unknown outcomes stay held. No
 current ingest code qualifies for expiry. Trust and security holds stay in place
 with a recorded reason. Evidence-linked drafts retain their

@@ -13,7 +13,12 @@ from brigade import memory_inbox_drain as drain
 TODAY = date(2026, 11, 13)
 
 
-def draft(target, code="document-content-present", body="A useful fact.", age=20, number=0):
+def draft(target, code="document-content-present", body=None, age=20, number=0):
+    if body is None:
+        body = "## Recommended memory action\nno-card\n## Target document\nUSER.md\n## Suggested document content\nA useful fact.\n"
+        if code in drain.RESOLVE_CODES:
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "USER.md").write_bytes(b"A useful fact.\n")
     source = target / ".claude/memory-handoffs" / f"2026-10-01-{number}.md"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(body, encoding="utf-8")
@@ -65,14 +70,19 @@ def test_harmless_code_with_injection_stays(tmp_path):
     assert path.exists()
 
 
-def test_deadline_dry_run_and_relative_target(tmp_path, monkeypatch):
+@pytest.mark.parametrize("unsupported", [False, True])
+def test_deadline_dry_run_and_relative_target(tmp_path, monkeypatch, unsupported):
+    if unsupported:
+        from brigade import memory_evidence_log
+
+        monkeypatch.setattr(memory_evidence_log, "read_evidence", lambda _: ([], 0, True))
     target = tmp_path / "ws"
     path = draft(target, "synthetic-expirable", age=13)
     monkeypatch.chdir(tmp_path)
     assert (
-        drain.drain(Path("ws"), today=TODAY, deadline_days=14, classifications={"synthetic-expirable": "expire"})[
-            "waiting"
-        ]
+        drain.drain(
+            Path("ws"), today=TODAY, deadline_days=14, classifications={"synthetic-expirable": ("expire", False)}
+        )["waiting"]
         == 1
     )
     from datetime import timedelta
@@ -80,15 +90,19 @@ def test_deadline_dry_run_and_relative_target(tmp_path, monkeypatch):
     later = TODAY + timedelta(days=2)
     assert (
         drain.drain(
-            Path("ws"), today=later, deadline_days=14, dry_run=True, classifications={"synthetic-expirable": "expire"}
+            Path("ws"),
+            today=later,
+            deadline_days=14,
+            dry_run=True,
+            classifications={"synthetic-expirable": ("expire", False)},
         )["expired"]
         == 1
     )
     assert path.exists()
     assert (
-        drain.drain(Path("ws"), today=later, deadline_days=14, classifications={"synthetic-expirable": "expire"})[
-            "expired"
-        ]
+        drain.drain(
+            Path("ws"), today=later, deadline_days=14, classifications={"synthetic-expirable": ("expire", False)}
+        )["expired"]
         == 1
     )
     assert not path.exists()
@@ -248,7 +262,9 @@ def test_malformed_writer_folder_and_quarantine(tmp_path):
     quarantine.mkdir()
     secret = quarantine / "untouched.md"
     secret.write_bytes(b"\xff")
-    result = drain.drain(tmp_path, today=TODAY, deadline_days=14, classifications={"synthetic-expirable": "expire"})
+    result = drain.drain(
+        tmp_path, today=TODAY, deadline_days=14, classifications={"synthetic-expirable": ("expire", False)}
+    )
     assert result["expired"] == 1
     assert not moved.exists()
     assert secret.read_bytes() == b"\xff"
@@ -394,15 +410,15 @@ def test_retry_reinforces_with_real_evidence_and_undo(tmp_path):
     assert not memory_evidence_log.read_evidence(tmp_path)[0]
 
 
-def test_unsupported_evidence_reader_without_log_holds(tmp_path, monkeypatch):
+def test_unsupported_evidence_reader_without_log_still_moves(tmp_path, monkeypatch):
     from brigade import memory_evidence_log
 
     monkeypatch.setattr(memory_evidence_log, "read_evidence", lambda _: ([], 0, True))
     path = draft(tmp_path)
     result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
-    assert result["held"] == 1
-    assert path.exists()
-    assert not (tmp_path / drain.RESOLVED_REL / path.name).exists()
+    assert result["resolved"] == 1
+    assert not path.exists()
+    assert (tmp_path / drain.RESOLVED_REL / path.name).exists()
 
 
 def test_resolution_drift_is_skipped_not_reported_as_resolved(tmp_path, monkeypatch):
@@ -537,6 +553,8 @@ def test_all_ingest_codes_are_explicitly_classified():
     ]
     assert codes <= set.union(*groups), codes - set.union(*groups)
     assert sum(map(len, groups)) == len(set.union(*groups))
+    assert set(drain.NEEDS_EVIDENCE_PROOF) == set.union(*groups)
+    assert all(type(value) is bool for value in drain.NEEDS_EVIDENCE_PROOF.values())
 
 
 @pytest.mark.parametrize("newline", ["crlf", "text"])
@@ -1038,3 +1056,52 @@ def test_scan_does_not_finish_pending_inbox_publication(tmp_path, monkeypatch):
     assert not (tmp_path / "USER.md").exists()
     assert main(["memory", "care", "scan", "--target", str(tmp_path)]) == 0
     assert not (tmp_path / "USER.md").exists()
+
+
+def test_unsupported_evidence_only_holds_evidence_dependent_drafts(tmp_path, monkeypatch):
+    from brigade import memory_evidence_log
+
+    monkeypatch.setattr(memory_evidence_log, "read_evidence", lambda _: ([], 0, True))
+    applied = draft(tmp_path, "document-content-present", number=0)
+    proposal = draft(tmp_path, "near-match-proposal", number=1)
+    result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    assert result["resolved"] == 1, result
+    assert result["held"] == 1
+    assert not applied.exists() and proposal.exists()
+
+
+@pytest.mark.parametrize("code", ["document-content-present", "document-anchor-present"])
+def test_resolution_requires_fresh_destination_proof(tmp_path, code):
+    body = "## Recommended memory action\nno-card\n## Target document\nUSER.md\n## Suggested document content\nPrefer verified receipts.\n"
+    path = draft(tmp_path, code, body)
+    result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    assert result["held"] == 1 and path.exists()
+    (tmp_path / "USER.md").write_bytes(b"Prefer verified receipts.\n")
+    result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    assert result["resolved"] == 1 and not path.exists()
+
+
+@pytest.mark.parametrize("kind", ["document", "card"])
+def test_unsupported_evidence_allows_independent_retry(tmp_path, monkeypatch, kind):
+    from brigade import memory_evidence_log
+
+    monkeypatch.setattr(memory_evidence_log, "read_evidence", lambda _: ([], 0, True))
+    if kind == "document":
+        code = "document-destination-unwritable"
+        body = "## Recommended memory action\nno-card\n## Target document\nUSER.md\n## Suggested document content\nPrefer verified receipts.\n"
+    else:
+        code = "card-publication-changed"
+        body = "## Recommended memory action\ncreate-card\n## Target card\nverified.md\n## Suggested card content\n---\ntopic: verified\n---\nRetain verified receipts.\n"
+    path = draft(tmp_path, code, body)
+    result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    assert result["retried"] == 1, result
+    assert not path.exists()
+
+
+def test_anchor_alone_does_not_prove_unapplied_content(tmp_path):
+    body = "## Recommended memory action\nno-card\n## Target document\nUSER.md\n## Suggested document content\nVerified preference.\nAdditional durable detail.\n"
+    (tmp_path / "USER.md").write_bytes(b"Verified preference.\n")
+    path = draft(tmp_path, "document-anchor-present", body)
+    result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    assert result["held"] == 1 and path.exists()
+    assert b"Additional durable detail." not in (tmp_path / "USER.md").read_bytes()

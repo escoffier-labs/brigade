@@ -21,7 +21,15 @@ def reprocess(
     dry_run: bool = False,
 ) -> ingest.Action:
     from .inbox_lock import held_file_lock
-    from .memory_inbox_drain import disposition_changes, disposition_metadata, classify, parse_header, retry_flags
+    from .memory_inbox_drain import (
+        disposition_changes,
+        disposition_metadata,
+        classify,
+        parse_header,
+        retry_flags,
+        evidence_uncertain,
+        NEEDS_EVIDENCE_PROOF,
+    )
     from .memory_inbox_append import plan_append
     from .memory_evidence_log import LOG_PATH, append_evidence, read_evidence
 
@@ -40,9 +48,9 @@ def reprocess(
     if flags is None:
         return ingest.Action("inboxed", "retry-flags-unknown")
     evidence, warnings, unsupported = read_evidence(owner)
-    if warnings:
-        return ingest.Action("inboxed", "evidence-unavailable")
-    cited = bool(unsupported) or any(row["evidence_id"] in (rel, str(draft)) for row in evidence)
+    cited = evidence_uncertain(owner, warnings, unsupported) or any(
+        row["evidence_id"] in (rel, str(draft)) for row in evidence
+    )
     sections = ingest.parse(draft, data)
     lock = journal.safe_path(owner, ".brigade/memory/proposals/proposal.lock")
     from contextlib import nullcontext, ExitStack
@@ -53,7 +61,7 @@ def reprocess(
         outcome = ingest.decide(
             sections, target=owner, promote_cards=flags[0], route_documents=flags[1], card_ids=card_ids
         )
-        if unsupported and outcome.kind == "reinforced":
+        if (warnings or unsupported) and NEEDS_EVIDENCE_PROOF.get(outcome.code, True):
             return ingest.Action("inboxed", "evidence-unavailable")
         if outcome.kind not in ("promoted", "reinforced", "routed") or outcome.dest is None:
             return ingest.Action("inboxed", outcome.code)
