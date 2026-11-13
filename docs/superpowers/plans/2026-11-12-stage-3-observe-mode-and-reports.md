@@ -4,7 +4,7 @@
 
 **Goal:** Add a three-way work mode (`strict`, `observe`, `off`) in which `observe` records every check an agent runs as its own record type with harness and model identity, and ship two read-only reports over those records, without changing the default or today's strict behavior.
 
-**Architecture:** The mode stays one key, `work.mode` in `.brigade/config.json`, now always written explicitly. Observe-mode capture lives in new modules (`agent_identity.py`, `observed_checks.py`, `claude_hooks/check_events.py`, `observe_harness_hooks.py`, `observe_claims.py`, `observed_report.py`) that the existing hook entry points call with one line each. Observed records are append-only JSONL under the ignored `.brigade/work/observed/` directory, separate from verify receipts, never signed or digest-chained.
+**Architecture:** The mode stays one key, `work.mode` in `.brigade/config.json`, now always written explicitly. Observe-mode capture lives in new modules (`agent_identity.py`, `observed_checks.py`, `claude_hooks/check_events.py`, `observe_harness_hooks.py`, `observe_claims.py`, `observed_report.py`) that the existing hook entry points call with one line each. Observed records are append-only JSONL in the private per-workspace state directory beside the digest key, separate from verify receipts, never signed or digest-chained.
 
 **Tech Stack:** Python 3 standard library only (zero runtime dependencies), pytest, ruff, mypy. Claude Code, Codex and Cursor hook payloads as documented by each vendor on 2026-11-13.
 
@@ -18,7 +18,7 @@
 4. **`work_mode.is_yolo` is deleted.** It is replaced by `is_strict` and `is_observe`, so any caller left on two-way logic fails to import instead of silently treating `observe` as one of the other two values.
 5. **Observe behaves like off for every enforcement surface**: PreToolUse deny, the PostToolUseFailure retry note, the Stop receipt gate and its handoff note, doctor outcome-loop findings, classify dormancy and adoption "bypassed" counting. Observe differs from off only in that capture runs.
 6. **Capture runs only for targets whose governing mode is `observe`.** Strict and off write no observed records. Per-target resolution follows the existing rule: the directory each check runs in decides, and an unplaceable check follows the handled root.
-7. **Record storage:** `.brigade/work/observed/checks.jsonl` (checks) and `.brigade/work/observed/claims.jsonl` (claims), files created with mode 0600, one JSON object per line, rotated at 4 MiB to a single `.1` generation under an exclusive-create lock file. Commands pass through `guard.redact_text`, then `claude_hooks.envelope.redact_paths`, then are cut to 1,000 characters. No output, output hash or output size is stored, because no report uses them.
+7. **Record storage:** `<user-config>/brigade/observed/<repository-key-hash>/checks.jsonl` (checks) and adjacent `claims.jsonl` (claims), owner-only directory and files, one JSON object per line. One bounded OS file lock covers size check, rotation at 4 MiB to a single `.1` generation, and append. Readers decode active then old generation under the same lock, newest first within each, returning at most 10,000 records. Appends never parse either generation. Close the active descriptor before rotation. Torn final lines are skipped by readers and separated by a newline before append. Command text is never stored. `command_digest` uses HMAC-SHA-256 after shell credential masking, `guard.redact_text`, `claude_hooks.envelope.redact_paths` and the 1,000-character cap, truncated to 16 lowercase hex characters. Each canonical workspace path has a directory named by SHA-256 of `work_mode.repository_key(target)` under the per-user rails record parent, in `observed/`. It contains `digest.key`, `checks.jsonl`, `checks.jsonl.1` and `checks.jsonl.lock`. The same directory will hold claims and session state. Nothing is written under the workspace. Ignore any older workspace observed directory, without migration. Refuse state inside any Git work tree. Existing POSIX directories must be owned by the effective user with no group or other bits. Keys must be effective-user-owned, single-link regular files, exactly 32 bytes and mode 0600. Publish a fully written, fsynced temporary key without overwriting a winner. Windows relies on inherited profile ACLs. Key files are exclusive, owner-only and no-follow. State or key failure disables appends and emits `0000000000000000`, which readers accept as unavailable and reports must never group. `tool` is the only human-readable description: a known tool name with an optional known subcommand or target restricted to 32 letters, digits or `._-:/`. Unknown targets become the bare tool name. Environment assignments, option values and arbitrary positional arguments never enter `tool`. Records containing the legacy `command` key are skipped and counted. The schema key set stays closed. No output, output hash or output size is stored.
 8. **Status mapping per harness** (anything else is `unknown`): Claude Code `PostToolUse` is `ok`. `PostToolUseFailure` with an `error` starting `Exit code N` is `failed` with `exit_code=N`. An interrupt or any other failure text is `unknown`. Cursor `postToolUse` reads `exitCode` from the JSON string in `tool_output`. `postToolUseFailure` with `failure_type == "error"` is `failed`, `timeout` is `unknown`, `permission_denied` is not recorded. Codex is always `unknown`, because the `tool_response` shape for Bash is not documented.
 9. **Verify receipts learn the model through a new variable, `BRIGADE_AGENT_SESSION`.** The Claude SessionStart handler appends `export BRIGADE_AGENT_SESSION=<session fingerprint>` to `CLAUDE_ENV_FILE`. It deliberately does not export `BRIGADE_CLAUDE_SESSION`, because the strict Stop gate matches receipts on `harness_session`, and stamping it on every receipt would change strict behavior.
 10. **Outcome records carry identity under `context["agent_identity"]`, not in `context["model"]`.** The capability fingerprint is computed from `context["model_family"]`, so moving the model there would shift `outcome rank` capability cohorts. The new key is outside the capability vector.
@@ -27,7 +27,7 @@
 13. **Cursor capture rides the existing presence hook** and adds `postToolUseFailure` to the managed Cursor events.
 14. **Grok learns the three values but captures nothing**, because its hook payload fields are not verified.
 15. **One new command path: `brigade work checks`**, with `--claims` for the second report. The word "score" appears in neither its name nor its output.
-16. **First pass** is the earliest record per group key `(source, session_fingerprint, tool, command)`. Receipts without a session fingerprint are grouped per target per UTC day. Receipt status `completed` is `ok`, `failed` is `failed`, `canceled` is `unknown`, `rejected` is excluded (Brigade refused to run it). Reports read live receipts only, not `verify-archive/`.
+16. **First pass** is the earliest record per group key `(source, session_fingerprint, tool, command_digest)`. The unavailable digest marker (`0000000000000000`) makes each record a separate sample and must never group records together. Receipts without a session fingerprint are grouped per target per UTC day. Receipt status `completed` is `ok`, `failed` is `failed`, `canceled` is `unknown`, `rejected` is excluded (Brigade refused to run it). Reports read live receipts only, not `verify-archive/`.
 17. **The claim phrase list** is a built-in default, replaced entirely by `.brigade/claim-phrases.txt` when that file exists, one `<kind>: <phrase>` per line, `#` comments. Kinds are `tests`, `lint`, `types`, `build` and `checks` (`checks` is generic and matches any tool). A phrase match is ignored when the 12 characters before it contain `not ` or `n't `. The message text is never stored, only the matched kinds.
 18. **`runtime.py` shrinks instead of growing.** The PostToolUseFailure retry note moves into `claude_hooks/check_events.py`, which pays for the two lines that wire capture in, and the `LEGACY_OVERSIZED` cap for `runtime.py` is lowered to the new count.
 19. **Harness detection moves** from `outcome_cmd._detect_harness` into `agent_identity.detect_harness`. `outcome_cmd` imports it. Harness names stay `claude-code`, `codex`, `cursor`, matching existing outcome records.
@@ -50,7 +50,7 @@
 
 ## Review Focus
 
-1. **A check command that carries a secret** (`curl -H "Authorization: Bearer <token>"`, a token in a URL) must be stored redacted, and the stored file must pass the guard scan. Pinned by `test_observed_file_passes_guard_scan_and_is_gitignored` (Task 5) and `test_observe_records_passing_and_failing_checks` (Task 6, token case).
+1. **A check command that carries a secret** (`curl -H "Authorization: Bearer <token>"`, a token in a URL) must be stored redacted, and the stored file must pass the guard scan. Pinned by `test_observed_file_passes_guard_scan` (Task 5) and `test_observe_records_passing_and_failing_checks` (Task 6, token case).
 2. **A capture failure** (unwritable `.brigade/work`, full disk, a bug in the parser) must never deny, block or change any hook result. Pinned by `test_capture_failure_never_changes_hook_result` (Task 6) and `test_cursor_capture_failure_keeps_presence_output` (Task 8).
 3. **An unreadable, invalid or unsupported-version config** must resolve to `strict`, and the pin must never overwrite it. Pinned by `test_unreadable_config_resolves_to_strict` and `test_pin_writes_current_mode_once_and_skips_tracked_or_unreadable_config` (Task 1).
 4. **Mixed modes in one session:** an observe workspace running a check in a strict child repo is still denied and records nothing there. A strict workspace running a check in an observe child is allowed and records into the child only. Pinned by `test_observe_repo_cd_into_strict_repo_is_denied` (Task 2) and `test_check_in_observe_child_records_only_in_child` (Task 6).
@@ -392,7 +392,7 @@ No user-visible effect on its own (library only), so no changelog fragment.
 - Test: `tests/test_agent_identity.py`
 
 **Interfaces:**
-- Produces: `UNKNOWN = "unknown"`. `MODEL_SOURCES = ("hook-session-start", "hook-model-switch", "hook-event", "env", "unknown")`. `@dataclass(frozen=True) class AgentIdentity: harness: str; harness_source: str; model: str; model_source: str; agent_type: str = UNKNOWN` with `as_dict(self) -> dict[str, str]`. `detect_harness(environ: Mapping[str, str] | None = None) -> tuple[str, str]` (moved body, same results). `env_model(environ: Mapping[str, str] | None = None) -> tuple[str, str]` (`BRIGADE_CONTEXT_MODEL` as `("<model>", "env")`, else `(UNKNOWN, UNKNOWN)`). `session_fingerprint(harness: str, session_id: str) -> str` (for `claude-code` exactly `localio.stable_hash({"claude_session_id": session_id})`, otherwise `localio.stable_hash({f"{harness}_session_id": session_id})`).
+- Produces: `UNKNOWN = "unknown"`. `MODEL_SOURCES = ("hook-session-start", "hook-model-switch", "hook-event", "env", "unknown")`. `@dataclass(frozen=True) class AgentIdentity: harness: str; harness_source: str; model: str; model_source: str; agent_type: str = UNKNOWN` with `as_dict(self) -> dict[str, str]`. `detect_harness(environ: Mapping[str, str] | None = None) -> tuple[str, str]` (moved body, same results). `env_model(environ: Mapping[str, str] | None = None) -> tuple[str, str]` (`BRIGADE_CONTEXT_MODEL` as `("<model>", "env")`, else `(UNKNOWN, UNKNOWN)`). `session_fingerprint(harness: str, session_id: str) -> str` remains the compatibility helper for existing receipt identity. Observed `build_check` HMACs its session identifier argument under the workspace key with the distinct `observed-session` domain. The fixed unavailable marker is used on key failure. Do not store raw session identifiers.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -442,9 +442,9 @@ git commit -m "refactor(outcome): move harness detection into agent_identity"
 **Interfaces:**
 - Consumes: `AgentIdentity`, `session_fingerprint` (Task 4). `claude_hooks.runtime._first_verifier_command`, `_shell_tokens`, `_strip_env`, `_python_module_invocation`, `_package_runner_script`, `_strip_runner_global_options`, `_strip_runner_run_options`, `_strip_npx_options` through a lazy `_rt()` accessor like `claude_hooks/write_attribution.py` uses. `guard.redact_text`. `claude_hooks.envelope.redact_paths`. `localio.tree_fingerprint`, `localio.utc_now_iso`.
 - Produces:
-  - `OBSERVED_DIR_REL = Path(".brigade/work/observed")`, `CHECKS_FILE = "checks.jsonl"`, `CHECK_SCHEMA = "brigade.observed_check.v1"`, `STATUSES = ("ok", "failed", "unknown")`, `ROTATE_BYTES = 4 * 1024 * 1024`, `COMMAND_MAX_CHARS = 1000`, `CHECK_KINDS = ("tests", "lint", "types", "build", "checks")`.
-  - `@dataclass(frozen=True) class ObservedCheck: schema: str; ts: str; harness: str; model: str; model_source: str; agent_type: str; session_fingerprint: str; tree_fingerprint: str | None; tool: str; command: str; status: str; exit_code: int | None; duration_ms: int | None` with `to_dict()` and `from_dict(cls, data: Mapping[str, Any]) -> ObservedCheck | None` (None for any missing or mistyped field).
-  - `normalize_tool(command: str) -> str`, `check_kind(tool: str) -> str`, `redact_command(command: str) -> str`.
+  - `digest_key_path(target)` resolves the private per-user workspace directory. `CHECKS_FILE = "checks.jsonl"`, `CHECK_SCHEMA = "brigade.observed_check.v1"`, `STATUSES = ("ok", "failed", "unknown")`, `ROTATE_BYTES = 4 * 1024 * 1024`, `COMMAND_MAX_CHARS = 1000`, `CHECK_KINDS = ("tests", "lint", "types", "build", "checks")`.
+  - `@dataclass(frozen=True) class ObservedCheck: schema: str; ts: str; harness: str; model: str; model_source: str; agent_type: str; session_fingerprint: str; tree_fingerprint: str | None; tool: str; command_digest: str; status: str; exit_code: int | None; duration_ms: int | None` with `to_dict()` and `from_dict(cls, data: Mapping[str, Any]) -> ObservedCheck | None` (None for any missing, extra or mistyped field, including a legacy `command` key).
+  - `normalize_tool(command: str) -> str`, `check_kind(tool: str) -> str`, `command_digest(command: str, target: Path) -> str`. Redaction is an internal step before hashing.
   - `build_check(*, target: Path, command: str, status: str, identity: AgentIdentity, session_fingerprint: str, exit_code: int | None = None, duration_ms: int | None = None) -> ObservedCheck`.
   - `append_jsonl(path: Path, payload: Mapping[str, Any]) -> bool` (rotation, 0600, one `os.write` per line with `O_APPEND`, False on `OSError`, never raises). `read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]` (reads `<path>.1` then `<path>`, returns records and skipped-line count).
   - `append_check(target: Path, check: ObservedCheck) -> bool`. `read_checks(target: Path) -> tuple[list[ObservedCheck], int]`.
@@ -473,8 +473,10 @@ def test_command_is_redacted_and_bounded(tmp_path, monkeypatch):
     set_home(monkeypatch, tmp_path / "home")
     # content-guard: allow bare-token-prefix
     command = f'curl -H "Authorization: Bearer ghp_{"A" * 36}" {tmp_path / "home"}/x && pytest ' + "x" * 2000
-    stored = observed_checks.redact_command(command)
-    assert "ghp_" not in stored and str(tmp_path / "home") not in stored and len(stored) <= 1000
+    check = observed_checks.build_check(target=tmp_path, command=command, status="ok",
+        identity=identity, session_fingerprint="a" * 16)
+    assert "command" not in check.to_dict()
+    assert len(check.command_digest) == 16
 
 def test_append_and_read_round_trip(tmp_path): ...       # build_check, append_check, read_checks == ([check], 0)
 def test_rotation_keeps_one_generation(tmp_path, monkeypatch): ...
@@ -485,11 +487,11 @@ def test_append_failure_returns_false_without_raising(tmp_path): ...
     # make .brigade/work a file; append_check returns False
 def test_observed_file_is_not_a_receipt(tmp_path): ...
     # after append: no .brigade/work/verify-runs dir; record has no "digests", "signature" or "previous" keys
-def test_observed_file_passes_guard_scan_and_is_gitignored(tmp_path):
+def test_observed_file_passes_guard_scan(tmp_path):
     # append a check whose command held the fake token above
-    text = (target / ".brigade/work/observed/checks.jsonl").read_text()
+    text = observed_checks.digest_key_path(target).with_name("checks.jsonl").read_text()
     assert guard.scan_text(text).findings == []
-    assert ".brigade/work/" in _managed_gitignore_entries()   # the list install.apply_gitignore writes
+    assert not (target / ".brigade").exists()
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -499,7 +501,7 @@ Expected: FAIL (`ModuleNotFoundError`).
 
 - [ ] **Step 3: Implement `observed_checks.py`**
 
-`normalize_tool` takes the first verifier segment from `_first_verifier_command`, strips env assignments and shell control prefixes, then applies, in order: `python -m X` gives `X`. `uv run` and `poetry run` and `npx` recurse on their tail. `npm`, `pnpm`, `yarn`, `bun` give `<runner>:<script>`. `go`, `cargo` give `<cmd> <sub>`. `make` gives `make <first target>`. `ruff` gives `ruff <sub>`. A path ending in `scripts/verify` or `scripts/verify-focused` gives that relative tail. Otherwise the basename of the first token. A command with no verifier gives `other`. `check_kind` maps by a module-level dict (`pytest`, `py.test`, `vitest`, `jest`, `mocha`, `rspec`, `phpunit`, `ctest`, `tox`, `nox`, `unittest`, `nose2`, `go test`, `cargo test`, `<runner>:test*` to `tests`. `ruff *`, `eslint`, `cargo clippy`, `go vet`, `pre-commit` to `lint`. `mypy`, `pyright`, `tsc` to `types`. `<runner>:build*` to `build`. Anything else `checks`). Rotation: when the file is at least `ROTATE_BYTES`, create `<file>.rotate.lock` with `O_CREAT | O_EXCL` (remove it first if older than 60 seconds), `os.replace` the file to `<file>.1`, remove the lock. Skip rotation when the lock exists.
+`normalize_tool` takes the first verifier segment using the existing classifier and strips environment and shell control prefixes. Wrappers recurse on their tail. Every result is checked against a closed vocabulary of known tools and known targets. Targets must also match `[A-Za-z0-9._:/-]{1,32}`. Never retain an arbitrary basename, target, script name, subcommand, option or positional argument. Unknown targets fall back to the bare known tool, other commands to `other`. `check_kind` maps known tools to tests, lint, types, build or checks. Build the digest only after the internal redaction pass. Validate its 16 lowercase hex characters on read and append. Reject extra keys, including legacy `command`. Map harness, model and agent type through the shared closed-value mapping at build, append and read. Unknown identity values become `unknown`. HMAC the session identifier argument under the workspace key with the distinct `observed-session` domain, using the fixed marker when unavailable. Non-null tree fingerprints must be 40 lowercase hex characters. Serialize size check, rotation and append under the shared OS file lock in the private per-user workspace directory. Appending never parses either generation. Close the active descriptor before replacing the previous generation. Readers decode active first, then old, newest first within each, skipping bad lines and returning at most 10,000 records. Keep the short-write newline guard. Bound each file read to 8 MiB, lines to 16 KiB and string fields to 4,096 characters. Windows uses the shared handle-relative backend and inherited ACLs. See decision 7 for state-directory and key trust checks. Nothing is created inside the workspace. Ignore older workspace records without migration.
 
 - [ ] **Step 4: Run to verify pass.** Expected: PASS.
 
@@ -557,7 +559,8 @@ def test_observe_records_passing_and_failing_checks(tmp_path, monkeypatch, capsy
     assert (checks[0].status, checks[0].duration_ms, checks[0].agent_type) == ("ok", 1200, "main")
     assert (checks[1].status, checks[1].exit_code, checks[1].agent_type) == ("failed", 1, "Explore")
     assert {c.model for c in checks} == {"test-model-a"} and {c.harness for c in checks} == {"claude-code"}
-    assert "ghp_" not in checks[2].command
+    assert "command" not in checks[2].to_dict()
+    assert len(checks[2].command_digest) == 16
 
 @pytest.mark.parametrize("mode", ["strict", "off"])
 def test_strict_and_off_record_nothing(tmp_path, monkeypatch, capsys, mode): ...
@@ -739,7 +742,7 @@ git commit -m "feat(hooks): record observed checks from Cursor shell tool events
 - Test: `tests/test_observe_harness_hooks.py`, `tests/test_work_mode.py`
 
 **Interfaces:**
-- Produces: `CODEX_HOOK_CONTEXT = "codex-observe"`. `CODEX_HOOK_COMMAND = "brigade work presence-hook --harness codex --stdin --context codex-observe"`. `CODEX_POST_TOOL_MATCHER = "^(Bash|apply_patch)$"`. `codex_identity(payload: Mapping[str, Any]) -> AgentIdentity` (harness `codex`, model from `model` with source `hook-event`, `agent_type` `unknown`). `run_codex_hook() -> None` (reads bounded stdin JSON, resolves the target with `resolve_wired_target(cwd, harness="codex")`, records a Bash check with status `unknown`, records `last_write_at` for `apply_patch` in `.brigade/work/observed/sessions/<session fingerprint>.json`, prints `{}`). `install_codex_observe_hooks(target: Path) -> str | None` (error text or None. Adds one async `PostToolUse` handler with the matcher above and one `Stop` handler to `<target>/.codex/hooks.json`, keeps foreign entries, is idempotent, refuses an unreadable or non-object file without writing). `codex_observe_hooks_installed(target: Path) -> bool`. `observe_session_path(target: Path, session_fingerprint: str) -> Path`.
+- Produces: `CODEX_HOOK_CONTEXT = "codex-observe"`. `CODEX_HOOK_COMMAND = "brigade work presence-hook --harness codex --stdin --context codex-observe"`. `CODEX_POST_TOOL_MATCHER = "^(Bash|apply_patch)$"`. `codex_identity(payload: Mapping[str, Any]) -> AgentIdentity` (harness `codex`, model from `model` with source `hook-event`, `agent_type` `unknown`). `run_codex_hook() -> None` (reads bounded stdin JSON, resolves the target with `resolve_wired_target(cwd, harness="codex")`, records a Bash check with status `unknown`, records `last_write_at` for `apply_patch` in `<private-workspace-state>/sessions/<session fingerprint>.json`, prints `{}`). `install_codex_observe_hooks(target: Path) -> str | None` (error text or None. Adds one async `PostToolUse` handler with the matcher above and one `Stop` handler to `<target>/.codex/hooks.json`, keeps foreign entries, is idempotent, refuses an unreadable or non-object file without writing). `codex_observe_hooks_installed(target: Path) -> bool`. `observe_session_path(target: Path, session_fingerprint: str) -> Path`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -803,7 +806,7 @@ Changelog fragment: `changelog.d/stage3-checks-report.md`.
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-def test_first_pass_counts_only_first_attempt_per_session_command(tmp_path):
+def test_first_pass_counts_only_first_attempt_per_session_digest(tmp_path):
     _checks(tmp_path, [("A", "pytest", "failed"), ("A", "pytest", "ok"), ("B", "pytest", "ok")], model="m1")
     rows, notes = observed_report.first_pass_rows(tmp_path)
     assert [(r.source, r.model, r.samples, r.passed, r.failed) for r in rows] == [("observed", "m1", 2, 1, 1)]
@@ -815,7 +818,7 @@ def test_unknown_identity_bucket_sorted_last(tmp_path): ...
     # rows for (claude-code, m1), (unknown, unknown): unknown row is last
 def test_receipts_labeled_and_grouped(tmp_path): ...
     # receipt fixtures: completed with harness_session fp X and agent_identity model m2 -> source "receipt";
-    # two receipts without a session on the same UTC day and planned command -> one sample;
+    # two receipts without a session on the same UTC day and redacted planned-command digest -> one sample;
     # rejected -> excluded; canceled -> unknown
 def test_report_text_carries_labels_and_never_says_score(tmp_path, capsys):
     assert cli.main(["work", "checks", "--target", str(target)]) == 0
@@ -834,7 +837,7 @@ def test_json_output_shape(tmp_path, capsys): ...
 Run: `brigade work verify run --target . --argv-json '["./scripts/verify-focused","tests/test_work_checks_report.py","tests/test_cli_inventory_contract.py","tests/test_completions.py"]' --capture brigade-work`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** the grouping in decision 16. Observed samples use the record's harness and model. Receipt samples use `agent_identity` when present, else `harness_session.harness` mapped `claude` to `claude-code` with model `unknown`, else both `unknown`. The receipt command is the first entry of `planned_commands`, and the tool is `normalize_tool` of it. Rows are sorted by source, then known identities by samples descending, unknown last. Text output prints the two label lines first, then a fixed-width table `source harness model n passed failed unknown rate`, then the skipped-line note when non-zero. `--claims` prints "claims report lands in a later release" and exits 2 until Task 12.
+- [ ] **Step 3: Implement** the grouping in decision 16. Observed samples use the record's harness and model. Receipt samples use `agent_identity` when present, else `harness_session.harness` mapped `claude` to `claude-code` with model `unknown`, else both `unknown`. For receipts, derive `command_digest` from the first entry of `planned_commands` using Task 5's workspace-keyed helper, and derive the tool using `normalize_tool`. Observed samples use their stored `command_digest` directly. An unavailable digest (`0000000000000000`) is a separate sample per record, never a shared grouping key. Never read or reconstruct command text from an observed record. Rows are sorted by source, then known identities by samples descending, unknown last. Text output prints the two label lines first, then a fixed-width table `source harness model n passed failed unknown rate`, then the skipped-line note when non-zero. `--claims` prints "claims report lands in a later release" and exits 2 until Task 12.
 
 - [ ] **Step 4: Register the command, regenerate the inventory, update the observe brief line and docs**
 
@@ -890,7 +893,7 @@ def test_claude_stop_appends_claim_without_message_text(tmp_path, monkeypatch, c
                                             last_assistant_message="Refactor done, all tests pass."))
     claims, _ = observe_claims.read_claims(target)
     assert claims[0].claimed_kinds == ("tests",) and claims[0].last_write_at is not None
-    assert "Refactor" not in (target / ".brigade/work/observed/claims.jsonl").read_text()
+    assert "Refactor" not in observed_checks.digest_key_path(target).with_name("claims.jsonl").read_text()
 
 def test_codex_stop_appends_claim(tmp_path, monkeypatch, capsys): ...
 def test_message_without_claim_writes_nothing(tmp_path, monkeypatch, capsys): ...
@@ -975,8 +978,10 @@ git commit -m "feat(work): add the claimed versus run checks report"
 
 ## Self-review
 
-1. **Spec coverage.** Three-way mode with aliases: Tasks 1 to 3. Default unchanged, explicit writes, brief-time pin, unreadable resolves to strict: Task 1. Rails separate: `test_every_mode_leaves_rails_record_untouched` (Task 2). Observe never denies or blocks: Task 2. Observed checks as their own record type, never a receipt, redacted, no output: Task 5. Classifier reuse: Task 5 (`normalize_tool`) and Task 6 (`is_raw_verification`). Claude identity: Task 6. Codex and Cursor where verified, unknowns stated: Tasks 8 and 9 and the coverage table. Model and harness on receipts and outcome records: Task 7. First report with sample size, unknown bucket and label: Task 10. Second report with a configured phrase list: Tasks 11 and 12. "Score" reserved, ratchet and eligibility untouched: Global Constraints and the label tests. Every yolo caller assigned: caller table. Ignored work directory and pre-push scan: Task 5. Gap found and fixed during review: `_normalize_state` drops unknown keys, so Task 6 adds `restore_identity` in both of its return paths.
+1. **Spec coverage.** Three-way mode with aliases: Tasks 1 to 3. Default unchanged, explicit writes, brief-time pin, unreadable resolves to strict: Task 1. Rails separate: `test_every_mode_leaves_rails_record_untouched` (Task 2). Observe never denies or blocks: Task 2. Observed checks as their own record type, never a receipt, command text never stored, no output: Task 5. Classifier reuse: Task 5 (`normalize_tool`) and Task 6 (`is_raw_verification`). Claude identity: Task 6. Codex and Cursor where verified, unknowns stated: Tasks 8 and 9 and the coverage table. Model and harness on receipts and outcome records: Task 7. First report with sample size, unknown bucket and label: Task 10. Second report with a configured phrase list: Tasks 11 and 12. "Score" reserved, ratchet and eligibility untouched: Global Constraints and the label tests. Every yolo caller assigned: caller table. Private per-user record directory and pre-push scan: Task 5. Gap found and fixed during review: `_normalize_state` drops unknown keys, so Task 6 adds `restore_identity` in both of its return paths.
 2. **Step scan.** Each code step names the function, file and pinned values. Test steps carry names and assertions. Steps marked `...` name the exact assertions in a comment. No step says "handle edge cases".
 3. **Type consistency.** `AgentIdentity` fields, `session_fingerprint(harness, session_id)`, `governing_modes -> list[tuple[Path, str]]`, `append_jsonl`/`read_jsonl`, `ObservedCheck`, `ObservedClaim`, `FirstPassRow`, `ClaimRow` and `ReportNotes` are used with the same names and types in every task that consumes them. Harness names are `claude-code`, `codex`, `cursor` throughout.
 4. **Review Focus.** Each of the five lines has a named test in its owning task.
 5. **Proportion.** The plan carries signatures, test names and assertions. The only algorithm bodies spelled out are the tool normalization order, the rotation lock and the claim matching rule, which the tests alone do not fix.
+
+Round 4 identity contract: observed harness names come from `selection.KNOWN_HARNESSES`, with the existing `claude-code` hook spelling. Agent types use closed hook defaults and built-in names. Models are lowercase, 3 to 48 letters, digits, dots or hyphens with a known family prefix. One mapping applies on build, append and read. Unknown free text becomes `unknown`.
