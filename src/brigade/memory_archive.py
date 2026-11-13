@@ -232,6 +232,7 @@ def restore(target: Path, decision: journal.Decision) -> journal.Decision:
                 path=str((d.hub or {}).get("path") or card_rel),
                 request=(d.hub or {}).get("request"),
                 recorded_hub=(d.hub or {}).get("hub"),
+                decision=d,
             )
             journal.update_hub(target, d.decision_id, result)
             if result["status"] in ("pending", "conflict", "needs_review"):

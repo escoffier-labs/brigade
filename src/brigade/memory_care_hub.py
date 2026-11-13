@@ -11,6 +11,56 @@ from . import memory_hub_store as store
 from . import memory_hub_sync as sync
 
 
+def _replay_state(target: Path, decision: journal.Decision) -> dict[str, str]:
+    """Reconcile a queued decision with current local files. Never rewrite an event."""
+    hub = decision.hub or {}
+    path = str(hub.get("path") or "")
+    decisions = journal.entries(target)
+    if any(
+        later.card_id == decision.card_id
+        and later.kind == "archive"
+        and later.created_at > decision.created_at
+        and journal._payload(target, later.decision_id).get("phase") != "abandoned"
+        for later in decisions
+    ):
+        return {"status": "superseded", "reason": "later-archive"}
+    try:
+        live = journal.current(target, path)
+        if hub.get("action") == "put":
+            recorded = journal._payload(target, decision.decision_id)
+            import base64
+
+            saved = recorded["after_bytes"][decision.paths.index(path)]
+            recorded_text = base64.b64decode(saved).decode("utf-8") if saved is not None else ""
+            withheld = sync.withheld(recorded_text) or (
+                sync.withheld(live.decode("utf-8")) if live is not None else None
+            )
+            if withheld:
+                return {"status": "skipped", "reason": withheld}
+            expected = decision.after_sha256.get(path)
+            if live is None or journal.kernel.content_digest(live) != expected:
+                return {"status": "superseded", "reason": "live-card-changed"}
+        else:
+            # A recorded undo must complete its retire before its revive, even though
+            # the undo has restored the source and removed the archive copy.
+            undo_pair = any(
+                d.undoes == decision.decision_id and journal._payload(target, d.decision_id).get("phase") != "abandoned"
+                for d in decisions
+            )
+            if not undo_pair:
+                if live is not None:
+                    return {"status": "superseded", "reason": "source-active"}
+                from .memory_archive import archive_rel
+
+                archived = archive_rel(path)
+                data = journal.current(target, archived)
+                if data is None or journal.kernel.content_digest(data) != decision.after_sha256.get(archived):
+                    return {"status": "superseded", "reason": "archive-changed"}
+    except (OSError, ValueError):
+        return {"status": "needs_review", "reason": "local-state-unreadable"}
+    return {"status": "send"}
+
+
 def _send(
     target: Path,
     *,
@@ -21,7 +71,7 @@ def _send(
     text: str = "",
     request: dict[str, Any] | None = None,
     recorded_hub: str | None = None,
-    replay: bool = False,
+    decision: journal.Decision | None = None,
 ) -> dict[str, Any]:
     if action == "put":
         reason_withheld = sync.withheld(text)
@@ -53,15 +103,10 @@ def _send(
                 "status": "needs_review",
                 "reason": "hub-changed" if recorded_hub != client.identity else "scope-changed",
             }
-        if action == "put" and replay:
-            refusal = sync._replay_refusal(
-                target,
-                {"scope": settings.scope, **(request or {}), "card_id": card_id, "path": path},
-                sync._local_cards(target),
-                settings.scope,
-            )
-            if refusal:
-                return {**pending, "status": "superseded", "reason": refusal}
+        if decision is not None:
+            verdict = _replay_state(target, decision)
+            if verdict["status"] != "send":
+                return {**pending, **verdict}
         with store.locked(target):
             state = store.published(target)
             base = state.get(client.identity, {}).get(settings.scope, {}).get(card_id)
@@ -144,7 +189,7 @@ def retry_pending(target: Path) -> dict[str, Any]:
         "superseded": 0,
     }
     decisions = sorted(journal.entries(target), key=lambda d: d.created_at)
-    for n, d in enumerate(decisions):
+    for d in decisions:
         hub = d.hub or {}
         payload = journal._payload(target, d.decision_id)
         if payload.get("phase") == "abandoned" and not (
@@ -162,25 +207,14 @@ def retry_pending(target: Path) -> dict[str, Any]:
             continue
         if hub.get("status") != "pending":
             continue
-        if any(
-            later.card_id == d.card_id and later.kind == "archive"
-            for later in decisions[n + 1 :]
-            if journal._payload(target, later.decision_id).get("phase") != "abandoned"
-        ):
-            journal.update_hub(target, d.decision_id, {**hub, "status": "superseded"})
-            counts["superseded"] += 1
+        verdict = _replay_state(target, d)
+        if verdict["status"] != "send":
+            journal.update_hub(target, d.decision_id, {**hub, **verdict})
+            counts[verdict["status"]] += 1
+            if verdict["status"] in ("needs_review", "skipped"):
+                key = "review_items" if verdict["status"] == "needs_review" else "skipped_items"
+                counts[key].append({"decision_id": d.decision_id, "reason": verdict["reason"]})
             continue
-        if hub.get("action") == "put":
-            refusal = sync._replay_refusal(
-                target,
-                {"scope": None, "card_id": d.card_id, "path": hub.get("path")},
-                sync._local_cards(target),
-                None,
-            )
-            if refusal in ("card-gone", "card-identity-changed", "card-id-duplicated", "card-unreadable"):
-                journal.update_hub(target, d.decision_id, {**hub, "status": "superseded", "reason": refusal})
-                counts["superseded"] += 1
-                continue
         if d.undoes:
             predecessor = journal.load(target, d.undoes)
             previous = predecessor.hub or {}
@@ -213,7 +247,7 @@ def retry_pending(target: Path) -> dict[str, Any]:
             text=text,
             request=hub.get("request"),
             recorded_hub=hub.get("hub"),
-            replay=True,
+            decision=d,
         )
         journal.update_hub(target, d.decision_id, result)
         counts[result["status"]] += 1

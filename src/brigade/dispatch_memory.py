@@ -240,6 +240,12 @@ def _local_matches(root: Path, query: str) -> list[dict[str, Any]]:
         except (OSError, UnicodeDecodeError):
             continue
         matches.append(match)
+    from .memory_card_reads import record
+
+    try:
+        record(root, [str(key) for match in matches for key in (match.get("path"), match.get("card_id")) if key])
+    except Exception:  # noqa: BLE001 - accounting must never fail dispatch
+        pass
     return matches
 
 

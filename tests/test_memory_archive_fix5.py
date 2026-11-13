@@ -14,7 +14,7 @@ def _row(card_id, day):
     return {"card_id": card_id, "reads_7d": 1, "reads_30d": 1, "total_reads": 1, "last_read_day": day}
 
 
-def _hub(monkeypatch, pages, *, refusals=0):
+def _hub(monkeypatch, pages, *, refusals=0, since=1, repeated_cursor=False):
     """A fake client that serves the given pages and refuses the first `refusals` page requests with 429."""
     calls = []
     left = [refusals]
@@ -29,7 +29,12 @@ def _hub(monkeypatch, pages, *, refusals=0):
                 raise hubc.HubRefusal(429, {"code": "memory_read_stats_rate_limited"})
             index = 0 if kwargs.get("after") is None else int(kwargs["after"])
             following = str(index + 1) if index + 1 < len(pages) else None
-            return {"scope": "fleet", "next_after": following, "read_counts_since_day": 1, "rows": pages[index]}
+            return {
+                "scope": "fleet",
+                "next_after": "0" if repeated_cursor else following,
+                "read_counts_since_day": since,
+                "rows": pages[index],
+            }
 
     monkeypatch.setattr(hubc, "load_settings", lambda _: hubc.HubSettings(mode="sync", scope="fleet"))
     monkeypatch.setattr(hubc, "client_for", lambda _: Client())
@@ -63,7 +68,7 @@ def test_unreadable_hub_stats_retire_nothing(tmp_path, monkeypatch, capsys):
     path.parent.mkdir(parents=True)
     path.write_text("---\ncard_id: old\nexpires_at: 2026-01-01\n---\nEnded\n")
     reads.record(tmp_path, [], today=date(2026, 1, 1))
-    monkeypatch.setattr(reads, "hub_last_reads", lambda _: None)
+    monkeypatch.setattr(reads, "hub_last_reads", lambda _, **_kw: None)
     plan = retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), tend.TendConfig(), today=date(2026, 11, 12))
     assert plan["candidates"] == []
     assert plan["skipped"]["hub_reads_unavailable"] == 1

@@ -180,16 +180,24 @@ def test_withheld_never_reaches_hub(tmp_path, monkeypatch, visibility, offline):
     assert counts["skipped"] or undo.hub["status"] == "skipped"
 
 
-def test_pending_put_replays_recorded_bytes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("edited", [False, True])
+def test_pending_put_replays_recorded_bytes(tmp_path, monkeypatch, edited):
     path = setup_card(tmp_path)
     original = path.read_bytes().decode("utf-8")
     fake = configure_hub(tmp_path, monkeypatch)
     d = move(tmp_path)
     fake.unavailable = True
     undo = archive.restore(tmp_path, d)
-    path.write_text("new public text")
+    if edited:
+        path.write_text("new public text")
     fake.unavailable = False
     hub.retry_pending(tmp_path)
+    if edited:
+        assert not any(a == "put" for a, _ in fake.calls)
+        saved = journal.load(tmp_path, undo.decision_id).hub
+        assert saved["status"] == "superseded"
+        assert saved["reason"] == "live-card-changed"
+        return
     fields = [f for a, f in fake.calls if a == "put"][-1]
     assert fields["text"] == original
     assert fields["client_event_id"] == undo.hub["request"]["client_event_id"]
@@ -220,7 +228,7 @@ def test_legacy_publication_identity_retire_revive_and_reads(tmp_path, monkeypat
     identity = sync.publication_identity(text, "memory/cards/Old Note.md")[0]
     fake = configure_hub(tmp_path, monkeypatch, identity, "memory/cards/Old Note.md")
     monkeypatch.setattr(reads, "load", lambda _: reads.ReadLedger(date(2000, 1, 1), {}))
-    monkeypatch.setattr(reads, "hub_last_reads", lambda _: {identity: date.today()})
+    monkeypatch.setattr(reads, "hub_last_reads", lambda _, **_kw: {identity: date.today()})
     assert (
         retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), TendConfig(), today=date.today())["candidate_count"] == 0
     )
@@ -284,6 +292,9 @@ def test_kernel_recovery_drift_abandons_without_blocking_care(tmp_path, monkeypa
     assert tend.run(tmp_path, stages=[])["recovery"] == []
     assert (tmp_path / "memory/cards/old.md").exists()
     assert not (tmp_path / "memory/archive/cards/old.md").exists()
-    decision_file = next((tmp_path / journal.JOURNAL_REL).glob("*/decision.json"))
-    d = journal.load(tmp_path, decision_file.parent.name)
+    d = next(
+        d
+        for path in (tmp_path / journal.JOURNAL_REL).glob("*/decision.json")
+        if (d := journal.load(tmp_path, path.parent.name)).kind == "archive" and d.card_id == "old"
+    )
     assert journal.before_bytes(tmp_path, d, "memory/cards/old.md") is not None

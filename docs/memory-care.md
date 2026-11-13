@@ -428,3 +428,23 @@ python -m brigade work hooks install --target "$target"
 ```
 
 For operator-owned cron, systemd, and CI recipes (and `brigade care`), see [scheduled care](scheduled-care.md).
+
+### Reads protect cards
+
+Automatic retirement needs a positive reason, currently an `expires_at` or
+`expires` date in the past. Being unread never archives a card by itself.
+A recorded read within `unused_after_days` blocks automatic retirement.
+
+Search results, recall at session start and after compaction, explicit card
+reads, local connector reads, replica card reads, and local dispatch memory
+context count as reads. The Claude Code Read hook also records an opened card
+in its owning memory root. Vault search and show count projected notes when
+their identity matches a canonical card in the target memory root. Projection
+maps, notes without an identifiable card, and projections of another root
+cannot be attributed. Card listings and maintenance operations do not count.
+
+Brigade cannot see a file opened by a person or by a tool it does not
+instrument. Hub read counts have budgets and can miss reads. Reads therefore
+only ever protect a card. Missing, incomplete, or too-young read history blocks
+automatic retirement. `memory care archive --from-file` applies an outside
+judgment and does not consult reads.

@@ -31,14 +31,15 @@ def load(target: Path) -> ReadLedger:
         return ReadLedger(date.today(), {})
 
 
-def record(target: Path, keys: Iterable[str], *, today: date | None = None) -> None:
+def record(target: Path, keys: Iterable[str], *, today: date | None = None, _retry: bool = True) -> None:
     from .inbox_lock import held_file_lock
 
     today = today or date.today()
+    keys = tuple(keys)
     try:
         path = target / READS_REL
         path.parent.mkdir(parents=True, exist_ok=True)
-        with held_file_lock(path.with_suffix(".lock"), deadline_seconds=1):
+        with held_file_lock(path.with_suffix(".lock"), deadline_seconds=5):
             try:
                 p = store.read_json(path)
                 ledger = ReadLedger(
@@ -58,6 +59,18 @@ def record(target: Path, keys: Iterable[str], *, today: date | None = None) -> N
                 },
             )
     except (OSError, ValueError):
+        if _retry:
+            record(target, keys, today=today, _retry=False)
+        return
+
+
+def record_content(target: Path, text: str, rel: str) -> None:
+    """Record both identities for successfully returned card content, failing open."""
+    try:
+        from .memory_cmd import card_identity_from_text
+
+        record(target, [rel, card_identity_from_text(text, rel)])
+    except Exception:  # noqa: BLE001 - ledger trouble must never fail retrieval
         return
 
 
@@ -68,7 +81,9 @@ def last_read(ledger: ReadLedger, keys: Iterable[str]) -> date | None:
 HUB_PAGE_GAP_SECONDS = 1.1
 
 
-def hub_last_reads(target: Path, *, sleep: Callable[[float], None] = time.sleep) -> dict[str, date] | None:
+def hub_last_reads(
+    target: Path, *, unused_after_days: int = 120, sleep: Callable[[float], None] = time.sleep
+) -> dict[str, date] | None:
     """Last read day per hub card, or ``None`` when a configured hub could not be read in full.
 
     ``None`` is not "nobody read anything": callers must not retire on use grounds without it.
@@ -81,6 +96,7 @@ def hub_last_reads(target: Path, *, sleep: Callable[[float], None] = time.sleep)
         client = hubc.client_for(settings)
         after = None
         result = {}
+        cursors: set[str] = set()
         while True:
             if after is not None:
                 sleep(HUB_PAGE_GAP_SECONDS)
@@ -92,6 +108,13 @@ def hub_last_reads(target: Path, *, sleep: Callable[[float], None] = time.sleep)
                     if getattr(exc, "status", None) != 429 or attempt == 2:
                         raise
                     sleep(HUB_PAGE_GAP_SECONDS)
+            since = body["read_counts_since_day"]
+            if (
+                type(since) is not int
+                or since < 0
+                or (date.today() - (date(1970, 1, 1) + timedelta(days=since))).days < unused_after_days
+            ):
+                raise ValueError("hub read tracking too young")
             for row in body["rows"]:
                 try:
                     day = row["last_read_day"]
@@ -100,10 +123,13 @@ def hub_last_reads(target: Path, *, sleep: Callable[[float], None] = time.sleep)
                     if day:
                         result[row["card_id"]] = date(1970, 1, 1) + timedelta(days=day)
                 except (TypeError, ValueError, OverflowError, KeyError):
-                    print("memory care: skipped unexpected hub read-stat row", file=sys.stderr)
+                    raise ValueError("malformed hub read-stat row") from None
             following = body.get("next_after")
-            if not following or following == after:
+            if following is None:
                 return result
+            if not isinstance(following, str) or not following or following in cursors:
+                raise ValueError("repeated or malformed hub read-stat cursor")
+            cursors.add(following)
             after = following
     except (
         hubc.HubConfigError,

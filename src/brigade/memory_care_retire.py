@@ -1,18 +1,21 @@
-"""Retirement requires both demonstrated non-use and an ended subject."""
+"""Unread cards are never archived for non-use alone.
+
+Automatic retirement needs a positive ended-subject signal, currently a past
+expires_at or expires date. A read within unused_after_days blocks retirement.
+Missing read history protects cards too.
+"""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from . import memory_archive, memory_card_reads, memory_cmd, memory_hub_sync
 
 if TYPE_CHECKING:
     from .memory_care_tend import TendConfig
-
-Judge = Callable[[str, str], str]
 
 
 @dataclass(frozen=True)
@@ -23,11 +26,9 @@ class Candidate:
     signal: str
 
 
-def plan(
-    target: Path, config: memory_cmd.MemoryCareConfig, tend: TendConfig, *, today: date, judge: Judge | None = None
-) -> dict[str, Any]:
+def plan(target: Path, config: memory_cmd.MemoryCareConfig, tend: TendConfig, *, today: date) -> dict[str, Any]:
     ledger = memory_card_reads.load(target)
-    hub_reads = memory_card_reads.hub_last_reads(target)
+    hub_reads = memory_card_reads.hub_last_reads(target, unused_after_days=tend.unused_after_days)
     candidates = []
     skipped = {"ledger_too_young": 0, "exempt": 0, "read_recently": 0}
     for path in memory_cmd._iter_cards(target, config):
@@ -60,10 +61,6 @@ def plan(
             continue
         expires = memory_cmd._parse_date(fm.get("expires_at") or fm.get("expires"))
         signal = "subject-expired" if expires and expires < today else ""
-        if not signal and judge is not None:
-            reviewed = memory_cmd._parse_date(fm.get("last_reviewed"))
-            if reviewed and (today - reviewed).days > config.stale_after_days and judge(card_id, text) == "ended":
-                signal = "subject-ended"
         if signal:
             candidates.append(asdict(Candidate(card_id, rel, read.isoformat() if read else None, signal)))
     candidates.sort(key=lambda c: (c["last_read"] or "", c["file"]))
@@ -83,10 +80,9 @@ def apply(
     tend: TendConfig,
     *,
     today: date,
-    judge: Judge | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    payload = plan(target, config, tend, today=today, judge=judge)
+    payload = plan(target, config, tend, today=today)
     decisions: list[str] = []
     refused = []
     if tend.enabled and not dry_run:
