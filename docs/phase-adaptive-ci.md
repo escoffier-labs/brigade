@@ -313,6 +313,112 @@ days, so recapturing an old window later can change that one field and
   retries it, and compares the rows it collected with `total_count`. No warning
   was printed for either window.
 
+## After window, 2026-11-13
+
+Files: `docs/adaptive-ci/after-ci-2026-11-13.json` (aggregates only) and `.md`.
+Window 2026-11-09T19:15:00Z to 2026-11-13T12:00:00Z (half-open), 311 runs,
+starting after the last campaign PR (#2439) merged at 19:14:39Z.
+
+### Choosing the window
+
+Two commits inside the window touched the files that decide CI timing. Neither
+is material, so the window was not shortened:
+
+- #2462 (2026-11-10 00:32Z) pinned the actions in `hub.yml` and `publish.yml` to
+  commit SHAs of the same versions.
+- #2468 (2026-11-10 12:51Z) added one step to `hub.yml` that starts the hub
+  binary on setup's output, and two hub paths (`ops/fleet-hub/bin/hub-setup.py`,
+  `ops/fleet-hub/r1-models.json`) to `scripts/ci_hub_paths.yml`.
+
+The hub test flake fixes (#2459) merged at 2026-11-09T23:43:50Z, about 4.5 hours
+into the window. One failed `merge_group` run before that is one of the flakes
+it fixed.
+
+### Reproducibility
+
+The timing script ran twice over the window, the first time with the per-run
+list and the second with `--aggregates-only`. The aggregates were identical
+apart from `generated_at` (zero differing lines), the Markdown summaries were
+identical apart from the generated line, and neither run printed a warning.
+
+### Before and after
+
+Successful view, first attempts, minutes. Baseline is the strict window.
+
+| event | metric | baseline | after |
+|---|---|---|---|
+| merge_group | n | 20 | 46 |
+| merge_group | wall median / p75 / p90 / max | 14.9 / 15.2 / 15.4 / 15.8 | 14.1 / 15.4 / 15.6 / 16.1 |
+| merge_group | runner median / p90 | 123.6 / 130.3 | 127.2 / 133.4 |
+| merge_group | runner mean (total / n) | 124.3 | 116.6 |
+| merge_group | Windows runner median / p90 | 12.2 / 13.5 | 12.9 / 13.9 |
+| merge_group | runs where `hub-rust` ran | 20 of 20 (100%) | 32 of 46 (70%) |
+| pull_request | n | 19 | 92 |
+| pull_request | wall median / p75 / p90 / max | 14.7 / 17.2 / 26.6 / 33.9 | 13.3 / 15.4 / 16.2 / 18.4 |
+| pull_request | runner median / p90 | 75.7 / 83.8 | 78.5 / 115.8 |
+| pull_request | runner mean (total / n) | 70.9 | 76.0 |
+| pull_request | Windows runner median / p90 | 9.8 / 31.9 | 8.9 / 39.1 |
+
+Job families, seconds:
+
+| family | event | baseline median / p90 / max | after median / p90 / max |
+|---|---|---|---|
+| `hub (Rust 1.85.0)` | merge_group | 860 / 892 / 907 | 813 / 914 / 924 |
+| `hub (Rust stable)` | merge_group | 734 / 838 / 860 | 813 / 884 / 903 |
+| Windows affected tests, slowest job per run | pull_request | 143 / 1,567 / 1,986 (one job, n=19) | 362 / 783 / 1,032 (slowest shard, n=74) |
+
+The Windows row compares the single `windows-affected-tests` job of the
+baseline with the slowest `windows-affected-shard` job of each run after #2440,
+computed from the per-run list of the first capture. Runs whose plan selected
+nothing have no shard job and are not in that row.
+
+Flakes and re-queue cost:
+
+| measure | baseline | after |
+|---|---|---|
+| `merge_group` runs not successful (all n minus successful n) | 9 of 29 | 3 of 49 |
+| their runner minutes (all total minus successful total) | 1,181.7 | 340.1 |
+| `reruns`, `merge_group` / `pull_request` | 0 / 5 | 0 / 5 |
+| `pull_request` all-attempt minus first-attempt runner minutes | 97.7 | 38.6 |
+
+The three failed `merge_group` runs after: the row-budget sweep flake on #2446
+before #2459 merged (run 42693841937), the hub test binary SIGSEGV on #2462
+(run 42727257188, issue #2470, fixed by #2494), and a Python test,
+`test_fleet_action_adapter_bounds.py::test_cleanup_stops_signal_ignoring_descendant_holding_pipes[overflow]`,
+on #2508 (run 43111993967).
+
+### What the numbers say
+
+- **Pull request tail: improved.** p90 wall fell from 26.6 to 16.2 minutes and
+  the worst run from 33.9 to 18.4. The slowest Windows affected job per run fell
+  from a p90 of 1,567 to 783 seconds. This is #2440's sharding.
+- **Pull request cost: worse.** Runner median rose from 75.7 to 78.5, runner p90
+  from 83.8 to 115.8, and Windows runner p90 from 31.9 to 39.1. A large
+  selection now runs on up to three Windows runners, each with its own setup,
+  so the tail is paid for in runner minutes. `hub-rust` also ran in a larger
+  share of successful pull requests (48 of 92, against 9 of 19).
+- **Merge queue cost: lower on average, not at the median.** The hub suite was
+  skipped in 14 of 46 successful groups (2 of them documentation-only). A
+  skipped group had a median of 11.0 wall and 100.9 runner minutes, against
+  15.2 and 129.2 for a group that ran it, about 28 runner minutes saved per
+  skip and about 394 over the window. Because 70% of groups still ran the hub
+  suite, the median group is a hub group and the runner median did not move
+  down (123.6 to 127.2). The mean fell from 124.3 to 116.6.
+- **Failed queue runs: fewer.** 3 of 49 against 9 of 29, costing 340 runner
+  minutes against 1,182. The baseline window's failures were not classified,
+  so this records the change without attributing it.
+
+### Caveats
+
+- The baseline is 14 hours overnight and the after window 3.7 days of weekday
+  work, so n and the change mix differ. Much of the work merged in the after
+  window edited `memory_hub_*` and `fleet_client*` files, which are hub paths.
+  The skip rate depends on that mix.
+- Runner p90 and mean move with the share of runs that include the hub suite
+  and with selection size, which this campaign does not control.
+- The Windows row compares one job with the slowest of up to three shards. It
+  measures what a pull request waits for, not total Windows time.
+
 ## Workstreams
 
 Each lane adds its own file under `docs/adaptive-ci/` and one row to the Results
@@ -321,8 +427,8 @@ log. Add the PR link and move the status when a lane lands or stops.
 | # | workstream | status | lane file |
 |---|---|---|---|
 | 1 | Test-audit pruning pilot on the grokbot subsystem | merged 2026-11-09 16:30Z ([#2438](https://github.com/escoffier-labs/brigade/pull/2438)) | [`docs/adaptive-ci/test-audit-grokbot.md`](adaptive-ci/test-audit-grokbot.md) |
-| 2 | Windows affected-tests tail | merged 2026-11-09 17:07Z ([#2440](https://github.com/escoffier-labs/brigade/pull/2440)), awaiting an after window | [`docs/adaptive-ci/windows-tail.md`](adaptive-ci/windows-tail.md) |
-| 3 | `hub-rust` path filtering in the merge queue | merged 2026-11-09 16:55Z ([#2436](https://github.com/escoffier-labs/brigade/pull/2436)), live, awaiting an after window | [`docs/adaptive-ci/hub-merge-queue.md`](adaptive-ci/hub-merge-queue.md) |
+| 2 | Windows affected-tests tail | merged 2026-11-09 17:07Z ([#2440](https://github.com/escoffier-labs/brigade/pull/2440)), measured 2026-11-13 (see After window) | [`docs/adaptive-ci/windows-tail.md`](adaptive-ci/windows-tail.md) |
+| 3 | `hub-rust` path filtering in the merge queue | merged 2026-11-09 16:55Z ([#2436](https://github.com/escoffier-labs/brigade/pull/2436)), live, measured 2026-11-13 (see After window) | [`docs/adaptive-ci/hub-merge-queue.md`](adaptive-ci/hub-merge-queue.md) |
 | 4 | Linux pull request test selection in shadow mode | merged 2026-11-09 17:47Z ([#2435](https://github.com/escoffier-labs/brigade/pull/2435)), collecting observations, skips nothing | [`docs/adaptive-ci/shadow-selection.md`](adaptive-ci/shadow-selection.md) |
 | 5 | Merge-group docs classifier loaded from trusted `main` (found while building lane 3) | merged 2026-11-09 17:41Z ([#2441](https://github.com/escoffier-labs/brigade/pull/2441)) | [`docs/adaptive-ci/docs-classifier-trust.md`](adaptive-ci/docs-classifier-trust.md) |
 
@@ -384,7 +490,7 @@ chunk boundary, and the second asserts a ratio within 1.5
 
 The two failures cost different amounts. #2437's group failed, but #2439's
 group, built on top of it, passed, and with `HEADGREEN` that green group merged
-#2437 and #2439 together at 19:14:39Z. The flake cost no extra run. #2446's
+#2437 and #2439 together at 19:14:39Z. Nothing was re-queued; the failed 12.9 minute run still counts in the window's `all` view. #2446's
 failed group had no green group behind it, so #2446 left the queue and needs
 another run. A failed queue entry that is re-queued starts a new workflow run
 with its own run id, not another attempt of the failed run. Its cost therefore shows up as extra `merge_group`
@@ -473,6 +579,11 @@ for wall and runner time, seconds for a job family.
 |---|---|---|---|---|---|---|
 <!-- adaptive-ci: append result rows directly below this line -->
 | 2026-11-09 | Test-audit pilot, grokbot tests | [#2438](https://github.com/escoffier-labs/brigade/pull/2438) | grokbot test LOC at the merge commit `7bc63865`; grokbot line coverage at `4940187b` | 33,044; 78.618% | 32,595 (-1.4%); 78.618% | 53 files |
+| 2026-11-13 | Windows affected-test sharding | [#2440](https://github.com/escoffier-labs/brigade/pull/2440) | `pull_request` successful wall p90 / max | 26.6 / 33.9 | 16.2 / 18.4 | 19 / 92 |
+| 2026-11-13 | Windows affected-test sharding | [#2440](https://github.com/escoffier-labs/brigade/pull/2440) | `pull_request` successful runner p90; Windows runner p90 | 83.8; 31.9 | 115.8; 39.1 | 19 / 92 |
+| 2026-11-13 | `hub-rust` selection in the merge queue | [#2436](https://github.com/escoffier-labs/brigade/pull/2436) | `merge_group` successful runs with `hub-rust` | 20 of 20 (100%) | 32 of 46 (70%) | 20 / 46 |
+| 2026-11-13 | `hub-rust` selection in the merge queue | [#2436](https://github.com/escoffier-labs/brigade/pull/2436) | `merge_group` successful wall median; runner median; runner mean | 14.9; 123.6; 124.3 | 14.1; 127.2; 116.6 | 20 / 46 |
+| 2026-11-13 | Campaign window, all changes | #2435 to #2441, #2459 | failed `merge_group` runs; their runner minutes | 9 of 29; 1,181.7 | 3 of 49; 340.1 | 29 / 49 |
 
 ## Prior art
 
