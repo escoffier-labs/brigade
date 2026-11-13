@@ -91,3 +91,11 @@ The PR's `windows-native-acceptance` job explicitly selects this file together
 with process-containment and skills-state tests, and fails on native test skips.
 The broader Windows pytest job runs on main. Native passing evidence and the
 independent security review required by issue #1238 remain merge gates.
+
+Claude Code session state also caches `model` and `model_source` from
+`SessionStart` and `PostModelSwitch`. Values pass through the shared identity
+mapper. They survive state normalization and task-epoch resets. Session start
+exports `BRIGADE_AGENT_SESSION` to an absolute `CLAUDE_ENV_FILE` for verify
+identity lookup. This does not set the strict gate's `BRIGADE_CLAUDE_SESSION`.
+Observed checks use separate private per-user storage and never store command
+text, command output, paths, prompt text, or raw session identifiers.

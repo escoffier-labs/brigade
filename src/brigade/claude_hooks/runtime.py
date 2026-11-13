@@ -24,6 +24,7 @@ from ..isolated_exec import module_argv, trusted_cwd
 from ..wiring import expand_user_path, resolve_wired_target
 from . import (
     anchored_io,
+    check_events,
     compaction_marker,
     dependencies,
     envelope,
@@ -1976,10 +1977,12 @@ def _normalize_state(
         # State written by an earlier dispatched task under the same reused
         # session id. ``write_observed`` must be re-earned by this task's own
         # writes and another task's repo graph must not re-arm this task's
-        # stop gate (#992). Only the brief marker survives: the session id
-        # already received its once-per-repo brief injection.
+        # stop gate (#992). The brief marker and bounded identity survive.
+        # The session already received its once-per-repo brief injection.
         normalized["briefed"] = payload.get("briefed") is True
+        check_events.restore_identity(normalized, payload)
         return normalized
+    check_events.restore_identity(normalized, payload)
     now = localio.utc_now()
     started = localio.parse_iso_datetime(payload.get("started_at"))
     if started is not None and started <= now:
@@ -2292,6 +2295,8 @@ def _handle_event(
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
     if event not in {"Stop", "SessionEnd"}:
         _touch_session_targets(session_id, target, payload, task_epoch=task_epoch)
+    if target_override is None or target_override == effective_hook_target(payload, pin=pin):
+        check_events.on_event(event, payload, target, session_id, state)
     if event == "SessionEnd":
         if presence_target is not None:
             heartbeat.on_event("SessionEnd", presence_target, session_id)
@@ -2480,33 +2485,7 @@ def _handle_event(
         return None
 
     if event == "PostToolUseFailure":
-        raw_tool_input = payload.get("tool_input")
-        tool_input = raw_tool_input if isinstance(raw_tool_input, dict) else {}
-        command = tool_input.get("command")
-        verifier = is_raw_verification(command) or _is_routed_verify(command)
-        if (
-            payload.get("tool_name") == "Bash"
-            and verifier
-            and verification_mode.verification_enforced(command, payload.get("cwd"), target)
-        ):
-            from .. import outcome_cmd
-
-            capture_id = outcome_cmd.resolve_capture_artifact_id(
-                _parse_capture_flag(command),
-                state.get("exercised_artifact_id") if isinstance(state.get("exercised_artifact_id"), str) else None,
-            )
-            return _additional_context(
-                "PostToolUseFailure",
-                "",
-                target=target,
-                session_id=session_id,
-                records=[
-                    "The failed or rejected verification must remain recorded in Brigade before retrying. "
-                    "Inspect the receipt, fix the cause, then rerun through "
-                    f"`brigade work verify run --capture {capture_id}`.",
-                ],
-            )
-        return None
+        return check_events.failure_followup(payload, target, session_id, state)
 
     if event == "Stop":
         if payload.get("stop_hook_active") is True:

@@ -6,6 +6,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 from . import localio
@@ -78,3 +79,41 @@ def map_identity(harness: Any, model: Any, agent_type: Any) -> dict[str, str]:
         "model": model if re.fullmatch(r"[a-z0-9.-]{3,48}", model) and model.startswith(MODEL_FAMILIES) else UNKNOWN,
         "agent_type": agent_type if isinstance(agent_type, str) and agent_type in AGENT_TYPES else UNKNOWN,
     }
+
+
+def claude_session_model(target: Path, fingerprint: str) -> tuple[str, str] | None:
+    from .claude_hooks import runtime
+
+    try:
+        for state in runtime.iter_session_states(target.resolve(), limit=256):
+            if state.get("session_fingerprint") == fingerprint:
+                model = map_identity("claude-code", state.get("model"), "unknown")["model"]
+                source = state.get("model_source")
+                if isinstance(state.get("model"), str) and source in MODEL_SOURCES:
+                    return model, source
+    except Exception:
+        pass
+    return None
+
+
+def for_verify_run(target: Path, environ: Mapping[str, str] | None = None) -> AgentIdentity:
+    environ = os.environ if environ is None else environ
+    harness, harness_source = detect_harness(environ)
+    model, source = env_model(environ)
+    if model == UNKNOWN:
+        for key in ("BRIGADE_AGENT_SESSION", "BRIGADE_CLAUDE_SESSION"):
+            fingerprint = environ.get(key, "")
+            if re.fullmatch(r"[0-9a-f]{16}", fingerprint):
+                cached = claude_session_model(target, fingerprint)
+                if cached is not None:
+                    model, source = cached
+                    break
+    return AgentIdentity(**map_identity(harness, model, UNKNOWN), harness_source=harness_source, model_source=source)
+
+
+def stamp_verify_identity(receipt: dict[str, Any], target: Path) -> None:
+    """Stamp identity before signing; preserve strict harness-session matching."""
+    receipt["agent_identity"] = for_verify_run(target).as_dict()
+    claude_session = os.environ.get("BRIGADE_CLAUDE_SESSION")
+    if claude_session and re.fullmatch(r"[0-9a-f]{16}", claude_session):
+        receipt["harness_session"] = {"harness": "claude", "fingerprint": claude_session}
