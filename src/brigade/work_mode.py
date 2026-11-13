@@ -6,8 +6,8 @@ The two settings are independent and live in different places:
   verification loop: hooks route raw checks through ``brigade work verify run``
   and the Stop gate wants a receipt. ``off`` keeps shared context (brief,
   recall, Fleet Hub messages, handoffs on request) and drops verification
-  enforcement. Leak checks are unaffected, so a committed off setting is an
-  acceptable repository choice.
+  enforcement. ``observe`` enforces nothing either. Leak checks are unaffected,
+  so a committed off or observe setting is an acceptable repository choice.
 - Safety rails: on by default. They keep the content guard, secret and
   credential scanning, and pre-push publication checks. The opt-out lives only
   in a per-user record outside every repository (``rails_record_path``), keyed
@@ -150,7 +150,10 @@ def pin_explicit_mode(target: Path, *, errors: list[str] | None = None) -> str |
         expected = {**data, "work": {**work, "mode": MODE_STRICT}}
         if json.loads(updated) != expected or path.read_bytes().decode("utf-8") != original:
             return None
+        permissions = path.stat().st_mode & 0o777
         localio.write_text_atomic(path, updated)
+        # The atomic writer creates an owner-only file; keep the config's own mode.
+        os.chmod(path, permissions)
     except (OSError, ValueError) as exc:
         if errors is not None:
             errors.append(f"unable to pin work.mode: {exc}")

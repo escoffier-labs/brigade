@@ -980,7 +980,10 @@ def test_pin_preserves_unknown_keys_and_original_bytes(tmp_path, with_work):
         original += ',"work":{"rails":"off","unknown":[3,2,1]}'
     original += "}\n"
     path.write_text(original)
+    path.chmod(0o644)
     assert work_mode.pin_explicit_mode(target) == "strict"
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o644
     updated = path.read_text()
     insertion = ',"mode": "strict"' if with_work else ',"work": {"mode": "strict"}'
     assert updated.replace(insertion, "", 1) == original
