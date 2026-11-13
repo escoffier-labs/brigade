@@ -1038,10 +1038,13 @@ def _check_vale_ini(text: str) -> PurePosixPath | None:
     # A BOM or control character is read differently by go-ini than by this check.
     if re.search("[\ufeff\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text):
         raise LandError("unsafe-vale-config")
+    # go-ini splits lines on LF only, so any other line break would be read differently here.
+    if re.search("\r(?!\n)|[\x85\u2028\u2029]", text):
+        raise LandError("unsafe-vale-config")
     styles: PurePosixPath | None = None
     seen: set[tuple[str, str]] = set()
     section = ""
-    for raw in text.splitlines():
+    for raw in text.split("\n"):
         line = raw.strip()
         if not line or line[0] in "#;":
             continue
@@ -1051,15 +1054,17 @@ def _check_vale_ini(text: str) -> PurePosixPath | None:
         if line.startswith("["):
             if not _VALE_SECTION.fullmatch(line) or ".." in line:
                 raise LandError("unsafe-vale-config")
-            # go-ini treats [DEFAULT] as the root section.
-            section = "" if line.lower() == "[default]" else line.lower()
+            # go-ini treats exactly [DEFAULT] as the root section. Other casings are refused.
+            if line.lower() == "[default]" and line != "[DEFAULT]":
+                raise LandError("unsafe-vale-config")
+            section = "" if line == "[DEFAULT]" else line.lower()
             continue
         found = _VALE_KEY.fullmatch(line)
         if not found:
             raise LandError("unsafe-vale-config")
         key = re.split(r"\s*[=:]", line, maxsplit=1)[0].lower()
         value = found[1].strip()
-        if key in {"include", "includes", "import", "imports"} or (section, key) in seen:
+        if key in {"include", "includes", "import", "imports", "nlpendpoint"} or (section, key) in seen:
             raise LandError("unsafe-vale-config")
         seen.add((section, key))
         if "`" in value or '"""' in value or re.search(r"\s[;#]", value):

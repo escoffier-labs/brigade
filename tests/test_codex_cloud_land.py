@@ -1730,6 +1730,12 @@ def test_vale_proposal_root_config_ignored_without_base_config(landing, monkeypa
         "StylesPath = styles\n[a] ; note\n",
         "StylesPath = st\u00e9les\n",
         "StylesPath = styles\n-key = 1\n",
+        "# c\rStylesPath = styles\n",
+        "# c\u0085StylesPath = styles\n",
+        "# c\u2028StylesPath = styles\n",
+        "# c\u2029StylesPath = styles\n",
+        "[default]\nStylesPath = styles\n",
+        "StylesPath = styles\nNLPEndpoint = https://example.invalid\n",
     ],
 )
 def test_vale_parser_mismatch_forms_refused(landing, tmp_path, config):
@@ -1900,6 +1906,14 @@ HOSTILE_VALE_INI = [
     "StylesPath = styles/../../etc\n",
     "StylesPath = ..#x\n",
     "StylesPath = styles\n",
+    "StylesPath: styles\n",
+    "StylesPath=styles\n",
+    "StylesPath = styles\r\n",
+    "StylesPath = styles/\n",
+    "StylesPath = ./styles\n",
+    "StylesPath = styles\n[DEFAULT]\nMinAlertLevel = error\n",
+    "# c\rStylesPath = styles\n",
+    "[default]\nStylesPath = styles\n",
 ]
 
 
