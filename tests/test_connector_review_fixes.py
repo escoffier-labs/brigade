@@ -130,7 +130,8 @@ def test_listener_failure_limit(tmp_path, monkeypatch, mode):
     for _ in range(10):
         assert asyncio.run(request(gate))[0] == 401
     assert asyncio.run(request(gate, client=("127.0.0.2", 2)))[0] == 429
-    assert len(records) == 10
+    # A failure during the cooldown is still recorded, and it does not extend the cooldown.
+    assert len(records) == 11
     assert all(row[1]["error_code"] == "authentication_required" for row in records)
     now[0] += 61
     assert asyncio.run(request(gate))[0] == 401
@@ -356,3 +357,45 @@ def test_legacy_setup_with_unreadable_neighbor_runtime(dot_private_dir, name):
     )
     neighbor.chmod(0o600)
     grokbot_packs.apply_setup(root, name, runtime_path=path)
+
+
+@requires_local_state
+@pytest.mark.parametrize("mode", ["token", "access"])
+def test_exported_listener_refuses_remote_bind(tmp_path, monkeypatch, mode):
+    import dataclasses
+
+    data = cloud_document(tmp_path)
+    if mode == "access":
+        data["auth"] = {**_memory_document()["auth"], "mode": "access"}
+    runtime = parse_runtime(data, schema=CLOUD_AGENT_RUNTIME_SCHEMA)
+    remote = dataclasses.replace(config(), bind_host="0.0.0.0")
+    started = []
+    monkeypatch.setattr(lifecycle, "require_credential_isolation", lambda *a, **k: started.append("isolation"))
+    with pytest.raises(DotError, match="^invalid_config$"):
+        lifecycle.run_listener(remote, None, runtime)
+    # The refusal comes before any credential read.
+    assert started == []
+
+
+def test_app_refuses_remote_bind_for_cloud_agent(tmp_path):
+    import dataclasses
+
+    pytest.importorskip("mcp", reason="requires the connector extra")
+    runtime = parse_runtime(cloud_document(tmp_path), schema=CLOUD_AGENT_RUNTIME_SCHEMA)
+    remote = dataclasses.replace(config(), bind_host="0.0.0.0")
+    with pytest.raises(DotError, match="^invalid_config$"):
+        lifecycle.build_app(remote, None, None, TokenVerifier(runtime.auth), profile=CLOUD_AGENT)
+
+
+def test_failed_token_write_leaves_no_file(tmp_path, monkeypatch):
+    from brigade.dot import token_auth
+
+    path = tmp_path / "listener-token"
+
+    def fail(fd):
+        raise OSError("no space")
+
+    monkeypatch.setattr(token_auth.os, "fsync", fail)
+    with pytest.raises(DotError, match="^invalid_config$"):
+        token_auth.ensure_listener_token(path)
+    assert not path.exists()

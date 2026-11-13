@@ -38,6 +38,11 @@ def ensure_listener_token(path: Path) -> bool:
             stream.flush()
             os.fsync(stream.fileno())
     except OSError:
+        # Never leave a partial credential behind for a later setup to mistake for a supplied one.
+        try:
+            path.unlink()
+        except OSError:
+            pass
         raise DotError("invalid_config") from None
     return True
 

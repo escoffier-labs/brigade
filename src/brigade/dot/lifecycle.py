@@ -27,7 +27,7 @@ from .adapter import DotTools, argument_problem, build_tools, validate_arguments
 from .events import EventService, EventsApp, IDENTITY
 from .hub_inbox import authenticated_authority
 from .profile import CLOUD_AGENT, DOT, PROFILES, ConnectorProfile, profile_for
-from .runtime_config import Runtime, load_runtime
+from .runtime_config import CLOUD_AGENT_RUNTIME_SCHEMA, Runtime, load_runtime
 from .safe_state import identity, require_local_platform
 from .server import register_tools
 from .state import BridgeState, call_label, client_label, summarize_arguments
@@ -111,7 +111,11 @@ class _DotGate:
         await send({"type": "http.response.body", "body": b'{"error":"request_denied"}'})
 
     async def auth_failed(self, now: float) -> None:
-        if self.profile.pack_id != "cloud-agent" or now < self._auth_blocked_until:
+        if self.profile.pack_id != "cloud-agent":
+            return
+        if now < self._auth_blocked_until:
+            # Keep the audit trail during a cooldown without extending the cooldown.
+            await self.record("authentication", False, now, error_code="authentication_required")
             return
         self._auth_failures = [t for t in self._auth_failures if now - t < 60]
         self._auth_failures.append(now)
@@ -302,6 +306,7 @@ def build_app(
 ) -> Callable[..., Any]:
     _, _, _, TransportSecuritySettings = grokbot_mcp._load_mcp()
     c.require(verifier.validated is True, "authentication_inactive")
+    c.require(profile.pack_id != "cloud-agent" or grokbot_mcp._is_loopback(config.bind_host), "invalid_config")
     server = _server(config, tools, profile)
     allowed = list(dict.fromkeys([*config.allowed_hosts, f"{config.bind_host}:{config.bind_port}"]))
     if grokbot_mcp._is_loopback(config.bind_host):
@@ -391,6 +396,11 @@ def build_listener_from_target(
 def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -> None:
     # Exported entry point: refuse before any import or startup, whatever built the config.
     require_local_platform()
+    # The loopback rule holds where the socket opens, not only where the CLI loads the config.
+    c.require(
+        runtime.schema != CLOUD_AGENT_RUNTIME_SCHEMA or grokbot_mcp._is_loopback(config.bind_host),
+        "invalid_config",
+    )
     if runtime.auth.token_file is not None:
         require_credential_isolation(runtime.auth.token_file, runtime.hub.message_token_file)
     try:
