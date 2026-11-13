@@ -32,11 +32,19 @@ def publish(target: Path, decision_id: str) -> None:
         or payload.get("undone_by")
     ):
         return
+    from .memory_cmd import _config_or_default
+
+    read_only = _config_or_default(target).read_only_paths
+    blocked = False
     for item in payload.get("appends", []):
         data = base64.b64decode(item["data"])
         path = journal.safe_path(target, item["path"])
         # The stored timestamp or decision-specific ledger row identifies this append.
         if _contains(target, item["path"], data):
+            continue
+        if item["writer"] == "document" and journal.read_only_pattern(item["path"], read_only):
+            # Protected since the decision finished: leave the append pending until it is lifted.
+            blocked = True
             continue
         if item["writer"] in ("evidence", "evidence-retraction"):
             memory_evidence_log.append_log_row(target, data)
@@ -48,7 +56,7 @@ def publish(target: Path, decision_id: str) -> None:
             ingest._append_document_nofollow(target, path, data.decode("utf-8"))
         if not _contains(target, item["path"], data):
             raise journal.JournalConflict("append bytes differ from recorded block")
-    if payload.get("appends"):
+    if payload.get("appends") and not blocked:
         journal.annotate(target, decision_id, appends_complete=True)
 
 

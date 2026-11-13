@@ -1136,3 +1136,29 @@ def test_recovery_respects_a_destination_protected_after_prepare(tmp_path, monke
     journal.resolve_prepared(tmp_path)
     assert not (tmp_path / "USER.md").exists()
     assert path.exists()
+
+
+def test_pending_append_waits_while_its_document_is_protected(tmp_path, monkeypatch):
+    draft(tmp_path, "document-destination-unwritable", DOCUMENT_BODY)
+    original = ingest._append_document_nofollow
+
+    class Crash(BaseException):
+        pass
+
+    def interrupted(*args, **kwargs):
+        raise Crash()
+
+    monkeypatch.setattr(ingest, "_append_document_nofollow", interrupted)
+    with pytest.raises(Crash):
+        drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    monkeypatch.setattr(ingest, "_append_document_nofollow", original)
+    config = tmp_path / ".brigade/memory-care.toml"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text('read_only_paths = ["USER.md"]\n')
+    journal.resolve_prepared(tmp_path)
+    assert not (tmp_path / "USER.md").exists()
+    decision = journal.entries(tmp_path)[0]
+    assert not journal._payload(tmp_path, decision.decision_id).get("appends_complete")
+    config.write_text("")
+    journal.resolve_prepared(tmp_path)
+    assert (tmp_path / "USER.md").read_text().count("Prefer short status updates.") == 1
