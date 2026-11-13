@@ -1555,3 +1555,120 @@ def test_r3_wrapper_supports_interpreter_path_with_spaces(landing, tmp_path, mon
     monkeypatch.setattr(proc, "run", run)
     codex_cloud_land.land(caller, "task_example", 2473)
     assert executed
+
+
+def _vale_probe(monkeypatch):
+    """Wrap the fake runner so each vale call records argv and the config tree at call time."""
+    seen = []
+    inner = proc.run
+
+    def run(argv, **kwargs):
+        if Path(argv[0]).name == "vale":
+            files = {}
+            if "--config" in argv:
+                ini = Path(argv[argv.index("--config") + 1])
+                directory = ini.parent
+                files = {str(p.relative_to(directory)): p.read_text() for p in directory.rglob("*") if p.is_file()}
+                seen.append((list(argv), files, oct(directory.stat().st_mode & 0o777), kwargs["env"]))
+            else:
+                seen.append((list(argv), files, None, kwargs["env"]))
+        return inner(argv, **kwargs)
+
+    monkeypatch.setattr(proc, "run", run)
+    return seen
+
+
+def _publish_base(landing_caller, tmp_path, files, symlinks=()):
+    remote = tmp_path / "remote"
+    for name, content in files.items():
+        path = remote / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    for name, destination in symlinks:
+        (remote / name).parent.mkdir(parents=True, exist_ok=True)
+        (remote / name).symlink_to(destination)
+    git(remote, "add", ".")
+    git(remote, "commit", "-m", "test: base vale config")
+
+
+def test_vale_base_config_materialized(landing, tmp_path, monkeypatch):
+    caller, state, calls = landing
+    _publish_base(
+        caller,
+        tmp_path,
+        {
+            ".vale.ini": "StylesPath = styles\nMinAlertLevel = error\n",
+            "styles/Brigade/Rule.yml": "extends: existence\n",
+        },
+    )
+    seen = _vale_probe(monkeypatch)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    argv, files, mode, environment = seen[0]
+    assert argv[1] == "--config" and argv[2].endswith("vale-config/.vale.ini") and len(argv) == 4
+    assert files[".vale.ini"].startswith("StylesPath = styles")
+    assert files["styles/Brigade/Rule.yml"] == "extends: existence\n"
+    assert mode == "0o700"
+    assert "VALE_CONFIG_PATH" not in environment
+    assert not any(a[:2] == ["vale", "sync"] or "sync" in a for a, _ in calls if a[0] == "vale")
+    assert sum(argv[:2] == ["git", "fetch"] and "refs/heads/main" in argv for argv, _ in calls) == 1
+
+
+def test_vale_without_base_config_keeps_user_config(landing, monkeypatch):
+    caller, state, calls = landing
+    seen = _vale_probe(monkeypatch)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert "--config" not in seen[0][0] and len(seen[0][0]) == 2
+
+
+@pytest.mark.parametrize("styles", ["/etc/styles", "../styles", "a/../../styles", "~/styles", "C:/styles", "."])
+def test_vale_unsafe_styles_path_refused(landing, tmp_path, styles):
+    caller, state, calls = landing
+    _publish_base(caller, tmp_path, {".vale.ini": f"StylesPath = {styles}\n"})
+    with pytest.raises(codex_cloud_land.LandError, match="unsafe-vale-config"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[0] == "vale" for argv, _ in calls)
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+
+
+def test_vale_symlinked_styles_refused(landing, tmp_path):
+    caller, state, calls = landing
+    _publish_base(caller, tmp_path, {".vale.ini": "StylesPath = styles\n"}, symlinks=[("styles", "/etc")])
+    with pytest.raises(codex_cloud_land.LandError, match="unsafe-vale-config"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[0] == "vale" for argv, _ in calls)
+
+
+def test_vale_symlink_inside_styles_refused(landing, tmp_path):
+    caller, state, calls = landing
+    _publish_base(
+        caller,
+        tmp_path,
+        {".vale.ini": "StylesPath = styles\n", "styles/A.yml": "x\n"},
+        symlinks=[("styles/B.yml", "/etc/passwd")],
+    )
+    with pytest.raises(codex_cloud_land.LandError, match="unsafe-vale-config"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+
+
+def test_vale_proposal_config_never_loads(landing, tmp_path, monkeypatch):
+    caller, state, calls = landing
+    _publish_base(caller, tmp_path, {".vale.ini": "StylesPath = styles\n", "styles/Base.yml": "base\n"})
+    state["extra_files"] = {
+        "docs/.vale.ini": "StylesPath = evil\n",
+        "styles/Evil.yml": "evil\n",
+        "evil/E.yml": "evil\n",
+    }
+    seen = _vale_probe(monkeypatch)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    _, files, _, _ = seen[0]
+    assert files[".vale.ini"] == "StylesPath = styles\n"
+    assert "styles/Base.yml" in files and not any("vale" in n.lower() and n != ".vale.ini" for n in files)
+    assert not any("Evil" in name or "evil" in name for name in files)
+
+
+def test_vale_proposal_root_config_ignored_without_base_config(landing, monkeypatch):
+    caller, state, calls = landing
+    state["extra_files"] = {".vale.ini": "StylesPath = evil\n", "evil/E.yml": "evil\n"}
+    seen = _vale_probe(monkeypatch)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert "--config" not in seen[0][0]

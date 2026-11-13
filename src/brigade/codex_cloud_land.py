@@ -829,9 +829,14 @@ def _land_locked(
         "Conductor review and merge required.\n",
         encoding="utf-8",
     )
-    git.tool("vale", [str(body)], git.repository, "pr-body-lint-failed")
+    # Fetch the trusted base first: Vale configuration comes only from this commit.
+    base = _fetch_base(git, canonical)
+    config = _materialize_vale_config(git, root, base)
+    # Without a base .vale.ini, Vale keeps its user-level configuration and the
+    # private repository as cwd, so no proposal or caller file can configure it.
+    git.tool("vale", [*(["--config", str(config)] if config else []), str(body)], git.repository, "pr-body-lint-failed")
     if not commit:
-        commit = _prepare(target, entry, issue, git, root, branch, canonical)
+        commit = _prepare(target, entry, issue, git, root, branch, base)
     else:
         git.scan_publication_text(
             entry["landing_title"],
@@ -962,8 +967,80 @@ def _validate_pr_url(url: str, repo: str) -> None:
         raise LandError("invalid-pr-url")
 
 
+def _fetch_base(git: _LandingGit, canonical: str) -> str:
+    git.git(["fetch", "--no-tags", canonical, "refs/heads/main"], git.repository, "fetch-failed")
+    return git.git(["rev-parse", "FETCH_HEAD"], git.repository, "inspect-failed").strip()
+
+
+def _materialize_vale_config(git: _LandingGit, root: Path, base: str) -> Path | None:
+    """Write the base tree's root .vale.ini and StylesPath subtree to a private directory.
+
+    Nothing is read from the proposal, the caller's checkout or a package download.
+    """
+    listing = git.git(["ls-tree", "-z", base, "--", ".vale.ini"], git.repository, "inspect-failed")
+    if not listing:
+        return None
+    if not listing.startswith("100644 blob ") and not listing.startswith("100755 blob "):
+        raise LandError("unsafe-vale-config")
+    text = git.git(["show", f"{base}:.vale.ini"], git.repository, "inspect-failed")
+    styles: PurePosixPath | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("["):
+            if ".." in line:
+                raise LandError("unsafe-vale-config")
+            continue
+        key, separator, value = line.partition("=")
+        key = key.strip().lower()
+        if not separator or key in {"include", "includes", "import", "imports"}:
+            raise LandError("unsafe-vale-config")
+        value = value.strip().strip("\"'")
+        for part in re.split(r"[,\s]+", value):
+            if part.startswith(("/", "~", "\\")) or re.match(r"[A-Za-z]:", part):
+                raise LandError("unsafe-vale-config")
+            if ".." in re.split(r"[/\\]", part):
+                raise LandError("unsafe-vale-config")
+        if key == "stylespath" and styles is None:
+            if "\\" in value or not value:
+                raise LandError("unsafe-vale-config")
+            styles = PurePosixPath(value)
+            if styles.is_absolute() or ".." in styles.parts or not [p for p in styles.parts if p != "."]:
+                raise LandError("unsafe-vale-config")
+            styles = PurePosixPath(*[p for p in styles.parts if p != "."])
+    directory = root / "vale-config"
+    # A retry reuses the private root, so rebuild the directory from the base.
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(mode=0o700)
+    ini = directory / ".vale.ini"
+    ini.write_text(text, encoding="utf-8")
+    if styles is not None:
+        # Every component of StylesPath must be a plain directory in the base tree.
+        for index in range(1, len(styles.parts) + 1):
+            prefix = "/".join(styles.parts[:index])
+            entry = git.git(["ls-tree", "-z", base, "--", prefix], git.repository, "inspect-failed")
+            if entry and not entry.startswith("040000 tree "):
+                raise LandError("unsafe-vale-config")
+        destination = (directory / Path(*styles.parts)).resolve()
+        if not destination.is_relative_to(directory.resolve()):
+            raise LandError("unsafe-vale-config")
+        tree = git.git(["ls-tree", "-r", "-z", base, "--", "/".join(styles.parts)], git.repository, "inspect-failed")
+        for record in filter(None, tree.split("\0")):
+            meta, _, name = record.partition("\t")
+            mode = meta.split()[0] if meta else ""
+            if mode not in {"100644", "100755"} or ".." in PurePosixPath(name).parts:
+                raise LandError("unsafe-vale-config")
+            out = directory / Path(*PurePosixPath(name).parts)
+            if not out.resolve().is_relative_to(directory.resolve()):
+                raise LandError("unsafe-vale-config")
+            out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            out.write_text(git.git(["show", f"{base}:{name}"], git.repository, "inspect-failed"), encoding="utf-8")
+    return ini
+
+
 def _prepare(
-    target: Path, entry: dict[str, Any], issue: int, git: _LandingGit, root: Path, branch: str, canonical: str
+    target: Path, entry: dict[str, Any], issue: int, git: _LandingGit, root: Path, branch: str, base: str
 ) -> str:
     status = git.tool("codex", ["cloud", "status", entry["task_id"]], git.repository, "status-failed")
     if codex_cloud._verified_status(status) not in codex_cloud.TERMINAL_OK:
@@ -975,8 +1052,6 @@ def _prepare(
         title = "fix: " + re.sub(r"^[a-z]+(?:\([^)]+\))?:\s*", "", title) if title else f"fix: address #{issue}"
     message = f"{title}\n\nCo-Authored-By: Codex <codex@openai.com>"  # content-guard: allow pii/email
     git.scan_publication_text(title, message, (root / "pr-body.md").read_text(encoding="utf-8"))
-    git.git(["fetch", "--no-tags", canonical, "refs/heads/main"], git.repository, "fetch-failed")
-    base = git.git(["rev-parse", "FETCH_HEAD"], git.repository, "inspect-failed").strip()
     _update(target, entry, landing_base=base, landing_title=title, landing_attempt=1)
     tree = root / "worktree"
     git.git(["worktree", "add", "-b", branch, str(tree), base], git.repository, "worktree-failed")
