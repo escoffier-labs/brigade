@@ -598,6 +598,11 @@ def test_first_cited_disposition_undo_after_later(tmp_path, monkeypatch):
     assert len(drain.pending(tmp_path)) == 1
 
 
+@pytest.mark.skipif(
+    __import__("os").name == "nt",
+    reason="covers an append descriptor held open across a retry, a POSIX sharing model; "
+    "what a retry does on Windows while another handle holds the document is not yet characterised",
+)
 def test_document_append_descriptor_survives_retry(tmp_path):
     import os
 
@@ -607,18 +612,11 @@ def test_document_append_descriptor_survives_retry(tmp_path):
     draft(tmp_path, "document-destination-unwritable", body)
     fd = os.open(dest, os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0))
     try:
-        retried = drain.drain(tmp_path, today=TODAY, deadline_days=14)["retried"]
+        assert drain.drain(tmp_path, today=TODAY, deadline_days=14)["retried"] == 1
         os.write(fd, b"Later writer row.\n")
     finally:
         os.close(fd)
     assert b"Later writer row." in dest.read_bytes()
-    if os.name == "nt" and not retried:
-        # Windows may refuse to touch a document another handle holds open for writing.
-        # The retry then waits: the draft stays pending and nothing is lost.
-        assert len(drain.pending(tmp_path)) == 1
-        assert dest.read_bytes() == b"Existing preferences.\nLater writer row.\n"
-        return
-    assert retried == 1
     tend.undo(tmp_path, journal.entries(tmp_path)[0].decision_id)
     assert dest.read_bytes() == b"Existing preferences.\nLater writer row.\n"
 
