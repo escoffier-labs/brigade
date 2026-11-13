@@ -11,18 +11,69 @@ from . import memory_hub_store as store
 from . import memory_hub_sync as sync
 
 
-def _replay_state(target: Path, decision: journal.Decision) -> dict[str, str]:
+class _Snapshot:
+    """Local cards and journal entries read once, then shared by the decisions of one run.
+
+    A caller that writes to the journal or the hub calls `refresh`, so a later
+    decision never reasons from entries or holders that the write changed.
+    """
+
+    def __init__(self, target: Path, decisions: list[journal.Decision] | None = None) -> None:
+        self.target = target
+        self._decisions = decisions
+        self._cards: list[dict[str, Any]] | None = None
+        self._phase: dict[str, Any] = {}
+
+    def decisions(self) -> list[journal.Decision]:
+        if self._decisions is None:
+            self._decisions = journal.entries(self.target)
+        return self._decisions
+
+    def cards(self) -> list[dict[str, Any]]:
+        if self._cards is None:
+            self._cards = sync._local_cards(self.target)
+        return self._cards
+
+    def abandoned(self, decision: journal.Decision) -> bool:
+        if decision.decision_id not in self._phase:
+            self._phase[decision.decision_id] = journal._payload(self.target, decision.decision_id).get("phase")
+        return bool(self._phase[decision.decision_id] == "abandoned")
+
+    def refresh(self) -> None:
+        self._decisions = None
+        self._cards = None
+        self._phase.clear()
+
+
+def _later_archive(snap: _Snapshot, decision: journal.Decision, path: str) -> bool:
+    """A later archive of this id that already settles the hub copy for this decision.
+
+    The same file archived again always does. Another file sharing the id does
+    only once its own hub write is done and its archive still stands: a skipped,
+    pending or undone archive of a different file says nothing about this one.
+    """
+    for later in snap.decisions():
+        if (
+            later.card_id != decision.card_id
+            or later.kind != "archive"
+            or later.created_at <= decision.created_at
+            or snap.abandoned(later)
+        ):
+            continue
+        if not path or path in later.paths:
+            return True
+        if (later.hub or {}).get("status") == "done" and not later.undone_by:
+            return True
+    return False
+
+
+def _replay_state(target: Path, decision: journal.Decision, snap: _Snapshot | None = None) -> dict[str, str]:
     """Reconcile a queued decision with current local files. Never rewrite an event."""
+    snap = snap or _Snapshot(target)
     hub = decision.hub or {}
     path = str(hub.get("path") or "")
-    decisions = journal.entries(target)
-    if any(
-        later.card_id == decision.card_id
-        and later.kind == "archive"
-        and later.created_at > decision.created_at
-        and journal._payload(target, later.decision_id).get("phase") != "abandoned"
-        for later in decisions
-    ):
+    decisions = snap.decisions()
+    if _later_archive(snap, decision, path):
         return {"status": "superseded", "reason": "later-archive"}
     try:
         live = journal.current(target, path)
@@ -61,11 +112,11 @@ def _replay_state(target: Path, decision: journal.Decision) -> dict[str, str]:
     return {"status": "send"}
 
 
-def _holders(target: Path, card_id: str, path: str) -> list[dict[str, Any]]:
+def _holders(target: Path, card_id: str, path: str, cards: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Live, publishable local cards (other than `path`) whose publication id is `card_id`."""
     return [
         card
-        for card in sync._local_cards(target)
+        for card in (sync._local_cards(target) if cards is None else cards)
         if card["card_id"] == card_id and card["rel"] != path and not card["private"]
     ]
 
@@ -73,7 +124,9 @@ def _holders(target: Path, card_id: str, path: str) -> list[dict[str, Any]]:
 _WRITES = ("retire", "put", "handover")
 
 
-def _retired_here(target: Path, card_id: str, identity: str, scope: str, base: dict[str, Any]) -> bool:
+def _retired_here(
+    decisions: list[journal.Decision], card_id: str, identity: str, scope: str, base: dict[str, Any]
+) -> bool:
     """This hub and scope's last completed write for the id from this workspace was a retire.
 
     Only journal results recorded against this hub identity and scope count. A
@@ -82,7 +135,7 @@ def _retired_here(target: Path, card_id: str, identity: str, scope: str, base: d
     Results from older releases carry no revision and fall back to hub and scope.
     """
     last: dict[str, Any] | None = None
-    for d in sorted(journal.entries(target), key=lambda d: d.created_at):
+    for d in sorted(decisions, key=lambda d: d.created_at):
         saved = d.hub or {}
         if d.card_id != card_id or saved.get("status") != "done" or saved.get("action") not in _WRITES:
             continue
@@ -105,9 +158,38 @@ def _archived_hash(target: Path, decision: journal.Decision, path: str) -> str |
         return None
 
 
-def _authorized(base: dict[str, Any], content_hash: str | None) -> bool:
-    """This workspace wrote the record, or the hub copy at that revision is exactly the archived text."""
-    return base.get("written") is True or (content_hash is not None and base.get("content_hash") == content_hash)
+def _archived_owner_hashes(
+    target: Path, snap: _Snapshot, card_id: str, base: dict[str, Any], identity: str, scope: str
+) -> set[str]:
+    """Hashes of card text this workspace archived and that the hub record could carry.
+
+    The archive being decided now is not always the file the record was
+    published from. The journal keeps the bytes of every archive. An archive
+    counts when it still stands (not undone, not abandoned), is for this id, is
+    for the record's file (any file when the record names none), and was not
+    recorded against another hub or scope. A decision skipped before any request
+    was built names no hub, so the match against the record's own hash is what
+    ties it to this hub and scope.
+    """
+    hashes: set[str] = set()
+    for d in snap.decisions():
+        saved = d.hub or {}
+        source = str(saved.get("path") or "")
+        if d.kind != "archive" or d.card_id != card_id or d.undone_by or not source or snap.abandoned(d):
+            continue
+        if base.get("path") and source != base["path"]:
+            continue
+        if saved.get("hub") not in (None, identity) or (saved.get("request") or {}).get("scope") not in (None, scope):
+            continue
+        digest = _archived_hash(target, d, source)
+        if digest is not None:
+            hashes.add(digest)
+    return hashes
+
+
+def _authorized(base: dict[str, Any], hashes: set[str]) -> bool:
+    """This workspace wrote the record, or the hub copy at that revision is exactly archived text."""
+    return base.get("written") is True or base.get("content_hash") in hashes
 
 
 def _ownership(
@@ -121,27 +203,42 @@ def _ownership(
     identity: str,
     scope: str,
     content_hash: str | None = None,
+    snap: _Snapshot | None = None,
 ) -> str:
     """What the hub copy does with this card: "send", "handover", "collision" or "not-owned".
 
     The hub copy follows the cards still in use. Archiving the last holder
-    retires it. Archiving the owner while one other holder remains writes that
-    holder's text to the hub. Either only happens for a record this workspace
-    wrote or whose text is the archived text. A revive goes out only when no
-    other card holds the id, and either this card owns the record or this
-    hub and scope's last write for the id was a retire from here.
+    retires it. Archiving a card while exactly one other card holds the id
+    writes that holder's text to the hub when the record has no live owner left
+    among the holders: the archived card owns it, or its file is gone or
+    archived, or the record names no file. Either only happens for a record this
+    workspace wrote or whose text is text this workspace archived. A revive goes
+    out only when no other card holds the id, and either this card owns the
+    record or this hub and scope's last write for the id was a retire from here.
     """
+    snap = snap or _Snapshot(target)
     if action == "retire":
         if not path:
             return "collision"
-        if holders and not (base is not None and base.get("path") == path and len(holders) == 1):
-            return "collision"
-        if base is not None and not _authorized(base, content_hash):
-            return "not-owned"
+        if holders:
+            owner_gone = base is not None and base.get("path") not in {h["rel"] for h in holders}
+            if len(holders) != 1 or not owner_gone:
+                return "collision"
+        if base is not None:
+            hashes = {content_hash} if content_hash is not None else set()
+            if not _authorized(base, hashes):
+                hashes |= _archived_owner_hashes(target, snap, card_id, base, identity, scope)
+                if not _authorized(base, hashes):
+                    return "not-owned"
         return "handover" if holders else "send"
     if holders:
         return "collision"
-    if not path or base is None or base.get("path") == path or _retired_here(target, card_id, identity, scope, base):
+    if (
+        not path
+        or base is None
+        or base.get("path") == path
+        or _retired_here(snap.decisions(), card_id, identity, scope, base)
+    ):
         return "send"
     return "collision"
 
@@ -158,7 +255,9 @@ def _send(
     recorded_hub: str | None = None,
     decision: journal.Decision | None = None,
     content_hash: str | None = None,
+    snap: _Snapshot | None = None,
 ) -> dict[str, Any]:
+    snap = snap or _Snapshot(target)
     if action == "put":
         reason_withheld = sync.withheld(text)
         if path:
@@ -194,14 +293,14 @@ def _send(
                 "reason": "hub-changed" if recorded_hub != client.identity else "scope-changed",
             }
         if decision is not None:
-            verdict = _replay_state(target, decision)
+            verdict = _replay_state(target, decision, snap)
             if verdict["status"] != "send":
                 return {**pending, **verdict}
         with store.locked(target):
             state = store.published(target)
             base = state.get(client.identity, {}).get(settings.scope, {}).get(card_id)
             # A revive must respect ownership too, or undo could overwrite the card that owns the id.
-            holders = _holders(target, card_id, path)
+            holders = _holders(target, card_id, path, snap.cards())
             ownership = _ownership(
                 target,
                 action,
@@ -212,6 +311,7 @@ def _send(
                 identity=client.identity,
                 scope=settings.scope,
                 content_hash=content_hash,
+                snap=snap,
             )
             if ownership == "collision":
                 return {**pending, "status": "skipped", "reason": "card-id-collision"}
@@ -336,6 +436,8 @@ def retry_pending(target: Path) -> dict[str, Any]:
         "superseded": 0,
     }
     decisions = sorted(journal.entries(target), key=lambda d: d.created_at)
+    # One read of the cards and the journal serves every decision until something changes them.
+    snap = _Snapshot(target, decisions)
     for d in decisions:
         hub = d.hub or {}
         payload = journal._payload(target, d.decision_id)
@@ -361,10 +463,12 @@ def retry_pending(target: Path) -> dict[str, Any]:
                 reason=d.reason,
                 path=str(hub.get("path") or ""),
                 decision=d,
+                snap=snap,
             )
             if result.get("status") == "skipped" and result.get("reason") in (None, "card-id-collision"):
                 continue
             journal.update_hub(target, d.decision_id, result)
+            snap.refresh()
             counts[result["status"]] += 1
             if result["status"] == "skipped":
                 counts["skipped_items"].append({"decision_id": d.decision_id, "reason": result.get("reason")})
@@ -373,9 +477,10 @@ def retry_pending(target: Path) -> dict[str, Any]:
             continue
         if hub.get("status") != "pending":
             continue
-        verdict = _replay_state(target, d)
+        verdict = _replay_state(target, d, snap)
         if verdict["status"] != "send":
             journal.update_hub(target, d.decision_id, {**hub, **verdict})
+            snap.refresh()
             counts[verdict["status"]] += 1
             if verdict["status"] in ("needs_review", "skipped"):
                 key = "review_items" if verdict["status"] == "needs_review" else "skipped_items"
@@ -387,6 +492,7 @@ def retry_pending(target: Path) -> dict[str, Any]:
             if previous.get("status") in ("pending", "conflict", "needs_review"):
                 result = {**hub, "status": previous["status"], "reason": previous.get("reason", "retire unresolved")}
                 journal.update_hub(target, d.decision_id, result)
+                snap.refresh()
                 counts[result["status"]] += 1
                 if result["status"] == "needs_review":
                     counts["review_items"].append({"decision_id": d.decision_id, "reason": result["reason"]})
@@ -415,8 +521,10 @@ def retry_pending(target: Path) -> dict[str, Any]:
             request=hub.get("request"),
             recorded_hub=hub.get("hub"),
             decision=d,
+            snap=snap,
         )
         journal.update_hub(target, d.decision_id, result)
+        snap.refresh()
         counts[result["status"]] += 1
         if result["status"] == "skipped":
             counts["skipped_items"].append({"decision_id": d.decision_id, "reason": result.get("reason")})

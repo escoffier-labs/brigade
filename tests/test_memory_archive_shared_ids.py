@@ -65,13 +65,35 @@ def test_record_without_path_retires_the_sole_holder(tmp_path, monkeypatch):
     assert record(tmp_path, fake)["path"] == A
 
 
-def test_record_without_path_beside_another_holder_is_left_alone(tmp_path, monkeypatch):
+def test_record_without_path_beside_one_holder_needs_proof_of_the_archived_text(tmp_path, monkeypatch):
     fake = two_cards(tmp_path, monkeypatch)
     set_record(tmp_path, fake)
     d = move(tmp_path)
-    # Rule: without a path the archived file owns the record only when it is the sole holder.
-    assert d.hub["reason"] == "card-id-collision"
+    # Rule: a record that names no file is orphaned, but nothing shows the hub text is archived text.
+    assert d.hub["reason"] == "card-id-not-owned"
+    assert not [a for a, _ in fake.calls if a != "status"]
+    assert "path" not in record(tmp_path, fake)
+
+
+def test_record_without_path_beside_one_holder_hands_over_when_the_hash_matches(tmp_path, monkeypatch):
+    fake = two_cards(tmp_path, monkeypatch)
+    set_record(tmp_path, fake, content_hash=hash_of(tmp_path, A))
+    d = move(tmp_path)
+    assert (d.hub["status"], d.hub["action"], d.hub["holder"]) == ("done", "handover", B)
+    assert [p["text"] for p in sent(fake, "put")] == [text_of(tmp_path, B)]
     assert not sent(fake, "retire")
+    assert record(tmp_path, fake)["path"] == B
+    tend.run(tmp_path, stages=["hub"])
+    assert len(sent(fake, "put")) == 1
+
+
+def test_record_without_path_beside_two_holders_is_left_alone(tmp_path, monkeypatch):
+    fake = two_cards(tmp_path, monkeypatch)
+    card(tmp_path, C, "C text")
+    set_record(tmp_path, fake, content_hash=hash_of(tmp_path, A))
+    d = move(tmp_path)
+    assert d.hub["reason"] == "card-id-collision"
+    assert not [a for a, _ in fake.calls if a != "status"]
     assert "path" not in record(tmp_path, fake)
 
 
@@ -260,12 +282,14 @@ def test_tend_retires_both_skipped_archives_of_a_shared_id_once(tmp_path, monkey
     first = move(tmp_path, A)
     second = move(tmp_path, B)
     third = move(tmp_path, C)
-    assert {first.hub["reason"], second.hub["reason"]} == {"card-id-collision"}
+    assert first.hub["reason"] == "card-id-collision"
+    assert (second.hub["status"], second.hub["action"], second.hub["holder"]) == ("done", "handover", C)
     assert third.hub["status"] == "done"  # last holder out: the retire went out at archive time
     assert len(sent(fake, "retire")) == 1
     tend.run(tmp_path, stages=["hub"])
     tend.run(tmp_path, stages=["hub"])
     assert len(sent(fake, "retire")) == 1
+    assert len(sent(fake, "put")) == 1
 
 
 def test_non_owner_with_live_owner_never_touches_the_hub(tmp_path, monkeypatch):
@@ -464,3 +488,272 @@ def test_repair_persists_its_event_id_before_sending(tmp_path, monkeypatch):
     assert result["done"] == 1
     assert [f["client_event_id"] for f in sent(fake, "retire")] == [event_id, event_id]
     assert journal.load(tmp_path, d.decision_id).hub["status"] == "done"
+
+
+def three_cards(tmp_path, monkeypatch):
+    fake = two_cards(tmp_path, monkeypatch)
+    card(tmp_path, C, "C text")
+    return fake
+
+
+def shared_text(fake):
+    """What the fake hub shares for the id: the last put's text, None after a retire, "initial" before any write."""
+    shown = "initial"
+    for action, fields in fake.calls:
+        if action == "put":
+            shown = fields["text"]
+        elif action == "retire":
+            shown = None
+    return shown
+
+
+def quiet(fake):
+    return [a for a, _ in fake.calls if a != "status"]
+
+
+def final(tmp_path, d):
+    return journal.load(tmp_path, d.decision_id).hub
+
+
+@pytest.mark.parametrize("tend_between", [False, True])
+def test_three_files_the_owner_is_replaced_when_one_holder_is_left(tmp_path, monkeypatch, tend_between):
+    fake = three_cards(tmp_path, monkeypatch)
+    first = move(tmp_path, A)
+    assert first.hub["reason"] == "card-id-collision"
+    if tend_between:
+        tend.run(tmp_path, stages=["hub"])
+        assert not quiet(fake)
+    second = move(tmp_path, B)
+    # The second archive carries the handover: the record names A, which is archived, and C is the only holder.
+    assert (second.hub["status"], second.hub["action"], second.hub["holder"]) == ("done", "handover", C)
+    tend.run(tmp_path, stages=["hub"])
+    assert shared_text(fake) == text_of(tmp_path, C)
+    assert record(tmp_path, fake)["path"] == C
+    # The first decision is closed, not re-sent.
+    assert final(tmp_path, first)["status"] == "superseded"
+    assert final(tmp_path, first)["reason"] == "later-archive"
+    assert final(tmp_path, second)["status"] == "done"
+    fake.calls.clear()
+    tend.run(tmp_path, stages=["hub"])
+    assert not quiet(fake)
+    assert "A text" not in repr(fake.calls) and "B text" not in repr(fake.calls)
+
+
+def test_three_files_offline_second_archive_hands_over_on_tend(tmp_path, monkeypatch):
+    fake = three_cards(tmp_path, monkeypatch)
+    first = move(tmp_path, A)
+    fake.unavailable = True
+    second = move(tmp_path, B)
+    assert second.hub["status"] == "pending"
+    fake.unavailable = False
+    fake.calls.clear()
+    tend.run(tmp_path, stages=["hub"])
+    # Here the first decision reaches the hub first and carries the handover; the second finds C already owning.
+    assert shared_text(fake) == text_of(tmp_path, C)
+    assert record(tmp_path, fake)["path"] == C
+    assert len(sent(fake, "put")) == 1
+    assert not sent(fake, "retire")
+    fake.calls.clear()
+    tend.run(tmp_path, stages=["hub"])
+    assert not quiet(fake)
+    assert (final(tmp_path, first)["status"], final(tmp_path, first)["action"]) == ("done", "handover")
+
+
+def skip_as_an_older_release_did(tmp_path, d, rel):
+    journal.update_hub(
+        tmp_path,
+        d.decision_id,
+        {"status": "skipped", "action": "retire", "card_id": "old", "reason": "card-id-collision", "path": rel},
+    )
+
+
+def test_old_data_undone_later_archive_does_not_close_the_owner_decision(tmp_path, monkeypatch):
+    fake = two_cards(tmp_path, monkeypatch)
+    # An older release archived both files and skipped both retires; nothing reached the hub.
+    monkeypatch.setattr(hubc, "load_settings", lambda _: hubc.HubSettings(mode="off"))
+    first = move(tmp_path, A)
+    second = move(tmp_path, B)
+    skip_as_an_older_release_did(tmp_path, first, A)
+    skip_as_an_older_release_did(tmp_path, second, B)
+    monkeypatch.setattr(hubc, "load_settings", lambda _: hubc.HubSettings(mode="sync", scope="fleet"))
+    undo = archive.restore(tmp_path, journal.load(tmp_path, second.decision_id))
+    assert undo.hub["reason"] == "card-id-collision"
+    assert not quiet(fake)
+    tend.run(tmp_path, stages=["hub"])
+    assert (final(tmp_path, first)["status"], final(tmp_path, first)["action"]) == ("done", "handover")
+    assert final(tmp_path, first)["holder"] == B
+    assert shared_text(fake) == text_of(tmp_path, B)
+    assert record(tmp_path, fake)["path"] == B
+    fake.calls.clear()
+    tend.run(tmp_path, stages=["hub"])
+    assert not quiet(fake)
+
+
+@pytest.mark.parametrize("tend_between", [False, True])
+def test_four_files_end_with_the_last_holder_sharing(tmp_path, monkeypatch, tend_between):
+    fake = three_cards(tmp_path, monkeypatch)
+    card(tmp_path, "memory/cards/fourth.md", "D text")
+    d_rel = "memory/cards/fourth.md"
+    decisions = []
+    for rel in (A, B, C):
+        decisions.append(move(tmp_path, rel))
+        if tend_between:
+            tend.run(tmp_path, stages=["hub"])
+    tend.run(tmp_path, stages=["hub"])
+    # R1 and R2: only D is in use and the hub shares D's text, never an archived card's.
+    assert shared_text(fake) == text_of(tmp_path, d_rel)
+    assert record(tmp_path, fake)["path"] == d_rel
+    assert not sent(fake, "retire")
+    assert "A text" not in repr(fake.calls) and "B text" not in repr(fake.calls) and "C text" not in repr(fake.calls)
+    assert [final(tmp_path, d)["status"] for d in decisions][2] == "done"
+    assert {final(tmp_path, d)["status"] for d in decisions[:2]} == {"superseded"}
+    fake.calls.clear()
+    tend.run(tmp_path, stages=["hub"])
+    assert not quiet(fake)
+    # The last holder going away retires the id once, and A and B are not re-sent after that.
+    archived_d = move(tmp_path, d_rel)
+    assert archived_d.hub["status"] == "done"
+    assert shared_text(fake) is None
+    tend.run(tmp_path, stages=["hub"])
+    tend.run(tmp_path, stages=["hub"])
+    assert len(sent(fake, "retire")) == 1
+
+
+def test_orphan_handover_uses_the_archived_owner_bytes_for_authority(tmp_path, monkeypatch):
+    fake = three_cards(tmp_path, monkeypatch)
+    set_record(tmp_path, fake, path=A, content_hash=hash_of(tmp_path, A))  # adopted: not written here
+    first = move(tmp_path, A)
+    assert first.hub["reason"] == "card-id-collision"
+    second = move(tmp_path, B)
+    # B's text differs from the hub text, but the journal holds A's archived bytes and they match the record.
+    assert (second.hub["status"], second.hub["action"], second.hub["holder"]) == ("done", "handover", C)
+    assert shared_text(fake) == text_of(tmp_path, C)
+
+
+def test_orphan_handover_without_provable_text_is_not_owned(tmp_path, monkeypatch):
+    fake = three_cards(tmp_path, monkeypatch)
+    set_record(tmp_path, fake, path=A, content_hash="f" * 64)
+    move(tmp_path, A)
+    second = move(tmp_path, B)
+    assert second.hub["reason"] == "card-id-not-owned"
+    assert not quiet(fake)
+    tend.run(tmp_path, stages=["hub"])
+    assert not quiet(fake)
+    assert final(tmp_path, second)["reason"] == "card-id-not-owned"
+
+
+def test_orphan_evidence_ignores_an_archive_that_was_undone(tmp_path, monkeypatch):
+    fake = three_cards(tmp_path, monkeypatch)
+    set_record(tmp_path, fake, path=A, content_hash=hash_of(tmp_path, A))
+    first = move(tmp_path, A)
+    archive.restore(tmp_path, first)
+    (tmp_path / A).unlink()  # the record's file is gone and the only archive of it was undone
+    second = move(tmp_path, B)
+    assert second.hub["reason"] == "card-id-not-owned"
+    assert not quiet(fake)
+
+
+@pytest.mark.parametrize("visibility", ["private", "secret"])
+@pytest.mark.parametrize("scenario", ["orphan", "pathless", "old-data", "four"])
+def test_withheld_remaining_holder_gets_no_put_on_the_new_paths(tmp_path, monkeypatch, visibility, scenario):
+    fake = three_cards(tmp_path, monkeypatch)
+
+    def hide(rel):
+        card(tmp_path, rel, "secret body", visibility=visibility)
+
+    if scenario == "orphan":
+        move(tmp_path, A)
+        hide(C)
+        move(tmp_path, B)
+    elif scenario == "pathless":
+        set_record(tmp_path, fake, content_hash=hash_of(tmp_path, A))
+        move(tmp_path, A)
+        hide(C)
+        move(tmp_path, B)
+    elif scenario == "four":
+        card(tmp_path, "memory/cards/fourth.md", "D text")
+        for rel in (A, B):
+            move(tmp_path, rel)
+        hide("memory/cards/fourth.md")
+        move(tmp_path, C)
+    else:
+        (tmp_path / C).unlink()
+        monkeypatch.setattr(hubc, "load_settings", lambda _: hubc.HubSettings(mode="off"))
+        first = move(tmp_path, A)
+        second = move(tmp_path, B)
+        skip_as_an_older_release_did(tmp_path, first, A)
+        skip_as_an_older_release_did(tmp_path, second, B)
+        monkeypatch.setattr(hubc, "load_settings", lambda _: hubc.HubSettings(mode="sync", scope="fleet"))
+        archive.restore(tmp_path, journal.load(tmp_path, second.decision_id))
+        hide(B)
+    tend.run(tmp_path, stages=["hub"])
+    # Nothing publishable holds the id, so it is retired and no card text is ever sent.
+    assert not sent(fake, "put")
+    assert len(sent(fake, "retire")) == 1
+    assert shared_text(fake) is None
+    assert "secret body" not in repr(fake.calls)
+    fake.calls.clear()
+    tend.run(tmp_path, stages=["hub"])
+    assert not quiet(fake)
+
+
+def test_retry_reads_the_cards_and_journal_a_constant_number_of_times(tmp_path, monkeypatch):
+    from brigade import memory_hub_sync as sync
+
+    setup_card(tmp_path, b"---\ncard_id: old\n---\nA text\n")
+    names = [f"memory/cards/dup{n}.md" for n in range(6)]
+    for rel in names:
+        card(tmp_path, rel, rel)
+    configure_hub(tmp_path, monkeypatch)
+    skipped = [move(tmp_path, rel) for rel in [A, *names[:4]]]
+    assert {d.hub["reason"] for d in skipped} == {"card-id-collision"}
+    reads = {"cards": 0, "entries": 0}
+    real_cards, real_entries = sync._local_cards, journal.entries
+
+    def count_cards(target):
+        reads["cards"] += 1
+        return real_cards(target)
+
+    def count_entries(target, **kwargs):
+        reads["entries"] += 1
+        return real_entries(target, **kwargs)
+
+    evaluated = []
+    real_send = hub._send
+
+    def count_send(*args, **kwargs):
+        evaluated.append(kwargs["decision"].decision_id)
+        return real_send(*args, **kwargs)
+
+    monkeypatch.setattr(sync, "_local_cards", count_cards)
+    monkeypatch.setattr(journal, "entries", count_entries)
+    monkeypatch.setattr(hub, "_send", count_send)
+    result = hub.retry_pending(tmp_path)
+    assert result["done"] == 0
+    # Five skipped decisions are re-evaluated with no hub write: one read of the cards and one of the journal.
+    assert sorted(evaluated) == sorted(d.decision_id for d in skipped)
+    assert reads == {"cards": 1, "entries": 1}
+
+
+def test_retry_reads_again_after_a_hub_write(tmp_path, monkeypatch):
+    from brigade import memory_hub_sync as sync
+
+    fake = three_cards(tmp_path, monkeypatch)
+    first = move(tmp_path, A)
+    fake.unavailable = True
+    move(tmp_path, B)
+    fake.unavailable = False
+    reads = {"cards": 0}
+    real_cards = sync._local_cards
+
+    def count_cards(target):
+        reads["cards"] += 1
+        return real_cards(target)
+
+    monkeypatch.setattr(sync, "_local_cards", count_cards)
+    hub.retry_pending(tmp_path)
+    # The first decision hands over to C and changes the record; the second is judged on fresh data.
+    assert reads["cards"] >= 2
+    assert shared_text(fake) == text_of(tmp_path, C)
+    assert len(sent(fake, "put")) == 1
+    assert final(tmp_path, first)["status"] == "done"
