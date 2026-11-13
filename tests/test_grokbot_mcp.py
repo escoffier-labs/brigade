@@ -2967,15 +2967,16 @@ def test_cli_dot_rejects_bearer(tmp_path, capsys, command, bearer_flag):
 @pytest.mark.parametrize(
     "action",
     [
-        ["serve", "--pack", "t3-dispatch"],
+        ["serve", "--pack", "operations-relay"],
         ["serve", "--instance", "operator"],
-        ["pack", "setup", "--id", "t3-dispatch"],
+        ["pack", "setup", "--id", "operations-relay"],
         ["pack", "setup", "--id", "operator"],
     ],
 )
 def test_cli_other_listeners_require_bearer(tmp_path, capsys, action):
     assert cli.main(["run", "cloud", "grokbot", *action, "--target", str(tmp_path)]) == 2
-    assert capsys.readouterr().err.strip() == "error: --bearer-file or --bearer-env is required"
+    error = capsys.readouterr().err.strip()
+    assert error == "error: --bearer-file or --bearer-env is required"
 
 
 def test_cli_dot_setup_without_bearer(tmp_path, monkeypatch):

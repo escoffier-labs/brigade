@@ -10,11 +10,7 @@ import pytest
 
 from brigade import grokbot_feed, grokbot_findings, grokbot_scout_feed
 from brigade.grokbot_fleet import ledger as fleet_ledger
-from brigade.grokbot_fleet import runtime_config as fleet_runtime_config
 from brigade.grokbot_fleet.contracts import FleetError
-from brigade.grokbot_obsidian import runtime_config as obsidian_runtime_config
-from brigade.grokbot_obsidian import store as obsidian_store
-from brigade.grokbot_obsidian.contracts import ObsidianError
 
 
 REASON = "secure-owner-read-unavailable"
@@ -40,11 +36,6 @@ def _read_cases(path_text: str):
         ),
         (lambda: fleet_ledger.FleetLedger(path_text)._ensure_state_dir(), FleetError, "unavailable"),
         (lambda: fleet_ledger.FleetLedger(path_text)._load_document(), FleetError, "unavailable"),
-        (lambda: obsidian_store._ensure_directory(Path(path_text)), ObsidianError, "unavailable"),
-        (lambda: obsidian_store._read_json(Path(path_text).parent, "record.json"), ObsidianError, "unavailable"),
-        (lambda: obsidian_store._hex_json_files(Path(path_text)), ObsidianError, "unavailable"),
-        (lambda: fleet_runtime_config.read_secure_runtime_text(path_text), FleetError, "unavailable"),
-        (lambda: obsidian_runtime_config.read_secure_runtime_text(path_text), ObsidianError, "unavailable"),
         (lambda: grokbot_feed._read_manifest_snapshot(Path(path_text)), grokbot_feed.FeedError, None),
         (lambda: grokbot_scout_feed._read_policy_snapshot(Path(path_text)), grokbot_scout_feed.ScoutFeedError, None),
     )
@@ -80,9 +71,6 @@ def test_private_readers_fail_closed_before_filesystem_access(monkeypatch: pytes
     modules = (
         grokbot_findings,
         fleet_ledger,
-        obsidian_store,
-        fleet_runtime_config,
-        obsidian_runtime_config,
         grokbot_feed,
         grokbot_scout_feed,
     )
@@ -106,9 +94,6 @@ def test_native_windows_capabilities_are_disabled(monkeypatch: pytest.MonkeyPatc
     for module in (
         grokbot_findings,
         fleet_ledger,
-        obsidian_store,
-        fleet_runtime_config,
-        obsidian_runtime_config,
         grokbot_feed,
         grokbot_scout_feed,
     ):

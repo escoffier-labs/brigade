@@ -19,12 +19,9 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from . import (
-    grokbot_fleet,
     grokbot_mcp,
-    grokbot_obsidian,
     grokbot_operations_relay,
     grokbot_ops,
-    grokbot_t3,
     dot,
 )
 
@@ -77,17 +74,11 @@ DEFAULT_BINDS = {
     "repository-scout": "127.0.0.1:8767",
 }
 CONNECTOR_DEFAULT_BINDS = {
-    "fleet-steward": "127.0.0.1:8771",
     "dot": "127.0.0.1:8779",
     "duet": "127.0.0.1:8780",
-    "obsidian-operator": "127.0.0.1:8773",
     "operations-relay": "127.0.0.1:8777",
-    "t3-dispatch": "127.0.0.1:8778",
 }
-STEWARD_PACK_IDS = frozenset({"fleet-steward"})
-OBSIDIAN_PACK_ID = "obsidian-operator"
 OPERATIONS_RELAY_PACK_ID = "operations-relay"
-T3_DISPATCH_PACK_ID = "t3-dispatch"
 DOT_PACK_ID = "dot"
 DUET_PACK_ID = "duet"
 # Packs that run the Dot connector code under their own profile and Cloudflare Access application.
@@ -100,19 +91,7 @@ FLEET_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
         "approval_dir",
     }
 )
-OBSIDIAN_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
-    {
-        "runtime_path",
-        "action_state_path",
-        "approval_dir",
-        "staging_dir",
-        "excalidraw_bin",
-        "upstream_url",
-        "upstream_key",
-    }
-)
 OPERATIONS_RELAY_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"owner_workspace"})
-T3_DISPATCH_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"runtime_path"})
 DOT_INSTANCE_KEYS = (INSTANCE_KEYS - {"bearer"}) | frozenset({"runtime_path"})
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 PACK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
@@ -134,16 +113,10 @@ def _queue_pack(instance: str) -> dict[str, Any]:
 
 
 def _connector_tools(pack_id: str) -> frozenset[str]:
-    if pack_id == "fleet-steward":
-        return grokbot_fleet.TOOLS
-    if pack_id == OBSIDIAN_PACK_ID:
-        return grokbot_obsidian.TOOLS
     if pack_id == OPERATIONS_RELAY_PACK_ID:
         return grokbot_operations_relay.TOOLS
     if pack_id in DOT_FAMILY_PACK_IDS:
         return dot.profile_for(pack_id).tools
-    if pack_id == T3_DISPATCH_PACK_ID:
-        return grokbot_t3.TOOLS
     return frozenset()
 
 
@@ -160,7 +133,7 @@ def _connector_pack(pack_id: str) -> dict[str, Any]:
         "kind": "connector",
         "instance": pack_id,
         "default_bind": CONNECTOR_DEFAULT_BINDS[pack_id],
-        "public_route": "/mcp" if pack_id == OBSIDIAN_PACK_ID else "",
+        "public_route": "",
         "tools": sorted(_connector_tools(pack_id)),
     }
 
@@ -246,12 +219,6 @@ def preview_setup(
     ledger_path: str | Path | None = None,
     action_state_path: str | Path | None = None,
     approval_dir: str | Path | None = None,
-    staging_dir: str | Path | None = None,
-    excalidraw_bin: str | Path | None = None,
-    upstream_url: str | None = None,
-    upstream_key_env: str | None = None,
-    upstream_key_file: Path | None = None,
-    upstream_key: dict[str, Any] | None = None,
     owner_workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     return _setup(
@@ -268,12 +235,6 @@ def preview_setup(
         ledger_path=ledger_path,
         action_state_path=action_state_path,
         approval_dir=approval_dir,
-        staging_dir=staging_dir,
-        excalidraw_bin=excalidraw_bin,
-        upstream_url=upstream_url,
-        upstream_key_env=upstream_key_env,
-        upstream_key_file=upstream_key_file,
-        upstream_key=upstream_key,
         owner_workspace=owner_workspace,
     )
 
@@ -292,12 +253,6 @@ def apply_setup(
     ledger_path: str | Path | None = None,
     action_state_path: str | Path | None = None,
     approval_dir: str | Path | None = None,
-    staging_dir: str | Path | None = None,
-    excalidraw_bin: str | Path | None = None,
-    upstream_url: str | None = None,
-    upstream_key_env: str | None = None,
-    upstream_key_file: Path | None = None,
-    upstream_key: dict[str, Any] | None = None,
     owner_workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     return _setup(
@@ -314,12 +269,6 @@ def apply_setup(
         ledger_path=ledger_path,
         action_state_path=action_state_path,
         approval_dir=approval_dir,
-        staging_dir=staging_dir,
-        excalidraw_bin=excalidraw_bin,
-        upstream_url=upstream_url,
-        upstream_key_env=upstream_key_env,
-        upstream_key_file=upstream_key_file,
-        upstream_key=upstream_key,
         owner_workspace=owner_workspace,
     )
 
@@ -328,16 +277,10 @@ def doctor(target: Path, pack_id: str, *, service_result: bool = False) -> list[
     pack = show_pack(pack_id, target)
     if pack["kind"] == "queue-role":
         checks = grokbot_ops.doctor(target, pack["instance"])
-    elif pack["id"] == "fleet-steward":
-        checks = grokbot_fleet.doctor(target)
-    elif pack["id"] == OBSIDIAN_PACK_ID:
-        checks = grokbot_obsidian.doctor(target)
     elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
         checks = grokbot_operations_relay.doctor(target)
     elif pack["id"] in DOT_FAMILY_PACK_IDS:
         checks = dot.doctor(target, **_profile_kwargs(pack["id"]))
-    elif pack["id"] == T3_DISPATCH_PACK_ID:
-        checks = grokbot_t3.doctor(target)
     else:
         raise PackError("unknown-pack")
     checks.extend(_installed_bind_checks(target, pack))
@@ -351,16 +294,10 @@ def canary(target: Path, pack_id: str) -> dict[str, Any]:
     pack = show_pack(pack_id)
     if pack["kind"] == "queue-role":
         return grokbot_ops.canary(target, pack["instance"])
-    if pack["id"] == "fleet-steward":
-        return grokbot_fleet.canary(target)
-    if pack["id"] == OBSIDIAN_PACK_ID:
-        return grokbot_obsidian.canary(target)
     if pack["id"] == OPERATIONS_RELAY_PACK_ID:
         return grokbot_operations_relay.canary(target)
     if pack["id"] in DOT_FAMILY_PACK_IDS:
         return dot.canary(target, **_profile_kwargs(pack["id"]))
-    if pack["id"] == T3_DISPATCH_PACK_ID:
-        return grokbot_t3.canary(target)
     raise PackError("unknown-pack")
 
 
@@ -369,7 +306,7 @@ _PLATFORM_REFUSALS = frozenset({"unsupported-platform", "unsupported_on_windows"
 
 def _raise_platform_refusal(exc: Exception) -> None:
     """Keep an explicit platform refusal instead of folding it into unsafe-path."""
-    if isinstance(exc, (grokbot_t3.T3DispatchError, dot.DotError)) and getattr(exc, "code", None) in _PLATFORM_REFUSALS:
+    if isinstance(exc, dot.DotError) and getattr(exc, "code", None) in _PLATFORM_REFUSALS:
         raise PackError(str(exc)) from exc
 
 
@@ -379,18 +316,12 @@ def render_install_service(target: Path, pack_id: str) -> str:
         if pack["kind"] == "queue-role":
             config = grokbot_ops.load_config(target, pack["instance"])
             return grokbot_ops.render_unit(config, python=sys.executable, exec_root=target)
-        if pack["id"] == "fleet-steward":
-            return grokbot_fleet.render_unit(target, python=sys.executable)
-        if pack["id"] == OBSIDIAN_PACK_ID:
-            return grokbot_obsidian.render_unit(target, python=sys.executable)
         if pack["id"] == OPERATIONS_RELAY_PACK_ID:
             return grokbot_operations_relay.render_unit(target, python=sys.executable)
         if pack["id"] in DOT_FAMILY_PACK_IDS:
             if pack["id"] == DOT_PACK_ID:
                 return dot.render_unit(target, python=sys.executable)
             return dot.render_unit(target, python=sys.executable, pack_id=pack["id"])
-        if pack["id"] == T3_DISPATCH_PACK_ID:
-            return grokbot_t3.render_unit(target, python=sys.executable)
         raise PackError("unknown-pack")
     except PackError:
         raise
@@ -401,10 +332,7 @@ def render_install_service(target: Path, pack_id: str) -> str:
         if isinstance(
             exc,
             (
-                grokbot_fleet.FleetError,
-                grokbot_obsidian.ObsidianError,
                 grokbot_operations_relay.OperationsRelayError,
-                grokbot_t3.T3DispatchError,
                 dot.DotError,
             ),
         ):
@@ -424,16 +352,10 @@ def apply_install_service(
         if pack["kind"] == "queue-role":
             config = grokbot_ops.load_config(target, pack["instance"])
             path = grokbot_ops.write_unit(config, out_dir, exec_root=target, force=force)
-        elif pack["id"] == "fleet-steward":
-            path = grokbot_fleet.write_unit(target, out_dir, force=force)
-        elif pack["id"] == OBSIDIAN_PACK_ID:
-            path = grokbot_obsidian.write_unit(target, out_dir, force=force)
         elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
             path = grokbot_operations_relay.write_unit(target, out_dir, force=force)
         elif pack["id"] in DOT_FAMILY_PACK_IDS:
             path = dot.write_unit(target, out_dir, force=force, **_profile_kwargs(pack["id"]))
-        elif pack["id"] == T3_DISPATCH_PACK_ID:
-            path = grokbot_t3.write_unit(target, out_dir, force=force)
         else:
             raise PackError("unknown-pack")
     except PackError:
@@ -445,10 +367,7 @@ def apply_install_service(
         if isinstance(
             exc,
             (
-                grokbot_fleet.FleetError,
-                grokbot_obsidian.ObsidianError,
                 grokbot_operations_relay.OperationsRelayError,
-                grokbot_t3.T3DispatchError,
                 dot.DotError,
             ),
         ):
@@ -488,12 +407,6 @@ def _setup(
     ledger_path: str | Path | None = None,
     action_state_path: str | Path | None = None,
     approval_dir: str | Path | None = None,
-    staging_dir: str | Path | None = None,
-    excalidraw_bin: str | Path | None = None,
-    upstream_url: str | None = None,
-    upstream_key_env: str | None = None,
-    upstream_key_file: Path | None = None,
-    upstream_key: dict[str, Any] | None = None,
     owner_workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     pack = show_pack(pack_id)
@@ -520,54 +433,22 @@ def _setup(
     if reference is not None:
         payload["bearer"] = reference
     fleet_paths = (runtime_path, ledger_path, action_state_path, approval_dir)
-    obsidian_paths = (staging_dir, excalidraw_bin)
-    upstream_fields = (upstream_url, upstream_key_env, upstream_key_file, upstream_key)
     if pack["kind"] == "queue-role":
-        if (
-            owner_workspace is not None
-            or any(path is not None for path in fleet_paths)
-            or any(path is not None for path in obsidian_paths)
-            or any(field is not None for field in upstream_fields)
-        ):
+        if owner_workspace is not None or any(path is not None for path in fleet_paths):
             raise PackError("unexpected-key")
-    elif pack["id"] in STEWARD_PACK_IDS:
-        if (
-            owner_workspace is not None
-            or any(path is not None for path in obsidian_paths)
-            or any(field is not None for field in upstream_fields)
-        ):
-            raise PackError("unexpected-key")
-        payload.update(_steward_path_references(pack["id"], runtime_path, ledger_path, action_state_path, approval_dir))
-    elif pack["id"] == OBSIDIAN_PACK_ID:
-        if ledger_path is not None or owner_workspace is not None:
-            raise PackError("unexpected-key")
-        payload.update(
-            _obsidian_path_references(runtime_path, action_state_path, approval_dir, staging_dir, excalidraw_bin)
-        )
-        payload.update(_obsidian_upstream_references(upstream_url, upstream_key_env, upstream_key_file, upstream_key))
     elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
-        if (
-            any(path is not None for path in fleet_paths)
-            or any(path is not None for path in obsidian_paths)
-            or any(field is not None for field in upstream_fields)
-        ):
+        if any(path is not None for path in fleet_paths):
             raise PackError("unexpected-key")
         payload["owner_workspace"] = _operations_relay_owner_reference(owner_workspace)
-    elif pack["id"] in {T3_DISPATCH_PACK_ID} | DOT_FAMILY_PACK_IDS:
+    elif pack["id"] in DOT_FAMILY_PACK_IDS:
         if (
             owner_workspace is not None
             or ledger_path is not None
             or action_state_path is not None
             or approval_dir is not None
-            or any(path is not None for path in obsidian_paths)
-            or any(field is not None for field in upstream_fields)
         ):
             raise PackError("unexpected-key")
-        payload["runtime_path"] = (
-            _dot_runtime_reference(runtime_path, pack_id)
-            if pack_id in DOT_FAMILY_PACK_IDS
-            else _t3_runtime_reference(runtime_path)
-        )
+        payload["runtime_path"] = _dot_runtime_reference(runtime_path, pack_id)
     else:
         raise PackError("unexpected-key")
     _validate_instance_config(payload, pack_id)
@@ -712,9 +593,9 @@ def _assert_setup_bind_available(target: Path, pack_id: str, chosen_bind: str) -
 def _occupied_setup_ports(target: Path, *, exclude_pack_id: str) -> set[int]:
     from .dot.connector_registry import instance_config_path as connector_path
 
-    ports: set[int] = {8781, 8782, 8783}
+    ports: set[int] = {8771, 8773, 8778, 8781, 8782, 8783}
     # Retained listener files still reserve their ports without loading a retired profile.
-    for name in ("grokbot-memory", "grokbot-inbox"):
+    for name in ("grokbot-memory", "grokbot-inbox", "fleet-steward", "obsidian-operator", "t3-dispatch"):
         path = target / INSTANCE_DIR / f"{name}.json"
         if path != instance_config_path(target, exclude_pack_id):
             port = _bind_port_from_existing_config(path)
@@ -809,8 +690,9 @@ def _validate_pack(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[str, Any]:
-    pack = show_pack(pack_id)
-    expected_keys = _instance_keys(pack)
+    # Retained fleet instances are read only by the Task 4 relay. They are not packaged.
+    pack = {"id": pack_id, "kind": "connector"} if pack_id == "fleet-steward" else show_pack(pack_id)
+    expected_keys = FLEET_INSTANCE_KEYS if pack_id == "fleet-steward" else _instance_keys(pack)
     present = set(payload)
     optional = present & INSTANCE_OPTIONAL_KEYS
     if present - optional != expected_keys or payload.get("schema") != INSTANCE_SCHEMA:
@@ -840,33 +722,21 @@ def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[
         raise PackError("unexpected-key")
     if "bearer" in expected_keys:
         _validate_bearer_reference(payload.get("bearer"))
+    if pack_id == "fleet-steward":
+        from .grokbot_fleet.contracts import FleetError
+        from .grokbot_fleet.retained_paths import validate_disjoint_state_paths
+
+        fields = ("runtime_path", "ledger_path", "action_state_path", "approval_dir")
+        if any(payload[key] is None for key in fields):
+            raise PackError("missing-path-reference")
+        try:
+            validate_disjoint_state_paths(*(str(payload[key]) for key in fields))
+        except FleetError as exc:
+            raise PackError("unsafe-path") from exc
     if pack["id"] == OPERATIONS_RELAY_PACK_ID:
         _operations_relay_owner_reference(payload.get("owner_workspace"))
-    elif pack["id"] == OBSIDIAN_PACK_ID:
-        _obsidian_path_references(
-            payload.get("runtime_path"),
-            payload.get("action_state_path"),
-            payload.get("approval_dir"),
-            payload.get("staging_dir"),
-            payload.get("excalidraw_bin"),
-        )
-        try:
-            grokbot_obsidian.required_upstream_url(payload.get("upstream_url"))
-        except grokbot_obsidian.ObsidianError as exc:
-            raise PackError("unsafe-path") from exc
-        _validate_bearer_reference(payload.get("upstream_key"))
-    elif pack["id"] in STEWARD_PACK_IDS:
-        _steward_path_references(
-            pack["id"],
-            payload.get("runtime_path"),
-            payload.get("ledger_path"),
-            payload.get("action_state_path"),
-            payload.get("approval_dir"),
-        )
     elif pack["id"] in DOT_FAMILY_PACK_IDS:
         _dot_runtime_reference(payload.get("runtime_path"), pack["id"])
-    elif pack["id"] == T3_DISPATCH_PACK_ID:
-        _t3_runtime_reference(payload.get("runtime_path"))
     return dict(payload)
 
 
@@ -907,16 +777,10 @@ def _validate_bearer_reference(reference: object) -> dict[str, str]:
 def _instance_keys(pack: Mapping[str, Any]) -> frozenset[str]:
     if pack["kind"] == "queue-role":
         return INSTANCE_KEYS
-    if pack["id"] == OBSIDIAN_PACK_ID:
-        return OBSIDIAN_INSTANCE_KEYS
     if pack["id"] == OPERATIONS_RELAY_PACK_ID:
         return OPERATIONS_RELAY_INSTANCE_KEYS
     if pack["id"] in DOT_FAMILY_PACK_IDS:
         return DOT_INSTANCE_KEYS
-    if pack["id"] == T3_DISPATCH_PACK_ID:
-        return T3_DISPATCH_INSTANCE_KEYS
-    if pack["id"] in STEWARD_PACK_IDS:
-        return FLEET_INSTANCE_KEYS
     raise PackError("unknown-pack")
 
 
@@ -936,81 +800,6 @@ def _dot_runtime_reference(runtime_path: object, pack_id: str = DOT_PACK_ID) -> 
         schema = dot.profile_for(pack_id).runtime_schema
         return dot.validate_runtime_reference(str(runtime_path), schema=schema)
     except dot.DotError as exc:
-        raise PackError("unsafe-path") from exc
-
-
-def _t3_runtime_reference(runtime_path: object) -> str:
-    if runtime_path is None:
-        raise PackError("missing-path-reference")
-    try:
-        return grokbot_t3.validate_runtime_reference(str(runtime_path))
-    except grokbot_t3.T3DispatchError as exc:
-        if exc.code == "unsupported-platform":
-            raise PackError(str(exc)) from exc
-        raise PackError("unsafe-path") from exc
-
-
-def _obsidian_upstream_references(
-    upstream_url: object,
-    upstream_key_env: str | None,
-    upstream_key_file: Path | None,
-    upstream_key: dict[str, Any] | None,
-) -> dict[str, Any]:
-    if upstream_url is None:
-        raise PackError("missing-upstream-reference")
-    try:
-        url = grokbot_obsidian.required_upstream_url(upstream_url)
-    except grokbot_obsidian.ObsidianError as exc:
-        raise PackError("unsafe-path") from exc
-    if upstream_key is not None:
-        if upstream_key_env is not None or upstream_key_file is not None:
-            raise PackError("missing-secret-reference")
-        reference = _validate_bearer_reference(upstream_key)
-    elif upstream_key_env is None and upstream_key_file is None:
-        raise PackError("missing-upstream-reference")
-    else:
-        reference = _bearer_reference(bearer_env=upstream_key_env, bearer_file=upstream_key_file, bearer=None)
-    return {"upstream_url": url, "upstream_key": reference}
-
-
-def _obsidian_path_references(
-    runtime_path: object,
-    action_state_path: object,
-    approval_dir: object,
-    staging_dir: object,
-    excalidraw_bin: object,
-) -> dict[str, str]:
-    if any(value is None for value in (runtime_path, action_state_path, approval_dir, staging_dir, excalidraw_bin)):
-        raise PackError("missing-path-reference")
-    try:
-        return grokbot_obsidian.validate_disjoint_state_paths(
-            str(runtime_path),
-            str(action_state_path),
-            str(approval_dir),
-            str(staging_dir),
-            str(excalidraw_bin),
-        )
-    except grokbot_obsidian.ObsidianError as exc:
-        raise PackError("unsafe-path") from exc
-
-
-def _steward_path_references(
-    pack_id: str,
-    runtime_path: object,
-    ledger_path: object,
-    action_state_path: object,
-    approval_dir: object,
-) -> dict[str, str]:
-    if any(value is None for value in (runtime_path, ledger_path, action_state_path, approval_dir)):
-        raise PackError("missing-path-reference")
-    try:
-        return grokbot_fleet.validate_disjoint_state_paths(
-            str(runtime_path),
-            str(ledger_path),
-            str(action_state_path),
-            str(approval_dir),
-        )
-    except grokbot_fleet.FleetError as exc:
         raise PackError("unsafe-path") from exc
 
 

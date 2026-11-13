@@ -333,7 +333,7 @@ Memory care archives eligible cards automatically and records every change with 
 
 ## Tending
 
-`brigade memory care tend` runs hub retries followed by retirement. Use `--stage hub` or `--stage retire` to select a stage, `--dry-run` to preview without writing, and `--json` for structured output. Successful CLI scans run tend afterwards. `memory care scan --no-tend` skips it once. Library scans remain read-only.
+`brigade memory care tend` runs hub retries, retirement and the review-inbox drain. Use `--stage hub`, `--stage retire` or `--stage inbox` to select a stage, `--dry-run` to preview without writing, and `--json` for structured output. CLI scans do not run automatic care or recover pending decisions. Use explicit `memory care tend` for those operations. `memory care scan --no-tend` remains accepted as a deprecated no-op. Library scans remain read-only.
 
 Workspace `.brigade/memory-care.toml` accepts:
 
@@ -352,6 +352,61 @@ Archive moves `memory/cards/x.md` to `memory/archive/cards/x.md`. Cards outside 
 `brigade memory care undo <decision-id>` restores the exact bytes and reinserts removed links without replacing unrelated index edits. It refuses when either card path changed after the decision. An occupied original path is never overwritten. The journal lives under `.brigade/memory-care/journal/` with owner-only before-images. In hub sync mode, published cards are retired and restored cards revived. Unavailable hub operations remain pending for retry. Local undo remains available. Hub revision conflicts enter the existing sync conflict path.
 
 To apply an external judgment, use `brigade memory care archive --from-file decisions.jsonl [--limit N]`. Each JSON line contains `card` (a target-relative card path) and a nonblank `reason`. The optional positive limit caps successful archives independently of the steady-state limit. Refused, missing, protected and duplicate cards are reported and skipped. Every accepted row uses the same archive journal and undo.
+
+
+### Review inbox
+
+Successful non-dry-run CLI ingest drains the review inbox. `ingest --no-tend` skips this
+once. `[tend] enabled = false` disables automatic care for the workspace. Ingest now
+takes the care lock and finishes or abandons pending care decisions. Library ingest
+keeps its existing behavior.
+
+| Disposition | Reason codes | Needs evidence-log proof | Action |
+|---|---|---|---|
+| Resolve | `document-content-present`, `document-anchor-present` | No. Read the destination to prove representation | Record already-applied and move to `memory/handoff-inbox/resolved/` |
+| Retry | `expected-sha-stale`, `expected-sha-mismatch`, `card-publication-changed`, `card-publication-busy`, `document-destination-unwritable` | Use the fresh outcome's per-code flag | Recheck with the original promotion and routing flags, once per run |
+| Retain | Injection, content-scan, contradiction, identity migration, collisions and unsafe destinations | Yes for contradiction candidates, otherwise no | Record a trust or security hold and leave the draft untouched |
+| Hold | Proposal notifications, near matches, invalid or missing fields, unapplied knowledge and unknown codes | Yes for near matches, reinforcement records and unknown codes, otherwise no | Leave untouched with a separate hold count and reason |
+| Expire | No current ingest codes qualify | No current codes | The deadline mechanism remains available for future codes that prove knowledge is represented elsewhere or carry nothing durable |
+
+An unsuccessful retry stays held when it contains unapplied knowledge. A later pull
+request in this plan will add background model judgment for held drafts. Every inspected
+draft gets a reason in the body-free report at `.brigade/memory-care/inbox/latest.json`.
+Reading that report is optional. Oversized destinations stay held. Invalid UTF-8,
+oversized drafts, unsafe paths, tracked review drafts and drafts without an unambiguous
+routing timestamp are skipped and reported. Malformed writer folders are inspected only
+within the target. Quarantine is never read. External writer roots are reported and
+skipped because the local journal cannot undo writes outside its target.
+
+An already-applied draft resolves only after a fresh read proves all proposed content is present in the destination. This proof works on any platform and does not depend on the evidence log. Review holds remain held even when evidence is available.
+
+A draft cited by the evidence log stays at its original path. A journaled row in
+`.brigade/memory-care/inbox-ledger.jsonl` removes it from pending work. If the evidence
+log cannot be read completely, outcomes needing evidence-log proof are held. Independent resolutions retain potentially cited drafts in place through the ledger. Undo restores
+the draft's pending state and any changed card or document. Card replacements require
+unchanged destination bytes. Appended blocks require an unchanged exact match. Machine
+logs stay append-only: undo appends a digest-addressed retraction, and readers omit
+withdrawn rows regardless of row order. Document undo matches its exact block under the
+same short lock used by Brigade document appenders, preserving later blocks. External
+editors do not take this lock, so their concurrent edits cannot be coordinated. A
+document-lock timeout leaves retries waiting. Plain ingest routes its original bytes
+into the review inbox.
+
+Retries prepare the journal and save before-images before writing a destination.
+Recovery uses the same prepare-then-finish protocol as card archives. Evidence, document
+and ledger bytes append after finish, with their path, length and digest recorded in the
+decision. Recovery recognizes a published block to avoid duplicate appends. Reprocessing
+keeps ingest's destination, identity, expected-SHA, injection and budget checks, and
+also honors memory-care read-only paths and archive pins. This drain changes local files
+only. Hub handoff rows remain outside this stage, and an unavailable hub cannot cause a
+hub-side inbox change.
+
+The drain also sweeps redundant before-images of abandoned decisions. A sweep requires
+an exact surviving copy at a recorded path, retains unique or unreadable images and
+restorable decisions, and records each removed path, size, digest and surviving live
+copy without saving another copy. These redundant images are not recoverable through
+undo. Orphan directories without readable decision metadata stay in place and are
+reported.
 
 
 ## Session-start and prompt recall (#466 Slice 1, #2196)

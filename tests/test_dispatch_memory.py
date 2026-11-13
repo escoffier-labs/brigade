@@ -15,9 +15,7 @@ from brigade import dispatch_memory, fleet_client_grokbot, grokbot_jobs
 from brigade import memory_hub_client as hubc
 from brigade.aboyeur import briefs
 from brigade.dot import contracts
-from brigade.grokbot_t3.tools import DISPATCH_HEADER
 from tests.test_grokbot_jobs import NOW, _spec
-from tests.test_grokbot_t3_tools import FakeRunner
 from tests.test_fleet_work_prepared_handoff_cli import hub  # noqa: F401 - the Worklore handoff fixture
 from tests.test_memory_hooks import _write_brigade_config
 
@@ -719,48 +717,13 @@ def test_a_worker_that_finishes_late_publishes_nothing(tmp_path, monkeypatch):
         assert not dispatch_memory._TWINS
 
 
-def test_no_block_leaves_every_dispatch_packet_unchanged(tmp_path, monkeypatch, make_tools):
+def test_no_block_leaves_shared_dispatch_packet_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatch_memory, "build", lambda *args, **kwargs: None)
     evidence = briefs.EvidenceBrief(attached=True, text="## evidence", bytes=11)
     assert briefs.with_memory_context(evidence, tmp_path, "task") is evidence
-    tools, runner = make_tools(memory=lambda prompt: dispatch_memory.connector_text(tmp_path, prompt))
-    tools.call_tool("t3_submit", {"repository": "brigade", "prompt": "Do it.", "title": "T", "caller": "Builder"})
-    assert runner.submits[0]["prompt"] == DISPATCH_HEADER.format(caller="Builder") + "Do it."
 
 
 # Packet builders
-
-
-@pytest.fixture
-def make_tools(tmp_path, t3_ledger_storage):
-    from brigade.grokbot_t3 import runtime_config as rc
-    from brigade.grokbot_t3.ledger import Ledger
-    from brigade.grokbot_t3.tools import T3DispatchTools
-    from tests.test_grokbot_t3_runtime import runtime_payload
-
-    def _make(**overrides):
-        memory = overrides.pop("memory", None)
-        runtime = rc.parse_runtime(runtime_payload(tmp_path / "t3", **overrides))
-        runner = FakeRunner()
-        tools = T3DispatchTools(runtime=runtime, runner=runner, ledger=Ledger(runtime.ledger_path), memory=memory)
-        return tools, runner
-
-    return _make
-
-
-def test_grokbot_t3_adapter_appends_a_connector_block(tmp_path, make_tools, hub_memory):
-    target = _private_hub(tmp_path, hub_memory)
-    tools, runner = make_tools(memory=lambda prompt: dispatch_memory.connector_text(target, prompt))
-
-    tools.call_tool(
-        "t3_submit", {"repository": "brigade", "prompt": "Fix the hub deploy.", "title": "T", "caller": "Bot"}
-    )
-
-    prompt = runner.submits[0]["prompt"]
-    assert prompt.startswith(DISPATCH_HEADER.format(caller="Bot") + "Fix the hub deploy.")
-    assert dispatch_memory.HEADING in prompt and "card_id: deploy-notes" in prompt
-    assert BODY_MARKER not in prompt
-    _assert_private_withheld(prompt)
 
 
 def test_aboyeur_prompts_carry_a_connector_block_even_on_a_local_capable_host(tmp_path, monkeypatch, hub_memory):

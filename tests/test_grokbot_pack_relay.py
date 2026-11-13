@@ -63,7 +63,24 @@ def _setup_stewards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Pa
     target.mkdir()
     owner = _owner(tmp_path / "owner")
     fleet_paths = _steward_paths(tmp_path / "fleet-state", "ledger.json")
-    grokbot_packs.apply_setup(target, "fleet-steward", bearer_env="TEST_GROKBOT_BEARER", **fleet_paths)
+    instance = grokbot_packs.instance_config_path(target, "fleet-steward")
+    instance.parent.mkdir(parents=True)
+    instance.write_text(
+        json.dumps(
+            {
+                "schema": grokbot_packs.INSTANCE_SCHEMA,
+                "pack_id": "fleet-steward",
+                "pack_version": "1.0.0",
+                "bind": "127.0.0.1:8771",
+                "allowed_hosts": [],
+                "allowed_origins": [],
+                "public_route": "",
+                "bearer": {"kind": "env", "name": "TEST_GROKBOT_BEARER"},
+                **{key: str(value) for key, value in fleet_paths.items()},
+            }
+        )
+    )
+    instance.chmod(0o600)
     FleetLedger(str(fleet_paths["ledger_path"])).ready()
     return target, owner, fleet_paths["ledger_path"]
 
@@ -458,3 +475,16 @@ def test_write_relay_units_rejects_service_symlink_with_force_before_either_writ
     assert service.readlink() == victim
     assert victim.read_text(encoding="utf-8") == original_target
     assert timer.read_text(encoding="utf-8") == original_timer
+
+
+def test_relay_refuses_retained_fleet_overlapping_paths(tmp_path, monkeypatch):
+    from brigade import grokbot_pack_relay
+
+    target, owner, _ledger = _setup_stewards(tmp_path, monkeypatch)
+    instance = grokbot_packs.instance_config_path(target, "fleet-steward")
+    payload = json.loads(instance.read_text())
+    payload["ledger_path"] = payload["runtime_path"]
+    instance.write_text(json.dumps(payload))
+    with pytest.raises(grokbot_pack_relay.PackRelayError) as caught:
+        grokbot_pack_relay.preview_relay(target, owner)
+    assert caught.value.reason == "unsafe-path"

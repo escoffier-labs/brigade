@@ -16,7 +16,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from brigade import grokbot_mcp, grokbot_ops, grokbot_packs
-from brigade.grokbot_t3.lifecycle import _write_rendered
+from brigade.dot.rendered_files import _write_rendered
 from brigade.isolated_exec import module_argv, trusted_cwd
 from . import contracts as c
 from . import access_auth

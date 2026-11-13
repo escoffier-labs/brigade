@@ -307,10 +307,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     serve_identity.add_argument(
         "--pack",
         choices=(
-            "fleet-steward",
-            "obsidian-operator",
             "operations-relay",
-            "t3-dispatch",
             "dot",
             "duet",
         ),
@@ -323,21 +320,6 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     secret_group = p_grokbot_serve.add_mutually_exclusive_group(required=False)
     secret_group.add_argument("--bearer-file", type=Path, help="Protected file containing the listener bearer.")
     secret_group.add_argument("--bearer-env", help="Environment variable name containing the listener bearer.")
-    p_grokbot_serve.add_argument(
-        "--upstream-url",
-        default=None,
-        help="Loopback HTTPS Local REST URL. Used by obsidian-operator.",
-    )
-    serve_upstream_key = p_grokbot_serve.add_mutually_exclusive_group()
-    serve_upstream_key.add_argument(
-        "--upstream-key-file",
-        type=Path,
-        help="Protected file containing the Obsidian upstream key (reference only).",
-    )
-    serve_upstream_key.add_argument(
-        "--upstream-key-env",
-        help="Environment variable name containing the Obsidian upstream key.",
-    )
 
     def add_client_id(command: argparse.ArgumentParser) -> None:
         command.add_argument(
@@ -416,52 +398,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         "--runtime-path",
         type=Path,
         default=None,
-        help="Absolute runtime JSON path. Required for fleet-steward, obsidian-operator, t3-dispatch, and dot.",
-    )
-    p_pack_setup.add_argument(
-        "--ledger-path",
-        type=Path,
-        default=None,
-        help="Absolute steward ledger path. Required for fleet-steward.",
-    )
-    p_pack_setup.add_argument(
-        "--action-state-path",
-        type=Path,
-        default=None,
-        help="Absolute action-state directory. Required for fleet-steward and obsidian-operator.",
-    )
-    p_pack_setup.add_argument(
-        "--approval-dir",
-        type=Path,
-        default=None,
-        help="Absolute approval directory. Required for fleet-steward and obsidian-operator.",
-    )
-    p_pack_setup.add_argument(
-        "--staging-dir",
-        type=Path,
-        default=None,
-        help="Absolute Obsidian staging directory. Required for obsidian-operator.",
-    )
-    p_pack_setup.add_argument(
-        "--excalidraw-bin",
-        type=Path,
-        default=None,
-        help="Absolute Excalidraw helper executable. Required for obsidian-operator.",
-    )
-    p_pack_setup.add_argument(
-        "--upstream-url",
-        default=None,
-        help="Loopback HTTPS Local REST URL. Required for obsidian-operator.",
-    )
-    pack_upstream_key = p_pack_setup.add_mutually_exclusive_group()
-    pack_upstream_key.add_argument(
-        "--upstream-key-file",
-        type=Path,
-        help="Path of a protected upstream-key file (reference only). Required for obsidian-operator.",
-    )
-    pack_upstream_key.add_argument(
-        "--upstream-key-env",
-        help="Name of the environment variable holding the upstream key. Required for obsidian-operator.",
+        help="Absolute runtime JSON path. Required for dot and duet.",
     )
     p_pack_setup.add_argument(
         "--owner",
@@ -1155,11 +1092,6 @@ def _dispatch_grokbot(args, target: Path) -> int:
             if getattr(args, "pack", None):
                 if args.client_id is not None:
                     raise grokbot_mcp.ConfigurationError("invalid")
-                if args.pack != "obsidian-operator" and (
-                    args.upstream_url or args.upstream_key_file or args.upstream_key_env
-                ):
-                    print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
-                    return 2
                 listener_kwargs = {
                     "bind": args.bind,
                     "allowed_hosts": args.allow_host,
@@ -1167,26 +1099,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                     "bearer_file": args.bearer_file,
                     "bearer_env": args.bearer_env,
                 }
-                if args.pack == "fleet-steward":
-                    from ..grokbot_fleet.lifecycle import (
-                        build_listener_from_target as build_fleet_listener,
-                        run_listener as run_fleet_listener,
-                    )
-
-                    fleet_config, fleet_tools = build_fleet_listener(target, **listener_kwargs)
-                    run_fleet_listener(fleet_config, fleet_tools)
-                elif args.pack == "obsidian-operator":
-                    from ..grokbot_obsidian.lifecycle import (
-                        build_listener_from_target as build_obsidian_listener,
-                        run_listener as run_obsidian_listener,
-                    )
-
-                    listener_kwargs["upstream_url"] = args.upstream_url
-                    listener_kwargs["upstream_key_file"] = args.upstream_key_file
-                    listener_kwargs["upstream_key_env"] = args.upstream_key_env
-                    obsidian_config, obsidian_tools = build_obsidian_listener(target, **listener_kwargs)
-                    run_obsidian_listener(obsidian_config, obsidian_tools)
-                elif args.pack == "operations-relay":
+                if args.pack == "operations-relay":
                     from .. import grokbot_operations_relay
 
                     operations_config, operations_tools = grokbot_operations_relay.build_listener_from_target(
@@ -1206,11 +1119,6 @@ def _dispatch_grokbot(args, target: Path) -> int:
                         **({} if args.pack == "dot" else {"pack_id": args.pack}),
                     )
                     dot.run_listener(dot_config, dot_tools, dot_runtime)
-                elif args.pack == "t3-dispatch":
-                    from .. import grokbot_t3
-
-                    t3_config, t3_tools = grokbot_t3.build_listener_from_target(target, **listener_kwargs)
-                    grokbot_t3.run_listener(t3_config, t3_tools)
                 else:
                     # A pack added to the choices without its own branch must not serve another pack's tools.
                     raise grokbot_mcp.ConfigurationError("invalid")
@@ -1234,25 +1142,16 @@ def _dispatch_grokbot(args, target: Path) -> int:
             return 2
         except Exception as exc:
             from .. import (
-                grokbot_fleet,
-                grokbot_obsidian,
                 grokbot_operations_relay,
                 grokbot_packs,
-                grokbot_t3,
                 dot,
             )
 
-            if isinstance(exc, grokbot_t3.T3DispatchError) and exc.code == "unsupported-platform":
-                print(f"error: {exc}", file=sys.stderr)
-                return 2
             if isinstance(
                 exc,
                 (
-                    grokbot_fleet.FleetError,
-                    grokbot_obsidian.ObsidianError,
                     grokbot_operations_relay.OperationsRelayError,
                     grokbot_packs.PackError,
-                    grokbot_t3.T3DispatchError,
                     dot.DotError,
                 ),
             ):
@@ -1614,14 +1513,6 @@ def _dispatch_grokbot_pack(args, target: Path) -> int:
                 "bearer_env": args.bearer_env,
                 "bearer_file": args.bearer_file,
                 "runtime_path": getattr(args, "runtime_path", None),
-                "ledger_path": getattr(args, "ledger_path", None),
-                "action_state_path": getattr(args, "action_state_path", None),
-                "approval_dir": getattr(args, "approval_dir", None),
-                "staging_dir": getattr(args, "staging_dir", None),
-                "excalidraw_bin": getattr(args, "excalidraw_bin", None),
-                "upstream_url": getattr(args, "upstream_url", None),
-                "upstream_key_env": getattr(args, "upstream_key_env", None),
-                "upstream_key_file": getattr(args, "upstream_key_file", None),
                 "owner_workspace": getattr(args, "owner_workspace", None),
             }
             result = (

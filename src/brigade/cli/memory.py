@@ -80,13 +80,15 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
     )
     p_memory_care_scan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_memory_care_scan.add_argument("--no-tend", action="store_true", help="Skip automatic care.")
+    p_memory_care_scan.add_argument(
+        "--no-tend", action="store_true", help="Deprecated no-op. Scan does not run automatic care."
+    )
     for name in ("tend", "undo", "archive"):
         command = memory_care_sub.add_parser(name, help=f"Memory care {name}.")
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true")
         if name == "tend":
-            command.add_argument("--stage", action="append", choices=("hub", "retire"))
+            command.add_argument("--stage", action="append", choices=("hub", "retire", "inbox"))
             command.add_argument("--dry-run", action="store_true")
         elif name == "undo":
             command.add_argument("decision_id")
@@ -596,12 +598,7 @@ def dispatch(args) -> int:
 
             return memory_care_tend.dispatch(args)
         if args.memory_care_command == "scan":
-            result = memory_cmd.scan(target=args.target, json_output=args.json)
-            if result == 0 and not args.no_tend:
-                from .. import memory_care_tend
-
-                memory_care_tend.after_command(args.target)
-            return result
+            return memory_cmd.scan(target=args.target, json_output=args.json)
         if args.memory_care_command == "backfill":
             return memory_cmd.backfill(target=args.target, apply=args.apply, json_output=args.json)
         if args.memory_care_command == "plan-fixes":
