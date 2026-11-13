@@ -132,11 +132,12 @@ import sys
 try:
     with open(sys.argv[1], encoding="utf-8") as config_file:
         config = json.load(config_file)
-    # An unsupported config version is invalid, so it resolves to engineer.
+    # An unsupported config version is invalid, so it resolves to strict.
     work = config.get("work") if config.get("version") == 1 else None
 except (AttributeError, OSError, TypeError, ValueError):
     work = None
-print(work.get("mode") if isinstance(work, dict) and work.get("mode") == "yolo" else "engineer")
+mode = work.get("mode") if isinstance(work, dict) else None
+print("off" if mode in ("off", "yolo") else "observe" if mode == "observe" else "strict")
 PY
 )"
 
@@ -218,7 +219,7 @@ close_out_work() {
   if has_new_receipt; then
     "$brigade_bin" receipts export evidence --target "$target" --new-only --import >>"$log_file" 2>&1 || true
     rm -f "$state_dir/substantive" "$state_dir/friction.reported"
-  elif [[ "$work_mode" == "yolo" ]]; then
+  elif [[ "$work_mode" != "strict" ]]; then
     rm -f "$state_dir/substantive"
   elif [[ ! -f "$state_dir/friction.reported" ]]; then
     "$brigade_bin" friction add --target "$target" --type workflow_correction --severity high --workflow grok/brigade-work --evidence "grok-session:$session_id" "Grok session $session_id ended after edits without a new Brigade verify receipt" >>"$log_file" 2>&1 || true
@@ -246,7 +247,7 @@ case "$event" in
       if is_direct_brigade_status; then
         allow
       fi
-      if [[ "$work_mode" != "yolo" ]] && ! is_direct_brigade_verification && is_raw_verification; then
+      if [[ "$work_mode" == "strict" ]] && ! is_direct_brigade_verification && is_raw_verification; then
         deny "This repository is Brigade-wired. Run the check through: brigade work verify run --target . --command \"<test command>\" --capture brigade-work"
       fi
     fi

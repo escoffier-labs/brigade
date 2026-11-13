@@ -201,31 +201,37 @@ def test_session_start_uses_portable_bounded_brief_runner(tmp_path: Path):
     assert 'timeout "$brief_timeout_seconds"' not in HOOK.read_text()
 
 
-def test_yolo_mode_allows_raw_verification_and_engineer_still_denies(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("mode", "decision"),
+    [
+        ("off", "allow"),
+        ("yolo", "allow"),
+        ("observe", "allow"),
+        ("strict", "deny"),
+        ("engineer", "deny"),
+        ("enforced", "deny"),
+        (None, "deny"),
+    ],
+)
+def test_unenforced_modes_allow_raw_verification_and_strict_denies(tmp_path: Path, mode, decision):
     target = tmp_path / "repo"
     _write_config(target, ["grok"])
     config_path = target / ".brigade" / "config.json"
     config = json.loads(config_path.read_text())
-    config_path.write_text(json.dumps({**config, "work": {"mode": "yolo"}}))
-
-    yolo = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
+    if mode is not None:
+        config["work"] = {"mode": mode}
     config_path.write_text(json.dumps(config))
-    engineer = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
-    # The legacy name for engineer mode keeps the deny too.
-    config_path.write_text(json.dumps({**config, "work": {"mode": "enforced"}}))
-    legacy = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
-
-    assert json.loads(yolo.stdout) == {"decision": "allow"}
-    assert json.loads(engineer.stdout)["decision"] == "deny"
-    assert json.loads(legacy.stdout)["decision"] == "deny"
+    result = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
+    assert json.loads(result.stdout)["decision"] == decision
 
 
-def test_yolo_ignored_for_unsupported_config_version(tmp_path: Path):
+@pytest.mark.parametrize("mode", ["yolo", "off", "observe"])
+def test_yolo_ignored_for_unsupported_config_version(tmp_path: Path, mode):
     target = tmp_path / "repo"
     _write_config(target, ["grok"])
     config_path = target / ".brigade" / "config.json"
     config = json.loads(config_path.read_text())
-    config_path.write_text(json.dumps({**config, "version": 2, "work": {"mode": "yolo"}}))
+    config_path.write_text(json.dumps({**config, "version": 2, "work": {"mode": mode}}))
 
     result = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
 

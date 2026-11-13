@@ -2,11 +2,11 @@
 
 The two settings are independent and live in different places:
 
-- ``work.mode`` in ``.brigade/config.json``: ``engineer`` (default) keeps the
+- ``work.mode`` in ``.brigade/config.json``: ``strict`` (default) keeps the
   verification loop: hooks route raw checks through ``brigade work verify run``
-  and the Stop gate wants a receipt. ``yolo`` keeps shared context (brief,
+  and the Stop gate wants a receipt. ``off`` keeps shared context (brief,
   recall, Fleet Hub messages, handoffs on request) and drops verification
-  enforcement. Leak checks are unaffected, so a committed yolo setting is an
+  enforcement. Leak checks are unaffected, so a committed off setting is an
   acceptable repository choice.
 - Safety rails: on by default. They keep the content guard, secret and
   credential scanning, and pre-push publication checks. The opt-out lives only
@@ -16,7 +16,7 @@ The two settings are independent and live in different places:
   Guard policies and baselines are never touched.
 
 Every hook adapter reads the settings through this module. Readers fail safe:
-an unreadable or invalid config resolves to ``engineer``, and an unreadable or
+an unreadable or invalid config resolves to ``strict``, and an unreadable or
 invalid rails record leaves rails ``on``.
 """
 
@@ -34,7 +34,7 @@ from typing import Any
 from . import component_paths, localio
 from .config import (
     CONFIG_REL_PATH,
-    DEFAULT_WORK_MODE,
+    ABSENT_WORK_MODE,
     LEGACY_WORKSPACE_DIRNAMES,
     SUPPORTED_VERSIONS,
     WORK_MODES,
@@ -43,8 +43,9 @@ from .config import (
     write_config,
 )
 
-MODE_ENGINEER = "engineer"
-MODE_YOLO = "yolo"
+MODE_STRICT = "strict"
+MODE_OBSERVE = "observe"
+MODE_OFF = "off"
 RAILS_STATES = ("on", "off")
 # Exit status of `brigade work rails check` when rails are off for the target.
 RAILS_OFF_EXIT = 3
@@ -73,7 +74,7 @@ def _work_settings_with_source(target: Path) -> tuple[dict[str, Any], Path | Non
         except (OSError, ValueError):
             return {}, path
         # Match load_config: a config with an unsupported version is invalid, so its
-        # settings must not switch anything off (engineer, rails on).
+        # settings must not switch anything off (strict, rails on).
         if not isinstance(data, dict) or data.get("version") not in SUPPORTED_VERSIONS:
             return {}, path
         work = data.get("work")
@@ -86,15 +87,45 @@ def _work_settings(target: Path) -> dict[str, Any]:
 
 
 def resolve_mode(target: Path) -> str:
-    """Return the persisted work mode, or ``engineer`` when unset or unreadable."""
+    """Return the persisted work mode, or ``strict`` when unset or unreadable."""
     try:
-        return validate_work_mode(_work_settings(target).get("mode", DEFAULT_WORK_MODE))
+        return validate_work_mode(_work_settings(target).get("mode", ABSENT_WORK_MODE))
     except ValueError:
-        return MODE_ENGINEER
+        return MODE_STRICT
 
 
-def is_yolo(target: Path) -> bool:
-    return resolve_mode(target) == MODE_YOLO
+def is_strict(target: Path) -> bool:
+    return resolve_mode(target) == MODE_STRICT
+
+
+def is_observe(target: Path) -> bool:
+    return resolve_mode(target) == MODE_OBSERVE
+
+
+def pin_explicit_mode(target: Path) -> str | None:
+    """Pin a readable, untracked keyless config without changing its behavior."""
+    _, path = _work_settings_with_source(target)
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("version") not in SUPPORTED_VERSIONS:
+            return None
+        work = data.get("work", {})
+        if not isinstance(work, dict) or "mode" in work:
+            return None
+        tracked = subprocess.run(
+            ["git", "-C", str(target), "ls-files", "--error-unmatch", path.relative_to(target).as_posix()],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if tracked.returncode == 0:
+        return None
+    mode = resolve_mode(target)
+    return mode if _update(target, work_mode=mode) is None else None
 
 
 def _case_insensitive_paths() -> bool:
@@ -302,21 +333,25 @@ def pre_push_hook_gated(target: Path) -> bool | None:
 def doctor_checks(target: Path) -> list[tuple[str, str, str]]:
     """Doctor rows that state the mode and rails plainly."""
     mode = resolve_mode(target)
-    if mode == MODE_YOLO:
+    if mode == MODE_OFF:
         mode_detail = (
-            "yolo: shared context stays on (brief, recall, Fleet Hub, handoffs on request); "
+            "off: shared context stays on (brief, recall, Fleet Hub, handoffs on request); "
             "verification is not enforced and missing receipts are not reported; "
-            "`brigade work mode set engineer` restores the loop"
+            "`brigade work mode set strict` restores the loop"
         )
+    elif mode == MODE_OBSERVE:
+        mode_detail = "observe: checks are recorded, nothing is blocked"
     else:
-        mode_detail = "engineer: checks route through `brigade work verify run` and the Stop gate wants a receipt"
+        mode_detail = "strict: checks route through `brigade work verify run` and the Stop gate wants a receipt"
     checks = [("INFO", "work mode", mode_detail)]
     settings = _work_settings(target)
     if "mode" in settings:
         try:
             validate_work_mode(settings["mode"])
         except ValueError:
-            checks.append(("WARN", "work.mode", "invalid value ignored; using the engineer default"))
+            checks.append(("WARN", "work.mode", "invalid value ignored; using strict"))
+    if "mode" not in settings:
+        checks.append(("INFO", "work.mode", "unpinned; use `brigade work mode set strict` to pin it"))
     ignored = ignored_repo_rails_note(target)
     if ignored is not None:
         checks.append(("WARN", "work.rails", ignored))

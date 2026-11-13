@@ -344,6 +344,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     del handoff_drafts_full
     from ... import brief_sections, work_mode
 
+    work_mode.pin_explicit_mode(target)
     work = work_mode.summary(target)
     return {
         "target": str(target),

@@ -111,15 +111,14 @@ def register(sub: argparse._SubParsersAction) -> None:
             )
     p_work_mode = work_sub.add_parser(
         "mode",
-        help="Show or set the work-loop mode: engineer (default, verification on) or yolo (no verification enforcement).",
+        help="Show or set the work-loop mode: strict (default), observe or off. Aliases: engineer/enforced=strict, yolo=off.",
     )
     mode_sub = p_work_mode.add_subparsers(dest="mode_command", metavar="<mode-command>")
     mode_sub.required = True
     p_mode_show = mode_sub.add_parser("show", help="Print the work mode and safety-rails state.")
     p_mode_set = mode_sub.add_parser("set", help="Persist the work mode and reconcile managed Claude hooks.")
-    # No argparse choices: set_mode validates and also accepts "enforced", the earlier
-    # name for engineer, without listing it in help or invalid-choice errors.
-    p_mode_set.add_argument("mode", metavar="{engineer,yolo}")
+    # No argparse choices: set_mode accepts legacy aliases and lists canonical names.
+    p_mode_set.add_argument("mode", metavar="{strict,observe,off}")
     p_work_rails = work_sub.add_parser(
         "rails", help="Show or switch safety rails (content guard and pre-push scanning); independent of the mode."
     )

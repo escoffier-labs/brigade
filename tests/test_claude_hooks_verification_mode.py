@@ -125,7 +125,7 @@ def test_a_cd_outside_a_plain_and_chain_never_promotes_an_enforced_start(repos, 
     # Each shape can run a check outside the cd destination: a skipped or failed cd, a
     # backgrounded list, a substitution, or a control structure. So none may count as yolo.
     command = template.format(yolo=_sh(repos["yolo"]), enforced=_sh(repos["enforced"]))
-    assert not verification_mode.verification_in_yolo(command, str(repos["enforced"]), repos["enforced"])
+    assert verification_mode.verification_enforced(command, str(repos["enforced"]), repos["enforced"])
     assert _denied(_bash("PreToolUse", repos["enforced"], command))
 
 
@@ -187,11 +187,22 @@ def test_a_workspace_subcommand_is_a_directory_override() -> None:
 
 def test_every_verification_in_a_command_must_be_yolo(repos) -> None:
     into_enforced = f"cd {_sh(repos['enforced'])} && pytest -q && ruff check ."
-    assert not verification_mode.verification_in_yolo(into_enforced, str(repos["yolo"]), repos["yolo"])
+    assert verification_mode.verification_enforced(into_enforced, str(repos["yolo"]), repos["yolo"])
     into_yolo = f"cd {_sh(repos['yolo'])} && pytest -q && ruff check ."
-    assert verification_mode.verification_in_yolo(into_yolo, str(repos["enforced"]), repos["enforced"])
+    assert not verification_mode.verification_enforced(into_yolo, str(repos["enforced"]), repos["enforced"])
 
 
 def test_missing_cwd_falls_back_to_the_handled_root(repos) -> None:
-    assert verification_mode.verification_in_yolo("pytest -q", None, repos["yolo"])
-    assert not verification_mode.verification_in_yolo("pytest -q", None, repos["enforced"])
+    assert not verification_mode.verification_enforced("pytest -q", None, repos["yolo"])
+    assert verification_mode.verification_enforced("pytest -q", None, repos["enforced"])
+
+
+def test_observe_repo_cd_into_strict_repo_is_denied(repos, capsys):
+    observed = _wired(repos["enforced"] / "observed", "observe", capsys)
+    assert _denied(_bash("PreToolUse", observed, f"cd {_sh(repos['enforced'])} && pytest -q"))
+    assert not _denied(_bash("PreToolUse", repos["enforced"], "cd ./observed && pytest -q"))
+    command = "pytest && cd ./observed && pytest"
+    assert verification_mode.governing_modes(command, repos["enforced"], repos["enforced"]) == [
+        (repos["enforced"], "strict"),
+        (observed, "observe"),
+    ]
