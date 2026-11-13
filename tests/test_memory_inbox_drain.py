@@ -79,33 +79,25 @@ def test_deadline_dry_run_and_relative_target(tmp_path, monkeypatch, unsupported
     target = tmp_path / "ws"
     path = draft(target, "synthetic-expirable", age=13)
     monkeypatch.chdir(tmp_path)
-    assert (
-        drain.drain(
-            Path("ws"), today=TODAY, deadline_days=14, classifications={"synthetic-expirable": ("expire", False)}
-        )["waiting"]
-        == 1
-    )
     from datetime import timedelta
 
-    later = TODAY + timedelta(days=2)
-    assert (
-        drain.drain(
+    counts = ("resolved", "retried", "expired", "kept_for_person", "held", "waiting", "skipped")
+    for today, expected in ((TODAY, "waiting"), (TODAY + timedelta(days=2), "expired")):
+        preview = drain.drain(
             Path("ws"),
-            today=later,
+            today=today,
             deadline_days=14,
             dry_run=True,
             classifications={"synthetic-expirable": ("expire", False)},
-        )["expired"]
-        == 1
-    )
-    assert path.exists()
-    assert (
-        drain.drain(
-            Path("ws"), today=later, deadline_days=14, classifications={"synthetic-expirable": ("expire", False)}
-        )["expired"]
-        == 1
-    )
-    assert not path.exists()
+        )
+        assert path.exists()
+        real = drain.drain(
+            Path("ws"), today=today, deadline_days=14, classifications={"synthetic-expirable": ("expire", False)}
+        )
+        assert preview[expected] == real[expected] == 1
+        assert {key: preview[key] for key in counts} == {key: real[key] for key in counts}
+        assert [row["reason"] for row in preview["decisions"]] == [row["reason"] for row in real["decisions"]]
+        assert path.exists() == (expected == "waiting")
 
 
 def test_unsafe_inputs_are_skipped_and_reported(tmp_path):
