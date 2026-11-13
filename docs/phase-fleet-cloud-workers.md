@@ -142,7 +142,17 @@ in paths, all `.github/` changes, Git attributes and submodules, CODEOWNERS,
 credentials, hook framework configuration and non-regular files. Git commands
 use absolute tool paths, sanitized control variables, disabled filters,
 textconv, signing and fsmonitor, and an isolated hooks directory containing only the
-operator-installed content-guard pre-push guard. Git credentials use only the trusted `gh auth git-credential` helper.
+operator-installed content-guard pre-push guard. For `https://github.com`,
+`land` accepts `!gh auth git-credential` in the operator's global Git config,
+or `!/path/to/helper auth git-credential` when that absolute path resolves to
+the trusted `gh` executable. It also accepts one custom helper written as a
+bare absolute path such as `/path/to/helper`, with no leading `!` and no
+arguments. The custom helper must be a regular executable file owned by root
+or the operator. Every ancestor directory must be owned by root or the
+operator and must not be writable by group or others. Any other form refuses
+with `unsafe-git-config`. The usual fixes are to write a custom helper as a
+bare absolute path and to remove group and other write permission from its
+directories.
 Editors, pagers, SSH commands, merge drivers and configured filter commands are
 neutralized. That guard must be configured
 in an absolute global `core.hooksPath` outside the target repository.
@@ -163,7 +173,7 @@ prepared commit for retry. Registry updates compare the entry id and revision
 under a short lock, while a task-specific lock prevents concurrent landings.
 
 Named refusals include `task-not-ready`, `protected-policy-path`, `credential-path`,
-`apply-conflict`, `guard-failed` and `pr-body-lint-failed`. A `push-failed` refusal
+`unsafe-git-config`, `apply-conflict`, `guard-failed` and `pr-body-lint-failed`. A `push-failed` refusal
 includes one reason class: `guard-refused`, `auth`, `network` or `rejected`.
 Hook output and proposal content are never included in that refusal.
 
