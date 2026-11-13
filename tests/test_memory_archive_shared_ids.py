@@ -754,9 +754,12 @@ def test_retry_reads_again_after_a_hub_write(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sync, "_local_cards", count_cards)
     hub.retry_pending(tmp_path)
-    # The first decision is settled by the queued second one, whose handover re-reads the cards before it sends.
+    # The first decision waits for the queued second one, whose handover re-reads the cards before it sends.
     assert reads["cards"] >= 2
     assert shared_text(fake) == text_of(tmp_path, C)
+    assert len(sent(fake, "put")) == 1
+    assert final(tmp_path, first)["status"] == "skipped"
+    hub.retry_pending(tmp_path)
     assert len(sent(fake, "put")) == 1
     assert final(tmp_path, first)["status"] == "superseded"
 
@@ -794,7 +797,46 @@ def test_two_archives_queued_offline_send_one_retire_and_no_conflict(tmp_path, m
     assert not sent(fake, "put")
     assert result["stages"]["hub"]["conflict"] == 0
     assert final(tmp_path, second)["status"] == "done"
+    # The earlier decision waited, unchanged, and is closed only once the later write is done.
+    assert final(tmp_path, first)["status"] == "pending"
+    fake.calls.clear()
+    tend.run(tmp_path, stages=["hub"])
+    assert not quiet(fake)
     assert (final(tmp_path, first)["status"], final(tmp_path, first)["reason"]) == ("superseded", "later-archive")
+
+
+def test_earlier_decision_repairs_when_the_queued_later_archive_ends_without_writing(tmp_path, monkeypatch):
+    fake = two_cards(tmp_path, monkeypatch)
+    fake.unavailable = True
+    first = move(tmp_path, A)
+    second = move(tmp_path, B)
+    # B is put back by hand, with no undo in the journal.
+    card(tmp_path, B, "B text")
+    fake.unavailable = False
+    fake.calls.clear()
+    tend.run(tmp_path, stages=["hub"])
+    assert (final(tmp_path, second)["status"], final(tmp_path, second)["reason"]) == ("superseded", "source-active")
+    # Rule: the earlier decision was not closed while the later one was only queued, so it still repairs.
+    assert final(tmp_path, first)["status"] == "pending"
+    tend.run(tmp_path, stages=["hub"])
+    assert shared_text(fake) == text_of(tmp_path, B)
+    assert not sent(fake, "retire")
+    assert (final(tmp_path, first)["status"], final(tmp_path, first)["action"]) == ("done", "handover")
+    assert record(tmp_path, fake)["path"] == B
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink"])
+def test_named_path_that_is_not_a_plain_file_keeps_the_record_without_error(tmp_path, monkeypatch, kind):
+    fake = three_cards(tmp_path, monkeypatch)
+    (tmp_path / A).unlink()
+    if kind == "directory":
+        (tmp_path / A).mkdir()
+    else:
+        (tmp_path / A).symlink_to(tmp_path / C)
+    d = move(tmp_path, B)
+    # Rule: something is at the named path, so the record is not orphaned; nothing is read and nothing stays queued.
+    assert (d.hub["status"], d.hub["reason"]) == ("skipped", "card-id-collision")
+    assert not quiet(fake)
 
 
 @pytest.mark.parametrize("front", ["card_id: elsewhere\n", "card_id: old\nvisibility: private\n"])

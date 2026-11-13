@@ -45,15 +45,18 @@ class _Snapshot:
         self._phase.clear()
 
 
-def _later_archive(snap: _Snapshot, decision: journal.Decision, path: str) -> bool:
-    """A later archive of this id that already settles the hub copy for this decision.
+def _later_archive(snap: _Snapshot, decision: journal.Decision, path: str) -> str:
+    """How a later archive of this id bears on this decision: "settled", "queued" or "".
 
-    The same file archived again always does. Another file sharing the id does
-    once its own hub write is done or queued and its archive still stands: it
-    was decided with fewer holders, so it carries the write, and sending both
-    would make the second one a stale-base conflict. A skipped or undone archive
-    of a different file says nothing about this one.
+    The same file archived again always settles it. Another file sharing the id
+    settles it once its own hub write is done and its archive still stands.
+    While that write is only queued this decision waits, unchanged: the later
+    one was decided with fewer holders and carries the write, sending both would
+    refuse the second as stale, and closing this one early would leave nothing
+    to repair the hub copy if the later one ends without writing. A skipped or
+    undone archive of a different file says nothing about this one.
     """
+    queued = False
     for later in snap.decisions():
         if (
             later.card_id != decision.card_id
@@ -63,10 +66,12 @@ def _later_archive(snap: _Snapshot, decision: journal.Decision, path: str) -> bo
         ):
             continue
         if not path or path in later.paths:
-            return True
-        if (later.hub or {}).get("status") in ("done", "pending") and not later.undone_by:
-            return True
-    return False
+            return "settled"
+        status = (later.hub or {}).get("status")
+        if status == "done" and not later.undone_by:
+            return "settled"
+        queued = queued or (status == "pending" and not later.undone_by)
+    return "queued" if queued else ""
 
 
 def _replay_state(target: Path, decision: journal.Decision, snap: _Snapshot | None = None) -> dict[str, str]:
@@ -75,8 +80,11 @@ def _replay_state(target: Path, decision: journal.Decision, snap: _Snapshot | No
     hub = decision.hub or {}
     path = str(hub.get("path") or "")
     decisions = snap.decisions()
-    if _later_archive(snap, decision, path):
+    later = _later_archive(snap, decision, path)
+    if later == "settled":
         return {"status": "superseded", "reason": "later-archive"}
+    if later == "queued":
+        return {"status": "deferred", "reason": "later-archive-queued"}
     try:
         live = journal.current(target, path)
         if hub.get("action") == "put":
@@ -121,6 +129,15 @@ def _holders(target: Path, card_id: str, path: str, cards: list[dict[str, Any]] 
         for card in (sync._local_cards(target) if cards is None else cards)
         if card["card_id"] == card_id and card["rel"] != path and not card["private"]
     ]
+
+
+def _on_disk(target: Path, rel: str) -> bool:
+    """Something is at the record's named path. Nothing is read, and a path that cannot be judged counts as present."""
+    try:
+        named = target / rel
+        return named.is_symlink() or named.exists()
+    except OSError:
+        return True
 
 
 _WRITES = ("retire", "put", "handover")
@@ -226,7 +243,7 @@ def _ownership(
         if holders:
             named = str(base.get("path") or "") if base is not None else ""
             # Absence is read from the named file itself, never from its missing among the holders.
-            owner_gone = base is not None and (not named or named == path or journal.current(target, named) is None)
+            owner_gone = base is not None and (not named or named == path or not _on_disk(target, named))
             if len(holders) != 1 or not owner_gone:
                 return "collision"
         if base is not None:
@@ -299,6 +316,9 @@ def _send(
             }
         if decision is not None:
             verdict = _replay_state(target, decision, snap)
+            if verdict["status"] == "deferred":
+                # Waiting on a later queued archive: the decision keeps the result it has.
+                return dict(decision.hub or pending)
             if verdict["status"] != "send":
                 return {**pending, **verdict}
         with store.locked(target):
@@ -321,6 +341,8 @@ def _send(
             if ownership == "handover":
                 # This put sends another card's text: read the cards again under the lock,
                 # so a holder edited or made private since the snapshot is judged as it is now.
+                # The lock covers hub state, not card files: an edit after this read is sent
+                # as read, and the regular sync republishes the holder because its hash differs.
                 holders = _holders(target, card_id, path)
                 ownership = _ownership(
                     target,
@@ -502,6 +524,9 @@ def retry_pending(target: Path) -> dict[str, Any]:
         if hub.get("status") != "pending":
             continue
         verdict = _replay_state(target, d, snap)
+        if verdict["status"] == "deferred":
+            counts["pending"] += 1
+            continue
         if verdict["status"] != "send":
             journal.update_hub(target, d.decision_id, {**hub, **verdict})
             snap.refresh()
