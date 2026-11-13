@@ -720,3 +720,30 @@ def test_cleanup_reclaims_an_already_absent_target(tmp_path):
     assert payload["removed"] == []
     assert payload["skipped"] == preview["skipped"]
     assert json.loads(state_path.read_text())["created_targets"] == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Connector setup preview loads a Linux-only private runtime")
+def test_hub_connector_offline_preview(dot_private_dir):
+    root = dot_private_dir.parent / "helper-state"
+    code, created = control("new-target", "--depth", "repo", "--harnesses", "claude", root=root)
+    assert code == 0, created
+    target = created["target"]
+    try:
+        code, result = control(
+            "hub-connector",
+            "--target",
+            target,
+            root=root,
+            env_extra={"BRIGADE_HOME": "invalid-relative-home"},
+        )
+        assert code == 0, result
+        assert result["ok"]
+        assert (
+            result["list"]["returncode"]
+            == result["preview"]["returncode"]
+            == result["token_preview"]["returncode"]
+            == 0
+        )
+        assert not (Path(target) / ".brigade/connectors/cloud-agent/instance.json").exists()
+    finally:
+        control("cleanup", root=root)

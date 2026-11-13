@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import inspect
 import json
-import os
 import re
-import stat
 import sys
 import urllib.error
 import urllib.request
@@ -28,6 +26,19 @@ from . import (
     grokbot_ops,
     grokbot_t3,
     dot,
+)
+
+from .dot.connector_files import (
+    PackError,
+    _assert_config_destination_safe,
+    _assert_removable,
+    _exists_or_link,
+    _is_relative_to,
+    _matches_regular_file_snapshot,
+    _owned_unit_dir,
+    _parse_version,
+    _restore_regular_file,
+    _snapshot_regular_file,
 )
 
 PACK_SCHEMA = "brigade.grokbot.connector-pack.v1"
@@ -111,14 +122,6 @@ VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 PACK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 PUBLIC_ROUTE_RE = re.compile(r"^$|^/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*$")
 SECRET_BEARER_KEYS = frozenset({"value", "token", "secret", "password", "bearer"})
-
-
-class PackError(ValueError):
-    """A rejected pack registry or lifecycle request."""
-
-    def __init__(self, reason: str):
-        self.reason = reason
-        super().__init__(reason)
 
 
 def _queue_pack(instance: str) -> dict[str, Any]:
@@ -387,7 +390,9 @@ def render_install_service(target: Path, pack_id: str) -> str:
         if pack["id"] == OPERATIONS_RELAY_PACK_ID:
             return grokbot_operations_relay.render_unit(target, python=sys.executable)
         if pack["id"] in DOT_FAMILY_PACK_IDS:
-            return dot.render_unit(target, python=sys.executable, **_profile_kwargs(pack["id"]))
+            if pack["id"] == DOT_PACK_ID:
+                return dot.render_unit(target, python=sys.executable)
+            return dot.render_unit(target, python=sys.executable, pack_id=pack["id"])
         if pack["id"] == T3_DISPATCH_PACK_ID:
             return grokbot_t3.render_unit(target, python=sys.executable)
         raise PackError("unknown-pack")
@@ -701,107 +706,6 @@ def _removal_paths(target: Path, pack: Mapping[str, Any], unit_dir: Path | None)
     return paths
 
 
-def _owned_unit_dir(unit_dir: Path, instance: str) -> bool:
-    if unit_dir.is_symlink() or not unit_dir.is_dir():
-        return False
-    unit = unit_dir / grokbot_ops.unit_name(instance)
-    return unit.is_file() and not unit.is_symlink()
-
-
-def _assert_removable(path: Path, *, config_file: bool) -> None:
-    if grokbot_ops._path_is_symlink(path) or path.is_symlink():
-        raise PackError("symlink")
-    try:
-        info = path.lstat()
-    except OSError as exc:
-        raise PackError("unsafe-path") from exc
-    if not stat.S_ISREG(info.st_mode):
-        raise PackError("unsafe-path")
-    if config_file and stat.S_IMODE(info.st_mode) & 0o077:
-        raise PackError("unsafe-permissions")
-    parent = -1
-    try:
-        parent = grokbot_ops._open_parent_nofollow(path, create=False)
-    except OSError as exc:
-        raise PackError("unsafe-path") from exc
-    finally:
-        if parent != -1:
-            os.close(parent)
-
-
-def _exists_or_link(path: Path) -> bool:
-    return path.exists() or path.is_symlink()
-
-
-def _assert_config_destination_safe(path: Path) -> None:
-    if grokbot_ops._path_is_symlink(path) or path.is_symlink():
-        raise PackError("unsafe-path")
-    parent = -1
-    try:
-        parent = grokbot_ops._open_parent_nofollow(path, create=False)
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise PackError("unsafe-path") from exc
-    finally:
-        if parent != -1:
-            os.close(parent)
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise PackError("unsafe-path") from exc
-    if not stat.S_ISREG(info.st_mode):
-        raise PackError("unsafe-path")
-
-
-def _snapshot_regular_file(path: Path) -> tuple[str, int] | None:
-    if grokbot_ops._path_is_symlink(path) or path.is_symlink():
-        raise PackError("unsafe-path")
-    try:
-        text = grokbot_ops._read_regular_text(path)
-        mode = stat.S_IMODE(path.lstat().st_mode)
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise PackError("unsafe-path") from exc
-    return text, mode
-
-
-def _restore_regular_file(path: Path, snapshot: tuple[str, int] | None) -> None:
-    if snapshot is None:
-        if grokbot_ops._path_is_symlink(path) or path.is_symlink():
-            raise PackError("unsafe-path")
-        try:
-            grokbot_ops.remove_regular_file(path)
-        except FileNotFoundError:
-            return
-        except OSError as exc:
-            raise PackError("unsafe-path") from exc
-        return
-    if _matches_regular_file_snapshot(path, snapshot):
-        return
-    text, mode = snapshot
-    try:
-        grokbot_ops._write_text_nofollow_atomic(path, text, mode=mode)
-    except OSError as exc:
-        raise PackError("unsafe-path") from exc
-
-
-def _matches_regular_file_snapshot(path: Path, snapshot: tuple[str, int] | None) -> bool:
-    """Return True only when existence, exact contents, and mode match the snapshot."""
-    try:
-        current = _snapshot_regular_file(path)
-    except PackError:
-        return False
-    if current is None or snapshot is None:
-        return current is None and snapshot is None
-    current_text, current_mode = current
-    expected_text, expected_mode = snapshot
-    return current_text.encode("utf-8") == expected_text.encode("utf-8") and current_mode == expected_mode
-
-
 def _assert_setup_bind_available(target: Path, pack_id: str, chosen_bind: str) -> None:
     """Refuse a bind whose port is owned by another packaged or installed instance."""
     _host, chosen_port = _parse_default_bind(chosen_bind)
@@ -810,7 +714,12 @@ def _assert_setup_bind_available(target: Path, pack_id: str, chosen_bind: str) -
 
 
 def _occupied_setup_ports(target: Path, *, exclude_pack_id: str) -> set[int]:
-    ports: set[int] = set()
+    from .dot.connector_registry import instance_config_path as connector_path
+
+    ports: set[int] = {8783}
+    generic_port = _bind_port_from_existing_config(connector_path(target, "cloud-agent"))
+    if generic_port is not None:
+        ports.add(generic_port)
     for pack in list_packs(target):
         if pack["id"] == exclude_pack_id:
             continue
@@ -824,29 +733,6 @@ def _occupied_setup_ports(target: Path, *, exclude_pack_id: str) -> set[int]:
             if legacy_port is not None:
                 ports.add(legacy_port)
     return ports
-
-
-def _bind_port_from_existing_config(path: Path) -> int | None:
-    """Read one bind port from a first-party config without following unsafe paths."""
-    if grokbot_ops._path_is_symlink(path) or path.is_symlink():
-        raise PackError("unsafe-path")
-    try:
-        raw = grokbot_ops._read_regular_text(path)
-    except FileNotFoundError:
-        return None
-    except (OSError, UnicodeDecodeError) as exc:
-        raise PackError("unsafe-path") from exc
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise PackError("unsafe-path") from exc
-    if not isinstance(payload, dict):
-        raise PackError("unsafe-path")
-    bind = payload.get("bind")
-    if not isinstance(bind, str):
-        raise PackError("unsafe-path")
-    _host, port = _parse_default_bind(bind)
-    return port
 
 
 def _write_instance_config(target: Path, pack_id: str, payload: dict[str, Any]) -> None:
@@ -1436,13 +1322,6 @@ def _parse_default_bind(value: str) -> tuple[str, int]:
     return host, port
 
 
-def _parse_version(value: str) -> tuple[int, int, int]:
-    if not VERSION_RE.fullmatch(value):
-        raise PackError("invalid-version")
-    major, minor, patch = value.split(".")
-    return int(major), int(minor), int(patch)
-
-
 def _routes_overlap(left: str, right: str) -> bool:
     if not left or not right:
         return False
@@ -1450,14 +1329,6 @@ def _routes_overlap(left: str, right: str) -> bool:
     right_parts = right.split("/")
     length = min(len(left_parts), len(right_parts))
     return left_parts[:length] == right_parts[:length]
-
-
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
 
 
 def preview_relay_setup(target: Path, owner_workspace: Path) -> dict[str, Any]:
@@ -1506,3 +1377,26 @@ def write_relay_units(target: Path, out_dir: Path, *, force: bool = False) -> li
     from . import grokbot_pack_relay
 
     return grokbot_pack_relay.write_relay_units(target, out_dir, force=force)
+
+
+def _bind_port_from_existing_config(path: Path) -> int | None:
+    """Read one bind port from a first-party config without following unsafe paths."""
+    if grokbot_ops._path_is_symlink(path) or path.is_symlink():
+        raise PackError("unsafe-path")
+    try:
+        raw = grokbot_ops._read_regular_text(path)
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PackError("unsafe-path") from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise PackError("unsafe-path") from exc
+    if not isinstance(payload, dict):
+        raise PackError("unsafe-path")
+    bind = payload.get("bind")
+    if not isinstance(bind, str):
+        raise PackError("unsafe-path")
+    _host, port = _parse_default_bind(bind)
+    return port
