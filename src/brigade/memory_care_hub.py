@@ -65,8 +65,9 @@ def _send(
         with store.locked(target):
             state = store.published(target)
             base = state.get(client.identity, {}).get(settings.scope, {}).get(card_id)
-            if action == "retire" and (
-                not path or sync.publication_collision(card_id, path, sync._local_cards(target), base)
+            # A revive must respect ownership too, or undo could overwrite the card that owns the id.
+            if (action == "retire" and not path) or (
+                path and sync.publication_collision(card_id, path, sync._local_cards(target), base)
             ):
                 return {**pending, "status": "skipped", "reason": "card-id-collision"}
             if not base:

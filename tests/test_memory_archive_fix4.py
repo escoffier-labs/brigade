@@ -67,3 +67,24 @@ def test_publication_other_path_skips_without_live_duplicate(tmp_path, monkeypat
     d = move(tmp_path)
     assert d.hub["status"] == "skipped"
     assert d.hub["reason"] == "card-id-collision"
+
+
+def test_undo_never_revives_over_the_owning_card(tmp_path, monkeypatch):
+    path = setup_card(tmp_path)
+    fake = configure_hub(tmp_path, monkeypatch)
+    owner = path.with_name("active.md")
+    owner.write_bytes(path.read_bytes())
+    with store.locked(tmp_path):
+        state = store.published(tmp_path)
+        state[fake.identity]["fleet"]["old"]["path"] = "memory/cards/active.md"
+        store.save_published(tmp_path, state)
+    original = path.read_bytes()
+    d = move(tmp_path, "memory/cards/old.md")
+    assert d.hub["reason"] == "card-id-collision"
+    fake.calls.clear()
+    archive.restore(tmp_path, d)
+    # The local undo still happens, and the hub card owned by the other file is left alone.
+    assert path.read_bytes() == original
+    assert not any(action == "put" for action, _ in fake.calls)
+    with store.locked(tmp_path):
+        assert store.published(tmp_path)[fake.identity]["fleet"]["old"]["path"] == "memory/cards/active.md"
