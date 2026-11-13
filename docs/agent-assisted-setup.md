@@ -179,3 +179,19 @@ https://github.com/escoffier-labs/brigade/issues/new/choose
 ```
 
 Use the "Quickstart setup problem" form and include the redacted `issue_report`.
+
+Codex observe capture installs project hooks in `.codex/hooks.json` when you
+run `brigade work mode set observe` with Codex selected. Trust the project
+`.codex/` layer, then review and trust the hook definition in Codex `/hooks`.
+An installed file alone does not mean the hooks are trusted or enabled.
+`brigade work mode show --json` reports installation under `observe_hooks.codex`.
+Codex check status and duration remain unknown because the finished-tool
+response has no documented exit-status or duration contract. Agent type remains
+unknown. Unknown statuses must be excluded from pass-rate denominators.
+Leaving observe mode or running `brigade work hooks uninstall` removes only
+Brigade's Codex entries. The installed command pins capture to its project.
+Strict and off modes do not record these observed checks.
+
+Cursor capture is deferred to its own pull request because a CLI version cannot
+establish compatibility for every editor and shared-project reader. Its redesign
+must avoid version probes and unsupported events that invalidate hook documents.

@@ -178,14 +178,16 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
     return found
 
 
-def governing_modes(command: object, cwd: object, root: Path) -> list[tuple[Path, str]]:
+def governing_modes(
+    command: object, cwd: object, root: Path, *, harness: str | None = "claude"
+) -> list[tuple[Path, str]]:
     """Resolve each verifier's governing target, preserving first-seen order."""
     if not isinstance(command, str) or not command.strip():
         return []
     start = Path(cwd) if isinstance(cwd, str) and cwd else root
     modes: dict[Path, str] = {}
     for path in verifier_cwds(command, start):
-        wired = resolve_wired_target(str(path)) if path is not None else None
+        wired = resolve_wired_target(str(path), harness=harness) if path is not None else None
         target = wired if wired is not None else root
         modes[target] = work_mode.resolve_mode(target)
     return list(modes.items())

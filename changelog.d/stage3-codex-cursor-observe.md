@@ -1,0 +1,3 @@
+- Record Codex finished-tool checks in observe mode with unknown status and duration, bounded capture, and no tree snapshot.
+- Install pinned asynchronous Codex hooks while preserving user entries, formatting and file mode. Remove Brigade entries when leaving observe or uninstalling hooks.
+- Defer Cursor capture to a separate compatibility redesign.

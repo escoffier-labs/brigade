@@ -28,6 +28,7 @@ from .inbox_lock import InboxLockTimeout, held_file_lock_descriptor as held_file
 
 CHECKS_FILE = "checks.jsonl"
 CHECK_SCHEMA = "brigade.observed_check.v1"
+# Exclude unknown status from every pass-rate denominator: Codex cannot report pass or fail.
 STATUSES = ("ok", "failed", "unknown")
 DIGEST_UNAVAILABLE = "0" * 16
 MAX_FILE_BYTES = 8 * 1024 * 1024
@@ -559,7 +560,13 @@ def append_jsonl(path: Path, payload: Mapping[str, Any]) -> bool:
             check_capture_deadline()
             with held_file_lock(_lock_path(path), deadline_seconds=_CAPTURE_LOCK_SECONDS.get()) as held:
                 held.verify()
-                fd = _open_regular(parent, path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND)
+                try:
+                    created = _open_regular(parent, path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                except FileExistsError:
+                    pass
+                else:
+                    os.close(created)
+                fd = _open_regular(parent, path.name, os.O_RDWR | os.O_APPEND)
                 try:
                     if os.name != "nt":
                         os.fchmod(fd, 0o600)
@@ -571,12 +578,19 @@ def append_jsonl(path: Path, payload: Mapping[str, Any]) -> bool:
                         except OSError:
                             # Another open handle can block the rename; keep the record, rotate next time.
                             pass
-                        fd = _open_regular(parent, path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND)
+                        try:
+                            created = _open_regular(parent, path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                        except FileExistsError:
+                            pass
+                        else:
+                            os.close(created)
+                        fd = _open_regular(parent, path.name, os.O_RDWR | os.O_APPEND)
                     check_capture_deadline()
                     if os.lseek(fd, 0, os.SEEK_END):
                         os.lseek(fd, -1, os.SEEK_END)
                         if os.read(fd, 1) != b"\n" and os.write(fd, b"\n") != 1:
                             return False
+                    os.lseek(fd, 0, os.SEEK_END)
                     return os.write(fd, line) == len(line)
                 finally:
                     if fd != -1:

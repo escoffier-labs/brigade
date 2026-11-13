@@ -541,6 +541,15 @@ def hooks_status(*, target: Path, scope: HooksScope = "project", json_output: bo
 
 
 def hooks_uninstall(*, target: Path, scope: HooksScope = "project", quiet: bool = False) -> int:
+    if scope == "project":
+        from ..codex_observe_hooks import remove_codex_observe_hooks
+
+        # Report a Codex hooks problem, but never let it stop the Claude cleanup below.
+        codex_error = remove_codex_observe_hooks(target)
+        if codex_error and not quiet:
+            print(f"error: {codex_error}", file=sys.stderr)
+    else:
+        codex_error = None
     layout = _layout(scope=scope, target=target)
     settings_path = layout.settings_path
     settings, error = _load_settings(settings_path)
@@ -560,4 +569,4 @@ def hooks_uninstall(*, target: Path, scope: HooksScope = "project", quiet: bool 
     if not quiet:
         location = str(layout.root) if scope == "project" else f"{layout.root} ({scope})"
         print(f"claude hooks: uninstalled {PACKAGE_ID} -> {location}")
-    return 0
+    return 2 if codex_error else 0
