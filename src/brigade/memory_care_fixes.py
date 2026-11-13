@@ -128,6 +128,18 @@ def prepare(target: Path, config: care.MemoryCareConfig, item: dict[str, Any], t
     )
     if any(key in group for key in nested for group in aliases):
         raise FixRefused("ambiguous")
+    # The parser keeps quotes on a key, so a quoted date key would be missed and duplicated.
+    quoted = (
+        [
+            line.partition(":")[0].strip()
+            for line in lines[1 : lines.index("---", 1)]
+            if line and not line[0].isspace() and ":" in line
+        ]
+        if lines and lines[0] == "---"
+        else []
+    )
+    if any(raw != raw.strip("\"'") and raw.strip("\"'").lower() in group for raw in quoted for group in aliases):
+        raise FixRefused("ambiguous")
     meta, header = care._parse_frontmatter(text)
     if not header:
         raise FixRefused("frontmatter-refused")

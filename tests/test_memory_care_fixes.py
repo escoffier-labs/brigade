@@ -354,3 +354,21 @@ def test_a_file_written_today_is_not_a_review_date(tmp_path):
     item = {"card_file": "memory/cards/a.md", "issue_type": "missing-reviewed"}
     with pytest.raises(fixes.FixRefused, match="date-too-recent"):
         fixes.prepare(tmp_path, care._config_or_default(tmp_path), item, TODAY)
+
+
+@pytest.mark.parametrize(
+    "kind,line",
+    [
+        ("missing-freshness", b'"fresh_until": 2027-01-01\n'),
+        ("missing-reviewed", b"'last_reviewed': 2026-10-01\n"),
+    ],
+)
+def test_a_quoted_date_key_is_never_duplicated(tmp_path, kind, line):
+    from brigade import memory_care_fixes as fixes
+
+    path = card(tmp_path, kind)
+    path.write_bytes(path.read_bytes().replace(b"topic: A\n", b"topic: A\n" + line))
+    before = path.read_bytes()
+    result = fixes.apply_fixes(tmp_path, care._config_or_default(tmp_path), today=TODAY)
+    assert result["applied"] == 0
+    assert path.read_bytes() == before
