@@ -71,7 +71,7 @@ def plan_item(
     target: Path,
     scan_date: str,
     config: MemoryCareConfig,
-    context: tuple[set[str], bool] | None = None,
+    context: tuple[set[str], bool | None] | None = None,
 ) -> dict[str, Any]:
     from . import memory_cmd as care
 

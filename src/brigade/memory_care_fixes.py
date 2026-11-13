@@ -109,8 +109,10 @@ def plain_frontmatter(text: str) -> dict[str, str]:
     return meta
 
 
-def plan_context(target: Path, config: care.MemoryCareConfig) -> tuple[set[str], bool]:
+def plan_context(target: Path, config: care.MemoryCareConfig) -> tuple[set[str], bool | None]:
+    """Enumerated cards, and whether the target is in a Git work tree (None when Git cannot be asked)."""
     cards = {p.relative_to(target).as_posix() for p in care._iter_cards(target, config)}
+    inside_git: bool | None
     try:
         inside_git = (
             subprocess.run(
@@ -118,8 +120,9 @@ def plan_context(target: Path, config: care.MemoryCareConfig) -> tuple[set[str],
             ).returncode
             == 0
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise FixRefused("date-unavailable") from exc
+    except (OSError, subprocess.TimeoutExpired):
+        # Only a fix that needs a review date depends on this, so the failure stays with that fix.
+        inside_git = None
     return cards, inside_git
 
 
@@ -127,6 +130,8 @@ def review_date(target: Path, rel: str, today: date, *, inside_git: bool | None 
     try:
         if inside_git is None:
             inside_git = plan_context(target, care._config_or_default(target))[1]
+        if inside_git is None:
+            raise FixRefused("date-unavailable")
         if inside_git:
             value = care._git_last_commit_date(target, rel)
             source = "git-last-commit"
@@ -151,7 +156,7 @@ def prepare(
     item: dict[str, Any],
     today: date,
     *,
-    context: tuple[set[str], bool] | None = None,
+    context: tuple[set[str], bool | None] | None = None,
 ) -> dict[str, Any]:
     from .memory_care_plan import derived_fresh_until
 

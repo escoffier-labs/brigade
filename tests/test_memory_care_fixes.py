@@ -397,3 +397,23 @@ def test_mixed_line_endings_are_refused(tmp_path):
     result = fixes.apply_fixes(tmp_path, care._config_or_default(tmp_path), today=TODAY)
     assert result["applied"] == 0
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("kind,applied", [("missing-freshness", 1), ("missing-reviewed", 0)])
+def test_git_being_unavailable_only_stops_the_fix_that_needs_it(tmp_path, monkeypatch, kind, applied):
+    from brigade import memory_care_fixes as fixes
+
+    path = card(tmp_path, kind)
+    before = path.read_bytes()
+
+    def no_git(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(fixes.subprocess, "run", no_git)
+    result = fixes.apply_fixes(tmp_path, care._config_or_default(tmp_path), today=TODAY)
+    assert result["applied"] == applied
+    if applied:
+        assert b"fresh_until:" in path.read_bytes()
+    else:
+        assert result["reasons"] == {"date-unavailable": 1}
+        assert path.read_bytes() == before
