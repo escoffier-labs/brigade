@@ -680,7 +680,13 @@ def read_jsonl(path: Path, *, snapshot: bool = False) -> tuple[list[dict[str, An
                         continue
                     except OSError:
                         skipped += 1
+                seen: set[tuple[int, int]] = set()
                 for fd in opened:
+                    # An unlocked reader can open the same file under both names across a rotation.
+                    identity = os.fstat(fd)
+                    if identity.st_ino and (identity.st_dev, identity.st_ino) in seen:
+                        continue
+                    seen.add((identity.st_dev, identity.st_ino))
                     batch, lost = _decode(fd, MAX_FILE_BYTES, MAX_LINE_BYTES, MAX_RECORDS - len(records))
                     records.extend(batch)
                     skipped += lost

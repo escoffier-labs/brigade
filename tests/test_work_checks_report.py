@@ -183,3 +183,39 @@ def test_observe_brief_names_report():
     from brigade.brief_sections import render_brief_session_close_lines
 
     assert any("brigade work checks" in line for line in render_brief_session_close_lines(mode="observe"))
+
+
+def test_first_attempt_is_the_earliest_timestamp_not_the_first_appended(store):
+    target, record = store
+    # A later passing capture is appended before an earlier failing one.
+    assert oc.append_check(target, record(status="ok", ts="2026-01-02T00:00:05+00:00"))
+    assert oc.append_check(target, record(status="failed", ts="2026-01-02T00:00:01+00:00"))
+    rows, notes = report.first_pass_rows(target)
+    assert [(r.passed, r.failed) for r in rows] == [(0, 1)]
+    assert notes.retries == 1
+    rows, notes = report.first_pass_rows(target, since=datetime(2026, 1, 2, 0, 0, 3, tzinfo=timezone.utc))
+    assert rows == [] and notes.retries == 1
+
+
+def test_snapshot_reader_does_not_count_one_file_twice(store):
+    import os
+
+    target, record = store
+    assert oc.append_check(target, record())
+    path = oc.digest_key_path(target).with_name("checks.jsonl")
+    try:
+        os.link(path, path.with_name("checks.jsonl.1"))
+    except OSError:
+        pytest.skip("hard links are unavailable here")
+    # Both names now reach one file, as an unlocked reader can see across a rotation.
+    original = oc._open_regular
+
+    def allow_two_links(parent, name, flags):
+        return os.open(path.with_name(name), flags)
+
+    oc._open_regular = allow_two_links
+    try:
+        checks, _ = oc.read_checks(target, snapshot=True)
+    finally:
+        oc._open_regular = original
+    assert len(checks) == 1

@@ -38,17 +38,19 @@ class ReportNotes:
 def first_pass_rows(
     target: Path, *, since: datetime | None = None, group_by: str = "model"
 ) -> tuple[list[FirstPassRow], ReportNotes]:
-    """Select earliest retained attempts, then filter their timestamps.
+    """Select the earliest retained attempt per key by timestamp, then filter by window.
 
-    Storage order breaks timestamp ties. A retry whose first retained attempt
-    predates the window cannot become a first attempt by filtering.
+    A record's timestamp is taken before it is appended, so concurrent captures can
+    land out of order; storage order only breaks timestamp ties. A retry whose first
+    retained attempt predates the window cannot become a first attempt by filtering.
     """
     if group_by not in {"harness", "model"}:
         raise ValueError("group_by must be harness or model")
     checks, skipped = observed_checks.read_checks(target.resolve(), snapshot=True)
     first: dict[tuple[str, str, str, str], observed_checks.ObservedCheck] = {}
     ungrouped = retries = 0
-    for check in reversed(checks):
+    # Oldest first by timestamp; the sort is stable, so storage order breaks ties.
+    for check in sorted(reversed(checks), key=lambda c: datetime.fromisoformat(c.ts)):
         if observed_checks.DIGEST_UNAVAILABLE in (check.command_digest, check.session_fingerprint):
             if since is None or datetime.fromisoformat(check.ts) >= since:
                 ungrouped += 1
