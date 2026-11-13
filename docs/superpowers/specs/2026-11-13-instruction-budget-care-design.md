@@ -1,6 +1,6 @@
 # Instruction budget care: design
 
-Date: 2026-11-13. Status: draft, revised after review. Part of Stage A
+Date: 2026-11-13. Status: draft, revised twice after review. Part of Stage A
 ("memory tends itself") in
 `docs/superpowers/specs/2026-11-12-brigade-stack-trim-design.md`.
 
@@ -31,7 +31,8 @@ person involved:
    limit, so the next few additions fit without another rewrite. Policy files
    move their least risky text first, never their opening sections.
 4. A handoff aimed at a file with no room goes into an overflow card for that
-   file instead of waiting for a person.
+   file instead of waiting for a person. The next daily pass adds the card's
+   pointer to the file, even when the file is under 85%.
 5. Every move is a journal decision. `brigade memory care undo <id>` puts the
    section back. After a move in a policy file the work brief names the moved
    headings and the undo command.
@@ -46,8 +47,9 @@ rules.
 
 ```mermaid
 flowchart TD
-  A["Measure the real file:<br/>bytes, loaders, limit"] -->|"at or under act-at"| R["Report: within headroom"]
+  A["Measure the real file:<br/>bytes, loaders, limit"] -->|"at or under act-at,<br/>no pointer due"| R["Report: within headroom"]
   A -->|"over act-at"| B{"Rewritten in the last 20 hours,<br/>or edited in the last 10 minutes?"}
+  A -->|"a pointer to add or remove"| B
   B -->|"yes"| W["Report: deferred to the next pass"]
   B -->|"no"| C["Split into sections,<br/>mark pins and managed blocks"]
   C --> D{"Model seat ready and<br/>calls left under the cap?"}
@@ -56,7 +58,7 @@ flowchart TD
   E -->|"proposal fails validation"| F
   E -->|"proposal valid"| G["Build the new file and the cards"]
   F --> G
-  G --> H{"Offline checks pass and<br/>something is movable?"}
+  G --> H{"Offline checks pass and<br/>something to write?"}
   H -->|"no"| X["Could not trim: one alert"]
   H -->|"yes"| P["Prepare: publish the decision<br/>record and the new cards"]
   P --> Q["Finish: rewrite the file<br/>with its pointers"]
@@ -118,15 +120,42 @@ request's head after review.
   Codex project instruction chain against Codex's own byte cap
   (`src/brigade/doctor_instruction_chain.py:35`, default cap 32,768 bytes at
   `src/brigade/codex_user_config.py:18`). Doctor already opens the OpenClaw
-  configuration file (`src/brigade/doctor.py:1705-1712`).
-- **Loader caps.** OpenClaw reads a per-file character cap and a total cap
-  from its own configuration, as `bootstrapMaxChars` and
-  `bootstrapTotalMaxChars` under its agent defaults and under each agent
-  entry. Its defaults are 20,000 and 60,000 characters. It also caps `USER.md`
-  at 4,000 characters, and its configuration can only lower that cap, never
-  raise it. On the field machine the defaults are set to 40,000 and 120,000,
-  and one agent with its own workspace sets 3,000 and 6,000. So the cap is per
-  install and per agent, and for `USER.md` it is stricter than Brigade's 8,000.
+  configuration file at a fixed home path and parses it as strict JSON,
+  reporting anything else as invalid (`src/brigade/doctor.py:1706-1716`).
+- **Loader caps.** Read from OpenClaw 2026.10.5, bootstrap module constants
+  and the agent config resolver in the same build:
+  - The per-file cap is `bootstrapMaxChars` on the agent's entry, else on
+    `agents.defaults`, else `DEFAULT_BOOTSTRAP_MAX_CHARS` (20,000). The total
+    cap is `bootstrapTotalMaxChars` the same way, else
+    `DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS` (60,000). A value counts only when it
+    is a positive finite number.
+  - A file named `USER.md`, compared without case, gets the smaller of the
+    per-file cap and `USER_BOOTSTRAP_MAX_CHARS` (4,000). Configuration can only
+    lower that cap, never raise it.
+  - Each file's budget is also cut to what is left of the total, in load
+    order. Once fewer than 64 characters are left, the remaining files are
+    skipped whole.
+  - Characters are UTF-16 code units, counted after trailing whitespace is
+    removed.
+  - An over-limit file keeps a head of `BOOTSTRAP_HEAD_RATIO` (0.75) and a tail
+    of `BOOTSTRAP_TAIL_RATIO` (0.25) of its budget, less a short marker, and
+    loses the middle. `AGENTS.md` is cut differently: 45% head, up to 35% for
+    a digest of rule-like lines from the rest (headings, list items, lines with
+    words such as must or never), and 15% tail.
+  - The configuration file is JSON or JSON5. Its path is
+    `OPENCLAW_CONFIG_PATH`, else `openclaw.json` in `OPENCLAW_STATE_DIR`, else
+    `.openclaw/openclaw.json` under the home directory.
+  - Agents are listed under `agents.entries`, an object keyed by agent id, or
+    `agents.list`, an array of entries with an `id`. With neither, one implicit
+    agent `main` uses the defaults. An agent's workspace is its entry's
+    `workspace`. With none, the one agent OpenClaw treats as the default owner
+    gets `agents.defaults.workspace` itself, and every other agent gets that
+    path plus `/<id>`, or a `workspace-<id>` folder in the state folder when no
+    default is set. Every path goes through home expansion before use.
+
+  On the field machine the defaults are set to 40,000 and 120,000, and one
+  agent with its own workspace sets 3,000 and 6,000. So the cap is per install
+  and per agent, and for `USER.md` it is stricter than Brigade's 8,000.
 - **Harness projection knows the user-level files.** `harness_profiles.py`
   names the instruction file for each harness: Claude and Codex
   (`src/brigade/harness_profiles.py:110-111`), OpenClaw's workspace
@@ -157,15 +186,25 @@ request's head after review.
   `care-<id>-(prepare|finish|repair)` (`src/brigade/memory_care_journal.py:576-580`),
   so it never recovers a plan from `commit`. Every decision writer except
   `revert` for append-free decisions (`src/brigade/memory_care_journal.py:278`)
-  uses `commit_phased`. Undo refuses when any path changed after the decision
+  uses `commit_phased`. `commit_phased` refuses a change whose path no longer
+  holds the expected before-bytes, including a new card whose path already
+  exists (`src/brigade/memory_care_journal.py:355-356`). When `finish_prepared`
+  finds drift, it removes the unchanged new cards
+  (`src/brigade/memory_care_journal.py:512-530`), except for an undo, where it
+  reverses nothing (`:524-527`). Only a clean finish marks the undone decision
+  undone (`:531-541`). When kernel recovery refuses, `_resolve_prepared_locked`
+  marks the decision abandoned and supersedes the operation, and removes
+  nothing (`src/brigade/memory_care_journal.py:600-631`). Undo refuses when any
+  path changed after the decision
   (`src/brigade/memory_care_journal.py:268-275`) and an undo cannot itself be
   undone (`:259-260`). `safe_path` refuses any path with a symlink in it and
   any path outside the target (`src/brigade/memory_care_journal.py:92-102`),
   and every journal structure is keyed by relative path.
 - **The kernel.** A plan applies its mutations one at a time, sorted by
-  destination path (`src/brigade/projection/kernel.py:413`, `:420-428`). It
-  either finishes or restores every destination when recovery can run, and its
-  header states it gives no simultaneous visibility across paths
+  destination path (`src/brigade/projection/kernel.py:408`, `:420-428`). It
+  either finishes or restores every destination when recovery can run.
+  Recovery refuses when any destination is in neither its before nor its after
+  state (`src/brigade/projection/kernel.py:322-328`). Its header states it gives no simultaneous visibility across paths
   (`src/brigade/projection/kernel.py:1-7`). It compares each destination's
   digest with the expected before-state at execute time
   (`src/brigade/projection/kernel.py:279`). It accepts absolute destinations
@@ -185,8 +224,13 @@ request's head after review.
   deadline (`src/brigade/ingest.py:795-812`). `revert` takes it only when the
   payload has document appends (`src/brigade/memory_care_journal.py:252-253`),
   and recovery only when a pending row says `document`
-  (`src/brigade/memory_care_pending.py:22`). Brigade keeps a user-level state
-  folder (`src/brigade/authority_marker.py:61`).
+  (`src/brigade/memory_care_pending.py:22`). Recovery decides on the lock
+  before it recovers anything, and only from unfinished undo operations whose
+  payload has `document_undo`, plus pending rows in phase `prepared` with that
+  flag (`src/brigade/memory_care_journal.py:556-568`). Brigade keeps a
+  user-level state folder (`src/brigade/authority_marker.py:61`). The profile
+  installer's kernel operations live under the workspace it runs from
+  (`src/brigade/harness_profile_cmd.py:1587-1595`).
 - **Archive.** `archive: never` in a card's frontmatter pins it
   (`src/brigade/memory_archive.py:53-54`).
 - **Card checks.** The fixes stage applies `missing-reviewed` and
@@ -210,7 +254,10 @@ request's head after review.
   the file name (`src/brigade/ingest.py:786`), takes the body from the
   handoff's suggested card content (`:762`), and only creates or replaces whole
   cards. The append writers the journal knows are `document`, `evidence` and
-  `ledger` (`src/brigade/memory_inbox_append.py:45-56`).
+  `ledger` (`src/brigade/memory_inbox_append.py:45-56`). A direct
+  `brigade ingest` appends a routed document block with no journal decision
+  (`src/brigade/ingest.py:948`). Only the inbox retry path journals the append
+  (`src/brigade/memory_inbox_retry.py:127`).
 - **Handoff targets.** Ingest may append to `rules/*.md`
   (`src/brigade/handoff_ingest_rules.py:28`) and to `TOOLS.md`, `USER.md` and
   three fixed `.learnings` files (`src/brigade/handoff_ingest_rules.py:29-37`).
@@ -231,7 +278,13 @@ request's head after review.
   `decide` (`src/brigade/memory_inbox_retry.py:62`), accepts only the outcome
   kinds `promoted`, `reinforced` and `routed` (`:66`), and takes the document
   lock only for `routed` (`:67-73`). A code missing from
-  `NEEDS_EVIDENCE_PROOF` is treated as needing evidence (`:64`).
+  `NEEDS_EVIDENCE_PROOF` is treated as needing evidence (`:64`). A held draft
+  from a run with both flags set carries a `retry-flags` header
+  (`src/brigade/ingest.py:984-986`), and the header wins over these defaults
+  (`src/brigade/memory_inbox_drain.py:111-115`). The CLI always sets both flags
+  (`src/brigade/cli/ingest.py:33-35`). The document branch, where
+  `bootstrap-budget-exceeded` comes from, runs only with routing on
+  (`src/brigade/ingest.py:530`).
 - **Model calls.** The memory verify pass already has an isolated way to call
   a model on private text: a roster seat run with no tools, no plugins and no
   memory loading, allowed only when its audience is this machine
@@ -254,7 +307,8 @@ request's head after review.
    (`src/brigade/budgets.py:27`), while the separate size checker used 17,000
    and called it fine. And the harness that loads it cuts `USER.md` at 4,000
    characters whatever its configuration says, so even the 8,241 bytes left
-   after the hand fix are cut today. This design takes the limit from the
+   after the hand fix are cut today, and the text lost is the middle of the
+   file. This design takes the limit from the
    loader where it can and keeps one target table.
 2. **Archiving is not yet automatic.** The trim design says the trim should
    work "the same way it already archives stale memory cards". No shipped
@@ -298,6 +352,11 @@ request's head after review.
     destinations one by one in path order, and a workspace `AGENTS.md` sorts
     before `memory/cards/`. The design now publishes cards and the file in two
     plans, cards first.
+12. **Doctor rejects a valid harness configuration.** OpenClaw accepts JSON5,
+    with comments and trailing commas, but doctor parses the file as strict
+    JSON and reports anything else as invalid
+    (`src/brigade/doctor.py:1713-1716`). Care reads the same file, so the
+    design states what happens when strict parsing fails (see Budgets).
 
 ## Decisions
 
@@ -347,34 +406,74 @@ asked to remove, and harness projection already knows the paths.
 - **Unit: UTF-8 bytes.** Codex enforces a byte cap, the journal and kernel work
   in bytes, and the existing budgets are bytes. A cap counted in characters is
   used as the same number of bytes, which is never looser: a file's UTF-8 byte
-  count is never below its character count, counted either way. Rejected:
+  count is never below its character count, counted as code points or as the
+  UTF-16 code units OpenClaw counts. Rejected:
   tokens. Each vendor tokenises differently, counting needs a tokenizer per
   vendor, and the answer would change with model upgrades.
 - **One limit per real file**: the smallest of every loader cap Brigade can
   read for that file, and the target budget.
 - **Loader caps, read per install and per agent:**
   - OpenClaw: for each agent whose workspace is this target, its own
-    `bootstrapMaxChars` entry, else the agent default, else the harness
-    default of 20,000. For `USER.md`, also the harness's fixed 4,000. Read from
-    the harness's own configuration file on every pass. The two harness
+    `bootstrapMaxChars`, else the `agents.defaults` value, else the harness
+    default of 20,000. For a file named `USER.md`, also the harness's fixed
+    4,000. Read from the harness's own configuration file on every pass, found
+    the way the harness finds it (see "Loader caps" above). The harness
     constants live in `harness_profiles.py` beside the file names already kept
     there, with the harness release they were read from.
   - Codex: `project_doc_max_bytes` for files in the Codex project chain,
     default 32,768, as the doctor check already reads it.
   - Any other harness: none known, so none applied.
+  - **OpenClaw: matching an agent to this target.** Brigade lists agents from
+    `agents.entries` or `agents.list`, or the implicit `main` when neither
+    exists. For each, it takes the entry's `workspace`, expands a leading `~`
+    to the home directory and resolves the result to a real path, then
+    compares it with the target's real path. An agent with no `workspace` of
+    its own matches when the resolved `agents.defaults.workspace` equals the
+    target, or when that path plus `/<id>` does, or, with no default set, when
+    the `workspace-<id>` folder in the OpenClaw state folder does. Brigade
+    does not copy
+    OpenClaw's rule for which agent owns the default workspace itself. Every
+    agent that may load the file counts, and since the limit is the smallest
+    cap among them, counting one too many is never looser.
+  - **OpenClaw: parsing its configuration.** Brigade reads the file as strict
+    JSON. When that fails, the file counts as unreadable with reason
+    `config-not-strict-json`. Rejected: a new JSON5 dependency for one
+    configuration file, and a hand-written comment stripper that could misread
+    a string.
 - **Target budget:** `limit_bytes` for the file in config, else the per-name
   table for workspace files, else `default_limit_bytes` (20,000). The per-name
   table is Brigade's target, and no harness enforces it. Slice 1 rewrites the
   stale comment at `src/brigade/budgets.py:19-21` to say so.
 - **When no cap can be read** (config file missing, unreadable, over 1 MiB, or
-  a key of the wrong type), the limit is the target budget alone. The report
-  shows `limit_source: target` and the reason, so a missing cap is visible.
+  a key of the wrong type), the per-agent caps fall back to the target budget.
+  The fixed `USER.md` cap still applies whenever OpenClaw is a known loader of
+  the file, since no configuration can raise it. OpenClaw is a known loader
+  without its configuration when an `openclaw` install-state file records
+  this target as its workspace. The report shows `limit_source` and the
+  reason, so a missing cap is visible. For the field `USER.md` with an
+  unreadable configuration, the limit stays 4,000, not 8,000.
 - **Act-at 85%, trim-to 70%.** A pass leaves at least 15% of the limit free.
   At a 20,000-byte limit that is 3,000 bytes, about ten typical handoff
   appends. The hand fix in finding 5 ended 54 bytes under its soft limit.
 - **Totals across files** (`bootstrapTotalMaxChars`, or a harness that loads
   four files) are reported per loader where Brigade can compute the chain.
-  They do not trigger moves in this design.
+  They do not trigger moves in this design. A total over its cap raises its
+  own alert (see Alerting), because OpenClaw cuts the files that load last
+  and skips them whole once the total runs out.
+- **Where the loader cuts, and what care does about it.** A head-and-tail
+  loader drops the middle of an over-limit file, so text in the middle is what
+  agents lose. Three rules follow:
+  - Pins hold text in place, so a pinned section survives the cut only near
+    the start or the end. The opening pin covers the head. When a file is over
+    its limit, the report lists every pinned heading inside the range the
+    loader drops, computed from the known ratios, and a `could-not-trim` alert
+    names them.
+  - New pointers that have no section to sit in, the overflow pointers, go at
+    the very end of the file, which the tail keeps. A moved section's pointer
+    stays where the section was, since exact undo needs that place.
+  - None of this matters while the file is under its limit, when the whole
+    file loads. Keeping files under the limit is the remedy, and the placement
+    rules only cover the days a file spends over it.
 - **The separate size checker's numbers are not imported.** Brigade's report
   becomes the one measure. The checker can be retired.
 
@@ -389,8 +488,8 @@ machine, measured 2026-11-13:
 
 | File | Class | Bytes | Limit and its source | Trim-to | First pass moves |
 | --- | --- | --- | --- | --- | --- |
-| Workspace `USER.md` | `append` | 8,241 | 4,000, the loader's fixed cap | 2,800 | About 5,500 bytes, oldest appended sections first |
-| Workspace `AGENTS.md` | `policy` | 12,200 | 12,000, the target (loader cap 40,000) | 8,400 | About 3,800 bytes, in the policy order below |
+| Workspace `USER.md` | `append` | 8,241 | 4,000, the loader's fixed cap | 2,800 | 5,945 bytes in seven sections and three cards, 5,525 net of the pointers, oldest appended sections first |
+| Workspace `AGENTS.md` | `policy` | 12,200 | 12,000, the target (loader cap 40,000) | 8,400 | Enough sections to free 3,800 bytes net of the pointers, in the policy order below |
 
 In general a file at twice its limit moves about 65% of its bytes.
 
@@ -405,7 +504,8 @@ In general a file at twice its limit moves about 65% of its bytes.
   file still has moves left.
 - **Afterwards.** Handoffs stop appending at act-at (see Handoffs), so a file
   grows again only through direct edits. It is rewritten when those edits add
-  15% of its limit: 600 bytes for `USER.md`, 1,800 for `AGENTS.md`.
+  15% of its limit: 600 bytes for `USER.md`, 1,800 for `AGENTS.md`, or when a
+  pointer is due (see Cache cost).
 - **Notice.** The policy notice below tells every agent what moved, so a first
   pass that moved something the owner relies on is visible on the next
   session.
@@ -516,7 +616,11 @@ design if it is wanted at all. A model may group only what the fixed rule may.
 `memory/cards/instructions/<file-key>--<slug>.md`, where `<file-key>` names the
 real file (for example `user-md`, `codex-agents-md`). A slug never starts with
 `overflow-`, which is reserved for overflow cards. A section titled "Overflow"
-gets `section-overflow`. Policy text goes to cards too, not to a loose rules
+gets `section-overflow`. When the name is taken, by another section with the
+same heading in the same plan, by an existing card, or by a card an earlier
+decision left behind, the planner adds `-2`, `-3` and so on, choosing the
+first free name. It checks the live tree and the names already used in the
+plan, so `commit_phased` never meets a card where it expects none. Policy text goes to cards too, not to a loose rules
 file, so it is searchable. The card holds the section bytes unchanged after a
 frontmatter block:
 
@@ -553,7 +657,10 @@ cards tagged `moved-instructions`: their source is the decision named in
   card and, for policy, sits under its own heading.
 - When the retire stage later archives a moved `append` card, the next
   instructions pass removes its pointer as part of its one rewrite of that
-  file. `policy` cards carry `archive: never`, because the rule still applies.
+  file, whether or not the file is over act-at.
+- Each overflow card gets one pointer line at the very end of its file, in the
+  `append` form, added by the first care pass after the card is created.
+  Later appends to the same card need no new pointer. `policy` cards carry `archive: never`, because the rule still applies.
   It was moved for space, and staleness rules do not apply to it.
 
 Rejected: shortening passages and keeping full text elsewhere, as the hand fix
@@ -620,16 +727,27 @@ together.
   - crash during `prepare`: some new cards, old file.
   - crash between the plans: every new card, old file.
   - crash during `finish`: every new card, and either the old file or the new
-    one.
+    one. The decision record sorts before the file, so the record may already
+    say committed while the file is still old.
 
   None of them shows a pointer whose card is missing. The next pass runs the
   existing recovery first (`src/brigade/memory_care_tend.py:49`): it restores
   an unfinished plan, then finishes the decision from the pending index. If
   the file changed in between, the decision is abandoned, the unchanged new
-  cards are removed, and the file is retried on the next pass. If an agent
-  edited the new file before recovery ran, kernel recovery refuses, the
-  decision is abandoned with the file's write recorded, and its cards stay,
-  since a live pointer names them. Undo accepts such a decision.
+  cards are removed, and the file is retried on the next pass.
+- **When kernel recovery refuses.** An agent edit before recovery ran, to the
+  old file or the new one, leaves the file in neither state, so kernel
+  recovery refuses and the decision is abandoned with its committed
+  destinations recorded. The decision is then marked for card repair, and a
+  `care-<id>-repair` plan removes each new card that still holds exactly the
+  bytes the decision wrote and that no pointer line in the live file names. A
+  card a live pointer names stays, and undo accepts that decision. Without the
+  repair, an edited old file would keep cards that no pointer names. No check
+  would report them, since `orphaned-card` skips these cards, and the next
+  pass would plan the same names and fail at `changed before preparation`
+  every day. Each pass runs the same repair for any abandoned `instructions`
+  decision whose cards are still present, so cards from an older crash clear
+  too, and the slug rule above is the second guard.
 - **A dangling pointer can still happen**, by a hand deletion or between a
   retire archive and the next instructions pass. Every pointer names its
   card's path, and the card's `moved_by` decision keeps the before-bytes, so
@@ -652,12 +770,31 @@ together.
   folder, named by a digest of the real path. The profile installer takes the
   same per-real-file lock before it writes its managed block into a user
   instruction file, since the two writers' kernel operations live under
-  different targets and cannot see each other's unfinished plans. The decision
-  sets `document_lock: true`, and recovery and the pending index read it the
-  way they read `document_undo` today, so recovering an `instructions`
-  decision also takes the document lock. A lock that times out after its
-  1-second deadline defers the file to the next pass. It is not a care-job
-  failure.
+  different targets and cannot see each other's unfinished plans. A lock that
+  times out after its 1-second deadline defers the file to the next pass. It
+  is not a care-job failure.
+- **Recovery across the two writers.** A lock alone orders the writes, not the
+  recovery after a crash. So the per-real-file lock leaves a record beside it
+  while the holder's kernel operation is unfinished: the holder's target and
+  operation id. The holder removes the record once its plan commits or is
+  restored. Before planning, the other writer reads the record. If that
+  operation is still unfinished under the named target, it defers the file
+  with `deferred_reason: other-writer-unfinished` and names
+  `brigade projection recover <operation-id>` in the report. If the operation
+  is finished or gone, the record is stale and is removed. A file deferred
+  this way on three passes in a row raises the alert with reason
+  `writer-unfinished`.
+- **Recovery takes the document lock.** Every `instructions` decision and
+  every undo of one sets `document_lock: true`. Recovery's lock check before
+  recovering changes in two ways. It matches every unfinished
+  `care-<id>-(prepare|finish|repair)` operation, not only undo ones, and takes
+  the lock when the payload has `document_lock` or `document_undo`, failing
+  closed on an unreadable payload as it does for undos today. The pending
+  row's `document` flag reads `document_lock` too. Without the first change, a
+  crash inside `finish` leaves a record that reads committed, neither check
+  fires, kernel recovery puts the record back to prepared, and the pending
+  loop (`src/brigade/memory_care_journal.py:641-646`) rewrites the file with
+  no document lock.
 - **Concurrency with agents.** Other agents' edits take no lock. The plan
   carries the digest the pass measured, and the kernel refuses if the file
   changed (`src/brigade/projection/kernel.py:279`). A refused file is retried
@@ -675,9 +812,11 @@ together.
   - Otherwise it rebases: it finds each pointer by its exact bytes, refusing
     unless they occur once (as `src/brigade/memory_inbox_append.py:63-76`
     does), and replaces it with the section bytes from the card's saved
-    before-image, keeping every other edit. The `after_sha256` gate
-    (`src/brigade/memory_care_journal.py:268-275`) is skipped for the
-    instruction file only.
+    before-image, keeping every other edit. For an `instructions` decision the
+    whole-digest `after_sha256` gate
+    (`src/brigade/memory_care_journal.py:268-275`) is replaced: for the
+    instruction file by the pointer rebase, and for each card by the body
+    comparison below.
   - For cards, undo compares the card body after its frontmatter with the
     moved bytes and ignores the frontmatter. That resolves the conflict with
     the fixes stage, which may rewrite frontmatter in the same tend, and with
@@ -685,6 +824,15 @@ together.
     instructions folder, which would also stop retire from archiving old
     `append` cards. Also rejected: comparing whole cards, which would make
     undo refuse within a day.
+  - **An undo whose `finish` meets drift.** Once the undo's `prepare` has
+    committed, the text is back in the file and the pointers are gone, so the
+    original decision is no longer in force. `finish` for an undo of an
+    `instructions` decision therefore always marks the original undone and
+    the undo `undone`, removes each card still holding exactly the moved
+    bytes, and keeps any edited card, listed as `cards_kept`. Today an undo
+    that meets drift reverses nothing and leaves the original looking active,
+    so the policy notice would stay in the brief and a second undo would
+    refuse for want of a pointer.
 
 Undo cases:
 
@@ -703,7 +851,10 @@ Undo cases:
 | Card archived by the retire stage | Needs the newer decision undone first. Undo names the retire decision, and the later instructions decision too if it removed the pointer, newest first |
 | Card split or renamed | No care stage splits or renames cards today. A card renamed by hand is missing: refuses and names it |
 | Undo of the older of two decisions on one file | Proceeds. The newer decision's pointers are untouched, and it stays undoable |
+| Decision only added or removed pointers | Proceeds. Added pointer lines are removed by their exact bytes, and removed lines go back beside the saved neighbour line, as the archive finish does. No card is touched |
 | Undo puts the file back over act-at | Proceeds. The restored sections are pinned, so the next pass moves other candidates or reports `could-not-trim` with reason `nothing-movable` |
+| Undo crashed after `prepare`, then a card or the restored file was edited | Proceeds on recovery. The original is marked undone, unchanged cards are removed, edited cards stay and are listed |
+| Undo crashed during `prepare`, then the file was edited | Abandoned on recovery. The file was never restored, so the original stays in force and can be undone again |
 | An undo was a mistake | An undo cannot be undone (`src/brigade/memory_care_journal.py:259-260`). Delete the undo pin and the next pass moves the section again |
 
 - **Visibility.** Every card created from an instruction file, moved or
@@ -752,9 +903,16 @@ flowchart TD
 - Overflow cards are always `visibility: private`, for the same reason as
   moved cards: their content was written for a file that never leaves the
   machine.
+- Overflow cards carry `archive: never`. Each one is the live destination for
+  new appends, so archiving it for staleness would hide text written the day
+  before along with the old text, and for `USER.md` it would hide the
+  preferences. An agent can drop the line by hand.
 - The card write is a new append writer, `card-append`, beside the
   `document`, `evidence` and `ledger` writers: journaled publish, exact-block
-  undo and recovery, like the `document` writer. Ingest's card publication
+  undo and recovery, like the `document` writer. Both paths use it: a direct
+  `brigade ingest`, which today appends documents with no journal decision
+  (`src/brigade/ingest.py:948`), and the inbox retry. So every overflow append
+  is a journal decision with exact-block undo, whichever path wrote it. Ingest's card publication
   path does not fit, because it refuses names with `/`, writes only to
   `memory/cards/<name>`, registers ids by file name and replaces whole cards.
   The card name is built by Brigade from the file key and type, never taken
@@ -763,7 +921,8 @@ flowchart TD
   path.
 - Ingest never adds the pointer. Adding it would be a second rewrite of an
   always-loaded file outside the care pass, and another cache reset. The next
-  care pass adds a missing overflow pointer as part of its one rewrite.
+  care pass adds a missing overflow pointer as part of its one rewrite, at any
+  file size (see Cache cost).
 - A known instruction file reached through a symlink is no longer a reason to
   hold the handoff. The content goes to the card, which lives in the
   workspace. Ingest still never writes through a link.
@@ -772,8 +931,14 @@ flowchart TD
   document lock for that kind as it does for `routed`. The drain moves
   `bootstrap-budget-exceeded` from `HOLD_CODES` to `RETRY_CODES` with the flags
   promote no and route yes, like `document-destination-unwritable`, so that
-  `decide` runs its document branch. Handoffs held under the old rule are
-  then routed on the next drain with no person.
+  `decide` runs its document branch. Those defaults cover a held draft with no
+  `retry-flags` header. A draft with the header keeps its own flags, since the
+  header wins (`src/brigade/memory_inbox_drain.py:111-115`). That strands no
+  `bootstrap-budget-exceeded` draft: the code comes only from the document
+  branch, which runs only with routing on (`src/brigade/ingest.py:530`), so
+  every such header says `route=true`. Handoffs held under the old rule are
+  therefore all routed on the next drain with no person, whether a sweep or a
+  manual `brigade ingest --route-documents` held them.
 - Injection signals and unsafe names still go to a person
   (`src/brigade/memory_inbox_drain.py:18-33`). This design does not change any
   trust rule.
@@ -789,9 +954,19 @@ for every agent that loads it (finding 7).
 
 - At most one care rewrite per file per pass, holding every move, pointer and
   pointer cleanup for that file. Ingest adds no pointers.
-- A file is rewritten only when it is over act-at, and then down to trim-to,
-  so rewrites are spaced by the growth of 15% of the limit.
-- Not again within `min_hours_between_rewrites` (20) of the last rewrite.
+- A file is rewritten when it is over act-at, and then down to trim-to, so
+  those rewrites are spaced by the growth of 15% of the limit.
+- A file is also rewritten when pointer work is due, at any size: an overflow
+  card with no pointer in its file, or a pointer to a card the retire stage
+  archived. Otherwise routed content could stay unreachable from its file for
+  good, since a file below act-at that takes no direct edits never crosses
+  it. Symlinked instruction files route to cards at any size, so they need
+  this most. Such a rewrite makes no moves unless the new pointer itself takes
+  the file over act-at, in which case the same rewrite also moves sections.
+  It is bounded: one pointer per overflow card, added once, and one removal
+  per archived card.
+- Not again within `min_hours_between_rewrites` (20) of the last rewrite,
+  whichever reason triggers it.
 - Not while the file was modified in the last `quiet_minutes` (10).
 - The pass runs once a day, at the existing daily care time.
 
@@ -799,8 +974,10 @@ for every agent that loads it (finding 7).
 
 **(proposed)** Before committing, the pass checks offline:
 
-1. Putting each moved section back at its pointer gives the original bytes
-   exactly. Grouping only adjacent sections keeps this exact.
+1. Putting each moved section back at its pointer, removing the overflow
+   pointers the decision adds and restoring the pointer lines it removes,
+   gives the original bytes exactly. Grouping only adjacent sections keeps
+   this exact.
 2. Each card body after its frontmatter equals the moved section bytes, and
    the card passes the card frontmatter rules ingest uses.
 3. Managed blocks are byte-identical, in the same order and count.
@@ -808,8 +985,8 @@ for every agent that loads it (finding 7).
    byte-identical.
 5. Fences and managed-block markers still balance, and the file is valid
    UTF-8.
-6. Every pointer names a card the same decision creates, appears once, and is
-   at most 240 bytes.
+6. Every new pointer names a card the same decision creates or an existing
+   overflow card, appears once, and is at most 240 bytes.
 7. The new size is at or under trim-to, or the summary says how far it got.
 
 After committing, the next pass re-measures and confirms each pointer still
@@ -866,11 +1043,18 @@ about 140 bytes each took their place: 8,241 - 5,945 + 420 = 2,716.
 The `state` value is one of `within`, `deferred`, `moved`, `could-not-trim`,
 `reported`. A `deferred` file carries `deferred_reason`: `recently-rewritten`,
 `recently-edited`, `changed-during-commit` (the decision was abandoned and is
-also in tend's `recovery` list) or `document-lock-busy`.
+also in tend's `recovery` list), `document-lock-busy` or
+`other-writer-unfinished`. A file whose real path cannot be written, such as an
+external file on Windows, has state `reported` and lists any pointers it is
+owed as `pending_pointers`.
 
 **One alert** per file, raised when the state turns to `could-not-trim` and
 cleared when it leaves that state. It is not repeated while the state holds.
-It appears:
+A loader whose total is over its total cap raises one alert of its own on the
+same terms, as
+`instruction_budget: total-over-cap <loader> <chars>/<cap> next="<command>"`,
+so a cap that cuts or skips whole files is seen even though totals trigger no
+moves. Each alert appears:
 
 - in the work brief, beside the existing scheduled-care failures
   (`src/brigade/work_cmd/session/briefing.py:409-418`), as one line:
@@ -888,6 +1072,8 @@ Reason codes and their next commands:
 | `checks-failed` | the same, which names the failed check |
 | `still-over-after-moves` | none needed. The next pass continues |
 | `unowned-user-file` | `brigade init --target <workspace>` for a harness that loads it |
+| `writer-unfinished` | `brigade projection recover <operation-id>`, from the target the record names |
+| `total-over-cap` | `brigade memory care tend --stage instructions --dry-run --json` (lists each loader's files and total) |
 
 A repeated failure of the pass itself (an exception, not a state) is a care
 job failure and uses the existing repeated-failure route.
@@ -1008,6 +1194,7 @@ stateDiagram-v2
   state "Undone" as Undone
   [*] --> Within: measured at or under act-at
   Within --> Over: grows past act-at
+  Within --> Planned: a pointer to add or remove
   Over --> Planned: a plan passes the offline checks
   Over --> Stuck: nothing movable or checks fail
   Planned --> Over: file changed before prepare
@@ -1108,22 +1295,27 @@ Changed:
 - `src/brigade/memory_care_tend.py`: add `instructions` to `STAGES`, load its
   config, send kind `instructions` to the new undo.
 - `src/brigade/memory_care_journal.py`: external path keys and checks, the
-  `document_lock` flag in recovery, and undo of kind `instructions` through
-  `commit_phased`.
+  `document_lock` flag in recovery's lock check for every care operation,
+  card repair after a refused recovery, undo of kind `instructions` through
+  `commit_phased`, and its finish rule that marks the original undone once the
+  file part is published.
 - `src/brigade/memory_care_pending.py`: read `document_lock` for the
-  `document` row.
+  `document` row, and the card repair flag for the `repair` row.
 - `src/brigade/memory_inbox_append.py`: the `card-append` writer.
 - `src/brigade/budgets.py`: act-at and trim-to, `default_limit_bytes`,
   `limit_for(file)`, and the corrected comment. The per-name table stays, as
   targets.
-- `src/brigade/harness_profiles.py`: the known loader cap constants and config
-  keys per harness.
+- `src/brigade/harness_profiles.py`: the known loader cap constants, head and
+  tail ratios, config path rules and config keys per harness, with the
+  harness release they were read from.
 - `src/brigade/harness_profile_cmd.py`: take the per-real-file lock before
-  writing a user instruction file.
+  writing a user instruction file, and keep its record until the plan
+  finishes.
 - `src/brigade/handoff_ingest_rules.py`: guard at act-at through the inventory,
   and the overflow card name.
 - `src/brigade/ingest.py`: the no-card document branch routes to the overflow
-  card after the injection scan, new outcome `document-routed-to-card`, and an
+  card after the injection scan, through the journaled `card-append` writer
+  on the direct path too, new outcome `document-routed-to-card`, and an
   append provenance row.
 - `src/brigade/memory_inbox_drain.py`: `bootstrap-budget-exceeded` from hold to
   retry with route on, and the new code as a success.
@@ -1199,3 +1391,47 @@ Changed:
   `:49-67`, `handoff_ingest_rules.py:28` and `:29-37`,
   `harness_profiles.py:162-171`, `harness_profile_cmd.py:202-228` and
   `:67-77`, and the unused soft and hard limits (`claude` citation table).
+
+Second revision, after the `claude` re-review and a Codex comment on
+`fbb7203a6`:
+
+- Pointer work alone triggers the one care rewrite, at any size, so an
+  overflow card or an archived card never leaves its file without a correct
+  pointer. Overflow pointers go at the end of the file (Codex).
+- The per-real-file lock keeps a record of the holder's unfinished operation,
+  and the other writer defers while it stands (`claude` J3).
+- The undo text says the whole-digest gate is replaced: by the pointer rebase
+  for the file and by a body comparison for cards (`claude` U1).
+- Card names take a `-2`, `-3` suffix when taken by a same-named section, an
+  existing card or a card left by an earlier decision (`claude` U6).
+- Overflow appends go through the journaled `card-append` writer from a direct
+  `brigade ingest` too, and overflow cards carry `archive: never` (`claude`
+  O1).
+- The drain change now says the `retry-flags` header wins over the defaults,
+  and shows why no `bootstrap-budget-exceeded` draft carries `route=false`, so
+  none is stranded (`claude` O2: the header point is accepted, the stranded
+  drafts it predicted cannot occur).
+- A refused kernel recovery is followed by a card repair that removes
+  unchanged cards no pointer names, and each pass repairs older leftovers
+  (`claude` N1).
+- An undo whose `finish` meets drift marks the original undone once the file
+  part is published, with two new undo table rows (`claude` N2).
+- Recovery's lock check matches every care operation whose payload sets
+  `document_lock`, and an undo of an `instructions` decision sets it too
+  (`claude` N3).
+- The OpenClaw caps, ratios, config path and JSON5 format are cited to
+  OpenClaw 2026.10.5, bootstrap module constants (`claude` C1).
+- The fixed `USER.md` cap survives an unreadable configuration, with OpenClaw
+  known as a loader from its install state (`claude` C2).
+- Agent matching names the roster keys, the `workspace` key, the default
+  workspace rule and home expansion with real-path comparison (`claude` C3).
+- Head-and-tail truncation shapes where pinned text and pointers sit, and the
+  report lists pinned headings inside the range the loader drops (conductor,
+  from C1).
+- Doctor's strict JSON parse of a JSON5 configuration is listed as mismatch 12
+  (found while answering `claude` C3).
+- A total over its cap raises its own alert, `total-over-cap` (`claude`, small
+  item).
+- The first-pass table gives 5,945 bytes moved and 5,525 net of pointers, to
+  match the JSON example (`claude`, small item).
+- The kernel sort citation is `kernel.py:408` (`claude`, small item).
