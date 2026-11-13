@@ -26,6 +26,8 @@ def test_shared_publication_never_retires(tmp_path, monkeypatch, owner, replay):
         other.write_bytes(path.read_bytes())
         path.unlink()
     fake.unavailable = replay
+    # Rule: an owner archived beside exactly one other holder hands over to it; a non-owner keeps the skip.
+    handover = owner or replay
     d = move(tmp_path, rel)
     if replay:
         assert d.hub["status"] == "pending"
@@ -34,12 +36,24 @@ def test_shared_publication_never_retires(tmp_path, monkeypatch, owner, replay):
         fake.unavailable = False
         fake.calls.clear()
         result = tend.run(tmp_path, stages=["hub"])
-        assert result["stages"]["hub"]["skipped_items"][0]["reason"] == "card-id-collision"
+        assert result["stages"]["hub"]["done"] == 1
         d = journal.load(tmp_path, d.decision_id)
     assert not any(action == "retire" for action, _ in fake.calls)
-    assert d.hub["status"] == "skipped"
-    assert d.hub["reason"] == "card-id-collision"
     assert not (tmp_path / rel).exists()
+    if not handover:
+        assert d.hub["status"] == "skipped"
+        assert d.hub["reason"] == "card-id-collision"
+        assert not any(action == "put" for action, _ in fake.calls)
+        return
+    # Rule: the archived file owns the record and one other holder remains, so the hub is given that card's text.
+    assert d.hub["status"] == "done"
+    assert d.hub["action"] == "handover"
+    held_rel = "memory/cards/other.md" if owner else "memory/cards/old.md"
+    puts = [fields for action, fields in fake.calls if action == "put"]
+    assert [p["text"] for p in puts] == [(tmp_path / held_rel).read_text()]
+    with store.locked(tmp_path):
+        held = store.published(tmp_path)[fake.identity]["fleet"]["old"]["path"]
+    assert held == held_rel
 
 
 def test_partial_recovery_does_not_block_next_archive(tmp_path, monkeypatch):
@@ -61,12 +75,13 @@ def test_partial_recovery_does_not_block_next_archive(tmp_path, monkeypatch):
     assert move(tmp_path).decision_id != decision_id
 
 
-def test_publication_other_path_skips_without_live_duplicate(tmp_path, monkeypatch):
+def test_publication_other_path_retires_without_live_duplicate(tmp_path, monkeypatch):
     setup_card(tmp_path)
-    configure_hub(tmp_path, monkeypatch, path="memory/cards/another.md")
+    fake = configure_hub(tmp_path, monkeypatch, path="memory/cards/another.md")
     d = move(tmp_path)
-    assert d.hub["status"] == "skipped"
-    assert d.hub["reason"] == "card-id-collision"
+    # Rule: no other live holder remains, so the retire goes out even when the record names a vanished file.
+    assert d.hub["status"] == "done"
+    assert [action for action, _ in fake.calls if action == "retire"] == ["retire"]
 
 
 def test_undo_never_revives_over_the_owning_card(tmp_path, monkeypatch):

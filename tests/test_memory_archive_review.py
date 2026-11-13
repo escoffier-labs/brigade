@@ -158,7 +158,7 @@ def configure_hub(target, monkeypatch, card_id="old", path="memory/cards/old.md"
     with store.locked(target):
         store.save_published(
             target,
-            {fake.identity: {"fleet": {card_id: {"revision": 1, "log_epoch": "epoch", "path": path}}}},
+            {fake.identity: {"fleet": {card_id: {"revision": 1, "log_epoch": "epoch", "path": path, "written": True}}}},
         )
     return fake
 

@@ -8,7 +8,7 @@ from typing import Any
 
 from . import memory_care_hub as hub
 from . import memory_care_journal as journal
-from . import memory_cmd, memory_hub_sync
+from . import memory_cmd, memory_hub_client, memory_hub_sync
 
 ARCHIVE_ROOT = "memory/archive"
 
@@ -138,7 +138,16 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
         if journal._payload(target, d.decision_id)["phase"] == "abandoned":
             raise ArchiveRefused(f"{card_rel}: decision abandoned after card changed")
         return journal.update_hub(
-            target, d.decision_id, hub.retire(target, card_id=card_id, reason=reason, path=card_rel)
+            target,
+            d.decision_id,
+            hub.retire(
+                target,
+                card_id=card_id,
+                reason=reason,
+                path=card_rel,
+                content_hash=memory_hub_client.content_hash(text),
+                decision=d,
+            ),
         )
     except (
         OSError,
