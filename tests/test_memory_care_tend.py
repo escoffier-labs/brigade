@@ -30,3 +30,25 @@ def test_manifest_exempt_missing_duplicate_and_undo(tmp_path, capsys):
     assert len(result["refused"]) == 4
     assert main(["memory", "care", "undo", result["decision_ids"][0], "--target", str(tmp_path), "--json"]) == 0
     assert (cards / "valid.md").read_bytes() == b"valid\r\n"
+
+
+def test_relative_target_archives_and_undoes_in_place(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    cards = workspace / "memory/cards"
+    cards.mkdir(parents=True)
+    original = b"body\n"
+    (cards / "old.md").write_bytes(original)
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(json.dumps({"card": "memory/cards/old.md", "reason": "ended"}))
+    monkeypatch.chdir(tmp_path)
+    assert main(["memory", "care", "archive", "--target", "workspace", "--from-file", "manifest.jsonl", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["archived"] == 1
+    assert (workspace / "memory/archive/cards/old.md").read_bytes() == original
+    assert not (cards / "old.md").exists()
+    assert not (workspace / "workspace").exists()
+    assert main(["memory", "care", "undo", result["decision_ids"][0], "--target", "workspace", "--json"]) == 0
+    capsys.readouterr()
+    assert (cards / "old.md").read_bytes() == original
+    assert not (workspace / "memory/archive/cards/old.md").exists()
+    assert not (workspace / "workspace").exists()

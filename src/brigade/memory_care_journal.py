@@ -33,6 +33,11 @@ def serialized(fn: Callable[P, R]) -> Callable[P, R]:
         if kwargs.get("dry_run"):
             return fn(*args, **kwargs)
         target = Path(args[0] if args else kwargs["target"]).resolve()  # type: ignore[arg-type]
+        # Hand the resolved target on, so a relative --target never reaches a kernel plan.
+        if args:
+            args = (target, *args[1:])  # type: ignore[assignment]
+        else:
+            kwargs["target"] = target
         lock = safe_path(target, ".brigade/memory-care/care.lock")
         lock.parent.mkdir(parents=True, exist_ok=True)
         held: set[Path] = getattr(_CARE_HELD, "targets", set())
