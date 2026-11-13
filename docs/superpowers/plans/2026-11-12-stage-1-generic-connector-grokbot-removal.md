@@ -10,12 +10,48 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-12-brigade-stack-trim-design.md`, Stage 1. The current owner instruction settles its open questions: hub messaging stays in core and is separately enabled within the generic profile. The design file still says draft, but the owner supplied it as approved for this planning task.
 
+## Owner amendments (2026-11-12)
+
+These override anything below that conflicts with them.
+
+1. **Connector commands live under the hub.** The lifecycle group is
+   `brigade hub connector {list,show,setup,doctor,canary,install-service,update,remove,serve}`,
+   registered from `src/brigade/cli/hub_connector.py` under a new top-level
+   `hub` group that this PR creates with only the `connector` subgroup. The
+   hub is becoming the core of the product and the `run` area is being
+   trimmed, so nothing new is added under `run cloud`. Old Dot and Duet
+   invocation routes under `run cloud` stay as compatibility aliases.
+2. **A token is the baseline authentication. Cloudflare Access is optional.**
+   The `cloud-agent` runtime accepts an `auth` block in one of two modes:
+   - `mode: "token"` (default): the listener requires
+     `Authorization: Bearer <token>` on every request, compared in constant
+     time against the profile's own protected token file. That file is
+     distinct from the hub principal token, is validated with the existing
+     protected-file checks, and is never the node credential. A missing,
+     malformed or wrong token gets 401 with no detail. The default bind stays
+     loopback, and a non-loopback bind in token mode requires an explicit
+     allowed-hosts list.
+   - `mode: "access"`: today's signed-identity verification, unchanged, with
+     its audience check.
+   Dot and Duet keep requiring Access. Only `cloud-agent` gains token mode.
+   `doctor` reports the active mode. Token mode is not a failure or a warning.
+3. **Tests for amendment 2 belong to Task 1:** token accepted, wrong token
+   refused, missing header refused, token file shared with another profile
+   or with the hub principal refused at configuration time, non-loopback bind
+   without allowed hosts refused, and Access mode behavior unchanged. Add to
+   Review Focus: a token-mode listener must not accept an Access assertion in
+   place of the token, and must not log the token.
+4. **Task 1's pull request gets a security review** on its current head
+   before merge, because it adds an authentication path.
+5. Task 6's guide documents token mode first and Access as the option for
+   clients that need a signed-identity front.
+
 ## Decisions made by the planner
 
 1. Keep Dot and Duet profiles and their current tools, runtime schemas, credentials and stored configuration working. Folding them into the generic profile is follow-up work because their dispatch and instruction contracts differ.
 2. Name the new packaged profile `cloud-agent`, runtime schema `brigade.cloud-agent.runtime.v1`, principal `agent:cloud-agent`, service `brigade-cloud-agent.service`, and state root `/var/lib/brigade-cloud-agent`. Each deployment uses its own protected token and Access audience. No automatic credential reuse from old profiles.
 3. Default `messaging_enabled` to false. False exposes exactly three memory tools. True exposes those three plus four messaging tools. Both variants use the same profile and principal, with hub grants bounding message recipients.
-4. Add `brigade run cloud connector` as the canonical lifecycle path for all surviving connector profiles. Keep old Dot/Duet invocation routes as compatibility aliases, without importing Grok modules. Removed Grok operations use one shared tombstone handler for one release.
+4. Add `brigade hub connector` as the canonical lifecycle path for all surviving connector profiles. Keep old Dot/Duet invocation routes as compatibility aliases, without importing Grok modules. Removed Grok operations use one shared tombstone handler for one release.
 5. Use six ordered PRs against `overhaul`. Required import, test and registration cleanup travels with each deletion, so each intermediate PR imports cleanly.
 6. Preserve legacy SQLite schema creation and read-only historical projections needed by existing databases in a small neutral storage helper. Remove job mutation, admission, leases and background workers. Do not drop tables, rewrite records or erase files.
 7. Treat the 29,389 Python lines in the whole-file manifest as gross source deletion. Shared helper relocation and the generic profile reduce net savings. Measure net source lines and all four size counters on each actual PR head.
@@ -67,7 +103,7 @@ For each code PR, regenerate inventory with `CHECK env BRIGADE_EXTRAS=1 brigade 
 
 **Files:**
 - Modify: `src/brigade/dot/{profile,runtime_config,adapter,lifecycle,__init__}.py`, `src/brigade/cli/run_cloud.py`, `src/brigade/grokbot_packs.py` (delegate surviving-profile lifecycle only).
-- Create: `src/brigade/dot/connector_registry.py`, `src/brigade/cli/run_cloud_connector.py`, `tests/test_cloud_agent_profile.py`, `tests/test_connector_registry.py`, `tests/fixtures/cloud_agent_tools_snapshot.json`.
+- Create: `src/brigade/dot/connector_registry.py`, `src/brigade/cli/hub_connector.py`, `tests/test_cloud_agent_profile.py`, `tests/test_connector_registry.py`, `tests/fixtures/cloud_agent_tools_snapshot.json`.
 - Modify/Test: `tests/test_dot_lifecycle.py`, `tests/test_dot_runtime.py`, `tests/test_duet_profile.py`, `tests/test_dot_access_auth.py`, `tests/test_dot_handoff_write_path.py`, `tests/test_dot_memory_tools.py`, `tests/test_dot_inbox_tools.py`, `tests/test_grokbot_packs.py`.
 - Modify: common inventory/baseline files above. Create `changelog.d/stage-1-generic-profile.md`. Add setup instructions to `docs/duet-connector.md` temporarily, then consolidate in Task 6.
 
@@ -76,7 +112,7 @@ For each code PR, regenerate inventory with `CHECK env BRIGADE_EXTRAS=1 brigade 
 - Produces: `CLOUD_AGENT: ConnectorProfile`, `CLOUD_AGENT_MEMORY_TOOLS: frozenset[str]`, `CLOUD_AGENT_MESSAGE_TOOLS: frozenset[str]`, `_parse_cloud_agent_runtime(payload: object) -> Runtime`.
 - Extend `runtime_profile(profile: ConnectorProfile, dispatch_enabled: bool, *, messaging_enabled: bool = False) -> ConnectorProfile` and pass the runtime flag at both adapter call sites. Only the cloud-agent branch uses the new keyword. True adds messaging tools, `hub_inbox=True`, strict recipients and the existing Grok inbox send limit. False has no polling or message discovery. Both have `principal_memory=True`, `memory_push=False`, `prompt_load_scan=True`, `fleet_dispatch=False`, no capabilities tool.
 - `connector_registry.py` exposes `instance_config_path(target: Path, pack_id: str) -> Path`, `load_instance_config(target: Path, pack_id: str) -> dict[str, Any]`, `packaged_manifests() -> tuple[dict[str, Any], ...]`, and `PackError(ValueError)` with the existing `reason` attribute. Its Dot-family API is `preview_setup(target: Path, pack_id: str, *, bind: str | None = None, allowed_hosts: list[str] | None = None, allowed_origins: list[str] | None = None, runtime_path: str | Path | None = None) -> dict[str, Any]`, with the identical signature for `apply_setup`. Also expose `preview_update(target: Path, pack_id: str) -> dict[str, Any]` and `apply_update` with the same signature, `preview_remove(target: Path, pack_id: str, *, unit_dir: Path | None = None) -> dict[str, Any]` and `apply_remove` with the same signature, `doctor(target: Path, pack_id: str, *, service_result: bool = False) -> list[dict[str, str]]`, `canary(target: Path, pack_id: str) -> dict[str, Any]`, `render_install_service(target: Path, pack_id: str) -> str`, `apply_install_service(target: Path, pack_id: str, *, out_dir: Path, force: bool = False) -> dict[str, Any]`, `list_packs(target: Path | None = None) -> list[dict[str, Any]]`, and `show_pack(pack_id: str, target: Path | None = None) -> dict[str, Any]`. Legacy wrappers accept old flags and retain their existing validation before delegation. Preserve Dot/Duet schema and instance paths. Cloud-agent uses `.brigade/connectors/cloud-agent/instance.json` and loopback port 8783 unless explicitly configured, with collision checks retained.
-- `run_cloud_connector.register(sub: argparse._SubParsersAction) -> None` and `dispatch(args: argparse.Namespace) -> int` own `run cloud connector {list,show,setup,doctor,canary,install-service,update,remove,serve}`. Use `--id` for profile selection and existing setup flags applicable to Dot-family profiles. Keep `python -m brigade.dot` watch entry point and its `--pack` selection.
+- `hub_connector.register(sub: argparse._SubParsersAction) -> None` and `dispatch(args: argparse.Namespace) -> int` own `hub connector {list,show,setup,doctor,canary,install-service,update,remove,serve}`. Use `--id` for profile selection and existing setup flags applicable to Dot-family profiles. Keep `python -m brigade.dot` watch entry point and its `--pack` selection.
 
 - [ ] **Step 1: Write failing generic-profile tests** in `tests/test_cloud_agent_profile.py`. A local `configured_cloud_agent(tmp_path, *, messaging_enabled=False)` fixture builds protected fake credentials and existing fake hub fixtures, without using the real workspace. Assert:
 
@@ -92,7 +128,7 @@ assert runtime.hub.principal == "agent:cloud-agent"
 
 Parameterize absent/false/true messaging, reject non-booleans and unknown dispatch/events/skill keys. Invoke each forbidden tool through the actual MCP adapter and require existing unknown-tool refusal, not an authorization-only wrapper around a registered tool.
 
-- [ ] **Step 2: Write registry, isolation and messaging tests**. In `tests/test_connector_registry.py`, pin `test_closed_generic_registry`, `test_existing_dot_duet_config_paths_unchanged` and `test_canonical_unit_argv`: unknown IDs raise `PackError`, Dot/Duet paths and schemas match the legacy registry, and new units invoke `run cloud connector serve --id cloud-agent`. Preserve preview/apply rollback and collision tests from the old pack suite. Then add isolation tests using `test_cloud_agent_rejects_shared_identity`, `test_cloud_agent_rejects_wrong_audience`, `test_cloud_agent_no_node_token_fallback`, `test_cloud_agent_message_grants_and_retry`. Assert shared token/state/principal and incorrect audience fail existing configuration/auth checks, missing token does not invoke node CLI authority, disallowed recipient returns `message_recipient_not_permitted`, duplicate sends deduplicate within the existing 10-minute UTC bucket, hourly limit remains shared between send/reply, and failed acknowledgements leave messages pending.
+- [ ] **Step 2: Write registry, isolation and messaging tests**. In `tests/test_connector_registry.py`, pin `test_closed_generic_registry`, `test_existing_dot_duet_config_paths_unchanged` and `test_canonical_unit_argv`: unknown IDs raise `PackError`, Dot/Duet paths and schemas match the legacy registry, and new units invoke `hub connector serve --id cloud-agent`. Preserve preview/apply rollback and collision tests from the old pack suite. Then add isolation tests using `test_cloud_agent_rejects_shared_identity`, `test_cloud_agent_rejects_wrong_audience`, `test_cloud_agent_no_node_token_fallback`, `test_cloud_agent_message_grants_and_retry`. Assert shared token/state/principal and incorrect audience fail existing configuration/auth checks, missing token does not invoke node CLI authority, disallowed recipient returns `message_recipient_not_permitted`, duplicate sends deduplicate within the existing 10-minute UTC bucket, hourly limit remains shared between send/reply, and failed acknowledgements leave messages pending.
 
 - [ ] **Step 3: Run red tests** with `FOCUSED tests/test_cloud_agent_profile.py tests/test_connector_registry.py`. Expected: the new profile/registry imports fail until implementation.
 
@@ -216,7 +252,7 @@ Parameterize absent/false/true messaging, reject non-booleans and unknown dispat
 - Test: `tests/test_cli_help.py`, `tests/test_cli_inventory_contract.py`, `tests/test_verify_brigade_skill.py`, `tests/test_connector_registry.py`, `tests/test_cloud_agent_profile.py`.
 
 **Interfaces:**
-- Consumes: canonical `run cloud connector` lifecycle from Task 1, tombstone wording/version from Task 2, existing `python -m brigade.dot` watch path. Uses existing hub principal/grant and Access provisioning documentation without inventing a new provisioning API.
+- Consumes: canonical `hub connector` lifecycle from Task 1, tombstone wording/version from Task 2, existing `python -m brigade.dot` watch path. Uses existing hub principal/grant and Access provisioning documentation without inventing a new provisioning API.
 - Produces: one public guide for any MCP client, including Grok Bot, with three-tool default and seven-tool messaging opt-in. Documentation links use repository-relative paths. No new command/service is implemented here.
 
 - [ ] **Step 1: Document a temp-directory setup walkthrough** with protected runtime/token references, dedicated hub principal/grants and Access audience. Render setup preview, apply only to the temp target, doctor, canary and MCP tool listing. Show both exact tool sets and sample search/card/untrusted-handoff results. Explain how to opt into messaging and recipient grants without enabling dispatch. Do not paste live credentials, Access identifiers or client profiles.
