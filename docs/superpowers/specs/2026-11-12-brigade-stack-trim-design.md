@@ -227,6 +227,20 @@ below describe the larger scope under review, not a settled removal list.
   decision" was asked and not yet answered.
 - Known gap to design around: a receipt proves that a command exited 0, and
   receipts created from a bare command are not scoreable.
+- Measured on the operator's main machine on 2026-11-12: of 21,648 stored
+  verification receipts, none is scoreable, and none records which model,
+  agent or subagent did the work. The existing model scorecard counts worker
+  processes that exited cleanly, not verified results.
+- **(proposed)** Observe mode records each check an agent runs as its own
+  kind of record, separate from receipts, with the model, harness and
+  subagent type taken from the hook event. It never stores command output.
+- **(proposed)** First report: first-pass check rate by harness and model,
+  with sample size and an "unknown" bucket, labeled as observed and not
+  independently verified. Second: checks claimed in the final message versus
+  checks actually run.
+- The mode default is stored today as an absent key, so changing the default
+  would silently change every existing install. The upgrade must write the
+  current mode explicitly first.
 
 ### Stage 4: fleet down to what the pillars need
 
