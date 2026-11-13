@@ -283,6 +283,23 @@ treatments:
 Unattended jobs follow the same rule. A scheduled job that keeps failing is
 fixed, reported once, or switched off. It does not fail quietly for weeks.
 
+**(decided, 2026-11-13)** Brigade Stack is used by agents, not by people, and
+setup follows from that:
+
+- Setup is one non-interactive command that an agent can run to the end. It
+  asks no questions and leaves no step for a person.
+- Setup schedules its own background work. Nobody writes a cron line, a
+  systemd unit or a scheduled task by hand, and no documented path depends on
+  one. Today `brigade care install` is a separate opt-in step. It becomes part
+  of setup, and an upgrade adds any schedule entry a new release needs.
+- Once the local daemon from Stage B exists, it owns the schedule and setup
+  starts it. Until then setup registers entries with the platform scheduler
+  itself.
+- Output and errors are written for an agent to act on: a stable machine
+  format, and an error that names the next command to run.
+- A feature that only works after a person performs a manual step is not
+  finished.
+
 ### Stage A: memory tends itself
 
 This runs alongside stages 1 to 3 and does not wait for the scorecard.
