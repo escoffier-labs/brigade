@@ -419,7 +419,10 @@ def log(index, *, failed=None, checkout=SHA):
     counts = f"{len(failures)} failed, {2 - len(failures)} passed" if failures else "2 passed"
     lines.append(f"2026-10-22T01:00:03Z {counts}, 6 deselected in 10.00s")
     # A separate real pytest invocation in shard 0 must not replace the shard summary.
-    lines += ["##[group]Run output=$(python -m pytest tests/test_grokbot_mcp.py -q 2>&1)", "##[endgroup]"]
+    lines += [
+        "##[group]Run output=$(python -m pytest tests/test_cloud_agent_profile.py tests/test_dot_transport.py -q 2>&1)",
+        "##[endgroup]",
+    ]
     lines.append("2026-10-22T01:00:04Z 4 passed in 1.00s")
     lines.append("##[group]Run actions/upload-artifact@v7")
     return "\n".join(lines)
@@ -789,11 +792,13 @@ def test_full_log_collects_auxiliary_failure_without_replacing_shard_elapsed(evi
     jobs[0]["conclusion"] = "failure"
     logs[500] = log(0).rsplit("4 passed", 1)[0] + (
         "================ short test summary info ================\n"
-        "FAILED tests/test_grokbot_mcp.py::test_auxiliary - AssertionError\n1 failed, 3 passed in 1.00s\n"
+        "FAILED tests/test_cloud_agent_profile.py tests/test_dot_transport.py::test_auxiliary - AssertionError\n1 failed, 3 passed in 1.00s\n"
     )
     result = shadow.compare(IDENTITY, run, jobs, logs, selected)
     assert result["status"] == "complete"
-    assert result["full_only_candidates"] == ["tests/test_grokbot_mcp.py::test_auxiliary"]
+    assert result["full_only_candidates"] == [
+        "tests/test_cloud_agent_profile.py tests/test_dot_transport.py::test_auxiliary"
+    ]
     assert result["timing"]["full_pytest_elapsed_seconds_sum"] == 40.0
     assert result["full_shards"][0]["auxiliary_pytest_elapsed_seconds"] == [1.0]
 

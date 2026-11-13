@@ -3,7 +3,7 @@
 import asyncio
 from typing import Annotated, Any
 
-from brigade.grokbot_mcp import OptionalDependencyError
+from .transport import OptionalDependencyError
 from ..fleet_dot import MAX_EVIDENCE_REFS, MAX_SUMMARY_CHARS, REPORTED_STATES
 from .adapter import DotTools
 from .contracts import ERROR_MESSAGES, DotError, TOOL_SCHEMAS

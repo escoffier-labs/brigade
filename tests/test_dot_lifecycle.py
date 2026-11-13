@@ -501,7 +501,7 @@ def test_run_listener_refuses_windows_before_startup(monkeypatch):
 def test_run_listener_refuses_to_start_without_a_jwt_backend(configured):
     # A missing RSA backend must fail startup, not serve a healthy-looking connector that rejects every login.
     pytest.importorskip("uvicorn", reason="requires the grokbot extra")
-    from brigade.grokbot_mcp import OptionalDependencyError
+    from brigade.dot.transport import OptionalDependencyError
     from brigade.dot import access_auth
 
     target, runtime, _ = configured

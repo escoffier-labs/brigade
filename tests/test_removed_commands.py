@@ -140,3 +140,106 @@ def test_retired_t3_module_commands(command):
     assert f"this was removed in {REMOVED_IN}." in result.stderr
     assert "brigade-grokbot-t3-watch.timer" in result.stderr
     assert "brigade-grokbot-t3-intake.timer" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        [name]
+        for name in (
+            "enqueue",
+            "feed",
+            "scout-feed",
+            "build-feed",
+            "reconcile-reports",
+            "reconcile-findings",
+            "convert-findings",
+            "relay-findings",
+            "claim",
+            "renew",
+            "start",
+            "fail",
+            "ack-cancel",
+            "complete",
+            "cancel",
+            "expire",
+            "status",
+            "setup",
+            "doctor",
+            "canary",
+            "install-service",
+        )
+    ]
+    + [["pack", name] for name in ("relay-setup", "relay-doctor", "relay", "install-relay-service")],
+)
+def test_removed_queue_commands_preserve_populated_store(tmp_path, monkeypatch, capsys, suffix):
+    import sqlite3
+    from tests._home import set_home
+
+    set_home(monkeypatch, tmp_path / "home")
+    target = tmp_path / "target"
+    target.mkdir()
+    database = target / "retained.db"
+    with sqlite3.connect(database) as conn:
+        conn.execute("CREATE TABLE retained (body TEXT)")
+        conn.execute("INSERT INTO retained VALUES ('keep this row')")
+    (target / "config.json").write_text('{"retained": true}', encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in target.iterdir()}
+    assert cli.main(["run", "cloud", "grokbot", *suffix, "--target", str(target), "--obsolete", "--apply"]) == 2
+    error = capsys.readouterr().err
+    assert f"this was removed in {REMOVED_IN}." in error
+    assert "usage:" not in error and "hub connector" in error
+    assert "brigade-grokbot-findings-relay.timer" in error
+    assert {p.name: p.read_bytes() for p in target.iterdir()} == before
+
+
+@pytest.mark.parametrize("flag", ["--pack", "--pac"])
+@pytest.mark.parametrize("attached", [True, False])
+def test_operations_relay_removal_accepts_old_flags(flag, attached, capsys):
+    selected = [flag + "=operations-relay"] if attached else [flag, "operations-relay"]
+    assert cli.main(["run", "cloud", "grokbot", "serve", *selected, "--obsolete"]) == 2
+    error = capsys.readouterr().err
+    assert "brigade-grokbot-operations-relay.service" in error
+    assert "usage:" not in error
+
+
+@pytest.mark.parametrize("profile", ["operations-relay", "operator", "repository-scout", "implementation-worker"])
+@pytest.mark.parametrize("command", ["setup", "show", "doctor", "canary", "update", "remove", "install-service"])
+@pytest.mark.parametrize("flag", ["--id", "--i"])
+def test_retired_queue_pack_paths(profile, command, flag, capsys):
+    assert cli.main(["run", "cloud", "grokbot", "pack", command, flag + "=" + profile, "--obsolete"]) == 2
+    error = capsys.readouterr().err
+    assert f"this was removed in {REMOVED_IN}." in error
+    assert "usage:" not in error
+    assert "brigade-grokbot-" + profile + ".service" in error
+
+
+def test_retired_enrollment_cli(capsys):
+    assert cli.main(["fleet", "grokbot", "enroll-actor", "--obsolete"]) == 2
+    assert f"this was removed in {REMOVED_IN}." in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("role", ["operator", "repository-scout", "implementation-worker"])
+@pytest.mark.parametrize("flag", ["--instance", "--inst"])
+def test_retired_listener_roles(role, flag, capsys):
+    assert cli.main(["run", "cloud", "grokbot", "serve", flag + "=" + role, "--obsolete"]) == 2
+    error = capsys.readouterr().err
+    assert f"this was removed in {REMOVED_IN}." in error
+    assert "brigade-grokbot-" + role + ".service" in error
+    assert "usage:" not in error
+
+
+@pytest.mark.parametrize("suffix", [[], ["serve"]])
+def test_surviving_legacy_family_help(suffix, capsys):
+    from pathlib import Path
+
+    with pytest.raises(SystemExit) as exit:
+        cli.main(["run", "cloud", "grokbot", *suffix, "--help"])
+    assert exit.value.code == 0
+    output = capsys.readouterr()
+    assert "this was removed" not in output.err
+    if suffix:
+        expected = (Path(__file__).parent / "fixtures/grokbot_serve_help.txt").read_text(encoding="utf-8")
+        assert output.out == expected
+    else:
+        assert "pack" in output.out and "serve" in output.out

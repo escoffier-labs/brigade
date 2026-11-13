@@ -72,8 +72,6 @@ This checkout ships patch-backed manifests for the focused suites agents actuall
 | --- | --- | --- |
 | `verify/manifests/work-cmd-verification.json` | `tests/test_work_cmd_verification.py` | `src/brigade/work_cmd/verification.py` |
 | `verify/manifests/guard.json` | `tests/guard` | `src/brigade/guard/engine.py` |
-| `verify/manifests/grokbot-feed.json` | `tests/test_grokbot_feed.py` | `src/brigade/grokbot_feed.py` |
-| `verify/manifests/grokbot-reconcile.json` | `tests/test_grokbot_reconcile.py` | `src/brigade/grokbot_reconcile.py` |
 | `verify/manifests/fleet-claims.json` | `tests/test_fleet_claims.py`, `tests/test_fleet_claim_release.py` | `src/brigade/fleet_hub.py` |
 | `verify/manifests/run-resume.json` | `tests/test_run_resume.py` | `src/brigade/run_resume.py` |
 | `verify/manifests/verify-manifest.json` | `tests/test_verify_manifest_tracked.py` | `src/brigade/verify_manifest.py` |

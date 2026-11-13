@@ -2,7 +2,7 @@
 
 from .contracts import DotError, PACK_ID, TOOLS
 
-# Profiles load before lifecycle: lifecycle imports grokbot_packs, which reads them from this package.
+# Profiles load before lifecycle: lifecycle imports the legacy registry, which reads them from this package.
 from .profile import (
     CLOUD_AGENT,
     CLOUD_AGENT_MEMORY_TOOLS,

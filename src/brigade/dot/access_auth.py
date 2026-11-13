@@ -11,7 +11,7 @@ from types import ModuleType
 from typing import Any
 from urllib.parse import urlsplit
 
-from brigade.grokbot_mcp import OptionalDependencyError
+from .transport import OptionalDependencyError
 
 from .contracts import DotError
 from .runtime_config import AuthConfig

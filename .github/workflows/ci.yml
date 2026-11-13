@@ -610,7 +610,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pip install -e ".[dev,grokbot]"
+          python -m pip install -e ".[dev,connector]"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Configure Windows test temp drive
         run: python scripts/windows_pytest.py --configure-temp-root
@@ -768,11 +768,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
-      - name: Install with grokbot extra
+      - name: Install with connector extra
         if: matrix.python == '3.12'
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,grokbot]"
+          python -m pip install -e ".[dev,connector]"
       - name: Pytest shard
         if: matrix.python != '3.12'
         run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q -n 4 --dist=worksteal
@@ -785,18 +785,18 @@ jobs:
           # An argument, not PYTEST_ADDOPTS, so tests that spawn pytest cannot overwrite it.
           SHADOW_JUNIT: ${{ github.event_name == 'pull_request' && format('--junitxml=shadow-junit-{0}.xml -o junit_family=xunit1', matrix.shard) || '' }}
         run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q -n 4 --dist=worksteal $SHADOW_JUNIT --cov="$PWD/src/brigade" --cov-report=
-      - name: Assert grokbot MCP tests run without skips
+      - name: Assert connector MCP tests run without skips
         if: matrix.python == '3.12' && matrix.shard == 0
         run: |
-          output=$(python -m pytest tests/test_grokbot_mcp.py -q --no-header -p no:cacheprovider 2>&1)
+          output=$(python -m pytest tests/test_cloud_agent_profile.py tests/test_dot_transport.py -q --no-header -p no:cacheprovider 2>&1)
           pytest_exit=$?
           echo "$output"
           if [ $pytest_exit -ne 0 ]; then
-            echo "ERROR: grokbot MCP tests failed"
+            echo "ERROR: connector MCP tests failed"
             exit 1
           fi
           if grep -q 'skipped' <<< "$output"; then
-            echo "ERROR: grokbot MCP tests were skipped; install the grokbot extra"
+            echo "ERROR: connector MCP tests were skipped; install the connector extra"
             exit 1
           fi
       - name: Upload coverage data
@@ -1666,7 +1666,7 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install shadow dependencies
         if: steps.trial.outputs.active == 'true' && (needs.test-shards.result == 'success' || needs.test-shards.result == 'failure')
-        run: python -m pip install -e ".[dev,grokbot]"
+        run: python -m pip install -e ".[dev,connector]"
       - name: Run selected files on the PR merge
         if: steps.trial.outputs.active == 'true' && (needs.test-shards.result == 'success' || needs.test-shards.result == 'failure')
         env:

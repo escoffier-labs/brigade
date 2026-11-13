@@ -14,14 +14,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from brigade import care_cmd, grokbot_ops, grokbot_pack_relay
+from brigade import care_cmd
+from brigade.dot import service_render as grokbot_ops
 
 RENDERERS = (
     "dot",
     "dot-watch",
-    "ops",
-    "pack-relay",
-    "operations-relay",
 )
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="systemd service renderers require POSIX")
 
@@ -42,23 +40,6 @@ def _render(name, target, python, monkeypatch):
         "upstream_key": {"kind": "env", "name": "TEST_UPSTREAM_KEY"},
         "staging_dir": str(target / "staging"),
     }
-    if name == "ops":
-        return grokbot_ops.render_unit(
-            {
-                "schema": grokbot_ops.CONFIG_SCHEMA,
-                "instance": "operator",
-                **{key: instance[key] for key in ("bind", "allowed_hosts", "allowed_origins", "bearer")},
-            },
-            python=python,
-            exec_root=target,
-        )
-    if name == "pack-relay":
-        monkeypatch.setattr(grokbot_pack_relay, "load_relay_config", lambda _: instance)
-        monkeypatch.setattr(grokbot_pack_relay, "_optional_instance", lambda *_: None)
-        out = target / "units"
-        out.mkdir()
-        paths = grokbot_pack_relay.write_relay_units(target, out, python=python)
-        return next(path.read_text() for path in paths if path.suffix == ".service")
     base = name.split("-", 1)[0]
     module = importlib.import_module(
         "brigade.dot.lifecycle"

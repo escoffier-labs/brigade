@@ -1,7 +1,7 @@
-"""``memory_context`` for dispatch packets, and card references for Grok Bot jobs (S25).
+"""Memory context for dispatch packets and validation of retained hub references.
 
-A dispatch packet (an ``aboyeur`` brief, a Grok Bot T3 adapter prompt, a native
-T3 child task or a Worklore prepared handoff) may carry one ``memory_context``
+A dispatch packet (an ``aboyeur`` brief, a native T3 child task or a Worklore
+prepared handoff) may carry one ``memory_context``
 block: at most 5 items and at most 4 KiB. Each item names a card by ``scope``,
 ``card_id``, ``title``, ``summary`` (at most 300 characters), a short content
 hash, ``trust``, ``score`` and ``source``. A card body never rides along: the
@@ -34,11 +34,7 @@ Each item's ``read`` field says how to open the card body through an interface
 that exists for its source: ``memory_card(name, scope)`` and ``brigade memory
 hub card <card_id> --scope <scope>`` for a hub card, the path in the memory
 workspace for a local card. A connector cannot open a local card, so a
-connector packet and a Grok Bot reference never name one. Grok Bot references
-are searched with the Grok Bot memory principal's own credential, so they name
-only cards that principal may read. That credential comes only from
-``[grokbot_memory] token_file`` in the user-level fleet.toml. Without it there
-are none.
+connector packet never names one.
 
 Every packet is built for the connector audience except one: Worklore
 ``handoff show``, which prints to the operator's own terminal, asks
@@ -59,7 +55,6 @@ the sentence that memory text is data, not instructions.
 from __future__ import annotations
 
 import collections
-import dataclasses
 import json
 import logging
 import math
@@ -603,61 +598,6 @@ def for_remote(prompt: str) -> str:
 Authority = Callable[[], "tuple[str, str] | None"]
 
 
-def grokbot_memory_authority() -> tuple[str, str] | None:
-    """The hub URL and token of the Grok Bot memory principal (``agent:grokbot-memory``), or None.
-
-    The token comes only from ``[grokbot_memory] token_file`` in the user-level
-    ``~/.brigade/fleet.toml`` (#2416), read with the private-file checks every
-    message credential gets. A workspace file never chooses the path. Absent or
-    refused, there is no authority and the feeds compute no references.
-    ``brigade run cloud grokbot doctor`` says why in its ``memory-refs`` line.
-    """
-    from . import grokbot_memory_credential
-
-    return grokbot_memory_credential.resolve().authority
-
-
-def job_refs(
-    target: Path | None, query: str, *, authority: Authority | None = None, **options: Any
-) -> list[dict[str, str]]:
-    """Card references for a Grok Bot job: scope, card id and short hash only, at most five.
-
-    The search runs as the Grok Bot memory principal, with ``query_source:
-    "push"``, so the hub applies that principal's own grants: every reference is
-    a hub card its memory profile (``memory_search``, ``memory_card``) can
-    retrieve. Without that credential there are no references. A local card or
-    a withheld card yields none either.
-    """
-    from . import memory_hub_client as hubc
-    from .memory_hooks import resolve_memory_recall_target
-
-    bot = (authority or grokbot_memory_authority)()
-    if bot is None or target is None:
-        return []
-    try:
-        root, status = resolve_memory_recall_target(Path(target))
-        if status != "active" or root is None:
-            return []
-        workspace = options.pop("settings", None) or hubc.load_settings(root)
-    except Exception:  # noqa: BLE001 - references never block an enqueue
-        return []
-    if not workspace.enabled:
-        return []
-    hub_url, token = bot
-    # The workspace's read scopes bound the search. The bot's own grants, which the hub
-    # applies to this credential, decide which of them it may see.
-    settings = dataclasses.replace(workspace, hub_url=hub_url, token=token)
-    built = build(target, query, audience=CONNECTOR, settings=settings, **options)
-    if built is None:
-        return []
-    refs = [
-        {"scope": str(item["scope"]), "card_id": str(item["card_id"]), "hash": str(item["hash"])}
-        for item in built.context["items"]
-        if "blocked" not in item and item["source"] == "hub"
-    ]
-    return refs[:MAX_REFS]
-
-
 def validate_refs(value: object) -> list[dict[str, str]]:
     """The ``memory_refs`` envelope field: a list of at most five ``{scope, card_id, hash}``. Raises ValueError."""
     from .memory_hub_client import valid_card_id, valid_scope
@@ -675,14 +615,3 @@ def validate_refs(value: object) -> list[dict[str, str]]:
             raise ValueError("invalid memory reference")
         refs.append({"scope": scope, "card_id": card_id, "hash": digest})
     return refs
-
-
-def with_job_refs(target: Path | None, spec: dict[str, Any]) -> dict[str, Any]:
-    """``spec`` with ``memory_refs`` computed from its own instructions, and without the key when there are none.
-
-    The feed computes them from task text it already holds. They never leave the
-    private envelope: the hub enqueue carries metadata only, as before.
-    """
-    plain = {key: value for key, value in spec.items() if key != "memory_refs"}
-    refs = job_refs(target, _text(plain.get("instructions")))
-    return {**plain, "memory_refs": refs} if refs else plain

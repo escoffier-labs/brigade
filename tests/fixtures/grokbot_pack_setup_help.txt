@@ -1,6 +1,5 @@
 usage: brigade run cloud grokbot pack setup [-h] [--target TARGET] --id
-                                            {implementation-worker,operator,repository-scout,dot,duet,operations-relay}
-                                            [--json] [--bind BIND]
+                                            {dot,duet} [--json] [--bind BIND]
                                             [--allow-host ALLOW_HOST]
                                             [--allow-origin ALLOW_ORIGIN]
                                             [--bearer-file BEARER_FILE | --bearer-env BEARER_ENV]
@@ -11,7 +10,7 @@ usage: brigade run cloud grokbot pack setup [-h] [--target TARGET] --id
 options:
   -h, --help            show this help message and exit
   --target TARGET
-  --id {implementation-worker,operator,repository-scout,dot,duet,operations-relay}
+  --id {dot,duet}
   --json
   --bind BIND           Listener host:port. Defaults to the pack loopback
                         port.

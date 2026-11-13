@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from brigade.grokbot_mcp import OptionalDependencyError
+from brigade.dot.transport import OptionalDependencyError
 from brigade.dot import access_auth, lifecycle, safe_state
 from brigade.dot.events import EventService
 from brigade.dot.runtime_config import parse_runtime
@@ -19,7 +19,7 @@ def test_core_imports_without_posix_or_optional_dependencies():
 import sys
 for name in ("fcntl", "pwd", "grp", "resource", "termios", "mcp", "jwt", "anyio"):
     sys.modules[name] = None
-import brigade.grokbot_packs
+import brigade.dot.legacy_registry
 import brigade.dot
 from brigade.cli import main
 assert main(["--help"]) == 0

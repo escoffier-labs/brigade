@@ -11,12 +11,10 @@ import os
 
 import pytest
 
-from brigade import dirfd
 from brigade import grokbot_jobs
-from brigade import grokbot_reconcile
-from brigade import proc
 from brigade.grokbot_job_validation import GrokbotJobError
-from brigade.grokbot_reconcile import ReconcileError
+from brigade import dirfd
+from brigade import proc
 from tests._posix import requires_dirfd, requires_process_groups
 
 
@@ -78,24 +76,6 @@ def test_file_flags_fail_closed_without_o_nofollow(
         dirfd.file_flags(os.O_RDONLY)
 
 
-def test_grokbot_jobs_directory_flags_maps_to_typed_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The jobs store surfaces the facade failure as unsafe-storage."""
-    monkeypatch.delattr(os, "O_DIRECTORY", raising=False)
-    with pytest.raises(GrokbotJobError, match="unsafe-storage"):
-        grokbot_jobs._directory_flags()
-
-
-def test_grokbot_reconcile_directory_flags_maps_to_typed_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Reconcile surfaces the facade failure as its own typed error."""
-    monkeypatch.delattr(os, "O_DIRECTORY", raising=False)
-    with pytest.raises(ReconcileError):
-        grokbot_reconcile._directory_flags()
-
-
 @requires_process_groups
 def test_process_group_id_matches_getpgid_on_posix() -> None:
     """The proc facade returns the real pgid where getpgid exists."""
@@ -108,3 +88,12 @@ def test_process_group_id_none_without_getpgid(
     """Windows has no os.getpgid: the facade returns None instead of raising."""
     monkeypatch.delattr(os, "getpgid", raising=False)
     assert proc.process_group_id(os.getpid()) is None
+
+
+def test_grokbot_jobs_directory_flags_maps_to_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The jobs store surfaces the facade failure as unsafe-storage."""
+    monkeypatch.delattr(os, "O_DIRECTORY", raising=False)
+    with pytest.raises(GrokbotJobError, match="unsafe-storage"):
+        grokbot_jobs._directory_flags()

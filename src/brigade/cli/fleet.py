@@ -727,25 +727,9 @@ def _dispatch_nodes_revoke(args: argparse.Namespace) -> int:
 
 
 def _dispatch_grokbot_enroll_actor(args: argparse.Namespace) -> int:
-    import json as _json
+    from .removed_commands import removed
 
-    from .. import fleet_client, fleet_client_grokbot
-
-    try:
-        payload = fleet_client_grokbot.enroll_actor(
-            node_id=args.node_id,
-            queue_owner_node_id=args.queue_owner_node_id,
-            queue_id=args.queue_id,
-            actor_kind=args.role,
-        )
-    except fleet_client.FleetClientError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    if args.json:
-        print(_json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"enrolled Grok Bot actor: node={payload['node_id']} role={args.role}")
-    return 0
+    return removed("fleet grokbot enroll-actor")
 
 
 def _dispatch_export(args: argparse.Namespace) -> int:

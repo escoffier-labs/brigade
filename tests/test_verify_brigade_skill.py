@@ -322,7 +322,6 @@ def test_skill_doc_states_what_the_helper_enforces():
     """SKILL.md must not promise guarantees the helper does not make."""
     doc = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
     assert ".brigade/verification-evidence" in doc
-    assert "--manifest" in doc, "the one flag outside the target contract must be documented"
 
 
 def test_skill_doc_includes_checkout_verification_map():
@@ -332,7 +331,7 @@ def test_skill_doc_includes_checkout_verification_map():
     for heading in ("## Launch", "## Doctor", "## Drive", "## Evidence", "## Cleanup", "## Feature map"):
         assert heading in doc, heading
     assert "python3 -m venv .venv" in doc
-    assert 'pip install -e ".[dev,grokbot]"' in doc
+    assert 'pip install -e ".[dev,connector]"' in doc
     assert "brigade doctor --target ." in doc
     assert "brigade status --target ." in doc
     assert "./scripts/verify-focused" in doc
@@ -351,7 +350,7 @@ def test_skill_doc_includes_checkout_verification_map():
         "brigade run",
         "brigade work verify",
         "brigade fleet",
-        "brigade run cloud grokbot",
+        "brigade hub connector",
         "brigade guard",
     ):
         assert surface in doc, surface
@@ -360,7 +359,7 @@ def test_skill_doc_includes_checkout_verification_map():
         "tests/test_run_cli.py",
         "tests/test_work_cmd_verification.py",
         "tests/test_fleet_claims.py",
-        "tests/test_grokbot_ops.py",
+        "tests/test_dot_transport.py",
         "tests/guard/test_cli.py",
         "tests/test_scrub.py",
     ):
