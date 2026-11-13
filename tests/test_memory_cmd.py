@@ -234,6 +234,9 @@ def test_memory_care_scan_detects_card_decay_issues(tmp_path, monkeypatch, capsy
 
 
 def test_memory_care_status_explains_freshness_metadata(tmp_path, monkeypatch, capsys):
+    # Legacy planning remains available when automatic tending is disabled.
+    (tmp_path / ".brigade").mkdir(exist_ok=True)
+    (tmp_path / ".brigade/memory-care.toml").write_text("[tend]\nenabled = false\n", encoding="utf-8")
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     cards = tmp_path / "memory" / "cards"
     _write_card(cards / "missing-meta.md", {"topic": "missing-meta", "confidence": "high", "evidence": ["README.md"]})
@@ -416,6 +419,9 @@ def test_derived_fresh_until_returns_none_outside_the_date_range():
 
 
 def test_memory_care_plan_fixes_reports_blockers_and_writes_nothing(tmp_path, monkeypatch, capsys):
+    # Legacy planning remains available when automatic tending is disabled.
+    (tmp_path / ".brigade").mkdir(exist_ok=True)
+    (tmp_path / ".brigade/memory-care.toml").write_text("[tend]\nenabled = false\n", encoding="utf-8")
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     cards = tmp_path / "memory" / "cards"
     reviewed_missing = cards / "reviewed-missing.md"

@@ -104,6 +104,19 @@ def plan_item(issue: dict[str, Any], *, target: Path, scan_date: str, config: Me
         else:
             candidate_fields["fresh_until"] = "<operator-selected-date>"
     blockers.extend(metadata_plan_blockers(issue_type, reviewed=reviewed))
+    from .memory_care_tend import load_config
+    from .memory_care_fixes import AUTO_FIXES, prepare, FixRefused
+
+    automatic = load_config(target).enabled and issue_type in AUTO_FIXES
+    derived_auto: dict[str, Any] = {}
+    if automatic:
+        try:
+            derived_auto = prepare(target, config, {"card_file": card_file, "issue_type": issue_type}, care._today())
+            candidate_fields = derived_auto["candidate_fields"]
+            blockers = []
+        except (FixRefused, OSError, ValueError) as exc:
+            candidate_fields = {}
+            blockers = [str(exc) if isinstance(exc, FixRefused) else "unreadable"]
     unblocked = not blockers
     item = {
         "id": f"memory-care-fix-{source_fingerprint or care._stable_hash({'file': card_file, 'issue_type': issue_type})}",
@@ -114,7 +127,8 @@ def plan_item(issue: dict[str, Any], *, target: Path, scan_date: str, config: Me
         "safe_summary": issue.get("safe_summary") or issue.get("summary") or "",
         "candidate_fields": candidate_fields,
         "status": "blocked" if blockers else "planned",
-        "safe_to_apply_automatically": False,
+        "safe_to_apply_automatically": automatic and unblocked,
+        "content_digest": derived_auto.get("content_digest"),
         "would_write": False,
         "blockers": blockers,
         "suggested_next_command": (
@@ -143,7 +157,7 @@ def plan_payload(target: Path, config: MemoryCareConfig, scan_payload: dict[str,
         plan_item(issue, target=target, scan_date=scan_date, config=config)
         for issue in issues
         if isinstance(issue, dict)
-        and str(issue.get("issue_type") or "") in PLANABLE_METADATA_FIXES
+        and str(issue.get("issue_type") or "") in (PLANABLE_METADATA_FIXES | {"missing-index-link", "orphaned-card"})
         # A saved scan can predate a read_only_paths entry; never plan edits for those cards.
         and care.read_only_pattern(str(issue.get("file") or issue.get("card_file") or ""), config.read_only_paths)
         is None
@@ -171,7 +185,7 @@ def plan_payload(target: Path, config: MemoryCareConfig, scan_payload: dict[str,
     }
 
 
-def plan_fixes(*, target: Path, json_output: bool = False) -> int:
+def plan_fixes(*, target: Path, json_output: bool = False, apply: bool = False) -> int:
     from . import memory_cmd as care
 
     target = target.expanduser().resolve()
@@ -182,12 +196,24 @@ def plan_fixes(*, target: Path, json_output: bool = False) -> int:
         config = care._config_or_default(target)
         scan_payload = care._load_scan_payload(target, config)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
+        if apply:
+            print("memory care fixes: applied=0 skipped=1 reasons=scan-unreadable=1", file=sys.stderr)
+            return 2
         print(f"error: cannot read memory-care scan: {exc}", file=sys.stderr)
         return 2
     if scan_payload is None:
+        if apply:
+            print("memory care fixes: applied=0 skipped=1 reasons=scan-missing=1", file=sys.stderr)
+            return 2
         print(f"error: memory-care scan not found: {care._scan_path(target, config)}", file=sys.stderr)
         return 2
     payload = plan_payload(target, config, scan_payload)
+    if apply:
+        from .memory_care_fixes import apply_fixes, summary
+
+        result = apply_fixes(target, config, today=care._today(), plan=payload)
+        print(json.dumps(result, sort_keys=True) if json_output else summary(result))
+        return 0
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0

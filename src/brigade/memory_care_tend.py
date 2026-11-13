@@ -13,7 +13,7 @@ from typing import Any, Sequence
 from . import memory_archive, memory_care_hub, memory_care_journal as journal, memory_care_retire, memory_cmd
 from . import memory_hub_store as store
 
-STAGES = ("hub", "retire", "inbox")
+STAGES = ("hub", "fixes", "retire", "inbox")
 STATE_REL = ".brigade/memory-care/tend/latest.json"
 
 
@@ -57,6 +57,12 @@ def run(
             continue
         if stage == "hub":
             payload["stages"][stage] = {} if dry_run else memory_care_hub.retry_pending(target)
+        elif stage == "fixes":
+            from .memory_care_fixes import apply_fixes
+
+            payload["stages"][stage] = apply_fixes(
+                target, memory_cmd._config_or_default(target), today=today or date.today(), dry_run=dry_run
+            )
         elif stage == "inbox":
             from .memory_inbox_drain import drain
 

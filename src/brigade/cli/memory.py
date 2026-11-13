@@ -88,7 +88,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true")
         if name == "tend":
-            command.add_argument("--stage", action="append", choices=("hub", "retire", "inbox"))
+            command.add_argument("--stage", action="append", choices=("hub", "fixes", "retire", "inbox"))
             command.add_argument("--dry-run", action="store_true")
         elif name == "undo":
             command.add_argument("decision_id")
@@ -101,6 +101,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_memory_care_plan_fixes.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
     )
+    p_memory_care_plan_fixes.add_argument("--apply", action="store_true", help="Apply journaled low-risk fixes.")
     p_memory_care_plan_fixes.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_care_backfill = memory_care_sub.add_parser(
         "backfill",
@@ -602,7 +603,9 @@ def dispatch(args) -> int:
         if args.memory_care_command == "backfill":
             return memory_cmd.backfill(target=args.target, apply=args.apply, json_output=args.json)
         if args.memory_care_command == "plan-fixes":
-            return memory_cmd.plan_fixes(target=args.target, json_output=args.json)
+            return memory_cmd.plan_fixes(
+                target=args.target, json_output=args.json, **({"apply": True} if args.apply else {})
+            )
         if args.memory_care_command == "status":
             return memory_cmd.status(target=args.target, json_output=args.json)
         if args.memory_care_command == "doctor":

@@ -289,7 +289,6 @@ def _revert_locked(target: Path, decision_id: str, *, reason: str) -> Decision:
         hub={},
         metadata={"appends": retractions(append_payload), "document_undo": document_undo},
     )
-    mark_undone(target, d.decision_id, undo.decision_id)
     return undo
 
 
@@ -563,14 +562,9 @@ def resolve_prepared(target: Path) -> list[dict[str, Any]]:
             except JournalConflict:
                 # An unreadable unfinished undo may contain a document mutation.
                 needs_lock = True
-    root = target / JOURNAL_REL
-    if root.exists() and not needs_lock:
-        for directory in root.iterdir():
-            if (directory / "decision.json").exists():
-                p = _payload(target, directory.name)
-                if p.get("document_undo") and p.get("phase") == "prepared":
-                    needs_lock = True
-                    break
+    from .memory_care_pending import load as pending_index
+
+    needs_lock = needs_lock or any(row["document"] for row in pending_index(target).values())
     with _document_lock(target) if needs_lock else nullcontext():
         return _resolve_prepared_locked(target)
 
@@ -639,26 +633,20 @@ def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
         else:
             if match.group(2) == "repair":
                 _repair_indexes(target, decision_id)
-    root = target / JOURNAL_REL
-    if root.exists():
-        for directory in sorted(root.iterdir()):
-            if not (directory / "decision.json").exists():
-                continue
-            p = _payload(target, directory.name)
-            if p.get("phase") == "abandoned" and p.get("repair_indexes"):
-                _repair_indexes(target, directory.name)
-            if p.get("phase") in ("committed", "undone"):
-                from .memory_inbox_append import publish
+    from .memory_care_pending import load as pending_index
 
-                publish(target, directory.name)
-            if p.get("phase") == "prepared":
-                finish_prepared(target, directory.name)
-                final = _payload(target, directory.name)
-                resolved.append(
-                    {
-                        "decision_id": directory.name,
-                        "phase": final["phase"],
-                        "reason": final.get("abandoned_reason", ""),
-                    }
-                )
+    for decision_id, row in pending_index(target).items():
+        if row["repair"]:
+            _repair_indexes(target, decision_id)
+        if row["append"]:
+            from .memory_inbox_append import publish
+
+            publish(target, decision_id)
+        if row["prepared"]:
+            finish_prepared(target, decision_id)
+            final = _payload(target, decision_id)
+            resolved.append(
+                {"decision_id": decision_id, "phase": final["phase"], "reason": final.get("abandoned_reason", "")}
+            )
+    pending_index(target)
     return resolved
