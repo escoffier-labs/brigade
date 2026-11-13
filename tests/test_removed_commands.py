@@ -296,4 +296,6 @@ def test_removed_fleet_keys_stop_before_family_import(monkeypatch, capsys, extra
     assert not output.out
     assert f"this was removed in {REMOVED_IN}." in output.err
     assert "Client-side message encryption no longer ships." in output.err
+    assert "fleet/mesh-keys" in output.err
+    assert "BRIGADE_HOME" in output.err
     assert "invalid choice" not in output.err

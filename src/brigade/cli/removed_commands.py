@@ -25,6 +25,13 @@ COMMAND_PATHS = (
     (("hub", "connector"), "--id"),
 )
 REPLACEMENT = "Use brigade hub connector setup --id cloud-agent with independent credentials."
+# The removed commands were the only way to find this state, so the message must name it.
+FLEET_KEYS_REPLACEMENT = (
+    "Client-side message encryption no longer ships. Plain messaging is unchanged. "
+    "Private keys and trust files from an earlier `fleet keys init` may remain in fleet/mesh-keys "
+    "inside the Brigade home directory (~/.brigade unless BRIGADE_HOME is set). "
+    "Nothing reads them now. Delete that directory to remove them."
+)
 
 
 def removed(command: str, *, replacement: str | None = None) -> int:
@@ -36,9 +43,7 @@ def compatibility(argv: list[str]) -> int | None:
     """Recognize historical IDs before loading command families or validating stale flags."""
     if argv[:2] == ["fleet", "keys"]:
         command = " ".join(argv[:3] if argv[2:3] in (["init"], ["show"], ["rotate"]) else argv[:2])
-        return removed(
-            command, replacement="Client-side message encryption no longer ships. Plain messaging is unchanged."
-        )
+        return removed(command, replacement=FLEET_KEYS_REPLACEMENT)
     for prefix, flag in COMMAND_PATHS:
         if tuple(argv[: len(prefix)]) != prefix:
             continue
