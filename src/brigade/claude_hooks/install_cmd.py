@@ -541,6 +541,14 @@ def hooks_status(*, target: Path, scope: HooksScope = "project", json_output: bo
 
 
 def hooks_uninstall(*, target: Path, scope: HooksScope = "project", quiet: bool = False) -> int:
+    if scope == "project":
+        from ..codex_observe_hooks import remove_codex_observe_hooks
+
+        error = remove_codex_observe_hooks(target)
+        if error:
+            if not quiet:
+                print(f"error: {error}", file=sys.stderr)
+            return 2
     layout = _layout(scope=scope, target=target)
     settings_path = layout.settings_path
     settings, error = _load_settings(settings_path)

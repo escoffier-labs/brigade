@@ -186,13 +186,12 @@ run `brigade work mode set observe` with Codex selected. Trust the project
 An installed file alone does not mean the hooks are trusted or enabled.
 `brigade work mode show --json` reports installation under `observe_hooks.codex`.
 Codex check status and duration remain unknown because the finished-tool
-response has no documented exit-status or duration contract. Cursor capture
-uses its existing presence hooks, including `postToolUseFailure`. Reinstall
-existing Cursor hooks to add that event. Both harnesses record agent type as
-unknown. Cursor failure hooks require a detected Cursor Agent build at or above
-`2026.09.18-9a7762b`. Install and update commands check `agent --version`.
-Older, undetected, or unparsable versions keep the existing hooks and disable
-all Cursor check recording to avoid recording only successes. Reinstalling
-on a compatible build enables recording. Reinstalling after a downgrade
-removes Brigade's failure hook. Doctor reports unavailable recording.
+response has no documented exit-status or duration contract. Agent type remains
+unknown. Unknown statuses must be excluded from pass-rate denominators.
+Leaving observe mode or running `brigade work hooks uninstall` removes only
+Brigade's Codex entries. The installed command pins capture to its project.
 Strict and off modes do not record these observed checks.
+
+Cursor capture is deferred to its own pull request because a CLI version cannot
+establish compatibility for every editor and shared-project reader. Its redesign
+must avoid version probes and unsupported events that invalidate hook documents.

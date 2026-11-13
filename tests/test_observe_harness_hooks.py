@@ -10,28 +10,27 @@ import pytest
 
 from brigade import fleet_session_presence as presence, observed_checks
 from tests._home import set_home
+from tests._posix import requires_dirfd
 from tests.test_work_mode import _wired, _set_mode
 
 
 @pytest.fixture
 def target(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("brigade.cursor_hook_compat.detect_version", lambda: "2026.10.01-e373342")
     set_home(monkeypatch, tmp_path / "home")
     monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
-    target = _wired(tmp_path, harnesses=("codex", "cursor"))
+    target = _wired(tmp_path, harnesses=("codex",))
     _set_mode(target, "observe", capsys)
     return target
 
 
 def payload(target, harness, **extra):
-    cursor = harness == "cursor"
     return {
-        "hook_event_name": "postToolUse" if cursor else "PostToolUse",
-        "conversation_id" if cursor else "session_id": "private-session",
+        "hook_event_name": "PostToolUse",
+        "session_id": "private-session",
         "workspace_roots": [target.as_posix()],
         "cwd": target.as_posix(),
         "model": "gpt-6.1-sol",
-        "tool_name": "Shell" if cursor else "Bash",
+        "tool_name": "Bash",
         "tool_input": {"command": "pytest -q"},
         "tool_output": '{"exitCode":0}',
         "duration": 5432,
@@ -44,12 +43,12 @@ def run(monkeypatch, harness, data, **kwargs):
     return presence.run_presence_hook(
         harness=harness,
         stdin=True,
-        context="cursor-work-loop-project" if harness == "cursor" else "codex-observe",
+        context="codex-observe",
         **kwargs,
     )
 
 
-@pytest.mark.parametrize("harness", ["cursor", "codex"])
+@pytest.mark.parametrize("harness", ["codex"])
 @pytest.mark.parametrize("mode", ["strict", "observe", "off"])
 def test_capture_mode_and_privacy(target, monkeypatch, capsys, harness, mode):
     _set_mode(target, mode, capsys)
@@ -60,14 +59,14 @@ def test_capture_mode_and_privacy(target, monkeypatch, capsys, harness, mode):
     if records:
         record = records[0]
         assert (record.harness, record.model, record.agent_type) == (harness, "gpt-6.1-sol", "unknown")
-        assert record.status == ("ok" if harness == "cursor" else "unknown")
-        assert record.duration_ms == (5432 if harness == "cursor" else None)
+        assert record.status == "unknown"
+        assert record.duration_ms is None
         assert record.tree_fingerprint is None
         text = json.dumps(record.to_dict())
         assert "private-session" not in text and str(target) not in text and "pytest -q" not in text
 
 
-@pytest.mark.parametrize("harness", ["cursor", "codex"])
+@pytest.mark.parametrize("harness", ["codex"])
 def test_no_process_or_snapshot(target, monkeypatch, harness):
     from brigade import localio
     from brigade import observe_harness_hooks as capture
@@ -89,28 +88,7 @@ def test_no_process_or_snapshot(target, monkeypatch, harness):
         mock.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "output,status,code",
-    [('{"exitCode":2}', "failed", 2), ("bad", "unknown", None), ('{"exitCode":true}', "unknown", None)],
-)
-def test_cursor_status(target, monkeypatch, output, status, code):
-    run(monkeypatch, "cursor", payload(target, "cursor", tool_output=output))
-    record = observed_checks.read_checks(target)[0][0]
-    assert (record.status, record.exit_code) == (status, code)
-
-
-@pytest.mark.parametrize("failure,status", [("error", "failed"), ("timeout", "unknown"), ("permission_denied", None)])
-def test_cursor_failure(target, monkeypatch, failure, status):
-    data = payload(target, "cursor", hook_event_name="postToolUseFailure", failure_type=failure)
-    del data["cwd"]
-    run(monkeypatch, "cursor", data)
-    records = observed_checks.read_checks(target)[0]
-    assert len(records) == (status is not None)
-    if records:
-        assert records[0].status == status
-
-
-@pytest.mark.parametrize("harness", ["cursor", "codex"])
+@pytest.mark.parametrize("harness", ["codex"])
 @pytest.mark.parametrize(
     "bad",
     [
@@ -118,7 +96,6 @@ def test_cursor_failure(target, monkeypatch, failure, status):
         [],
         {"tool_input": []},
         {"session_id": []},
-        {"conversation_id": []},
         {"tool_input": {"command": "x" * 70000}},
     ],
 )
@@ -130,38 +107,14 @@ def test_malformed(target, monkeypatch, capsys, harness, bad):
     assert not observed_checks.read_checks(target)[0]
 
 
-@pytest.mark.parametrize("slow", [False, True])
-def test_cursor_existing_handling_precedes_capture(target, monkeypatch, capsys, slow):
-    from brigade import observe_harness_hooks as capture
-
-    seen = []
-    monkeypatch.setattr(presence, "_publish_presence", lambda *a, **k: seen.append("published"))
-
-    def broken(*a, **k):
-        assert seen == ["published"]
-        assert capsys.readouterr().out == "{}\n"
-        if slow:
-            time.sleep(0.3)
-        raise RuntimeError("optional capture")
-
-    monkeypatch.setattr(capture, "_capture", broken)
-    data = payload(target, "cursor", tool_name="Write")
-    assert run(monkeypatch, "cursor", data) == 0
-    assert capsys.readouterr() == ("", "")
-
-
-@pytest.mark.parametrize("harness", ["cursor", "codex"])
+@pytest.mark.parametrize("harness", ["codex"])
 @pytest.mark.parametrize("stage", ["identity", "append"])
 def test_deadline(target, monkeypatch, harness, stage):
     from brigade import observe_harness_hooks as capture
 
     now = [0.0]
     monkeypatch.setattr(observed_checks, "_capture_clock", lambda: now[0])
-    module, name = (
-        (capture, "cursor_identity" if harness == "cursor" else "codex_identity")
-        if stage == "identity"
-        else (observed_checks, "_digest_key")
-    )
+    module, name = (capture, "codex_identity") if stage == "identity" else (observed_checks, "_digest_key")
     original = getattr(module, name)
 
     def expire(*args, **kwargs):
@@ -174,7 +127,7 @@ def test_deadline(target, monkeypatch, harness, stage):
     assert not observed_checks.read_checks(target)[0]
 
 
-@pytest.mark.parametrize("harness", ["cursor", "codex"])
+@pytest.mark.parametrize("harness", ["codex"])
 def test_pin_and_home_each_destination(target, tmp_path, monkeypatch, capsys, harness):
     other = _wired(tmp_path, name="other", harnesses=(harness,))
     _set_mode(other, "observe", capsys)
@@ -224,7 +177,7 @@ def test_codex_install_preserves_and_refuses(tmp_path):
         assert path.read_text() == raw
 
 
-@pytest.mark.parametrize("harness", ["cursor", "codex"])
+@pytest.mark.parametrize("harness", ["codex"])
 @pytest.mark.parametrize("windows", [False, True])
 def test_append_preserves_other_writer(target, monkeypatch, harness, windows):
     from brigade import dirfd
@@ -246,15 +199,7 @@ def test_append_preserves_other_writer(target, monkeypatch, harness, windows):
     assert path.read_bytes() == first * 2
 
 
-def test_cursor_manages_failure_event(target):
-    from brigade import cursor_profile_hooks, cursor_user_cmd
-
-    assert "postToolUseFailure" in cursor_profile_hooks.HOOK_EVENTS
-    assert cursor_user_cmd.install_project_presence_hooks(target) is None
-    assert "postToolUseFailure" in json.loads((target / ".cursor/hooks.json").read_text())["hooks"]
-
-
-@pytest.mark.parametrize("harness", ["cursor", "codex"])
+@pytest.mark.parametrize("harness", ["codex"])
 def test_hostile_bounded_input(target, monkeypatch, capsys, harness):
     for raw in [
         "{",
@@ -269,9 +214,7 @@ def test_hostile_bounded_input(target, monkeypatch, capsys, harness):
         ),
     ]:
         monkeypatch.setattr("sys.stdin", io.StringIO(raw))
-        presence.run_presence_hook(
-            harness=harness, stdin=True, context="cursor-work-loop-project" if harness == "cursor" else "codex-observe"
-        )
+        presence.run_presence_hook(harness=harness, stdin=True, context="codex-observe")
         assert capsys.readouterr() == ("{}\n", "")
     assert not observed_checks.read_checks(target)[0]
 
@@ -303,25 +246,14 @@ def test_ordinary_codex_write_preserves_cached_identity(target, monkeypatch):
     assert current["model"] == state["model"] and current["model_source"] == state["model_source"]
 
 
-@pytest.mark.parametrize("failure", ["permission_denied", None, []])
-def test_denied_or_malformed_failure_never_records(target, monkeypatch, failure):
-    run(
-        monkeypatch,
-        "cursor",
-        payload(target, "cursor", hook_event_name="postToolUseFailure", failure_type=failure, is_interrupt=True),
-    )
-    assert not observed_checks.read_checks(target)[0]
-
-
 @pytest.mark.parametrize(
     "harness,mode,installed",
-    [("codex", "observe", True), ("codex", "strict", False), ("codex", "off", False), ("cursor", "observe", False)],
+    [("codex", "observe", True), ("codex", "strict", False), ("codex", "off", False)],
 )
 def test_mode_installs_only_for_codex(tmp_path, monkeypatch, capsys, harness, mode, installed):
     from brigade import cli
 
     set_home(monkeypatch, tmp_path / "home")
-    monkeypatch.setattr("brigade.cursor_hook_compat.detect_version", lambda: None)
     target = _wired(tmp_path, harnesses=(harness,))
     _set_mode(target, mode, capsys)
     assert (target / ".codex/hooks.json").exists() is installed
@@ -329,9 +261,115 @@ def test_mode_installs_only_for_codex(tmp_path, monkeypatch, capsys, harness, mo
     assert json.loads(capsys.readouterr().out)["observe_hooks"] == {"codex": installed}
 
 
-def test_capture_boundary_exception_preserves_single_response(target, monkeypatch, capsys):
-    from brigade import observe_harness_hooks as capture
+@pytest.mark.parametrize("tool", ["Bash", "apply_patch"])
+def test_installed_command_pins_target(target, tmp_path, monkeypatch, capsys, tool):
+    import shlex
+    from brigade import cli
+    from brigade.claude_hooks.package import COMMAND_PREFIX
+    from brigade.codex_observe_hooks import observe_session_path
 
-    monkeypatch.setattr(capture, "after_handling", Mock(side_effect=RuntimeError("optional capture")))
-    assert run(monkeypatch, "cursor", payload(target, "cursor")) == 0
-    assert capsys.readouterr() == ("{}\n", "")
+    other = _wired(tmp_path, name="other", harnesses=("codex",))
+    _set_mode(other, "observe", capsys)
+    document = json.loads((target / ".codex/hooks.json").read_bytes())
+    handler = document["hooks"]["PostToolUse"][0]["hooks"][0]
+    command = handler["command"]
+    assert shlex.split(command)[:1] == shlex.split(COMMAND_PREFIX)[:1]
+    assert shlex.split(command)[-2:] == ["--target", str(target.resolve())]
+    assert handler["async"] is True
+    data = payload(other, "codex", tool_name=tool)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
+    assert cli.main(shlex.split(command)[1:]) == 0
+    assert not observed_checks.read_checks(other)[0]
+    assert not observe_session_path(other, "private-session").exists()
+    # A command launched in the pinned workspace cannot redirect a verifier either.
+    data = payload(target, "codex", tool_input={"command": f"cd {other.as_posix()} && pytest"})
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
+    assert cli.main(shlex.split(command)[1:]) == 0
+    assert not observed_checks.read_checks(other)[0]
+
+
+@pytest.mark.parametrize("action", ["strict", "off", "uninstall"])
+def test_codex_cleanup_preserves_user_entries(target, capsys, action):
+    from brigade import cli
+
+    path = target / ".codex/hooks.json"
+    doc = json.loads(path.read_bytes())
+    foreign = {"hooks": [{"command": "user-hook"}], "matcher": "user"}
+    for groups in doc["hooks"].values():
+        groups.insert(0, foreign)
+    path.write_bytes(json.dumps(doc).encode("utf-8"))
+    if action == "uninstall":
+        assert cli.main(["work", "hooks", "uninstall", "--target", str(target)]) == 0
+    else:
+        _set_mode(target, action, capsys)
+    assert json.loads(path.read_bytes())["hooks"] == {"Stop": [foreign], "PostToolUse": [foreign]}
+
+
+def test_codex_utf8_crlf_surgical_install_and_remove(tmp_path):
+    from brigade.codex_observe_hooks import install_codex_observe_hooks, remove_codex_observe_hooks
+
+    folder = tmp_path / ".codex"
+    folder.mkdir()
+    path = folder / "hooks.json"
+    entry = '{ "hooks" : [ { "command" : "echo ō" } ], "matcher" : "user" }'
+    original = (
+        '{\r\n  "z": "ō",\r\n  "hooks" : { "Stop" : [\r\n    ' + entry + '\r\n  ] },\r\n  "a": 1\r\n}\r\n'
+    ).encode("utf-8")
+    path.write_bytes(original)
+    path.chmod(0o640)
+    mode = path.stat().st_mode
+    assert install_codex_observe_hooks(tmp_path) is None
+    installed = path.read_bytes()
+    assert entry.encode("utf-8") in installed
+    assert installed.startswith(b'{\r\n  "z":')
+    assert installed.endswith(b',\r\n  "a": 1\r\n}\r\n')
+    assert path.stat().st_mode == mode
+    assert install_codex_observe_hooks(tmp_path) is None
+    assert path.read_bytes() == installed
+    assert remove_codex_observe_hooks(tmp_path) is None
+    cleaned = path.read_bytes()
+    assert entry.encode("utf-8") in cleaned
+    assert cleaned.startswith(b'{\r\n  "z":')
+    assert cleaned.endswith(b',\r\n  "a": 1\r\n}\r\n')
+    assert path.stat().st_mode == mode
+
+
+@requires_dirfd
+@pytest.mark.parametrize("parent", [False, True])
+def test_codex_refuses_symlink(tmp_path, parent):
+    from brigade.codex_observe_hooks import install_codex_observe_hooks
+
+    destination = tmp_path / "foreign"
+    destination.mkdir()
+    file = destination / "hooks.json"
+    file.write_bytes(b'{"hooks":{}}')
+    directory = tmp_path / ".codex"
+    if parent:
+        directory.symlink_to(destination, target_is_directory=True)
+    else:
+        directory.mkdir()
+        (directory / "hooks.json").symlink_to(file)
+    assert install_codex_observe_hooks(tmp_path)
+    assert file.read_bytes() == b'{"hooks":{}}'
+
+
+def test_reinstall_preserves_interleaved_user_entries(target):
+    from brigade.codex_observe_hooks import install_codex_observe_hooks, remove_codex_observe_hooks
+
+    path = target / ".codex/hooks.json"
+    doc = json.loads(path.read_bytes())
+    user = {"hooks": [{"command": "user-hook"}]}
+    for entries in doc["hooks"].values():
+        entries.append(user)
+    raw = json.dumps(doc, ensure_ascii=False, indent=3).replace("\n", "\r\n").encode("utf-8")
+    path.write_bytes(raw)
+    assert install_codex_observe_hooks(target) is None
+    assert path.read_bytes() == raw
+    # A user can put their handler alongside Brigade's within a group.
+    doc["hooks"]["Stop"][0]["hooks"].append({"command": "mixed-user"})
+    path.write_bytes(json.dumps(doc).encode("utf-8"))
+    assert remove_codex_observe_hooks(target) is None
+    assert json.loads(path.read_bytes())["hooks"]["Stop"] == [
+        {"hooks": [{"command": "mixed-user"}]},
+        user,
+    ]

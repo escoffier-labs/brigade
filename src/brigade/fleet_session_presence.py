@@ -581,7 +581,7 @@ def run_presence_hook(
                 _CURSOR_PROJECT_HOOK_CONTEXT,
             }
         ):
-            _run_cursor_presence_hook(scope="user" if context == _CURSOR_USER_HOOK_CONTEXT else "project", pin=target)
+            _run_cursor_presence_hook(scope="user" if context == _CURSOR_USER_HOOK_CONTEXT else "project")
             return 0
         _run_explicit_presence_hook(target=target, harness=harness, session=session, event=event)
     except Exception:
@@ -610,7 +610,7 @@ def _run_explicit_presence_hook(
     _publish_presence(event, target, session, harness=harness)
 
 
-def _run_cursor_presence_hook(*, scope: str = "project", pin: Path | None = None) -> None:
+def _run_cursor_presence_hook(*, scope: str = "project") -> None:
     payload = _read_bounded_json_object()
     hook_event = payload.get("hook_event_name") if payload else None
     mapped = _CURSOR_HOOK_EVENTS.get(hook_event) if isinstance(hook_event, str) else None
@@ -630,13 +630,6 @@ def _run_cursor_presence_hook(*, scope: str = "project", pin: Path | None = None
         else:
             _publish_presence(mapped, target, session_id, harness="cursor")
     _print_cursor_hook_output(hook_event if isinstance(hook_event, str) else None)
-    sys.stdout.flush()
-    try:
-        from .observe_harness_hooks import after_handling
-
-        after_handling("cursor", payload, target, pin=pin)
-    except Exception:
-        pass
 
 
 def _cursor_presence_target(workspace: Path | None) -> Path | None:

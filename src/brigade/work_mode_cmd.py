@@ -54,7 +54,11 @@ def mode_command(*, target: Path, action: str, mode: str | None = None, json_out
         hooks = _reconcile_claude_hooks(target)
         if hooks is not None and hooks != "reconciled":
             print(f"warning: unable to reconcile Claude hooks; {hooks}", file=sys.stderr)
-    from .codex_observe_hooks import codex_observe_hooks_installed, install_codex_observe_hooks
+    from .codex_observe_hooks import (
+        codex_observe_hooks_installed,
+        install_codex_observe_hooks,
+        remove_codex_observe_hooks,
+    )
 
     try:
         cfg = load_config(target)
@@ -62,6 +66,10 @@ def mode_command(*, target: Path, action: str, mode: str | None = None, json_out
         cfg = None
     if action == "set" and work_mode.is_observe(target) and cfg is not None and "codex" in cfg.selection.harnesses:
         error = install_codex_observe_hooks(target)
+        if error:
+            print(f"warning: {error}", file=sys.stderr)
+    if action == "set" and not work_mode.is_observe(target):
+        error = remove_codex_observe_hooks(target)
         if error:
             print(f"warning: {error}", file=sys.stderr)
     payload: dict[str, object] = {"target": str(target), **work_mode.summary(target)}

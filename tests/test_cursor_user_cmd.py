@@ -9,12 +9,6 @@ from brigade import cli, cursor_user_cmd, fleet_client
 from tests._home import set_home
 
 
-@pytest.fixture(params=["2026.10.01-e373342", None], ids=["verified-new", "undetected-old"])
-def cursor_events(monkeypatch, request):
-    monkeypatch.setattr("brigade.cursor_hook_compat.detect_version", lambda: request.param)
-    return {"sessionStart", "postToolUse", "sessionEnd"} | ({"postToolUseFailure"} if request.param else set())
-
-
 def _wire_cursor_workspace(path: Path) -> Path:
     brigade = path / ".brigade"
     brigade.mkdir(parents=True, exist_ok=True)
@@ -220,7 +214,7 @@ def test_cursor_user_install_preserves_managed_name_collisions(tmp_path, monkeyp
     assert "brigade-evidence" in live["mcpServers"]
 
 
-def test_cursor_user_install_rejects_malformed_coowned_json(tmp_path, monkeypatch, capsys, cursor_events):
+def test_cursor_user_install_rejects_malformed_coowned_json(tmp_path, monkeypatch, capsys):
     _use_home(monkeypatch, tmp_path)
     cursor = tmp_path / ".cursor"
     cursor.mkdir()
@@ -232,8 +226,12 @@ def test_cursor_user_install_rejects_malformed_coowned_json(tmp_path, monkeypatc
     assert cli.main(["harness", "install", "cursor", "--scope", "user", "--write", "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
 
-    assert len(payload["conflicts"]) == len(cursor_events) + 1
-    assert {item.get("name") for item in payload["conflicts"] if item.get("surface") == "hook-config"} == cursor_events
+    assert len(payload["conflicts"]) == 4
+    assert {item.get("name") for item in payload["conflicts"] if item.get("surface") == "hook-config"} == {
+        "sessionStart",
+        "postToolUse",
+        "sessionEnd",
+    }
     assert sum(item.get("surface") == "mcp-config" for item in payload["conflicts"]) == 1
     assert hooks_path.read_text() == "{bad hooks"
     assert mcp_path.read_text() == "[]"
@@ -366,7 +364,7 @@ def test_cursor_user_unreadable_mcp_config_preserves_ownership_for_later_uninsta
     assert not {"brigade", "brigade-code-graph", "brigade-evidence"} & set(live["mcpServers"])
 
 
-def test_cursor_user_uninstall_reload_requires_an_actual_change(tmp_path, monkeypatch, capsys, cursor_events):
+def test_cursor_user_uninstall_reload_requires_an_actual_change(tmp_path, monkeypatch, capsys):
     _use_home(monkeypatch, tmp_path)
     assert cli.main(["harness", "install", "cursor", "--scope", "user", "--write", "--json"]) == 0
     capsys.readouterr()
@@ -378,7 +376,7 @@ def test_cursor_user_uninstall_reload_requires_an_actual_change(tmp_path, monkey
     state_path.write_text(json.dumps(state))
     hooks_path = cursor / "hooks.json"
     hooks = json.loads(hooks_path.read_text())
-    for event in cursor_events:
+    for event in ("sessionStart", "postToolUse", "sessionEnd"):
         hooks["hooks"].pop(event, None)
     hooks_path.write_text(json.dumps(hooks))
 

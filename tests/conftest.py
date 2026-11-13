@@ -197,7 +197,7 @@ def _stub_codex_cloud_inventory(monkeypatch, request):
     )
 
 
-_AGENT_CLI_BINARIES = frozenset({"codex", "claude", "cursor-agent", "opencode", "gemini", "agy", "grok"})
+_AGENT_CLI_BINARIES = frozenset({"codex", "claude", "cursor-agent", "agent", "opencode", "gemini", "agy", "grok"})
 
 # Process managers that start a long-lived daemon on first use. With HOME pointed
 # at a per-session temp dir, every real ``pm2 jlist`` started a new PM2 God

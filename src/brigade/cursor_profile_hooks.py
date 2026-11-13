@@ -7,10 +7,9 @@ from typing import Any
 
 from . import __version__ as BRIGADE_VERSION
 from .harness_profiles import PROFILE_STATE_VERSION
-from .cursor_hook_compat import CURSOR_HOOK_PACKAGE_VERSION
 
 HOOK_STATE_PREFIX = "hooks.json#"
-HOOK_EVENTS = ("sessionStart", "postToolUse", "postToolUseFailure", "sessionEnd")
+HOOK_EVENTS = ("sessionStart", "postToolUse", "sessionEnd")
 LEGACY_CURSOR_INSTRUCTION = "plugins/local/brigade-loop/rules/brigade-loop.mdc"
 LEGACY_CURSOR_GENERATED = (
     "plugins/local/brigade-loop/.cursor-plugin/plugin.json",
@@ -134,17 +133,7 @@ def plan(profile, state: dict[str, Any], *, adopt: bool) -> dict[str, Any]:
     # The earlier profile sync migrated only sessionStart, so the legacy installer's identical
     # postToolUse and sessionEnd entries have no ownership record. Claim them on upgrade.
     legacy_migrated = _legacy_migration_recorded(state)
-    from .cursor_hook_compat import detect_version, supports_failure_hook
-
-    compatible = supports_failure_hook(detect_version())
     for event, entry in hook.entries.items():
-        if event == "postToolUseFailure" and not compatible:
-            if any(cursor_user_cmd._same_command_hook(old, entry) for old in hooks.get(event, [])):
-                actions[event] = {"action": "remove"}
-                items.append(
-                    {"surface": "hook", "path": str(path), "name": event, "status": "stale", "action": "remove"}
-                )
-            continue
         item: dict[str, Any] = {"surface": "hook", "path": str(path), "name": event}
         entries = hooks.get(event)
         if entries is not None and not isinstance(entries, list):
@@ -174,10 +163,7 @@ def plan(profile, state: dict[str, Any], *, adopt: bool) -> dict[str, Any]:
                     detail=f"matching {event} hook entry is unowned; rerun with --adopt",
                 )
                 conflicts.append(item)
-            next_records[f"{HOOK_STATE_PREFIX}{event}"] = {
-                "entry_fingerprint": desired_fp,
-                "package_version": CURSOR_HOOK_PACKAGE_VERSION,
-            }
+            next_records[f"{HOOK_STATE_PREFIX}{event}"] = {"entry_fingerprint": desired_fp}
         else:
             prior_fp = record.get("entry_fingerprint")
             prior_index = next(
@@ -194,10 +180,7 @@ def plan(profile, state: dict[str, Any], *, adopt: bool) -> dict[str, Any]:
             else:
                 item.update(status="missing", action="create")
                 actions[event] = {"action": "create"}
-            next_records[f"{HOOK_STATE_PREFIX}{event}"] = {
-                "entry_fingerprint": desired_fp,
-                "package_version": CURSOR_HOOK_PACKAGE_VERSION,
-            }
+            next_records[f"{HOOK_STATE_PREFIX}{event}"] = {"entry_fingerprint": desired_fp}
         items.append(item)
     if repair_version:
         items.append(
@@ -264,22 +247,3 @@ def uninstall_plan(profile, state: dict[str, Any]) -> dict[str, Any]:
             conflicts.append(item)
         items.append(item)
     return {"items": items, "conflicts": conflicts, "doc": doc if indices else None, "indices": indices}
-
-
-def apply_actions(hook_map, actions, desired):
-    """Apply a planned merge or downgrade without changing foreign entries."""
-    from . import cursor_user_cmd
-
-    for event, action in actions.items():
-        entries = hook_map.setdefault(event, [])
-        entry = desired[event]
-        if action["action"] == "remove":
-            retained = [old for old in entries if not cursor_user_cmd._same_command_hook(old, entry)]
-            if retained:
-                hook_map[event] = retained
-            else:
-                hook_map.pop(event, None)
-        elif action["action"] == "create":
-            entries.append(entry)
-        else:
-            entries[action["prior_index"]] = entry

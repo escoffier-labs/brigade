@@ -28,6 +28,7 @@ from .inbox_lock import InboxLockTimeout, held_file_lock_descriptor as held_file
 
 CHECKS_FILE = "checks.jsonl"
 CHECK_SCHEMA = "brigade.observed_check.v1"
+# Exclude unknown status from every pass-rate denominator: Codex cannot report pass or fail.
 STATUSES = ("ok", "failed", "unknown")
 DIGEST_UNAVAILABLE = "0" * 16
 MAX_FILE_BYTES = 8 * 1024 * 1024
@@ -589,6 +590,7 @@ def append_jsonl(path: Path, payload: Mapping[str, Any]) -> bool:
                         os.lseek(fd, -1, os.SEEK_END)
                         if os.read(fd, 1) != b"\n" and os.write(fd, b"\n") != 1:
                             return False
+                    os.lseek(fd, 0, os.SEEK_END)
                     return os.write(fd, line) == len(line)
                 finally:
                     if fd != -1:

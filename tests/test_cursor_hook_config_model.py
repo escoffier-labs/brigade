@@ -17,12 +17,6 @@ import pytest
 from brigade import cli, cursor_user_cmd, fleet_client, localio
 from tests._home import set_home
 
-
-@pytest.fixture(autouse=True)
-def compatible_cursor(monkeypatch):
-    monkeypatch.setattr("brigade.cursor_hook_compat.detect_version", lambda: "2026.10.01-e373342")
-
-
 EVENTS = cursor_user_cmd._MANAGED_HOOK_EVENTS
 PROJECT = cursor_user_cmd._hook_entry(scope="project")
 LEGACY = cursor_user_cmd._hook_entry(scope="user")
@@ -120,7 +114,6 @@ INSTALL_ROWS = [
             "beforeSubmitPrompt": [FOREIGN],
             "sessionStart": [FOREIGN, FOREIGN_2, PROJECT],
             "postToolUse": [PROJECT],
-            "postToolUseFailure": [PROJECT],
             "sessionEnd": [FOREIGN, PROJECT],
         },
         id="user-authored-hooks-preserved",
@@ -129,24 +122,14 @@ INSTALL_ROWS = [
         "legacy",
         "r4343977825 P2: legacy project entry migrates in place",
         {"version": 1, "hooks": {"sessionStart": [FOREIGN, LEGACY], "postToolUse": [LEGACY], "sessionEnd": [LEGACY]}},
-        {
-            "sessionStart": [FOREIGN, PROJECT],
-            "postToolUse": [PROJECT],
-            "postToolUseFailure": [PROJECT],
-            "sessionEnd": [PROJECT],
-        },
+        {"sessionStart": [FOREIGN, PROJECT], "postToolUse": [PROJECT], "sessionEnd": [PROJECT]},
         id="legacy-managed-hooks-migrate",
     ),
     pytest.param(
         "mixed-and-duplicates",
         "r4343977836 P2: mixed legacy and new collapse to one entry",
         {"version": 1, "hooks": {"sessionStart": [LEGACY, FOREIGN, PROJECT, LEGACY, PROJECT]}},
-        {
-            "sessionStart": [PROJECT, FOREIGN],
-            "postToolUse": [PROJECT],
-            "postToolUseFailure": [PROJECT],
-            "sessionEnd": [PROJECT],
-        },
+        {"sessionStart": [PROJECT, FOREIGN], "postToolUse": [PROJECT], "sessionEnd": [PROJECT]},
         id="mixed-legacy-and-new-with-duplicates",
     ),
     pytest.param(
