@@ -185,7 +185,18 @@ Bot for shared memory.
 - Open for the stage design: whether hub messaging is part of the generic
   profile, and whether the Dot and Duet profiles fold into it too.
 
-### Stage 2: Brigade's own orchestration out
+### Stage 2: Brigade's own orchestration trimmed or removed
+
+**(decided)** Whether this is a full removal or a trim is open, and is settled
+on evidence. Brigade must keep working for someone who does not use T3 Code.
+
+**(proposed)** Trim to a thin cross-vendor worker. A harness can dispatch its
+own vendor's subagents, but it cannot ask another vendor's agent for work or a
+second opinion. That is the one job nothing else does for a user without a
+multi-harness app. So keep a small "run this task on that agent CLI and bring
+back the result, recorded" command, and remove the planning, admission,
+roster policy, budgets and cloud dispatch layered on top of it. The bullets
+below describe the larger scope under review, not a settled removal list.
 
 - In scope: `brigade run` and its run records, rosters, seats, model
   admission and the dispatcher. About 40,000 lines.
