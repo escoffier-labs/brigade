@@ -1,4 +1,4 @@
-"""One-release compatibility parsing for removed connector profiles."""
+"""One-release compatibility parsing for removed connector profiles and command families."""
 
 from __future__ import annotations
 

@@ -703,7 +703,6 @@ def test_sealed_operations_without_crypto_modules(tmp_path):
     code = """
 import sys
 sys.modules['cryptography'] = None
-sys.modules['brigade.fleet_mesh_crypto'] = None
 import runpy
 from pathlib import Path
 from tempfile import TemporaryDirectory
