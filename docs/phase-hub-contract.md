@@ -1,5 +1,9 @@
 # Fleet Hub wire contract
 
+Client-side message sealing no longer ships. The hub storage, routes and schema
+below remain unchanged and are scheduled for removal with the next contract version.
+
+
 The Fleet Hub is the HTTP service `brigade fleet serve` runs
 (`src/brigade/fleet_hub.py`, `src/brigade/fleet_hub_http.py`, and the
 `fleet_hub_*` helper modules). A Rust rewrite (axum, tokio, rusqlite) has to

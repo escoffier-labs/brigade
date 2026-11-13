@@ -110,7 +110,7 @@ brigadestack skills serve-mcp --stdio
 - **Parallel workers.** Dispatch ready tasks into separate worktrees, supervise them, and keep results for review.
 - **Memory reflection.** Evidence-backed consolidation proposals for review. Nothing is rewritten automatically.
 - **Run patrol.** Detects local lane states and offers explicit repair actions.
-- **In progress:** [fleet coordination](https://github.com/escoffier-labs/brigade/issues/1121), [governed T3 delegation](https://github.com/escoffier-labs/brigade/issues/2046), [cross-repository campaigns](https://github.com/escoffier-labs/brigade/issues/1128), and the [agent mesh](docs/phase-agent-mesh.md).
+- **In progress:** [fleet coordination](https://github.com/escoffier-labs/brigade/issues/1121), [governed T3 delegation](https://github.com/escoffier-labs/brigade/issues/2046), [cross-repository campaigns](https://github.com/escoffier-labs/brigade/issues/1128).
 
 ## Reference
 

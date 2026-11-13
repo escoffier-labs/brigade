@@ -81,8 +81,6 @@ def documentation_path(path: bytes) -> bool:
         and parts[0] == "docs"
         and all(not part.startswith(".") for part in parts)
         and parts[-1] not in POLICY_NAMES
-        # This document is an existing security-critical mesh test trigger.
-        and name != "docs/phase-agent-mesh.md"
         and PurePosixPath(name).suffix in DOC_SUFFIXES
     )
 

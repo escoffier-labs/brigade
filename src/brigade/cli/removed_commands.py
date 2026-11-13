@@ -34,6 +34,11 @@ def removed(command: str, *, replacement: str | None = None) -> int:
 
 def compatibility(argv: list[str]) -> int | None:
     """Recognize historical IDs before loading command families or validating stale flags."""
+    if argv[:2] == ["fleet", "keys"]:
+        command = " ".join(argv[:3] if argv[2:3] in (["init"], ["show"], ["rotate"]) else argv[:2])
+        return removed(
+            command, replacement="Client-side message encryption no longer ships. Plain messaging is unchanged."
+        )
     for prefix, flag in COMMAND_PATHS:
         if tuple(argv[: len(prefix)]) != prefix:
             continue

@@ -1232,7 +1232,7 @@ def _station_read(
 
     def project(result: dict[str, Any]) -> dict[str, Any]:
         if role == "teammate":
-            from .fleet_mesh_crypto import decode_binary, fingerprint
+            from .fleet_hub_message_keys import decode_binary, fingerprint
 
             result["sessions"] = []
             if isinstance(result.get("total"), dict):

@@ -284,3 +284,16 @@ def test_listener_install_hint_names_connector_extra(tmp_path, monkeypatch, caps
     message = capsys.readouterr().err
     assert "pip install brigade-cli[connector]" in message
     assert "grokbot extra remains an alias during the removal window" in message
+
+
+@pytest.mark.parametrize("extras", ["0", "1"])
+@pytest.mark.parametrize("suffix", [[], ["init"], ["show"], ["rotate"]])
+def test_removed_fleet_keys_stop_before_family_import(monkeypatch, capsys, extras, suffix):
+    monkeypatch.setenv("BRIGADE_EXTRAS", extras)
+    monkeypatch.setattr(cli, "_family_module", lambda *args: pytest.fail("command family imported"))
+    assert cli.main(["fleet", "keys", *suffix, "--obsolete"]) == 2
+    output = capsys.readouterr()
+    assert not output.out
+    assert f"this was removed in {REMOVED_IN}." in output.err
+    assert "Client-side message encryption no longer ships." in output.err
+    assert "invalid choice" not in output.err
