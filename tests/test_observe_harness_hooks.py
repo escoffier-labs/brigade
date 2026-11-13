@@ -182,6 +182,9 @@ def test_codex_install_preserves_and_refuses(tmp_path):
 def test_append_preserves_other_writer(target, monkeypatch, harness, windows):
     from brigade import dirfd
 
+    if windows and __import__("os").name == "nt":
+        pytest.skip("simulates the Windows open flags on other platforms; the native case runs unsimulated")
+
     monkeypatch.setattr("brigade.localio.utc_now_iso", lambda: "2026-11-13T00:00:00+00:00")
     run(monkeypatch, harness, payload(target, harness))
     path = observed_checks.digest_key_path(target).with_name("checks.jsonl")
@@ -373,3 +376,38 @@ def test_reinstall_preserves_interleaved_user_entries(target):
         {"hooks": [{"command": "mixed-user"}]},
         user,
     ]
+
+
+def test_codex_install_refuses_the_user_level_hooks_file(tmp_path, monkeypatch):
+    from brigade.codex_observe_hooks import install_codex_observe_hooks
+
+    home = tmp_path / "home"
+    set_home(monkeypatch, home)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    assert install_codex_observe_hooks(home)
+    assert not (home / ".codex/hooks.json").exists()
+    elsewhere = tmp_path / "elsewhere"
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(project / ".codex"))
+    assert install_codex_observe_hooks(project)
+    assert not (project / ".codex/hooks.json").exists()
+    monkeypatch.setenv("CODEX_HOME", str(elsewhere))
+    assert install_codex_observe_hooks(project) is None
+
+
+def test_broken_codex_hooks_file_does_not_block_claude_uninstall(tmp_path, monkeypatch, capsys):
+    from brigade import cli
+
+    set_home(monkeypatch, tmp_path / "home")
+    target = _wired(tmp_path, harnesses=("claude",))
+    assert cli.main(["work", "hooks", "install", "--target", str(target)]) == 0
+    settings = target / ".claude/settings.json"
+    assert "brigade work hook-run" in settings.read_text()
+    broken = target / ".codex/hooks.json"
+    broken.parent.mkdir(exist_ok=True)
+    broken.write_text("{")
+    capsys.readouterr()
+    assert cli.main(["work", "hooks", "uninstall", "--target", str(target)]) == 2
+    assert "brigade work hook-run" not in settings.read_text()
+    assert broken.read_text() == "{"

@@ -194,6 +194,16 @@ def _reconcile(target: Path, *, install: bool) -> str | None:
 
 
 def install_codex_observe_hooks(target: Path) -> str | None:
+    from .claude_hooks.paths import is_operator_home
+
+    # The home directory's hooks file is the user-level one Codex reads for every project.
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    try:
+        user_level = (target / ".codex").resolve() == home.expanduser().resolve()
+    except OSError:
+        user_level = True
+    if is_operator_home(target) or user_level:
+        return "refusing to install project hooks in the Codex user-level hooks file; choose a project directory"
     return _reconcile(target, install=True)
 
 
