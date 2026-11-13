@@ -1,0 +1,4 @@
+- Record checks from Codex and Cursor finished-tool hooks in observe mode, with bounded capture after existing hook handling.
+- Install Codex project observe hooks when setting observe mode for a Codex target. Trust the project layer and review the hooks in Codex before use.
+- Keep Codex status and duration unknown, and agent type unknown for both harnesses. Preserve strict and off behavior.
+- Gate Cursor failure-hook installation on a verified Agent build. Disable all Cursor check recording when failure coverage is unavailable, and report the required version in doctor.

@@ -12,6 +12,12 @@ from brigade import cli, cursor_user_cmd, harness_profile_cmd, harness_profiles
 from tests._home import set_home
 
 
+@pytest.fixture(params=["2026.10.01-e373342", None], ids=["verified-new", "undetected-old"])
+def cursor_events(monkeypatch, request):
+    monkeypatch.setattr("brigade.cursor_hook_compat.detect_version", lambda: request.param)
+    return {"sessionStart", "postToolUse", "sessionEnd"} | ({"postToolUseFailure"} if request.param else set())
+
+
 def _use_home(monkeypatch, tmp_path: Path) -> Path:
     home = tmp_path / "home"
     home.mkdir()
@@ -132,7 +138,7 @@ def test_load_profile_state_migrates_legacy_cursor_state(tmp_path):
     assert loaded.state["instructions"]["digest"] == "digest"
 
 
-def test_legacy_install_then_profile_sync_migrates_and_uninstalls(tmp_path, monkeypatch, capsys):
+def test_legacy_install_then_profile_sync_migrates_and_uninstalls(tmp_path, monkeypatch, capsys, cursor_events):
     home = _use_home(monkeypatch, tmp_path)
     workspace = _workspace(tmp_path)
     hooks_path = home / ".cursor" / "hooks.json"
@@ -172,9 +178,7 @@ def test_legacy_install_then_profile_sync_migrates_and_uninstalls(tmp_path, monk
     }
     assert set(migrated["mcp"]) == set(legacy["mcp"])
     assert {event for event in migrated["generated"] if event.startswith("hooks.json#")} == {
-        "hooks.json#sessionStart",
-        "hooks.json#postToolUse",
-        "hooks.json#sessionEnd",
+        f"hooks.json#{event}" for event in cursor_events
     }
     installed_hooks = json.loads(hooks_path.read_text())["hooks"]
     for event, entries in foreign.items():
@@ -306,19 +310,21 @@ _LIFECYCLE_EVENTS = ("sessionStart", "postToolUse", "sessionEnd")
 _USER_SYNC = ["harness", "sync", "--target", "cursor", "--scope", "user", "--write", "--json"]
 
 
-def _prior_migrated_state(home: Path, workspace: Path, capsys, *, versioned: bool) -> tuple[Path, Path]:
+def _prior_migrated_state(
+    home: Path, workspace: Path, capsys, *, versioned: bool, events: set[str]
+) -> tuple[Path, Path]:
     """Rebuild what the earlier profile sync left behind: v2 state owning only sessionStart."""
     legacy = _legacy_state(home, capsys)
     state_path = home / ".cursor" / "brigade" / "install-state.json"
     migrated = harness_profile_cmd.migrate_legacy_cursor_install_state(
         state=legacy, workspace=workspace, harness="cursor"
     )
-    for event in ("postToolUse", "sessionEnd"):
+    for event in events - {"sessionStart"}:
         del migrated["generated"][f"hooks.json#{event}"]
     state_path.write_text(json.dumps(migrated))
     hooks_path = home / ".cursor" / "hooks.json"
     doc = json.loads(hooks_path.read_text())
-    assert set(doc["hooks"]) == set(_LIFECYCLE_EVENTS)
+    assert set(doc["hooks"]) == events
     if not versioned:
         doc.pop("version", None)
         hooks_path.write_text(json.dumps(doc))
@@ -331,10 +337,12 @@ def _owned_hook_events(state_path: Path) -> set[str]:
 
 
 @pytest.mark.parametrize("versioned", [True, False], ids=["versioned", "versionless"])
-def test_upgrade_sync_claims_legacy_lifecycle_entries_without_adopt(tmp_path, monkeypatch, capsys, versioned):
+def test_upgrade_sync_claims_legacy_lifecycle_entries_without_adopt(
+    tmp_path, monkeypatch, capsys, versioned, cursor_events
+):
     home = _use_home(monkeypatch, tmp_path)
     workspace = _workspace(tmp_path)
-    state_path, hooks_path = _prior_migrated_state(home, workspace, capsys, versioned=versioned)
+    state_path, hooks_path = _prior_migrated_state(home, workspace, capsys, versioned=versioned, events=cursor_events)
     assert _owned_hook_events(state_path) == {"sessionStart"}
 
     assert cli.main([*_USER_SYNC, "--workspace", str(workspace)]) == 0
@@ -342,20 +350,20 @@ def test_upgrade_sync_claims_legacy_lifecycle_entries_without_adopt(tmp_path, mo
 
     assert payload["ready"] is True
     assert payload["results"][0]["conflicts"] == []
-    assert _owned_hook_events(state_path) == set(_LIFECYCLE_EVENTS)
+    assert _owned_hook_events(state_path) == cursor_events
     doc = json.loads(hooks_path.read_text())
     assert doc["version"] == 1
-    for event in _LIFECYCLE_EVENTS:
+    for event in cursor_events:
         assert len(doc["hooks"][event]) == 1
 
     assert cli.main([*_USER_SYNC, "--workspace", str(workspace)]) == 0
     assert json.loads(capsys.readouterr().out)["results"][0]["status"] == "current"
 
 
-def test_upgrade_sync_never_claims_an_edited_lifecycle_entry(tmp_path, monkeypatch, capsys):
+def test_upgrade_sync_never_claims_an_edited_lifecycle_entry(tmp_path, monkeypatch, capsys, cursor_events):
     home = _use_home(monkeypatch, tmp_path)
     workspace = _workspace(tmp_path)
-    state_path, hooks_path = _prior_migrated_state(home, workspace, capsys, versioned=True)
+    state_path, hooks_path = _prior_migrated_state(home, workspace, capsys, versioned=True, events=cursor_events)
     doc = json.loads(hooks_path.read_text())
     edited = {"command": "exec brigade work presence-hook --harness cursor --stdin --context my-own-edit"}
     doc["hooks"]["postToolUse"] = [edited]
@@ -372,10 +380,10 @@ def test_upgrade_sync_never_claims_an_edited_lifecycle_entry(tmp_path, monkeypat
     assert [cursor_user_cmd._digest_value(entry) for entry in after["postToolUse"][1:]] == [managed_fingerprint]
 
 
-def test_sync_without_a_legacy_migration_still_requires_adopt(tmp_path, monkeypatch, capsys):
+def test_sync_without_a_legacy_migration_still_requires_adopt(tmp_path, monkeypatch, capsys, cursor_events):
     home = _use_home(monkeypatch, tmp_path)
     workspace = _workspace(tmp_path)
-    state_path, _hooks_path = _prior_migrated_state(home, workspace, capsys, versioned=False)
+    state_path, _hooks_path = _prior_migrated_state(home, workspace, capsys, versioned=False, events=cursor_events)
     state = json.loads(state_path.read_text())
     state["instructions"].pop("legacy_migrated")
     state["skills"]["brigade-work"].pop("legacy_migrated")
@@ -389,5 +397,5 @@ def test_sync_without_a_legacy_migration_still_requires_adopt(tmp_path, monkeypa
 
     assert payload["ready"] is False
     names = {item["name"] for item in payload["results"][0]["conflicts"] if item.get("surface") == "hook"}
-    assert names == {"postToolUse", "sessionEnd"}
+    assert names == cursor_events - {"sessionStart"}
     assert "version" not in json.loads((home / ".cursor" / "hooks.json").read_text())

@@ -562,6 +562,11 @@ def run_presence_hook(
 ) -> int:
     """Publish or end one interactive session. Always exits 0 for adapter safety."""
     try:
+        if harness == "codex" and stdin and context == "codex-observe":
+            from .observe_harness_hooks import run_codex_hook
+
+            run_codex_hook(pin=target)
+            return 0
         if harness == "antigravity" and stdin:
             from .antigravity_presence import run_hook
 
@@ -576,7 +581,7 @@ def run_presence_hook(
                 _CURSOR_PROJECT_HOOK_CONTEXT,
             }
         ):
-            _run_cursor_presence_hook(scope="user" if context == _CURSOR_USER_HOOK_CONTEXT else "project")
+            _run_cursor_presence_hook(scope="user" if context == _CURSOR_USER_HOOK_CONTEXT else "project", pin=target)
             return 0
         _run_explicit_presence_hook(target=target, harness=harness, session=session, event=event)
     except Exception:
@@ -605,7 +610,7 @@ def _run_explicit_presence_hook(
     _publish_presence(event, target, session, harness=harness)
 
 
-def _run_cursor_presence_hook(*, scope: str = "project") -> None:
+def _run_cursor_presence_hook(*, scope: str = "project", pin: Path | None = None) -> None:
     payload = _read_bounded_json_object()
     hook_event = payload.get("hook_event_name") if payload else None
     mapped = _CURSOR_HOOK_EVENTS.get(hook_event) if isinstance(hook_event, str) else None
@@ -625,6 +630,13 @@ def _run_cursor_presence_hook(*, scope: str = "project") -> None:
         else:
             _publish_presence(mapped, target, session_id, harness="cursor")
     _print_cursor_hook_output(hook_event if isinstance(hook_event, str) else None)
+    sys.stdout.flush()
+    try:
+        from .observe_harness_hooks import after_handling
+
+        after_handling("cursor", payload, target, pin=pin)
+    except Exception:
+        pass
 
 
 def _cursor_presence_target(workspace: Path | None) -> Path | None:

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__, component_bins, harness_profiles, localio
+from .cursor_hook_compat import CURSOR_HOOK_PACKAGE_VERSION
 
 STATE_VERSION = 1
 # Engine MCP server keys: (canonical, legacy). New entries use the canonical key.
@@ -16,7 +17,7 @@ STATE_VERSION = 1
 # operator passes --rename-legacy-servers; v0.33 renames by default
 # (docs/phase-engine-rename.md, R4). Entries the user wrote are never renamed.
 _ENGINE_SERVER_KEYS = (("brigade-code-graph", "graphtrail"), ("brigade-evidence", "miseledger"))
-_MANAGED_HOOK_EVENTS = ("sessionStart", "postToolUse", "sessionEnd")
+_MANAGED_HOOK_EVENTS = ("sessionStart", "postToolUse", "postToolUseFailure", "sessionEnd")
 # https://cursor.com/docs/hooks#hook-events (retrieved 2026-10-22)
 _SUPPORTED_HOOK_EVENTS = frozenset(
     {
@@ -72,8 +73,14 @@ def _json_text(payload: object) -> str:
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
-def _coowned_json_text(payload: object) -> str:
-    return json.dumps(payload, indent=2, sort_keys=False) + "\n"
+def _coowned_json_text(payload: object, previous: str = "") -> str:
+    from .cursor_hook_compat import render_hooks
+
+    return render_hooks(payload, previous)
+
+
+def _hooks_json_text(payload: object, path: Path) -> str:
+    return _coowned_json_text(payload, path.read_text() if path.exists() else "")
 
 
 def _legacy_rename_blocker(canonical: str, legacy: str, owned: dict[str, Any], live: dict[str, Any]) -> str | None:
@@ -402,7 +409,7 @@ def project_presence_hook_installed(workspace: Path, event: str) -> bool:
 
 
 def install_project_presence_hooks(workspace: Path) -> str | None:
-    """Add the three Cursor lifecycle hooks to a project without replacing entries."""
+    """Add compatible Cursor lifecycle hooks to a project without replacing entries."""
     path = workspace / ".cursor" / "hooks.json"
     doc, error = _prepare_project_document(path)
     if doc is None:
@@ -412,8 +419,24 @@ def install_project_presence_hooks(workspace: Path) -> str | None:
     managed = _hook_entry(scope="project")
     legacy = {"command": _LEGACY_HOOK_COMMAND}
     changed = created
+    from .cursor_hook_compat import detect_version, supports_failure_hook
+
+    compatible = supports_failure_hook(detect_version())
     for event in _MANAGED_HOOK_EVENTS:
         entries = hooks.get(event, [])
+        if event == "postToolUseFailure" and not compatible:
+            retained = [
+                entry
+                for entry in entries
+                if not (_same_command_hook(entry, managed) or _same_command_hook(entry, legacy))
+            ]
+            if retained != entries:
+                if retained:
+                    hooks[event] = retained
+                else:
+                    hooks.pop(event, None)
+                changed = True
+            continue
         normalized: list[Any] = []
         managed_added = False
         for entry in entries:
@@ -432,7 +455,7 @@ def install_project_presence_hooks(workspace: Path) -> str | None:
         return None
     doc.setdefault("version", _HOOKS_DOCUMENT_VERSION)
     doc["hooks"] = hooks
-    text = _coowned_json_text(doc)
+    text = _coowned_json_text(doc, path.read_text() if path.exists() else "")
     if len(text.encode("utf-8")) > _MAX_HOOKS_JSON_BYTES:
         return _OVERSIZE_ERROR
     try:
@@ -465,6 +488,10 @@ def _plan_hook_event(hooks: dict[str, Any], state: dict[str, Any], event: str, p
 
 
 def _plan_hook(root: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str | None]:
+    from .cursor_hook_compat import detect_version, supports_failure_hook
+
+    compatible = supports_failure_hook(detect_version())
+    events = tuple(event for event in _MANAGED_HOOK_EVENTS if event != "postToolUseFailure" or compatible)
     path = root / "hooks.json"
     doc, error = _read_json_object(path)
     if doc is None:
@@ -477,7 +504,7 @@ def _plan_hook(root: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]],
                 "action": "skip",
                 "detail": error or "could not read hooks configuration",
             }
-            for event in _MANAGED_HOOK_EVENTS
+            for event in events
         ]
         return items, None, error
     detail, _needs_version = user_hooks_document_status(doc)
@@ -491,11 +518,26 @@ def _plan_hook(root: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]],
                 "action": "skip",
                 "detail": detail,
             }
-            for event in _MANAGED_HOOK_EVENTS
+            for event in events
         ]
         return items, None, detail
     hooks = doc.get("hooks") or {}
-    return [_plan_hook_event(hooks, state, event, path) for event in _MANAGED_HOOK_EVENTS], doc, None
+    items = [
+        _plan_hook_event(hooks, state, event, path) for event in events if event != "postToolUseFailure" or compatible
+    ]
+    if not compatible and any(
+        _same_command_hook(entry, _hook_entry()) for entry in hooks.get("postToolUseFailure", [])
+    ):
+        items.append(
+            {
+                "surface": "hook-config",
+                "path": str(path),
+                "name": "postToolUseFailure",
+                "status": "stale",
+                "action": "remove",
+            }
+        )
+    return items, doc, None
 
 
 def _plan_mcp(
@@ -634,6 +676,7 @@ def install(*, write: bool = False, json_output: bool = False, rename_legacy_ser
         next_state: dict[str, Any] = {
             "version": STATE_VERSION,
             "package_version": __version__,
+            "hook_package_version": CURSOR_HOOK_PACKAGE_VERSION,
             "files": {},
             "hooks": {},
             "mcp": {},
@@ -663,6 +706,14 @@ def install(*, write: bool = False, json_output: bool = False, rename_legacy_ser
             for hook_item in hook_items:
                 event = str(hook_item["name"])
                 entries = hooks.setdefault(event, [])
+                if hook_item["action"] == "remove":
+                    retained = [entry for entry in entries if not _same_command_hook(entry, desired_hook)]
+                    if retained:
+                        hooks[event] = retained
+                    else:
+                        hooks.pop(event, None)
+                    hook_changed = True
+                    continue
                 if hook_item["action"] == "create":
                     entries.append(desired_hook)
                     hook_changed = True
@@ -672,7 +723,9 @@ def install(*, write: bool = False, json_output: bool = False, rename_legacy_ser
                 next_state["hooks"][event] = hook_item["desired_fingerprint"]
             if hook_changed:
                 path = root / "hooks.json"
-                localio.write_text_atomic(path, _coowned_json_text(hooks_doc))
+                localio.write_text_atomic(
+                    path, _coowned_json_text(hooks_doc, path.read_text() if path.exists() else "")
+                )
                 files_written.append(str(path))
         else:
             for event in _MANAGED_HOOK_EVENTS:
@@ -823,7 +876,7 @@ def uninstall(*, write: bool = False, json_output: bool = False) -> int:
             conflicts.append(hook_item)
         items.append(hook_item)
     if write and hook_changed and hook_doc is not None:
-        localio.write_text_atomic(hook_path, _coowned_json_text(hook_doc))
+        localio.write_text_atomic(hook_path, _hooks_json_text(hook_doc, hook_path))
 
     mcp_path = root / "mcp.json"
     mcp_doc, mcp_error = _read_json_object(mcp_path)

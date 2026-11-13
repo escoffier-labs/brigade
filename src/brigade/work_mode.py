@@ -391,7 +391,9 @@ def doctor_checks(target: Path) -> list[tuple[str, str, str]]:
         mode_detail = "observe: checks are not enforced. Recording requires `brigade work verify run`"
     else:
         mode_detail = "strict: checks route through `brigade work verify run` and the Stop gate wants a receipt"
-    checks = [("INFO", "work mode", mode_detail)]
+    from .cursor_hook_compat import doctor_checks as cursor_checks
+
+    checks = [("INFO", "work mode", mode_detail), *cursor_checks(target)]
     from .observed_checks import recording_unavailable_reason
 
     reason = recording_unavailable_reason(target) if mode == MODE_OBSERVE else None

@@ -559,7 +559,13 @@ def append_jsonl(path: Path, payload: Mapping[str, Any]) -> bool:
             check_capture_deadline()
             with held_file_lock(_lock_path(path), deadline_seconds=_CAPTURE_LOCK_SECONDS.get()) as held:
                 held.verify()
-                fd = _open_regular(parent, path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND)
+                try:
+                    created = _open_regular(parent, path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                except FileExistsError:
+                    pass
+                else:
+                    os.close(created)
+                fd = _open_regular(parent, path.name, os.O_RDWR | os.O_APPEND)
                 try:
                     if os.name != "nt":
                         os.fchmod(fd, 0o600)
@@ -571,7 +577,13 @@ def append_jsonl(path: Path, payload: Mapping[str, Any]) -> bool:
                         except OSError:
                             # Another open handle can block the rename; keep the record, rotate next time.
                             pass
-                        fd = _open_regular(parent, path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND)
+                        try:
+                            created = _open_regular(parent, path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                        except FileExistsError:
+                            pass
+                        else:
+                            os.close(created)
+                        fd = _open_regular(parent, path.name, os.O_RDWR | os.O_APPEND)
                     check_capture_deadline()
                     if os.lseek(fd, 0, os.SEEK_END):
                         os.lseek(fd, -1, os.SEEK_END)

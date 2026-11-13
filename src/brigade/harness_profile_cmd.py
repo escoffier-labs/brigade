@@ -1766,15 +1766,12 @@ def _sync_profile(
                 hook_doc = hook_plan["doc"] if hook_plan["doc"] is not None else {}
                 hook_doc.setdefault("version", cursor_user_cmd._HOOKS_DOCUMENT_VERSION)
                 hook_map = hook_doc.setdefault("hooks", {})
-                for event, action in hook_plan["actions"].items():
-                    entries = hook_map.setdefault(event, [])
-                    entry = profile.hook.entries[event]
-                    if action["action"] == "create":
-                        entries.append(entry)
-                    else:
-                        entries[action["prior_index"]] = entry
+                from .cursor_profile_hooks import apply_actions
+
+                apply_actions(hook_map, hook_plan["actions"], profile.hook.entries)
                 mutation = _profile_mutation(
-                    profile.hook.path, cursor_user_cmd._coowned_json_text(hook_doc).encode("utf-8")
+                    profile.hook.path,
+                    cursor_user_cmd._hooks_json_text(hook_doc, profile.hook.path).encode("utf-8"),
                 )
                 if mutation is not None:
                     mutations.append(mutation)
@@ -2077,7 +2074,8 @@ def _uninstall_profile(
                 if not entries:
                     hook_map.pop(event, None)
             mutation = _profile_mutation(
-                profile.hook.path, cursor_user_cmd._coowned_json_text(hook_doc).encode("utf-8")
+                profile.hook.path,
+                cursor_user_cmd._hooks_json_text(hook_doc, profile.hook.path).encode("utf-8"),
             )
             if mutation is not None:
                 mutations.append(mutation)
