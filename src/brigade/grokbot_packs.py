@@ -32,7 +32,6 @@ from .dot.connector_files import (
     PackError,
     _assert_config_destination_safe,
     _assert_removable,
-    _bind_port_from_existing_config,
     _exists_or_link,
     _is_relative_to,
     _matches_regular_file_snapshot,
@@ -463,18 +462,10 @@ def apply_install_service(
 
 
 def preview_update(target: Path, pack_id: str) -> dict[str, Any]:
-    if pack_id in {DOT_PACK_ID, DUET_PACK_ID}:
-        from .dot import connector_registry
-
-        return connector_registry.preview_update(target, pack_id)
     return _update(target, pack_id, apply=False)
 
 
 def apply_update(target: Path, pack_id: str) -> dict[str, Any]:
-    if pack_id in {DOT_PACK_ID, DUET_PACK_ID}:
-        from .dot import connector_registry
-
-        return connector_registry.apply_update(target, pack_id)
     return _update(target, pack_id, apply=True)
 
 
@@ -1386,3 +1377,26 @@ def write_relay_units(target: Path, out_dir: Path, *, force: bool = False) -> li
     from . import grokbot_pack_relay
 
     return grokbot_pack_relay.write_relay_units(target, out_dir, force=force)
+
+
+def _bind_port_from_existing_config(path: Path) -> int | None:
+    """Read one bind port from a first-party config without following unsafe paths."""
+    if grokbot_ops._path_is_symlink(path) or path.is_symlink():
+        raise PackError("unsafe-path")
+    try:
+        raw = grokbot_ops._read_regular_text(path)
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PackError("unsafe-path") from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise PackError("unsafe-path") from exc
+    if not isinstance(payload, dict):
+        raise PackError("unsafe-path")
+    bind = payload.get("bind")
+    if not isinstance(bind, str):
+        raise PackError("unsafe-path")
+    _host, port = _parse_default_bind(bind)
+    return port

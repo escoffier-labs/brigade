@@ -19,6 +19,39 @@ def capture(root):
         row["preview"] = packs.preview_setup(target, name, runtime_path=runtime)
         row["setup"] = packs.apply_setup(target, name, runtime_path=runtime)
         row["instance"] = json.loads(packs.instance_config_path(target, name).read_text())
+        row["update_preview"] = packs.preview_update(target, name)
+        row["update"] = packs.apply_update(target, name)
+        instance = packs.instance_config_path(target, name)
+        original = instance.read_text()
+        row["malformed_updates"] = {}
+        for key, value in (("bind", 42), ("pack_version", 42), ("bind", "0.0.0.0:8999")):
+            document = json.loads(original)
+            document[key] = value
+            if isinstance(value, str):
+                document["runtime_path"] = str(target / "missing")
+            instance.write_text(json.dumps(document))
+            try:
+                outcome = packs.preview_update(target, name)
+            except packs.PackError as error:
+                outcome = {"error": error.reason}
+            row["malformed_updates"][key + str(value)] = outcome
+        instance.write_text(original)
+        row["unsafe_neighbors"] = {}
+        for kind in ("instance", "queue"):
+            neighbor = (
+                packs.instance_config_path(target, "grokbot-memory")
+                if kind == "instance"
+                else grokbot_ops.config_path(target, "operator")
+            )
+            neighbor.parent.mkdir(parents=True, exist_ok=True)
+            neighbor.write_text(json.dumps({"bind": "0.0.0.0:8998"}))
+            neighbor.chmod(0o600)
+            try:
+                outcome = packs.preview_setup(target, name, runtime_path=runtime)
+            except packs.PackError as error:
+                outcome = {"error": error.reason}
+            row["unsafe_neighbors"][kind] = outcome
+            neighbor.unlink()
         units = root / (name + "-units")
         row["install"] = packs.apply_install_service(target, name, out_dir=units)
         row["unit"] = next(units.glob("*.service")).read_text()

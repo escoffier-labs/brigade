@@ -1,6 +1,5 @@
 """Protected bearer authentication for the generic connector only."""
 
-import hashlib
 import hmac
 import os
 import secrets
@@ -18,7 +17,9 @@ def read_token(path: Path) -> bytes:
 
     try:
         value = read_message_token_file(str(path)).encode("ascii")
-        if len(set(value)) == 1 or not re.fullmatch(rb"[A-Za-z0-9_-]{32,512}", value):
+        if not re.fullmatch(rb"[A-Za-z0-9_-]{43,512}", value) or any(
+            value == (value[:n] * (len(value) // n)) for n in range(1, 9)
+        ):
             raise ValueError
         return value
     except Exception:
@@ -41,12 +42,15 @@ def ensure_listener_token(path: Path) -> bool:
     return True
 
 
-def require_credential_isolation(listener: Path, hub_token_file: Path | None = None) -> None:
+def require_credential_isolation(
+    listener: Path, hub_token_file: Path | None = None, *, value: bytes | None = None, planned: bool = False
+) -> None:
     """Refuse shared authority without returning credential material."""
     from brigade import fleet_client, fleet_home_guard
 
     try:
-        value = read_token(listener)
+        if value is None and not planned:
+            value = read_token(listener)
         settings = fleet_client.load_fleet_settings(strict=True)
         config_path, section = fleet_home_guard.user_fleet_config(strict=True)
         paths = [hub_token_file] if hub_token_file is not None else []
@@ -59,15 +63,17 @@ def require_credential_isolation(listener: Path, hub_token_file: Path | None = N
                         raise ValueError
                     paths.append(path)
         for path in paths:
-            if listener.resolve() == path.resolve() or (path.exists() and listener.samefile(path)):
+            if listener.resolve() == path.resolve() or (
+                path.exists() and listener.exists() and listener.samefile(path)
+            ):
                 raise ValueError
             if path.exists():
                 with path.open("rb") as stream:
                     other = stream.read(4097)
-                if len(other) > 4096 or hmac.compare_digest(value, other.strip()):
+                if len(other) > 4096 or (value is not None and hmac.compare_digest(value, other.strip())):
                     raise ValueError
         for key in ("node_token", "admin_token"):
-            if settings.get(key) and hmac.compare_digest(value, settings[key].encode("utf-8")):
+            if value is not None and settings.get(key) and hmac.compare_digest(value, settings[key].encode("utf-8")):
                 raise ValueError
     except Exception:
         raise DotError("invalid_config") from None
@@ -82,7 +88,6 @@ class TokenVerifier:
         read_token(auth.token_file)
         self.config = auth
         self.hub_token_file = hub_token_file
-        self._verified_digest: bytes | None = None
         self.validated = True
         self.metadata_url = self.resource = self.authorization_server = ""
 
@@ -93,10 +98,7 @@ class TokenVerifier:
                 raise ValueError
             assert self.config.token_file is not None
             value = read_token(self.config.token_file)
-            digest = hashlib.sha256(value).digest()
-            if self._verified_digest != digest:
-                require_credential_isolation(self.config.token_file, self.hub_token_file)
-                self._verified_digest = digest
+            require_credential_isolation(self.config.token_file, self.hub_token_file, value=value)
             if not hmac.compare_digest(values[0][7:], value):
                 raise ValueError
             return self.config.approved_email

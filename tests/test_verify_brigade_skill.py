@@ -729,10 +729,21 @@ def test_hub_connector_offline_preview(dot_private_dir):
     assert code == 0, created
     target = created["target"]
     try:
-        code, result = control("hub-connector", "--target", target, root=root)
+        code, result = control(
+            "hub-connector",
+            "--target",
+            target,
+            root=root,
+            env_extra={"BRIGADE_HOME": "invalid-relative-home"},
+        )
         assert code == 0, result
         assert result["ok"]
-        assert result["list"]["returncode"] == result["preview"]["returncode"] == 0
+        assert (
+            result["list"]["returncode"]
+            == result["preview"]["returncode"]
+            == result["token_preview"]["returncode"]
+            == 0
+        )
         assert not (Path(target) / ".brigade/connectors/cloud-agent/instance.json").exists()
     finally:
         control("cleanup", root=root)

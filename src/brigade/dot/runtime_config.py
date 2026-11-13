@@ -508,7 +508,7 @@ def _parse_grokbot_inbox_runtime(payload: object) -> Runtime:
     )
 
 
-def load_runtime(path: Path, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
+def load_runtime(path: Path, *, schema: str = RUNTIME_SCHEMA, planned_token: bool = False) -> Runtime:
     require_local_platform()
     directory = descriptor = None
     try:
@@ -531,6 +531,10 @@ def load_runtime(path: Path, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
             os.close(descriptor)
         if directory is not None:
             os.close(directory)
+    if planned_token and schema == CLOUD_AGENT_RUNTIME_SCHEMA:
+        from .cloud_runtime import parse_cloud_runtime
+
+        return parse_cloud_runtime(payload, planned_token=True)
     return parse_runtime(payload, schema=schema)
 
 

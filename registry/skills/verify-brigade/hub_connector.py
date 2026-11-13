@@ -64,7 +64,34 @@ def command(args, helper):
         and not (work / ".brigade").exists()
         and not (work / "absent-token").exists()
     )
+    document["auth"] = {"mode": "token", "token_file": str(work / "absent-listener")}
+    runtime.write_text(json.dumps(document), encoding="utf-8")
+    token_preview = helper.run(
+        base + ["setup", "--target", str(work), "--id", "cloud-agent", "--runtime-path", str(runtime)],
+        root=root,
+        name="hub-connector-token-setup",
+        env_extra={
+            "BRIGADE_HOME": str(work / "fleet-home"),
+            "BRIGADE_FLEET_TOKEN": "",
+            "BRIGADE_FLEET_NODE_TOKEN": "",
+        },
+    )
+    token_result = token_preview.get("json")
+    ok = (
+        ok
+        and token_preview["returncode"] == 0
+        and isinstance(token_result, dict)
+        and str(work / "absent-listener") in token_result.get("writes", [])
+        and not (work / "absent-listener").exists()
+        and not (work / ".brigade").exists()
+    )
     return helper.emit(
-        {"action": "hub-connector", "ok": ok, "list": helper.slim(listing), "preview": helper.slim(preview)},
+        {
+            "action": "hub-connector",
+            "ok": ok,
+            "list": helper.slim(listing),
+            "preview": helper.slim(preview),
+            "token_preview": helper.slim(token_preview),
+        },
         0 if ok else 3,
     )

@@ -357,8 +357,8 @@ bind is `127.0.0.1:8783`.
 
 Token authentication is the default. Set `auth` to
 `{"mode": "token", "token_file": "/var/lib/brigade-cloud-agent/listener-token"}`.
-The listener token must be an owned, private regular file containing 32 to 512
-characters matching `[A-Za-z0-9_-]`, excluding a single repeated character. It must differ from the hub
+The listener token must be an owned, private regular file containing 43 to 512
+characters matching `[A-Za-z0-9_-]`, excluding short-period repetition. It must differ from the hub
 principal credential, node and admin credentials, and every other connector credential. Send it in the
 `Authorization: Bearer <token>` header. Both authentication modes require a
 loopback bind. Remote access uses an operator-managed TLS tunnel or reverse
@@ -371,10 +371,19 @@ Preview setup with `brigade hub connector setup --id cloud-agent --target
 <target> --runtime-path <protected-runtime.json>`. Add `--apply` to write the
 instance configuration. Applied token-mode setup generates a random token in a
 new 0600 file when the configured token path is absent, and reports only its path.
-Ten failed authentications within 60 seconds block the listener for 60 seconds
-with a bare 429 response. Authentication failures are counted without headers
+After ten failed authentications within 60 seconds, failed requests receive a
+bare 429 response for 60 seconds. Valid credentials remain usable. Authentication failures are counted without headers
 or credentials in the call log. Inspect it with `show`, validate it with `doctor` and
 `canary`, then preview `install-service`. Installation requires `--apply` and
 an explicit `--out-dir`. These commands do not start services. `update` and
 `remove` also preview by default. Removal preserves runtime files, credentials
 and stored data. New units use `brigade hub connector serve --id cloud-agent`.
+
+Setup-generated listener tokens are the supported path. Imported tokens must use
+URL-safe characters and cannot repeat a unit of eight characters or fewer.
+The failed-auth budget penalizes failed verification only. Valid credentials
+remain usable during a cooldown in either authentication mode.
+
+When cloud-agent is installed, the other connector profiles' isolation check
+also reads the machine's fleet credentials. Those profiles refuse to run if the
+credentials cannot be read.

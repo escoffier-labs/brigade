@@ -323,6 +323,8 @@ def test_loopback_probes(dot_private_dir, monkeypatch, mode):
     assert watch.probe_route(listener, runtime) == []
     assert {"check": "endpoint", "status": "ok"} in lifecycle.doctor(root, pack_id="cloud-agent")
     assert lifecycle.canary(root, pack_id="cloud-agent")["ok"]
+    assert len(gate._auth_failures) < 10
+    assert gate._auth_blocked_until == 0
 
 
 @pytest.mark.parametrize("name", ["dot", "duet"])

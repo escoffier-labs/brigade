@@ -3,3 +3,4 @@
 - Require loopback connectors in both auth modes, isolate listener credentials from hub and fleet authority through rotation, generate private random listener tokens at applied setup, and limit failed authentication attempts.
 - Preserve legacy Dot and Duet lifecycle output and removal behavior, and match canonical service removal to the installed unit name.
 - Preserve Dot and Duet service loading and fail-closed neighbor isolation. Add an offline connector verification drive and platform-specific test boundaries.
+- Preview token setup before writing credentials, preserve valid clients during failed-auth cooldowns, recheck credential isolation on each authentication, and retain legacy update validation.

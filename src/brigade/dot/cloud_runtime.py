@@ -17,7 +17,7 @@ from .runtime_config import (
 from .token_auth import read_token, require_credential_isolation
 
 
-def parse_cloud_runtime(payload: object) -> Runtime:
+def parse_cloud_runtime(payload: object, *, planned_token: bool = False) -> Runtime:
     root = _object(payload, {"schema", "auth", "paths", "hub"}, optional={"notify_command", "messaging_enabled"})
     if root["schema"] != CLOUD_AGENT_RUNTIME_SCHEMA:
         raise _invalid()
@@ -28,7 +28,8 @@ def parse_cloud_runtime(payload: object) -> Runtime:
     if mode == "token":
         data = _object(raw, {"token_file"}, optional={"mode"})
         token_file = _absolute_path(data["token_file"])
-        read_token(token_file)
+        if not planned_token:
+            read_token(token_file)
         auth = AuthConfig("", "", "", "agent:cloud-agent", "", mode="token", token_file=token_file)
     elif mode == "access":
         auth = replace(_parse_auth({k: v for k, v in raw.items() if k != "mode"}), mode="access")
@@ -39,7 +40,7 @@ def parse_cloud_runtime(payload: object) -> Runtime:
     if hub.principal != "agent:cloud-agent":
         raise _invalid()
     if auth.token_file is not None:
-        require_credential_isolation(auth.token_file, hub.message_token_file)
+        require_credential_isolation(auth.token_file, hub.message_token_file, planned=planned_token)
     return Runtime(
         auth=auth,
         paths=paths,

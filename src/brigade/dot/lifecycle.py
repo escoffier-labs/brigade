@@ -26,7 +26,7 @@ from .access_auth import AccessVerifier, METADATA_PATH, bounded_headers, unique_
 from .adapter import DotTools, argument_problem, build_tools, validate_arguments
 from .events import EventService, EventsApp, IDENTITY
 from .hub_inbox import authenticated_authority
-from .profile import DOT, PROFILES, ConnectorProfile, profile_for
+from .profile import CLOUD_AGENT, DOT, PROFILES, ConnectorProfile, profile_for
 from .runtime_config import Runtime, load_runtime
 from .safe_state import identity, require_local_platform
 from .server import register_tools
@@ -111,7 +111,7 @@ class _DotGate:
         await send({"type": "http.response.body", "body": b'{"error":"request_denied"}'})
 
     async def auth_failed(self, now: float) -> None:
-        if self.profile.pack_id != "cloud-agent":
+        if self.profile.pack_id != "cloud-agent" or now < self._auth_blocked_until:
             return
         self._auth_failures = [t for t in self._auth_failures if now - t < 60]
         self._auth_failures.append(now)
@@ -156,16 +156,14 @@ class _DotGate:
             await self.reject(send, 403)
             return
         now = time.monotonic()
-        if self.profile.pack_id == "cloud-agent" and now < self._auth_blocked_until:
-            await self.reject(send, 429)
-            return
         if isinstance(self.verifier, TokenVerifier):
             try:
                 c.require(self.profile.pack_id == "cloud-agent")
-                await self.verifier.verify(scope)
+                owner = await self.verifier.verify(scope)
             except Exception:
+                refusal_status = 429 if now < self._auth_blocked_until else 401
                 await self.auth_failed(now)
-                await self.reject(send, 401)
+                await self.reject(send, refusal_status)
                 return
         if path == METADATA_PATH and isinstance(self.verifier, TokenVerifier):
             await self.reject(send, 404)
@@ -185,11 +183,13 @@ class _DotGate:
             return
         try:
             c.require(self.verifier.validated is True)
-            owner = await self.verifier.verify(scope)
+            if not isinstance(self.verifier, TokenVerifier):
+                owner = await self.verifier.verify(scope)
             c.require(identity(owner) == self.verifier.config.approved_email)
         except Exception:
+            refusal_status = 429 if now < self._auth_blocked_until else 401
             await self.auth_failed(now)
-            await self.reject(send, 401)
+            await self.reject(send, refusal_status)
             return
         body = bytearray()
         try:
@@ -512,7 +512,7 @@ def doctor(target: Path, *, pack_id: str = c.PACK_ID) -> list[dict[str, str]]:
     from brigade.fleet_client_message_credentials import read_message_token_file
 
     if profile.pack_id == "cloud-agent" and runtime.auth.mode == "access":
-        record("dependency", access_auth._jwt)
+        record("access-dependency", access_auth._jwt)
     record("state", state_check)
     if profile.pack_id == "cloud-agent":
         checks.append({"check": "auth-mode", "status": "ok", "mode": runtime.auth.mode})
@@ -578,7 +578,13 @@ def _isolated_from_dot(target: Path, runtime: Runtime) -> bool:
             or _same_token(runtime.hub.message_token_file, other_runtime.hub.message_token_file)
             or _same_location(runtime.paths.state_dir, other_runtime.paths.state_dir)
             or (
-                runtime.auth.mode == other_runtime.auth.mode == "access"
+                (
+                    (
+                        runtime.schema != CLOUD_AGENT.runtime_schema
+                        and other_runtime.schema != CLOUD_AGENT.runtime_schema
+                    )
+                    or runtime.auth.mode == other_runtime.auth.mode == "access"
+                )
                 and (
                     runtime.auth.audience == other_runtime.auth.audience
                     or runtime.auth.resource == other_runtime.auth.resource

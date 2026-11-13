@@ -27,9 +27,9 @@ def cloud_document(tmp_path):
     data["paths"]["state_dir"] = str(tmp_path / "state")
     data["paths"]["workspace"] = str(tmp_path / "workspace")
     token = tmp_path / "listener-token"
-    token.write_text("example-listener-credential-00000000000000")
+    token.write_text(("example-listener-credential-" + "0" * 24))
     token.chmod(0o600)
-    (tmp_path / "hub-token").write_text("example-hub-credential-0000000000000000000")
+    (tmp_path / "hub-token").write_text(("example-hub-credential-" + "0" * 30))
     (tmp_path / "hub-token").chmod(0o600)
     data["auth"] = {"token_file": str(token)}
     return data
@@ -72,11 +72,11 @@ def test_closed_runtime(tmp_path, key, value):
 @pytest.mark.parametrize(
     "headers,accepted",
     [
-        ([(b"authorization", b"Bearer " + b"example-listener-credential-00000000000000")], True),
+        ([(b"authorization", b"Bearer " + ("example-listener-credential-" + "0" * 24).encode())], True),
         ([], False),
         ([(b"authorization", b"Bearer wrong")], False),
-        ([(b"cf-access-jwt-assertion", b"example-listener-credential-00000000000000")], False),
-        ([(b"authorization", b"Bearer " + b"example-listener-credential-00000000000000")] * 2, False),
+        ([(b"cf-access-jwt-assertion", ("example-listener-credential-" + "0" * 24).encode())], False),
+        ([(b"authorization", b"Bearer " + ("example-listener-credential-" + "0" * 24).encode())] * 2, False),
     ],
 )
 def test_token_auth(tmp_path, headers, accepted, caplog):
@@ -87,8 +87,8 @@ def test_token_auth(tmp_path, headers, accepted, caplog):
     else:
         with pytest.raises(DotError, match="authentication_required"):
             asyncio.run(verifier.verify({"headers": headers}))
-    assert "example-listener-credential-00000000000000" not in caplog.text
-    assert "example-listener-credential-00000000000000" not in repr(runtime)
+    assert ("example-listener-credential-" + "0" * 24) not in caplog.text
+    assert ("example-listener-credential-" + "0" * 24) not in repr(runtime)
 
 
 def test_token_cannot_share_hub_credential(tmp_path):
@@ -108,7 +108,7 @@ def test_access_configuration_unchanged(tmp_path):
 
 @pytest.mark.parametrize(
     "header,status",
-    [(b"Bearer " + b"example-listener-credential-00000000000000", 200), (b"Bearer wrong", 401), (None, 401)],
+    [(b"Bearer " + ("example-listener-credential-" + "0" * 24).encode(), 200), (b"Bearer wrong", 401), (None, 401)],
 )
 def test_listener_token_gate(tmp_path, header, status):
     from tests.test_dot_lifecycle import request

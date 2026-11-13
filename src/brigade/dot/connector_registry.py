@@ -76,7 +76,7 @@ def show_pack(pack_id: str, target: Path | None = None) -> dict[str, Any]:
     return next(p for p in list_packs(target) if p["id"] == pack_id)
 
 
-def _validate(payload: Any, pack_id: str) -> dict[str, Any]:
+def _validate(payload: Any, pack_id: str, *, planned_token: bool = False) -> dict[str, Any]:
     profile = _profile(pack_id)
     keys = {
         "schema",
@@ -109,7 +109,7 @@ def _validate(payload: Any, pack_id: str) -> dict[str, Any]:
         path = Path(payload["runtime_path"])
         if not path.is_absolute():
             raise ValueError
-        load_runtime(path, schema=profile.runtime_schema)
+        load_runtime(path, schema=profile.runtime_schema, planned_token=planned_token)
     except Exception:
         raise PackError("unsafe-path") from None
     if not grokbot_mcp._is_loopback(host):
@@ -161,20 +161,20 @@ def _setup(
         runtime_path=str(runtime_path),
     )
     generated = None
-    if pack_id == "cloud-agent" and apply:
-        from .token_auth import ensure_listener_token
-
+    if pack_id == "cloud-agent":
         try:
             raw = json.loads(grokbot_ops._read_regular_text(Path(payload["runtime_path"])))
-            if raw.get("auth", {}).get("mode", "token") == "token":
+            if not isinstance(raw, dict) or not isinstance(raw.get("auth"), dict):
+                raise ValueError
+            if raw["auth"].get("mode", "token") == "token":
                 token_path = Path(raw["auth"]["token_file"])
                 if not token_path.is_absolute():
                     raise ValueError
-                if ensure_listener_token(token_path):
+                if not token_path.exists():
                     generated = str(token_path)
         except (DotError, OSError, ValueError, KeyError, TypeError):
             raise PackError("unsafe-path") from None
-    _validate(payload, pack_id)
+    _validate(payload, pack_id, planned_token=generated is not None)
     port = files._parse_default_bind(payload["bind"])[1]
     # Include old installed profiles and queue listeners without importing their registry.
     reserved = {8766, 8767, 8768, 8771, 8773, 8777, 8778, 8781, 8782}
@@ -195,7 +195,9 @@ def _setup(
     if port in reserved:
         raise PackError("duplicate-port")
     try:
-        runtime = load_runtime(Path(payload["runtime_path"]), schema=_profile(pack_id).runtime_schema)
+        runtime = load_runtime(
+            Path(payload["runtime_path"]), schema=_profile(pack_id).runtime_schema, planned_token=generated is not None
+        )
     except DotError:
         raise PackError("unsafe-path") from None
     from .lifecycle import _isolated_from_dot
@@ -216,7 +218,18 @@ def _setup(
     if generated is not None:
         result["writes"].append(generated)
     if apply:
-        _write(target, pack_id, payload)
+        from .token_auth import ensure_listener_token
+
+        created = False
+        try:
+            if generated is not None:
+                created = ensure_listener_token(Path(generated))
+            _validate(payload, pack_id)
+            _write(target, pack_id, payload)
+        except (DotError, OSError, PackError):
+            if created and generated is not None:
+                Path(generated).unlink()
+            raise PackError("unsafe-path") from None
     return result
 
 
