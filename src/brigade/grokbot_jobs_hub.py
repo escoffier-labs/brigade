@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-
 from typing import Any
-
 
 from .grokbot_job_validation import (
     WORKER_LABEL_RE,

@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .removed_commands import REMOVED_IN
+
 _PROMPT_FILE_MAX_BYTES = 64 * 1024
 _LAUNCH_LABEL_MAX = 120
 
@@ -179,7 +181,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         help="Codex Cloud environment selector to validate (Codex Cloud only).",
     )
 
-    p_grokbot = cloud_sub.add_parser("grokbot", help="Manage the private local Grok Bot job queue.")
+    p_grokbot = cloud_sub.add_parser("grokbot", help=f"Removed in {REMOVED_IN}.")
     grokbot_sub = p_grokbot.add_subparsers(dest="grokbot_command", metavar="<grokbot-command>")
     grokbot_sub.required = True
 
@@ -187,12 +189,12 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         command.add_argument("--target", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true")
 
-    p_enqueue = grokbot_sub.add_parser("enqueue", help="Queue a Grok Bot envelope from a JSON file.")
+    p_enqueue = grokbot_sub.add_parser("enqueue", help=f"Removed in {REMOVED_IN}.")
     add_target(p_enqueue)
     p_enqueue.add_argument("--spec", type=Path, required=True, help="Path to the private task envelope JSON file.")
     p_enqueue.add_argument("--idempotency-key", required=True)
 
-    p_feed = grokbot_sub.add_parser("feed", help="Validate or enqueue an approved Grok Bot feed manifest.")
+    p_feed = grokbot_sub.add_parser("feed", help=f"Removed in {REMOVED_IN}.")
     add_target(p_feed)
     p_feed.add_argument("--manifest", type=Path, required=True, help="Path to the approved private feed manifest.")
     p_feed.add_argument("--limit", type=int, default=1, help="Maximum newly created jobs (1-10). Defaults to 1.")
@@ -202,9 +204,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         help="Enqueue after validation. Default is validate only. A private wake webhook is notified after each new job.",
     )
 
-    p_scout_feed = grokbot_sub.add_parser(
-        "scout-feed", help="Select one approved GitHub issue for Grok Bot Repository Scout."
-    )
+    p_scout_feed = grokbot_sub.add_parser("scout-feed", help=f"Removed in {REMOVED_IN}.")
     add_target(p_scout_feed)
     p_scout_feed.add_argument("--policy", type=Path, required=True, help="Path to the approved private scout policy.")
     p_scout_feed.add_argument(
@@ -213,11 +213,11 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         help="Enqueue after selection. Default is preview only. A private wake webhook is notified after a new job.",
     )
 
-    grokbot_sub.add_parser("build-feed", help="Removed job feed.")
+    grokbot_sub.add_parser("build-feed", help=f"Removed in {REMOVED_IN}.")
 
     p_reconcile = grokbot_sub.add_parser(
         "reconcile-reports",
-        help="Preview or draft canonical-owner Memory Handoffs from completed scout reports.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     add_target(p_reconcile)
     p_reconcile.add_argument("--owner", type=Path, required=True, help="Owner workspace that receives handoff drafts.")
@@ -231,7 +231,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_findings = grokbot_sub.add_parser(
         "reconcile-findings",
-        help="Preview or draft canonical-owner Memory Handoffs from a private findings manifest.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     add_target(p_findings)
     p_findings.add_argument("--owner", type=Path, required=True, help="Owner workspace that receives handoff drafts.")
@@ -241,7 +241,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_convert = grokbot_sub.add_parser(
         "convert-findings",
-        help="Convert live normalized findings into a private generic manifest.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     add_target(p_convert)
     p_convert.add_argument("--input", type=Path, required=True, help="Path to the live normalized findings file.")
@@ -249,7 +249,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_relay = grokbot_sub.add_parser(
         "relay-findings",
-        help="Preview or relay private findings to Fleet Hub and owner-review drafts.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     add_target(p_relay)
     p_relay.add_argument("--owner", type=Path, required=True, help="Owner workspace that receives handoff drafts.")
@@ -259,41 +259,34 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         "--apply", action="store_true", help="Write drafts and report events. Default is preview only."
     )
 
-    for name, help_text in (("claim", "Claim a queued job."), ("renew", "Renew a current job lease.")):
-        command = grokbot_sub.add_parser(name, help=help_text)
+    for name in ("claim", "renew"):
+        command = grokbot_sub.add_parser(name, help=f"Removed in {REMOVED_IN}.")
         add_target(command)
         command.add_argument("--job-id", required=True)
         command.add_argument("--bot-id", required=True)
         command.add_argument("--lease-id", required=True)
         command.add_argument("--lease-seconds", required=True, type=int)
 
-    for name, help_text in (
-        ("start", "Mark a claimed job running."),
-        ("fail", "Mark a live job failed."),
-        ("ack-cancel", "Acknowledge a requested cancellation."),
-    ):
-        command = grokbot_sub.add_parser(name, help=help_text)
+    for name in ("start", "fail", "ack-cancel"):
+        command = grokbot_sub.add_parser(name, help=f"Removed in {REMOVED_IN}.")
         add_target(command)
         command.add_argument("--job-id", required=True)
         command.add_argument("--bot-id", required=True)
         command.add_argument("--lease-id", required=True)
 
-    p_complete = grokbot_sub.add_parser("complete", help="Complete a running job with artifact references.")
+    p_complete = grokbot_sub.add_parser("complete", help=f"Removed in {REMOVED_IN}.")
     add_target(p_complete)
     p_complete.add_argument("--job-id", required=True)
     p_complete.add_argument("--bot-id", required=True)
     p_complete.add_argument("--lease-id", required=True)
     p_complete.add_argument("--artifact", type=Path, required=True, help="Path to the completion artifact JSON file.")
 
-    for name, help_text in (
-        ("cancel", "Cancel a queued job or request cancellation."),
-        ("expire", "Expire a deadline or lease-expired job."),
-    ):
-        command = grokbot_sub.add_parser(name, help=help_text)
+    for name in ("cancel", "expire"):
+        command = grokbot_sub.add_parser(name, help=f"Removed in {REMOVED_IN}.")
         add_target(command)
         command.add_argument("--job-id", required=True)
 
-    p_grokbot_status = grokbot_sub.add_parser("status", help="Show safe Grok Bot job projections.")
+    p_grokbot_status = grokbot_sub.add_parser("status", help=f"Removed in {REMOVED_IN}.")
     add_target(p_grokbot_status)
     p_grokbot_status.add_argument("--job-id", default=None)
 
@@ -335,7 +328,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         command.add_argument("--json", action="store_true")
         add_client_id(command)
 
-    p_setup = grokbot_sub.add_parser("setup", help="Write non-secret role-scoped listener configuration.")
+    p_setup = grokbot_sub.add_parser("setup", help=f"Removed in {REMOVED_IN}.")
     add_target(p_setup)
     add_client_id(p_setup)
     p_setup.add_argument("--instance", required=True, choices=("operator", "repository-scout", "implementation-worker"))
@@ -352,15 +345,13 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         help="Protected absolute Fleet Hub node-token file for this worker role (reference only).",
     )
 
-    p_doctor = grokbot_sub.add_parser(
-        "doctor", help="Sanitized dependency/config/permission/queue/endpoint diagnostics."
-    )
+    p_doctor = grokbot_sub.add_parser("doctor", help=f"Removed in {REMOVED_IN}.")
     add_instance(p_doctor)
 
-    p_canary = grokbot_sub.add_parser("canary", help="Bounded non-mutating authentication and inventory check.")
+    p_canary = grokbot_sub.add_parser("canary", help=f"Removed in {REMOVED_IN}.")
     add_instance(p_canary)
 
-    p_install = grokbot_sub.add_parser("install-service", help="Render or install a role-scoped systemd unit.")
+    p_install = grokbot_sub.add_parser("install-service", help=f"Removed in {REMOVED_IN}.")
     add_instance(p_install)
     p_install.add_argument("--out", type=Path, default=None, help="Directory to render the unit into.")
     p_install.add_argument("--force", action="store_true", help="Allow overwriting this role's own unit file.")
@@ -435,18 +426,18 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_pack_relay_setup = pack_sub.add_parser(
         "relay-setup",
-        help="Preview or apply first-party finding-relay owner configuration.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     add_target(p_pack_relay_setup)
     p_pack_relay_setup.add_argument("--owner", type=Path, required=True, help="Absolute owner workspace.")
     p_pack_relay_setup.add_argument("--apply", action="store_true", help="Write local config. Default is preview only.")
 
-    p_pack_relay_doctor = pack_sub.add_parser("relay-doctor", help="Sanitized first-party finding-relay diagnostics.")
+    p_pack_relay_doctor = pack_sub.add_parser("relay-doctor", help=f"Removed in {REMOVED_IN}.")
     add_target(p_pack_relay_doctor)
 
     p_pack_relay = pack_sub.add_parser(
         "relay",
-        help="Preview or relay first-party steward findings to owner review and Fleet Hub.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     add_target(p_pack_relay)
     p_pack_relay.add_argument("--limit", type=int, default=1, help="Maximum new drafts (1-50). Defaults to 1.")
@@ -456,7 +447,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_pack_install_relay = pack_sub.add_parser(
         "install-relay-service",
-        help="Render or install the first-party findings-relay systemd units.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     add_target(p_pack_install_relay)
     p_pack_install_relay.add_argument("--out", type=Path, default=None, help="Directory to render the units into.")
@@ -1081,7 +1072,10 @@ def _dispatch_grokbot(args, target: Path) -> int:
         )
         dot.run_listener(dot_config, dot_tools, dot_runtime)
     except transport.OptionalDependencyError:
-        print("error: Grok Bot listener requires pip install brigade-cli[grokbot]", file=sys.stderr)
+        print(
+            "error: Grok Bot listener requires pip install brigade-cli[connector]. The grokbot extra remains an alias during the removal window",
+            file=sys.stderr,
+        )
         return 2
     except (transport.ConfigurationError, legacy_registry.PackError, service_render.ServiceRenderError):
         print("error: Grok Bot listener configuration is invalid", file=sys.stderr)

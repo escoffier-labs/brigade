@@ -1,0 +1,1 @@
+- Mark removed queue commands in help and include client-scoped service patterns in stop instructions. Connector setup hints now name the `connector` extra and explain the temporary `grokbot` alias.

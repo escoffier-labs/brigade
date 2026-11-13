@@ -1,5 +1,10 @@
 # Duet connector pack
 
+> Retired queue listeners: removal messages keep the bare-unit disable command and
+> show separate stop and list commands for client-scoped units. Inspect the listed
+> concrete unit names before disabling them. Quoted patterns work with `stop` and
+> `list-unit-files`, but `disable --now` requires concrete names.
+
 The duet pack connects Claude Duet, a hosted agent that runs tasks on its own
 cloud machine, to Brigade memory, skills and the Fleet Hub inbox. It runs the
 Dot connector code under a separate profile, so it shares Dot's origin
@@ -189,7 +194,7 @@ Dot's runtime also accepts an optional `messaging_enabled`. When Dot omits it,
 
 ## Setup
 
-Install the MCP SDK with `pip install brigade-cli[grokbot]`, plus `uvicorn` and
+Install the MCP SDK with `pip install brigade-cli[connector]` (the `grokbot` extra remains an alias during the removal window), plus `uvicorn` and
 `PyJWT[crypto]`. Before setup, prepare:
 
 - a Cloudflare Access application for the Duet host, separate from Dot's.

@@ -63,7 +63,8 @@ def compatibility(argv: list[str]) -> int | None:
             return removed(
                 " ".join(argv[:5] if command == "pack" else argv[:4]),
                 replacement=REPLACEMENT
-                + " Stop installed units: systemctl --user disable --now brigade-grokbot-findings-relay.timer brigade-grokbot-findings-relay.service brigade-grokbot-operator.service brigade-grokbot-repository-scout.service brigade-grokbot-implementation-worker.service",
+                + " Stop installed units: systemctl --user disable --now brigade-grokbot-findings-relay.timer brigade-grokbot-findings-relay.service brigade-grokbot-operator.service brigade-grokbot-repository-scout.service brigade-grokbot-implementation-worker.service"
+                + _client_unit_commands(("operator", "repository-scout", "implementation-worker")),
             )
         if command == "serve":
             tail = argv[4:]
@@ -76,7 +77,8 @@ def compatibility(argv: list[str]) -> int | None:
                 return removed(
                     "run cloud grokbot serve",
                     replacement=REPLACEMENT
-                    + " Stop installed units: systemctl --user disable --now brigade-grokbot-operator.service brigade-grokbot-repository-scout.service brigade-grokbot-implementation-worker.service",
+                    + " Stop installed units: systemctl --user disable --now brigade-grokbot-operator.service brigade-grokbot-repository-scout.service brigade-grokbot-implementation-worker.service"
+                    + _client_unit_commands(("operator", "repository-scout", "implementation-worker")),
                 )
     if argv[:2] == ["fleet", "grokbot"]:
         return removed("fleet grokbot enroll-actor")
@@ -96,5 +98,19 @@ def removed_profile(value: str, command: str | None = None) -> int:
         units = f"brigade-{value}.service brigade-{value}-watch.service brigade-{value}-watch.timer"
     return removed(
         command or value,
-        replacement=REPLACEMENT + " Stop installed units: systemctl --user disable --now " + units,
+        replacement=REPLACEMENT
+        + " Stop installed units: systemctl --user disable --now "
+        + units
+        + (
+            _client_unit_commands((value,))
+            if value in {"operator", "repository-scout", "implementation-worker"}
+            else ""
+        ),
+    )
+
+
+def _client_unit_commands(roles: tuple[str, ...]) -> str:
+    patterns = " ".join(f"'brigade-grokbot-{role}-*.service'" for role in roles)
+    return (
+        "\nClient-scoped units:\nsystemctl --user stop " + patterns + "\nsystemctl --user list-unit-files " + patterns
     )

@@ -2,39 +2,19 @@
 
 from __future__ import annotations
 
-
 import inspect
-
-
 import json
-
-
 import re
-
-
 import sys
-
-
 import urllib.error
-
-
 import urllib.request
-
-
 from pathlib import Path
-
-
 from typing import Any, Iterable, Mapping
-
-
 from urllib.parse import urlsplit
-
 
 from brigade import dot
 
-
 from . import transport as grokbot_mcp, service_render as grokbot_ops
-
 
 from .connector_files import (
     PackError,
@@ -49,85 +29,43 @@ from .connector_files import (
     _snapshot_regular_file,
 )
 
-
 PACK_SCHEMA = "brigade.grokbot.connector-pack.v1"
-
-
 INSTANCE_SCHEMA = "brigade.grokbot.connector-instance.v1"
-
-
 INSTANCE_DIR = Path(".brigade") / "grokbot" / "packs"
-
-
 PACK_KEYS = frozenset({"schema", "id", "version", "kind", "instance", "default_bind", "public_route", "tools"})
-
-
 BIND_DRIFT_CHECK = "bind-drift"
-
-
 INGRESS_PORT_MISMATCH_CHECK = "ingress-port-mismatch"
-
-
 ALLOWED_HOST_MISSING_CHECK = "allowed-host-missing"
-
-
 NO_PUBLIC_ROUTE_CHECK = "no-public-route"
-
-
 REACHABILITY_NO_PUBLIC_ROUTE = "no-public-route"
-
-
 REACHABILITY_HOST_LOCAL = "host-local"
-
-
 REACHABILITY_PUBLIC = "public"
-
-
 _MAX_CLOUDFLARED_PROCS = 16
-
-
 _MAX_METRICS_ENDPOINTS = 8
-
-
 _MAX_PUBLIC_HOSTS = 8
-
-
-_MAX_CONFIG_BYTES = 65536
-
-
+_MAX_CONFIG_BYTES = 65_536
 _PROBE_TIMEOUT_SECONDS = 2
-
-
 INSTANCE_KEYS = frozenset(
-    {"schema", "pack_id", "pack_version", "bind", "allowed_hosts", "allowed_origins", "public_route", "bearer"}
+    {
+        "schema",
+        "pack_id",
+        "pack_version",
+        "bind",
+        "allowed_hosts",
+        "allowed_origins",
+        "public_route",
+        "bearer",
+    }
 )
-
-
 INSTANCE_OPTIONAL_KEYS = frozenset({"host_local"})
-
-
 CONNECTOR_DEFAULT_BINDS = {"dot": "127.0.0.1:8779", "duet": "127.0.0.1:8780"}
-
-
 DOT_PACK_ID = "dot"
-
-
 DUET_PACK_ID = "duet"
-
-
 DOT_FAMILY_PACK_IDS = frozenset({DOT_PACK_ID, DUET_PACK_ID})
-
-
-DOT_INSTANCE_KEYS = INSTANCE_KEYS - {"bearer"} | frozenset({"runtime_path"})
-
-
-VERSION_RE = re.compile("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
-
-
-PACK_ID_RE = re.compile("^[a-z][a-z0-9-]{0,62}$")
-
-
-PUBLIC_ROUTE_RE = re.compile("^$|^/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*$")
+DOT_INSTANCE_KEYS = (INSTANCE_KEYS - {"bearer"}) | frozenset({"runtime_path"})
+VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+PACK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+PUBLIC_ROUTE_RE = re.compile(r"^$|^/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*$")
 
 
 def _connector_tools(pack_id: str) -> frozenset[str]:
@@ -154,12 +92,12 @@ def _connector_pack(pack_id: str) -> dict[str, Any]:
     }
 
 
-_PACKAGED = tuple((_connector_pack(pack_id) for pack_id in sorted(DOT_FAMILY_PACK_IDS)))
+_PACKAGED = tuple(_connector_pack(pack_id) for pack_id in sorted(DOT_FAMILY_PACK_IDS))
 
 
 def packaged_manifests() -> tuple[dict[str, Any], ...]:
     """Return copies of the closed first-party pack manifests."""
-    return tuple((dict(pack) for pack in _PACKAGED))
+    return tuple(dict(pack) for pack in _PACKAGED)
 
 
 def instance_config_path(target: Path, pack_id: str) -> Path:
@@ -209,7 +147,7 @@ def validate_registry(manifests: Iterable[Mapping[str, Any]]) -> tuple[dict[str,
         if port in seen_ports:
             raise PackError("duplicate-port")
         route = pack["public_route"]
-        if any((_routes_overlap(route, existing) for existing in routes)):
+        if any(_routes_overlap(route, existing) for existing in routes):
             raise PackError("overlapping-public-route")
         seen_ids.add(pack["id"])
         seen_ports.add(port)
@@ -387,7 +325,7 @@ def _setup(
     owner_workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     pack = show_pack(pack_id)
-    if pack_id in DOT_FAMILY_PACK_IDS and any((value is not None for value in (bearer_env, bearer_file, bearer))):
+    if pack_id in DOT_FAMILY_PACK_IDS and any(value is not None for value in (bearer_env, bearer_file, bearer)):
         raise PackError("unexpected-key")
     reference = None
     chosen_bind = bind or pack["default_bind"]
@@ -410,7 +348,7 @@ def _setup(
             owner_workspace is not None
             or ledger_path is not None
             or action_state_path is not None
-            or (approval_dir is not None)
+            or approval_dir is not None
         ):
             raise PackError("unexpected-key")
         payload["runtime_path"] = _dot_runtime_reference(runtime_path, pack_id)
@@ -512,7 +450,7 @@ def _remove(target: Path, pack_id: str, *, apply: bool, unit_dir: Path | None) -
 
 
 def _removal_paths(target: Path, pack: Mapping[str, Any], unit_dir: Path | None) -> list[Path]:
-    if unit_dir is not None and (not _owned_unit_dir(unit_dir, pack["instance"])):
+    if unit_dir is not None and not _owned_unit_dir(unit_dir, pack["instance"]):
         raise PackError("outside-owned-path")
     candidates: list[tuple[Path, bool]] = []
     pack_path = instance_config_path(target, pack["id"])
@@ -566,7 +504,11 @@ def _occupied_setup_ports(target: Path, *, exclude_pack_id: str) -> set[int]:
 def _write_instance_config(target: Path, pack_id: str, payload: dict[str, Any]) -> None:
     path = instance_config_path(target, pack_id)
     try:
-        grokbot_ops._write_text_nofollow_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n", mode=384)
+        grokbot_ops._write_text_nofollow_atomic(
+            path,
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            mode=0o600,
+        )
     except OSError as exc:
         raise PackError("unsafe-path") from exc
 
@@ -605,7 +547,7 @@ def _validate_pack(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise PackError("unexpected-key")
     if not isinstance(route, str) or not PUBLIC_ROUTE_RE.fullmatch(route):
         raise PackError("overlapping-public-route" if route else "unexpected-key")
-    if not isinstance(tools, list) or any((not isinstance(name, str) for name in tools)):
+    if not isinstance(tools, list) or any(not isinstance(name, str) for name in tools):
         raise PackError("inventory-mismatch")
     if set(tools) != expected_tools or len(tools) != len(set(tools)):
         raise PackError("inventory-mismatch")
@@ -633,7 +575,7 @@ def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[
     if present - optional != expected_keys or payload.get("schema") != INSTANCE_SCHEMA:
         raise PackError("unexpected-key")
     host_local = payload.get("host_local")
-    if host_local is not None and host_local is not True and (host_local is not False):
+    if host_local is not None and host_local is not True and host_local is not False:
         raise PackError("unexpected-key")
     if payload.get("pack_id") != pack_id:
         raise PackError("unexpected-key")
@@ -649,9 +591,9 @@ def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[
     route = payload.get("public_route")
     if not isinstance(hosts, list) or not isinstance(origins, list):
         raise PackError("unexpected-key")
-    if any((not grokbot_mcp._valid_host(value) for value in hosts)):
+    if any(not grokbot_mcp._valid_host(value) for value in hosts):
         raise PackError("unexpected-key")
-    if any((not grokbot_mcp._valid_origin(value) for value in origins)):
+    if any(not grokbot_mcp._valid_origin(value) for value in origins):
         raise PackError("unexpected-key")
     if not isinstance(route, str) or not PUBLIC_ROUTE_RE.fullmatch(route):
         raise PackError("unexpected-key")
@@ -757,7 +699,12 @@ def _no_public_route_checks(target: Path, pack: Mapping[str, Any]) -> list[dict[
         return []
     if _peek_allowed_hosts(target, pack_id) or _peek_public_route(target, pack_id):
         return []
-    return [{"check": NO_PUBLIC_ROUTE_CHECK, "status": "manual"}]
+    return [
+        {
+            "check": NO_PUBLIC_ROUTE_CHECK,
+            "status": "manual",
+        }
+    ]
 
 
 def _public_allowed_hosts(hosts: Iterable[str]) -> tuple[str, ...]:
@@ -781,7 +728,10 @@ def _installed_bind_checks(target: Path, pack: Mapping[str, Any]) -> list[dict[s
     if installed is None:
         return []
     checks: list[dict[str, str]] = [
-        {"check": BIND_DRIFT_CHECK, "status": "ok" if installed == pack["default_bind"] else "warn"}
+        {
+            "check": BIND_DRIFT_CHECK,
+            "status": "ok" if installed == pack["default_bind"] else "warn",
+        }
     ]
     public = _public_allowed_hosts(_peek_allowed_hosts(target, pack_id))
     if not public:
@@ -866,7 +816,7 @@ def _cloudflared_metrics_binds() -> tuple[str, ...]:
             raw = (entry / "cmdline").read_bytes()
         except OSError:
             continue
-        argv = [part.decode("utf-8", "replace") for part in raw.split(b"\x00") if part]
+        argv = [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
         bind = _metrics_bind_from_argv(argv)
         if bind is not None:
             found.append(bind)
@@ -917,7 +867,7 @@ def _ingress_origin_ports(payload: Mapping[str, Any]) -> list[tuple[str, int]]:
             continue
         hostname = item.get("hostname")
         service = item.get("service")
-        if not isinstance(hostname, str) or not hostname or (not isinstance(service, str)):
+        if not isinstance(hostname, str) or not hostname or not isinstance(service, str):
             continue
         origin = _origin_port(service)
         if origin is None:
@@ -976,7 +926,7 @@ def _parse_default_bind(value: str) -> tuple[str, int]:
         raise PackError("unsafe-bind") from exc
     if not grokbot_mcp._is_loopback(host):
         raise PackError("unsafe-bind")
-    return (host, port)
+    return host, port
 
 
 def _routes_overlap(left: str, right: str) -> bool:
@@ -993,7 +943,7 @@ def _bind_port_from_existing_config(path: Path) -> int | None:
     if grokbot_ops._path_is_symlink(path) or path.is_symlink():
         raise PackError("unsafe-path")
     try:
-        raw = grokbot_ops._read_regular_text(path, max_bytes=65536)
+        raw = grokbot_ops._read_regular_text(path, max_bytes=65_536)
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError) as exc:

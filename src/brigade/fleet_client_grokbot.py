@@ -2,40 +2,19 @@
 
 from __future__ import annotations
 
-
 import json
-
-
 import urllib.error
-
-
 import urllib.request
-
-
 from contextlib import contextmanager
-
-
 from contextvars import ContextVar
-
-
 from dataclasses import dataclass
-
-
 from typing import Any, Iterator
-
 
 from . import fleet_client as _client
 
-
 FleetClientError = _client.FleetClientError
-
-
 GROKBOT_TIMEOUT_SECONDS = _client.CLOUD_TIMEOUT_SECONDS
-
-
 MAX_GROKBOT_RESPONSE_BYTES = _client.MAX_CLOUD_RESPONSE_BYTES
-
-
 _SAFE_JOB_FIELDS = frozenset(
     {
         "job_id",
@@ -68,8 +47,6 @@ _SAFE_JOB_FIELDS = frozenset(
         "harness",
     }
 )
-
-
 _OK_KEYS = {
     "enqueue": "enqueued",
     "list": "jobs",
@@ -85,9 +62,7 @@ _OK_KEYS = {
     "ack-cancel": "acknowledged",
 }
 
-
 _LISTENER_TOKEN: ContextVar[str | None] = ContextVar("grokbot_listener_token", default=None)
-
 
 _BOUNDED_REFUSAL_REASONS = frozenset(
     {

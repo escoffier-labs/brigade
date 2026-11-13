@@ -243,3 +243,44 @@ def test_surviving_legacy_family_help(suffix, capsys):
         assert output.out == expected
     else:
         assert "pack" in output.out and "serve" in output.out
+
+
+@pytest.mark.parametrize("suffix", [["enqueue"], ["serve"], ["pack", "show", "--id", "operator"]])
+def test_stop_instructions_cover_client_scoped_units(suffix, capsys):
+    import fnmatch
+    import shlex
+    from brigade.dot.service_render import unit_name
+
+    assert cli.main(["run", "cloud", "grokbot", *suffix]) == 2
+    message = capsys.readouterr().err
+    commands = [shlex.split(line) for line in message.splitlines() if line.startswith("systemctl ")]
+    arguments = shlex.split(message.split("systemctl ", 1)[1].splitlines()[0])
+    assert [command[:3] for command in commands] == [
+        ["systemctl", "--user", "stop"],
+        ["systemctl", "--user", "list-unit-files"],
+    ]
+    assert arguments[:3] == ["--user", "disable", "--now"]
+    roles = ["operator"] if suffix[0] == "pack" else ["operator", "repository-scout", "implementation-worker"]
+    for role in roles:
+        assert unit_name(role) in arguments
+        pattern = f"brigade-grokbot-{role}-*.service"
+        assert pattern not in arguments
+        assert all(pattern in command[3:] for command in commands)
+        assert fnmatch.fnmatchcase(unit_name(role, "client-a"), pattern)
+
+
+def test_listener_install_hint_names_connector_extra(tmp_path, monkeypatch, capsys):
+    from brigade import dot
+    from brigade.dot.transport import OptionalDependencyError
+    from tests._home import set_home
+
+    set_home(monkeypatch, tmp_path / "home")
+
+    def missing_dependency(*args, **kwargs):
+        raise OptionalDependencyError("fixture missing SDK")
+
+    monkeypatch.setattr(dot, "build_listener_from_target", missing_dependency)
+    assert cli.main(["run", "cloud", "grokbot", "serve", "--pack", "dot", "--target", str(tmp_path)]) == 2
+    message = capsys.readouterr().err
+    assert "pip install brigade-cli[connector]" in message
+    assert "grokbot extra remains an alias during the removal window" in message

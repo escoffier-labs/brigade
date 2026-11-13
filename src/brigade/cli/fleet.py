@@ -15,6 +15,8 @@ from typing import Any
 from .. import fleet_admin_stats_collector
 from ..fleet_claim_release import _print_claim_failure, _release_claim, _workspace_from_run_dir  # noqa: F401
 
+from .removed_commands import REMOVED_IN
+
 DEFAULT_PORT = 3774
 DEFAULT_DB_REL_PATH = Path(".brigade") / "fleet-hub.db"
 
@@ -222,13 +224,13 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     p_grokbot = fleet_sub.add_parser(
         "grokbot",
-        help="Enroll an existing fleet node as one Hub-authoritative Grok Bot listener actor.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     grokbot_sub = p_grokbot.add_subparsers(dest="fleet_grokbot_command", metavar="<grokbot-command>")
     grokbot_sub.required = True
     p_grokbot_enroll = grokbot_sub.add_parser(
         "enroll-actor",
-        help="Enroll one enabled, role-scoped listener actor (admin token).",
+        help=f"Removed in {REMOVED_IN}.",
     )
     p_grokbot_enroll.add_argument("node_id", help="Already-enrolled fleet node id that will hold the actor token.")
     p_grokbot_enroll.add_argument("--queue-owner-node-id", required=True, help="Fleet node id that owns the queue.")
