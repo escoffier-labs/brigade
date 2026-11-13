@@ -996,10 +996,10 @@ def scan(*, target: Path, json_output: bool = False) -> int:
     return 0
 
 
-def plan_fixes(*, target: Path, json_output: bool = False) -> int:
+def plan_fixes(*, target: Path, json_output: bool = False, apply: bool = False) -> int:
     from . import memory_care_plan
 
-    return memory_care_plan.plan_fixes(target=target, json_output=json_output)
+    return memory_care_plan.plan_fixes(target=target, json_output=json_output, apply=apply)
 
 
 def _load_json_file(path: Path) -> dict[str, Any] | None:

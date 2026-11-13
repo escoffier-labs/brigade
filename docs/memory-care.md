@@ -292,13 +292,19 @@ Each match's `score` is a non-negative float rounded to 4 decimals. Higher ranks
 
 `brigade memory care backfill` handles the bulk version of the same repair for setups whose cards predate the freshness convention. It finds cards with frontmatter but no reviewed or freshness dates, derives `last_reviewed` from each card file's last git commit date (the last time anyone touched the fact, or file mtime outside git, labeled as the lower-confidence source), and proposes `fresh_until` as the reviewed date plus the configured stale window. It also backfills a missing content `fingerprint` (stable hash of normalized card body) so ingest reinforcement can match known facts, and mints a missing stable ID even when care dates and fingerprint are already present. It is dry-run by default and prints the full plan. `--apply` writes the derived values into card frontmatter, never overwrites an existing value, and records a receipt under `.brigade/memory-care/backfills/`. Backfilled dates are honest rather than flattering: an old card lands as stale immediately, which is the point, since the scan then ranks the refresh queue by real age instead of reporting unknowable gaps.
 
-`brigade memory care plan-fixes` reads the latest scan and builds a planning-only view for low-risk metadata repairs such as missing reviewed dates or missing freshness dates. The command never writes card files. Plan items include candidate metadata fields, source fingerprints, blockers, and the next review command. `status` and `plan-fixes` print the top block reasons with counts so a fully blocked plan is diagnosable.
+`brigade memory care plan-fixes` reads the latest scan and reports proposed repairs without changing cards. Add `--apply` to apply the automatic allowlist. The `fixes` tend stage runs before retirement, including through existing scan triggers. `[tend] enabled = false` disables automatic fixes and retains the reviewed-date evidence-review blocker.
 
-A planned fix is blocked when Brigade can name a metadata repair but will not treat it as ready. `requires-current-evidence-review` is an operator decision: `missing-reviewed` stays blocked until someone checks current evidence and sets `last_reviewed`. `requires-operator-freshness-date` applies only when the card also has no reviewed date, so Brigade cannot derive `fresh_until`. Other blockers (`card-file-missing`, `card-frontmatter-missing`, and similar) mean the card is not readable as a metadata-only repair.
+| Fix kind | Disposition | Reason |
+|---|---|---|
+| `missing-freshness` | Applied | Derives `fresh_until` from the recorded review date plus `stale_after_days`. |
+| `missing-reviewed` | Applied | Uses only the card's last commit date, or modification time outside Git. |
+| `orphaned-card` | Reported | Indexes are curated bootstrap documents and must not grow with every card. |
+| `missing-index-link` | Reported | A dead link needs a separate removal decision. |
+| Other kinds | Reported | Evidence, content, ownership and retirement judgments are outside the fix stage. |
 
-When a card already has `last_reviewed` but no `fresh_until`, that freshness plan is unblocked. Brigade derives `fresh_until` as `last_reviewed + stale_after_days`, the same rule as `backfill`. The plan still writes nothing. Run `brigade memory care backfill` (dry-run, then `--apply` after review) to drain that class. To unblock a reviewed-date plan, review the card against current evidence, or promote the memory-care import and set `last_reviewed` through the normal refresh path.
+A missing, unreadable or future review-date source leaves the card unchanged. The journal reason records `git-last-commit` or `file-mtime`. It never claims a review happened today. Missing freshness remains blocked if there is no usable review date. A later scan can derive freshness after a reviewed-date repair.
 
-Safe fix plans are copied into memory-care imports as metadata so the work inbox and daily brief can show that a local plan exists. The plan remains advisory. Follow-up work still goes through task promotion, `backfill --apply` for derived freshness dates, or Memory Handoff review.
+Each changed card has one journal decision with its reason and before-bytes. `brigade memory care undo <decision-id>` restores it only if the card still has the expected bytes. Apply compares the card digest with its plan and refuses protected paths, archive pins, malformed frontmatter and unsafe input. The one-line apply summary gives counts and fixed reason words without card text or absolute paths. Hub publication continues through the existing push path.
 
 ## Refresh Queue
 
