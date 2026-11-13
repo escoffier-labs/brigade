@@ -1,2 +1,2 @@
-- Add shared agent identity detection and a private, rotating observed-check log with redacted commands and tolerant readers. Hook capture and reports are not connected yet.
-- Mask command credentials and constrain observed identity fields. Serialize rotation and appends with bounded OS locks, recover after partial lines, and count unlocked reader fallbacks. Tighten owner-only storage permissions where supported.
+- Add shared agent identity detection and a private, rotating observed-check log with command digests and tolerant readers. Command text is never stored. Hook capture and reports are not connected yet.
+- Redact commands before hashing and constrain tool labels and observed identity fields. Skip and count legacy command-text records. Serialize rotation and appends with bounded OS locks, recover after partial lines, and count unlocked reader fallbacks. Tighten owner-only storage permissions where supported.

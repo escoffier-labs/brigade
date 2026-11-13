@@ -2,7 +2,7 @@
 
 import multiprocessing
 import os
-import random
+import secrets
 import shlex
 import stat
 from concurrent.futures import ProcessPoolExecutor
@@ -54,22 +54,48 @@ POSITIONS = [
 @pytest.mark.parametrize("secret", ["x", "fake secret with spaces", "fake[REDACTED]value"])
 def test_command_secrets_absent_from_storage(tmp_path, position, secret):
     command = position.format(s=shlex.quote(secret), raw=secret)
-    assert checks.append_check(tmp_path, replace(_record(tmp_path), command=command))
+    assert checks.append_check(tmp_path, _record(tmp_path, command))
     stored, skipped = checks.read_checks(tmp_path)
     assert skipped == 0
-    assert secret not in stored[0].command
+    assert secret not in stored[0].tool
+    assert "command" not in stored[0].to_dict()
 
 
 def test_random_secrets_in_every_position(tmp_path):
-    rng = random.Random(2521)
-    secrets = ["fake" + "".join(rng.choices("abcdef0123456789", k=24)) for _ in range(20)]
-    for secret in secrets:
-        for position in POSITIONS:
-            command = position.format(s=shlex.quote(secret), raw=secret)
-            assert checks.append_check(tmp_path, replace(_record(tmp_path), command=command))
+    positions = POSITIONS + [
+        "pytest --opt {s}",
+        "pytest --opt={s}",
+        "mysql -p{raw} -e query",
+        "pytest {s}",
+        "echo {s} | gh auth login --with-token",
+        'bash -c "pytest {raw}"',
+        "pytest <<< {s}",
+        "pytest\n{s}",
+        "make {s}",
+        "npm run {s}",
+        "cargo {s}",
+        "pytest --{raw}",
+        "npm run test:{raw}",
+        "make test/{raw}",
+        "cargo test/{raw}",
+    ]
+    for position in positions:
+        secret = secrets.token_hex(24)
+        command = position.format(s=shlex.quote(secret), raw=secret)
+        assert checks.append_check(tmp_path, _record(tmp_path, command))
+        path = tmp_path / checks.OBSERVED_DIR_REL / checks.CHECKS_FILE
+        line = path.read_text().splitlines()[-1]
+        assert secret not in line
+        assert all(secret[i : i + 8] not in line for i in range(len(secret) - 7))
     stored, skipped = checks.read_checks(tmp_path)
-    assert skipped == 0
-    assert all(secret not in record.command for secret in secrets for record in stored)
+    assert len(stored) == len(positions) and skipped == 0
+
+
+@pytest.mark.parametrize("tool", ["make private", "npm:private", "cargo private", "private"])
+def test_direct_record_tool_is_sanitized(tmp_path, tool):
+    assert checks.append_check(tmp_path, replace(_record(tmp_path), tool=tool))
+    stored, skipped = checks.read_checks(tmp_path)
+    assert skipped == 0 and stored[0].tool == "other"
 
 
 @pytest.mark.parametrize("value", ["fake identity secret", "x" * 81, "name/secret", None, 3])

@@ -10,6 +10,7 @@ import pytest
 from brigade import agent_identity, guard, observed_checks
 from brigade.install import build_gitignore_block
 from brigade.selection import Selection
+from tests._home import set_home
 
 
 def _check(target, command="pytest -q"):
@@ -40,6 +41,11 @@ def _check(target, command="pytest -q"):
         ("./scripts/verify-focused tests/x.py", "scripts/verify-focused"),
         ("cd sub && FOO=1 pytest", "pytest"),
         ("echo hi", "other"),
+        ("make unknown", "make"),
+        ("npm run unknown", "npm"),
+        ("cargo unknown", "cargo"),
+        ("pnpm run check:invalid!", "pnpm"),
+        ("make test/path", "make"),
         ("uv --project sub run --locked pytest", "pytest"),
         ("npx --yes vitest", "vitest"),
         ("python -I -m pytest", "pytest"),
@@ -72,8 +78,7 @@ def test_check_kind(tool, kind):
 
 
 def test_command_is_redacted_and_bounded(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    set_home(monkeypatch, tmp_path / "home")
     # content-guard: allow bare-token-prefix
     command = 'curl -H "Authorization: Bearer ghp_' + "A" * 36 + '" ' + str(tmp_path / "home" / "x")
     command += " && pytest " + "x" * 2000
@@ -85,12 +90,12 @@ def test_append_and_read_round_trip(tmp_path):
     check = _check(tmp_path)
     assert observed_checks.append_check(tmp_path, check)
     assert observed_checks.read_checks(tmp_path) == ([check], 0)
-    assert check.tool == "pytest" and check.command == "pytest -q"
+    assert check.tool == "pytest" and check.command_digest == observed_checks.command_digest("pytest -q")
 
 
 def test_rotation_keeps_one_generation(tmp_path, monkeypatch):
     monkeypatch.setattr(observed_checks, "ROTATE_BYTES", 200)
-    checks = [replace(_check(tmp_path), command=f"pytest {i}") for i in range(10)]
+    checks = [_check(tmp_path, command=f"pytest {i}") for i in range(10)]
     for check in checks:
         assert observed_checks.append_check(tmp_path, check)
     path = tmp_path / observed_checks.OBSERVED_DIR_REL / observed_checks.CHECKS_FILE
@@ -129,7 +134,7 @@ def test_record_reader_validates_every_field(tmp_path):
         ("model_source", "guess"),
         ("exit_code", True),
         ("duration_ms", -1),
-        ("command", ""),
+        ("command_digest", ""),
         ("ts", "yesterday"),
     ]:
         assert observed_checks.ObservedCheck.from_dict(dict(data, **{key: value})) is None
@@ -210,12 +215,29 @@ def test_deeply_nested_corrupt_line_is_skipped(tmp_path, monkeypatch):
     assert observed_checks.read_jsonl(path) == ([], 1)
 
 
-def test_direct_record_command_is_redacted_before_append(tmp_path):
-    # content-guard: allow bare-token-prefix
-    raw = 'pytest -H "Authorization: Bearer ghp_' + "A" * 36 + '"'
-    check = replace(_check(tmp_path), command=raw)
+def test_direct_record_rejects_invalid_digest(tmp_path):
+    assert not observed_checks.append_check(tmp_path, replace(_check(tmp_path), command_digest="raw"))
+
+
+def test_legacy_command_records_are_skipped(tmp_path):
+    check = _check(tmp_path)
+    path = tmp_path / observed_checks.OBSERVED_DIR_REL / observed_checks.CHECKS_FILE
+    legacy = check.to_dict()
+    legacy["command"] = "pytest"
+    assert observed_checks.append_jsonl(path, legacy)
+    del legacy["command_digest"]
+    assert observed_checks.append_jsonl(path, legacy)
     assert observed_checks.append_check(tmp_path, check)
-    stored, skipped = observed_checks.read_checks(tmp_path)
-    assert skipped == 0
-    assert stored[0].command == observed_checks.redact_command(raw)
-    assert "ghp_" not in stored[0].command
+    assert observed_checks.read_checks(tmp_path) == ([check], 2)
+    assert observed_checks.read_jsonl(path) == ([check.to_dict()], 2)
+
+
+def test_digest_hashes_only_redacted_input(tmp_path, monkeypatch):
+    import hashlib
+
+    monkeypatch.setattr(observed_checks, "redact_command", lambda _: "masked")
+    assert _check(tmp_path, "raw").command_digest == hashlib.sha256(b"masked").hexdigest()[:16]
+
+
+def test_secret_value_changes_preserve_digest():
+    assert observed_checks.command_digest("TOKEN=one pytest") == observed_checks.command_digest("TOKEN=two pytest")

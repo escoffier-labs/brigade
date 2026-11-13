@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -43,7 +44,7 @@ class ObservedCheck:
     session_fingerprint: str
     tree_fingerprint: str | None
     tool: str
-    command: str
+    command_digest: str
     status: str
     exit_code: int | None
     duration_ms: int | None
@@ -74,7 +75,7 @@ class ObservedCheck:
             or data["model_source"] not in MODEL_SOURCES
         ):
             return None
-        if len(data["command"]) > COMMAND_MAX_CHARS:
+        if not re.fullmatch(r"[0-9a-f]{16}", data["command_digest"]) or data["tool"] not in _TOOL_LABELS:
             return None
         try:
             if datetime.fromisoformat(data["ts"].replace("Z", "+00:00")).tzinfo is None:
@@ -90,6 +91,72 @@ def _rt() -> Any:
     return runtime
 
 
+# Closed vocabularies prevent even safe-looking positional secrets from becoming labels.
+_BARE_TOOLS = frozenset(
+    {
+        "other",
+        "pytest",
+        "py.test",
+        "nose",
+        "nose2",
+        "tox",
+        "nox",
+        "vitest",
+        "jest",
+        "mocha",
+        "rspec",
+        "phpunit",
+        "ctest",
+        "unittest",
+        "mypy",
+        "pyright",
+        "eslint",
+        "tsc",
+        "pre-commit",
+        "make",
+        "go",
+        "cargo",
+        "ruff",
+        "npm",
+        "pnpm",
+        "yarn",
+        "bun",
+        "scripts/verify",
+        "scripts/verify-focused",
+    }
+)
+_TOOL_TARGETS = {
+    "make": {"test", "check", "verify"},
+    "go": {"test", "vet"},
+    "cargo": {"test", "clippy"},
+    "ruff": {"check", "format"},
+    **dict.fromkeys(
+        ("npm", "pnpm", "yarn", "bun"),
+        {
+            "test",
+            "check",
+            "build",
+            "test:unit",
+            "test:integration",
+            "check:types",
+            "check:lint",
+        },
+    ),
+}
+_SAFE_TARGET = re.compile(r"[A-Za-z0-9._:/-]{1,32}\Z")
+_TOOL_LABELS = _BARE_TOOLS | frozenset(
+    name + (":" if name in {"npm", "pnpm", "yarn", "bun"} else " ") + target
+    for name, targets in _TOOL_TARGETS.items()
+    for target in targets
+)
+
+
+def _tool_label(name: str, target: str | None, separator: str = " ") -> str:
+    if target and _SAFE_TARGET.fullmatch(target) and target in _TOOL_TARGETS[name]:
+        return name + separator + target
+    return name
+
+
 def _normalize_tokens(tokens: list[str]) -> str:
     rt = _rt()
     tokens = rt._strip_env(tokens)
@@ -100,7 +167,7 @@ def _normalize_tokens(tokens: list[str]) -> str:
     name = Path(tokens[0]).name
     module = rt._python_module_invocation(tokens)
     if module:
-        return str(module[0])
+        return str(module[0]) if module[0] in _BARE_TOOLS else "other"
     if name in {"uv", "poetry", "npm", "pnpm", "yarn", "bun"}:
         tail, ambiguous = rt._strip_runner_global_options(name, tokens[1:])
         if ambiguous:
@@ -111,7 +178,7 @@ def _normalize_tokens(tokens: list[str]) -> str:
             tail, ambiguous = rt._strip_runner_run_options(name, tail[1:])
             return "other" if ambiguous else _normalize_tokens(tail)
         script = rt._package_runner_script(tail)
-        return f"{name}:{script}" if script else "other"
+        return _tool_label(name, script, ":")
     if name == "npx":
         tail, ambiguous = rt._strip_npx_options(tokens[1:])
         return "other" if ambiguous else _normalize_tokens(tail)
@@ -120,10 +187,10 @@ def _normalize_tokens(tokens: list[str]) -> str:
             return suffix
     if name == "make":
         tail, ambiguous = rt._strip_make_global_options(tokens[1:])
-        return f"make {tail[0]}" if tail and not ambiguous else "make"
+        return _tool_label("make", tail[0] if tail and not ambiguous else None)
     if name in {"go", "cargo", "ruff"} and len(tokens) > 1:
-        return f"{name} {tokens[1]}"
-    return name
+        return _tool_label(name, tokens[1])
+    return name if name in _BARE_TOOLS else "other"
 
 
 def normalize_tool(command: str) -> str:
@@ -133,8 +200,11 @@ def normalize_tool(command: str) -> str:
     try:
         segment = rt._shell_tokens(rt._first_verifier_command(command))
         if not rt._segment_is_verifier(segment):
-            return "other"
-        return _normalize_tokens(segment)
+            tokens = rt._strip_env(segment)
+            name = Path(tokens[0]).name if tokens else "other"
+            return name if name in _TOOL_TARGETS else "other"
+        label = _normalize_tokens(segment)
+        return label if label in _TOOL_LABELS else "other"
     except (ValueError, RecursionError):
         return "other"
 
@@ -220,6 +290,16 @@ def redact_command(command: str) -> str:
     return redact_paths(guard.redact_text(_command_secrets(command)))[:COMMAND_MAX_CHARS]
 
 
+def command_digest(command: str) -> str:
+    """Hash only redacted text, retaining 16 hex characters for check grouping.
+
+    The digest cannot be reversed to recover the command, but is not a secret-safe
+    identifier for low-entropy input: guesses can be hashed and compared. Redact
+    first to avoid encoding recognized credentials. Command text is never stored.
+    """
+    return hashlib.sha256(redact_command(command).encode("utf-8")).hexdigest()[:16]
+
+
 def _safe_identity(value: Any) -> str:
     if not isinstance(value, str) or not _SAFE_IDENTITY.fullmatch(value):
         return "unknown"
@@ -247,7 +327,7 @@ def build_check(
         session_fingerprint=session_fingerprint,
         tree_fingerprint=localio.tree_fingerprint(target),
         tool=normalize_tool(command),
-        command=redact_command(command),
+        command_digest=command_digest(command),
         status=status if status in STATUSES else "unknown",
         exit_code=exit_code,
         duration_ms=duration_ms,
@@ -339,8 +419,8 @@ def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
                         if not line.endswith(b"\n"):
                             raise ValueError("partial line")
                         record = json.loads(line)
-                        if not isinstance(record, dict):
-                            raise ValueError("expected object")
+                        if not isinstance(record, dict) or "command" in record:
+                            raise ValueError("expected object without legacy command text")
                         records.append(record)
                     except (ValueError, UnicodeError, RecursionError):
                         skipped += 1
@@ -350,9 +430,9 @@ def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
 
 
 def append_check(target: Path, check: ObservedCheck) -> bool:
-    # Redact at the storage boundary too, even for a directly constructed record.
+    # Validate the closed label vocabulary even for directly constructed records.
     payload = check.to_dict()
-    payload["command"] = redact_command(check.command)
+    payload["tool"] = check.tool if check.tool in _TOOL_LABELS else "other"
     payload["model"] = _safe_identity(check.model)
     payload["agent_type"] = _safe_identity(check.agent_type)
     if ObservedCheck.from_dict(payload) is None:

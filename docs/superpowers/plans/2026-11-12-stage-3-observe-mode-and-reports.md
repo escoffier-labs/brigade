@@ -18,7 +18,7 @@
 4. **`work_mode.is_yolo` is deleted.** It is replaced by `is_strict` and `is_observe`, so any caller left on two-way logic fails to import instead of silently treating `observe` as one of the other two values.
 5. **Observe behaves like off for every enforcement surface**: PreToolUse deny, the PostToolUseFailure retry note, the Stop receipt gate and its handoff note, doctor outcome-loop findings, classify dormancy and adoption "bypassed" counting. Observe differs from off only in that capture runs.
 6. **Capture runs only for targets whose governing mode is `observe`.** Strict and off write no observed records. Per-target resolution follows the existing rule: the directory each check runs in decides, and an unplaceable check follows the handled root.
-7. **Record storage:** `.brigade/work/observed/checks.jsonl` (checks) and `.brigade/work/observed/claims.jsonl` (claims), files created with mode 0600, one JSON object per line, rotated at 4 MiB to a single `.1` generation under an exclusive-create lock file. Commands pass through `guard.redact_text`, then `claude_hooks.envelope.redact_paths`, then are cut to 1,000 characters. No output, output hash or output size is stored, because no report uses them.
+7. **Record storage:** `.brigade/work/observed/checks.jsonl` (checks) and `.brigade/work/observed/claims.jsonl` (claims), owner-only directory and files, one JSON object per line. One bounded OS file lock covers size check, rotation at 4 MiB to a single `.1` generation, and append. Readers open both generations under the same lock. Command text is never stored. `command_digest` is the first 16 hex characters of SHA-256 after shell credential masking, `guard.redact_text`, `claude_hooks.envelope.redact_paths` and the 1,000-character cap. The digest is not reversible to the command and is not a secret-safe identifier of low-entropy input, so redaction runs first. `tool` is the only human-readable description: a known tool name with an optional known subcommand or target restricted to 32 letters, digits or `._-:/`. Unknown targets become the bare tool name. Environment assignments, option values and arbitrary positional arguments never enter `tool`. Records containing the legacy `command` key are skipped and counted. The schema key set stays closed. No output, output hash or output size is stored.
 8. **Status mapping per harness** (anything else is `unknown`): Claude Code `PostToolUse` is `ok`. `PostToolUseFailure` with an `error` starting `Exit code N` is `failed` with `exit_code=N`. An interrupt or any other failure text is `unknown`. Cursor `postToolUse` reads `exitCode` from the JSON string in `tool_output`. `postToolUseFailure` with `failure_type == "error"` is `failed`, `timeout` is `unknown`, `permission_denied` is not recorded. Codex is always `unknown`, because the `tool_response` shape for Bash is not documented.
 9. **Verify receipts learn the model through a new variable, `BRIGADE_AGENT_SESSION`.** The Claude SessionStart handler appends `export BRIGADE_AGENT_SESSION=<session fingerprint>` to `CLAUDE_ENV_FILE`. It deliberately does not export `BRIGADE_CLAUDE_SESSION`, because the strict Stop gate matches receipts on `harness_session`, and stamping it on every receipt would change strict behavior.
 10. **Outcome records carry identity under `context["agent_identity"]`, not in `context["model"]`.** The capability fingerprint is computed from `context["model_family"]`, so moving the model there would shift `outcome rank` capability cohorts. The new key is outside the capability vector.
@@ -27,7 +27,7 @@
 13. **Cursor capture rides the existing presence hook** and adds `postToolUseFailure` to the managed Cursor events.
 14. **Grok learns the three values but captures nothing**, because its hook payload fields are not verified.
 15. **One new command path: `brigade work checks`**, with `--claims` for the second report. The word "score" appears in neither its name nor its output.
-16. **First pass** is the earliest record per group key `(source, session_fingerprint, tool, command)`. Receipts without a session fingerprint are grouped per target per UTC day. Receipt status `completed` is `ok`, `failed` is `failed`, `canceled` is `unknown`, `rejected` is excluded (Brigade refused to run it). Reports read live receipts only, not `verify-archive/`.
+16. **First pass** is the earliest record per group key `(source, session_fingerprint, tool, command_digest)`. Receipts without a session fingerprint are grouped per target per UTC day. Receipt status `completed` is `ok`, `failed` is `failed`, `canceled` is `unknown`, `rejected` is excluded (Brigade refused to run it). Reports read live receipts only, not `verify-archive/`.
 17. **The claim phrase list** is a built-in default, replaced entirely by `.brigade/claim-phrases.txt` when that file exists, one `<kind>: <phrase>` per line, `#` comments. Kinds are `tests`, `lint`, `types`, `build` and `checks` (`checks` is generic and matches any tool). A phrase match is ignored when the 12 characters before it contain `not ` or `n't `. The message text is never stored, only the matched kinds.
 18. **`runtime.py` shrinks instead of growing.** The PostToolUseFailure retry note moves into `claude_hooks/check_events.py`, which pays for the two lines that wire capture in, and the `LEGACY_OVERSIZED` cap for `runtime.py` is lowered to the new count.
 19. **Harness detection moves** from `outcome_cmd._detect_harness` into `agent_identity.detect_harness`. `outcome_cmd` imports it. Harness names stay `claude-code`, `codex`, `cursor`, matching existing outcome records.
@@ -443,8 +443,8 @@ git commit -m "refactor(outcome): move harness detection into agent_identity"
 - Consumes: `AgentIdentity`, `session_fingerprint` (Task 4). `claude_hooks.runtime._first_verifier_command`, `_shell_tokens`, `_strip_env`, `_python_module_invocation`, `_package_runner_script`, `_strip_runner_global_options`, `_strip_runner_run_options`, `_strip_npx_options` through a lazy `_rt()` accessor like `claude_hooks/write_attribution.py` uses. `guard.redact_text`. `claude_hooks.envelope.redact_paths`. `localio.tree_fingerprint`, `localio.utc_now_iso`.
 - Produces:
   - `OBSERVED_DIR_REL = Path(".brigade/work/observed")`, `CHECKS_FILE = "checks.jsonl"`, `CHECK_SCHEMA = "brigade.observed_check.v1"`, `STATUSES = ("ok", "failed", "unknown")`, `ROTATE_BYTES = 4 * 1024 * 1024`, `COMMAND_MAX_CHARS = 1000`, `CHECK_KINDS = ("tests", "lint", "types", "build", "checks")`.
-  - `@dataclass(frozen=True) class ObservedCheck: schema: str; ts: str; harness: str; model: str; model_source: str; agent_type: str; session_fingerprint: str; tree_fingerprint: str | None; tool: str; command: str; status: str; exit_code: int | None; duration_ms: int | None` with `to_dict()` and `from_dict(cls, data: Mapping[str, Any]) -> ObservedCheck | None` (None for any missing or mistyped field).
-  - `normalize_tool(command: str) -> str`, `check_kind(tool: str) -> str`, `redact_command(command: str) -> str`.
+  - `@dataclass(frozen=True) class ObservedCheck: schema: str; ts: str; harness: str; model: str; model_source: str; agent_type: str; session_fingerprint: str; tree_fingerprint: str | None; tool: str; command_digest: str; status: str; exit_code: int | None; duration_ms: int | None` with `to_dict()` and `from_dict(cls, data: Mapping[str, Any]) -> ObservedCheck | None` (None for any missing, extra or mistyped field, including a legacy `command` key).
+  - `normalize_tool(command: str) -> str`, `check_kind(tool: str) -> str`, `command_digest(command: str) -> str`. Redaction is an internal step before hashing.
   - `build_check(*, target: Path, command: str, status: str, identity: AgentIdentity, session_fingerprint: str, exit_code: int | None = None, duration_ms: int | None = None) -> ObservedCheck`.
   - `append_jsonl(path: Path, payload: Mapping[str, Any]) -> bool` (rotation, 0600, one `os.write` per line with `O_APPEND`, False on `OSError`, never raises). `read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]` (reads `<path>.1` then `<path>`, returns records and skipped-line count).
   - `append_check(target: Path, check: ObservedCheck) -> bool`. `read_checks(target: Path) -> tuple[list[ObservedCheck], int]`.
@@ -473,8 +473,10 @@ def test_command_is_redacted_and_bounded(tmp_path, monkeypatch):
     set_home(monkeypatch, tmp_path / "home")
     # content-guard: allow bare-token-prefix
     command = f'curl -H "Authorization: Bearer ghp_{"A" * 36}" {tmp_path / "home"}/x && pytest ' + "x" * 2000
-    stored = observed_checks.redact_command(command)
-    assert "ghp_" not in stored and str(tmp_path / "home") not in stored and len(stored) <= 1000
+    check = observed_checks.build_check(target=tmp_path, command=command, status="ok",
+        identity=identity, session_fingerprint="sample")
+    assert "command" not in check.to_dict()
+    assert len(check.command_digest) == 16
 
 def test_append_and_read_round_trip(tmp_path): ...       # build_check, append_check, read_checks == ([check], 0)
 def test_rotation_keeps_one_generation(tmp_path, monkeypatch): ...
@@ -499,7 +501,7 @@ Expected: FAIL (`ModuleNotFoundError`).
 
 - [ ] **Step 3: Implement `observed_checks.py`**
 
-`normalize_tool` takes the first verifier segment from `_first_verifier_command`, strips env assignments and shell control prefixes, then applies, in order: `python -m X` gives `X`. `uv run` and `poetry run` and `npx` recurse on their tail. `npm`, `pnpm`, `yarn`, `bun` give `<runner>:<script>`. `go`, `cargo` give `<cmd> <sub>`. `make` gives `make <first target>`. `ruff` gives `ruff <sub>`. A path ending in `scripts/verify` or `scripts/verify-focused` gives that relative tail. Otherwise the basename of the first token. A command with no verifier gives `other`. `check_kind` maps by a module-level dict (`pytest`, `py.test`, `vitest`, `jest`, `mocha`, `rspec`, `phpunit`, `ctest`, `tox`, `nox`, `unittest`, `nose2`, `go test`, `cargo test`, `<runner>:test*` to `tests`. `ruff *`, `eslint`, `cargo clippy`, `go vet`, `pre-commit` to `lint`. `mypy`, `pyright`, `tsc` to `types`. `<runner>:build*` to `build`. Anything else `checks`). Rotation: when the file is at least `ROTATE_BYTES`, create `<file>.rotate.lock` with `O_CREAT | O_EXCL` (remove it first if older than 60 seconds), `os.replace` the file to `<file>.1`, remove the lock. Skip rotation when the lock exists.
+`normalize_tool` takes the first verifier segment using the existing classifier and strips environment and shell control prefixes. Wrappers recurse on their tail. Every result is checked against a closed vocabulary of known tools and known targets. Targets must also match `[A-Za-z0-9._:/-]{1,32}`. Never retain an arbitrary basename, target, script name, subcommand, option or positional argument. Unknown targets fall back to the bare known tool, other commands to `other`. `check_kind` maps known tools to tests, lint, types, build or checks. Build the digest only after the internal redaction pass. Validate its 16 lowercase hex characters on read and append. Reject extra keys, including legacy `command`. Keep sanitised model and agent type fields. Serialize size check, rotation and append under the shared OS file lock, with reader locking and the short-write newline guard.
 
 - [ ] **Step 4: Run to verify pass.** Expected: PASS.
 
@@ -557,7 +559,8 @@ def test_observe_records_passing_and_failing_checks(tmp_path, monkeypatch, capsy
     assert (checks[0].status, checks[0].duration_ms, checks[0].agent_type) == ("ok", 1200, "main")
     assert (checks[1].status, checks[1].exit_code, checks[1].agent_type) == ("failed", 1, "Explore")
     assert {c.model for c in checks} == {"test-model-a"} and {c.harness for c in checks} == {"claude-code"}
-    assert "ghp_" not in checks[2].command
+    assert "command" not in checks[2].to_dict()
+    assert len(checks[2].command_digest) == 16
 
 @pytest.mark.parametrize("mode", ["strict", "off"])
 def test_strict_and_off_record_nothing(tmp_path, monkeypatch, capsys, mode): ...
@@ -803,7 +806,7 @@ Changelog fragment: `changelog.d/stage3-checks-report.md`.
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-def test_first_pass_counts_only_first_attempt_per_session_command(tmp_path):
+def test_first_pass_counts_only_first_attempt_per_session_digest(tmp_path):
     _checks(tmp_path, [("A", "pytest", "failed"), ("A", "pytest", "ok"), ("B", "pytest", "ok")], model="m1")
     rows, notes = observed_report.first_pass_rows(tmp_path)
     assert [(r.source, r.model, r.samples, r.passed, r.failed) for r in rows] == [("observed", "m1", 2, 1, 1)]
@@ -815,7 +818,7 @@ def test_unknown_identity_bucket_sorted_last(tmp_path): ...
     # rows for (claude-code, m1), (unknown, unknown): unknown row is last
 def test_receipts_labeled_and_grouped(tmp_path): ...
     # receipt fixtures: completed with harness_session fp X and agent_identity model m2 -> source "receipt";
-    # two receipts without a session on the same UTC day and planned command -> one sample;
+    # two receipts without a session on the same UTC day and redacted planned-command digest -> one sample;
     # rejected -> excluded; canceled -> unknown
 def test_report_text_carries_labels_and_never_says_score(tmp_path, capsys):
     assert cli.main(["work", "checks", "--target", str(target)]) == 0
@@ -834,7 +837,7 @@ def test_json_output_shape(tmp_path, capsys): ...
 Run: `brigade work verify run --target . --argv-json '["./scripts/verify-focused","tests/test_work_checks_report.py","tests/test_cli_inventory_contract.py","tests/test_completions.py"]' --capture brigade-work`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** the grouping in decision 16. Observed samples use the record's harness and model. Receipt samples use `agent_identity` when present, else `harness_session.harness` mapped `claude` to `claude-code` with model `unknown`, else both `unknown`. The receipt command is the first entry of `planned_commands`, and the tool is `normalize_tool` of it. Rows are sorted by source, then known identities by samples descending, unknown last. Text output prints the two label lines first, then a fixed-width table `source harness model n passed failed unknown rate`, then the skipped-line note when non-zero. `--claims` prints "claims report lands in a later release" and exits 2 until Task 12.
+- [ ] **Step 3: Implement** the grouping in decision 16. Observed samples use the record's harness and model. Receipt samples use `agent_identity` when present, else `harness_session.harness` mapped `claude` to `claude-code` with model `unknown`, else both `unknown`. For receipts, derive `command_digest` from the first entry of `planned_commands` using Task 5's redaction-then-hash helper, and derive the tool using `normalize_tool`. Observed samples use their stored `command_digest` directly. Never read or reconstruct command text from an observed record. Rows are sorted by source, then known identities by samples descending, unknown last. Text output prints the two label lines first, then a fixed-width table `source harness model n passed failed unknown rate`, then the skipped-line note when non-zero. `--claims` prints "claims report lands in a later release" and exits 2 until Task 12.
 
 - [ ] **Step 4: Register the command, regenerate the inventory, update the observe brief line and docs**
 
@@ -975,7 +978,7 @@ git commit -m "feat(work): add the claimed versus run checks report"
 
 ## Self-review
 
-1. **Spec coverage.** Three-way mode with aliases: Tasks 1 to 3. Default unchanged, explicit writes, brief-time pin, unreadable resolves to strict: Task 1. Rails separate: `test_every_mode_leaves_rails_record_untouched` (Task 2). Observe never denies or blocks: Task 2. Observed checks as their own record type, never a receipt, redacted, no output: Task 5. Classifier reuse: Task 5 (`normalize_tool`) and Task 6 (`is_raw_verification`). Claude identity: Task 6. Codex and Cursor where verified, unknowns stated: Tasks 8 and 9 and the coverage table. Model and harness on receipts and outcome records: Task 7. First report with sample size, unknown bucket and label: Task 10. Second report with a configured phrase list: Tasks 11 and 12. "Score" reserved, ratchet and eligibility untouched: Global Constraints and the label tests. Every yolo caller assigned: caller table. Ignored work directory and pre-push scan: Task 5. Gap found and fixed during review: `_normalize_state` drops unknown keys, so Task 6 adds `restore_identity` in both of its return paths.
+1. **Spec coverage.** Three-way mode with aliases: Tasks 1 to 3. Default unchanged, explicit writes, brief-time pin, unreadable resolves to strict: Task 1. Rails separate: `test_every_mode_leaves_rails_record_untouched` (Task 2). Observe never denies or blocks: Task 2. Observed checks as their own record type, never a receipt, command text never stored, no output: Task 5. Classifier reuse: Task 5 (`normalize_tool`) and Task 6 (`is_raw_verification`). Claude identity: Task 6. Codex and Cursor where verified, unknowns stated: Tasks 8 and 9 and the coverage table. Model and harness on receipts and outcome records: Task 7. First report with sample size, unknown bucket and label: Task 10. Second report with a configured phrase list: Tasks 11 and 12. "Score" reserved, ratchet and eligibility untouched: Global Constraints and the label tests. Every yolo caller assigned: caller table. Ignored work directory and pre-push scan: Task 5. Gap found and fixed during review: `_normalize_state` drops unknown keys, so Task 6 adds `restore_identity` in both of its return paths.
 2. **Step scan.** Each code step names the function, file and pinned values. Test steps carry names and assertions. Steps marked `...` name the exact assertions in a comment. No step says "handle edge cases".
 3. **Type consistency.** `AgentIdentity` fields, `session_fingerprint(harness, session_id)`, `governing_modes -> list[tuple[Path, str]]`, `append_jsonl`/`read_jsonl`, `ObservedCheck`, `ObservedClaim`, `FirstPassRow`, `ClaimRow` and `ReportNotes` are used with the same names and types in every task that consumes them. Harness names are `claude-code`, `codex`, `cursor` throughout.
 4. **Review Focus.** Each of the five lines has a named test in its owning task.
