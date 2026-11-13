@@ -830,10 +830,23 @@ def _land_locked(
         encoding="utf-8",
     )
     # Fetch the trusted base first: Vale configuration comes only from this commit.
-    base = _fetch_base(git, canonical)
+    # A retry lints against the base the commit was built on when its objects are still present.
+    recorded = str(entry.get("landing_base") or "") if commit else ""
+    base = ""
+    if re.fullmatch(r"[0-9a-f]{40}", recorded):
+        base = git.git(
+            ["rev-parse", "--verify", "--quiet", f"{recorded}^{{commit}}"],
+            git.repository,
+            "inspect-failed",
+            optional=True,
+        ).strip()
+    base = base or _fetch_base(git, canonical)
     config = _materialize_vale_config(git, root, base)
-    # Without a base .vale.ini, Vale keeps its user-level configuration and the
-    # private repository as cwd, so no proposal or caller file can configure it.
+    # Without a base .vale.ini this keeps the earlier behavior: no --config, so Vale
+    # searches upward from the private repository and then uses user-level configuration.
+    # The proposal tree is never checked out there. When the private root falls back to
+    # a directory under the target checkout, Vale's upward search can still reach a
+    # config in that checkout. That gap predates this change.
     git.tool("vale", [*(["--config", str(config)] if config else []), str(body)], git.repository, "pr-body-lint-failed")
     if not commit:
         commit = _prepare(target, entry, issue, git, root, branch, base)
@@ -984,6 +997,8 @@ def _materialize_vale_config(git: _LandingGit, root: Path, base: str) -> Path | 
         raise LandError("unsafe-vale-config")
     text = git.git(["show", f"{base}:.vale.ini"], git.repository, "inspect-failed")
     styles: PurePosixPath | None = None
+    seen: set[tuple[str, str]] = set()
+    section = ""
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line[0] in "#;":
@@ -991,18 +1006,24 @@ def _materialize_vale_config(git: _LandingGit, root: Path, base: str) -> Path | 
         if line.startswith("["):
             if ".." in line:
                 raise LandError("unsafe-vale-config")
+            section = line.lower()
             continue
-        key, separator, value = line.partition("=")
-        key = key.strip().lower()
-        if not separator or key in {"include", "includes", "import", "imports"}:
+        # Vale's INI reader splits at the first "=" or ":" and strips inline comments.
+        # Refuse anything it could read differently from this check.
+        found = re.match(r"([^=:]+?)\s*[=:]\s*(.*)", line)
+        if not found:
             raise LandError("unsafe-vale-config")
-        value = value.strip().strip("\"'")
+        key, value = found[1].strip().lower(), found[2].strip()
+        if key in {"include", "includes", "import", "imports"} or (section, key) in seen or re.search("[;#]", value):
+            raise LandError("unsafe-vale-config")
+        seen.add((section, key))
+        value = value.strip("\"'")
         for part in re.split(r"[,\s]+", value):
             if part.startswith(("/", "~", "\\")) or re.match(r"[A-Za-z]:", part):
                 raise LandError("unsafe-vale-config")
             if ".." in re.split(r"[/\\]", part):
                 raise LandError("unsafe-vale-config")
-        if key == "stylespath" and styles is None:
+        if key == "stylespath":
             if "\\" in value or not value:
                 raise LandError("unsafe-vale-config")
             styles = PurePosixPath(value)
@@ -1011,7 +1032,11 @@ def _materialize_vale_config(git: _LandingGit, root: Path, base: str) -> Path | 
             styles = PurePosixPath(*[p for p in styles.parts if p != "."])
     directory = root / "vale-config"
     # A retry reuses the private root, so rebuild the directory from the base.
+    if directory.is_symlink():
+        directory.unlink()
     shutil.rmtree(directory, ignore_errors=True)
+    if directory.exists():
+        raise LandError("unsafe-vale-config")
     directory.mkdir(mode=0o700)
     ini = directory / ".vale.ini"
     ini.write_text(text, encoding="utf-8")

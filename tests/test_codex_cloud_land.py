@@ -1672,3 +1672,45 @@ def test_vale_proposal_root_config_ignored_without_base_config(landing, monkeypa
     seen = _vale_probe(monkeypatch)
     codex_cloud_land.land(caller, "task_example", 2473)
     assert "--config" not in seen[0][0]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        "StylesPath: /etc/x ;=y\n",
+        "StylesPath = /etc/x ;c\n",
+        "StylesPath = styles\nStylesPath = other\n",
+        "StylesPath: ../x\n",
+        "StylesPath = styles\ninclude = other.ini\n",
+        "StylesPath = styles\nVocab = ../v\n",
+    ],
+)
+def test_vale_parser_mismatch_forms_refused(landing, tmp_path, config):
+    caller, state, calls = landing
+    _publish_base(caller, tmp_path, {".vale.ini": config})
+    with pytest.raises(codex_cloud_land.LandError, match="unsafe-vale-config"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[0] == "vale" for argv, _ in calls)
+
+
+def test_vale_colon_delimiter_accepted(landing, tmp_path, monkeypatch):
+    caller, state, calls = landing
+    _publish_base(caller, tmp_path, {".vale.ini": "StylesPath: styles\n", "styles/A.yml": "x\n"})
+    seen = _vale_probe(monkeypatch)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert seen[0][1]["styles/A.yml"] == "x\n"
+
+
+def test_vale_retry_uses_recorded_base(landing, tmp_path, monkeypatch):
+    caller, state, calls = landing
+    _publish_base(caller, tmp_path, {".vale.ini": "StylesPath = styles\n", "styles/Old.yml": "old\n"})
+    state["failure"] = "push"
+    with pytest.raises(codex_cloud_land.LandError):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    state["failure"] = None
+    _publish_base(caller, tmp_path, {"styles/New.yml": "new\n"})
+    fetches = sum(argv[:2] == ["git", "fetch"] and "refs/heads/main" in argv for argv, _ in calls)
+    seen = _vale_probe(monkeypatch)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert "styles/Old.yml" in seen[0][1] and "styles/New.yml" not in seen[0][1]
+    assert sum(argv[:2] == ["git", "fetch"] and "refs/heads/main" in argv for argv, _ in calls) == fetches
