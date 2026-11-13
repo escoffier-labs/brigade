@@ -45,7 +45,9 @@ def test_workspace_digest(tmp_path):
 
 @pytest.mark.parametrize("value", ["first", "password-value", "token-value"])
 def test_attached_password_masked(value):
-    assert checks.redact_command("mysql -p" + value) == checks.redact_command("mysql -psecond")
+    first = value + secrets.token_hex(8)
+    second = secrets.token_hex(8)
+    assert checks.redact_command("mysql -p" + first) == checks.redact_command("mysql -p" + second)
 
 
 def test_key_location_mode_and_failure(tmp_path, monkeypatch):
