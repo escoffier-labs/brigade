@@ -199,7 +199,13 @@ def restore(target: Path, decision: journal.Decision) -> journal.Decision:
                     key=lambda n: abs(n - anchor),
                     default=anchor,
                 )
-                lines.insert(position, row["line"])
+                line = row["line"]
+                # Keep line boundaries when the saved line or its new neighbour has no trailing newline.
+                if position < len(lines) and not line.endswith("\n"):
+                    line += "\n"
+                if 0 < position == len(lines) and not lines[-1].endswith("\n"):
+                    lines[-1] += "\n"
+                lines.insert(position, line)
             changes.append(journal.Change(index, live, "".join(lines).encode("utf-8")))
         undo = journal.commit_phased(
             target,

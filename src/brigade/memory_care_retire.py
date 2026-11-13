@@ -40,6 +40,10 @@ def plan(
         if (today - ledger.tracking_since).days < tend.unused_after_days:
             skipped["ledger_too_young"] += 1
             continue
+        if hub_reads is None:
+            # A configured hub that cannot report reads proves nothing about use.
+            skipped["hub_reads_unavailable"] = skipped.get("hub_reads_unavailable", 0) + 1
+            continue
         card_id = memory_cmd.card_identity_from_text(text, rel)
         read = max(
             filter(

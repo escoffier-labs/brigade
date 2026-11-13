@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 import sys
+import time
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
@@ -64,7 +65,15 @@ def last_read(ledger: ReadLedger, keys: Iterable[str]) -> date | None:
     return max((ledger.last_read[k] for k in keys if k in ledger.last_read), default=None)
 
 
-def hub_last_reads(target: Path) -> dict[str, date]:
+HUB_PAGE_GAP_SECONDS = 1.1
+
+
+def hub_last_reads(target: Path, *, sleep: Callable[[float], None] = time.sleep) -> dict[str, date] | None:
+    """Last read day per hub card, or ``None`` when a configured hub could not be read in full.
+
+    ``None`` is not "nobody read anything": callers must not retire on use grounds without it.
+    The hub allows one read-stat request per second per principal, so pages are paced.
+    """
     try:
         settings = hubc.load_settings(target)
         if not settings.enabled or not settings.scope:
@@ -73,7 +82,16 @@ def hub_last_reads(target: Path) -> dict[str, date]:
         after = None
         result = {}
         while True:
-            body = hubc.read_stats(client, settings.scope, limit=500, after=after)
+            if after is not None:
+                sleep(HUB_PAGE_GAP_SECONDS)
+            for attempt in range(3):
+                try:
+                    body = hubc.read_stats(client, settings.scope, limit=500, after=after)
+                    break
+                except hubc.HubRefusal as exc:
+                    if getattr(exc, "status", None) != 429 or attempt == 2:
+                        raise
+                    sleep(HUB_PAGE_GAP_SECONDS)
             for row in body["rows"]:
                 try:
                     day = row["last_read_day"]
@@ -98,5 +116,5 @@ def hub_last_reads(target: Path) -> dict[str, date]:
         AttributeError,
         OverflowError,
     ) as exc:
-        print(f"memory care: skipped hub read stats: {exc}", file=sys.stderr)
-        return {}
+        print(f"memory care: hub read stats unavailable, retiring nothing on use grounds: {exc}", file=sys.stderr)
+        return None

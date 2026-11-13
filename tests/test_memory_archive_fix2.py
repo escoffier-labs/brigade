@@ -188,7 +188,8 @@ def test_malformed_hub_shapes_reported(tmp_path, monkeypatch, capsys, reply):
     monkeypatch.setattr(hubc, "client_for", lambda _: Client())
     tend.run(tmp_path)
     tend.after_command(tmp_path)
-    assert "skipped hub read stats" in capsys.readouterr().err
+    # Both entry points keep running and say why nothing is retired on use grounds.
+    assert "hub read stats unavailable" in capsys.readouterr().err
 
 
 def test_indented_malformed_fence_cannot_hide_pin(tmp_path):
