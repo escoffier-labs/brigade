@@ -606,19 +606,28 @@ def _decode(fd: int, byte_cap: int, line_cap: int, record_cap: int) -> tuple[lis
 
     records: deque[dict[str, Any]] = deque(maxlen=record_cap)
     skipped = 0
-    if os.fstat(fd).st_size > byte_cap:
-        return [], 1
+    size = os.fstat(fd).st_size
     with os.fdopen(os.dup(fd), "rb") as stream:
-        remaining = byte_cap
+        remaining = min(size, byte_cap)
+        if size > byte_cap:
+            stream.seek(size - byte_cap)
+            # The bounded tail starts inside an unavailable line. Discard it
+            # even at a boundary rather than parsing a possible fragment.
+            skipped += 1
+            while remaining > 0:
+                fragment = stream.readline(min(line_cap, remaining))
+                remaining -= len(fragment)
+                if not fragment or fragment.endswith(b"\n"):
+                    break
         while remaining > 0:
-            line = stream.readline(min(line_cap, remaining) + 1)
+            line = stream.readline(min(line_cap + 1, remaining))
             if not line:
                 break
             remaining -= len(line)
             if len(line) > line_cap or remaining < 0:
                 skipped += 1
                 while line and not line.endswith(b"\n") and remaining > 0:
-                    line = stream.readline(min(line_cap, remaining) + 1)
+                    line = stream.readline(min(line_cap + 1, remaining))
                     remaining -= len(line)
                 continue
             try:
@@ -629,18 +638,22 @@ def _decode(fd: int, byte_cap: int, line_cap: int, record_cap: int) -> tuple[lis
                     raise ValueError("expected object without legacy command text")
                 if any(isinstance(v, str) and len(v) > MAX_STRING_CHARS for v in record.values()):
                     raise ValueError("oversized string field")
-                if "schema" in record and ObservedCheck.from_dict(record) is None:
-                    raise ValueError("invalid check schema")
+                if "schema" in record:
+                    check = ObservedCheck.from_dict(record)
+                    if check is None:
+                        raise ValueError("invalid check schema")
+                    record = check.to_dict()
                 records.append(record)
             except (ValueError, UnicodeError, RecursionError):
                 skipped += 1
     return list(reversed(records)), skipped
 
 
-def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
+def read_jsonl(path: Path, *, snapshot: bool = False) -> tuple[list[dict[str, Any]], int]:
     """Open both generations under one lock, then decode with fixed bounds.
 
-    Lock timeout permits a bounded unlocked snapshot and counts one skip.
+    snapshot=True avoids writable locks and takes a bounded unlocked snapshot.
+    Lock timeout permits the same snapshot and counts one skip.
     Uses the same POSIX/Windows no-follow backend as the writer.
     """
     records: list[dict[str, Any]] = []
@@ -651,9 +664,10 @@ def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
             streams.callback(os.close, parent)
             with ExitStack() as locking:
                 try:
-                    locking.enter_context(
-                        held_file_lock(_lock_path(path), deadline_seconds=_CAPTURE_LOCK_SECONDS.get())
-                    )
+                    if not snapshot:
+                        locking.enter_context(
+                            held_file_lock(_lock_path(path), deadline_seconds=_CAPTURE_LOCK_SECONDS.get())
+                        )
                 except (InboxLockTimeout, OSError):
                     skipped += 1
                 opened = []
@@ -693,14 +707,14 @@ def append_check(target: Path, check: ObservedCheck) -> bool:
         return False
 
 
-def read_checks(target: Path) -> tuple[list[ObservedCheck], int]:
+def read_checks(target: Path, *, snapshot: bool = False) -> tuple[list[ObservedCheck], int]:
     path = digest_key_path(target)
     if path is None:
         return [], 0
-    records, skipped = read_jsonl(path.with_name(CHECKS_FILE))
+    records, skipped = read_jsonl(path.with_name(CHECKS_FILE), snapshot=snapshot)
     checks = []
     for record in records:
-        check = ObservedCheck.from_dict(record)
+        check = ObservedCheck(**record) if record.get("schema") == CHECK_SCHEMA else None
         if check is None:
             skipped += 1
         else:

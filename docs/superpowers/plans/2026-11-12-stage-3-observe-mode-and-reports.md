@@ -995,3 +995,11 @@ Pull request 2 merged with the record stored in the per-user state directory, ou
 - **Pull request 5 (first-pass report):** when rotation keeps failing because another process holds the old generation open, the active file can pass the reader's size limit and the reader then returns nothing from it. Read the newest part of an oversized file instead of rejecting it.
 - **Pull request 5:** each record is validated twice on read. Fold the two passes into one before reports read the file often.
 - Windows relies on the user profile's inherited access rules for the state directory. Revisit only if a shared state location becomes a supported setup.
+
+## Follow-up from the first-pass report
+
+Pull request 5 reports observed checks only and omits `--claims`. Verify
+receipts are a second source with a real pass or fail result, and the only
+such source for a harness whose hooks cannot report status. Folding receipts
+into this report first needs a read-only way to compute the planned-command
+digest. The existing helper can create state and cannot be used by this report.
