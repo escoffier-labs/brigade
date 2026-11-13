@@ -159,3 +159,15 @@ def test_catalog_invalid_subcommand_remains_usage_error(command, capsys):
         cli.main([command, "unknown-subcommand"])
     assert exc.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("path", [("serve",), ("pack", "setup")])
+def test_retained_grokbot_help_snapshot(path, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setenv("COLUMNS", "80")
+    parser = cli._build_parser()
+    for command in ("run", "cloud", "grokbot", *path):
+        parser = _subparsers_action(parser).choices[command]
+    snapshot = Path(__file__).parent / "fixtures" / ("grokbot_" + "_".join(path) + "_help.txt")
+    assert parser.format_help() == snapshot.read_text(encoding="utf-8")
