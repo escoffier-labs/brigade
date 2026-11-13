@@ -5,15 +5,51 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import threading
 import uuid
 from dataclasses import asdict, dataclass
+from functools import wraps
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Sequence, Callable, ParamSpec, TypeVar
 
 from . import memory_hub_store as store
 from .memory_paths import read_only_pattern, relative_path
 from .projection import kernel
+
+_CARE_HELD = threading.local()
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def serialized(fn: Callable[P, R]) -> Callable[P, R]:
+    """Hold the same reentrant, cross-process lock for an entire care operation."""
+
+    @wraps(fn)
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        from .inbox_lock import held_file_lock, InboxLockTimeout
+
+        if kwargs.get("dry_run"):
+            return fn(*args, **kwargs)
+        target = Path(args[0] if args else kwargs["target"]).resolve()  # type: ignore[arg-type]
+        lock = safe_path(target, ".brigade/memory-care/care.lock")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        held: set[Path] = getattr(_CARE_HELD, "targets", set())
+        if target in held:
+            return fn(*args, **kwargs)
+        try:
+            with held_file_lock(lock, deadline_seconds=1):
+                _CARE_HELD.targets = held | {target}
+                try:
+                    return fn(*args, **kwargs)
+                finally:
+                    _CARE_HELD.targets = held
+        except InboxLockTimeout as exc:
+            raise JournalConflict("memory care busy") from exc
+
+    return wrapped
+
 
 JOURNAL_REL = ".brigade/memory-care/journal"
 
@@ -31,6 +67,7 @@ class Change:
     path: str
     before: bytes | None
     after: bytes | None
+    mode: int | None = None
 
 
 @dataclass(frozen=True)
@@ -232,7 +269,15 @@ def _execute_phase(target: Path, decision_id: str, phase: str, changes: Sequence
             expected_before=kernel.content_digest(c.before),
             desired_after=kernel.content_digest(c.after),
             staged_bytes=c.after,
-            mode=0o600,
+            mode=(
+                0o600
+                if c.path.startswith(JOURNAL_REL + "/")
+                else (
+                    c.mode
+                    if c.mode is not None
+                    else (safe_path(target, c.path).stat().st_mode & 0o777 if c.before is not None else None)
+                )
+            ),
         )
         for c in changes
     ]
@@ -295,6 +340,10 @@ def commit_phased(
         "phase": "prepared",
         "before_absent": [c.before is None for c in changes],
         "prepared_paths": list(prepared_paths),
+        "modes": {
+            c.path: (safe_path(target, c.path).stat().st_mode & 0o777 if c.before is not None else c.mode)
+            for c in changes
+        },
         "after_bytes": [None if c.after is None else base64.b64encode(c.after).decode("ascii") for c in changes],
     }
     preparation = [Change(f"{JOURNAL_REL}/{decision_id}/decision.json", None, _json_bytes(payload))]
@@ -317,7 +366,12 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
     p = _payload(target, decision_id)
     config = _config_or_default(target)
     changes = [
-        Change(path, before_bytes(target, d, path), None if data is None else base64.b64decode(data))
+        Change(
+            path,
+            before_bytes(target, d, path),
+            None if data is None else base64.b64decode(data),
+            p.get("modes", {}).get(path),
+        )
         for path, data in zip(d.paths, p["after_bytes"], strict=True)
     ]
     if d.kind == "archive":
@@ -341,7 +395,8 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
                     for n, line in enumerate(lines)
                     if line in removed
                 ]
-                c = Change(c.path, live, after)
+                p.setdefault("index_before", {})[c.path] = base64.b64encode(live).decode("ascii")
+                c = Change(c.path, live, after, c.mode)
                 p["after_sha256"][c.path] = kernel.content_digest(after)
             rebased.append(c)
         changes = rebased
@@ -349,12 +404,18 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
     drift = [c.path for c in changes if current(target, c.path) != (c.after if c.path in prepared else c.before)]
     if any(read_only_pattern(c.path, config.read_only_paths) for c in changes):
         raise ReadOnlyPath("prepared decision now touches a read-only path")
-    if drift and d.kind != "archive":
-        raise JournalConflict(f"prepared undo changed: {', '.join(drift)}")
     if drift:
         # Discard only our unchanged safety copy. Never overwrite an edited card or archive.
         final = {**p, "phase": "abandoned", "status": "abandoned", "abandoned_reason": f"changed: {', '.join(drift)}"}
-        pending = [Change(c.path, c.after, c.before) for c in changes if c.path in prepared and c.path not in drift]
+        original_missing = any(
+            c.before is not None and c.after is None and current(target, c.path) is None for c in changes
+        )
+        final["restorable"] = d.kind == "archive" and original_missing
+        pending = (
+            []
+            if d.kind == "undo" or original_missing
+            else [Change(c.path, c.after, c.before) for c in changes if c.path in prepared and c.path not in drift]
+        )
     else:
         final = {**p, "phase": "undone" if d.kind == "undo" else "committed", "status": "committed"}
         pending = [c for c in changes if c.path not in prepared]
@@ -372,15 +433,31 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
     return load(target, decision_id)
 
 
+@serialized
 def resolve_prepared(target: Path) -> list[dict[str, str]]:
     """Recover our interrupted kernel plans before interpreting decision phases."""
+    resolved = []
     for operation in kernel.unfinished_operations(target):
-        if operation.operation_id.startswith("care-"):
+        match = re.fullmatch(r"care-([0-9]{8}T[0-9]{6}Z-[a-z]+-[0-9a-f]{8})-(prepare|finish)", operation.operation_id)
+        if not match:
+            continue
+        decision_id = match.group(1)
+        try:
+            p = _payload(target, decision_id)
+        except JournalConflict:
+            p = {}
+        if p.get("phase") == "abandoned":
+            continue
+        try:
             receipt = kernel.recover(operation.operation_id, target=target)
             if receipt.terminal_state != "restored":
                 raise JournalConflict(f"kernel {receipt.terminal_state}")
+        except (JournalConflict, kernel.ProjectionError) as exc:
+            if not p:
+                raise
+            annotate(target, decision_id, phase="abandoned", status="abandoned", abandoned_reason=str(exc))
+            resolved.append({"decision_id": decision_id, "phase": "abandoned", "reason": str(exc)})
     root = target / JOURNAL_REL
-    resolved = []
     if root.exists():
         for directory in sorted(root.iterdir()):
             if not (directory / "decision.json").exists():

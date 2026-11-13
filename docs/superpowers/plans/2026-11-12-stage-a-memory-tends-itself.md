@@ -149,6 +149,8 @@ Each PR merges green on its own. PR 2, 3 and 4 depend only on PR 1. PR 6 depends
 
 ### Task 1: Decision journal
 
+Care holds one bounded cross-process file lock across recovery, archive and undo. Decisions record original file modes. Undo drift abandons the decision while keeping both copies, so later care continues. Recovery conflicts retain kernel evidence and are reported once.
+
 **Files:**
 - Create: `src/brigade/memory_care_journal.py`
 - Test: `tests/test_memory_care_journal.py`
@@ -228,6 +230,8 @@ git commit -m "feat(memory-care): add a decision journal with before-bytes and u
 
 ### Task 2: Archive and restore, local and hub
 
+Archive accepts only canonical paths enumerated as cards. BOM and CRLF frontmatter is normalized for protection checks. Malformed frontmatter is refused. Mixed-content index lines stay in place and are reported. Undo restores exact index before-bytes when the after-digest matches, otherwise it uses the recorded line number as its insertion anchor. An abandoned archive keeps its safety copy when the original is missing and remains restorable.
+
 **Files:**
 - Create: `src/brigade/memory_archive.py`, `src/brigade/memory_care_hub.py`
 - Modify: `src/brigade/memory_cmd.py` (`_iter_cards`, around line 442)
@@ -304,6 +308,8 @@ git commit -m "feat(memory-care): archive and restore cards, retiring them on th
 ```
 
 ### Task 3: Read ledger, retirement, `tend` and `undo`
+
+Hub retire, revive and read-stat lookup use push publication identities. Every revive checks push visibility rules, including retries, and reports withheld content as skipped while local undo succeeds. Pending puts replay the immutable decision after-image with the original event id. Manifest batches report failed rows and all committed decision ids without aborting on projection errors.
 
 **Files:**
 - Create: `src/brigade/memory_card_reads.py`, `src/brigade/memory_care_retire.py`, `src/brigade/memory_care_tend.py`

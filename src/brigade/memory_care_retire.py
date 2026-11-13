@@ -7,7 +7,7 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from . import memory_archive, memory_card_reads, memory_cmd
+from . import memory_archive, memory_card_reads, memory_cmd, memory_hub_sync
 
 if TYPE_CHECKING:
     from .memory_care_tend import TendConfig
@@ -42,7 +42,14 @@ def plan(
             continue
         card_id = memory_cmd.card_identity_from_text(text, rel)
         read = max(
-            filter(None, [memory_card_reads.last_read(ledger, (card_id, rel)), hub_reads.get(card_id)]), default=None
+            filter(
+                None,
+                [
+                    memory_card_reads.last_read(ledger, (card_id, rel)),
+                    hub_reads.get(memory_hub_sync.publication_identity(text, rel)[0]),
+                ],
+            ),
+            default=None,
         )
         if read is not None and (today - read).days < tend.unused_after_days:
             skipped["read_recently"] += 1

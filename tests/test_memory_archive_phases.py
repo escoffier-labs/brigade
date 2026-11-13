@@ -6,9 +6,10 @@ from brigade import memory_archive as archive, memory_care_journal as journal, m
 
 
 def card(target):
-    path = target / "cards.md"
+    path = target / "memory/cards/cards.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"---\ncard_id: old\n---\nOriginal\r\n")
-    (target / "MEMORY.md").write_text("- [Old](cards.md)\n")
+    (target / "MEMORY.md").write_text("- [Old](memory/cards/cards.md)\n")
     return path
 
 
@@ -41,14 +42,14 @@ def test_archive_crash_resolves_before_next_command(tmp_path, monkeypatch, entry
     original = path.read_bytes()
     execute = interrupt_second_plan(monkeypatch)
     with pytest.raises(RuntimeError, match="between phases"):
-        archive.archive_card(tmp_path, "cards.md", reason="ended", config=memory_cmd.MemoryCareConfig())
+        archive.archive_card(tmp_path, "memory/cards/cards.md", reason="ended", config=memory_cmd.MemoryCareConfig())
     p = prepared(tmp_path)
     assert path.read_bytes() == original
-    assert (tmp_path / "memory/archive/cards.md").read_bytes() == original
-    assert journal.before_bytes(tmp_path, journal.load(tmp_path, p["decision_id"]), "cards.md") == original
+    assert (tmp_path / "memory/archive/cards/cards.md").read_bytes() == original
+    assert journal.before_bytes(tmp_path, journal.load(tmp_path, p["decision_id"]), "memory/cards/cards.md") == original
     cards = memory_cmd._iter_cards(tmp_path, memory_cmd.MemoryCareConfig(card_roots=(".", "memory")))
     assert cards.count(path) == 1
-    assert tmp_path / "memory/archive/cards.md" not in cards
+    assert tmp_path / "memory/archive/cards/cards.md" not in cards
     assert "- [Old]" in (tmp_path / "MEMORY.md").read_text()
     monkeypatch.setattr(journal.kernel, "execute", execute)
     if changed:
@@ -70,7 +71,7 @@ def test_archive_crash_resolves_before_next_command(tmp_path, monkeypatch, entry
     state = journal._payload(tmp_path, p["decision_id"])
     if changed:
         assert path.read_bytes() == b"Changed"
-        assert not (tmp_path / "memory/archive/cards.md").exists()
+        assert not (tmp_path / "memory/archive/cards/cards.md").exists()
         assert state["phase"] == "abandoned"
         if result is not None:
             assert result["recovery"][0]["phase"] == "abandoned"
@@ -85,17 +86,17 @@ def test_archive_crash_resolves_before_next_command(tmp_path, monkeypatch, entry
 def test_undo_crash_keeps_both_copies_and_finishes(tmp_path, monkeypatch):
     path = card(tmp_path)
     original = path.read_bytes()
-    d = archive.archive_card(tmp_path, "cards.md", reason="ended", config=memory_cmd.MemoryCareConfig())
+    d = archive.archive_card(tmp_path, "memory/cards/cards.md", reason="ended", config=memory_cmd.MemoryCareConfig())
     execute = interrupt_second_plan(monkeypatch)
     with pytest.raises(RuntimeError, match="between phases"):
         tend.undo(tmp_path, d.decision_id)
     assert path.read_bytes() == original
-    assert (tmp_path / "memory/archive/cards.md").read_bytes() == original
+    assert (tmp_path / "memory/archive/cards/cards.md").read_bytes() == original
     assert "- [Old]" in (tmp_path / "MEMORY.md").read_text()
     monkeypatch.setattr(journal.kernel, "execute", execute)
     tend.run(tmp_path, stages=[])
     assert path.read_bytes() == original
-    assert not (tmp_path / "memory/archive/cards.md").exists()
+    assert not (tmp_path / "memory/archive/cards/cards.md").exists()
     assert journal._payload(tmp_path, d.decision_id)["phase"] == "undone"
 
 
@@ -115,18 +116,18 @@ def test_kernel_crash_reproduction_preserves_original_until_prepared(tmp_path, m
 
     monkeypatch.setattr(journal.kernel, "execute", interrupted)
     with pytest.raises(archive.ArchiveRefused, match="recovery-required"):
-        archive.archive_card(tmp_path, "cards.md", reason="ended", config=memory_cmd.MemoryCareConfig())
+        archive.archive_card(tmp_path, "memory/cards/cards.md", reason="ended", config=memory_cmd.MemoryCareConfig())
     if phase == 1:
         assert path.read_bytes() == original
     else:
-        assert (tmp_path / "memory/archive/cards.md").read_bytes() == original
+        assert (tmp_path / "memory/archive/cards/cards.md").read_bytes() == original
     monkeypatch.setattr(journal.kernel, "execute", execute)
     tend.run(tmp_path, stages=[])
     if phase == 1:
         assert path.read_bytes() == original
     else:
         assert not path.exists()
-        assert (tmp_path / "memory/archive/cards.md").read_bytes() == original
+        assert (tmp_path / "memory/archive/cards/cards.md").read_bytes() == original
 
 
 def test_hub_waits_for_local_phases_and_offline_recovery_stays_pending(tmp_path, monkeypatch):
@@ -141,12 +142,12 @@ def test_hub_waits_for_local_phases_and_offline_recovery_stays_pending(tmp_path,
         else:
             assert path.read_bytes().endswith(b"Original\r\n")
         calls.append(action)
-        return {"status": "pending" if offline else "done", "action": action, "path": "cards.md"}
+        return {"status": "pending" if offline else "done", "action": action, "path": "memory/cards/cards.md"}
 
     monkeypatch.setattr(archive.hub, "_send", send)
     execute = interrupt_second_plan(monkeypatch)
     with pytest.raises(RuntimeError):
-        archive.archive_card(tmp_path, "cards.md", reason="ended", config=memory_cmd.MemoryCareConfig())
+        archive.archive_card(tmp_path, "memory/cards/cards.md", reason="ended", config=memory_cmd.MemoryCareConfig())
     assert calls == []
     monkeypatch.setattr(journal.kernel, "execute", execute)
     tend.run(tmp_path, stages=["hub"])
@@ -176,15 +177,15 @@ def test_prepared_archive_preserves_intervening_index_edits(tmp_path, monkeypatc
     path = card(tmp_path)
     execute = interrupt_second_plan(monkeypatch)
     with pytest.raises(RuntimeError):
-        archive.archive_card(tmp_path, "cards.md", reason="ended", config=memory_cmd.MemoryCareConfig())
+        archive.archive_card(tmp_path, "memory/cards/cards.md", reason="ended", config=memory_cmd.MemoryCareConfig())
     p = prepared(tmp_path)
-    (tmp_path / "MEMORY.md").write_text("New header\n- [Old](cards.md)\nNew footer\n")
+    (tmp_path / "MEMORY.md").write_text("New header\n- [Old](memory/cards/cards.md)\nNew footer\n")
     monkeypatch.setattr(journal.kernel, "execute", execute)
     tend.run(tmp_path, stages=[])
     assert not path.exists()
     assert (tmp_path / "MEMORY.md").read_text() == "New header\nNew footer\n"
     tend.undo(tmp_path, p["decision_id"])
-    assert (tmp_path / "MEMORY.md").read_text() == "New header\n- [Old](cards.md)\nNew footer\n"
+    assert (tmp_path / "MEMORY.md").read_text() == "New header\n- [Old](memory/cards/cards.md)\nNew footer\n"
 
 
 def test_edit_between_phases_abandons_without_retiring(tmp_path, monkeypatch):
@@ -201,7 +202,7 @@ def test_edit_between_phases_abandons_without_retiring(tmp_path, monkeypatch):
     monkeypatch.setattr(journal.kernel, "execute", edit_after_prepare)
     monkeypatch.setattr(archive.hub, "retire", lambda *a, **k: calls.append("retire"))
     with pytest.raises(archive.ArchiveRefused, match="abandoned"):
-        archive.archive_card(tmp_path, "cards.md", reason="ended", config=memory_cmd.MemoryCareConfig())
+        archive.archive_card(tmp_path, "memory/cards/cards.md", reason="ended", config=memory_cmd.MemoryCareConfig())
     assert calls == []
     assert path.read_bytes() == b"Changed concurrently"
-    assert not (tmp_path / "memory/archive/cards.md").exists()
+    assert not (tmp_path / "memory/archive/cards/cards.md").exists()

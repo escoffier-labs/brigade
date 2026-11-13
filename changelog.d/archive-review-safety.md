@@ -1,0 +1,1 @@
+- Refuse non-card archive paths and pinned or malformed frontmatter, preserve file modes and index bytes on undo, serialize care recovery, and keep withheld cards off the hub during revival and retries.

@@ -8,6 +8,7 @@ from typing import Any
 from . import memory_care_journal as journal
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
+from . import memory_hub_sync as sync
 
 
 def _send(
@@ -20,6 +21,14 @@ def _send(
     text: str = "",
     request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if action == "put":
+        reason_withheld = sync.withheld(text)
+        if path:
+            live = journal.current(target, path)
+            if live is not None:
+                reason_withheld = reason_withheld or sync.withheld(live.decode("utf-8"))
+        if reason_withheld:
+            return {"status": "skipped", "reason": reason_withheld}
     pending: dict[str, Any] = {
         "status": "pending",
         "action": action,
@@ -37,13 +46,17 @@ def _send(
             base = state.get(client.identity, {}).get(settings.scope, {}).get(card_id)
             if not base:
                 return {"status": "skipped"}
-            fields = request or {
-                "scope": settings.scope,
-                "card_id": card_id,
-                "base_revision": base["revision"],
-                "base_epoch": base["log_epoch"],
-                "client_event_id": hubc.event_id(),
-            }
+            fields = (
+                dict(request)
+                if request
+                else {
+                    "scope": settings.scope,
+                    "card_id": card_id,
+                    "base_revision": base["revision"],
+                    "base_epoch": base["log_epoch"],
+                    "client_event_id": hubc.event_id(),
+                }
+            )
             if action == "retire":
                 fields["reason"] = reason
             else:
@@ -92,6 +105,7 @@ def revive(target: Path, *, card_id: str, path: str, text: str) -> dict[str, Any
     return _send(target, action="put", card_id=card_id, path=path, text=text)
 
 
+@journal.serialized
 def retry_pending(target: Path) -> dict[str, int]:
     counts = {"done": 0, "pending": 0, "conflict": 0, "skipped": 0}
     for d in journal.entries(target):
@@ -109,10 +123,16 @@ def retry_pending(target: Path) -> dict[str, int]:
         path = str(hub.get("path") or "")
         text = ""
         if hub.get("action") == "put":
-            data = journal.current(target, path)
+            import base64
+
+            payload = journal._payload(target, d.decision_id)
+            # The immutable after-image binds this text to this decision and event id.
+            if path not in d.paths:
+                continue
+            data = payload["after_bytes"][d.paths.index(path)]
             if data is None:
                 continue
-            text = data.decode("utf-8")
+            text = base64.b64decode(data).decode("utf-8")
         result = _send(
             target,
             action=str(hub.get("action", "retire")),

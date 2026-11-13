@@ -39,6 +39,7 @@ def load_config(target: Path) -> TendConfig:
     return TendConfig(**values)
 
 
+@journal.serialized
 def run(
     target: Path, *, stages: Sequence[str] | None = None, dry_run: bool = False, today: date | None = None
 ) -> dict[str, Any]:
@@ -65,6 +66,7 @@ def run(
     return payload
 
 
+@journal.serialized
 def undo(target: Path, decision_id: str) -> journal.Decision:
     recovery = journal.resolve_prepared(target)
     for item in recovery:
@@ -81,17 +83,21 @@ def undo(target: Path, decision_id: str) -> journal.Decision:
 def after_command(target: Path, *, stages: Sequence[str] | None = None) -> None:
     try:
         run(target, stages=stages)
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, journal.kernel.ProjectionError) as exc:
         print(f"memory care tend: {exc}", file=sys.stderr)
 
 
+@journal.serialized
 def archive_manifest(target: Path, path: Path, *, limit: int | None = None) -> dict[str, Any]:
     recovery = journal.resolve_prepared(target)
     if limit is not None and limit < 1:
         raise ValueError("limit must be positive")
     config = memory_cmd._config_or_default(target)
     decisions: list[str] = []
+    warnings: list[dict[str, Any]] = []
+    hub_results: dict[str, Any] = {}
     refused = []
+    failed = 0
     seen: set[str] = set()
     with path.open(encoding="utf-8") as handle:
         for n, line in enumerate(handle, 1):
@@ -108,9 +114,23 @@ def archive_manifest(target: Path, path: Path, *, limit: int | None = None) -> d
                 seen.add(card)
                 d = memory_archive.archive_card(target, card, reason=reason, config=config)
                 decisions.append(d.decision_id)
-            except (ValueError, OSError, AttributeError) as exc:
+                warnings.extend(journal._payload(target, d.decision_id).get("index_warnings", []))
+                hub_results[d.decision_id] = d.hub
+            except (ValueError, OSError, AttributeError, journal.kernel.ProjectionError) as exc:
+                if isinstance(exc, journal.kernel.ProjectionError) or isinstance(
+                    exc.__cause__, journal.kernel.ProjectionError
+                ):
+                    failed += 1
                 refused.append({"line": n, "reason": str(exc)})
-    return {"archived": len(decisions), "decision_ids": decisions, "refused": refused, "recovery": recovery}
+    return {
+        "archived": len(decisions),
+        "decision_ids": decisions,
+        "refused": refused,
+        "recovery": recovery,
+        "failed": failed,
+        "warnings": warnings,
+        "hub": hub_results,
+    }
 
 
 def dispatch(args: Any) -> int:
@@ -122,7 +142,7 @@ def dispatch(args: Any) -> int:
         else:
             payload = run(args.target, stages=args.stage, dry_run=args.dry_run)
         print(json.dumps(payload, sort_keys=True) if args.json else json.dumps(payload, indent=2))
-        return 0
-    except (ValueError, OSError) as exc:
+        return 1 if payload.get("failed") else 0
+    except (ValueError, OSError, journal.kernel.ProjectionError) as exc:
         print(f"memory care: {exc}", file=sys.stderr)
         return 1
