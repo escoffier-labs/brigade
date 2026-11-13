@@ -73,6 +73,8 @@ def test_plain_accepted(fields):
         "topic: - item\n",
         "- item\n",
         "topic:A\n",
+        *[f"topic: a{separator}---\nfresh_until: 2027-01-01\n" for separator in "\u2028\u2029\x85\x0b\x0c\x1c\x1d\x1e"],
+        "title: x\x0clast_reviewed:2026-01-01\n",
     ],
 )
 def test_plain_refused(fields):

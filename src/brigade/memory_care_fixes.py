@@ -62,7 +62,8 @@ def plain_frontmatter(text: str) -> dict[str, str]:
         {"fresh_until", "freshness_until", "expires", "expires_at"},
     )
     for line in lines[1 : lines.index("---", 1)]:
-        if "\t" in line:
+        # Other readers split on every line boundary character, not only on a newline.
+        if "\t" in line or len(line.splitlines()) > 1:
             raise FixRefused("frontmatter-refused")
         if not line.strip() or line.startswith("#"):
             continue
