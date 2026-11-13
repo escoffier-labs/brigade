@@ -688,3 +688,13 @@ Task 3 merged: the three steward packs and their helpers are removed, about fort
 - **Hub server routes stay until the contract change.** The job routes, enrollment and handlers on the hub server are unchanged in both hub implementations. Client-side removal happens now. Server-side removal happens with the next wire contract version.
 - **The job sweeper and the two projections that display stored jobs go together**, in Task 5, so a stale job never shows as owned forever.
 - **Task 6:** a leftover instance file reserves its configured port until deleted by hand, and the retired default ports stay reserved regardless. Say so in the migration guide.
+
+## Follow-ups from the Task 4 reviews
+
+Task 4 merged: the client side of the job queue is removed. The hub server routes and handlers, the stored-job sweeper and the two read projections are unchanged.
+
+- **Task 5** removes the projections and the sweeper together, and the read-only shims Task 4 left, listed in that pull request's body.
+- **Deferred to the next wire contract version:** the hub server job module and its expiry test, in both hub implementations.
+- **Task 6:** docs that still describe removed commands as working, and install hints, should name the new extra. The old extra name is an alias for one release.
+- When a test file is deleted, check each retained check it was the only test for. Task 4 lost seven such tests and had to restore them.
+- An exact snapshot of `--help` text is not stable across Python patch releases when subcommand names are long. Check rendered words.

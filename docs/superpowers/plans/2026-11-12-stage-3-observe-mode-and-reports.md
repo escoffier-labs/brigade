@@ -1014,3 +1014,12 @@ Claude Code and Codex capture are merged. Cursor capture was removed from pull r
 - **Model names are shaped, not allowlisted.** They reach the tracked outcome ledger. Revisit if a repository with a tracked ledger is public.
 - **Timing-sensitive tests on Windows.** A hook-isolation test that starts a child brief process sits close to its timeout on the Windows runner, and an HTTP test file drops connections there intermittently. Give both a bound that scales, or fix the cause.
 - The per-check capture budget is 250 ms. A dropped record under load is possible and silent.
+
+## Follow-ups from the first-pass report reviews
+
+`brigade work checks` is merged. It reads hook observations only.
+
+- A separate `truncated` marker when an oversized file is cut to its newest part, so one skipped line does not hide how much was dropped.
+- Say in the docs what `Retries` counts under `--since`, that a record with a future timestamp always passes the window, and that an unlocked read can count a record twice across a rotation.
+- `--since 0` returns almost nothing. Make the minimum one day or say so in the help.
+- Pull request 6 (claims against runs) and the receipts source both need a short design pass before building.

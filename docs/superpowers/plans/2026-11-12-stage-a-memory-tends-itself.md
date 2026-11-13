@@ -944,3 +944,13 @@ PR 2 merged. The drain resolves drafts already present in their destination, ret
 - Recovery treats an identical block already present elsewhere in a document as published.
 - Check whether any other writer replaces a routed document without taking the document lock.
 - A symlinked inbox root is refused. Workspaces that link the inbox to another directory get a summary line and nothing else.
+
+## Follow-ups from the PR 3 reviews
+
+PR 3 and its hardening follow-up merged. Memory care applies two fixes automatically, a derived freshness date and a derived review date, and only to a card whose whole frontmatter is plain: one unquoted key and a single-line value per line. Cards with consistent CRLF endings are supported. Everything else is reported and left unchanged.
+
+- **Keep the automatic allowlist short.** Review found five separate ways an automatic edit could change a card wrongly or uselessly before the plain-frontmatter rule replaced the special cases. Any new automatic fix kind needs the same rule and a table of accepted and refused shapes before it ships.
+- **PR 5 and PR 6 (background model work)** are the next step and the first to spend subscription quota. Held inbox drafts and reported card issues are the queue they judge. They need a short design pass before building.
+- Removing a dead index link could become an automatic fix, since it only shrinks the index, once it has its own tests.
+- Stamp collisions for the pending index are possible on file systems with coarse modification times and no inode numbers.
+- The review date for a card outside Git comes from its modification time, which any tool that rewrites the file resets.
