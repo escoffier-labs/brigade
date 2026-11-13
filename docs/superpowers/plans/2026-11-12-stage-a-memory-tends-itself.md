@@ -10,6 +10,37 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-12-brigade-stack-trim-design.md`, sections "Automation: nothing waits on a person forever" and "Stage A: memory tends itself". Read both before this plan.
 
+## Owner amendments (2026-11-12)
+
+These override anything below that conflicts with them.
+
+1. **An existing store gets cleaned on day one, not after 120 days.** The
+   use ledger rule in decision 4 stays for steady state. In addition, a
+   catch-up pass judges every card that has no recorded read, in any store
+   whose read ledger is younger than `unused_after_days`. It runs once per
+   workspace, resumes across runs, and is recorded in the journal like any
+   other decision. It belongs to PR 5 with the model judgment.
+2. **Model judgment is batched.** One seat call judges many cards (a digest
+   of frontmatter plus the first part of each card, sized to the seat's
+   context), so the daily call cap in decision 12 bounds cost without
+   stretching a catch-up over months. The reply is one verdict per card, and
+   a card missing from the reply is left untouched.
+3. **The blast cap in decision 6 applies to steady state only.** The catch-up
+   pass and the manifest command below have their own explicit limit, which
+   the caller passes.
+4. **PR 1 adds one more command path:**
+   `brigade memory care archive --from-file <jsonl> [--limit N]`. Each line
+   names a card and a reason. Every card goes through
+   `memory_archive.archive_card`, so exemptions, the journal, hub retire and
+   `memory care undo` all apply. Refused cards are reported and skipped. This
+   is how a judgment made outside Brigade is applied reversibly. Tests: a
+   manifest with a read-only card, an `archive: never` card, a missing card
+   and a duplicate line archives only the valid cards and reports the rest.
+5. **Nothing waits for a credential nobody set up.** In decision 14, when no
+   reviewer credential is configured, a verifier proposal does not stay
+   pending forever. It gets the same deadline as other deferred items, then
+   expires, and the summary reports it.
+
 ## Decisions made by the planner
 
 The owner did not decide these. Each is a reviewer checkpoint.
