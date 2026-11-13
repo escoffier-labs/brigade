@@ -1,0 +1,5 @@
+- Claude Code records raw checks in observe mode with bounded model and agent identity, without enforcing verification. Strict and off modes record no observed checks.
+- Claude session identity is cached at session start and model switches, exported for verify runs, and carried on receipts and outcome audit records without changing capability cohorts or strict session matching.
+- Doctor reports a fixed, path-free cause when observed-check storage is unavailable.
+- Optional hook recording skips Git snapshots and checks one cooperative deadline after existing event handling. Off mode skips new identity writes, and environment exports use no-follow descriptor opens.
+- Preserve the latest cached model across concurrent tool-state writes and append session exports only to existing harness environment files.
