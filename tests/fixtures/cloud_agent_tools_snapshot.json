@@ -1,0 +1,1 @@
+{"memory": ["handoff_write", "memory_card", "memory_search"], "messaging": ["handoff_write", "inbox_ack", "inbox_list", "inbox_reply", "memory_card", "memory_search", "message_send"]}

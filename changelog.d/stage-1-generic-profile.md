@@ -1,0 +1,2 @@
+- Add an isolated `cloud-agent` MCP profile with shared memory, optional messaging, protected bearer token authentication and optional Access authentication.
+- Add `brigade hub connector` lifecycle commands while preserving Dot, Duet and existing Grok Bot profiles.

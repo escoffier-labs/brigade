@@ -15,6 +15,7 @@ from uuid import UUID
 from .contracts import DotError
 from .safe_state import private_directory, private_file, require_local_platform
 
+CLOUD_AGENT_RUNTIME_SCHEMA = "brigade.cloud-agent.runtime.v1"
 RUNTIME_SCHEMA = "brigade.dot.runtime.v1"
 DUET_RUNTIME_SCHEMA = "brigade.duet.runtime.v1"
 DUET_PRINCIPAL = "agent:duet"
@@ -49,6 +50,8 @@ class AuthConfig:
     audience: str
     approved_email: str
     resource: str
+    mode: str = "access"
+    token_file: Path | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -252,6 +255,8 @@ def _boolean(value: object) -> bool:
 
 def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
     """Parse one runtime document. The expected schema comes from the pack, never the document."""
+    if schema == CLOUD_AGENT_RUNTIME_SCHEMA:
+        return _parse_cloud_agent_runtime(payload)
     if schema == DUET_RUNTIME_SCHEMA:
         return _parse_duet_runtime(payload)
     if schema == GROKBOT_MEMORY_RUNTIME_SCHEMA:
@@ -590,3 +595,9 @@ def runtime_template(schema: str = RUNTIME_SCHEMA) -> dict[str, object]:
         owner_authorization={"version": "1", "text": "Owner-authorized bounded work on the configured repositories."},
     )
     return document
+
+
+def _parse_cloud_agent_runtime(payload: object) -> Runtime:
+    from .cloud_runtime import parse_cloud_runtime
+
+    return parse_cloud_runtime(payload)

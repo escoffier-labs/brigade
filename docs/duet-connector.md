@@ -340,3 +340,36 @@ To disable dispatch while keeping reads and messaging, remove `dispatch_enabled`
 tools and builds no fleet client. Running tasks continue. the operator must
 interrupt them separately if needed. Retain Duet's SQLite state for audit and
 admission accounting if dispatch is enabled again.
+
+## Generic cloud-agent profile
+
+`brigade hub connector` manages `dot`, `duet` and `cloud-agent` independently
+of the worker queue. Existing Dot and Duet commands remain compatibility paths.
+The generic profile exposes `memory_search`, `memory_card` and `handoff_write`.
+Setting `messaging_enabled` to `true` adds `inbox_list`, `inbox_ack`,
+`inbox_reply` and `message_send`, with existing recipient grants and send limits.
+Dispatch, fleet, event and skill tools are unavailable.
+
+Use runtime schema `brigade.cloud-agent.runtime.v1` with hosted `paths` and
+`hub` sections as above. Set `hub.principal` to `agent:cloud-agent`. Use a
+separate state directory and hub principal credential. The default listener
+bind is `127.0.0.1:8783`.
+
+Token authentication is the default. Set `auth` to
+`{"mode": "token", "token_file": "/var/lib/brigade-cloud-agent/listener-token"}`.
+The listener token must be an owned, private regular file containing 32 to 512
+characters matching `[A-Za-z0-9_-]`. It must differ from the hub
+principal credential and every other connector credential. Send it in the
+`Authorization: Bearer <token>` header. A non-loopback bind requires explicit
+`--allow-host` entries. `doctor` reports token mode as healthy configuration.
+For a signed-identity front, use `auth.mode: "access"` with the existing
+issuer, team domain, audience, approved email and resource fields. Dot and
+Duet continue to require Access.
+
+Preview setup with `brigade hub connector setup --id cloud-agent --target
+<target> --runtime-path <protected-runtime.json>`. Add `--apply` to write the
+instance configuration. Inspect it with `show`, validate it with `doctor` and
+`canary`, then preview `install-service`. Installation requires `--apply` and
+an explicit `--out-dir`. These commands do not start services. `update` and
+`remove` also preview by default. Removal preserves runtime files, credentials
+and stored data. New units use `brigade hub connector serve --id cloud-agent`.
