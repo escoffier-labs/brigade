@@ -63,7 +63,8 @@ def undo_changes(target: Path, payload: dict[str, Any]) -> list[journal.Change]:
         if live is None or live.count(data) != 1 or hashlib.sha256(data).hexdigest() != item["sha256"]:
             raise journal.JournalConflict("appended block missing or changed; file left unchanged")
         after = live.replace(data, b"", 1)
-        changes.append(journal.Change(item["path"], live, after or None))
+        # Remove the file only when this decision created it; an existing empty document stays.
+        changes.append(journal.Change(item["path"], live, after if after or not item.get("created", True) else None))
     return changes
 
 

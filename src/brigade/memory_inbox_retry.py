@@ -124,7 +124,7 @@ def reprocess(
                     appends.append(plan_append(LOG_PATH, row, "evidence"))
         else:
             block = ("\n\n" + sections["suggested document content"].strip() + "\n").encode()
-            appends.append(plan_append(dest_rel, block, "document"))
+            appends.append(plan_append(dest_rel, block, "document", created=before is None))
             after = before or b""
         if outcome.kind != "routed":
             changes.insert(0, journal.Change(dest_rel, before, after))

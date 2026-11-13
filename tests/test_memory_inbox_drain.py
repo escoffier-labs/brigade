@@ -1097,3 +1097,42 @@ def test_anchor_alone_does_not_prove_unapplied_content(tmp_path):
     result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
     assert result["held"] == 1 and path.exists()
     assert b"Additional durable detail." not in (tmp_path / "USER.md").read_bytes()
+
+
+DOCUMENT_BODY = "## Recommended memory action\nno-card\n## Target document\nUSER.md\n## Suggested document content\nPrefer short status updates.\n"
+
+
+def test_undo_keeps_a_document_that_existed_empty(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "USER.md").write_bytes(b"")
+    path = draft(tmp_path, "document-destination-unwritable", DOCUMENT_BODY)
+    assert drain.drain(tmp_path, today=TODAY, deadline_days=14)["retried"] == 1
+    assert "Prefer short" in (tmp_path / "USER.md").read_text()
+    tend.undo(tmp_path, journal.entries(tmp_path)[0].decision_id)
+    assert path.exists()
+    assert (tmp_path / "USER.md").read_bytes() == b""
+
+
+def test_recovery_respects_a_destination_protected_after_prepare(tmp_path, monkeypatch):
+    path = draft(tmp_path, "document-destination-unwritable", DOCUMENT_BODY)
+    original = journal._execute_phase
+
+    class Crash(BaseException):
+        pass
+
+    def crash(target, decision_id, phase, changes):
+        result = original(target, decision_id, phase, changes)
+        if phase == "prepare":
+            raise Crash()
+        return result
+
+    monkeypatch.setattr(journal, "_execute_phase", crash)
+    with pytest.raises(Crash):
+        drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    monkeypatch.setattr(journal, "_execute_phase", original)
+    config = tmp_path / ".brigade/memory-care.toml"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text('read_only_paths = ["USER.md"]\n')
+    journal.resolve_prepared(tmp_path)
+    assert not (tmp_path / "USER.md").exists()
+    assert path.exists()

@@ -505,7 +505,11 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
         for path, digest in p.get("append_guards", {}).items()
         if kernel.content_digest(current(target, path)) != digest
     )
-    protected = any(read_only_pattern(c.path, config.read_only_paths) for c in changes)
+    # Routed documents are written after finish, so they are not among the changes.
+    destinations = [c.path for c in changes] + [
+        a["path"] for a in p.get("appends", []) if a.get("writer") == "document"
+    ]
+    protected = any(read_only_pattern(path, config.read_only_paths) for path in destinations)
     if drift or protected:
         # Discard only our unchanged safety copy. Never overwrite an edited card or archive.
         final = {
