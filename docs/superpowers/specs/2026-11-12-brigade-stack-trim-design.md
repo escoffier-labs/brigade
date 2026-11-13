@@ -325,9 +325,10 @@ part of the product, not an optional add-on. Nobody should need an LXC
 container to run it. A small daemon or a first-class local Docker setup is
 wanted, and it must not be complicated.
 
-**(proposed)**
+**(decided)** The three items marked decided below were approved by the
+operator on 2026-11-12.
 
-- **Default: a small local daemon.** One command starts the hub as a
+- **Default: a small local daemon (decided).** One command starts the hub as a
   background service for the current user, with a local database, bound to
   this machine only, with no token or config for the user to prepare. Agents
   on the same machine find it without setup.
@@ -338,13 +339,15 @@ wanted, and it must not be complicated.
 - **Adding a machine is one step:** a pairing code or a single address and
   token. Brigade does not try to solve private networking. The user brings
   whatever they already use to reach their own machines.
-- **One memory path.** Memory always goes through the hub, including on a
-  single machine. This would retire the separate hubless memory path and the
-  sync, mirror, push and pull commands between the two. Open: needs the
-  operator.
-- Known gap: the native hub binary installs on Linux only today and still
-  runs the Python hub as a child process. macOS and Windows users would get
-  the Python hub until that changes.
+- **One memory path (decided).** Memory always goes through the hub,
+  including on a single machine. This retires the separate hubless memory
+  path and the sync, mirror, push and pull commands between the two.
+- **Native hub on macOS and Windows (decided, in scope).** The native hub
+  binary installs on Linux only today and still runs the Python hub as a
+  child process. Closing that gap is part of this stage. Until it lands,
+  those users get the Python hub.
+- Hub messaging between agents stays in the core, because the hub is how
+  agents reach each other.
 
 ## How success is measured
 
@@ -366,10 +369,10 @@ wanted, and it must not be complicated.
 
 ## Open questions for the operator
 
-1. What should the scorecard show? Which numbers have changed a real decision
-   so far, such as which model gets a job or how a subagent is briefed?
-2. Does hub messaging between agents stay in the core?
-3. Is the one-release removal window acceptable, given existing installs on
-   0.30.0 and 0.31.0?
-4. When observe-and-score becomes the default, do existing installs stay
-   strict (proposed) or switch with everyone else?
+1. Is the proposed first scorecard right: first-pass check rate by harness
+   and model, then checks claimed versus checks run?
+2. Is the one-release removal window acceptable, given existing installs on
+   0.30.0 and 0.31.0? Proposed: yes.
+3. When observe-and-score becomes the default, do existing installs stay
+   strict? Proposed: yes, by writing their current mode explicitly at
+   upgrade.
