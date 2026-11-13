@@ -15,9 +15,9 @@ Brigade Stack should be something an engineer who is not its author can adopt
 in a day and keep using. Today the first thing a new engineer meets is its
 size. Measured on main at `60c0b3046`:
 
-- about 436,000 lines of Python in 531 top-level modules under `src/brigade`
-- about 1,070 command paths
-- 232 entries under `docs/`
+- about 436,000 lines of Python in 912 files under `src/brigade`
+- 894 command paths in 61 command groups, per the generated command inventory
+- 478 files under `docs/`
 
 Much of that surface exists for one of two reasons that no longer hold as
 strongly: models needed rails to avoid skipping steps, and harnesses could not
