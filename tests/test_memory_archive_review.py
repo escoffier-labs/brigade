@@ -151,12 +151,15 @@ def test_projection_error_is_per_row_and_ids_printed(tmp_path, monkeypatch, caps
     assert "injected kernel error" in payload["refused"][0]["reason"]
 
 
-def configure_hub(target, monkeypatch, card_id="old"):
+def configure_hub(target, monkeypatch, card_id="old", path="memory/cards/old.md"):
     fake = FakeHub()
     monkeypatch.setattr(hubc, "load_settings", lambda _: hubc.HubSettings(mode="sync", scope="fleet"))
     monkeypatch.setattr(hubc, "client_for", lambda _: fake)
     with store.locked(target):
-        store.save_published(target, {fake.identity: {"fleet": {card_id: {"revision": 1, "log_epoch": "epoch"}}}})
+        store.save_published(
+            target,
+            {fake.identity: {"fleet": {card_id: {"revision": 1, "log_epoch": "epoch", "path": path}}}},
+        )
     return fake
 
 
@@ -215,7 +218,7 @@ def test_legacy_publication_identity_retire_revive_and_reads(tmp_path, monkeypat
     text = "---\nexpires: 2000-01-01\n---\nlegacy\n"
     path.write_text(text)
     identity = sync.publication_identity(text, "memory/cards/Old Note.md")[0]
-    fake = configure_hub(tmp_path, monkeypatch, identity)
+    fake = configure_hub(tmp_path, monkeypatch, identity, "memory/cards/Old Note.md")
     monkeypatch.setattr(reads, "load", lambda _: reads.ReadLedger(date(2000, 1, 1), {}))
     monkeypatch.setattr(reads, "hub_last_reads", lambda _: {identity: date.today()})
     assert (
@@ -280,4 +283,7 @@ def test_kernel_recovery_drift_abandons_without_blocking_care(tmp_path, monkeypa
     test_real_kernel_drift_does_not_block_index(tmp_path, monkeypatch)
     assert tend.run(tmp_path, stages=[])["recovery"] == []
     assert (tmp_path / "memory/cards/old.md").exists()
-    assert (tmp_path / "memory/archive/cards/old.md").exists()
+    assert not (tmp_path / "memory/archive/cards/old.md").exists()
+    decision_file = next((tmp_path / journal.JOURNAL_REL).glob("*/decision.json"))
+    d = journal.load(tmp_path, decision_file.parent.name)
+    assert journal.before_bytes(tmp_path, d, "memory/cards/old.md") is not None

@@ -22,12 +22,15 @@ def test_retire_revive_and_pending(tmp_path, monkeypatch):
     monkeypatch.setattr(hubc, "load_settings", lambda target: hubc.HubSettings(mode="sync", scope="fleet"))
     monkeypatch.setattr(hubc, "client_for", lambda settings: fake)
     with store.locked(tmp_path):
-        store.save_published(tmp_path, {"fake-hub": {"fleet": {"old": {"revision": 1, "log_epoch": "epoch"}}}})
+        store.save_published(
+            tmp_path,
+            {"fake-hub": {"fleet": {"old": {"revision": 1, "log_epoch": "epoch", "path": "memory/cards/old.md"}}}},
+        )
     fake.unavailable = True
-    pending = bridge.retire(tmp_path, card_id="old", reason="ended")
+    pending = bridge.retire(tmp_path, card_id="old", reason="ended", path="memory/cards/old.md")
     assert pending["status"] == "pending"
     fake.unavailable = False
-    done = bridge.retire(tmp_path, card_id="old", reason="ended")
+    done = bridge.retire(tmp_path, card_id="old", reason="ended", path="memory/cards/old.md")
     assert done["status"] == "done"
     fields = [f for a, f in fake.calls if a == "retire"][-1]
     assert set(fields) == {"scope", "card_id", "base_revision", "base_epoch", "reason", "client_event_id"}
@@ -37,7 +40,7 @@ def test_retire_revive_and_pending(tmp_path, monkeypatch):
 
 
 def test_off_skips(tmp_path):
-    assert bridge.retire(tmp_path, card_id="old", reason="ended")["status"] == "skipped"
+    assert bridge.retire(tmp_path, card_id="old", reason="ended", path="memory/cards/old.md")["status"] == "skipped"
 
 
 def test_pending_retire_then_offline_undo_retries_in_order(tmp_path, monkeypatch):
@@ -50,7 +53,10 @@ def test_pending_retire_then_offline_undo_retries_in_order(tmp_path, monkeypatch
     card.parent.mkdir(parents=True)
     card.write_text("---\ncard_id: old\n---\nOriginal\n")
     with store.locked(tmp_path):
-        store.save_published(tmp_path, {"fake-hub": {"fleet": {"old": {"revision": 1, "log_epoch": "epoch"}}}})
+        store.save_published(
+            tmp_path,
+            {"fake-hub": {"fleet": {"old": {"revision": 1, "log_epoch": "epoch", "path": "memory/cards/old.md"}}}},
+        )
     fake.unavailable = True
     d = memory_archive.archive_card(
         tmp_path, "memory/cards/old.md", reason="ended", config=memory_cmd.MemoryCareConfig()

@@ -124,7 +124,7 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
             reason=reason,
             card_id=card_id,
             changes=changes,
-            hub={"status": "pending", "action": "retire"},
+            hub={"status": "pending", "action": "retire", "path": card_rel},
             prepared_paths=[dest],
             metadata={
                 "index_paths": sorted({row["path"] for row in index_lines}),
@@ -134,7 +134,9 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
         )
         if journal._payload(target, d.decision_id)["phase"] == "abandoned":
             raise ArchiveRefused(f"{card_rel}: decision abandoned after card changed")
-        return journal.update_hub(target, d.decision_id, hub.retire(target, card_id=card_id, reason=reason))
+        return journal.update_hub(
+            target, d.decision_id, hub.retire(target, card_id=card_id, reason=reason, path=card_rel)
+        )
     except (
         OSError,
         UnicodeError,
@@ -218,6 +220,7 @@ def restore(target: Path, decision: journal.Decision) -> journal.Decision:
                 action="retire",
                 card_id=d.card_id or "",
                 reason=d.reason,
+                path=str((d.hub or {}).get("path") or card_rel),
                 request=(d.hub or {}).get("request"),
                 recorded_hub=(d.hub or {}).get("hub"),
             )

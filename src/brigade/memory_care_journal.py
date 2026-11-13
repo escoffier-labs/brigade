@@ -349,11 +349,16 @@ def commit_phased(
         "after_bytes": [None if c.after is None else base64.b64encode(c.after).decode("ascii") for c in changes],
     }
     preparation = [Change(f"{JOURNAL_REL}/{decision_id}/decision.json", None, _json_bytes(payload))]
-    preparation.extend(
-        Change(f"{JOURNAL_REL}/{decision_id}/before/{n}.bin", None, c.before)
-        for n, c in enumerate(changes)
-        if c.before is not None
-    )
+    # Immutable evidence is durable before the reversible plan. Recovery must
+    # never roll back publication of these saved bytes.
+    for n, c in enumerate(changes):
+        if c.before is not None:
+            fd = os.open(directory / "before" / f"{n}.bin", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(c.before)
+                handle.flush()
+                os.fsync(handle.fileno())
+    store.fsync_dir(directory / "before")
     preparation.extend(c for c in changes if c.path in prepared_paths)
     _execute_phase(target, decision_id, "prepare", preparation)
     return finish_prepared(target, decision_id)
@@ -394,6 +399,20 @@ def _repair_indexes(target: Path, decision_id: str) -> None:
         before = base64.b64decode(saved) if saved is not None else before_bytes(target, d, path)
         if live != before:
             changes.append(Change(path, live, before))
+    if p.get("kind") == "archive" and not p.get("restorable"):
+        originals = [path for path in d.paths if path not in index_paths(p) and p["after_sha256"][path] is None]
+        if originals and all(current(target, path) is not None for path in originals):
+            saved = [before_bytes(target, d, path) for path in originals]
+            for path in p.get("prepared_paths", []):
+                live = current(target, path)
+                if (
+                    live is not None
+                    and kernel.content_digest(live) == p["after_sha256"][path]
+                    and live in saved
+                    and not read_only_pattern(path, config.read_only_paths)
+                ):
+                    # These exact bytes remain in the immutable decision before-images.
+                    changes.append(Change(path, live, None))
     if changes:
         _execute_phase(target, decision_id, "repair", changes)
     annotate(target, decision_id, repair_indexes=[])
@@ -525,7 +544,12 @@ def resolve_prepared(target: Path) -> list[dict[str, Any]]:
                 phase="abandoned",
                 status="abandoned",
                 abandoned_reason=reason,
-                restorable=_restorable(target, p),
+                restorable=_restorable(target, p)
+                and any(
+                    current(target, path) is None and p["after_sha256"][path] is None
+                    for path in p["paths"]
+                    if path not in index_paths(p)
+                ),
                 committed_destinations=committed,
                 repair_indexes=[] if match.group(2) == "repair" else sorted(index_paths(p)),
             )

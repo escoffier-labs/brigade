@@ -3,3 +3,5 @@
 - Preserve index identity through archive recovery, show partial recovery destinations, and retain undo access after completed removals.
 - Refuse replay into changed hub destinations or revival of missing or reidentified cards. List destination mismatches for review on every tend run.
 - Refuse unsafe reflection card roots before writing any state under those roots.
+- Skip hub retirement when the archive does not own the published source path or another local card holds its id. Report the skip reason while completing the local archive.
+- Preserve saved before-images through prepare recovery and release unchanged abandoned archive copies only when identical saved bytes remain, so a changed live card can be archived again.

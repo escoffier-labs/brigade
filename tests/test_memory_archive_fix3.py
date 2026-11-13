@@ -159,7 +159,13 @@ def test_annotate_precedes_supersede_and_retry_keeps_archive(tmp_path, monkeypat
         tend.run(tmp_path, stages=[])
     monkeypatch.setattr(journal.kernel, "supersede", supersede)
     tend.run(tmp_path, stages=[])
-    assert (tmp_path / "memory/archive/cards/old.md").read_bytes() == original
+    if recreated:
+        decision_file = next((tmp_path / journal.JOURNAL_REL).glob("*/decision.json"))
+        d = journal.load(tmp_path, decision_file.parent.name)
+        assert journal.before_bytes(tmp_path, d, "memory/cards/old.md") == original
+        assert not (tmp_path / "memory/archive/cards/old.md").exists()
+    else:
+        assert (tmp_path / "memory/archive/cards/old.md").read_bytes() == original
     assert tend.run(tmp_path, stages=[])["recovery"] == []
 
 
@@ -228,10 +234,15 @@ def test_every_mutation_recovers_to_accounted_state(tmp_path, monkeypatch, actio
         patch.setattr(kernel, "execute", observe)
         archive.restore(baseline, d) if d else move(baseline)
     assert len(seen) == 1
+    assert seen[0] > 0
     for step in range(seen[0]):
         target = tmp_path / str(step)
         path = setup_card(target)
         original = path.read_bytes()
+        original_index = (target / "MEMORY.md").read_bytes()
+        linkless_index = b"".join(
+            line for line in original_index.splitlines(keepends=True) if b"[Old](memory/cards/old.md)" not in line
+        )
         sentinel = target / "unrelated.txt"
         sentinel.write_bytes(b"must survive")
         d = move(target) if action == "undo" else None
@@ -251,16 +262,33 @@ def test_every_mutation_recovers_to_accounted_state(tmp_path, monkeypatch, actio
                 )
             return execute(plan, **kwargs)
 
+        killed = False
         with monkeypatch.context() as patch:
             patch.setattr(kernel, "execute", interrupt)
             try:
                 archive.restore(target, d) if d else move(target)
-            except (archive.ArchiveRefused, Killed):
+            except Killed:
+                killed = True
+            except archive.ArchiveRefused:
                 pass
         assert injected
+        assert (
+            killed
+            or kernel.unfinished_operations(target)
+            or any(
+                journal._payload(target, f.parent.name)["phase"] == "prepared"
+                for f in (target / journal.JOURNAL_REL).glob("*/decision.json")
+            )
+        ), (action, phase, side, step)
+        before_images = {
+            p.relative_to(target): p.read_bytes() for p in (target / journal.JOURNAL_REL).glob("*/before/*.bin")
+        }
         recovered = tend.run(target, stages=[])
         copies = [p.read_bytes() for p in (path, target / "memory/archive/cards/old.md") if p.exists()]
         assert original in copies, (action, phase, side, step)
+        assert (target / "MEMORY.md").read_bytes() == (original_index if path.exists() else linkless_index)
+        for rel, data in before_images.items():
+            assert (target / rel).read_bytes() == data, rel
         final = {p.relative_to(target).as_posix(): p.read_bytes() for p in target.rglob("*") if p.is_file()}
         allowed = {"memory/cards/old.md", "memory/archive/cards/old.md", "MEMORY.md"}
         for rel in initial.keys() | final.keys():
@@ -269,9 +297,28 @@ def test_every_mutation_recovers_to_accounted_state(tmp_path, monkeypatch, actio
                 assert initial.get(rel) == final.get(rel), rel
         assert tend.run(target, stages=[])["recovery"] == []
         assert not kernel.unfinished_operations(target)
+        for rel, data in before_images.items():
+            assert (target / rel).read_bytes() == data, rel
         listed = {d.decision_id for d in journal.entries(target)}
-        for decision_file in (target / journal.JOURNAL_REL).glob("*/decision.json"):
+        decision_files = list((target / journal.JOURNAL_REL).glob("*/decision.json"))
+        if not decision_files:
+            # Prepare rollback can remove the decision itself, but must still
+            # satisfy the rolled-back filesystem invariant.
+            assert path.read_bytes() == original
+            assert not (target / "memory/archive/cards/old.md").exists()
+        for decision_file in decision_files:
             p = journal._payload(target, decision_file.parent.name)
+            saved_archive = target / "memory/archive/cards/old.md"
+            if p["phase"] == "committed" and p["kind"] == "archive" and not p.get("undone_by"):
+                assert not path.exists()
+                assert saved_archive.read_bytes() == original
+            elif p["phase"] in ("undone", "rolled_back"):
+                assert path.read_bytes() == original
+                assert not saved_archive.exists()
+            elif p["phase"] == "abandoned":
+                assert path.read_bytes() == original if path.exists() else saved_archive.read_bytes() == original
+                if p.get("restorable"):
+                    assert saved_archive.read_bytes() == original
             assert (
                 p["phase"] in ("committed", "undone")
                 or (

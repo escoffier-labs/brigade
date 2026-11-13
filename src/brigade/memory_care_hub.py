@@ -65,6 +65,10 @@ def _send(
         with store.locked(target):
             state = store.published(target)
             base = state.get(client.identity, {}).get(settings.scope, {}).get(card_id)
+            if action == "retire" and (
+                not path or sync.publication_collision(card_id, path, sync._local_cards(target), base)
+            ):
+                return {**pending, "status": "skipped", "reason": "card-id-collision"}
             if not base:
                 return {"status": "skipped"}
             fields = (
@@ -118,8 +122,8 @@ def _send(
         return pending
 
 
-def retire(target: Path, *, card_id: str, reason: str) -> dict[str, Any]:
-    return _send(target, action="retire", card_id=card_id, reason=reason)
+def retire(target: Path, *, card_id: str, reason: str, path: str = "") -> dict[str, Any]:
+    return _send(target, action="retire", card_id=card_id, reason=reason, path=path)
 
 
 def revive(target: Path, *, card_id: str, path: str, text: str) -> dict[str, Any]:
@@ -135,6 +139,7 @@ def retry_pending(target: Path) -> dict[str, Any]:
         "pending": 0,
         "conflict": 0,
         "skipped": 0,
+        "skipped_items": [],
         "superseded": 0,
     }
     decisions = sorted(journal.entries(target), key=lambda d: d.created_at)
@@ -211,6 +216,8 @@ def retry_pending(target: Path) -> dict[str, Any]:
         )
         journal.update_hub(target, d.decision_id, result)
         counts[result["status"]] += 1
+        if result["status"] == "skipped":
+            counts["skipped_items"].append({"decision_id": d.decision_id, "reason": result.get("reason")})
         if result["status"] == "needs_review":
             counts["review_items"].append({"decision_id": d.decision_id, "reason": result.get("reason")})
     return counts
