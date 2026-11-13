@@ -66,6 +66,7 @@ class _DotGate:
         self.profile = profile
         self._auth_failures: list[float] = []
         self._auth_blocked_until = 0.0
+        self._auth_cooldown_recorded = False
 
     async def record(
         self,
@@ -114,13 +115,16 @@ class _DotGate:
         if self.profile.pack_id != "cloud-agent":
             return
         if now < self._auth_blocked_until:
-            # Keep the audit trail during a cooldown without extending the cooldown.
-            await self.record("authentication", False, now, error_code="authentication_required")
+            # One audit row per cooldown: visible, never extending it, and bounded however many requests arrive.
+            if not self._auth_cooldown_recorded:
+                self._auth_cooldown_recorded = True
+                await self.record("authentication", False, now, error_code="authentication_required")
             return
         self._auth_failures = [t for t in self._auth_failures if now - t < 60]
         self._auth_failures.append(now)
         if len(self._auth_failures) >= 10:
             self._auth_blocked_until = now + 60
+            self._auth_cooldown_recorded = False
             self._auth_failures.clear()
         await self.record("authentication", False, now, error_code="authentication_required")
 
@@ -306,7 +310,9 @@ def build_app(
 ) -> Callable[..., Any]:
     _, _, _, TransportSecuritySettings = grokbot_mcp._load_mcp()
     c.require(verifier.validated is True, "authentication_inactive")
-    c.require(profile.pack_id != "cloud-agent" or grokbot_mcp._is_loopback(config.bind_host), "invalid_config")
+    # Judge by the profile argument and by the tools' own profile, so the two cannot disagree past this check.
+    cloud = "cloud-agent" in (profile.pack_id, getattr(getattr(tools, "profile", None), "pack_id", None))
+    c.require(not cloud or grokbot_mcp._is_loopback(config.bind_host), "invalid_config")
     server = _server(config, tools, profile)
     allowed = list(dict.fromkeys([*config.allowed_hosts, f"{config.bind_host}:{config.bind_port}"]))
     if grokbot_mcp._is_loopback(config.bind_host):
@@ -397,10 +403,11 @@ def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -
     # Exported entry point: refuse before any import or startup, whatever built the config.
     require_local_platform()
     # The loopback rule holds where the socket opens, not only where the CLI loads the config.
-    c.require(
-        runtime.schema != CLOUD_AGENT_RUNTIME_SCHEMA or grokbot_mcp._is_loopback(config.bind_host),
-        "invalid_config",
-    )
+    # The runtime and the tools must describe the same kind of connector before anything else happens.
+    tools_cloud = getattr(getattr(tools, "profile", None), "pack_id", None) == "cloud-agent"
+    runtime_cloud = runtime.schema == CLOUD_AGENT_RUNTIME_SCHEMA
+    c.require(tools is None or tools_cloud == runtime_cloud, "invalid_config")
+    c.require(not (tools_cloud or runtime_cloud) or grokbot_mcp._is_loopback(config.bind_host), "invalid_config")
     if runtime.auth.token_file is not None:
         require_credential_isolation(runtime.auth.token_file, runtime.hub.message_token_file)
     try:

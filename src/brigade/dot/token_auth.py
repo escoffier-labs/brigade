@@ -26,6 +26,10 @@ def read_token(path: Path) -> bytes:
         raise DotError("invalid_config") from None
 
 
+class TokenCleanupError(OSError):
+    """A newly created credential file could not be removed after its write failed."""
+
+
 def ensure_listener_token(path: Path) -> bool:
     """Create a private credential without overwriting an existing file."""
     try:
@@ -37,12 +41,12 @@ def ensure_listener_token(path: Path) -> bool:
             stream.write(secrets.token_urlsafe(48))
             stream.flush()
             os.fsync(stream.fileno())
-    except OSError:
+    except Exception:
         # Never leave a partial credential behind for a later setup to mistake for a supplied one.
         try:
             path.unlink()
         except OSError:
-            pass
+            raise TokenCleanupError() from None
         raise DotError("invalid_config") from None
     return True
 

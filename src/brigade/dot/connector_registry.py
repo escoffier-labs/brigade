@@ -218,7 +218,7 @@ def _setup(
     if generated is not None:
         result["writes"].append(generated)
     if apply:
-        from .token_auth import ensure_listener_token
+        from .token_auth import TokenCleanupError, ensure_listener_token
 
         created = False
         try:
@@ -232,6 +232,8 @@ def _setup(
                     Path(generated).unlink()
                 except OSError:
                     raise PackError("rollback-failed") from None
+            if isinstance(exc, TokenCleanupError):
+                raise PackError("rollback-failed") from None
             if isinstance(exc, PackError) and exc.reason == "rollback-failed":
                 raise
             raise PackError("unsafe-path") from None

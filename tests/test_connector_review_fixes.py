@@ -130,7 +130,10 @@ def test_listener_failure_limit(tmp_path, monkeypatch, mode):
     for _ in range(10):
         assert asyncio.run(request(gate))[0] == 401
     assert asyncio.run(request(gate, client=("127.0.0.2", 2)))[0] == 429
-    # A failure during the cooldown is still recorded, and it does not extend the cooldown.
+    # A cooldown gets one audit row however many requests fail in it, and failures do not extend it.
+    assert len(records) == 11
+    for _ in range(5):
+        assert asyncio.run(request(gate))[0] == 429
     assert len(records) == 11
     assert all(row[1]["error_code"] == "authentication_required" for row in records)
     now[0] += 61
@@ -399,3 +402,48 @@ def test_failed_token_write_leaves_no_file(tmp_path, monkeypatch):
     with pytest.raises(DotError, match="^invalid_config$"):
         token_auth.ensure_listener_token(path)
     assert not path.exists()
+
+
+def test_failed_token_cleanup_is_reported(tmp_path, monkeypatch):
+    from brigade.dot import token_auth
+
+    path = tmp_path / "listener-token"
+
+    def fail(*args, **kwargs):
+        raise OSError("failed")
+
+    monkeypatch.setattr(token_auth.os, "fsync", fail)
+    monkeypatch.setattr(Path, "unlink", fail)
+    with pytest.raises(token_auth.TokenCleanupError):
+        token_auth.ensure_listener_token(path)
+
+
+def test_token_cleanup_covers_non_os_errors(tmp_path, monkeypatch):
+    from brigade.dot import token_auth
+
+    path = tmp_path / "listener-token"
+
+    def fail(nbytes):
+        raise RuntimeError("no entropy")
+
+    monkeypatch.setattr(token_auth.secrets, "token_urlsafe", fail)
+    with pytest.raises(DotError, match="^invalid_config$"):
+        token_auth.ensure_listener_token(path)
+    assert not path.exists()
+
+
+@requires_local_state
+def test_listener_refuses_mismatched_runtime_and_tools(tmp_path, monkeypatch):
+    import dataclasses
+    import types
+
+    cloud_tools = types.SimpleNamespace(profile=CLOUD_AGENT)
+    other_runtime = types.SimpleNamespace(schema="brigade.other.runtime.v1", auth=None, hub=None)
+    remote = dataclasses.replace(config(), bind_host="0.0.0.0")
+    touched = []
+    monkeypatch.setattr(lifecycle, "require_credential_isolation", lambda *a, **k: touched.append(1))
+    with pytest.raises(DotError, match="^invalid_config$"):
+        lifecycle.run_listener(remote, cloud_tools, other_runtime)
+    with pytest.raises(DotError, match="^invalid_config$"):
+        lifecycle.run_listener(config(), cloud_tools, other_runtime)
+    assert touched == []
