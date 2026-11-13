@@ -92,6 +92,8 @@ def test_export_and_managed_event(target, tmp_path, monkeypatch):
 
 
 def test_child_target_and_relative_target(target, tmp_path, monkeypatch, capsys):
+    # This checks target routing. Deadline behavior has controlled-clock tests.
+    monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
     child = _wired(target, name="child")
     _set_mode(target, "strict", capsys)
     _set_mode(child, "observe", capsys)
@@ -160,18 +162,24 @@ def test_storage_symlink_cause(target, monkeypatch, tmp_path):
     assert observed_checks.recording_unavailable_reason(target) == "config directory reached through a symbolic link"
 
 
-def test_recording_lock_budget(target):
-    import time
+def test_recording_lock_budget(target, monkeypatch, capsys):
+    from unittest.mock import Mock
 
     from brigade.inbox_lock import held_file_lock_descriptor as held_file_lock
 
+    monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
     observed_checks.command_digest("pytest", target)
     path = observed_checks.digest_key_path(target).with_name("checks.jsonl.lock")
+    lock = Mock(wraps=observed_checks.held_file_lock)
+    monkeypatch.setattr(observed_checks, "held_file_lock", lock)
+    capsys.readouterr()
     with held_file_lock(path, deadline_seconds=1):
-        started = time.monotonic()
-        runtime.handle_payload("PostToolUse", _bash(target, "PostToolUse", "pytest"))
-        elapsed = time.monotonic() - started
-    assert elapsed < 0.5
+        assert runtime.handle_payload("PostToolUse", _bash(target, "PostToolUse", "pytest")) is None
+    assert capsys.readouterr() == ("", "")
+    assert lock.call_args_list
+    for call in lock.call_args_list:
+        assert call.args == (path,)
+        assert call.kwargs == {"deadline_seconds": 0.01}
     assert observed_checks.read_checks(target)[0] == []
 
 

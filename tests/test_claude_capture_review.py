@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from brigade import observed_checks, work_mode
+from brigade import localio, observed_checks, work_mode
 from brigade.claude_hooks import check_events, runtime
 from tests.test_claude_hooks_check_events import target as _target
 
@@ -34,7 +34,7 @@ def test_capture_never_spawns(target, monkeypatch):
     assert observed_checks.read_checks(target)[0][0].tree_fingerprint is None
 
 
-def test_git_capture_is_small_and_has_no_tree(target):
+def test_git_capture_is_small_and_has_no_tree(target, monkeypatch):
     subprocess.run(["git", "init", "-q", str(target)], check=True)
     from tests.test_claude_hooks_fingerprint import _git
 
@@ -42,9 +42,17 @@ def test_git_capture_is_small_and_has_no_tree(target):
     _git(target, "add", ".")
     _git(target, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture")
     (target / "untracked.txt").write_text("untracked\n" * 1000)
-    started = time.monotonic()
+    fingerprint = Mock(side_effect=AssertionError("tree fingerprint during capture"))
+    capture = check_events._on_event
+
+    def no_tree(*args):
+        with monkeypatch.context() as patch:
+            patch.setattr(localio, "tree_fingerprint", fingerprint)
+            capture(*args)
+
+    monkeypatch.setattr(check_events, "_on_event", no_tree)
     runtime.handle_payload("PostToolUse", _bash(target, "PostToolUse", "pytest"))
-    assert time.monotonic() - started < 0.5
+    fingerprint.assert_not_called()
     assert observed_checks.read_checks(target)[0][0].tree_fingerprint is None
 
 
@@ -226,3 +234,69 @@ def test_session_identity_has_one_second_budget(target, tmp_path, monkeypatch, e
     runtime.handle_payload(event, _payload(target, event, **{field: "claude-sonnet-4-6"}))
     assert bool(env.read_text()) == (elapsed < 1.0 and event == "SessionStart")
     assert ("model" in runtime.read_session_state(target, "s1")) == (elapsed < 1.0)
+
+
+@pytest.mark.parametrize("native_flags", [False, True])
+def test_env_append_preserves_other_hook(target, tmp_path, monkeypatch, native_flags):
+    monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
+    env = tmp_path / "env.sh"
+    earlier = "export OTHER_HOOK=ready\n"
+    env.write_text(earlier)
+    monkeypatch.setenv("CLAUDE_ENV_FILE", str(env))
+    if native_flags:
+        # Model the Windows backend's existing-file open contract on every OS.
+        original = check_events.dirfd.open_file_nofollow
+
+        def existing_file(path, flags, mode=0o600):
+            if path == env:
+                if flags & os.O_CREAT and not flags & os.O_EXCL:
+                    raise OSError("non-exclusive create")
+                flags &= ~os.O_APPEND
+            return original(path, flags, mode)
+
+        monkeypatch.setattr(check_events.dirfd, "open_file_nofollow", existing_file)
+    line = f"export BRIGADE_AGENT_SESSION={runtime._session_fingerprint('s1')}\n"
+    for count in (1, 2):
+        runtime.handle_payload("SessionStart", _payload(target, "SessionStart"))
+        assert env.read_text() == earlier + line * count
+
+
+def test_env_missing_is_not_created(target, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
+    env = tmp_path / "absent.sh"
+    monkeypatch.setenv("CLAUDE_ENV_FILE", str(env))
+    capsys.readouterr()
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart"))
+    assert not env.exists()
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("switch_first", [False, True])
+def test_stale_tool_snapshot_preserves_identity(target, monkeypatch, switch_first):
+    monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", model="claude-sonnet-4-6"))
+    original = runtime._write_session_state_preserving_latch
+    interleaved = []
+
+    def write_with_switch(target, session_id, state, **kwargs):
+        if not interleaved and "pending_bash_fingerprint" in state and kwargs.get("patch_fields") is None:
+            interleaved.append(dict(state))
+            switch = _payload(target, "PostModelSwitch", to_model="claude-opus-4-6")
+            if switch_first:
+                runtime.handle_payload("PostModelSwitch", switch)
+            result = original(target, session_id, state, **kwargs)
+            if not switch_first:
+                runtime.handle_payload("PostModelSwitch", switch)
+            return result
+        return original(target, session_id, state, **kwargs)
+
+    monkeypatch.setattr(runtime, "_write_session_state_preserving_latch", write_with_switch)
+    runtime.handle_payload("PreToolUse", _bash(target, "PreToolUse", "pytest"))
+    assert interleaved[0]["model"] == "claude-sonnet-4-6"
+    state = runtime.read_session_state(target, "s1")
+    assert (state["model"], state["model_source"]) == ("claude-opus-4-6", "hook-model-switch")
+    runtime.handle_payload("PostToolUse", _bash(target, "PostToolUse", "pytest"))
+    assert observed_checks.read_checks(target)[0][0].model == "claude-opus-4-6"
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", model="claude-sonnet-4-6"))
+    state = runtime.read_session_state(target, "s1")
+    assert (state["model"], state["model_source"]) == ("claude-sonnet-4-6", "hook-session-start")

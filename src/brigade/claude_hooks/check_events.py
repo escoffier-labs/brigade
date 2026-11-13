@@ -72,11 +72,12 @@ def _on_event(event: str, payload: dict[str, Any], target: Path, session_id: str
             env_file = os.environ.get("CLAUDE_ENV_FILE", "")
             if env_file and Path(env_file).is_absolute():
                 observed_checks.check_capture_deadline()
-                flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NONBLOCK", 0)
+                flags = os.O_WRONLY | getattr(os, "O_NONBLOCK", 0)
                 fd = dirfd.open_file_nofollow(Path(env_file), flags, 0o600)
                 try:
                     if stat.S_ISREG(os.fstat(fd).st_mode):
                         observed_checks.check_capture_deadline()
+                        os.lseek(fd, 0, os.SEEK_END)
                         os.write(fd, f"export {AGENT_SESSION_ENV}={rt._session_fingerprint(session_id)}\n".encode())
                 finally:
                     os.close(fd)
