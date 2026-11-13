@@ -192,6 +192,8 @@ def entries(target: Path, *, since: datetime | None = None) -> list[Decision]:
         return []
     decisions = []
     for directory in sorted(root.iterdir()):
+        if not (directory / "decision.json").exists():
+            continue
         p = _payload(target, directory.name)
         if p.get("status") != "committed":
             continue
@@ -214,3 +216,184 @@ def revert(target: Path, decision_id: str, *, reason: str) -> Decision:
     undo = commit(target, kind="undo", reason=reason, card_id=d.card_id, changes=changes, undoes=d.decision_id)
     mark_undone(target, d.decision_id, undo.decision_id)
     return undo
+
+
+def _json_bytes(payload: dict[str, Any]) -> bytes:
+    import json
+
+    return (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode()
+
+
+def _execute_phase(target: Path, decision_id: str, phase: str, changes: Sequence[Change]) -> None:
+    mutations = [
+        kernel.mutation(
+            destination=safe_path(target, c.path),
+            mutation="remove" if c.after is None else ("create" if c.before is None else "replace"),
+            expected_before=kernel.content_digest(c.before),
+            desired_after=kernel.content_digest(c.after),
+            staged_bytes=c.after,
+            mode=0o600,
+        )
+        for c in changes
+    ]
+    plan = kernel.build_plan(
+        operation_id=f"care-{decision_id}-{phase}",
+        projector="memory-care",
+        source_fingerprint=decision_id,
+        mutations=mutations,
+        target=target,
+    )
+    receipt = kernel.execute(plan, target=target)
+    if receipt.terminal_state != "committed":
+        raise JournalConflict(f"kernel {receipt.terminal_state}")
+
+
+def commit_phased(
+    target: Path,
+    *,
+    kind: str,
+    reason: str,
+    card_id: str | None,
+    changes: Sequence[Change],
+    prepared_paths: Sequence[str],
+    hub: dict[str, Any],
+    undoes: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Decision:
+    """Publish the safety copy and recovery recipe before any removal."""
+    import base64
+
+    from .memory_cmd import _config_or_default
+
+    config = _config_or_default(target)
+    for c in changes:
+        safe_path(target, c.path)
+        if read_only_pattern(c.path, config.read_only_paths):
+            raise ReadOnlyPath(c.path)
+        if current(target, c.path) != c.before:
+            raise JournalConflict(f"{c.path}: changed before preparation")
+    stamp = datetime.now(timezone.utc)
+    decision_id = f"{stamp:%Y%m%dT%H%M%SZ}-{kind}-{uuid.uuid4().hex[:8]}"
+    directory = _directory(target, decision_id)
+    store.private_dir(directory / "before")
+    d = Decision(
+        decision_id,
+        kind,
+        reason,
+        card_id,
+        stamp.isoformat(),
+        tuple(c.path for c in changes),
+        {c.path: None if c.after is None else kernel.content_digest(c.after) for c in changes},
+        hub,
+        undoes,
+        None,
+    )
+    payload = {
+        **asdict(d),
+        **(metadata or {}),
+        "status": "prepared",
+        "phase": "prepared",
+        "before_absent": [c.before is None for c in changes],
+        "prepared_paths": list(prepared_paths),
+        "after_bytes": [None if c.after is None else base64.b64encode(c.after).decode("ascii") for c in changes],
+    }
+    preparation = [Change(f"{JOURNAL_REL}/{decision_id}/decision.json", None, _json_bytes(payload))]
+    preparation.extend(
+        Change(f"{JOURNAL_REL}/{decision_id}/before/{n}.bin", None, c.before)
+        for n, c in enumerate(changes)
+        if c.before is not None
+    )
+    preparation.extend(c for c in changes if c.path in prepared_paths)
+    _execute_phase(target, decision_id, "prepare", preparation)
+    return finish_prepared(target, decision_id)
+
+
+def finish_prepared(target: Path, decision_id: str) -> Decision:
+    import base64
+
+    from .memory_cmd import _config_or_default
+
+    d = load(target, decision_id)
+    p = _payload(target, decision_id)
+    config = _config_or_default(target)
+    changes = [
+        Change(path, before_bytes(target, d, path), None if data is None else base64.b64decode(data))
+        for path, data in zip(d.paths, p["after_bytes"], strict=True)
+    ]
+    if d.kind == "archive":
+        # Rebase link removal on the live index, keeping unrelated edits.
+        indices = {row["path"] for row in p.get("index_lines", [])}
+        rebased = []
+        for c in changes:
+            live = current(target, c.path)
+            if c.path in indices and live is not None and live != c.before:
+                lines = live.decode("utf-8").splitlines(keepends=True)
+                rows = [row for row in p["index_lines"] if row["path"] == c.path]
+                removed = {row["line"] for row in rows}
+                after = "".join(line for line in lines if line not in removed).encode("utf-8")
+                p["index_lines"] = [row for row in p["index_lines"] if row["path"] != c.path] + [
+                    {
+                        "path": c.path,
+                        "line": line,
+                        "number": n,
+                        "neighbor": lines[n + 1] if n + 1 < len(lines) else None,
+                    }
+                    for n, line in enumerate(lines)
+                    if line in removed
+                ]
+                c = Change(c.path, live, after)
+                p["after_sha256"][c.path] = kernel.content_digest(after)
+            rebased.append(c)
+        changes = rebased
+    prepared = set(p["prepared_paths"])
+    drift = [c.path for c in changes if current(target, c.path) != (c.after if c.path in prepared else c.before)]
+    if any(read_only_pattern(c.path, config.read_only_paths) for c in changes):
+        raise ReadOnlyPath("prepared decision now touches a read-only path")
+    if drift and d.kind != "archive":
+        raise JournalConflict(f"prepared undo changed: {', '.join(drift)}")
+    if drift:
+        # Discard only our unchanged safety copy. Never overwrite an edited card or archive.
+        final = {**p, "phase": "abandoned", "status": "abandoned", "abandoned_reason": f"changed: {', '.join(drift)}"}
+        pending = [Change(c.path, c.after, c.before) for c in changes if c.path in prepared and c.path not in drift]
+    else:
+        final = {**p, "phase": "undone" if d.kind == "undo" else "committed", "status": "committed"}
+        pending = [c for c in changes if c.path not in prepared]
+        if d.undoes:
+            predecessor = _payload(target, d.undoes)
+            rel = f"{JOURNAL_REL}/{d.undoes}/decision.json"
+            pending.append(
+                Change(
+                    rel, current(target, rel), _json_bytes({**predecessor, "phase": "undone", "undone_by": decision_id})
+                )
+            )
+    rel = f"{JOURNAL_REL}/{decision_id}/decision.json"
+    pending.append(Change(rel, current(target, rel), _json_bytes(final)))
+    _execute_phase(target, decision_id, "finish", pending)
+    return load(target, decision_id)
+
+
+def resolve_prepared(target: Path) -> list[dict[str, str]]:
+    """Recover our interrupted kernel plans before interpreting decision phases."""
+    for operation in kernel.unfinished_operations(target):
+        if operation.operation_id.startswith("care-"):
+            receipt = kernel.recover(operation.operation_id, target=target)
+            if receipt.terminal_state != "restored":
+                raise JournalConflict(f"kernel {receipt.terminal_state}")
+    root = target / JOURNAL_REL
+    resolved = []
+    if root.exists():
+        for directory in sorted(root.iterdir()):
+            if not (directory / "decision.json").exists():
+                continue
+            p = _payload(target, directory.name)
+            if p.get("phase") == "prepared":
+                finish_prepared(target, directory.name)
+                final = _payload(target, directory.name)
+                resolved.append(
+                    {
+                        "decision_id": directory.name,
+                        "phase": final["phase"],
+                        "reason": final.get("abandoned_reason", ""),
+                    }
+                )
+    return resolved

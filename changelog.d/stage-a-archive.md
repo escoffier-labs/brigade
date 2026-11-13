@@ -1,3 +1,4 @@
 - Memory care archives unread cards with expired subjects into `memory/archive/`, with byte-for-byte restore through `brigade memory care undo <id>` and retire or revive in hub sync mode.
 - `brigade memory care tend` runs bounded automatic retirement after successful CLI scans unless disabled. A fresh read ledger protects existing cards for 120 days.
 - `brigade memory care archive --from-file decisions.jsonl [--limit N]` applies external judgments through the same protections, journal and undo, reporting refused and duplicate cards.
+- Archive and undo publish their safety copies before removing cards. Interrupted decisions resume on the next care command and preserve cards edited during preparation.

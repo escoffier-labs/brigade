@@ -66,15 +66,18 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
                     index, data, "".join(line for n, line in enumerate(lines) if n not in removed).encode("utf-8")
                 )
             )
-        d = journal.commit(
+        d = journal.commit_phased(
             target,
             kind="archive",
             reason=reason,
             card_id=card_id,
             changes=changes,
             hub={"status": "pending", "action": "retire"},
+            prepared_paths=[dest],
+            metadata={"index_lines": index_lines},
         )
-        journal.annotate(target, d.decision_id, index_lines=index_lines)
+        if journal._payload(target, d.decision_id)["phase"] == "abandoned":
+            raise ArchiveRefused(f"{card_rel}: decision abandoned after card changed")
         return journal.update_hub(target, d.decision_id, hub.retire(target, card_id=card_id, reason=reason))
     except (OSError, UnicodeError, journal.JournalConflict, journal.ReadOnlyPath) as exc:
         raise ArchiveRefused(str(exc)) from exc
@@ -83,9 +86,11 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
 def restore(target: Path, decision: journal.Decision) -> journal.Decision:
     try:
         d = journal.load(target, decision.decision_id)
+        metadata = journal._payload(target, d.decision_id)
+        if metadata.get("phase") == "abandoned":
+            raise ArchiveRefused("decision abandoned after card changed")
         if d.undone_by or d.kind != "archive":
             raise ArchiveRefused("decision is not an active archive")
-        metadata = journal._payload(target, d.decision_id)
         indices = {row["path"] for row in metadata.get("index_lines", [])}
         changes = []
         card_rel = ""
@@ -116,7 +121,7 @@ def restore(target: Path, decision: journal.Decision) -> journal.Decision:
                 position = lines.index(neighbor) if neighbor in lines else len(lines)
                 lines.insert(position, row["line"])
             changes.append(journal.Change(index, live, "".join(lines).encode("utf-8")))
-        undo = journal.commit(
+        undo = journal.commit_phased(
             target,
             kind="undo",
             reason=f"restore {d.decision_id}",
@@ -124,8 +129,8 @@ def restore(target: Path, decision: journal.Decision) -> journal.Decision:
             changes=changes,
             undoes=d.decision_id,
             hub={"status": "pending", "action": "put", "path": card_rel},
+            prepared_paths=[c.path for c in changes if c.after is not None],
         )
-        journal.mark_undone(target, d.decision_id, undo.decision_id)
         # Flush a pending retire first using its original event id, then revive.
         if (d.hub or {}).get("status") == "pending":
             result = hub._send(

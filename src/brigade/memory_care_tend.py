@@ -43,11 +43,12 @@ def run(
     target: Path, *, stages: Sequence[str] | None = None, dry_run: bool = False, today: date | None = None
 ) -> dict[str, Any]:
     target = target.resolve()
+    recovery = [] if dry_run else journal.resolve_prepared(target)
     tend = load_config(target)
     selected = tuple(stages) if stages is not None else STAGES
     if any(stage not in STAGES for stage in selected):
         raise ValueError("unknown tend stage")
-    payload: dict[str, Any] = {"enabled": tend.enabled, "dry_run": dry_run, "stages": {}}
+    payload: dict[str, Any] = {"enabled": tend.enabled, "dry_run": dry_run, "stages": {}, "recovery": recovery}
     if not tend.enabled:
         return payload
     for stage in STAGES:
@@ -65,7 +66,13 @@ def run(
 
 
 def undo(target: Path, decision_id: str) -> journal.Decision:
+    recovery = journal.resolve_prepared(target)
+    for item in recovery:
+        if item["phase"] == "abandoned":
+            print(f"memory care: abandoned {item['decision_id']}: {item['reason']}", file=sys.stderr)
     d = journal.load(target, decision_id)
+    if d.undone_by:
+        return journal.load(target, d.undone_by)
     return (
         memory_archive.restore(target, d) if d.kind == "archive" else journal.revert(target, decision_id, reason="undo")
     )
@@ -79,6 +86,7 @@ def after_command(target: Path, *, stages: Sequence[str] | None = None) -> None:
 
 
 def archive_manifest(target: Path, path: Path, *, limit: int | None = None) -> dict[str, Any]:
+    recovery = journal.resolve_prepared(target)
     if limit is not None and limit < 1:
         raise ValueError("limit must be positive")
     config = memory_cmd._config_or_default(target)
@@ -102,7 +110,7 @@ def archive_manifest(target: Path, path: Path, *, limit: int | None = None) -> d
                 decisions.append(d.decision_id)
             except (ValueError, OSError, AttributeError) as exc:
                 refused.append({"line": n, "reason": str(exc)})
-    return {"archived": len(decisions), "decision_ids": decisions, "refused": refused}
+    return {"archived": len(decisions), "decision_ids": decisions, "refused": refused, "recovery": recovery}
 
 
 def dispatch(args: Any) -> int:
