@@ -318,8 +318,12 @@ def digest_key_path(target: Path) -> Path | None:
         return None
     name = hashlib.sha256(work_mode.repository_key(target).encode("utf-8")).hexdigest()
     path = root.parent / "observed" / name / "digest.key"
-    # State inside the workspace's own work tree could be committed with it.
-    return None if work_mode._record_in_target_repository(path, target) else path
+    # State inside the workspace's own repository could be committed with it. Only the
+    # nearest work tree counts: an outer one, such as a home directory kept in Git, is
+    # handled by the state directory ignoring itself.
+    real = Path(os.path.realpath(target))
+    tree = next((d for d in (real, *real.parents) if os.path.lexists(d / ".git")), real)
+    return None if Path(os.path.realpath(path)).is_relative_to(tree) else path
 
 
 def _state_directory(path: Path, *, create: bool = False) -> int:

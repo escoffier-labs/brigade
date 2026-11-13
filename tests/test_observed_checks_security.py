@@ -338,3 +338,20 @@ def test_model_variant_suffix_is_dropped():
     mapped = agent_identity.map_identity("claude-code", "claude-fable-5-2[1m]", "main")
     assert mapped["model"] == "claude-fable-5-2"
     assert agent_identity.map_identity("codex", "gpt-6[secret value]", "main")["model"] == "unknown"
+
+
+@pytest.mark.parametrize("own_repository", [True, False])
+def test_project_inside_a_home_directory_kept_in_git(tmp_path, monkeypatch, own_repository):
+    home = tmp_path / "home"
+    target = home / "code" / "proj"
+    target.mkdir(parents=True)
+    (home / ".git").mkdir()
+    if own_repository:
+        (target / ".git").mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("LOCALAPPDATA", str(home / ".config"))
+    check = record(target)
+    # Without its own repository the home directory is the project's repository.
+    assert checks.append_check(target, check) is own_repository
+    assert (check.command_digest != checks.DIGEST_UNAVAILABLE) is own_repository
