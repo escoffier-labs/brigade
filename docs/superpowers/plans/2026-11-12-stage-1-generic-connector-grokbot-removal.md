@@ -46,6 +46,21 @@ These override anything below that conflicts with them.
 5. Task 6's guide documents token mode first and Access as the option for
    clients that need a signed-identity front.
 
+## Follow-ups from the Task 1 reviews
+
+Task 1 merged. These were judged safe to follow and belong to the tasks named:
+
+- **Task 2:** classify a connector as cloud-agent from a normalized profile
+  identity, so a library caller cannot evade the exact-string check with a
+  malformed pack id. Run setup rollback for any exception after the token
+  file is created, not only the expected ones.
+- **Task 6 (guide):** say that the failed sign-in limit reduces noise and is
+  not brute-force protection, since a valid credential is always served. Say
+  that when cloud-agent is installed, the other profiles' isolation check
+  also reads the machine's fleet credentials and refuses if they cannot be
+  read. Say that cloud-agent listens on loopback only and remote access goes
+  through the operator's own tunnel or proxy.
+
 ## Decisions made by the planner
 
 1. Keep Dot and Duet profiles and their current tools, runtime schemas, credentials and stored configuration working. Folding them into the generic profile is follow-up work because their dispatch and instruction contracts differ.
