@@ -96,7 +96,7 @@ def test_selection_is_deterministic_and_carries_replay_inputs(repo):
 def test_curated_smoke_contains_replay_miss_invariants():
     manifest = json.loads((ROOT / "scripts/pr_test_tiers.json").read_text())
     assert len(manifest["A"]) == 23
-    assert len(manifest["C"]) == 39
+    assert len(manifest["C"]) == 38
     assert not set(manifest["A"]) & set(manifest["C"])
     for path in (
         "tests/test_module_size_ratchet.py",

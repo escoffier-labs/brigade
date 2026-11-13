@@ -478,7 +478,7 @@ def test_full_windows_harness_still_requires_record(capsys):
 def test_shipped_allowlist_reflects_the_current_ratchet_count():
     assert (
         len(windows_pytest.load_allowlist(windows_pytest.DEFAULT_ALLOWLIST))
-        == windows_pytest.INITIAL_ALLOWLIST_ENTRIES - 24
+        == windows_pytest.INITIAL_ALLOWLIST_ENTRIES - 38
     )
 
 
