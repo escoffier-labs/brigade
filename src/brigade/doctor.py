@@ -128,10 +128,10 @@ _OUTCOME_LOOP_HALF_FED_NAME = "outcome loop: half-fed"
 
 def _check_outcome_loop(ctx: DoctorContext) -> List[CheckResult]:
     """First-class dormancy findings for the verify/outcome work loop (#734)."""
-    from .work_mode import is_yolo
+    from .work_mode import is_strict
 
-    # Yolo mode opts out of receipts; an idle ledger there is the chosen state (#2233).
-    if ctx.selection is None or is_yolo(ctx.target):
+    # Unenforced modes opt out of receipts; an idle ledger there is the chosen state (#2233).
+    if ctx.selection is None or not is_strict(ctx.target):
         return []
     from . import outcome_cmd
 
@@ -825,8 +825,8 @@ def _check_claude_work_loop(target: Path) -> CheckResult | None:
     if payload is None:
         return None
     state = payload["state"]
-    clean_yolo = state == "yolo" and not payload.get("issues")
-    status = FAIL if state == "error" else OK if state == "enforced" or clean_yolo else WARN
+    clean_unenforced = state in {"off", "observe"} and not payload.get("issues")
+    status = FAIL if state == "error" else OK if state == "enforced" or clean_unenforced else WARN
     detail = str(payload["detail"])
     hooks = payload.get("hooks") or {}
     hook_error = hooks.get("error")

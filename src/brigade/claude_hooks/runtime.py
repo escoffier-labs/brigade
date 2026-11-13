@@ -2370,7 +2370,7 @@ def _handle_event(
         state["pending_bash_fingerprint"] = baseline or _UNAVAILABLE_FINGERPRINT
         state["pending_bash_started_at"] = localio.utc_now_iso()
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
-        if not is_raw_verification(command) or verification_mode.verification_in_yolo(
+        if not is_raw_verification(command) or not verification_mode.verification_enforced(
             command, payload.get("cwd"), target
         ):
             return None
@@ -2487,7 +2487,7 @@ def _handle_event(
         if (
             payload.get("tool_name") == "Bash"
             and verifier
-            and not verification_mode.verification_in_yolo(command, payload.get("cwd"), target)
+            and verification_mode.verification_enforced(command, payload.get("cwd"), target)
         ):
             from .. import outcome_cmd
 
@@ -2523,7 +2523,7 @@ def _handle_event(
             stop_state = _normalize_state(
                 stop_target, session_id, stop_state, task_epoch=task_epoch, fingerprint=event_fingerprint
             )
-            if not stop_state.get("write_observed") or work_mode.is_yolo(stop_target):
+            if not stop_state.get("write_observed") or not work_mode.is_strict(stop_target):
                 continue
             fingerprint = stop_state.get("session_fingerprint")
             if not isinstance(fingerprint, str):

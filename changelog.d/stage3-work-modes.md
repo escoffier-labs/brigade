@@ -1,0 +1,3 @@
+- Add canonical work modes `strict`, `observe` and `off`. `engineer` and `enforced` alias `strict`. `yolo` aliases `off`. Observe disables enforcement. Recording checks requires `brigade work verify run`. Safety rails stay independent.
+- Always write `work.mode` explicitly. The default remains strict for new installs, absent keys, unreadable configs and invalid values. The brief pins readable untracked keyless canonical configs without changing other settings and reports write failures. Doctor reports unpinned configs and unreadable configs separately.
+- Older binaries treat all canonical names as unknown, fall back to engineer enforcement and warn in doctor. A shared config set to `off` therefore enforces verification when read by an older binary.

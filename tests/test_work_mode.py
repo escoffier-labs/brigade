@@ -78,11 +78,11 @@ def test_config_round_trips_mode_and_never_writes_rails(tmp_path: Path) -> None:
     target = tmp_path / "t"
     selection = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
     config.write_config(target, config.Config(version=1, selection=selection))
-    assert "work" not in json.loads(config.config_path(target).read_text())
-    config.write_config(target, config.Config(version=1, selection=selection, work_mode="yolo"))
-    assert json.loads(config.config_path(target).read_text())["work"] == {"mode": "yolo"}
+    assert json.loads(config.config_path(target).read_text())["work"] == {"mode": "strict"}
+    config.write_config(target, config.Config(version=1, selection=selection, work_mode="off"))
+    assert json.loads(config.config_path(target).read_text())["work"] == {"mode": "off"}
     loaded = config.load_config(target)
-    assert loaded is not None and loaded.work_mode == "yolo"
+    assert loaded is not None and loaded.work_mode == "off"
     assert not hasattr(loaded, "safety_rails")
 
 
@@ -91,15 +91,16 @@ def test_invalid_settings_fail_safe_in_hook_readers(tmp_path: Path) -> None:
     path = target / ".brigade" / "config.json"
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({"version": 1, "work": {"mode": "chaos", "rails": "maybe"}}))
-    assert work_mode.resolve_mode(target) == "engineer"
+    assert work_mode.resolve_mode(target) == "strict"
     assert work_mode.rails_enabled(target) is True
     with pytest.raises(ValueError):
         config.load_config(target)
 
 
-def test_yolo_session_runs_raw_checks_and_finishes_without_block(tmp_path: Path, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize("mode", ["observe", "off", "yolo"])
+def test_yolo_session_runs_raw_checks_and_finishes_without_block(tmp_path: Path, monkeypatch, capsys, mode) -> None:
     target = _wired(tmp_path)
-    _set_mode(target, "yolo", capsys)
+    _set_mode(target, mode, capsys)
     monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "work brief: yolo")
     monkeypatch.setattr(
         "brigade.memory_hooks.recall_for_hook", lambda **_kwargs: ("recall: astro notes card", []), raising=True
@@ -135,14 +136,14 @@ def test_switching_back_to_enforced_restores_block_and_hooks(tmp_path: Path, mon
     monkeypatch.setattr(runtime, "_run_recall", lambda *_args, **_kwargs: "")
     enforced_settings = (target / ".claude" / "settings.json").read_text()
 
-    _set_mode(target, "yolo", capsys)
+    _set_mode(target, "off", capsys)
     # Yolo keeps every managed event; the runtime skips checks per target.
     assert (target / ".claude" / "settings.json").read_text() == enforced_settings
     assert set(install_cmd.MANAGED_EVENTS) <= set(_settings_events(target))
     status = install_cmd.status_payload(target)
-    assert status["current"] is True and status["work_mode"] == "yolo"
+    assert status["current"] is True and status["work_mode"] == "off"
 
-    _set_mode(target, "engineer", capsys)
+    _set_mode(target, "strict", capsys)
     assert (target / ".claude" / "settings.json").read_text() == enforced_settings
     assert "work_mode" not in install_cmd.status_payload(target)
     denied = runtime.handle_payload("PreToolUse", _bash(target, "PreToolUse", "python -m pytest -q"))
@@ -159,17 +160,17 @@ def test_mode_switch_preserves_foreign_stop_handlers(tmp_path: Path, capsys) -> 
     foreign = {"hooks": [{"type": "command", "command": "echo mine"}]}
     settings["hooks"]["Stop"].append(foreign)
     settings_path.write_text(json.dumps(settings))
-    _set_mode(target, "yolo", capsys)
+    _set_mode(target, "off", capsys)
     stop = _settings_events(target)["Stop"]
     assert foreign in stop and len(stop) == 2
-    _set_mode(target, "engineer", capsys)
+    _set_mode(target, "strict", capsys)
     stop = _settings_events(target)["Stop"]
     assert foreign in stop and len(stop) == 2
 
 
 def test_yolo_install_missing_stop_is_reported_and_healed(tmp_path: Path, capsys) -> None:
     target = _wired(tmp_path)
-    _set_mode(target, "yolo", capsys)
+    _set_mode(target, "off", capsys)
     # An install written by a build that dropped Stop in yolo mode is incomplete.
     settings_path = target / ".claude" / "settings.json"
     settings = json.loads(settings_path.read_text())
@@ -177,14 +178,14 @@ def test_yolo_install_missing_stop_is_reported_and_healed(tmp_path: Path, capsys
     settings_path.write_text(json.dumps(settings))
     status = install_cmd.status_payload(target)
     assert status["current"] is False and "Stop" in status["missing_events"]
-    _set_mode(target, "yolo", capsys)
+    _set_mode(target, "off", capsys)
     assert "Stop" in _settings_events(target)
     assert install_cmd.status_payload(target)["current"] is True
 
 
 def test_yolo_workspace_session_is_blocked_for_enforced_child_repo(tmp_path: Path, monkeypatch, capsys) -> None:
     workspace = _wired(tmp_path, name="workspace")
-    _set_mode(workspace, "yolo", capsys)
+    _set_mode(workspace, "off", capsys)
     child = workspace / "child"
     selection = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
     assert install_selection(child, selection) == 0
@@ -211,7 +212,7 @@ def test_yolo_workspace_session_is_blocked_for_enforced_child_repo(tmp_path: Pat
 
 def test_yolo_only_session_finishes_with_stop_installed(tmp_path: Path, monkeypatch, capsys) -> None:
     target = _wired(tmp_path)
-    _set_mode(target, "yolo", capsys)
+    _set_mode(target, "off", capsys)
     assert "Stop" in _settings_events(target)
     monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "work brief: test")
     monkeypatch.setattr(runtime, "_run_recall", lambda *_args, **_kwargs: "")
@@ -225,11 +226,11 @@ def test_init_yolo_installs_every_managed_event(tmp_path: Path, capsys) -> None:
     rc = cli.main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "claude", "--yolo"])
     assert rc == 0
     capsys.readouterr()
-    assert work_mode.resolve_mode(target) == "yolo"
+    assert work_mode.resolve_mode(target) == "off"
     assert set(install_cmd.MANAGED_EVENTS) <= set(_settings_events(target))
     # Re-running init without --yolo keeps the recorded mode.
     assert cli.main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "claude"]) == 0
-    assert work_mode.resolve_mode(target) == "yolo"
+    assert work_mode.resolve_mode(target) == "off"
 
 
 def test_init_engineer_switches_a_yolo_install_back(tmp_path: Path, capsys) -> None:
@@ -238,9 +239,9 @@ def test_init_engineer_switches_a_yolo_install_back(tmp_path: Path, capsys) -> N
     assert cli.main([*base, "--yolo"]) == 0
     assert cli.main([*base, "--engineer"]) == 0
     capsys.readouterr()
-    assert work_mode.resolve_mode(target) == "engineer"
-    # The default is never written, so the config carries no work.mode at all.
-    assert "work" not in json.loads((target / config.CONFIG_REL_PATH).read_text(encoding="utf-8"))
+    assert work_mode.resolve_mode(target) == "strict"
+    # The default is explicitly stored.
+    assert json.loads((target / config.CONFIG_REL_PATH).read_text(encoding="utf-8"))["work"] == {"mode": "strict"}
     with pytest.raises(SystemExit):
         cli.main([*base, "--yolo", "--engineer"])
 
@@ -252,13 +253,13 @@ def test_legacy_enforced_name_reads_and_sets_as_engineer(tmp_path: Path, capsys)
     data["work"] = {"mode": "enforced"}
     path.write_text(json.dumps(data), encoding="utf-8")
     loaded = config.load_config(target)
-    assert loaded is not None and loaded.work_mode == "engineer"
-    assert work_mode.resolve_mode(target) == "engineer"
+    assert loaded is not None and loaded.work_mode == "strict"
+    assert work_mode.resolve_mode(target) == "strict"
     assert not any(row[1] == "work.mode" for row in work_mode.doctor_checks(target))
-    _set_mode(target, "yolo", capsys)
+    _set_mode(target, "off", capsys)
     _set_mode(target, "enforced", capsys)
-    assert work_mode.resolve_mode(target) == "engineer"
-    assert "work" not in json.loads(path.read_text(encoding="utf-8"))
+    assert work_mode.resolve_mode(target) == "strict"
+    assert json.loads(path.read_text(encoding="utf-8"))["work"] == {"mode": "strict"}
     denied = runtime.handle_payload("PreToolUse", _bash(target, "PreToolUse", "python -m pytest -q"))
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
 
@@ -269,7 +270,7 @@ def test_mode_set_rejects_unknown_mode_without_naming_the_alias(tmp_path: Path, 
     before = path.read_text(encoding="utf-8")
     assert cli.main(["work", "mode", "set", "enforce", "--target", str(target)]) == 2
     err = capsys.readouterr().err
-    assert "mode must be one of: engineer, yolo" in err
+    assert "mode must be one of: strict, observe, off" in err
     assert "enforced" not in err
     assert path.read_text(encoding="utf-8") == before
 
@@ -278,14 +279,14 @@ def test_yolo_brief_drops_verification_wording(tmp_path: Path, capsys) -> None:
     target = _wired(tmp_path)
     assert cli.main(["work", "brief", "--target", str(target)]) == 0
     assert "Verify captured through Brigade" in capsys.readouterr().out
-    _set_mode(target, "yolo", capsys)
+    _set_mode(target, "off", capsys)
     assert cli.main(["work", "brief", "--target", str(target)]) == 0
     text = capsys.readouterr().out
     assert "Verify captured" not in text and "Outcome recorded" not in text
-    assert "work_mode: yolo" in text and "Memory Handoff" in text
+    assert "work_mode: off" in text and "Memory Handoff" in text
     assert cli.main(["work", "brief", "--target", str(target), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["work_mode"] == {"mode": "yolo", "rails": "on"}
+    assert payload["work_mode"] == {"mode": "off", "rails": "on"}
     assert not any("Verify" in item for item in payload["session_close"]["items"])
 
 
@@ -307,7 +308,8 @@ def _unreceipted_session(repo: Path, session_id: str = "yolo-session") -> None:
     )
 
 
-def test_adoption_reports_yolo_and_never_bypassed(tmp_path: Path, capsys) -> None:
+@pytest.mark.parametrize("mode", ["observe", "off"])
+def test_adoption_reports_unenforced_modes_and_never_bypassed(tmp_path: Path, capsys, mode) -> None:
     workspace = tmp_path / "workspace"
     repo = _wired(workspace / "repos", name="claude")
     (workspace / ".brigade").mkdir(parents=True)
@@ -319,32 +321,32 @@ def test_adoption_reports_yolo_and_never_bypassed(tmp_path: Path, capsys) -> Non
     assert payload is not None and payload["rows"][0]["state"] == "bypassed"
     assert classify.classify(repo)["state"] == "dormant"
 
-    _set_mode(repo, "yolo", capsys)
+    _set_mode(repo, mode, capsys)
     payload, _ = adoption.adoption_payload(target=workspace, harnesses=["claude"])
     assert payload is not None
     row = payload["rows"][0]
-    assert row["state"] == "yolo" and row["work"] == {"mode": "yolo", "rails": "on"}
+    assert row["state"] == mode and row["work"] == {"mode": mode, "rails": "on"}
     assert row["use"]["bypassed_session_count"] == 0
-    assert [item["status"] for item in row["use"]["sessions"]] == ["yolo"]
+    assert [item["status"] for item in row["use"]["sessions"]] == [mode]
     assert payload["denominators"]["bypassed_sessions"] == 0
     assert payload["monitor"]["alerts"] == []
-    assert classify.classify(repo)["state"] == "yolo"
+    assert classify.classify(repo)["state"] == mode
 
 
 def test_doctor_and_status_show_mode_and_rails(tmp_path: Path, capsys) -> None:
     target = _wired(tmp_path)
-    _set_mode(target, "yolo", capsys)
+    _set_mode(target, "off", capsys)
     before = (target / config.CONFIG_REL_PATH).read_text(encoding="utf-8")
     assert cli.main(["work", "rails", "off", "--target", str(target)]) == 0
     capsys.readouterr()
     assert (target / config.CONFIG_REL_PATH).read_text(encoding="utf-8") == before
     checks = {name: (status, detail) for status, name, detail in work_mode.doctor_checks(target)}
-    assert checks["work mode"][0] == "INFO" and checks["work mode"][1].startswith("yolo")
+    assert checks["work mode"][0] == "INFO" and checks["work mode"][1].startswith("off")
     assert checks["safety rails"][0] == "WARN" and "secrets" in checks["safety rails"][1]
     assert cli.main(["status", "--target", str(target)]) == 0
-    assert "work mode: yolo; safety rails: off" in capsys.readouterr().out
+    assert "work mode: off; safety rails: off" in capsys.readouterr().out
     cli.main(["status", "--target", str(target), "--json"])
-    assert json.loads(capsys.readouterr().out)["work"] == {"mode": "yolo", "rails": "off"}
+    assert json.loads(capsys.readouterr().out)["work"] == {"mode": "off", "rails": "off"}
 
 
 def test_rails_are_independent_of_mode_and_warn_once(tmp_path: Path, capsys) -> None:
@@ -355,10 +357,10 @@ def test_rails_are_independent_of_mode_and_warn_once(tmp_path: Path, capsys) -> 
     assert "secrets, credentials, private hosts, or private paths" in first
     assert cli.main(["work", "rails", "off", "--target", str(target)]) == 0
     assert "secrets" not in capsys.readouterr().err
-    assert work_mode.resolve_mode(target) == "engineer"
+    assert work_mode.resolve_mode(target) == "strict"
     assert cli.main(["work", "rails", "check", "--target", str(target)]) == work_mode.RAILS_OFF_EXIT
-    _set_mode(target, "yolo", capsys)
-    assert work_mode.summary(target) == {"mode": "yolo", "rails": "off"}
+    _set_mode(target, "off", capsys)
+    assert work_mode.summary(target) == {"mode": "off", "rails": "off"}
     assert cli.main(["work", "rails", "on", "--target", str(target)]) == 0
     assert cli.main(["work", "rails", "check", "--target", str(target)]) == 0
 
@@ -424,8 +426,8 @@ def test_invalid_work_mode_keeps_enforcement_in_hooks(tmp_path: Path) -> None:
     data.setdefault("work", {})["mode"] = "typo"
     path.write_text(json.dumps(data), encoding="utf-8")
     loaded = config.load_config(target)
-    assert loaded is not None and loaded.work_mode == "engineer"
-    assert work_mode.resolve_mode(target) == "engineer"
+    assert loaded is not None and loaded.work_mode == "strict"
+    assert work_mode.resolve_mode(target) == "strict"
     assert any(row[0] == "WARN" and row[1] == "work.mode" for row in work_mode.doctor_checks(target))
 
 
@@ -437,7 +439,7 @@ def test_yolo_sessions_are_never_bypassed_even_with_stale_wiring(tmp_path: Path,
         '[[repo]]\nid = "claude"\nlabel = "claude repo"\npath = "repos/claude"\nenabled = true\nexpect_brigade = true\n'
     )
     _unreceipted_session(repo)
-    _set_mode(repo, "yolo", capsys)
+    _set_mode(repo, "off", capsys)
     settings_path = repo / ".claude" / "settings.json"
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     for groups in settings.get("hooks", {}).values():
@@ -537,7 +539,7 @@ def test_pre_push_honors_rails_switch_with_planted_secret(tmp_path: Path, monkey
 
 def test_session_integrity_scan_runs_in_yolo_mode(tmp_path: Path, monkeypatch, capsys) -> None:
     target = _wired(tmp_path)
-    _set_mode(target, "yolo", capsys)
+    _set_mode(target, "off", capsys)
 
     def refuse(_target: Path) -> bool:
         raise classify.SessionIntegrityError("planted")
@@ -553,7 +555,7 @@ def test_init_yolo_prints_yolo_agent_workflow(tmp_path: Path, capsys) -> None:
     args = ["init", "--target", str(target), "--depth", "repo", "--harnesses", "claude"]
     assert cli.main([*args, "--yolo"]) == 0
     yolo_out = capsys.readouterr().out
-    assert "yolo work mode" in yolo_out
+    assert "off work mode" in yolo_out
     assert "THROUGH brigade" not in yolo_out and "outcome capture" not in yolo_out
     other = tmp_path / "enforced"
     assert cli.main(["init", "--target", str(other), "--depth", "repo", "--harnesses", "claude"]) == 0
@@ -564,10 +566,10 @@ def test_unsupported_config_version_cannot_turn_rails_off(tmp_path: Path) -> Non
     target = _wired(tmp_path)
     path = target / config.CONFIG_REL_PATH
     data = json.loads(path.read_text(encoding="utf-8"))
-    data.update({"version": 99, "work": {"mode": "yolo", "rails": "off"}})
+    data.update({"version": 99, "work": {"mode": "off", "rails": "off"}})
     path.write_text(json.dumps(data), encoding="utf-8")
     assert work_mode.rails_enabled(target) is True
-    assert work_mode.resolve_mode(target) == "engineer"
+    assert work_mode.resolve_mode(target) == "strict"
 
 
 def test_config_write_failure_is_reported_and_keeps_old_config(tmp_path: Path, monkeypatch) -> None:
@@ -579,7 +581,7 @@ def test_config_write_failure_is_reported_and_keeps_old_config(tmp_path: Path, m
         raise OSError("disk full")
 
     monkeypatch.setattr(config.os, "replace", boom)
-    error = work_mode.set_mode(target, "yolo")
+    error = work_mode.set_mode(target, "off")
     assert error is not None and "disk full" in error
     assert path.read_text(encoding="utf-8") == before
     assert sorted(item.name for item in path.parent.iterdir() if item.name.endswith(".tmp")) == []
@@ -588,7 +590,7 @@ def test_config_write_failure_is_reported_and_keeps_old_config(tmp_path: Path, m
 def test_mode_set_warns_when_managed_hooks_lack_sidecar(tmp_path: Path, capsys) -> None:
     target = _wired(tmp_path)
     (target / install_cmd.SIDECAR_REL_PATH).unlink()
-    assert cli.main(["work", "mode", "set", "yolo", "--target", str(target)]) == 0
+    assert cli.main(["work", "mode", "set", "off", "--target", str(target)]) == 0
     assert "managed Claude hooks exist without" in capsys.readouterr().err
 
 
@@ -823,3 +825,218 @@ def test_rails_off_for_a_subdirectory_warns_about_the_hook_root(tmp_path: Path, 
     assert cli.main(["work", "rails", "off", "--target", str(sub)]) == 0
     assert "the pre-push hook checks the repository root" in capsys.readouterr().err
     assert work_mode.rails_enabled(repo) is True
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("strict", "strict"),
+        ("observe", "observe"),
+        ("off", "off"),
+        ("engineer", "strict"),
+        ("enforced", "strict"),
+        ("yolo", "off"),
+    ],
+)
+def test_mode_aliases_resolve_to_canonical(tmp_path, value, expected):
+    target = _wired(tmp_path)
+    path = config.config_path(target)
+    data = json.loads(path.read_text())
+    data["work"] = {"mode": value}
+    path.write_text(json.dumps(data))
+    assert work_mode.resolve_mode(target) == expected
+    assert config.load_config(target).work_mode == expected
+
+
+def _drop_mode_key(target):
+    path = config.config_path(target)
+    data = json.loads(path.read_text())
+    data.pop("work", None)
+    path.write_text(json.dumps(data))
+
+
+def test_pin_writes_current_mode_once_and_skips_tracked_or_unreadable_config(tmp_path):
+    target = _wired(tmp_path)
+    _drop_mode_key(target)
+    assert work_mode.pin_explicit_mode(target) == "strict"
+    assert json.loads(config.config_path(target).read_text())["work"] == {"mode": "strict"}
+    assert work_mode.pin_explicit_mode(target) is None
+    _drop_mode_key(target)
+    subprocess.run(["git", "init", "-q", str(target)], check=True)
+    subprocess.run(["git", "-C", str(target), "add", "-f", ".brigade/config.json"], check=True)
+    before = config.config_path(target).read_bytes()
+    assert work_mode.pin_explicit_mode(target) is None
+    assert config.config_path(target).read_bytes() == before
+    assert ("INFO", "work.mode") in {(s, n) for s, n, _ in work_mode.doctor_checks(target)}
+
+
+@pytest.mark.parametrize(
+    "content", ["{", '{"version":99,"work":{"mode":"off"}}', '{"version":1,"work":{"mode":"chaos"}}']
+)
+def test_unreadable_config_resolves_to_strict(tmp_path, content):
+    target = _wired(tmp_path)
+    config.config_path(target).write_text(content)
+    assert work_mode.resolve_mode(target) == "strict"
+    assert work_mode.is_strict(target)
+    assert work_mode.pin_explicit_mode(target) is None
+    assert config.config_path(target).read_text() == content
+
+
+def test_brief_pins_an_unpinned_untracked_config(tmp_path, capsys):
+    target = _wired(tmp_path)
+    _drop_mode_key(target)
+    assert cli.main(["work", "brief", "--target", str(target), "--json"]) == 0
+    assert json.loads(config.config_path(target).read_text())["work"] == {"mode": "strict"}
+
+
+@pytest.mark.parametrize("mode", ["strict", "observe", "off", "engineer", "enforced", "yolo"])
+def test_every_mode_leaves_rails_record_untouched(tmp_path, monkeypatch, capsys, mode):
+    record = tmp_path / "user-config" / "work-rails.json"
+    monkeypatch.setattr(work_mode, "rails_record_path", lambda: record)
+    target = _wired(tmp_path)
+    guard = target / ".brigade" / "guard-policy.json"
+    guard.write_text("{}")
+    assert work_mode.set_rails(target, "off") is None
+    before = record.read_bytes()
+    _set_mode(target, mode, capsys)
+    assert record.read_bytes() == before
+    assert guard.read_text() == "{}"
+    assert not work_mode.rails_enabled(target)
+
+
+@pytest.mark.parametrize(
+    ("flag", "stored"),
+    [("--strict", "strict"), ("--engineer", "strict"), ("--observe", "observe"), ("--off", "off"), ("--yolo", "off")],
+)
+def test_init_mode_flags_write_canonical_mode(tmp_path, capsys, flag, stored):
+    target = tmp_path / "fresh"
+    assert cli.main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "claude", flag]) == 0
+    out = capsys.readouterr().out
+    assert json.loads(config.config_path(target).read_text())["work"] == {"mode": stored}
+    if stored == "observe":
+        assert "Agent: observe work mode" in out and "brigade work mode set strict" in out
+
+
+def test_observe_brief_requires_explicit_recording(tmp_path, capsys):
+    target = _wired(tmp_path)
+    _set_mode(target, "observe", capsys)
+    assert (
+        "INFO",
+        "work mode",
+        "observe: checks are not enforced. Recording requires `brigade work verify run`",
+    ) in work_mode.doctor_checks(target)
+    assert cli.main(["work", "brief", "--target", str(target)]) == 0
+    assert (
+        "work_mode: observe (checks are not enforced. Recording requires `brigade work verify run`"
+        in capsys.readouterr().out
+    )
+
+
+@pytest.mark.parametrize("mode", ["strict", "engineer", "enforced"])
+def test_strict_behavior_unchanged_under_each_alias(tmp_path, monkeypatch, capsys, mode):
+    target = _wired(tmp_path)
+    _set_mode(target, mode, capsys)
+    monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "work brief")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *args, **kwargs: "")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart"))
+    denied = runtime.handle_payload("PreToolUse", _bash(target, "PreToolUse", "python -m pytest -q"))
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    runtime.handle_payload("PostToolUse", _write(target))
+    assert runtime.handle_payload("Stop", _payload(target, "Stop", stop_hook_active=False))["decision"] == "block"
+
+
+def test_outcome_loop_findings_run_only_in_strict(tmp_path, monkeypatch, capsys):
+    from brigade import doctor
+
+    calls = []
+    monkeypatch.setattr("brigade.outcome_cmd.health", lambda target: calls.append(target) or {"issues": []})
+    for mode in ("observe", "off", "strict"):
+        target = _wired(tmp_path, name=mode)
+        _set_mode(target, mode, capsys)
+        doctor._check_outcome_loop(doctor.build_context(target))
+    assert [path.name for path in calls] == ["strict"]
+
+
+def test_pin_never_migrates_legacy_config(tmp_path):
+    target = _wired(tmp_path)
+    _drop_mode_key(target)
+    canonical = config.config_path(target)
+    legacy = target / config.LEGACY_WORKSPACE_DIRNAMES[0] / "config.json"
+    legacy.parent.mkdir(exist_ok=True)
+    canonical.rename(legacy)
+    before = legacy.read_bytes()
+    assert work_mode.pin_explicit_mode(target) is None
+    assert legacy.read_bytes() == before
+    assert not canonical.exists()
+    assert any("unpinned" in detail for _, name, detail in work_mode.doctor_checks(target) if name == "work.mode")
+
+
+@pytest.mark.parametrize("with_work", [False, True])
+def test_pin_preserves_unknown_keys_and_original_bytes(tmp_path, with_work):
+    target = _wired(tmp_path)
+    path = config.config_path(target)
+    original = '{"version":1,"unknown":{"z":1e2,"a":"\\u0061"}'
+    if with_work:
+        original += ',"work":{"rails":"off","unknown":[3,2,1]}'
+    original += "}\n"
+    path.write_text(original)
+    path.chmod(0o644)
+    assert work_mode.pin_explicit_mode(target) == "strict"
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o644
+    updated = path.read_text()
+    insertion = ',"mode": "strict"' if with_work else ',"work": {"mode": "strict"}'
+    assert updated.replace(insertion, "", 1) == original
+    assert json.loads(updated)["unknown"] == json.loads(original)["unknown"]
+    if with_work:
+        assert json.loads(updated)["work"]["rails"] == "off"
+
+
+@pytest.mark.parametrize("content", ["{", '{"version":99}', '{"version":1,"work":{},"work":{}}'])
+def test_pin_parse_or_unsafe_edit_writes_nothing(tmp_path, content):
+    target = _wired(tmp_path)
+    path = config.config_path(target)
+    path.write_text(content)
+    assert work_mode.pin_explicit_mode(target) is None
+    assert path.read_text() == content
+
+
+@pytest.mark.parametrize("content", ["{", '{"version":99}', "[]", "\udcff"])
+def test_doctor_unreadable_config_has_no_pin_hint(tmp_path, content):
+    target = _wired(tmp_path)
+    config.config_path(target).write_bytes(content.encode("utf-8", errors="surrogateescape"))
+    rows = [detail for _, name, detail in work_mode.doctor_checks(target) if name == "work.mode"]
+    assert len(rows) == 1 and "cannot be read" in rows[0]
+    assert "mode set" not in rows[0]
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_brief_reports_pin_write_failure(tmp_path, monkeypatch, capsys, json_output):
+    target = _wired(tmp_path)
+    _drop_mode_key(target)
+    before = config.config_path(target).read_bytes()
+
+    def fail(*args, **kwargs):
+        raise OSError("write denied")
+
+    monkeypatch.setattr(localio, "write_text_atomic", fail)
+    capsys.readouterr()
+    args = ["work", "brief", "--target", str(target)] + (["--json"] if json_output else [])
+    assert cli.main(args) == 0
+    output = capsys.readouterr().out
+    if json_output:
+        assert json.loads(output)["work_mode"]["pin_error"] == "unable to pin work.mode: write denied"
+    else:
+        assert "work_mode_pin: unable to pin work.mode: write denied" in output
+    assert config.config_path(target).read_bytes() == before
+
+
+@pytest.mark.parametrize("mode", [None, "", "unexpected", 42, [], {}])
+def test_invalid_mode_readers_fail_safe(tmp_path, mode):
+    target = _wired(tmp_path)
+    path = config.config_path(target)
+    data = json.loads(path.read_text())
+    data["work"] = {"mode": mode}
+    path.write_text(json.dumps(data))
+    assert work_mode.resolve_mode(target) == "strict"
+    assert config.load_config(target).work_mode == "strict"

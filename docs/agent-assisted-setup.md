@@ -119,21 +119,23 @@ brigade work hooks install --scope user
 
 Session start then injects the work brief. An unwired repo prints the exact `brigade init` command for the agent to run. The home directory is never a work target. Pin with `--target <wired-workspace>` when the session cwd is not the workspace you want. Uninstall with `brigade work hooks uninstall --scope user`. Only Brigade-owned hook entries are touched.
 
-## Engineer mode, yolo mode and safety rails
+## Strict, observe and off modes and safety rails
 
-Brigade's default is `engineer` mode, with verification on. Hooks route tests, linters, and builds through `brigade work verify run`, and the Stop gate asks for a verification receipt before a session that wrote code can finish. Yolo mode keeps the shared context and drops that enforcement:
+Brigade's default remains `strict`. Hooks route checks through `brigade work verify run`, and the Stop gate asks for a receipt after code changes. `observe` and `off` allow direct checks and session completion without a receipt. Observe does not record raw checks. Recording requires `brigade work verify run`.
 
 ```bash
-brigade init --target . --depth repo --harnesses claude --yolo
-brigade work mode set yolo --target .       # switch an existing repo or workspace
-brigade work mode set engineer --target .   # switch back (or: brigade init ... --engineer)
+brigade init --target . --depth repo --harnesses claude --observe
+brigade work mode set off --target .
+brigade work mode set strict --target .
 ```
 
-Yolo keeps the work brief, memory recall at session start and on prompts, memory search, Fleet Hub messages, and handoffs when you ask for one. Agents run checks raw and finish without a receipt or a handoff. `brigade work verify run` still works by hand. Both modes install the same Claude hook events. The hooks skip verification checks only for targets set to yolo, so a session started in a yolo workspace is still held to the receipt gate for an engineer-mode child repository it writes into. `brigade status`, `brigade doctor`, and `brigade repos adoption` report the mode, and adoption shows a yolo repo as `yolo`, never `bypassed`.
+`--strict` accepts `--engineer` as an alias. `--off` accepts `--yolo`. Config values and `mode set` accept `engineer` and `enforced` as `strict`, and `yolo` as `off`. Writers store only `strict`, `observe` or `off` in `work.mode` in `.brigade/config.json`, including the default. Init without a flag preserves the recorded mode.
 
-Without receipts you give up evidence. Nothing records which checks ran, on which tree, or with what exit code. Outcomes are not captured, so skill and card scores stop moving. Adoption and doctor no longer flag a session that edited code and never ran a test, which leaves a skipped check invisible.
+An absent, unreadable or invalid mode still resolves to `strict`. The work brief pins a readable keyless config only when git does not track it. Doctor reports an unpinned config. use `brigade work mode set strict` to pin a tracked one explicitly. Older binaries treat all three canonical names as unknown, fall back to engineer enforcement and warn in doctor. An `off` config shared with an older binary therefore enforces verification there.
 
-Safety rails are a separate switch, on by default in both modes. They are the content guard, secret and credential scanning, and the pre-push publication checks:
+All modes keep the brief, recall, memory search, Fleet Hub messages and handoffs on request. All install the same Claude hook events. Each target governs its checks: a strict child repository still requires receipts when reached from an observe or off workspace. Adoption reports `observe` and `off` by name and never counts their sessions as bypassed. `brigade work verify run` remains available in every mode.
+
+Safety rails are a separate switch, on by default in every mode. They are the content guard, secret and credential scanning, and the pre-push publication checks:
 
 ```bash
 brigade work rails off --target .   # prints what stops being checked

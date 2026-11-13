@@ -21,7 +21,7 @@ def _reconcile_claude_hooks(target: Path) -> str | None:
     """Re-merge an existing project-scope Claude install after a mode switch.
 
     Every mode carries the same events; this heals installs written by builds that
-    dropped ``Stop`` and ``PostToolUseFailure`` in yolo mode.
+    dropped ``Stop`` and ``PostToolUseFailure`` in the off mode, then named yolo.
     """
     from .claude_hooks import install_cmd
 
