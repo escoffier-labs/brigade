@@ -6,7 +6,7 @@ import json
 import sys
 import tomllib
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -61,7 +61,10 @@ def run(
             from .memory_inbox_drain import drain
 
             payload["stages"][stage] = drain(
-                target, today=today or date.today(), deadline_days=tend.deadline_days, dry_run=dry_run
+                target,
+                today=today or datetime.now(timezone.utc).date(),
+                deadline_days=tend.deadline_days,
+                dry_run=dry_run,
             )
         else:
             payload["stages"][stage] = memory_care_retire.apply(
@@ -88,11 +91,25 @@ def undo(target: Path, decision_id: str) -> journal.Decision:
     )
 
 
+def inbox_summary(payload: dict[str, Any]) -> None:
+    inbox = payload.get("stages", {}).get("inbox", {})
+    if inbox and any(inbox.get(key) for key in ("error", "skipped", "held", "kept_for_person", "waiting")):
+        keys = ("resolved", "retried", "expired", "waiting", "held", "kept_for_person", "skipped")
+        counts = " ".join(f"{key}={inbox.get(key, 0)}" for key in keys)
+        reason = (
+            ("symlink-refused" if "symlink" in str(inbox.get("error", "")) else "setup-error")
+            if inbox.get("error")
+            else "hold-or-skip"
+        )
+        print(f"memory inbox: {reason} {counts}", file=sys.stderr)
+
+
 def after_command(target: Path, *, stages: Sequence[str] | None = None) -> None:
     try:
-        run(target, stages=stages)
+        payload = run(target, stages=stages)
+        inbox_summary(payload)
     except (ValueError, OSError, journal.kernel.ProjectionError) as exc:
-        print(f"memory care tend: {exc}", file=sys.stderr)
+        print(f"memory inbox: setup-error skipped=0 held=0 reason={type(exc).__name__}", file=sys.stderr)
 
 
 @journal.serialized
@@ -149,6 +166,7 @@ def dispatch(args: Any) -> int:
             payload = archive_manifest(args.target, args.from_file, limit=args.limit)
         else:
             payload = run(args.target, stages=args.stage, dry_run=args.dry_run)
+        inbox_summary(payload)
         print(json.dumps(payload, sort_keys=True) if args.json else json.dumps(payload, indent=2))
         return 1 if payload.get("failed") else 0
     except (ValueError, OSError, journal.kernel.ProjectionError) as exc:

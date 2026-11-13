@@ -333,7 +333,7 @@ Memory care archives eligible cards automatically and records every change with 
 
 ## Tending
 
-`brigade memory care tend` runs hub retries, retirement and the review-inbox drain. Use `--stage hub`, `--stage retire` or `--stage inbox` to select a stage, `--dry-run` to preview without writing, and `--json` for structured output. Successful CLI scans run tend afterwards. `memory care scan --no-tend` skips it once. Library scans remain read-only.
+`brigade memory care tend` runs hub retries, retirement and the review-inbox drain. Use `--stage hub`, `--stage retire` or `--stage inbox` to select a stage, `--dry-run` to preview without writing, and `--json` for structured output. CLI scans do not run automatic care or recover pending decisions. Use explicit `memory care tend` for those operations. `memory care scan --no-tend` remains accepted as a deprecated no-op. Library scans remain read-only.
 
 Workspace `.brigade/memory-care.toml` accepts:
 
@@ -356,45 +356,55 @@ To apply an external judgment, use `brigade memory care archive --from-file deci
 
 ### Review inbox
 
-Successful non-dry-run CLI ingest drains the review inbox. `ingest --no-tend`
-skips this once. `[tend] enabled = false` disables automatic care for the
-workspace. Library ingest keeps its existing behavior.
+Successful non-dry-run CLI ingest drains the review inbox. `ingest --no-tend` skips this
+once. `[tend] enabled = false` disables automatic care for the workspace. Ingest now
+takes the care lock and finishes or abandons pending care decisions. Library ingest
+keeps its existing behavior.
 
 | Disposition | Reason codes | Action |
 |---|---|---|
-| Resolve | `document-content-present`, `document-anchor-present`, `near-match-proposal` | Record already-applied or evidence-logged and move to `memory/handoff-inbox/resolved/` |
-| Retry | `expected-sha-stale`, `expected-sha-mismatch`, `card-publication-changed`, `card-publication-busy`, `document-destination-unwritable` | Recheck with card promotion and document routing enabled, once per run |
+| Resolve | `document-content-present`, `document-anchor-present` | Record already-applied and move to `memory/handoff-inbox/resolved/` |
+| Retry | `expected-sha-stale`, `expected-sha-mismatch`, `card-publication-changed`, `card-publication-busy`, `document-destination-unwritable` | Recheck with the original promotion and routing flags, once per run |
 | Retain | Injection, content-scan, contradiction, identity migration, collisions and unsafe destinations | Record a trust or security hold and leave the draft untouched |
-| Expire | Other reason codes, including proposal notifications | Wait until `routed-at` plus `deadline_days`, then archive under `resolved/expired/` |
+| Hold | Proposal notifications, near matches, invalid or missing fields, unapplied knowledge and unknown codes | Leave untouched with a separate hold count and reason |
+| Expire | No current ingest codes qualify | The deadline mechanism remains available for future codes that prove knowledge is represented elsewhere or carry nothing durable |
 
-An unsuccessful retry expires at the same deadline unless its new disposition
-is a trust or security hold. Every inspected draft gets a reason in the
-body-free report at `.brigade/memory-care/inbox/latest.json`. Reading that
-report is optional. Invalid UTF-8, oversized files, unsafe paths, tracked review drafts and drafts
-without an unambiguous routing timestamp are skipped and reported. Malformed
-writer folders are inspected only within the target. Quarantine is never read.
-External writer roots are reported and skipped because the local journal cannot
-undo writes outside its target.
+An unsuccessful retry stays held when it contains unapplied knowledge. A later pull
+request in this plan will add background model judgment for held drafts. Every inspected
+draft gets a reason in the body-free report at `.brigade/memory-care/inbox/latest.json`.
+Reading that report is optional. Oversized destinations stay held. Invalid UTF-8,
+oversized drafts, unsafe paths, tracked review drafts and drafts without an unambiguous
+routing timestamp are skipped and reported. Malformed writer folders are inspected only
+within the target. Quarantine is never read. External writer roots are reported and
+skipped because the local journal cannot undo writes outside its target.
 
-A draft cited by the evidence log stays at its original path. A journaled row
-in `.brigade/memory-care/inbox-ledger.jsonl` removes it from pending work. If the
-evidence log cannot be read completely, drafts are retained in place and resolved
-through the ledger. Undo restores the draft's pending state and any changed card
-or document, provided none of the affected paths has changed since the decision.
-Undo decisions sharing the ledger in reverse order.
+A draft cited by the evidence log stays at its original path. A journaled row in
+`.brigade/memory-care/inbox-ledger.jsonl` removes it from pending work. If the evidence
+log cannot be read completely, evidence-dependent resolutions are held. Undo restores
+the draft's pending state and any changed card or document. Card replacements require
+unchanged destination bytes. Appended blocks require an unchanged exact match. Machine
+logs stay append-only: undo appends a digest-addressed retraction, and readers omit
+withdrawn rows regardless of row order. Document undo matches its exact block under the
+same short lock used by Brigade document appenders, preserving later blocks. External
+editors do not take this lock, so their concurrent edits cannot be coordinated. A
+document-lock timeout leaves retries waiting. Plain ingest routes its original bytes
+into the review inbox.
 
 Retries prepare the journal and save before-images before writing a destination.
-Recovery uses the same prepare-then-finish protocol as card archives. Reprocessing
-keeps ingest's destination, identity, expected-SHA, injection and budget checks,
-and also honors memory-care read-only paths and archive pins. This drain changes
-local files only. Hub handoff rows remain outside this stage, and an unavailable
-hub cannot cause a hub-side inbox change.
+Recovery uses the same prepare-then-finish protocol as card archives. Evidence, document
+and ledger bytes append after finish, with their path, length and digest recorded in the
+decision. Recovery recognizes a published block to avoid duplicate appends. Reprocessing
+keeps ingest's destination, identity, expected-SHA, injection and budget checks, and
+also honors memory-care read-only paths and archive pins. This drain changes local files
+only. Hub handoff rows remain outside this stage, and an unavailable hub cannot cause a
+hub-side inbox change.
 
-The drain also sweeps redundant before-images of abandoned decisions. A sweep
-requires an exact surviving copy at a recorded path, retains unique or unreadable
-images and restorable decisions, and journals the removal so undo remains
-available. Orphan directories without readable decision metadata stay in place
-and are reported.
+The drain also sweeps redundant before-images of abandoned decisions. A sweep requires
+an exact surviving copy at a recorded path, retains unique or unreadable images and
+restorable decisions, and records each removed path, size, digest and surviving live
+copy without saving another copy. These redundant images are not recoverable through
+undo. Orphan directories without readable decision metadata stay in place and are
+reported.
 
 
 ## Session-start and prompt recall (#466 Slice 1, #2196)

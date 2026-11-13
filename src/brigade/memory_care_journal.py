@@ -246,18 +246,49 @@ def entries(target: Path, *, since: datetime | None = None) -> list[Decision]:
 
 
 def revert(target: Path, decision_id: str, *, reason: str) -> Decision:
+    from contextlib import nullcontext
+    from .ingest import _document_lock
+
+    documents = any(item["writer"] == "document" for item in _payload(target, decision_id).get("appends", []))
+    with _document_lock(target) if documents else nullcontext():
+        return _revert_locked(target, decision_id, reason=reason)
+
+
+def _revert_locked(target: Path, decision_id: str, *, reason: str) -> Decision:
     d = load(target, decision_id)
     if d.kind == "undo":
         raise JournalConflict("cannot undo an undo decision")
     if d.undone_by:
         raise JournalConflict("decision already undone")
-    changes = []
+    from .memory_inbox_append import undo_changes, retractions
+
+    append_payload = _payload(target, decision_id)
+    changes = undo_changes(target, append_payload)
+    document_undo = bool(changes)
     for path in d.paths:
         live = current(target, path)
         if (None if live is None else kernel.content_digest(live)) != d.after_sha256[path]:
+            if d.kind == "inbox" and path.startswith("memory/cards/"):
+                raise JournalConflict(
+                    "card-changed-by-later-decision: card changed by a later decision. Undo the later decision first."
+                )
             raise JournalConflict(f"{path} changed after decision")
         changes.append(Change(path, live, before_bytes(target, d, path)))
-    undo = commit(target, kind="undo", reason=reason, card_id=d.card_id, changes=changes, undoes=d.decision_id)
+    if not append_payload.get("appends"):
+        undo = commit(target, kind="undo", reason=reason, card_id=d.card_id, changes=changes, undoes=d.decision_id)
+        mark_undone(target, d.decision_id, undo.decision_id)
+        return undo
+    undo = commit_phased(
+        target,
+        kind="undo",
+        reason=reason,
+        card_id=d.card_id,
+        changes=changes,
+        undoes=d.decision_id,
+        prepared_paths=[],
+        hub={},
+        metadata={"appends": retractions(append_payload), "document_undo": document_undo},
+    )
     mark_undone(target, d.decision_id, undo.decision_id)
     return undo
 
@@ -469,6 +500,11 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
         changes = rebased
     prepared = set(p["prepared_paths"])
     drift = [c.path for c in changes if current(target, c.path) != (c.after if c.path in prepared else c.before)]
+    drift.extend(
+        path
+        for path, digest in p.get("append_guards", {}).items()
+        if kernel.content_digest(current(target, path)) != digest
+    )
     protected = any(read_only_pattern(c.path, config.read_only_paths) for c in changes)
     if drift or protected:
         # Discard only our unchanged safety copy. Never overwrite an edited card or archive.
@@ -503,11 +539,39 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
     rel = f"{JOURNAL_REL}/{decision_id}/decision.json"
     pending.append(Change(rel, current(target, rel), _json_bytes(final)))
     _execute_phase(target, decision_id, "finish", pending)
+    from .memory_inbox_append import publish
+
+    publish(target, decision_id)
     return load(target, decision_id)
 
 
 @serialized
 def resolve_prepared(target: Path) -> list[dict[str, Any]]:
+    from contextlib import nullcontext
+    from .ingest import _document_lock
+
+    needs_lock = False
+    for op in kernel.unfinished_operations(target):
+        match = re.fullmatch(r"care-([0-9]{8}T[0-9]{6}Z-undo-[0-9a-f]{8})-(prepare|finish|repair)", op.operation_id)
+        if match:
+            try:
+                needs_lock = needs_lock or bool(_payload(target, match[1]).get("document_undo"))
+            except JournalConflict:
+                # An unreadable unfinished undo may contain a document mutation.
+                needs_lock = True
+    root = target / JOURNAL_REL
+    if root.exists() and not needs_lock:
+        for directory in root.iterdir():
+            if (directory / "decision.json").exists():
+                p = _payload(target, directory.name)
+                if p.get("document_undo") and p.get("phase") == "prepared":
+                    needs_lock = True
+                    break
+    with _document_lock(target) if needs_lock else nullcontext():
+        return _resolve_prepared_locked(target)
+
+
+def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
     """Recover our interrupted kernel plans before interpreting decision phases."""
     resolved = []
     for operation in kernel.unfinished_operations(target):
@@ -579,6 +643,10 @@ def resolve_prepared(target: Path) -> list[dict[str, Any]]:
             p = _payload(target, directory.name)
             if p.get("phase") == "abandoned" and p.get("repair_indexes"):
                 _repair_indexes(target, directory.name)
+            if p.get("phase") in ("committed", "undone"):
+                from .memory_inbox_append import publish
+
+                publish(target, directory.name)
             if p.get("phase") == "prepared":
                 finish_prepared(target, directory.name)
                 final = _payload(target, directory.name)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -12,9 +12,17 @@ from .memory_inbox_io import read
 
 
 @journal.serialized
-def reprocess(owner: Path, draft: Path, *, card_ids: ingest.CardIdIndex | None = None) -> ingest.Action:
+def reprocess(
+    owner: Path,
+    draft: Path,
+    *,
+    card_ids: ingest.CardIdIndex | None = None,
+    today: date | None = None,
+    dry_run: bool = False,
+) -> ingest.Action:
     from .inbox_lock import held_file_lock
-    from .memory_inbox_drain import disposition_changes, classify, parse_header
+    from .memory_inbox_drain import disposition_changes, disposition_metadata, classify, parse_header, retry_flags
+    from .memory_inbox_append import plan_append
     from .memory_evidence_log import LOG_PATH, append_evidence, read_evidence
 
     draft = draft.absolute()
@@ -26,22 +34,42 @@ def reprocess(owner: Path, draft: Path, *, card_ids: ingest.CardIdIndex | None =
         raise ValueError("review draft missing")
     text = data.decode("utf-8")
     code, routed = parse_header(text)
-    if not code or routed is None or classify(code, text) == "human":
+    if not code or routed is None or classify(code, text) in ("human", "hold"):
         return ingest.Action("inboxed", "unsafe-review-draft")
+    flags = retry_flags(code, text)
+    if flags is None:
+        return ingest.Action("inboxed", "retry-flags-unknown")
     evidence, warnings, unsupported = read_evidence(owner)
-    cited = bool(warnings or (unsupported and read(owner, LOG_PATH, limit=4 * 1024 * 1024) is not None)) or any(
-        row["evidence_id"] in (rel, str(draft)) for row in evidence
-    )
+    if warnings:
+        return ingest.Action("inboxed", "evidence-unavailable")
+    cited = bool(unsupported) or any(row["evidence_id"] in (rel, str(draft)) for row in evidence)
     sections = ingest.parse(draft, data)
     lock = journal.safe_path(owner, ".brigade/memory/proposals/proposal.lock")
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    with held_file_lock(lock, deadline_seconds=1):
-        outcome = ingest.decide(sections, target=owner, promote_cards=True, route_documents=True, card_ids=card_ids)
+    from contextlib import nullcontext, ExitStack
+
+    if not dry_run:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+    with ExitStack() as stack, nullcontext() if dry_run else held_file_lock(lock, deadline_seconds=1):
+        outcome = ingest.decide(
+            sections, target=owner, promote_cards=flags[0], route_documents=flags[1], card_ids=card_ids
+        )
+        if unsupported and outcome.kind == "reinforced":
+            return ingest.Action("inboxed", "evidence-unavailable")
         if outcome.kind not in ("promoted", "reinforced", "routed") or outcome.dest is None:
             return ingest.Action("inboxed", outcome.code)
+        if outcome.kind == "routed" and not dry_run:
+            from .inbox_lock import InboxLockTimeout
+
+            try:
+                stack.enter_context(ingest._document_lock(owner))
+            except InboxLockTimeout:
+                return ingest.Action("inboxed", "document-publication-busy")
         dest = outcome.dest
         dest_rel = dest.relative_to(owner).as_posix()
-        before = read(owner, dest_rel)
+        try:
+            before = read(owner, dest_rel)
+        except ValueError:
+            return ingest.Action("inboxed", "destination-unreadable-or-oversized")
         if before is not None:
             refusal = memory_archive.frontmatter_refusal(before.decode("utf-8"))
             if refusal:
@@ -51,9 +79,14 @@ def reprocess(owner: Path, draft: Path, *, card_ids: ingest.CardIdIndex | None =
             raise journal.ReadOnlyPath(dest_rel)
         changes = disposition_changes(owner, rel, data, f"retry:{outcome.code}", cited=cited, expired=False)
         evidence_rel = rel if cited else changes[0].path
-        extra_changes = []
+        metadata = disposition_metadata(rel, f"retry:{outcome.code}", cited=cited)
+        appends = metadata.setdefault("appends", [])
         if outcome.kind == "promoted":
-            expected = sections.get(ingest.EXPECTED_SHA_SECTION.lower(), "").strip().lower()
+            expected = (
+                sections.get(ingest.EXPECTED_SHA_SECTION.lower(), "").strip().lower()
+                if sections.get("recommended memory action", "").strip().lower() == "update-card"
+                else ""
+            )
             text = ingest._publish_promoted_card(dest, owner, sections, dry_run=True, expected_sha=expected)
             after = text.encode("utf-8")
         elif outcome.kind == "reinforced":
@@ -64,7 +97,9 @@ def reprocess(owner: Path, draft: Path, *, card_ids: ingest.CardIdIndex | None =
                 copy = Path(staging) / dest_rel
                 copy.parent.mkdir(parents=True, exist_ok=True)
                 copy.write_bytes(before)
-                ingest.reinforce_existing_card(copy, today=date.today(), evidence_pointer=evidence_rel)
+                ingest.reinforce_existing_card(
+                    copy, today=today or datetime.now(timezone.utc).date(), evidence_pointer=evidence_rel
+                )
                 after = copy.read_bytes()
                 if not unsupported and outcome.match is not None:
                     append_evidence(
@@ -73,14 +108,23 @@ def reprocess(owner: Path, draft: Path, *, card_ids: ingest.CardIdIndex | None =
                         evidence_id=evidence_rel,
                         kind="reinforced",
                         similarity=outcome.match.similarity,
+                        ts=datetime.combine(
+                            today or datetime.now(timezone.utc).date(), datetime.now(timezone.utc).time(), timezone.utc
+                        ).isoformat(),
                     )
-                    log_before = read(owner, LOG_PATH, limit=4 * 1024 * 1024)
                     row = (Path(staging) / LOG_PATH).read_bytes()
-                    extra_changes.append(journal.Change(LOG_PATH, log_before, (log_before or b"") + row))
+                    appends.append(plan_append(LOG_PATH, row, "evidence"))
         else:
-            after = (before or b"") + ("\n\n" + sections["suggested document content"].strip() + "\n").encode()
-        changes.extend(extra_changes)
-        changes.insert(0, journal.Change(dest_rel, before, after))
+            block = ("\n\n" + sections["suggested document content"].strip() + "\n").encode()
+            appends.append(plan_append(dest_rel, block, "document"))
+            after = before or b""
+        if outcome.kind != "routed":
+            changes.insert(0, journal.Change(dest_rel, before, after))
+        else:
+            # Guard the observed destination until finish without replacing it.
+            metadata["append_guards"] = {dest_rel: journal.kernel.content_digest(before)}
+        if dry_run:
+            return ingest.Action(outcome.kind, outcome.code, dest_rel)
         if ingest._is_tracked(draft, ingest._git_tracked_files(draft.parent)):
             raise ingest.TrackedHandoffError("tracked review draft")
         decision = journal.commit_phased(
@@ -89,11 +133,12 @@ def reprocess(owner: Path, draft: Path, *, card_ids: ingest.CardIdIndex | None =
             reason=f"retry:{outcome.code}",
             card_id=None,
             changes=changes,
-            prepared_paths=[] if cited else [changes[1].path],
+            prepared_paths=[] if cited else [next(c.path for c in changes if c.before is None)],
             hub={},
+            metadata=metadata,
         )
         if journal._payload(owner, decision.decision_id).get("phase") != "committed":
             raise journal.JournalConflict("retry abandoned")
         if outcome.kind in ("promoted", "reinforced") and card_ids is not None:
             card_ids.register(dest_rel, after.decode("utf-8"))
-        return ingest.Action(outcome.kind, decision.decision_id)
+        return ingest.Action(outcome.kind, decision.decision_id, dest_rel)

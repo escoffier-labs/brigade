@@ -34,7 +34,6 @@ HUMAN_CODES = frozenset(
 RESOLVE_CODES = {
     "document-content-present": "already-applied",
     "document-anchor-present": "already-applied",
-    "near-match-proposal": "evidence-logged",
 }
 RETRY_CODES = frozenset(
     {
@@ -47,10 +46,47 @@ RETRY_CODES = frozenset(
 )
 
 
+HOLD_CODES = frozenset(
+    {
+        "proposal-notification",
+        "near-match-proposal",
+        "card-frontmatter-invalid",
+        "card-fence-error",
+        "unknown-sections",
+        "expected-sha-invalid",
+        "missing-action",
+        "bootstrap-budget-exceeded",
+        "document-has-headings",
+        "missing-target-document",
+        "empty-document-content",
+        "action-not-auto-handled",
+        "card-promoted",
+        "card-reinforced",
+        "document-appended",
+    }
+)
+EXPIRE_CODES: frozenset[str] = frozenset()  # No ingest code proves that unapplied knowledge is disposable.
+
+
+def retry_flags(code: str, text: str) -> tuple[bool, bool] | None:
+    header = text.replace("\r\n", "\n").split("-->", 1)[0].rstrip() + " -->"
+    match = re.search(r"^     retry-flags: promote=(true|false) route=(true|false) -->$", header, re.M)
+    if match:
+        return match[1] == "true", match[2] == "true"
+    if "retry-flags:" in header:
+        return None
+    if code in RETRY_CODES - {"document-destination-unwritable"}:
+        return True, False
+    if code == "document-destination-unwritable":
+        return False, True
+    return None
+
+
 def parse_header(text: str) -> tuple[str | None, datetime | None]:
     text = text.replace("\r\n", "\n")
     match = re.match(
-        r"\A<!-- routed from [^\n]*\n\s+reason: ([a-z0-9-]+)[^\n]*\n\s+routed-at: ([0-9]{8}T[0-9]{6}Z) -->\n", text
+        r"\A<!-- routed from [^\n]*\n\s+reason: ([a-z0-9-]+)[^\n]*\n\s+routed-at: ([0-9]{8}T[0-9]{6}Z)(?: -->|\n     retry-flags: [^\n]* -->)\n",
+        text,
     )
     if not match:
         return None, None
@@ -60,7 +96,7 @@ def parse_header(text: str) -> tuple[str | None, datetime | None]:
         return None, None
 
 
-def classify(code: str | None, text: str) -> str:
+def classify(code: str | None, text: str, table: dict[str, str] | None = None) -> str:
     if (
         code in HUMAN_CODES
         or memory_content_scan.scan_verdict([text])[0] != "clean"
@@ -69,20 +105,23 @@ def classify(code: str | None, text: str) -> str:
         return "human"
     if code in RESOLVE_CODES:
         return "resolve"
-    return "retry" if code in RETRY_CODES else "expire"
+    if code in RETRY_CODES:
+        return "retry"
+    return (table or {}).get(code or "", "expire" if code in EXPIRE_CODES else "hold")
 
 
 def _ledger(target: Path) -> set[str]:
-    data = read(target, LEDGER_REL, limit=4 * 1024 * 1024)
-    if data is None:
-        return set()
-    result = set()
-    for line in data.splitlines():
+    from .memory_inbox_io import rows
+
+    from .memory_log_retractions import active, retraction
+
+    parsed = []
+    for line in rows(target, LEDGER_REL):
         row = json.loads(line)
-        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+        if not retraction(row) and (not isinstance(row, dict) or not isinstance(row.get("path"), str)):
             raise ValueError("malformed inbox ledger")
-        result.add(row["path"])
-    return result
+        parsed.append((row, line))
+    return {row["path"] for row in active(parsed)}
 
 
 def pending(target: Path) -> list[Path]:
@@ -107,10 +146,19 @@ def disposition_changes(
     target: Path, rel: str, data: bytes, reason: str, *, cited: bool, expired: bool
 ) -> list[journal.Change]:
     if cited:
-        before = read(target, LEDGER_REL, limit=4 * 1024 * 1024)
-        row = json.dumps({"path": rel, "reason": reason}, sort_keys=True).encode() + b"\n"
-        return [journal.Change(rel, data, data), journal.Change(LEDGER_REL, before, (before or b"") + row)]
+        return [journal.Change(rel, data, data)]
     return move_changes(target, rel, data, RESOLVED_REL + ("/expired" if expired else ""))
+
+
+def disposition_metadata(rel: str, reason: str, *, cited: bool) -> dict[str, Any]:
+    from .memory_inbox_append import plan_append
+
+    if not cited:
+        return {}
+    import uuid
+
+    row = json.dumps({"path": rel, "reason": reason, "id": uuid.uuid4().hex}, sort_keys=True).encode() + b"\n"
+    return {"appends": [plan_append(LEDGER_REL, row, "ledger")]}
 
 
 def _record(target: Path, rel: str, data: bytes, reason: str, *, cited: bool, expired: bool) -> journal.Decision:
@@ -126,6 +174,7 @@ def _record(target: Path, rel: str, data: bytes, reason: str, *, cited: bool, ex
         changes=changes,
         prepared_paths=[] if cited else [changes[0].path],
         hub={},
+        metadata=disposition_metadata(rel, reason, cited=cited),
     )
 
     if journal._payload(target, decision.decision_id).get("phase") != "committed":
@@ -134,12 +183,19 @@ def _record(target: Path, rel: str, data: bytes, reason: str, *, cited: bool, ex
 
 
 @journal.serialized
-def drain(target: Path, *, today: date, deadline_days: int, dry_run: bool = False) -> dict[str, Any]:
+def drain(
+    target: Path,
+    *,
+    today: date,
+    deadline_days: int,
+    dry_run: bool = False,
+    classifications: dict[str, str] | None = None,
+) -> dict[str, Any]:
     from .memory_inbox_sweep import sweep
 
     target = target.resolve()
     result: dict[str, Any] = dict(
-        resolved=0, retried=0, expired=0, kept_for_person=0, waiting=0, skipped=0, decisions=[]
+        resolved=0, retried=0, expired=0, kept_for_person=0, held=0, waiting=0, skipped=0, decisions=[]
     )
     if deadline_days < 1:
         raise ValueError("deadline_days must be positive")
@@ -159,9 +215,7 @@ def drain(target: Path, *, today: date, deadline_days: int, dry_run: bool = Fals
         paths = [path for path in paths if path.relative_to(target).as_posix() not in handled]
         evidence, warnings, unsupported = memory_evidence_log.read_evidence(target)
         # A truncated or unsupported evidence scan cannot prove a path is unreferenced.
-        preserve_all = bool(
-            warnings or (unsupported and read(target, memory_evidence_log.LOG_PATH, limit=4 * 1024 * 1024) is not None)
-        )
+        preserve_all = bool(warnings or unsupported)
         cited = {row["evidence_id"] for row in evidence}
     except (ValueError, OSError) as exc:
         result["error"] = str(exc)
@@ -178,39 +232,48 @@ def drain(target: Path, *, today: date, deadline_days: int, dry_run: bool = Fals
             code, routed = parse_header(text)
             if not code or routed is None:
                 raise ValueError("missing or malformed routing header")
-            disposition = classify(code, text)
+            disposition = classify(code, text, classifications)
             expired = (today - routed.date()).days >= deadline_days
             keep = preserve_all or rel in cited or str(path) in cited
             decision = None
             if disposition == "human":
                 result["kept_for_person"] += 1
                 reason = f"trust-or-security:{code}"
+            elif disposition == "hold" or (preserve_all and disposition == "resolve"):
+                result["held"] += 1
+                reason = f"hold:{code}" if disposition == "hold" else "hold:evidence-unavailable"
             elif disposition == "retry":
-                if not dry_run:
-                    action = ingest.reprocess_review_draft(target, path, card_ids=card_ids)
-                else:
-                    action = ingest.Action("inboxed", "dry-run retry")
+                from .memory_inbox_retry import reprocess
+
+                action = reprocess(target, path, card_ids=card_ids, today=today, dry_run=dry_run)
                 if action.kind in ("promoted", "reinforced", "routed"):
                     result["retried"] += 1
-                    reason = "retry-applied"
+                    reason = f"retry-applied:{action.destination}"
                     decision = action.summary
+                elif action.summary == "document-publication-busy":
+                    result["waiting"] += 1
+                    reason = "retry-waiting:document-publication-busy"
                 else:
                     # Re-evaluate safety after retry; new unsafe findings never expire.
-                    sections = ingest.parse(path, data)
-                    outcome = ingest.decide(
-                        sections, target=target, promote_cards=True, route_documents=True, card_ids=card_ids
-                    )
-                    if classify(outcome.code, text) == "human":
-                        result["kept_for_person"] += 1
-                        reason = f"trust-or-security:{outcome.code}"
-                    elif expired:
+                    if classify(action.summary, text) in ("human", "hold"):
+                        key = "kept_for_person" if classify(action.summary, text) == "human" else "held"
+                        result[key] += 1
+                        reason = (
+                            f"trust-or-security:{action.summary}"
+                            if key == "kept_for_person"
+                            else f"hold:{action.summary}"
+                        )
+                    elif expired and classify(action.summary, text, classifications) == "expire":
                         reason = "retry-deadline-expired"
                         if not dry_run:
                             decision = _record(target, rel, data, reason, cited=keep, expired=True).decision_id
                         result["expired"] += 1
+                    elif classify(action.summary, text, classifications) == "retry":
+                        result["held"] += 1
+                        reason = f"hold:{action.summary}"
                     else:
                         result["waiting"] += 1
-                        reason = f"retry-unresolved:{outcome.code}"
+                        reason = f"retry-unresolved:{action.summary}"
             elif disposition == "resolve" or expired:
                 key = "resolved" if disposition == "resolve" else "expired"
                 reason = RESOLVE_CODES[code] if key == "resolved" else "deadline-expired"

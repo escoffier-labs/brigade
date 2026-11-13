@@ -25,7 +25,7 @@ def draft(target, code="document-content-present", body="A useful fact.", age=20
         target / drain.INBOX_REL,
         source.parent / "processed",
         False,
-        snapshot=body.encode(),
+        snapshot=source.read_bytes(),
     )
     result = sorted((target / drain.INBOX_REL).glob("*.md"))[-1]
     text = result.read_text()
@@ -67,15 +67,30 @@ def test_harmless_code_with_injection_stays(tmp_path):
 
 def test_deadline_dry_run_and_relative_target(tmp_path, monkeypatch):
     target = tmp_path / "ws"
-    path = draft(target, "missing-action", age=13)
+    path = draft(target, "synthetic-expirable", age=13)
     monkeypatch.chdir(tmp_path)
-    assert drain.drain(Path("ws"), today=TODAY, deadline_days=14)["waiting"] == 1
+    assert (
+        drain.drain(Path("ws"), today=TODAY, deadline_days=14, classifications={"synthetic-expirable": "expire"})[
+            "waiting"
+        ]
+        == 1
+    )
     from datetime import timedelta
 
     later = TODAY + timedelta(days=2)
-    assert drain.drain(Path("ws"), today=later, deadline_days=14, dry_run=True)["expired"] == 1
+    assert (
+        drain.drain(
+            Path("ws"), today=later, deadline_days=14, dry_run=True, classifications={"synthetic-expirable": "expire"}
+        )["expired"]
+        == 1
+    )
     assert path.exists()
-    assert drain.drain(Path("ws"), today=later, deadline_days=14)["expired"] == 1
+    assert (
+        drain.drain(Path("ws"), today=later, deadline_days=14, classifications={"synthetic-expirable": "expire"})[
+            "expired"
+        ]
+        == 1
+    )
     assert not path.exists()
 
 
@@ -168,7 +183,7 @@ def test_sweep_preserves_only_copy(tmp_path):
 def test_cited_draft_stays_and_undo_restores_pending(tmp_path, monkeypatch):
     from brigade import memory_evidence_log
 
-    path = draft(tmp_path, "near-match-proposal")
+    path = draft(tmp_path, "document-content-present")
     card = tmp_path / "memory/cards/existing.md"
     card.parent.mkdir(parents=True)
     card.write_text("---\ntopic: existing\n---\nExisting fact.\n")
@@ -224,7 +239,7 @@ def test_retry_card_retains_identity_and_undo(tmp_path):
 
 
 def test_malformed_writer_folder_and_quarantine(tmp_path):
-    path = draft(tmp_path, "missing-action")
+    path = draft(tmp_path, "synthetic-expirable")
     malformed = tmp_path / ".claude/memory-handoffs/malformed"
     malformed.mkdir()
     moved = malformed / path.name
@@ -233,7 +248,7 @@ def test_malformed_writer_folder_and_quarantine(tmp_path):
     quarantine.mkdir()
     secret = quarantine / "untouched.md"
     secret.write_bytes(b"\xff")
-    result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    result = drain.drain(tmp_path, today=TODAY, deadline_days=14, classifications={"synthetic-expirable": "expire"})
     assert result["expired"] == 1
     assert not moved.exists()
     assert secret.read_bytes() == b"\xff"
@@ -379,15 +394,15 @@ def test_retry_reinforces_with_real_evidence_and_undo(tmp_path):
     assert not memory_evidence_log.read_evidence(tmp_path)[0]
 
 
-def test_unsupported_evidence_reader_without_log_still_moves(tmp_path, monkeypatch):
+def test_unsupported_evidence_reader_without_log_holds(tmp_path, monkeypatch):
     from brigade import memory_evidence_log
 
     monkeypatch.setattr(memory_evidence_log, "read_evidence", lambda _: ([], 0, True))
     path = draft(tmp_path)
     result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
-    assert result["resolved"] == 1
-    assert not path.exists()
-    assert (tmp_path / drain.RESOLVED_REL / path.name).exists()
+    assert result["held"] == 1
+    assert path.exists()
+    assert not (tmp_path / drain.RESOLVED_REL / path.name).exists()
 
 
 def test_resolution_drift_is_skipped_not_reported_as_resolved(tmp_path, monkeypatch):
@@ -421,12 +436,12 @@ def test_content_scan_private_text_never_retries(tmp_path, monkeypatch):
     assert path.exists()
 
 
-@pytest.mark.parametrize("age,expected", [(13, "waiting"), (15, "expired")])
+@pytest.mark.parametrize("age,expected", [(13, "held"), (15, "held")])
 def test_unsuccessful_retry_deadline(tmp_path, age, expected):
     path = draft(tmp_path, "expected-sha-mismatch", "## Recommended memory action\nno-card\n", age=age)
     result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
     assert result[expected] == 1
-    assert path.exists() == (expected == "waiting")
+    assert path.exists()
 
 
 def test_retry_new_security_disposition_stays_past_deadline(tmp_path):
@@ -480,3 +495,546 @@ def test_sweep_retention_records_reason(tmp_path):
     assert result["retentions"] == [
         {"decision_id": decision.decision_id, "reason": "unique or unreadable before-image"}
     ]
+
+
+@pytest.mark.parametrize("code", ["proposal-notification", "near-match-proposal", "future-outcome"])
+def test_review_required_and_unknown_codes_hold(tmp_path, code):
+    path = draft(tmp_path, code)
+    result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    assert result["held"] == 1
+    assert result["kept_for_person"] == 0
+    assert path.exists() and path in drain.pending(tmp_path)
+    assert result["decisions"][0]["reason"] == f"hold:{code}"
+
+
+def test_all_ingest_codes_are_explicitly_classified():
+    import ast
+
+    source = Path(ingest.__file__)
+    tree = ast.parse(source.read_text())
+    helpers = set()
+    for statement in tree.body:
+        if isinstance(statement, ast.ImportFrom) and statement.level == 1:
+            names = [statement.module] if statement.module else [alias.name for alias in statement.names]
+            helpers.update(source.parent / (name.replace(".", "/") + ".py") for name in names)
+    trees = [tree, *(ast.parse(helper.read_text()) for helper in sorted(helpers) if helper.is_file())]
+    codes = set()
+    for node in (node for parsed in trees for node in ast.walk(parsed)):
+        if isinstance(node, ast.keyword) and node.arg == "code":
+            codes.update(
+                n.value for n in ast.walk(node.value) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            )
+        if isinstance(node, ast.Assign) and any(isinstance(n, ast.Name) and n.id == "code" for n in node.targets):
+            codes.update(
+                n.value for n in ast.walk(node.value) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            )
+    groups = [
+        set(drain.HUMAN_CODES),
+        set(drain.HOLD_CODES),
+        set(drain.RESOLVE_CODES),
+        set(drain.RETRY_CODES),
+        set(drain.EXPIRE_CODES),
+    ]
+    assert codes <= set.union(*groups), codes - set.union(*groups)
+    assert sum(map(len, groups)) == len(set.union(*groups))
+
+
+@pytest.mark.parametrize("newline", ["crlf", "text"])
+def test_retry_preserves_binary_draft_snapshot(tmp_path, newline):
+    body = "## Recommended memory action\nno-card\n## Target document\nUSER.md\n## Suggested document content\nPrefer brief updates.\n"
+    path = draft(tmp_path, "document-destination-unwritable", body)
+    text = path.read_text()
+    if newline == "crlf":
+        path.write_bytes(text.replace("\n", "\r\n").encode())
+    else:
+        path.write_text(text, encoding="utf-8")
+    original = path.read_bytes()
+    result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    assert result["retried"] == 1, result
+    tend.undo(tmp_path, journal.entries(tmp_path)[0].decision_id)
+    assert path.read_bytes() == original
+
+
+def test_preview_successful_retry_matches_real(tmp_path):
+    body = "## Recommended memory action\nno-card\n## Target document\nUSER.md\n## Suggested document content\nPrefer brief updates.\n"
+    draft(tmp_path, "document-destination-unwritable", body)
+    preview = drain.drain(tmp_path, today=TODAY, deadline_days=14, dry_run=True)
+    assert not (tmp_path / "USER.md").exists()
+    real = drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    for key in ("retried", "expired", "waiting", "held", "kept_for_person", "resolved", "skipped"):
+        assert preview[key] == real[key]
+    assert [d["reason"] for d in preview["decisions"]] == [d["reason"] for d in real["decisions"]]
+
+
+def test_first_cited_disposition_undo_after_later(tmp_path, monkeypatch):
+    from brigade import memory_evidence_log
+
+    paths = [draft(tmp_path, number=n) for n in range(3)]
+    monkeypatch.setattr(
+        memory_evidence_log,
+        "read_evidence",
+        lambda _: ([{"evidence_id": p.relative_to(tmp_path).as_posix()} for p in paths], 0, False),
+    )
+    assert drain.drain(tmp_path, today=TODAY, deadline_days=14)["resolved"] == 3
+    decisions = journal.entries(tmp_path)
+    first = next(d for d in decisions if paths[0].relative_to(tmp_path).as_posix() in d.paths)
+    tend.undo(tmp_path, first.decision_id)
+    assert len(drain.pending(tmp_path)) == 1
+
+
+def test_document_append_descriptor_survives_retry(tmp_path):
+    import os
+
+    dest = tmp_path / "USER.md"
+    dest.write_bytes(b"Existing preferences.\n")
+    body = "## Recommended memory action\nno-card\n## Target document\nUSER.md\n## Suggested document content\nPrefer brief updates.\n"
+    draft(tmp_path, "document-destination-unwritable", body)
+    fd = os.open(dest, os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0))
+    try:
+        assert drain.drain(tmp_path, today=TODAY, deadline_days=14)["retried"] == 1
+        os.write(fd, b"Later writer row.\n")
+    finally:
+        os.close(fd)
+    assert b"Later writer row." in dest.read_bytes()
+    tend.undo(tmp_path, journal.entries(tmp_path)[0].decision_id)
+    assert dest.read_bytes() == b"Existing preferences.\nLater writer row.\n"
+
+
+def test_ledger_stream_exceeds_old_blob_limit(tmp_path):
+    ledger = tmp_path / drain.LEDGER_REL
+    ledger.parent.mkdir(parents=True)
+    ledger.write_bytes(b'{"path":"already-handled-draft.md"}\n' * 140000)
+    draft(tmp_path)
+    assert drain.drain(tmp_path, today=TODAY, deadline_days=14)["resolved"] == 1
+
+
+def test_scan_excludes_inbox(tmp_path, monkeypatch):
+    from brigade.cli import main
+
+    calls = []
+    monkeypatch.setattr(tend, "after_command", lambda target, **kw: calls.append(kw))
+    main(["memory", "care", "scan", "--target", str(tmp_path)])
+    assert calls == []
+
+
+def test_sweep_does_not_save_another_copy(tmp_path):
+    from brigade.memory_inbox_sweep import sweep
+
+    card = tmp_path / "memory/cards/a.md"
+    card.parent.mkdir(parents=True)
+    card.write_bytes(b"unique redundant bytes")
+    d = journal.commit_phased(
+        tmp_path,
+        kind="fix",
+        reason="fixture",
+        card_id=None,
+        changes=[journal.Change("memory/cards/a.md", card.read_bytes(), b"new")],
+        prepared_paths=[],
+        hub={},
+    )
+    journal.annotate(tmp_path, d.decision_id, phase="abandoned", status="abandoned")
+    card.write_bytes(b"unique redundant bytes")
+    assert sweep(tmp_path)["swept"] == 1
+    assert not list((tmp_path / journal.JOURNAL_REL).glob("*/before/*.bin"))
+
+
+def test_hold_summary_is_visible_without_body_or_paths(tmp_path, capsys):
+    draft(tmp_path, "proposal-notification", body="Confidential draft sentence.")
+    tend.after_command(tmp_path, stages=("inbox",))
+    err = capsys.readouterr().err
+    assert "held=1" in err and "hold" in err
+    assert "Confidential" not in err and str(tmp_path) not in err
+
+
+def test_flags_cannot_expand_on_retry(tmp_path):
+    body = "## Recommended memory action\nno-card\n## Target document\nUSER.md\n## Suggested document content\nPrefer brief updates.\n"
+    path = draft(tmp_path, "expected-sha-mismatch", body)
+    result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    assert not (tmp_path / "USER.md").exists()
+    assert result["expired"] == 0 and path.exists()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("log", ["evidence", "ledger"])
+def test_machine_log_retractions_are_order_independent(tmp_path, reverse, log):
+    import json
+    import os
+    from brigade import memory_evidence_log
+    from brigade.memory_log_retractions import withdrawn
+    from brigade.memory_inbox_io import append
+
+    if log == "evidence":
+        if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+            pytest.skip("evidence producer requires POSIX directory descriptors")
+        rel = memory_evidence_log.LOG_PATH
+        row = dict(
+            ts="2026-11-13T00:00:00+00:00",
+            card_id="legacy:a",
+            card_path="memory/cards/a.md",
+            evidence_id="first",
+            kind="reinforced",
+            similarity=1.0,
+        )
+        later = {**row, "evidence_id": "later"}
+    else:
+        rel = drain.LEDGER_REL
+        row = {"path": "first", "reason": "already-applied"}
+        later = {"path": "later", "reason": "already-applied"}
+    data = (json.dumps(row, sort_keys=True) + "\n").encode()
+    other = (json.dumps(later, sort_keys=True) + "\n").encode()
+    blocks = [data, withdrawn(data)]
+    if reverse:
+        blocks.reverse()
+    for block in [*blocks, withdrawn(b"unknown row\n"), other]:
+        if log == "evidence":
+            memory_evidence_log.append_log_row(tmp_path, block)
+        else:
+            append(tmp_path, rel, block)
+    if log == "evidence":
+        rows, warnings, unsupported = memory_evidence_log.read_evidence(tmp_path)
+        assert not warnings and not unsupported
+        assert [r["evidence_id"] for r in rows] == ["later"]
+    else:
+        assert drain._ledger(tmp_path) == {"later"}
+    assert (tmp_path / rel).read_bytes() == b"".join([*blocks, withdrawn(b"unknown row\n"), other])
+
+
+def test_evidence_append_descriptor_survives_reinforcement(tmp_path):
+    import os
+    from brigade import memory_evidence_log
+
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("evidence producer requires POSIX directory descriptors")
+    content = "---\ntopic: formatting\n---\nPrefer concise status updates for routine changes.\n"
+    card = tmp_path / "memory/cards/original.md"
+    card.parent.mkdir(parents=True)
+    ingest._publish_promoted_card(card, tmp_path, {"suggested card content": content}, dry_run=False)
+    memory_evidence_log.append_evidence(
+        tmp_path, card_path=card, evidence_id="earlier", kind="reinforced", similarity=1
+    )
+    log = tmp_path / memory_evidence_log.LOG_PATH
+    row = log.read_bytes().replace(b'"earlier"', b'"later"')
+    body = (
+        "## Recommended memory action\ncreate-card\n## Target card\nduplicate.md\n## Suggested card content\n" + content
+    )
+    draft(tmp_path, "card-publication-changed", body)
+    fd = os.open(log, os.O_WRONLY | os.O_APPEND)
+    try:
+        assert drain.drain(tmp_path, today=TODAY, deadline_days=14)["retried"] == 1
+        os.write(fd, row)
+    finally:
+        os.close(fd)
+    assert row in log.read_bytes()
+    before_undo = log.read_bytes()
+    tend.undo(tmp_path, journal.entries(tmp_path)[0].decision_id)
+    assert log.read_bytes().startswith(before_undo)
+    assert {r["evidence_id"] for r in memory_evidence_log.read_evidence(tmp_path)[0]} == {"earlier", "later"}
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "document-content-present",
+        "proposal-notification",
+        "near-match-proposal",
+        "future-outcome",
+        "contradiction-candidate",
+        "expected-sha-mismatch",
+    ],
+)
+def test_preview_dispositions_match_real(tmp_path, code):
+    draft(tmp_path, code)
+    preview = drain.drain(tmp_path, today=TODAY, deadline_days=14, dry_run=True)
+    real = drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    for key in ("retried", "expired", "waiting", "held", "kept_for_person", "resolved", "skipped"):
+        assert preview[key] == real[key]
+    assert [d["reason"] for d in preview["decisions"]] == [d["reason"] for d in real["decisions"]]
+
+
+def test_original_flags_are_written_in_header(tmp_path):
+    source = tmp_path / ".claude/memory-handoffs/2026-11-13-flags.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("## Recommended memory action\nno-card\n", encoding="utf-8")
+    stats = ingest.IngestStats()
+    ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, promote_cards=False, route_documents=True)
+    path = next((tmp_path / drain.INBOX_REL).glob("*.md"))
+    code, stamp = drain.parse_header(path.read_text())
+    assert code and stamp
+    assert drain.retry_flags(code, path.read_text()) == (False, True)
+
+
+def test_document_lock_timeout_preserves_plain_and_retry_drafts(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from brigade.inbox_lock import InboxLockTimeout
+
+    @contextmanager
+    def busy(_):
+        raise InboxLockTimeout("fixture lock busy")
+        yield
+
+    body = "## Recommended memory action\nno-card\n## Target document\nUSER.md\n## Suggested document content\nPrefer brief updates.\n"
+    path = draft(tmp_path, "document-destination-unwritable", body)
+    monkeypatch.setattr(ingest, "_document_lock", busy)
+    result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    assert result["waiting"] == 1 and path.exists()
+    source = tmp_path / ".claude/memory-handoffs/2026-11-13-lock.md"
+    source.write_text(body, encoding="utf-8")
+    stats = ingest.IngestStats()
+    ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, route_documents=True)
+    assert stats.inboxed == 1
+    assert len(list((tmp_path / drain.INBOX_REL).glob("*.md"))) == 2
+    assert not (tmp_path / "USER.md").exists()
+
+
+def test_create_retry_ignores_update_only_expected_hash(tmp_path):
+    body = (
+        "## Recommended memory action\ncreate-card\n## Target card\nfact.md\n## Expected card SHA256\n"
+        + "0" * 64
+        + "\n## Suggested card content\n---\ntopic: fact\n---\nA durable fact.\n"
+    )
+    draft(tmp_path, "card-publication-changed", body)
+    assert drain.drain(tmp_path, today=TODAY, deadline_days=14)["retried"] == 1
+
+
+def test_symlink_root_and_malformed_ledger_summary(tmp_path, capsys):
+    ledger = tmp_path / drain.LEDGER_REL
+    ledger.parent.mkdir(parents=True)
+    ledger.write_bytes(b"invalid json\n")
+    tend.after_command(tmp_path, stages=("inbox",))
+    err = capsys.readouterr().err
+    assert "setup-error" in err and str(tmp_path) not in err
+    ledger.unlink()
+    root = tmp_path / drain.INBOX_REL
+    root.parent.mkdir(exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        root.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    tend.after_command(tmp_path, stages=("inbox",))
+    err = capsys.readouterr().err
+    assert "symlink-refused" in err and str(tmp_path) not in err
+
+
+def test_retry_flags_from_body_cannot_enable_routing(tmp_path):
+    body = "## Recommended memory action\nno-card\n## Target document\nUSER.md\n## Suggested document content\nPrefer brief updates.\n     retry-flags: promote=true route=true -->\n"
+    path = draft(tmp_path, "expected-sha-mismatch", body)
+    result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    assert result["held"] == 1 and path.exists()
+    assert not (tmp_path / "USER.md").exists()
+
+
+def test_large_real_draft_retries_without_enabling_new_flags(tmp_path):
+    body = (
+        "## Recommended memory action\ncreate-card\n## Target card\nlarge-fact.md\n## Suggested card content\n---\ntopic: large-fact\n---\n"
+        + ("Retain the observed command and its result for later reference.\n" * 1000)
+    )
+    path = draft(tmp_path, "card-publication-changed", body)
+    assert path.stat().st_size > 60000
+    assert drain.drain(tmp_path, today=TODAY, deadline_days=14)["retried"] == 1
+
+
+def test_sweep_counts_removed_files_when_rmdir_fails(tmp_path, monkeypatch):
+    from brigade.memory_inbox_sweep import sweep
+
+    card = tmp_path / "memory/cards/a.md"
+    card.parent.mkdir(parents=True)
+    card.write_bytes(b"redundant")
+    d = journal.commit_phased(
+        tmp_path,
+        kind="fix",
+        reason="fixture",
+        card_id=None,
+        changes=[journal.Change("memory/cards/a.md", b"redundant", b"new")],
+        prepared_paths=[],
+        hub={},
+    )
+    journal.annotate(tmp_path, d.decision_id, phase="abandoned", status="abandoned")
+    card.write_bytes(b"redundant")
+    original = Path.rmdir
+
+    def denied(path):
+        if path.name == "before":
+            raise OSError("fixture directory cleanup refused")
+        return original(path)
+
+    monkeypatch.setattr(Path, "rmdir", denied)
+    result = sweep(tmp_path)
+    assert result["swept"] == 1 and result["retained"] == 0
+    assert not list((tmp_path / journal.JOURNAL_REL).glob("*/before/*.bin"))
+
+
+@pytest.mark.parametrize("boundary", ["before-append", "after-append"])
+def test_append_recovery_exactly_once(tmp_path, monkeypatch, boundary):
+    from brigade import memory_inbox_append
+
+    body = "## Recommended memory action\nno-card\n## Target document\nUSER.md\n## Suggested document content\nPrefer brief updates.\n"
+    draft(tmp_path, "document-destination-unwritable", body)
+    original = ingest._append_document_nofollow
+
+    class Crash(BaseException):
+        pass
+
+    def interrupted(*args, **kwargs):
+        if boundary == "before-append":
+            raise Crash()
+        original(*args, **kwargs)
+        raise Crash()
+
+    monkeypatch.setattr(ingest, "_append_document_nofollow", interrupted)
+    with pytest.raises(Crash):
+        drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    monkeypatch.setattr(ingest, "_append_document_nofollow", original)
+    journal.resolve_prepared(tmp_path)
+    journal.resolve_prepared(tmp_path)
+    assert (tmp_path / "USER.md").read_text().count("Prefer brief updates.") == 1
+    decision = journal.entries(tmp_path)[0]
+    payload = journal._payload(tmp_path, decision.decision_id)
+    assert payload["appends_complete"]
+    assert payload["appends"][0]["length"] > 0
+    assert memory_inbox_append.undo_changes(tmp_path, payload)
+
+
+def test_document_append_recovery_streams_large_destination(tmp_path):
+    dest = tmp_path / "rules/notes.md"
+    dest.parent.mkdir()
+    dest.write_bytes(b"Existing durable note.\n" * 7000)
+    body = (
+        "## Recommended memory action\nno-card\n## Target document\nrules/notes.md\n## Suggested document content\n"
+        + ("Preserve command receipts for future reference.\n" * 3000)
+    )
+    path = draft(tmp_path, "document-destination-unwritable", body)
+    result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    assert result["retried"] == 1, result
+    assert not path.exists()
+    journal.resolve_prepared(tmp_path)
+    assert dest.read_bytes().count(b"Preserve command receipts") == 3000
+
+
+def test_machine_log_undo_does_not_take_document_lock(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from brigade import memory_evidence_log
+
+    path = draft(tmp_path)
+    monkeypatch.setattr(
+        memory_evidence_log,
+        "read_evidence",
+        lambda _: ([{"evidence_id": path.relative_to(tmp_path).as_posix()}], 0, False),
+    )
+    assert drain.drain(tmp_path, today=TODAY, deadline_days=14)["resolved"] == 1
+    decision = journal.entries(tmp_path)[0]
+
+    @contextmanager
+    def forbidden(_):
+        raise AssertionError("machine-log undo must not need the document lock")
+        yield
+
+    monkeypatch.setattr(ingest, "_document_lock", forbidden)
+    tend.undo(tmp_path, decision.decision_id)
+    assert path in drain.pending(tmp_path)
+
+
+def test_evidence_recovery_appends_recorded_bytes_after_card_edit(tmp_path, monkeypatch):
+    import os
+    from brigade import memory_evidence_log
+
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("evidence producer requires POSIX directory descriptors")
+    content = "---\ntopic: formatting\n---\nPrefer concise status updates for routine changes.\n"
+    card = tmp_path / "memory/cards/original.md"
+    card.parent.mkdir(parents=True)
+    ingest._publish_promoted_card(card, tmp_path, {"suggested card content": content}, dry_run=False)
+    body = (
+        "## Recommended memory action\ncreate-card\n## Target card\nduplicate.md\n## Suggested card content\n" + content
+    )
+    draft(tmp_path, "card-publication-changed", body)
+    original = memory_evidence_log.append_log_row
+
+    class Crash(BaseException):
+        pass
+
+    def interrupted(target, data):
+        if target == tmp_path:
+            raise Crash()
+        return original(target, data)
+
+    monkeypatch.setattr(memory_evidence_log, "append_log_row", interrupted)
+    with pytest.raises(Crash):
+        drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    monkeypatch.setattr(memory_evidence_log, "append_log_row", original)
+    text = card.read_text()
+    import re
+
+    text = re.sub(r"(?m)^id: .+$", "id: m_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", text)
+    card.write_bytes(text.encode())
+    decision = journal.entries(tmp_path)[0]
+    import base64
+
+    block = base64.b64decode(journal._payload(tmp_path, decision.decision_id)["appends"][0]["data"])
+    journal.resolve_prepared(tmp_path)
+    journal.resolve_prepared(tmp_path)
+    assert (tmp_path / memory_evidence_log.LOG_PATH).read_bytes() == block
+
+
+def test_same_card_reinforcement_undo_refuses_whole_then_newest_first(tmp_path):
+    import os
+    from brigade import memory_evidence_log
+
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("evidence producer requires POSIX directory descriptors")
+    content = "---\ntopic: formatting\n---\nPrefer concise status updates for routine changes.\n"
+    card = tmp_path / "memory/cards/original.md"
+    card.parent.mkdir(parents=True)
+    ingest._publish_promoted_card(card, tmp_path, {"suggested card content": content}, dry_run=False)
+    original = card.read_bytes()
+    body = (
+        "## Recommended memory action\ncreate-card\n## Target card\nduplicate.md\n## Suggested card content\n" + content
+    )
+    paths = [draft(tmp_path, "card-publication-changed", body, number=n) for n in range(2)]
+    for path in paths:
+        memory_evidence_log.append_evidence(
+            tmp_path, card_path=card, evidence_id=path.relative_to(tmp_path).as_posix(), kind="near-match", similarity=1
+        )
+    assert drain.drain(tmp_path, today=TODAY, deadline_days=14)["retried"] == 2
+    entries = journal.entries(tmp_path)
+    decisions = [next(d for d in entries if path.relative_to(tmp_path).as_posix() in d.paths) for path in paths]
+    assert len(decisions) == 2
+    observed = [card, *paths, tmp_path / memory_evidence_log.LOG_PATH, tmp_path / drain.LEDGER_REL]
+    before = {path: path.read_bytes() for path in observed}
+    expected = "card-changed-by-later-decision: card changed by a later decision. Undo the later decision first."
+    with pytest.raises(journal.JournalConflict) as exc:
+        tend.undo(tmp_path, decisions[0].decision_id)
+    assert str(exc.value) == expected
+    assert {path: path.read_bytes() for path in observed} == before
+    assert len(journal.entries(tmp_path)) == 2
+    assert journal.load(tmp_path, decisions[0].decision_id).undone_by is None
+    tend.undo(tmp_path, decisions[1].decision_id)
+    tend.undo(tmp_path, decisions[0].decision_id)
+    assert card.read_bytes() == original
+    assert all(path in drain.pending(tmp_path) for path in paths)
+    assert not [row for row in memory_evidence_log.read_evidence(tmp_path)[0] if row["kind"] == "reinforced"]
+
+
+def test_scan_does_not_finish_pending_inbox_publication(tmp_path, monkeypatch):
+    from brigade.cli import main
+
+    body = "## Recommended memory action\nno-card\n## Target document\nUSER.md\n## Suggested document content\nPrefer brief updates.\n"
+    draft(tmp_path, "document-destination-unwritable", body)
+    original = journal._execute_phase
+
+    class Crash(BaseException):
+        pass
+
+    def interrupted(target, decision_id, phase, changes):
+        if phase == "finish":
+            raise Crash()
+        return original(target, decision_id, phase, changes)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "_execute_phase", interrupted)
+        with pytest.raises(Crash):
+            drain.drain(tmp_path, today=TODAY, deadline_days=14)
+    assert not (tmp_path / "USER.md").exists()
+    assert main(["memory", "care", "scan", "--target", str(tmp_path)]) == 0
+    assert not (tmp_path / "USER.md").exists()

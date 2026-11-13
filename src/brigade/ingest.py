@@ -9,6 +9,9 @@ Conservative by design:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import threading
+
 import hashlib
 import os
 import re
@@ -337,6 +340,8 @@ def ingest_into(
                     dry_run=dry_run,
                     snapshot=snapshot,
                     card_ids=card_ids,
+                    promote_cards=promote_cards,
+                    route_documents=route_documents,
                 )
             except TrackedHandoffError:
                 action = Action("skipped", _summary("skip", path.name, _TRACKED_SKIP_CODE))
@@ -614,6 +619,7 @@ def _decide_create_card_match(content: str, *, target: Path) -> Outcome | None:
 class Action:
     kind: str
     summary: str
+    destination: str | None = None
 
 
 def _read_card_child(parent: int, name: str) -> tuple[bytes, int] | None:
@@ -782,7 +788,41 @@ def _publish_promoted_card(
     return built
 
 
+_DOCUMENT_HELD = threading.local()
+
+
+@contextmanager
+def _document_lock(target: Path):
+    from .inbox_lock import held_file_lock
+    from .memory_care_journal import safe_path
+
+    target = target.resolve()
+    held: set[Path] = getattr(_DOCUMENT_HELD, "targets", set())
+    if target in held:
+        yield
+        return
+    lock = safe_path(target, ".brigade/memory-care/document.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with held_file_lock(lock, deadline_seconds=1):
+        _DOCUMENT_HELD.targets = held | {target}
+        try:
+            yield
+        finally:
+            _DOCUMENT_HELD.targets = held
+
+
 def _append_document_nofollow(target: Path, dest: Path, text: str) -> None:
+    from .inbox_lock import InboxLockTimeout
+
+    try:
+        with _document_lock(target):
+            _append_document_locked(target, dest, text)
+    except InboxLockTimeout as exc:
+        # Plain ingest catches OSError and preserves the source in its review inbox.
+        raise OSError("document publication busy") from exc
+
+
+def _append_document_locked(target: Path, dest: Path, text: str) -> None:
     """Append to a routed document without following a link anywhere below the workspace.
 
     The parent directory is opened by descriptor from the resolved workspace root, and
@@ -798,7 +838,7 @@ def _append_document_nofollow(target: Path, dest: Path, text: str) -> None:
     if problem:
         raise OSError(problem)
     resolved = root / relative
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
     if dirfd.posix_available():
         # O_NOFOLLOW; the Windows backend refuses reparse points itself. O_NONBLOCK makes a FIFO
         # fail the open (no reader) or the type check below instead of hanging.
@@ -811,9 +851,11 @@ def _append_document_nofollow(target: Path, dest: Path, text: str) -> None:
                 raise OSError("target document is not a regular file")
             if dirfd.posix_available():
                 os.set_blocking(descriptor, True)
-            with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            with os.fdopen(descriptor, "ab") as handle:
                 descriptor = -1
-                handle.write(text)
+                handle.write(text.encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
         finally:
             if descriptor != -1:
                 os.close(descriptor)
@@ -831,6 +873,8 @@ def _execute(
     dry_run: bool,
     snapshot: bytes | None = None,
     card_ids: CardIdIndex | None = None,
+    promote_cards: bool | None = None,
+    route_documents: bool | None = None,
 ) -> Action:
     from .inbox_lock import InboxLockTimeout
     from .memory_evidence_log import log_match
@@ -872,6 +916,8 @@ def _execute(
                 processed_dir,
                 dry_run,
                 snapshot,
+                promote_cards=promote_cards,
+                route_documents=route_documents,
             )
         summary = _summary("promote", name, outcome.code)
         if not dry_run:
@@ -914,6 +960,8 @@ def _execute(
                     processed_dir,
                     dry_run,
                     snapshot,
+                    promote_cards=promote_cards,
+                    route_documents=route_documents,
                 )
             _archive(handoff_path, processed_dir, snapshot_sha)
         return Action("routed", summary)
@@ -933,6 +981,9 @@ def _execute(
                 f"<!-- routed from {handoff_worktrees.safe_text(handoff_path.name)}\n"
                 f"     reason: {outcome.code}{_match_meta(outcome, target)}\n     routed-at: {slug} -->\n\n"
             )
+            if promote_cards is not None and route_documents is not None:
+                flags = f"promote={str(promote_cards).lower()} route={str(route_documents).lower()}"
+                header = header.replace(f"routed-at: {slug} -->", f"routed-at: {slug}\n     retry-flags: {flags} -->")
             dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
             log_match(target, outcome.match, dest)
             _archive(handoff_path, processed_dir, snapshot_sha)
@@ -1154,8 +1205,10 @@ def _write_review_draft(inbox_dir: Path, base: str, text: str) -> Path:
     for index in range(_MAX_DRAFT_SUFFIX):
         dest = inbox_dir / (f"{base}.md" if index == 0 else f"{base}-{index}.md")
         try:
-            with dest.open("x", encoding="utf-8") as handle:
-                handle.write(text)
+            with dest.open("xb") as handle:
+                handle.write(text.encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
         except FileExistsError:
             continue
         return dest
