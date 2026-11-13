@@ -20,6 +20,7 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
             "handoff-template",
             "ingest",
             "memory",
+            "hub",
             "doctor",
             "bug",
             "version",

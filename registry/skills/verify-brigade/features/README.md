@@ -11,6 +11,7 @@ exact helper calls (`Driving it with control-brigade`), and what bites
 
 | Feature | File | Drive with |
 |---|---|---|
+| Hub connector discovery and preview | [hub-connector.md](hub-connector.md) | `hub-connector` |
 | Install and wiring health | [init-and-doctor.md](init-and-doctor.md) | `new-target`, `init`, `doctor-target` |
 | Work verification receipts | [work-verify-receipts.md](work-verify-receipts.md) | `work-verify` |
 | Grok Bot connector packs | [grokbot-pack-lifecycle.md](grokbot-pack-lifecycle.md) | `grokbot-pack-setup/-doctor/-canary/-remove` |

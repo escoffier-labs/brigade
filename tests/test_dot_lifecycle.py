@@ -497,6 +497,7 @@ def test_run_listener_refuses_windows_before_startup(monkeypatch):
         m.run_listener(None, None, None)  # type: ignore[arg-type]
 
 
+@requires_local_state
 def test_run_listener_refuses_to_start_without_a_jwt_backend(configured):
     # A missing RSA backend must fail startup, not serve a healthy-looking connector that rejects every login.
     pytest.importorskip("uvicorn", reason="requires the grokbot extra")

@@ -89,9 +89,9 @@ def test_each_profile_lists_exactly_its_tools():
         assert profile.prompt_load_scan
         assert not profile.memory_push
     assert GROKBOT_INBOX.hub_inbox and not GROKBOT_MEMORY.hub_inbox
-    # Only the Grok profiles change behavior: the Dot and Duet profiles keep their own recipient, credential and
-    # handoff handling.
-    others = [profile for profile in PROFILES.values() if profile.pack_id not in {"grokbot-memory", "grokbot-inbox"}]
+    # Dot and Duet keep their own recipient, credential and handoff handling.
+    # The generic principal-memory profile has its own inventory and isolation tests.
+    others = [PROFILES[name] for name in ("dot", "duet")]
     assert others and not any(p.strict_recipients or p.principal_memory for p in others)
     assert all(p.memory_push for p in others)
     assert GROKBOT_INBOX.strict_recipients and GROKBOT_MEMORY.principal_memory

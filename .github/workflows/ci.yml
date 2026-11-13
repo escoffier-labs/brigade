@@ -610,7 +610,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pip install -e ".[dev]"
+          python -m pip install -e ".[dev,grokbot]"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Configure Windows test temp drive
         run: python scripts/windows_pytest.py --configure-temp-root

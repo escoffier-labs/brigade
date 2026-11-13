@@ -28,9 +28,9 @@ These override anything below that conflicts with them.
      time against the profile's own protected token file. That file is
      distinct from the hub principal token, is validated with the existing
      protected-file checks, and is never the node credential. A missing,
-     malformed or wrong token gets 401 with no detail. The default bind stays
-     loopback, and a non-loopback bind in token mode requires an explicit
-     allowed-hosts list.
+     malformed or wrong token gets 401 with no detail. Both modes require a loopback bind. Remote access uses the operator's
+     TLS tunnel or reverse proxy connecting to loopback. The prior allowance
+     for a non-loopback bind with an allowed-hosts list is withdrawn.
    - `mode: "access"`: today's signed-identity verification, unchanged, with
      its audience check.
    Dot and Duet keep requiring Access. Only `cloud-agent` gains token mode.
@@ -38,13 +38,28 @@ These override anything below that conflicts with them.
 3. **Tests for amendment 2 belong to Task 1:** token accepted, wrong token
    refused, missing header refused, token file shared with another profile
    or with the hub principal refused at configuration time, non-loopback bind
-   without allowed hosts refused, and Access mode behavior unchanged. Add to
+   refused in both modes even with allowed hosts, and Access mode behavior unchanged. Add to
    Review Focus: a token-mode listener must not accept an Access assertion in
    place of the token, and must not log the token.
 4. **Task 1's pull request gets a security review** on its current head
    before merge, because it adds an authentication path.
 5. Task 6's guide documents token mode first and Access as the option for
    clients that need a signed-identity front.
+
+## Follow-ups from the Task 1 reviews
+
+Task 1 merged. These were judged safe to follow and belong to the tasks named:
+
+- **Task 2:** classify a connector as cloud-agent from a normalized profile
+  identity, so a library caller cannot evade the exact-string check with a
+  malformed pack id. Run setup rollback for any exception after the token
+  file is created, not only the expected ones.
+- **Task 6 (guide):** say that the failed sign-in limit reduces noise and is
+  not brute-force protection, since a valid credential is always served. Say
+  that when cloud-agent is installed, the other profiles' isolation check
+  also reads the machine's fleet credentials and refuses if they cannot be
+  read. Say that cloud-agent listens on loopback only and remote access goes
+  through the operator's own tunnel or proxy.
 
 ## Decisions made by the planner
 
