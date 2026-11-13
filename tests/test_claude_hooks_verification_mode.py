@@ -204,5 +204,8 @@ def test_observe_repo_cd_into_strict_repo_is_denied(repos, capsys):
     command = "pytest && cd ./observed && pytest"
     assert verification_mode.governing_modes(command, repos["enforced"], repos["enforced"]) == [
         (repos["enforced"], "strict"),
-        (observed, "observe"),
     ]
+    assert verification_mode.governing_modes("cd ./observed && pytest", repos["enforced"], repos["enforced"]) == [
+        (observed, "observe")
+    ]
+    assert verification_mode.governing_modes("echo done", repos["enforced"], repos["enforced"]) == []
