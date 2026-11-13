@@ -65,7 +65,14 @@ def format_block_reasons(reasons: object) -> str:
     return ", ".join(parts) if parts else "none"
 
 
-def plan_item(issue: dict[str, Any], *, target: Path, scan_date: str, config: MemoryCareConfig) -> dict[str, Any]:
+def plan_item(
+    issue: dict[str, Any],
+    *,
+    target: Path,
+    scan_date: str,
+    config: MemoryCareConfig,
+    context: tuple[set[str], bool | None] | None = None,
+) -> dict[str, Any]:
     from . import memory_cmd as care
 
     card_file = str(issue.get("file") or issue.get("card_file") or "")
@@ -81,11 +88,12 @@ def plan_item(issue: dict[str, Any], *, target: Path, scan_date: str, config: Me
         blockers.append("card-file-missing")
     else:
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            with path.open(encoding="utf-8", errors="replace", newline="") as handle:
+                text = handle.read()
         except OSError:
             blockers.append("card-file-unreadable")
         else:
-            meta, has_frontmatter = care._parse_frontmatter(text)
+            meta, has_frontmatter = care._parse_frontmatter(text.replace("\r\n", "\n"))
             if not has_frontmatter:
                 blockers.append("card-frontmatter-missing")
             else:
@@ -111,7 +119,9 @@ def plan_item(issue: dict[str, Any], *, target: Path, scan_date: str, config: Me
     derived_auto: dict[str, Any] = {}
     if automatic:
         try:
-            derived_auto = prepare(target, config, {"card_file": card_file, "issue_type": issue_type}, care._today())
+            derived_auto = prepare(
+                target, config, {"card_file": card_file, "issue_type": issue_type}, care._today(), context=context
+            )
             candidate_fields = derived_auto["candidate_fields"]
             blockers = []
         except (FixRefused, OSError, ValueError) as exc:
@@ -153,8 +163,41 @@ def plan_payload(target: Path, config: MemoryCareConfig, scan_payload: dict[str,
     )
     issues_value = scan_payload.get("issues") if isinstance(scan_payload, dict) else None
     issues = issues_value if isinstance(issues_value, list) else []
+    # The shared scanner does not recognize BOM frontmatter. Interpret it only
+    # here, using the fixer's strict grammar, without changing other consumers.
+    from .memory_care_fixes import plain_frontmatter, read, FixRefused
+
+    issues = list(issues)
+    for issue in list(issues):
+        if not isinstance(issue, dict) or issue.get("issue_type") != "missing-frontmatter":
+            continue
+        try:
+            raw = read(target, str(issue.get("file", "")))
+            if not raw.startswith(b"\xef\xbb\xbf"):
+                continue
+            meta = plain_frontmatter(raw.decode("utf-8"))
+        except (FixRefused, OSError, ValueError):
+            continue
+        for kind, keys in (
+            ("missing-reviewed", ("last_reviewed", "last_reviewed_at", "reviewed_at")),
+            ("missing-freshness", ("fresh_until", "freshness_until", "expires", "expires_at")),
+        ):
+            if kind in config.enabled_checks and not any(key in meta for key in keys):
+                issues.append({**issue, "issue_type": kind})
+
+    from .memory_care_fixes import AUTO_FIXES, plan_context
+    from .memory_care_tend import load_config
+
+    needs_context = load_config(target).enabled and any(
+        isinstance(issue, dict)
+        and issue.get("issue_type") in AUTO_FIXES
+        and care.read_only_pattern(str(issue.get("file") or issue.get("card_file") or ""), config.read_only_paths)
+        is None
+        for issue in issues
+    )
+    context = plan_context(target, config) if needs_context else None
     items = [
-        plan_item(issue, target=target, scan_date=scan_date, config=config)
+        plan_item(issue, target=target, scan_date=scan_date, config=config, context=context)
         for issue in issues
         if isinstance(issue, dict)
         and str(issue.get("issue_type") or "") in (PLANABLE_METADATA_FIXES | {"missing-index-link", "orphaned-card"})
@@ -211,7 +254,13 @@ def plan_fixes(*, target: Path, json_output: bool = False, apply: bool = False) 
     if apply:
         from .memory_care_fixes import apply_fixes, summary
 
-        result = apply_fixes(target, config, today=care._today(), plan=payload)
+        from .memory_care_journal import JournalConflict
+
+        try:
+            result = apply_fixes(target, config, today=care._today(), plan=payload)
+        except JournalConflict:
+            print("memory care busy", file=sys.stderr)
+            return 1
         print(json.dumps(result, sort_keys=True) if json_output else summary(result))
         return 0
     if json_output:

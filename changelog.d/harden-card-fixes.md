@@ -1,0 +1,2 @@
+- Automatic card fixes accept only plain frontmatter with independent single-line fields, preserve LF, CRLF and byte order marks, and refuse mixed line endings.
+- Memory care tolerates pending-cache write failures, rebuilds invalid cache rows, retries legacy abandoned undos, shares planning scans and Git probes, uses UTC dates, and reports lock contention without a traceback.
