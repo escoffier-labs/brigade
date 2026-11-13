@@ -423,3 +423,15 @@ operator on 2026-11-12.
 - **(found)** A one-time model triage cleared a 359-draft review inbox with
   one item left for the owner. The same triage, run on a schedule under the
   quota cap, is the design for the background model step in Stage A.
+- **(decided)** Message encryption stays removed. A hub that a person runs on
+  a rented server is self-hosted: that person is the hub operator, so hiding
+  messages from the operator protects nothing, and the memory cards sit on
+  the same disk in plain text. Two smaller protections replace it and belong
+  to the hub stage:
+  - The hub refuses to listen on a non-loopback address unless the
+    connection is encrypted (TLS) or the operator declares a private network.
+    Setup picks the safe choice without asking a person.
+  - Hub backups are encrypted with a key the user holds, which covers memory
+    as well as messages.
+  Neither defends against a hub run by a third party for many people. That
+  would need memory encryption too and is outside this design.
