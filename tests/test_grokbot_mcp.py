@@ -2975,7 +2975,14 @@ def test_cli_dot_rejects_bearer(tmp_path, capsys, command, bearer_flag):
 )
 def test_cli_other_listeners_require_bearer(tmp_path, capsys, action):
     assert cli.main(["run", "cloud", "grokbot", *action, "--target", str(tmp_path)]) == 2
-    assert capsys.readouterr().err.strip() == "error: --bearer-file or --bearer-env is required"
+    error = capsys.readouterr().err.strip()
+    if "t3-dispatch" in action:
+        from brigade.cli.removed_commands import REMOVED_IN
+
+        assert f"this was removed in {REMOVED_IN}." in error
+        assert "hub connector setup --id cloud-agent" in error
+    else:
+        assert error == "error: --bearer-file or --bearer-env is required"
 
 
 def test_cli_dot_setup_without_bearer(tmp_path, monkeypatch):

@@ -1,5 +1,7 @@
 # Grok Bot MCP listener
 
+> Retirement in 0.32.0: fleet-steward, obsidian-operator and t3-dispatch are removed. Their old command selections print migration guidance and exit 2. Existing configuration, state and unit files remain on disk. Use `brigade hub connector setup --id cloud-agent` with independent credentials. The sections describing these retired packs below are historical until the migration guide replaces this page.
+
 Install the listener with Brigade. The `grokbot-dispatch-mcp` sidecar is retired; do not clone or install it. See [Retirement and rollback window](phase-grokbot-one-repository-distribution.md).
 
 For the whole integration (pack reference, queue actor authorization, lifecycle semantics, finding delivery, and Bot configuration), see [Grok Bot operating guide](grokbot-operating-guide.md).

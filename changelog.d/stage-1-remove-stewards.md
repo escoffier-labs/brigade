@@ -1,0 +1,1 @@
+- Remove fleet-steward, obsidian-operator and t3-dispatch packs and their dedicated helpers and plugin. Historical command selections report removal in 0.32.0 and retain user files. Dot, Duet and cloud-agent keep their connector behavior.

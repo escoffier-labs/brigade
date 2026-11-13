@@ -19,48 +19,14 @@ QUEUE_PACK_IDS = ("implementation-worker", "operator", "repository-scout")
 PACK_IDS = (
     "dot",
     "duet",
-    "fleet-steward",
     "implementation-worker",
-    "obsidian-operator",
     "operations-relay",
     "operator",
     "repository-scout",
-    "t3-dispatch",
-)
-FLEET_TOOLS = (
-    "execute_remediation",
-    "fleet_overview",
-    "host_status",
-    "incident_bundle",
-    "propose_remediation",
-    "service_health",
-)
-OBSIDIAN_TOOLS = (
-    "obsidian_action_status",
-    "obsidian_capabilities",
-    "obsidian_execute_action",
-    "obsidian_propose_action",
-    "obsidian_read",
-    "obsidian_search",
 )
 OPERATIONS_RELAY_TOOLS = (
     "automation_finding_status",
     "submit_automation_finding",
-)
-T3_DISPATCH_TOOLS = (
-    "hub_inbox_ack",
-    "hub_inbox_list",
-    "hub_message_send",
-    "hub_message_status",
-    "t3_answer",
-    "t3_approve",
-    "t3_capacity",
-    "t3_followup",
-    "t3_interrupt",
-    "t3_recent",
-    "t3_status",
-    "t3_submit",
-    "t3_wait",
 )
 
 
@@ -114,11 +80,6 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
         if pack["id"] in QUEUE_PACK_IDS:
             assert pack["kind"] == "queue-role"
             assert set(shown["tools"]) == grokbot_mcp.tools_for_instance(pack["instance"])
-        elif pack["id"] == "obsidian-operator":
-            assert pack["kind"] == "connector"
-            assert shown["tools"] == list(OBSIDIAN_TOOLS)
-            assert shown["default_bind"] == "127.0.0.1:8773"
-            assert shown["public_route"] == "/mcp"
         elif pack["id"] == "operations-relay":
             assert pack["kind"] == "connector"
             assert shown["tools"] == list(OPERATIONS_RELAY_TOOLS)
@@ -137,17 +98,6 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
             assert pack["kind"] == "connector"
             assert set(shown["tools"]) == dot.DUET_TOOLS
             assert shown["default_bind"] == "127.0.0.1:8780"
-            assert shown["public_route"] == ""
-        elif pack["id"] == "t3-dispatch":
-            assert pack["kind"] == "connector"
-            assert shown["tools"] == list(T3_DISPATCH_TOOLS)
-            assert shown["default_bind"] == "127.0.0.1:8778"
-            assert shown["public_route"] == ""
-        else:
-            assert pack["kind"] == "connector"
-            assert pack["id"] == "fleet-steward"
-            assert shown["tools"] == list(FLEET_TOOLS)
-            assert shown["default_bind"] == "127.0.0.1:8771"
             assert shown["public_route"] == ""
 
 
@@ -671,279 +621,6 @@ def test_legacy_lifecycle_stays_compatible_with_pack_config(tmp_path: Path, monk
     )
 
 
-def test_fleet_steward_pack_is_closed_connector_with_exact_inventory():
-    pack = grokbot_packs.show_pack("fleet-steward")
-    assert pack["kind"] == "connector"
-    assert pack["instance"] == "fleet-steward"
-    assert pack["default_bind"] == "127.0.0.1:8771"
-    assert pack["public_route"] == ""
-    assert pack["tools"] == list(FLEET_TOOLS)
-    with _reject("unknown-pack"):
-        grokbot_packs.show_pack("fleet")
-
-
-def _fleet_paths(tmp_path: Path) -> dict[str, Path]:
-    runtime = tmp_path / "runtime.json"
-    ledger = tmp_path / "ledger" / "ledger.json"
-    actions = tmp_path / "actions"
-    approvals = tmp_path / "approvals"
-    runtime.write_text("{}", encoding="utf-8")
-    ledger.parent.mkdir(mode=0o700)
-    actions.mkdir(mode=0o700)
-    approvals.mkdir(mode=0o700)
-    os.chmod(ledger.parent, 0o700)
-    os.chmod(actions, 0o700)
-    os.chmod(approvals, 0o700)
-    return {
-        "runtime_path": runtime,
-        "ledger_path": ledger,
-        "action_state_path": actions,
-        "approval_dir": approvals,
-    }
-
-
-def test_fleet_setup_preview_apply_and_rejects_foreign_keys(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
-    paths = _fleet_paths(tmp_path)
-    preview = grokbot_packs.preview_setup(
-        tmp_path,
-        "fleet-steward",
-        bearer_env="TEST_GROKBOT_BEARER",
-        **paths,
-    )
-    assert preview["apply"] is False
-    assert preview["bind"] == "127.0.0.1:8771"
-    dumped = json.dumps(preview)
-    assert str(paths["runtime_path"]) not in dumped
-    assert str(paths["ledger_path"]) not in dumped
-    assert not grokbot_packs.instance_config_path(tmp_path, "fleet-steward").exists()
-    assert not grokbot_ops.config_path(tmp_path, "fleet-steward").exists()
-
-    applied = grokbot_packs.apply_setup(
-        tmp_path,
-        "fleet-steward",
-        bearer_env="TEST_GROKBOT_BEARER",
-        **paths,
-    )
-    pack_path = grokbot_packs.instance_config_path(tmp_path, "fleet-steward")
-    assert applied["apply"] is True
-    assert pack_path.is_file()
-    assert pack_path.stat().st_mode & 0o777 == 0o600
-    assert not grokbot_ops.config_path(tmp_path, "fleet-steward").exists()
-    config = json.loads(pack_path.read_text(encoding="utf-8"))
-    assert set(config) == grokbot_packs.FLEET_INSTANCE_KEYS
-    assert SECRET not in json.dumps(config)
-    assert "cli_executable" not in config
-    assert "workdir" not in config
-    assert config["runtime_path"] == str(paths["runtime_path"])
-    assert config["bearer"] == {"kind": "env", "name": "TEST_GROKBOT_BEARER"}
-
-    with _reject("unexpected-key"):
-        grokbot_packs.apply_setup(
-            tmp_path,
-            "operator",
-            bearer_env="TEST_GROKBOT_BEARER",
-            runtime_path=paths["runtime_path"],
-        )
-    with _reject("missing-path-reference"):
-        grokbot_packs.preview_setup(tmp_path, "fleet-steward", bearer_env="TEST_GROKBOT_BEARER")
-
-
-def test_fleet_setup_refuses_queue_default_ports(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
-    paths = _fleet_paths(tmp_path)
-    with _reject("duplicate-port"):
-        grokbot_packs.apply_setup(
-            tmp_path,
-            "fleet-steward",
-            bind="127.0.0.1:8766",
-            bearer_env="TEST_GROKBOT_BEARER",
-            **paths,
-        )
-    grokbot_packs.apply_setup(tmp_path, "operator", bearer_env="TEST_GROKBOT_BEARER")
-    with _reject("duplicate-port"):
-        grokbot_packs.apply_setup(
-            tmp_path,
-            "operator",
-            bind="127.0.0.1:8771",
-            bearer_env="TEST_GROKBOT_BEARER",
-        )
-    with _reject("duplicate-port"):
-        grokbot_packs.apply_setup(
-            tmp_path,
-            "fleet-steward",
-            bind="127.0.0.1:8777",
-            bearer_env="TEST_GROKBOT_BEARER",
-            **paths,
-        )
-    with _reject("duplicate-port"):
-        grokbot_packs.apply_setup(
-            tmp_path,
-            "fleet-steward",
-            bind="127.0.0.1:8773",
-            bearer_env="TEST_GROKBOT_BEARER",
-            **paths,
-        )
-    with _reject("duplicate-port"):
-        grokbot_packs.apply_setup(
-            tmp_path,
-            "fleet-steward",
-            bind="127.0.0.1:8778",
-            bearer_env="TEST_GROKBOT_BEARER",
-            **paths,
-        )
-    with _reject("duplicate-port"):
-        grokbot_packs.apply_setup(
-            tmp_path,
-            "fleet-steward",
-            bind="127.0.0.1:8779",
-            bearer_env="TEST_GROKBOT_BEARER",
-            **paths,
-        )
-    assert grokbot_ops.load_config(tmp_path, "operator")["bind"] == "127.0.0.1:8766"
-
-
-def _obsidian_paths(tmp_path: Path) -> dict[str, Path]:
-    runtime = tmp_path / "obsidian-runtime.json"
-    actions = tmp_path / "obsidian-actions"
-    approvals = tmp_path / "obsidian-approvals"
-    staging = tmp_path / "obsidian-staging"
-    helper = tmp_path / "excalidraw-helper"
-    runtime.write_text("{}\n", encoding="utf-8")
-    actions.mkdir(mode=0o700)
-    approvals.mkdir(mode=0o700)
-    staging.mkdir(mode=0o700)
-    helper.write_text("#!/bin/sh\n", encoding="utf-8")
-    os.chmod(actions, 0o700)
-    os.chmod(approvals, 0o700)
-    os.chmod(staging, 0o700)
-    os.chmod(helper, 0o755)
-    return {
-        "runtime_path": runtime,
-        "action_state_path": actions,
-        "approval_dir": approvals,
-        "staging_dir": staging,
-        "excalidraw_bin": helper,
-    }
-
-
-def _obsidian_setup_kwargs(tmp_path: Path, monkeypatch) -> dict[str, object]:
-    monkeypatch.setenv("TEST_GROKBOT_UPSTREAM", "u" * 16)
-    return {
-        **_obsidian_paths(tmp_path),
-        "upstream_url": "https://127.0.0.1:27124/",
-        "upstream_key_env": "TEST_GROKBOT_UPSTREAM",
-    }
-
-
-def test_obsidian_is_closed_connector_not_a_steward():
-    pack = grokbot_packs.show_pack("obsidian-operator")
-    assert pack["kind"] == "connector"
-    assert pack["instance"] == "obsidian-operator"
-    assert pack["default_bind"] == "127.0.0.1:8773"
-    assert pack["public_route"] == "/mcp"
-    assert pack["tools"] == list(OBSIDIAN_TOOLS)
-    assert "obsidian-operator" not in grokbot_packs.STEWARD_PACK_IDS
-    with _reject("unknown-pack"):
-        grokbot_packs.show_pack("obsidian")
-
-
-def test_obsidian_setup_preview_apply_and_rejects_foreign_keys(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
-    kwargs = _obsidian_setup_kwargs(tmp_path, monkeypatch)
-    preview = grokbot_packs.preview_setup(
-        tmp_path,
-        "obsidian-operator",
-        bearer_env="TEST_GROKBOT_BEARER",
-        **kwargs,
-    )
-    assert preview["apply"] is False
-    assert preview["bind"] == "127.0.0.1:8773"
-    dumped = json.dumps(preview)
-    assert str(kwargs["runtime_path"]) not in dumped
-    assert str(kwargs["excalidraw_bin"]) not in dumped
-    assert SECRET not in dumped
-    assert "u" * 16 not in dumped
-    assert not grokbot_packs.instance_config_path(tmp_path, "obsidian-operator").exists()
-    assert not grokbot_ops.config_path(tmp_path, "obsidian-operator").exists()
-
-    applied = grokbot_packs.apply_setup(
-        tmp_path,
-        "obsidian-operator",
-        bearer_env="TEST_GROKBOT_BEARER",
-        **kwargs,
-    )
-    pack_path = grokbot_packs.instance_config_path(tmp_path, "obsidian-operator")
-    assert applied["apply"] is True
-    assert pack_path.is_file()
-    assert pack_path.stat().st_mode & 0o777 == 0o600
-    assert not grokbot_ops.config_path(tmp_path, "obsidian-operator").exists()
-    config = json.loads(pack_path.read_text(encoding="utf-8"))
-    assert set(config) == grokbot_packs.OBSIDIAN_INSTANCE_KEYS
-    assert SECRET not in json.dumps(config)
-    assert "cli_executable" not in config
-    assert "ledger_path" not in config
-    assert config["public_route"] == "/mcp"
-    assert config["runtime_path"] == str(kwargs["runtime_path"])
-    assert config["bearer"] == {"kind": "env", "name": "TEST_GROKBOT_BEARER"}
-    assert config["upstream_url"] == "https://127.0.0.1:27124/"
-    assert config["upstream_key"] == {"kind": "env", "name": "TEST_GROKBOT_UPSTREAM"}
-    assert "u" * 16 not in json.dumps(config)
-
-    with _reject("unexpected-key"):
-        grokbot_packs.apply_setup(
-            tmp_path,
-            "obsidian-operator",
-            bearer_env="TEST_GROKBOT_BEARER",
-            ledger_path=tmp_path / "ledger.json",
-            **kwargs,
-        )
-    with _reject("missing-path-reference"):
-        grokbot_packs.preview_setup(tmp_path, "obsidian-operator", bearer_env="TEST_GROKBOT_BEARER")
-    with _reject("missing-upstream-reference"):
-        grokbot_packs.preview_setup(
-            tmp_path,
-            "obsidian-operator",
-            bearer_env="TEST_GROKBOT_BEARER",
-            runtime_path=kwargs["runtime_path"],
-            action_state_path=kwargs["action_state_path"],
-            approval_dir=kwargs["approval_dir"],
-            staging_dir=kwargs["staging_dir"],
-            excalidraw_bin=kwargs["excalidraw_bin"],
-        )
-    with _reject("unexpected-key"):
-        grokbot_packs.preview_setup(
-            tmp_path,
-            "operator",
-            bearer_env="TEST_GROKBOT_BEARER",
-            upstream_url="https://127.0.0.1:27124/",
-            upstream_key_env="TEST_GROKBOT_UPSTREAM",
-        )
-
-
-def test_obsidian_setup_refuses_existing_default_ports(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
-    kwargs = _obsidian_setup_kwargs(tmp_path, monkeypatch)
-    for bind in ("127.0.0.1:8766", "127.0.0.1:8771", "127.0.0.1:8777"):
-        with _reject("duplicate-port"):
-            grokbot_packs.apply_setup(
-                tmp_path,
-                "obsidian-operator",
-                bind=bind,
-                bearer_env="TEST_GROKBOT_BEARER",
-                **kwargs,
-            )
-    grokbot_packs.apply_setup(tmp_path, "operator", bearer_env="TEST_GROKBOT_BEARER")
-    with _reject("duplicate-port"):
-        grokbot_packs.apply_setup(
-            tmp_path,
-            "operator",
-            bind="127.0.0.1:8773",
-            bearer_env="TEST_GROKBOT_BEARER",
-        )
-    assert grokbot_ops.load_config(tmp_path, "operator")["bind"] == "127.0.0.1:8766"
-
-
 def _record_pack_systemctl(monkeypatch, *, stdout="success\n", returncode=0, error: BaseException | None = None):
     recorded: list[list[str]] = []
 
@@ -1349,26 +1026,6 @@ def test_pack_list_json_exposes_reachability(tmp_path: Path, memory_runtime, mon
     assert SECRET not in dumped
     assert PUBLIC_HOST not in dumped
     assert str(tmp_path) not in dumped
-
-
-def test_t3_dispatch_setup_requires_runtime_path(tmp_path, monkeypatch):
-    from tests.test_grokbot_t3_runtime import write_runtime
-
-    monkeypatch.setenv("TEST_GROKBOT_BEARER", "x" * 40)
-    runtime = write_runtime(tmp_path)
-    with _reject("missing-path-reference"):
-        grokbot_packs.preview_setup(tmp_path, "t3-dispatch", bearer_env="TEST_GROKBOT_BEARER")
-    result = grokbot_packs.apply_setup(
-        tmp_path,
-        "t3-dispatch",
-        bearer_env="TEST_GROKBOT_BEARER",
-        runtime_path=str(runtime),
-        allowed_hosts=["t3-dispatch.brigade.tools"],
-    )
-    assert result["bind"] == "127.0.0.1:8778"
-    config = json.loads(grokbot_packs.instance_config_path(tmp_path, "t3-dispatch").read_text())
-    assert config["runtime_path"] == str(runtime)
-    assert config["allowed_hosts"] == ["t3-dispatch.brigade.tools"]
 
 
 @pytest.fixture

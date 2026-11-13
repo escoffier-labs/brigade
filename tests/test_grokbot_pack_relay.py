@@ -63,7 +63,24 @@ def _setup_stewards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Pa
     target.mkdir()
     owner = _owner(tmp_path / "owner")
     fleet_paths = _steward_paths(tmp_path / "fleet-state", "ledger.json")
-    grokbot_packs.apply_setup(target, "fleet-steward", bearer_env="TEST_GROKBOT_BEARER", **fleet_paths)
+    instance = grokbot_packs.instance_config_path(target, "fleet-steward")
+    instance.parent.mkdir(parents=True)
+    instance.write_text(
+        json.dumps(
+            {
+                "schema": grokbot_packs.INSTANCE_SCHEMA,
+                "pack_id": "fleet-steward",
+                "pack_version": "1.0.0",
+                "bind": "127.0.0.1:8771",
+                "allowed_hosts": [],
+                "allowed_origins": [],
+                "public_route": "",
+                "bearer": {"kind": "env", "name": "TEST_GROKBOT_BEARER"},
+                **{key: str(value) for key, value in fleet_paths.items()},
+            }
+        )
+    )
+    instance.chmod(0o600)
     FleetLedger(str(fleet_paths["ledger_path"])).ready()
     return target, owner, fleet_paths["ledger_path"]
 

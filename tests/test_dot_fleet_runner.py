@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from brigade.grokbot_t3 import fleet
+from brigade.dot import fleet_runner as fleet
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 
@@ -220,3 +220,10 @@ def test_nested_result_envelope_is_flattened():
     assert result["host"] == "host-a"
     assert result["request_id"] == "host-a-r5"
     assert "result" not in result
+
+
+@pytest.mark.parametrize("output", ["[]", '{"schema":"unknown"}', "x" * (fleet.MAX_OUTPUT_BYTES + 1)])
+def test_untrusted_and_oversized_output_refused(output):
+    runner = fleet.FleetRunner("t3-fleet", "git", run=FakeRun(output))
+    with pytest.raises(fleet.FleetProtocolError):
+        runner.capacity()

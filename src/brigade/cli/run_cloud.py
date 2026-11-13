@@ -1167,26 +1167,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                     "bearer_file": args.bearer_file,
                     "bearer_env": args.bearer_env,
                 }
-                if args.pack == "fleet-steward":
-                    from ..grokbot_fleet.lifecycle import (
-                        build_listener_from_target as build_fleet_listener,
-                        run_listener as run_fleet_listener,
-                    )
-
-                    fleet_config, fleet_tools = build_fleet_listener(target, **listener_kwargs)
-                    run_fleet_listener(fleet_config, fleet_tools)
-                elif args.pack == "obsidian-operator":
-                    from ..grokbot_obsidian.lifecycle import (
-                        build_listener_from_target as build_obsidian_listener,
-                        run_listener as run_obsidian_listener,
-                    )
-
-                    listener_kwargs["upstream_url"] = args.upstream_url
-                    listener_kwargs["upstream_key_file"] = args.upstream_key_file
-                    listener_kwargs["upstream_key_env"] = args.upstream_key_env
-                    obsidian_config, obsidian_tools = build_obsidian_listener(target, **listener_kwargs)
-                    run_obsidian_listener(obsidian_config, obsidian_tools)
-                elif args.pack == "operations-relay":
+                if args.pack == "operations-relay":
                     from .. import grokbot_operations_relay
 
                     operations_config, operations_tools = grokbot_operations_relay.build_listener_from_target(
@@ -1206,11 +1187,6 @@ def _dispatch_grokbot(args, target: Path) -> int:
                         **({} if args.pack == "dot" else {"pack_id": args.pack}),
                     )
                     dot.run_listener(dot_config, dot_tools, dot_runtime)
-                elif args.pack == "t3-dispatch":
-                    from .. import grokbot_t3
-
-                    t3_config, t3_tools = grokbot_t3.build_listener_from_target(target, **listener_kwargs)
-                    grokbot_t3.run_listener(t3_config, t3_tools)
                 else:
                     # A pack added to the choices without its own branch must not serve another pack's tools.
                     raise grokbot_mcp.ConfigurationError("invalid")
@@ -1234,25 +1210,16 @@ def _dispatch_grokbot(args, target: Path) -> int:
             return 2
         except Exception as exc:
             from .. import (
-                grokbot_fleet,
-                grokbot_obsidian,
                 grokbot_operations_relay,
                 grokbot_packs,
-                grokbot_t3,
                 dot,
             )
 
-            if isinstance(exc, grokbot_t3.T3DispatchError) and exc.code == "unsupported-platform":
-                print(f"error: {exc}", file=sys.stderr)
-                return 2
             if isinstance(
                 exc,
                 (
-                    grokbot_fleet.FleetError,
-                    grokbot_obsidian.ObsidianError,
                     grokbot_operations_relay.OperationsRelayError,
                     grokbot_packs.PackError,
-                    grokbot_t3.T3DispatchError,
                     dot.DotError,
                 ),
             ):

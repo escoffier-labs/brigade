@@ -1,5 +1,7 @@
 # Grok Bot T3 dispatch pack
 
+> Retirement in 0.32.0: fleet-steward, obsidian-operator and t3-dispatch are removed. Their old command selections print migration guidance and exit 2. Existing configuration, state and unit files remain on disk. Use `brigade hub connector setup --id cloud-agent` with independent credentials. The sections describing these retired packs below are historical until the migration guide replaces this page.
+
 ## Platform support
 
 The dispatch runtime requires POSIX owner-only files and no-follow opens. The

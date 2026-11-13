@@ -7,6 +7,7 @@ import sys
 REMOVED_IN = "0.32.0"
 # Remove this compatibility table in the next ordinary release after REMOVED_IN.
 RETIRED_PROFILES = frozenset({"grokbot-memory", "grokbot-inbox"})
+RETIRED_PACKS = frozenset({"fleet-steward", "obsidian-operator", "t3-dispatch"})
 COMMAND_PATHS = (
     (("dot",), "--pack"),
     (("run", "cloud", "grokbot", "pack"), "--id"),
@@ -33,6 +34,8 @@ def compatibility(argv: list[str]) -> int | None:
                 if item.startswith(flag + "=")
                 else (tail[index + 1] if item == flag and index + 1 < len(tail) else None)
             )
+            if value in RETIRED_PACKS:
+                return removed_profile(value, " ".join((*prefix, value)))
             if value in RETIRED_PROFILES:
                 if tail[0:1] == ["remove"] and flag == "--id":
                     from brigade.dot.retired_instances import remove_command
@@ -44,9 +47,16 @@ def compatibility(argv: list[str]) -> int | None:
 
 def removed_profile(value: str, command: str | None = None) -> int:
     """The removal message for a retired profile, with how to stop its installed units."""
+    if value in RETIRED_PACKS:
+        units = f"brigade-grokbot-{value}.service"
+        if value == "t3-dispatch":
+            units += (
+                " brigade-grokbot-t3-watch.timer brigade-grokbot-t3-intake.timer"
+                " brigade-grokbot-t3-watch.service brigade-grokbot-t3-intake.service"
+            )
+    else:
+        units = f"brigade-{value}.service brigade-{value}-watch.service brigade-{value}-watch.timer"
     return removed(
         command or value,
-        replacement=REPLACEMENT
-        + f" Stop installed units: systemctl --user disable --now brigade-{value}.service "
-        + f"brigade-{value}-watch.service brigade-{value}-watch.timer",
+        replacement=REPLACEMENT + " Stop installed units: systemctl --user disable --now " + units,
     )

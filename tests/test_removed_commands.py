@@ -42,7 +42,9 @@ def test_retired_pack_flags_reach_tombstone(tmp_path, monkeypatch, capsys, profi
     assert {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()} == before
 
 
-@pytest.mark.parametrize("profile", ["grokbot-memory", "grokbot-inbox"])
+@pytest.mark.parametrize(
+    "profile", ["grokbot-memory", "grokbot-inbox", "fleet-steward", "obsidian-operator", "t3-dispatch"]
+)
 def test_retired_serve_never_imports_implementation(profile):
     code = """
 import sys
@@ -93,3 +95,41 @@ def test_retired_module_flags_reach_tombstone(profile, capsys):
 
     assert main(["watch", "--pack", profile, "--old-flag"]) == 2
     assert f"this was removed in {REMOVED_IN}." in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("profile", ["fleet-steward", "obsidian-operator", "t3-dispatch"])
+@pytest.mark.parametrize("command", ["setup", "doctor", "canary", "update", "install-service", "remove", "show"])
+def test_retired_steward_commands_preserve_user_files(tmp_path, monkeypatch, capsys, profile, command):
+    from tests._home import set_home
+
+    set_home(monkeypatch, tmp_path / "home")
+    target = tmp_path / "target"
+    target.mkdir()
+    retained = target / "state.json"
+    retained.write_text('{"retained": true}')
+    before = retained.read_bytes()
+    for prefix, flag in (
+        (["run", "cloud", "grokbot", "pack", command], "--id"),
+        (["run", "cloud", "grokbot", "serve"], "--pack"),
+        (["hub", "connector", command], "--id"),
+        (["dot", "watch"], "--pack"),
+    ):
+        assert cli.main([*prefix, flag, profile, "--target", str(target), "--obsolete", "--apply"]) == 2
+        error = capsys.readouterr().err
+        assert f"this was removed in {REMOVED_IN}." in error
+        assert "hub connector setup --id cloud-agent" in error
+        assert "systemctl --user disable --now" in error
+        assert "usage:" not in error
+        assert retained.read_bytes() == before
+        assert sorted(p.name for p in target.iterdir()) == ["state.json"]
+
+
+@pytest.mark.parametrize("command", ["watch", "intake", "install-watch", "install-intake"])
+def test_retired_t3_module_commands(command):
+    result = subprocess.run(
+        [sys.executable, "-m", "brigade.grokbot_t3", command, "--old-flag"], capture_output=True, text=True
+    )
+    assert result.returncode == 2
+    assert f"this was removed in {REMOVED_IN}." in result.stderr
+    assert "brigade-grokbot-t3-watch.timer" in result.stderr
+    assert "brigade-grokbot-t3-intake.timer" in result.stderr

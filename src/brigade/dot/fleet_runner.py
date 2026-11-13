@@ -1,4 +1,4 @@
-"""The only t3-fleet and git subprocess boundary for t3-dispatch.
+"""Shared t3-fleet and git subprocess boundary for connectors.
 
 t3-fleet runs in machine mode: argv is the binary plus the action, and the
 request is one JSON object on stdin. Prompts never appear on argv.
