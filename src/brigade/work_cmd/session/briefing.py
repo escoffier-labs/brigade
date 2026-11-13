@@ -344,8 +344,11 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     del handoff_drafts_full
     from ... import brief_sections, work_mode
 
-    work_mode.pin_explicit_mode(target)
+    pin_errors: list[str] = []
+    work_mode.pin_explicit_mode(target, errors=pin_errors)
     work = work_mode.summary(target)
+    if pin_errors:
+        work["pin_error"] = pin_errors[0]
     return {
         "target": str(target),
         "session_close": {
@@ -671,6 +674,8 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
 
     for line in brief_sections.render_brief_session_close_lines(mode=payload["work_mode"]["mode"]):
         print(line)
+    if "pin_error" in payload["work_mode"]:
+        print(f"work_mode_pin: {payload['work_mode']['pin_error']}")
     if payload["work_mode"]["rails"] == "off":
         print("safety_rails: off (pre-push content guard and secret scanning are skipped)")
     update = payload.get("update")

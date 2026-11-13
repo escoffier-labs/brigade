@@ -917,11 +917,19 @@ def test_init_mode_flags_write_canonical_mode(tmp_path, capsys, flag, stored):
         assert "Agent: observe work mode" in out and "brigade work mode set strict" in out
 
 
-def test_observe_brief_states_checks_are_recorded(tmp_path, capsys):
+def test_observe_brief_requires_explicit_recording(tmp_path, capsys):
     target = _wired(tmp_path)
     _set_mode(target, "observe", capsys)
+    assert (
+        "INFO",
+        "work mode",
+        "observe: checks are not enforced. Recording requires `brigade work verify run`",
+    ) in work_mode.doctor_checks(target)
     assert cli.main(["work", "brief", "--target", str(target)]) == 0
-    assert "work_mode: observe (checks are recorded, not enforced" in capsys.readouterr().out
+    assert (
+        "work_mode: observe (checks are not enforced. Recording requires `brigade work verify run`"
+        in capsys.readouterr().out
+    )
 
 
 @pytest.mark.parametrize("mode", ["strict", "engineer", "enforced"])
@@ -947,3 +955,85 @@ def test_outcome_loop_findings_run_only_in_strict(tmp_path, monkeypatch, capsys)
         _set_mode(target, mode, capsys)
         doctor._check_outcome_loop(doctor.build_context(target))
     assert [path.name for path in calls] == ["strict"]
+
+
+def test_pin_never_migrates_legacy_config(tmp_path):
+    target = _wired(tmp_path)
+    _drop_mode_key(target)
+    canonical = config.config_path(target)
+    legacy = target / config.LEGACY_WORKSPACE_DIRNAMES[0] / "config.json"
+    legacy.parent.mkdir(exist_ok=True)
+    canonical.rename(legacy)
+    before = legacy.read_bytes()
+    assert work_mode.pin_explicit_mode(target) is None
+    assert legacy.read_bytes() == before
+    assert not canonical.exists()
+    assert any("unpinned" in detail for _, name, detail in work_mode.doctor_checks(target) if name == "work.mode")
+
+
+@pytest.mark.parametrize("with_work", [False, True])
+def test_pin_preserves_unknown_keys_and_original_bytes(tmp_path, with_work):
+    target = _wired(tmp_path)
+    path = config.config_path(target)
+    original = '{"version":1,"unknown":{"z":1e2,"a":"\\u0061"}'
+    if with_work:
+        original += ',"work":{"rails":"off","unknown":[3,2,1]}'
+    original += "}\n"
+    path.write_text(original)
+    assert work_mode.pin_explicit_mode(target) == "strict"
+    updated = path.read_text()
+    insertion = ',"mode": "strict"' if with_work else ',"work": {"mode": "strict"}'
+    assert updated.replace(insertion, "", 1) == original
+    assert json.loads(updated)["unknown"] == json.loads(original)["unknown"]
+    if with_work:
+        assert json.loads(updated)["work"]["rails"] == "off"
+
+
+@pytest.mark.parametrize("content", ["{", '{"version":99}', '{"version":1,"work":{},"work":{}}'])
+def test_pin_parse_or_unsafe_edit_writes_nothing(tmp_path, content):
+    target = _wired(tmp_path)
+    path = config.config_path(target)
+    path.write_text(content)
+    assert work_mode.pin_explicit_mode(target) is None
+    assert path.read_text() == content
+
+
+@pytest.mark.parametrize("content", ["{", '{"version":99}', "[]", "\udcff"])
+def test_doctor_unreadable_config_has_no_pin_hint(tmp_path, content):
+    target = _wired(tmp_path)
+    config.config_path(target).write_bytes(content.encode("utf-8", errors="surrogateescape"))
+    rows = [detail for _, name, detail in work_mode.doctor_checks(target) if name == "work.mode"]
+    assert len(rows) == 1 and "cannot be read" in rows[0]
+    assert "mode set" not in rows[0]
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_brief_reports_pin_write_failure(tmp_path, monkeypatch, capsys, json_output):
+    target = _wired(tmp_path)
+    _drop_mode_key(target)
+    before = config.config_path(target).read_bytes()
+
+    def fail(*args, **kwargs):
+        raise OSError("write denied")
+
+    monkeypatch.setattr(localio, "write_text_atomic", fail)
+    capsys.readouterr()
+    args = ["work", "brief", "--target", str(target)] + (["--json"] if json_output else [])
+    assert cli.main(args) == 0
+    output = capsys.readouterr().out
+    if json_output:
+        assert json.loads(output)["work_mode"]["pin_error"] == "unable to pin work.mode: write denied"
+    else:
+        assert "work_mode_pin: unable to pin work.mode: write denied" in output
+    assert config.config_path(target).read_bytes() == before
+
+
+@pytest.mark.parametrize("mode", [None, "", "unexpected", 42, [], {}])
+def test_invalid_mode_readers_fail_safe(tmp_path, mode):
+    target = _wired(tmp_path)
+    path = config.config_path(target)
+    data = json.loads(path.read_text())
+    data["work"] = {"mode": mode}
+    path.write_text(json.dumps(data))
+    assert work_mode.resolve_mode(target) == "strict"
+    assert config.load_config(target).work_mode == "strict"

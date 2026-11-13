@@ -124,7 +124,7 @@ if [[ -z "$target" || -z "$brigade_bin" ]]; then
   exit 0
 fi
 
-# Work mode (#2233): yolo keeps the brief and drops verification enforcement.
+# Work mode: only explicit off or observe disables verification enforcement.
 work_mode="$(python3 - "$target/.brigade/config.json" <<'PY' 2>/dev/null || true
 import json
 import sys
@@ -140,6 +140,10 @@ mode = work.get("mode") if isinstance(work, dict) else None
 print("off" if mode in ("off", "yolo") else "observe" if mode == "observe" else "strict")
 PY
 )"
+case "$work_mode" in
+  off|observe) ;;
+  *) work_mode=strict ;;
+esac
 
 mkdir -p "$state_dir" "$state_root/logs"
 log_file="$state_root/logs/$safe_session.log"

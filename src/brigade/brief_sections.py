@@ -194,9 +194,7 @@ def render_brief_session_close_lines(*, mode: str = "strict") -> list[str]:
     lines = ["session_close:"]
     lines.extend(f"  - [ ] {item}" for item in session_close_items(mode=mode))
     if mode == "observe":
-        lines.append(
-            "work_mode: observe (checks are recorded, not enforced; `brigade work verify run` still records a receipt)"
-        )
+        lines.append("work_mode: observe (checks are not enforced. Recording requires `brigade work verify run`)")
     elif mode == "off":
         lines.append(
             "work_mode: off (verification is not enforced; "

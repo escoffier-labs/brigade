@@ -211,6 +211,9 @@ def test_session_start_uses_portable_bounded_brief_runner(tmp_path: Path):
         ("engineer", "deny"),
         ("enforced", "deny"),
         (None, "deny"),
+        ("", "deny"),
+        ("unexpected", "deny"),
+        (42, "deny"),
     ],
 )
 def test_unenforced_modes_allow_raw_verification_and_strict_denies(tmp_path: Path, mode, decision):
@@ -236,3 +239,37 @@ def test_yolo_ignored_for_unsupported_config_version(tmp_path: Path, mode):
     result = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
 
     assert json.loads(result.stdout)["decision"] == "deny"
+
+
+@pytest.mark.parametrize("reader_output", ["", "unexpected"])
+def test_failed_mode_reader_keeps_deny_and_close_out_friction(tmp_path, reader_output):
+    target = tmp_path / "repo"
+    _write_config(target, ["grok"])
+    bin_dir = Path(_without_jq_path(tmp_path))
+    (bin_dir / "python3").unlink()
+    # Keep payload parsing, target discovery and deny output working. Fail only
+    # the mode reader, so this exercises its empty-output failure boundary.
+    (bin_dir / "python3").write_text(
+        "#!/usr/bin/bash\n"
+        'if [[ "$1" == "-" ]]; then\n'
+        '  script="$(cat)"\n'
+        '  if [[ "$script" == *\'print("off"\'* ]]; then\n'
+        f'    printf "%s" "{reader_output}"; exit 1\n'
+        "  fi\n"
+        f'  exec {sys.executable} -c "$script" "${{@:2}}"\n'
+        "fi\n"
+        f'exec {sys.executable} "$@"\n'
+    )
+    (bin_dir / "python3").chmod(0o755)
+    brigade = tmp_path / "missing-brigade"
+    brigade.write_text('#!/usr/bin/bash\nprintf "%s\\n" "$*"\nexit 1\n')
+    brigade.chmod(0o755)
+    result = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
+    assert json.loads(result.stdout)["decision"] == "deny"
+    state = tmp_path / "state" / "session-1"
+    (state / "substantive").touch()
+    result = _run_hook(tmp_path, {**_pre_tool_payload(target, ""), "hookEventName": "stop"})
+    assert result.returncode == 0
+    assert (state / "friction.reported").exists()
+    assert (state / "substantive").exists()
+    assert "friction add" in (tmp_path / "state" / "logs" / "session-1.log").read_text()

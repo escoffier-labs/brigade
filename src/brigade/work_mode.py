@@ -38,6 +38,7 @@ from .config import (
     LEGACY_WORKSPACE_DIRNAMES,
     SUPPORTED_VERSIONS,
     WORK_MODES,
+    config_path,
     load_config,
     validate_work_mode,
     write_config,
@@ -102,13 +103,14 @@ def is_observe(target: Path) -> bool:
     return resolve_mode(target) == MODE_OBSERVE
 
 
-def pin_explicit_mode(target: Path) -> str | None:
+def pin_explicit_mode(target: Path, *, errors: list[str] | None = None) -> str | None:
     """Pin a readable, untracked keyless config without changing its behavior."""
     _, path = _work_settings_with_source(target)
-    if path is None:
+    if path != config_path(target) or path.is_symlink():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        original = path.read_bytes().decode("utf-8")
+        data = json.loads(original, object_pairs_hook=_unique_config_keys)
         if not isinstance(data, dict) or data.get("version") not in SUPPORTED_VERSIONS:
             return None
         work = data.get("work", {})
@@ -124,8 +126,51 @@ def pin_explicit_mode(target: Path) -> str | None:
         return None
     if tracked.returncode == 0:
         return None
-    mode = resolve_mode(target)
-    return mode if _update(target, work_mode=mode) is None else None
+    # Insert at the object boundary, preserving all existing bytes and key order.
+    end = len(original.rstrip()) - 1
+    value = '"work": {"mode": "strict"}'
+    nonempty = bool(data)
+    if "work" in data:
+        decoder = json.JSONDecoder()
+        pos = original.index("{") + 1
+        while True:
+            pos = _skip_json_space(original, pos)
+            key, pos = decoder.raw_decode(original, pos)
+            pos = _skip_json_space(original, pos) + 1  # colon
+            _, end = decoder.raw_decode(original, _skip_json_space(original, pos))
+            if key == "work":
+                end -= 1  # closing brace of work
+                break
+            pos = _skip_json_space(original, end) + 1  # comma
+        value = '"mode": "strict"'
+        nonempty = bool(work)
+    updated = original[:end] + ("," if nonempty else "") + value + original[end:]
+    try:
+        # Validate the edit before replacing the canonical file atomically.
+        expected = {**data, "work": {**work, "mode": MODE_STRICT}}
+        if json.loads(updated) != expected or path.read_bytes().decode("utf-8") != original:
+            return None
+        localio.write_text_atomic(path, updated)
+    except (OSError, ValueError) as exc:
+        if errors is not None:
+            errors.append(f"unable to pin work.mode: {exc}")
+        return None
+    return MODE_STRICT
+
+
+def _skip_json_space(text: str, pos: int) -> int:
+    while pos < len(text) and text[pos] in " \t\r\n":
+        pos += 1
+    return pos
+
+
+def _unique_config_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate config key")
+        result[key] = value
+    return result
 
 
 def _case_insensitive_paths() -> bool:
@@ -340,17 +385,26 @@ def doctor_checks(target: Path) -> list[tuple[str, str, str]]:
             "`brigade work mode set strict` restores the loop"
         )
     elif mode == MODE_OBSERVE:
-        mode_detail = "observe: checks are recorded, nothing is blocked"
+        mode_detail = "observe: checks are not enforced. Recording requires `brigade work verify run`"
     else:
         mode_detail = "strict: checks route through `brigade work verify run` and the Stop gate wants a receipt"
     checks = [("INFO", "work mode", mode_detail)]
-    settings = _work_settings(target)
-    if "mode" in settings:
+    settings, path = _work_settings_with_source(target)
+    readable = True
+    if path is not None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            readable = isinstance(data, dict) and data.get("version") in SUPPORTED_VERSIONS
+        except (OSError, ValueError):
+            readable = False
+    if not readable:
+        checks.append(("WARN", "work.mode", "config cannot be read or is unsupported; using strict"))
+    if readable and "mode" in settings:
         try:
             validate_work_mode(settings["mode"])
         except ValueError:
             checks.append(("WARN", "work.mode", "invalid value ignored; using strict"))
-    if "mode" not in settings:
+    if readable and "mode" not in settings:
         checks.append(("INFO", "work.mode", "unpinned; use `brigade work mode set strict` to pin it"))
     ignored = ignored_repo_rails_note(target)
     if ignored is not None:

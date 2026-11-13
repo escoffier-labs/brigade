@@ -209,3 +209,8 @@ def test_observe_repo_cd_into_strict_repo_is_denied(repos, capsys):
         (observed, "observe")
     ]
     assert verification_mode.governing_modes("echo done", repos["enforced"], repos["enforced"]) == []
+
+
+@pytest.mark.parametrize("command", [None, 42, "", "  "])
+def test_invalid_command_is_always_enforced(tmp_path, capsys, command):
+    assert verification_mode.verification_enforced(command, None, _wired(tmp_path / "repo", "off", capsys))

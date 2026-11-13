@@ -193,5 +193,7 @@ def governing_modes(command: object, cwd: object, root: Path) -> list[tuple[Path
 
 def verification_enforced(command: object, cwd: object, root: Path) -> bool:
     """Enforce when any verifier belongs to a strict target."""
+    if not isinstance(command, str) or not command.strip():
+        return True
     modes = governing_modes(command, cwd, root)
     return any(mode == work_mode.MODE_STRICT for _, mode in modes) if modes else work_mode.is_strict(root)
