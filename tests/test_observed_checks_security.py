@@ -228,3 +228,44 @@ def test_rotation_refuses_foreign_json_generation(tmp_path, monkeypatch):
     monkeypatch.setattr(checks, "ROTATE_BYTES", 1)
     assert not checks.append_check(tmp_path, check)
     assert path.read_text() == '{"foreign": true}\n'
+
+
+def test_key_creation_does_not_require_readable_write_handle(tmp_path, monkeypatch):
+    original = checks._open_regular
+
+    def write_only_creation(parent, name, flags):
+        if name.endswith(".key") and flags & os.O_CREAT:
+            flags = (flags & ~os.O_RDWR) | os.O_WRONLY
+        return original(parent, name, flags)
+
+    monkeypatch.setattr(checks, "_open_regular", write_only_creation)
+    first = record(tmp_path)
+    assert first.command_digest != checks.DIGEST_UNAVAILABLE
+    assert first.command_digest == record(tmp_path).command_digest
+
+
+def test_rotation_does_not_leave_an_open_generation_delete_pending(tmp_path, monkeypatch):
+    path = tmp_path / "checks.jsonl"
+    monkeypatch.setattr(checks, "ROTATE_BYTES", 1)
+    assert checks.append_jsonl(path, {"record": 1})
+    assert checks.append_jsonl(path, {"record": 2})
+    unlink = checks.dirfd.unlink_child
+    replace_children = checks.dirfd.replace_children
+    pending = False
+
+    def mark_delete_pending(parent, name, **kwargs):
+        nonlocal pending
+        if name == path.name + ".1":
+            pending = True
+            return None
+        return unlink(parent, name, **kwargs)
+
+    def rename(parent, source, destination, **kwargs):
+        if pending and destination == path.name + ".1":
+            raise PermissionError("generation still has an open delete-pending handle")
+        return replace_children(parent, source, destination, **kwargs)
+
+    monkeypatch.setattr(checks.dirfd, "unlink_child", mark_delete_pending)
+    monkeypatch.setattr(checks.dirfd, "replace_children", rename)
+    assert checks.append_jsonl(path, {"record": 3})
+    assert checks.read_jsonl(path) == ([{"record": 2}, {"record": 3}], 0)

@@ -336,7 +336,7 @@ def _digest_key(target: Path) -> bytes:
         if os.name != "nt":
             os.fchmod(parent, 0o700)
         try:
-            fd = _open_regular(parent, path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL)
+            fd = _open_regular(parent, path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         except FileExistsError:
             fd = _open_regular(parent, path.name, os.O_RDONLY)
         else:
@@ -345,9 +345,10 @@ def _digest_key(target: Path) -> bytes:
                 if os.write(fd, key) != 32:
                     raise OSError("incomplete workspace key")
                 os.fsync(fd)
-            except BaseException:
+            finally:
                 os.close(fd)
-                raise
+            # The Windows backend grants creation handles write access only.
+            fd = _open_regular(parent, path.name, os.O_RDONLY)
         try:
             metadata = os.fstat(fd)
             if os.name != "nt" and metadata.st_mode & 0o077:
@@ -490,9 +491,9 @@ def _rotate(path: Path, parent: int, fd: int, older: int | None) -> bool:
             named, held = dirfd.stat_child(parent, name), os.fstat(descriptor)
             if (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino):
                 raise OSError("record entry changed")
-    if older is not None:
-        dirfd.unlink_child(parent, path.name + ".1")
-    dirfd.replace_children(parent, path.name, path.name + ".1", replace=False)
+    # Replacing the validated generation avoids a Windows delete-pending name
+    # while its descriptor (or a reader's descriptor) is still open.
+    dirfd.replace_children(parent, path.name, path.name + ".1", replace=older is not None)
     return True
 
 
