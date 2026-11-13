@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tomllib
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from datetime import date
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -27,7 +28,8 @@ class TendConfig:
 
 def load_config(target: Path) -> TendConfig:
     path = target / ".brigade/memory-care.toml"
-    table = tomllib.loads(path.read_text()).get("tend", {}) if path.exists() else {}
+    with path.open(encoding="utf-8", newline="") if path.exists() else io.StringIO("") as handle:
+        table = tomllib.loads(handle.read()).get("tend", {})
     if not isinstance(table, dict):
         raise ValueError("tend must be a table")
     values = asdict(TendConfig())
@@ -61,20 +63,20 @@ def run(
             from .memory_care_fixes import apply_fixes
 
             payload["stages"][stage] = apply_fixes(
-                target, memory_cmd._config_or_default(target), today=today or date.today(), dry_run=dry_run
+                target, memory_cmd._config_or_default(target), today=today or memory_cmd._today(), dry_run=dry_run
             )
         elif stage == "inbox":
             from .memory_inbox_drain import drain
 
             payload["stages"][stage] = drain(
                 target,
-                today=today or datetime.now(timezone.utc).date(),
+                today=today or memory_cmd._today(),
                 deadline_days=tend.deadline_days,
                 dry_run=dry_run,
             )
         else:
             payload["stages"][stage] = memory_care_retire.apply(
-                target, memory_cmd._config_or_default(target), tend, today=today or date.today(), dry_run=dry_run
+                target, memory_cmd._config_or_default(target), tend, today=today or memory_cmd._today(), dry_run=dry_run
             )
     if not dry_run:
         store.write_json(target / STATE_REL, payload)
@@ -90,7 +92,7 @@ def undo(target: Path, decision_id: str) -> journal.Decision:
     d = journal.load(target, decision_id)
     if d.kind == "undo":
         raise journal.JournalConflict("cannot undo an undo decision")
-    if d.undone_by:
+    if d.undone_by and journal._payload(target, d.undone_by).get("phase") != "abandoned":
         return journal.load(target, d.undone_by)
     return (
         memory_archive.restore(target, d) if d.kind == "archive" else journal.revert(target, decision_id, reason="undo")

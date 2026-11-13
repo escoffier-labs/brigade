@@ -258,7 +258,7 @@ def _revert_locked(target: Path, decision_id: str, *, reason: str) -> Decision:
     d = load(target, decision_id)
     if d.kind == "undo":
         raise JournalConflict("cannot undo an undo decision")
-    if d.undone_by:
+    if d.undone_by and _payload(target, d.undone_by).get("phase") != "abandoned":
         raise JournalConflict("decision already undone")
     from .memory_inbox_append import undo_changes, retractions
 

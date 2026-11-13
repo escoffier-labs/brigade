@@ -375,13 +375,25 @@ def test_a_quoted_date_key_is_never_duplicated(tmp_path, kind, line):
     assert path.read_bytes() == before
 
 
-def test_a_card_with_windows_line_endings_is_reported_and_left_unchanged(tmp_path):
-    """Such a card is refused today. Supporting it is a recorded follow-up."""
+def test_a_card_with_windows_line_endings_applies_and_undoes_exactly(tmp_path):
     from brigade import memory_care_fixes as fixes
 
     path = card(tmp_path, "missing-freshness")
     path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
     before = path.read_bytes()
+    result = fixes.apply_fixes(tmp_path, care._config_or_default(tmp_path), today=TODAY)
+    assert result["applied"] == 1
+    assert path.read_bytes() == before.replace(b"\r\n---\r\n", b"\r\nfresh_until: 2027-01-30\r\n---\r\n")
+    tend.undo(tmp_path, result["decision_ids"][0])
+    assert path.read_bytes() == before
+
+
+def test_mixed_line_endings_are_refused(tmp_path):
+    from brigade import memory_care_fixes as fixes
+
+    path = card(tmp_path, "missing-freshness")
+    before = path.read_bytes().replace(b"---\n", b"---\r\n", 1)
+    path.write_bytes(before)
     result = fixes.apply_fixes(tmp_path, care._config_or_default(tmp_path), today=TODAY)
     assert result["applied"] == 0
     assert path.read_bytes() == before

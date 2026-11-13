@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import memory_archive, memory_cmd as care, memory_care_journal as journal
-from .card_fingerprint import _upsert_frontmatter_fields
 
 # Every scanner kind has an explicit disposition; unknown kinds also fail closed.
 FIX_POLICY = {
@@ -46,12 +46,88 @@ def read(target: Path, rel: str) -> bytes:
         raise FixRefused("unreadable") from exc
 
 
-def review_date(target: Path, rel: str, today: date) -> tuple[str, str]:
+def plain_frontmatter(text: str) -> dict[str, str]:
+    """Accept only independent physical fields, without interpreting general YAML."""
+    text = text.removeprefix("\ufeff")
+    normalized = text.replace("\r\n", "\n")
+    if "\r" in normalized or ("\r\n" in text and "\n" in text.replace("\r\n", "")):
+        raise FixRefused("frontmatter-refused")
+    lines = normalized.split("\n")
+    if not lines or lines[0] != "---" or "---" not in lines[1:]:
+        raise FixRefused("frontmatter-refused")
+    meta: dict[str, str] = {}
+    seen: set[str] = set()
+    aliases = (
+        {"last_reviewed", "last_reviewed_at", "reviewed_at"},
+        {"fresh_until", "freshness_until", "expires", "expires_at"},
+    )
+    for line in lines[1 : lines.index("---", 1)]:
+        if "\t" in line:
+            raise FixRefused("frontmatter-refused")
+        if not line.strip() or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_-]*):(?: +(.*)|$)", line)
+        if not match:
+            raise FixRefused("frontmatter-refused")
+        key, value = match[1], match[2] or ""
+        lowered = key.lower()
+        if lowered in seen or any(lowered in group and seen & group for group in aliases):
+            raise FixRefused("frontmatter-refused")
+        seen.add(lowered)
+        stack: list[str] = []
+        quote = ""
+        index = 0
+        while index < len(value):
+            char = value[index]
+            if quote:
+                if char == "\\" and quote == '"':
+                    index += 2
+                    continue
+                if char == quote:
+                    if quote == "'" and value[index : index + 2] == "''":
+                        index += 2
+                        continue
+                    quote = ""
+            elif char == "#" and (index == 0 or value[index - 1].isspace()):
+                value = value[:index].rstrip()
+                break
+            elif char in "\"'":
+                quote = char
+            elif char in "[{":
+                stack.append({"[": "]", "{": "}"}[char])
+            elif char in "]}":
+                if not stack or stack.pop() != char:
+                    raise FixRefused("frontmatter-refused")
+            elif char in "&*!|>" and (index == 0 or value[index - 1] in " [,{"):
+                raise FixRefused("frontmatter-refused")
+            elif char == ":" and not stack and (index + 1 == len(value) or value[index + 1].isspace()):
+                raise FixRefused("frontmatter-refused")
+            index += 1
+        if quote or stack or value.startswith(("- ", "? ", "%", "@", "`")):
+            raise FixRefused("frontmatter-refused")
+        meta[lowered] = value.strip().strip("'\"")
+    return meta
+
+
+def plan_context(target: Path, config: care.MemoryCareConfig) -> tuple[set[str], bool]:
+    cards = {p.relative_to(target).as_posix() for p in care._iter_cards(target, config)}
     try:
-        result = subprocess.run(
-            ["git", "-C", str(target), "rev-parse", "--is-inside-work-tree"], capture_output=True, timeout=15
+        inside_git = (
+            subprocess.run(
+                ["git", "-C", str(target), "rev-parse", "--is-inside-work-tree"], capture_output=True, timeout=15
+            ).returncode
+            == 0
         )
-        if result.returncode == 0:
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise FixRefused("date-unavailable") from exc
+    return cards, inside_git
+
+
+def review_date(target: Path, rel: str, today: date, *, inside_git: bool | None = None) -> tuple[str, str]:
+    try:
+        if inside_git is None:
+            inside_git = plan_context(target, care._config_or_default(target))[1]
+        if inside_git:
             value = care._git_last_commit_date(target, rel)
             source = "git-last-commit"
         else:
@@ -69,7 +145,14 @@ def review_date(target: Path, rel: str, today: date) -> tuple[str, str]:
     return value.isoformat(), source
 
 
-def prepare(target: Path, config: care.MemoryCareConfig, item: dict[str, Any], today: date) -> dict[str, Any]:
+def prepare(
+    target: Path,
+    config: care.MemoryCareConfig,
+    item: dict[str, Any],
+    today: date,
+    *,
+    context: tuple[set[str], bool] | None = None,
+) -> dict[str, Any]:
     from .memory_care_plan import derived_fresh_until
 
     rel = str(item["card_file"])
@@ -79,7 +162,8 @@ def prepare(target: Path, config: care.MemoryCareConfig, item: dict[str, Any], t
     if care._is_read_only(config, rel) or rel in config.index_paths or memory_archive.is_archived_path(rel):
         raise FixRefused("protected")
     # Only actual enumerated cards can be changed, even for forged saved scans.
-    if rel not in {p.relative_to(target).as_posix() for p in care._iter_cards(target, config)}:
+    cards, inside_git = context if context is not None else plan_context(target, config)
+    if rel not in cards:
         raise FixRefused("not-card")
     before = read(target, rel)
     if len(before) > config.max_card_bytes:
@@ -97,60 +181,17 @@ def prepare(target: Path, config: care.MemoryCareConfig, item: dict[str, Any], t
             if restored is None or restored == before:
                 raise FixRefused("undone")
     text = before.decode("utf-8")
+    meta = plain_frontmatter(text)
     if memory_archive.frontmatter_refusal(text):
-        raise FixRefused("frontmatter-refused")
-    lines = text.removeprefix("\ufeff").replace("\r\n", "\n").lstrip("\n").splitlines()
-    keys = (
-        [
-            line.partition(":")[0].strip().strip("\"'").lower()
-            for line in lines[1 : lines.index("---", 1)]
-            if line and not line[0].isspace() and ":" in line
-        ]
-        if lines and lines[0] == "---"
-        else []
-    )
-    aliases = (
-        {"last_reviewed", "last_reviewed_at", "reviewed_at"},
-        {"fresh_until", "freshness_until", "expires", "expires_at"},
-    )
-    if len(keys) != len(set(keys)) or any(len(set(keys) & group) > 1 for group in aliases):
-        raise FixRefused("ambiguous")
-    # The field writer matches a key on any line. An indented line that looks like one of
-    # these keys is nested or block-scalar content, which the writer would overwrite.
-    nested = (
-        [
-            line.partition(":")[0].strip().strip("\"'").lower()
-            for line in lines[1 : lines.index("---", 1)]
-            if line and line[0].isspace() and ":" in line
-        ]
-        if lines and lines[0] == "---"
-        else []
-    )
-    if any(key in group for key in nested for group in aliases):
-        raise FixRefused("ambiguous")
-    # The parser keeps quotes on a key, so a quoted date key would be missed and duplicated.
-    quoted = (
-        [
-            line.partition(":")[0].strip()
-            for line in lines[1 : lines.index("---", 1)]
-            if line and not line[0].isspace() and ":" in line
-        ]
-        if lines and lines[0] == "---"
-        else []
-    )
-    if any(raw != raw.strip("\"'") and raw.strip("\"'").lower() in group for raw in quoted for group in aliases):
-        raise FixRefused("ambiguous")
-    meta, header = care._parse_frontmatter(text)
-    if not header:
         raise FixRefused("frontmatter-refused")
     result: dict[str, Any] = {"content_digest": digest, "candidate_fields": {}, "source": "derived", "before": before}
     if kind == "missing-reviewed":
-        if care._frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at"):
+        if any(key in meta for key in ("last_reviewed", "last_reviewed_at", "reviewed_at")):
             raise FixRefused("already-present")
-        value, result["source"] = review_date(target, rel, today)
+        value, result["source"] = review_date(target, rel, today, inside_git=inside_git)
         result["candidate_fields"] = {"last_reviewed": value}
     elif kind == "missing-freshness":
-        if care._frontmatter_value(meta, "fresh_until", "freshness_until", "expires", "expires_at"):
+        if any(key in meta for key in ("fresh_until", "freshness_until", "expires", "expires_at")):
             raise FixRefused("already-present")
         reviewed = care._parse_date(care._frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at"))
         fresh = derived_fresh_until(reviewed, config.stale_after_days) if reviewed else None
@@ -184,6 +225,7 @@ def apply_fixes(
         except (OSError, ValueError, UnicodeError):
             result.update(skipped=1, reasons={"scan-unreadable": 1})
             return result
+    context = plan_context(target, config)
     grouped: dict[str, list[dict[str, Any]]] = {}
     for item in plan["items"]:
         if item.get("blockers"):
@@ -202,10 +244,15 @@ def apply_fixes(
             for item in items:
                 if not isinstance(item.get("content_digest"), str):
                     raise FixRefused("unbound-plan")
-                prepared.append((item, prepare(target, config, item, today)))
+                prepared.append((item, prepare(target, config, item, today, context=context)))
             before = prepared[0][1]["before"]
             fields = {k: v for _, p in prepared for k, v in p["candidate_fields"].items()}
-            after = _upsert_frontmatter_fields(before.decode("utf-8"), fields).encode("utf-8") if fields else before
+            # Insert only: preserve the BOM, every existing byte, and the physical newline style.
+            newline = b"\r\n" if b"\r\n" in before else b"\n"
+            lines = before.split(newline)
+            closing = lines.index(b"---", 1)
+            additions = [f"{key}: {value}".encode("utf-8") for key, value in fields.items()]
+            after = newline.join(lines[:closing] + additions + lines[closing:])
             changes = [journal.Change(rel, before, after)]
             reason = ",".join(i["issue_type"] + ":" + p["source"] for i, p in prepared)
             if not dry_run:

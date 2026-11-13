@@ -45,10 +45,25 @@ def load(target: Path) -> dict[str, dict[str, Any]]:
     path = safe_path(target, INDEX_REL)
     cached: dict[str, Any] = {}
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        with path.open(encoding="utf-8", newline="") as handle:
+            value = json.load(handle)
         records = value["records"]
         digest = hashlib.sha256(json.dumps(records, sort_keys=True).encode("utf-8")).hexdigest()
-        if digest == value["sha256"] and isinstance(records, dict):
+        if (
+            digest == value["sha256"]
+            and isinstance(records, dict)
+            and all(
+                isinstance(entry, dict)
+                and set(entry) == {"stamp", "row"}
+                and isinstance(entry["stamp"], list)
+                and len(entry["stamp"]) == 4
+                and all(type(part) is int for part in entry["stamp"])
+                and isinstance(entry["row"], dict)
+                and set(entry["row"]) == {"prepared", "document", "repair", "append"}
+                and all(type(flag) is bool for flag in entry["row"].values())
+                for entry in records.values()
+            )
+        ):
             cached = records
     except (OSError, ValueError, KeyError, TypeError):
         pass
@@ -60,11 +75,14 @@ def load(target: Path) -> dict[str, dict[str, Any]]:
         row = old["row"] if isinstance(old, dict) and old.get("stamp") == stamp else _row(p)
         records[p.parent.name] = {"stamp": stamp, "row": row}
     if records != cached or not path.exists():
-        store.write_json(
-            path,
-            {
-                "records": records,
-                "sha256": hashlib.sha256(json.dumps(records, sort_keys=True).encode("utf-8")).hexdigest(),
-            },
-        )
+        try:
+            store.write_json(
+                path,
+                {
+                    "records": records,
+                    "sha256": hashlib.sha256(json.dumps(records, sort_keys=True).encode("utf-8")).hexdigest(),
+                },
+            )
+        except OSError:
+            pass  # Rebuilt rows remain usable when the optional cache cannot be replaced.
     return {key: value["row"] for key, value in records.items() if any(value["row"].values())}
