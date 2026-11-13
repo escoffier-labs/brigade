@@ -670,3 +670,12 @@ The exclusion covers the entire `engines/hub/` tree, including the following nam
 7. **Publication:** Only repository-relative source paths and public example runtime paths appear. Private research locations, identities and counts are omitted. No em dashes or external inspiration names are present. The committed plan is the only tracked deliverable.
 
 Nothing durable: this plan records the decisions and repository-grounded findings for later implementation.
+
+## Follow-ups from the Task 2 reviews
+
+Task 2 merged. The retired `grokbot-memory` and `grokbot-inbox` ids print a removal message that names the installed units and how to stop them, and `remove` for those ids deletes only the generated unit files.
+
+- **Task 6 (operator migration guide):** tell operators to stop the old units first, then run `remove` with the unit directory, then set up `cloud-agent` with new credentials. A retained instance that shares a principal, token, state directory or Access identifier with the new profile is refused.
+- **Task 6:** `remove` needs the listener unit to exist. If only the watch service and timer remain, they must be deleted by hand. Say so in the guide.
+- **Tasks 3 to 5:** retained instance files are read for five fields only, with a size limit. When the remaining Grok-specific modules are deleted, keep `retired_instances.py` and the shared bounded reader it uses.
+- A fleet digest deadline test failed once on a shared runner during this task and passed on the next run. If it recurs, give it a scaling bound instead of a wall-clock one.

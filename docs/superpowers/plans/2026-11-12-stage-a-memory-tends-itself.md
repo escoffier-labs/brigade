@@ -917,3 +917,13 @@ git commit -m "feat(memory-care): write a weekly summary of what care archived, 
   undo, refuse undo of undo, and list abandoned decisions that remain restorable.
   Reject the repository root as a card root.
 - Verify CRLF pins through a manifest without relying on platform newline translation.
+
+## Follow-ups from the PR 1 reviews
+
+PR 1 merged with these items deferred. Each belongs to a later PR in this plan.
+
+- A retire that is skipped because the published path is stale is not reported anywhere. Surface it in the care summary (PR 7).
+- Before-image directories can be left behind when a decision is abandoned. Add a sweep to the inbox drain (PR 2).
+- Archive, undo and then edit a card while the hub is unreachable: the retire is sent and the revive is superseded, so the hub copy stays retired until the next normal hub push republishes it. Document this in the memory care guide, or send the paired retire only when the undo itself will be replayed.
+- Projected vault reads re-read every card on each search or show. Cache the identity map before vaults grow.
+- The hub side of archive and undo has only been exercised by tests. Run it against a real hub with throwaway cards before applying a large manifest.

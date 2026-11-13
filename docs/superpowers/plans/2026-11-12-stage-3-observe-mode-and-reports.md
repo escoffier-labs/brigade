@@ -985,3 +985,13 @@ git commit -m "feat(work): add the claimed versus run checks report"
 5. **Proportion.** The plan carries signatures, test names and assertions. The only algorithm bodies spelled out are the tool normalization order, the rotation lock and the claim matching rule, which the tests alone do not fix.
 
 Round 4 identity contract: observed harness names come from `selection.KNOWN_HARNESSES`, with the existing `claude-code` hook spelling. Agent types use closed hook defaults and built-in names. Models are lowercase, 3 to 48 letters, digits, dots or hyphens with a known family prefix. One mapping applies on build, append and read. Unknown free text becomes `unknown`.
+
+## Follow-ups from the pull request 2 reviews
+
+Pull request 2 merged with the record stored in the per-user state directory, outside every repository. These items were deferred to the pull requests named.
+
+- **Pull request 3 (hook capture):** add a `brigade doctor` line that says when recording is unavailable and why, without printing the path. Known causes: the state directory sits inside the project's nearest work tree, a parent directory is writable by other users, or the config directory is reached through a symbolic link.
+- **Pull request 3:** the model field keeps a shaped model id with a known family prefix. Add new families to the table in `agent_identity.py` when a harness reports one, and consider stripping provider prefixes and date suffixes so those ids keep their family.
+- **Pull request 5 (first-pass report):** when rotation keeps failing because another process holds the old generation open, the active file can pass the reader's size limit and the reader then returns nothing from it. Read the newest part of an oversized file instead of rejecting it.
+- **Pull request 5:** each record is validated twice on read. Fold the two passes into one before reports read the file often.
+- Windows relies on the user profile's inherited access rules for the state directory. Revisit only if a shared state location becomes a supported setup.
