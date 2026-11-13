@@ -201,32 +201,75 @@ def test_session_start_uses_portable_bounded_brief_runner(tmp_path: Path):
     assert 'timeout "$brief_timeout_seconds"' not in HOOK.read_text()
 
 
-def test_yolo_mode_allows_raw_verification_and_engineer_still_denies(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("mode", "decision"),
+    [
+        ("off", "allow"),
+        ("yolo", "allow"),
+        ("observe", "allow"),
+        ("strict", "deny"),
+        ("engineer", "deny"),
+        ("enforced", "deny"),
+        (None, "deny"),
+        ("", "deny"),
+        ("unexpected", "deny"),
+        (42, "deny"),
+    ],
+)
+def test_unenforced_modes_allow_raw_verification_and_strict_denies(tmp_path: Path, mode, decision):
     target = tmp_path / "repo"
     _write_config(target, ["grok"])
     config_path = target / ".brigade" / "config.json"
     config = json.loads(config_path.read_text())
-    config_path.write_text(json.dumps({**config, "work": {"mode": "yolo"}}))
-
-    yolo = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
+    if mode is not None:
+        config["work"] = {"mode": mode}
     config_path.write_text(json.dumps(config))
-    engineer = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
-    # The legacy name for engineer mode keeps the deny too.
-    config_path.write_text(json.dumps({**config, "work": {"mode": "enforced"}}))
-    legacy = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
-
-    assert json.loads(yolo.stdout) == {"decision": "allow"}
-    assert json.loads(engineer.stdout)["decision"] == "deny"
-    assert json.loads(legacy.stdout)["decision"] == "deny"
+    result = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
+    assert json.loads(result.stdout)["decision"] == decision
 
 
-def test_yolo_ignored_for_unsupported_config_version(tmp_path: Path):
+@pytest.mark.parametrize("mode", ["yolo", "off", "observe"])
+def test_yolo_ignored_for_unsupported_config_version(tmp_path: Path, mode):
     target = tmp_path / "repo"
     _write_config(target, ["grok"])
     config_path = target / ".brigade" / "config.json"
     config = json.loads(config_path.read_text())
-    config_path.write_text(json.dumps({**config, "version": 2, "work": {"mode": "yolo"}}))
+    config_path.write_text(json.dumps({**config, "version": 2, "work": {"mode": mode}}))
 
     result = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
 
     assert json.loads(result.stdout)["decision"] == "deny"
+
+
+@pytest.mark.parametrize("reader_output", ["", "unexpected"])
+def test_failed_mode_reader_keeps_deny_and_close_out_friction(tmp_path, reader_output):
+    target = tmp_path / "repo"
+    _write_config(target, ["grok"])
+    bin_dir = Path(_without_jq_path(tmp_path))
+    (bin_dir / "python3").unlink()
+    # Keep payload parsing, target discovery and deny output working. Fail only
+    # the mode reader, so this exercises its empty-output failure boundary.
+    (bin_dir / "python3").write_text(
+        "#!/usr/bin/bash\n"
+        'if [[ "$1" == "-" ]]; then\n'
+        '  script="$(cat)"\n'
+        '  if [[ "$script" == *\'print("off"\'* ]]; then\n'
+        f'    printf "%s" "{reader_output}"; exit 1\n'
+        "  fi\n"
+        f'  exec {sys.executable} -c "$script" "${{@:2}}"\n'
+        "fi\n"
+        f'exec {sys.executable} "$@"\n'
+    )
+    (bin_dir / "python3").chmod(0o755)
+    brigade = tmp_path / "missing-brigade"
+    brigade.write_text('#!/usr/bin/bash\nprintf "%s\\n" "$*"\nexit 1\n')
+    brigade.chmod(0o755)
+    result = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
+    assert json.loads(result.stdout)["decision"] == "deny"
+    state = tmp_path / "state" / "session-1"
+    (state / "substantive").touch()
+    result = _run_hook(tmp_path, {**_pre_tool_payload(target, ""), "hookEventName": "stop"})
+    assert result.returncode == 0
+    assert (state / "friction.reported").exists()
+    assert (state / "substantive").exists()
+    assert "friction add" in (tmp_path / "state" / "logs" / "session-1.log").read_text()

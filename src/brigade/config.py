@@ -29,11 +29,11 @@ DEFAULT_VERIFY_ARCHIVE_DIR = ".brigade/work/verify-archive"
 DEFAULT_RUN_LOCK_WAIT_SECONDS = 0.0
 # Work-loop mode (#2233). Safety rails are not a repository setting:
 # their opt-out lives in a per-user record outside the repo (see work_mode).
-WORK_MODES = ("engineer", "yolo")
-DEFAULT_WORK_MODE = "engineer"
-# Earlier name for engineer mode. Still read from configs and accepted by
-# `brigade work mode set`; the writer never emits it.
-LEGACY_WORK_MODE_ALIASES = {"enforced": "engineer"}
+WORK_MODES = ("strict", "observe", "off")
+ABSENT_WORK_MODE = "strict"
+NEW_INSTALL_WORK_MODE = "strict"
+# Legacy names are accepted on reads and by mode set; writers emit canonical names.
+LEGACY_WORK_MODE_ALIASES = {"engineer": "strict", "enforced": "strict", "yolo": "off"}
 
 
 @dataclass
@@ -50,7 +50,7 @@ class Config:
     # Absent on repo installs until the operator sets an explicit path.
     memory_recall_target: str | None = None
     run_record: str = "metadata-only"
-    work_mode: str = DEFAULT_WORK_MODE
+    work_mode: str = NEW_INSTALL_WORK_MODE
 
 
 def validate_work_mode(value: Any) -> str:
@@ -222,12 +222,7 @@ def write_config(target: Path, cfg: Config) -> None:
     memory_recall_target = validate_memory_recall_target(cfg.memory_recall_target)
     if memory_recall_target is not None:
         payload["memory_recall_target"] = memory_recall_target
-    work: dict[str, str] = {}
-    work_mode = validate_work_mode(cfg.work_mode)
-    if work_mode != DEFAULT_WORK_MODE:
-        work["mode"] = work_mode
-    if work:
-        payload["work"] = work
+    payload["work"] = {"mode": validate_work_mode(cfg.work_mode)}
     # Write a sibling temp file and rename it over the config so a failed write
     # (full disk, interrupt) never leaves a truncated config behind.
     destination = Path(os.path.realpath(path))
@@ -292,7 +287,7 @@ def load_config(target: Path) -> Optional[Config]:
     if not isinstance(run, dict):
         raise ValueError("run must be an object")
     run_record = validate_run_record(run.get("record", "metadata-only"))
-    # An invalid optional work mode falls back to engineer instead of failing the
+    # An invalid optional work mode falls back to strict instead of failing the
     # whole config: a failed load reads as "not wired" to hook target discovery,
     # which would drop enforcement. Doctor reports it. An in-repo work.rails is
     # never read here; work_mode reports it as ignored.
@@ -300,9 +295,9 @@ def load_config(target: Path) -> Optional[Config]:
     if not isinstance(work, dict):
         work = {}
     try:
-        work_mode = validate_work_mode(work.get("mode", DEFAULT_WORK_MODE))
+        work_mode = validate_work_mode(work.get("mode", ABSENT_WORK_MODE))
     except ValueError:
-        work_mode = DEFAULT_WORK_MODE
+        work_mode = ABSENT_WORK_MODE
     return Config(
         version=version,
         selection=sel,

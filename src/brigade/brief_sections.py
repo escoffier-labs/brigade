@@ -52,8 +52,8 @@ _SESSION_CLOSE_ITEMS: tuple[str, ...] = (
     "Memory Handoff written only for durable knowledge, or closed with `Nothing durable: <reason>`?",
 )
 # Yolo mode (#2233) keeps handoffs available on request and drops verification wording.
-_YOLO_SESSION_CLOSE_ITEMS: tuple[str, ...] = (
-    "Memory Handoff written if this work produced durable knowledge? (optional in yolo mode)",
+_UNENFORCED_SESSION_CLOSE_ITEMS: tuple[str, ...] = (
+    "Memory Handoff written if this work produced durable knowledge? (optional in unenforced modes)",
 )
 
 
@@ -91,9 +91,9 @@ def profiles_for_depth(profile: str) -> tuple[str, ...]:
     return FULL_SECTIONS
 
 
-def session_close_items(*, mode: str = "engineer") -> tuple[str, ...]:
+def session_close_items(*, mode: str = "strict") -> tuple[str, ...]:
     """Checklist items that lead the live brief and the full static profile."""
-    return _YOLO_SESSION_CLOSE_ITEMS if mode == "yolo" else _SESSION_CLOSE_ITEMS
+    return _UNENFORCED_SESSION_CLOSE_ITEMS if mode in {"off", "observe"} else _SESSION_CLOSE_ITEMS
 
 
 def render_session_close_section(*, heading: str = "## Session close") -> str:
@@ -189,13 +189,15 @@ def render_static_instruction(profile: str = DEFAULT_PROFILE) -> str:
     return render_sections(profiles_for_depth(profile))
 
 
-def render_brief_session_close_lines(*, mode: str = "engineer") -> list[str]:
+def render_brief_session_close_lines(*, mode: str = "strict") -> list[str]:
     """Lines printed at the top of live ``brigade work brief`` text output."""
     lines = ["session_close:"]
     lines.extend(f"  - [ ] {item}" for item in session_close_items(mode=mode))
-    if mode == "yolo":
+    if mode == "observe":
+        lines.append("work_mode: observe (checks are not enforced. Recording requires `brigade work verify run`)")
+    elif mode == "off":
         lines.append(
-            "work_mode: yolo (verification is not enforced; "
+            "work_mode: off (verification is not enforced; "
             "`brigade work verify run` still works by hand and records a receipt)"
         )
     return lines
