@@ -428,3 +428,6 @@ has `"status": "completed"`, a `run_id` shaped
 and the identity tuple `baseline_commit` / `tree_fingerprint` /
 `changes_patch_sha256`. Failures still write a receipt (`"status": "failed"`);
 that is the ledger signal, not a missing file.
+
+Connector discovery and setup preview: see [hub-connector.md](features/hub-connector.md).
+Run `$C hub-connector --target "$TARGET"` on Linux for an offline preview.

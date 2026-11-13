@@ -1,5 +1,7 @@
 """Regression coverage for connector review findings."""
 
+from tests.dot_support import requires_local_state
+
 import asyncio
 import json
 from pathlib import Path
@@ -34,6 +36,7 @@ def runtime_file(root, mode="token"):
 
 
 @pytest.mark.parametrize("mode", ["token", "access"])
+@requires_local_state
 def test_nonloopback_refused_at_setup_and_load(dot_private_dir, mode):
     root = dot_private_dir.parent
     path = runtime_file(root, mode)
@@ -65,7 +68,7 @@ def test_credential_isolation(tmp_path, credential, alias, monkeypatch):
         home = tmp_path / "fleet-home"
         home.mkdir()
         key = "node_token_file" if credential == "node" else "token_file"
-        (home / "fleet.toml").write_text(f'[fleet]\n{key} = "{other}"\n')
+        (home / "fleet.toml").write_text(f'[fleet]\n{key} = "{other.as_posix()}"\n')
     with pytest.raises(DotError, match="invalid_config"):
         parse_runtime(data, schema=CLOUD_AGENT_RUNTIME_SCHEMA)
 
@@ -82,6 +85,7 @@ def test_rotation_rechecks_isolation(tmp_path):
         asyncio.run(verifier.verify({"headers": [(b"authorization", b"Bearer " + value.read_bytes())]}))
 
 
+@requires_local_state
 def test_setup_generates_private_token(dot_private_dir, capsys):
     root = dot_private_dir.parent
     path = runtime_file(root)
@@ -133,6 +137,7 @@ def test_listener_failure_limit(tmp_path, monkeypatch, mode):
 
 
 @pytest.mark.parametrize("name", ["dot", "duet", "cloud-agent"])
+@requires_local_state
 def test_canonical_install_remove(dot_private_dir, name):
     from tests.test_dot_runtime import _document
     from brigade.dot.profile import profile_for
@@ -160,6 +165,7 @@ def test_canonical_install_remove(dot_private_dir, name):
 @pytest.mark.parametrize(
     "bad_json", ["{", "{}", "[]", json.dumps({"schema": registry.INSTANCE_SCHEMA, "pack_id": "dot"})]
 )
+@requires_local_state
 def test_bad_neighbor_list_and_selected_show(dot_private_dir, bad_json):
     root = dot_private_dir.parent
     path = runtime_file(root)
@@ -167,11 +173,13 @@ def test_bad_neighbor_list_and_selected_show(dot_private_dir, bad_json):
     bad = registry.instance_config_path(root, "dot")
     bad.parent.mkdir(parents=True, exist_ok=True)
     bad.write_text(bad_json)
-    assert lifecycle._isolated_from_dot(root, lifecycle._load_config(root, profile=CLOUD_AGENT)[1])
+    with pytest.raises(DotError, match="not_isolated_from_dot"):
+        lifecycle._isolated_from_dot(root, lifecycle._load_config(root, profile=CLOUD_AGENT)[1])
     assert registry.show_pack("cloud-agent", root)["installed_bind"] == "127.0.0.1:8783"
     assert next(p for p in registry.list_packs(root) if p["id"] == "dot")["status"] == "invalid"
 
 
+@requires_local_state
 def test_doctor_config_failure_is_not_dependency(dot_private_dir, monkeypatch):
     root = dot_private_dir.parent
     monkeypatch.setattr(lifecycle.grokbot_mcp, "_load_mcp", lambda: None)
@@ -180,6 +188,7 @@ def test_doctor_config_failure_is_not_dependency(dot_private_dir, monkeypatch):
     assert {"check": "config", "status": "fail"} in checks
 
 
+@requires_local_state
 def test_registry_converts_isolation_error(dot_private_dir, monkeypatch):
     root = dot_private_dir.parent
     path = runtime_file(root)
@@ -192,6 +201,7 @@ def test_registry_converts_isolation_error(dot_private_dir, monkeypatch):
         registry.apply_setup(root, "cloud-agent", runtime_path=path)
 
 
+@requires_local_state
 def test_legacy_flow_matches_base(dot_private_dir):
     from tests.connector_legacy_capture import capture
 
@@ -200,6 +210,7 @@ def test_legacy_flow_matches_base(dot_private_dir):
 
 
 @pytest.mark.parametrize("name", ["dot", "duet"])
+@requires_local_state
 def test_legacy_setup_skips_isolation(dot_private_dir, monkeypatch, name):
     from brigade import grokbot_packs
     from tests.test_dot_runtime import _document
@@ -215,6 +226,7 @@ def test_legacy_setup_skips_isolation(dot_private_dir, monkeypatch, name):
         lifecycle._load_config(root, profile=lifecycle.profile_for(name), bind="0.0.0.0:8999")
 
 
+@requires_local_state
 def test_legacy_remove_oserror(dot_private_dir, monkeypatch):
     from brigade import grokbot_packs, grokbot_ops
 
@@ -233,6 +245,7 @@ def test_legacy_remove_oserror(dot_private_dir, monkeypatch):
 
 
 @pytest.mark.parametrize("mode", ["token", "access"])
+@requires_local_state
 def test_load_refuses_remote_override(dot_private_dir, mode):
     root = dot_private_dir.parent
     path = runtime_file(root, mode)
@@ -241,6 +254,7 @@ def test_load_refuses_remote_override(dot_private_dir, mode):
         lifecycle._load_config(root, profile=CLOUD_AGENT, bind="0.0.0.0:8783", allowed_hosts=["example.test:8783"])
 
 
+@requires_local_state
 def test_start_rechecks_rotated_token(tmp_path):
     data = cloud_document(tmp_path)
     runtime = parse_runtime(data, schema=CLOUD_AGENT_RUNTIME_SCHEMA)
@@ -250,6 +264,7 @@ def test_start_rechecks_rotated_token(tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["token", "access"])
+@requires_local_state
 def test_loopback_probes(dot_private_dir, monkeypatch, mode):
     from types import SimpleNamespace
     from brigade.dot import watch
@@ -311,6 +326,7 @@ def test_loopback_probes(dot_private_dir, monkeypatch, mode):
 
 
 @pytest.mark.parametrize("name", ["dot", "duet"])
+@requires_local_state
 def test_legacy_setup_with_unreadable_neighbor_runtime(dot_private_dir, name):
     from brigade import grokbot_packs
     from tests.test_dot_runtime import _document

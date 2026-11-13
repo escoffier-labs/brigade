@@ -568,23 +568,9 @@ def _isolated_from_dot(target: Path, runtime: Runtime) -> bool:
         if not neighbor.exists():
             continue
         try:
-            raw = json.loads(grokbot_ops._read_regular_text(neighbor))
-            if (
-                not isinstance(raw, dict)
-                or raw.get("schema") != connector_registry.INSTANCE_SCHEMA
-                or raw.get("pack_id") != other.pack_id
-            ):
-                continue
-        except (OSError, ValueError):
-            continue
-        try:
             _, other_runtime = _load_config(target, profile=other)
-        except grokbot_packs.PackError as error:
-            if error.reason in {"unexpected-key", "unsafe-bind"}:
-                continue
-            raise c.DotError("not_isolated_from_dot", reason=f"cannot load the {other.pack_id} instance") from None
-        except (c.DotError, OSError, ValueError):
-            # An unreadable neighbour cannot be shown to be isolated. Name it, so its fault is not read as this pack's.
+        except (c.DotError, grokbot_packs.PackError, OSError, ValueError):
+            # An unreadable neighbour cannot be shown to be isolated.
             raise c.DotError("not_isolated_from_dot", reason=f"cannot load the {other.pack_id} instance") from None
         if (
             runtime.hub.principal == other_runtime.hub.principal
@@ -753,13 +739,13 @@ def write_watch_units(
 
 
 def _instance_path(target: Path, pack_id: str) -> Path:
-    if pack_id in {"dot", "duet", "cloud-agent"}:
+    if pack_id == "cloud-agent":
         return connector_registry.instance_config_path(target, pack_id)
     return grokbot_packs.instance_config_path(target, pack_id)
 
 
 def _instance_config(target: Path, pack_id: str) -> dict[str, Any]:
-    if pack_id in {"dot", "duet", "cloud-agent"}:
+    if pack_id == "cloud-agent":
         return connector_registry.load_instance_config(target, pack_id)
     return grokbot_packs._load_instance_config(target, pack_id)
 

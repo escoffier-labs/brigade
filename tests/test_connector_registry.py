@@ -1,5 +1,7 @@
 """Independent connector lifecycle contract."""
 
+from tests.dot_support import requires_local_state
+
 import json
 from pathlib import Path
 from brigade.dot.contracts import DotError
@@ -31,6 +33,7 @@ def test_existing_dot_duet_config_paths_unchanged(tmp_path):
     )
 
 
+@requires_local_state
 def test_canonical_unit_argv(dot_private_dir):
     tmp_path = dot_private_dir.parent
     runtime = setup_runtime(tmp_path)
@@ -43,6 +46,7 @@ def test_canonical_unit_argv(dot_private_dir):
     assert "example-listener-credential" not in unit
 
 
+@requires_local_state
 def test_nonloopback_refused_even_with_explicit_hosts(dot_private_dir):
     tmp_path = dot_private_dir.parent
     runtime = setup_runtime(tmp_path)
@@ -59,6 +63,7 @@ def test_nonloopback_refused_even_with_explicit_hosts(dot_private_dir):
 
 
 @pytest.mark.parametrize("shared", ["token", "hub-token", "state", "principal", "audience"])
+@requires_local_state
 def test_cloud_agent_rejects_shared_identity(dot_private_dir, shared):
     tmp_path = dot_private_dir.parent
     from tests.test_grokbot_memory_profile import _memory_document
@@ -109,6 +114,7 @@ def test_cloud_agent_rejects_shared_identity(dot_private_dir, shared):
         registry.preview_setup(tmp_path, "cloud-agent", runtime_path=runtime)
 
 
+@requires_local_state
 def test_doctor_reports_token_mode_without_access_dependency(dot_private_dir, monkeypatch):
     from brigade.dot import lifecycle
     from brigade.dot import access_auth
@@ -125,6 +131,7 @@ def test_doctor_reports_token_mode_without_access_dependency(dot_private_dir, mo
     assert {"check": "dependency", "status": "ok"} in checks
 
 
+@requires_local_state
 def test_collision_and_remove_preserve_runtime(dot_private_dir):
     root = dot_private_dir.parent
     runtime = setup_runtime(root)
@@ -139,6 +146,7 @@ def test_collision_and_remove_preserve_runtime(dot_private_dir):
     assert runtime.read_bytes() == before
 
 
+@requires_local_state
 def test_failed_write_restores_instance(dot_private_dir, monkeypatch):
     from brigade import grokbot_ops
 
@@ -157,6 +165,7 @@ def test_failed_write_restores_instance(dot_private_dir, monkeypatch):
     assert instance.read_bytes() == before
 
 
+@requires_local_state
 def test_collision_with_legacy_listener_config(dot_private_dir):
     from brigade import grokbot_ops
 
@@ -169,6 +178,7 @@ def test_collision_with_legacy_listener_config(dot_private_dir):
         registry.preview_setup(root, "cloud-agent", runtime_path=runtime, bind="127.0.0.1:8888")
 
 
+@requires_local_state
 def test_legacy_registry_respects_generic_installed_port(dot_private_dir):
     root = dot_private_dir.parent
     runtime = setup_runtime(root)

@@ -1,5 +1,7 @@
 """Generic connector inventory and authentication boundaries."""
 
+from tests.dot_support import requires_local_state
+
 import asyncio
 import json
 from pathlib import Path
@@ -163,6 +165,7 @@ def test_cloud_agent_rejects_wrong_audience(tmp_path):
         asyncio.run(helper.verify(verifier, helper.token(changes={"aud": ["b" * 64]})))
 
 
+@requires_local_state
 class TestCloudAgentMessages(Fixture):
     def make_adapter(self, enabled):
         from dataclasses import replace
