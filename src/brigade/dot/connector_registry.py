@@ -226,7 +226,7 @@ def _setup(
                 created = ensure_listener_token(Path(generated))
             _validate(payload, pack_id)
             _write(target, pack_id, payload)
-        except (DotError, OSError, PackError) as exc:
+        except Exception as exc:
             if created and generated is not None:
                 try:
                     Path(generated).unlink()
@@ -236,7 +236,9 @@ def _setup(
                 raise PackError("rollback-failed") from None
             if isinstance(exc, PackError) and exc.reason == "rollback-failed":
                 raise
-            raise PackError("unsafe-path") from None
+            if isinstance(exc, (PackError, DotError, OSError)):
+                raise PackError("unsafe-path") from None
+            raise
     return result
 
 

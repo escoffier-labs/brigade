@@ -17,7 +17,7 @@ from tests.test_memory_hub_client import (  # noqa: F401
     workspace,
 )
 
-PINNED = "agent:grokbot-memory"
+PINNED = "agent:cloud-agent"
 
 
 @pytest.fixture

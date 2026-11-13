@@ -1,0 +1,4 @@
+- Retire the product-specific memory and inbox profiles in favor of cloud-agent. Historical commands return a migration message without reading credentials or changing data.
+- Classify library connector identities before enforcing loopback and roll back generated listener tokens after unexpected setup errors.
+- Remove the retired-profile compatibility messages in the next ordinary release after the removal release.
+- Retired connector cleanup removes only historical service and watch units. Retained instances still enforce identity isolation.

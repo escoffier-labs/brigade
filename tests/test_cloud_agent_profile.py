@@ -14,7 +14,7 @@ from brigade.dot.contracts import DotError
 from brigade.dot.profile import CLOUD_AGENT, runtime_profile
 from brigade.dot.runtime_config import CLOUD_AGENT_RUNTIME_SCHEMA, parse_runtime
 from brigade.dot.token_auth import TokenVerifier
-from tests.test_grokbot_memory_profile import _memory_document
+from tests.cloud_agent_support import _memory_document
 from tests.test_dot_lifecycle import config
 from brigade.dot import lifecycle
 

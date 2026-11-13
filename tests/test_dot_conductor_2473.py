@@ -14,15 +14,14 @@ from brigade.dot.profile import (
     DOT,
     DUET,
     DUET_TRUST_NOTICE,
-    GROKBOT_INBOX,
-    GROKBOT_MEMORY,
+    CLOUD_AGENT,
     INBOX_TRUST_NOTICE,
 )
 from brigade.dot.runtime_config import (
     ASSIGNMENT_ACTIONS,
     CONDUCTOR_ALIAS,
     DUET_RUNTIME_SCHEMA,
-    GROKBOT_INBOX_RUNTIME_SCHEMA,
+    CLOUD_AGENT_RUNTIME_SCHEMA,
     RUNTIME_SCHEMA,
     parse_runtime,
     runtime_template,
@@ -63,7 +62,7 @@ def test_fresh_runtime_config_lists_the_conductor_alias(schema):
 
 def test_runtime_template_refuses_other_schemas():
     with pytest.raises(DotError):
-        runtime_template(GROKBOT_INBOX_RUNTIME_SCHEMA)
+        runtime_template(CLOUD_AGENT_RUNTIME_SCHEMA)
 
 
 @requires_local_state
@@ -99,7 +98,7 @@ def test_operating_instructions_pin_the_conductor_authorization():
         assert text.count(CONDUCTOR_WORK_AUTHORIZATION) == 1
         # The untrusted-inbox language stays, and the authorization follows it.
         assert notice in text and text.index(notice) < text.index(CONDUCTOR_WORK_AUTHORIZATION)
-    for profile in (GROKBOT_INBOX, GROKBOT_MEMORY):
+    for profile in (CLOUD_AGENT,):
         assert "conductor" not in profile.operating_instructions
         assert "assignment" not in profile.operating_instructions
 

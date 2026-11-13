@@ -20,8 +20,6 @@ PACK_IDS = (
     "dot",
     "duet",
     "fleet-steward",
-    "grokbot-inbox",
-    "grokbot-memory",
     "implementation-worker",
     "obsidian-operator",
     "operations-relay",
@@ -116,13 +114,6 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
         if pack["id"] in QUEUE_PACK_IDS:
             assert pack["kind"] == "queue-role"
             assert set(shown["tools"]) == grokbot_mcp.tools_for_instance(pack["instance"])
-        elif pack["id"] == "grokbot-inbox":
-            from brigade import dot
-
-            assert pack["kind"] == "connector"
-            assert set(shown["tools"]) == dot.GROKBOT_INBOX_TOOLS
-            assert shown["default_bind"] == "127.0.0.1:8782"
-            assert shown["public_route"] == ""
         elif pack["id"] == "obsidian-operator":
             assert pack["kind"] == "connector"
             assert shown["tools"] == list(OBSIDIAN_TOOLS)
@@ -146,13 +137,6 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
             assert pack["kind"] == "connector"
             assert set(shown["tools"]) == dot.DUET_TOOLS
             assert shown["default_bind"] == "127.0.0.1:8780"
-            assert shown["public_route"] == ""
-        elif pack["id"] == "grokbot-memory":
-            from brigade import dot
-
-            assert pack["kind"] == "connector"
-            assert set(shown["tools"]) == dot.GROKBOT_MEMORY_TOOLS
-            assert shown["default_bind"] == "127.0.0.1:8781"
             assert shown["public_route"] == ""
         elif pack["id"] == "t3-dispatch":
             assert pack["kind"] == "connector"
@@ -1285,10 +1269,10 @@ def test_pack_doctor_reports_manual_no_public_route_for_connector(tmp_path: Path
     monkeypatch.setattr(grokbot_packs, "_cloudflared_metrics_binds", lambda: ())
     grokbot_packs.apply_setup(
         tmp_path,
-        "grokbot-memory",
+        "dot",
         runtime_path=memory_runtime,
     )
-    checks = grokbot_packs.doctor(tmp_path, "grokbot-memory")
+    checks = grokbot_packs.doctor(tmp_path, "dot")
     rendered = json.dumps(checks)
     assert {
         "check": "no-public-route",
@@ -1304,11 +1288,11 @@ def test_pack_doctor_stays_quiet_when_connector_has_public_host(tmp_path: Path, 
     monkeypatch.setattr(grokbot_packs, "_cloudflared_metrics_binds", lambda: ())
     grokbot_packs.apply_setup(
         tmp_path,
-        "grokbot-memory",
+        "dot",
         allowed_hosts=[PUBLIC_HOST],
         runtime_path=memory_runtime,
     )
-    checks = grokbot_packs.doctor(tmp_path, "grokbot-memory")
+    checks = grokbot_packs.doctor(tmp_path, "dot")
     rendered = json.dumps(checks)
     assert all(check["check"] != "no-public-route" for check in checks)
     assert SECRET not in rendered
@@ -1321,11 +1305,11 @@ def test_pack_doctor_stays_quiet_when_connector_is_host_local(tmp_path: Path, me
     monkeypatch.setattr(grokbot_packs, "_cloudflared_metrics_binds", lambda: ())
     grokbot_packs.apply_setup(
         tmp_path,
-        "grokbot-memory",
+        "dot",
         runtime_path=memory_runtime,
     )
-    _mark_host_local(tmp_path, "grokbot-memory")
-    checks = grokbot_packs.doctor(tmp_path, "grokbot-memory")
+    _mark_host_local(tmp_path, "dot")
+    checks = grokbot_packs.doctor(tmp_path, "dot")
     rendered = json.dumps(checks)
     assert all(check["check"] != "no-public-route" for check in checks)
     assert SECRET not in rendered
@@ -1336,30 +1320,30 @@ def test_pack_list_json_exposes_reachability(tmp_path: Path, memory_runtime, mon
     monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
     grokbot_packs.apply_setup(
         tmp_path,
-        "grokbot-memory",
+        "dot",
         runtime_path=memory_runtime,
     )
     listed = {pack["id"]: pack for pack in grokbot_packs.list_packs(tmp_path)}
-    assert listed["grokbot-memory"]["reachability"] == "no-public-route"
+    assert listed["dot"]["reachability"] == "no-public-route"
     assert listed["operator"]["reachability"] is None
 
     grokbot_packs.apply_setup(
         tmp_path,
-        "grokbot-memory",
+        "dot",
         allowed_hosts=[PUBLIC_HOST],
         runtime_path=memory_runtime,
     )
     listed = {pack["id"]: pack for pack in grokbot_packs.list_packs(tmp_path)}
-    assert listed["grokbot-memory"]["reachability"] == "public"
+    assert listed["dot"]["reachability"] == "public"
 
-    _mark_host_local(tmp_path, "grokbot-memory")
+    _mark_host_local(tmp_path, "dot")
     listed = {pack["id"]: pack for pack in grokbot_packs.list_packs(tmp_path)}
-    assert listed["grokbot-memory"]["reachability"] == "host-local"
+    assert listed["dot"]["reachability"] == "host-local"
 
     assert cli.main(_pack_argv(tmp_path, "list", "--json")) == 0
     payload = json.loads(capsys.readouterr().out)
     cli_listed = {pack["id"]: pack for pack in payload["packs"]}
-    assert cli_listed["grokbot-memory"]["reachability"] == "host-local"
+    assert cli_listed["dot"]["reachability"] == "host-local"
     assert "reachability" in cli_listed["operator"]
     dumped = json.dumps(payload)
     assert SECRET not in dumped
@@ -1399,10 +1383,10 @@ def dot_runtime(dot_private_dir):
 @pytest.fixture
 def memory_runtime(dot_private_dir):
     from tests.test_dot_runtime import _write_private
-    from tests.test_grokbot_memory_profile import _memory_document
+    from tests.test_dot_runtime import _document
 
     runtime = dot_private_dir.parent / "memory-runtime.json"
-    _write_private(runtime, json.dumps(_memory_document()).encode())
+    _write_private(runtime, json.dumps(_document()).encode())
     return runtime
 
 

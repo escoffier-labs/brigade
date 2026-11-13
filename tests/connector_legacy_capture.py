@@ -1,4 +1,6 @@
 import json
+import os
+from unittest.mock import patch
 import sys
 from pathlib import Path
 from brigade import grokbot_packs as packs, grokbot_ops
@@ -16,6 +18,38 @@ def capture(root):
         runtime.write_text(json.dumps(_document() if name == "dot" else _duet_document()))
         runtime.chmod(0o600)
         row = {}
+        from brigade.dot import connector_registry as registry
+
+        row["setup_parity"] = {}
+        stray = target / ".brigade/grokbot/packs/backup.json"
+        stray.parent.mkdir(parents=True, exist_ok=True)
+        stray.write_text("{")
+        row["setup_parity"]["stray"] = packs.preview_setup(target, name, runtime_path=runtime)
+        stray.unlink()
+        old_cwd = Path.cwd()
+        try:
+            os.chdir(root)
+            row["setup_parity"]["relative"] = registry.apply_setup(Path(name), name, runtime_path=runtime)
+        finally:
+            os.chdir(old_cwd)
+        row["setup_parity"]["relative_instance"] = json.loads(registry.instance_config_path(target, name).read_text())
+        if os.name != "nt":
+            link = root / (name + "-link")
+            link.symlink_to(target, target_is_directory=True)
+            try:
+                row["setup_parity"]["symlink"] = registry.apply_setup(link, name, runtime_path=runtime)
+            except registry.PackError as error:
+                row["setup_parity"]["symlink"] = {"error": error.reason}
+            link.unlink()
+        for exception in (TypeError, OSError):
+            with patch.object(registry, "_write", side_effect=exception("example write failure")):
+                try:
+                    outcome = registry.apply_setup(target, name, runtime_path=runtime)
+                except registry.PackError as error:
+                    outcome = {"error": error.reason}
+                except TypeError:
+                    outcome = {"error": "TypeError"}
+                row["setup_parity"][exception.__name__] = outcome
         row["preview"] = packs.preview_setup(target, name, runtime_path=runtime)
         row["setup"] = packs.apply_setup(target, name, runtime_path=runtime)
         row["instance"] = json.loads(packs.instance_config_path(target, name).read_text())

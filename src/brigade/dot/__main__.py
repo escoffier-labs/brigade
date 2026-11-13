@@ -110,6 +110,12 @@ def _notify(args, runtime):
 
 
 def main(argv=None):
+    from ..cli.removed_commands import compatibility
+
+    raw = list(sys.argv[1:] if argv is None else argv)
+    retired = compatibility(["dot", *raw])
+    if retired is not None:
+        return retired
     parser = argparse.ArgumentParser(prog="python -m brigade.dot", allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
     watch = commands.add_parser("watch", allow_abbrev=False)
@@ -136,7 +142,7 @@ def main(argv=None):
         command.add_argument("--pack", choices=tuple(PROFILES), default="dot")
     template = commands.add_parser("runtime-template", allow_abbrev=False)
     template.add_argument("--pack", choices=("dot", "duet"), default="dot")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw)
     if args.command == "runtime-template":
         # Placeholders only: no target, no runtime file and no credential is read.
         print(json.dumps(runtime_template(profile_for(args.pack).runtime_schema), indent=2, sort_keys=True))

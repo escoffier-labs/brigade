@@ -121,8 +121,7 @@ be the bug.
 - Doctor output is deliberately sanitized to `{check, status}` pairs. Do not
   wait for a detail string that explains the failure; there is none by design.
 - Several packs need more than a bearer (`--runtime-path`, `--ledger-path`,
-  `--action-state-path`, `--approval-dir`). `dot`, `duet`, `grokbot-memory` and
-  `grokbot-inbox` require only `--runtime-path`
+  `--action-state-path`, `--approval-dir`). `dot` and `duet` require only `--runtime-path`
   and take neither bearer flag because it verifies Cloudflare Access tokens at the origin. `implementation-worker` needs only the
   bearer reference, which is why it is the default pack to drive.
 - Ports are fixed per pack in `grokbot_packs.py`. If a real listener is already
