@@ -927,3 +927,20 @@ PR 1 merged with these items deferred. Each belongs to a later PR in this plan.
 - Archive, undo and then edit a card while the hub is unreachable: the retire is sent and the revive is superseded, so the hub copy stays retired until the next normal hub push republishes it. Document this in the memory care guide, or send the paired retire only when the undo itself will be replayed.
 - Projected vault reads re-read every card on each search or show. Cache the identity map before vaults grow.
 - The hub side of archive and undo has only been exercised by tests. Run it against a real hub with throwaway cards before applying a large manifest.
+
+## Follow-ups from the PR 2 reviews
+
+PR 2 merged. The drain resolves drafts already present in their destination, retries five transient failure codes, and holds everything else. Its expire set is empty on purpose: no ingest reason proves a draft carries nothing durable.
+
+- **PR 5 and PR 6 (background model work):** held drafts are the queue those tasks judge. Until then holds stay in the inbox, counted and reported.
+- **Undo after an abandoned undo.** If a document is protected between an undo's prepare and finish, the undo is abandoned but the original decision is still marked undone, so a later undo does nothing. Mark the original undone only when the undo itself committed, with a test that protects the destination between the phases and retries after the protection is lifted.
+- **Per-undo cost grows with the journal.** Each undo and each ingest re-reads every decision record to look for pending appends. Keep an index of pending appends.
+- **Windows with the document open elsewhere.** What a retry does while another program holds the destination open for writing is not characterised: the test for it is skipped there. Find out, make it wait safely, and test it.
+- **Durable writes are slow on Windows.** Draining a few hundred drafts takes about a minute there. Acceptable for a background job, but batch the syncs before using the journal for bulk work.
+- A draft cited by a concurrent ingest after the drain read the evidence can be moved, leaving the new citation pointing at the old path.
+- A crash between an undo's finish and marking the original undone leaves the original looking active.
+- Document appends on Windows are written with LF endings.
+- A failed drain prints the exception type only. Print the message too.
+- Recovery treats an identical block already present elsewhere in a document as published.
+- Check whether any other writer replaces a routed document without taking the document lock.
+- A symlinked inbox root is refused. Workspaces that link the inbox to another directory get a summary line and nothing else.

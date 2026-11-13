@@ -200,6 +200,7 @@ guard *              only guard scan and guard redact are driven (guard-parity)
 handoff *            only handoff lint has a feature, and it is paused
 run approve          no feature file yet
 run cloud            provider adapters and removal tombstones have no dedicated drive feature
+work checks          report tests cover observations. No standalone drive yet
 work *               only work verify run is driven
 work verify *        plan, runs, and show are not driven; work-verify runs only work verify run
 ```

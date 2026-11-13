@@ -21,15 +21,21 @@ def register(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Auto-route no-card handoffs to TOOLS.md/USER.md/rules/.learnings (default off; opt-in).",
     )
+    p_ing.add_argument("--no-tend", action="store_true", help="Skip the automatic review-inbox drain.")
     p_ing.set_defaults(func=dispatch)
 
 
 def dispatch(args) -> int:
     from .. import ingest as ingest_mod
 
-    return ingest_mod.run(
+    result = ingest_mod.run(
         target=args.target,
         dry_run=args.dry_run,
         promote_cards=args.promote_cards,
         route_documents=args.route_documents,
     )
+    if result == 0 and not args.dry_run and not args.no_tend:
+        from ..memory_care_tend import after_command
+
+        after_command(args.target, stages=("inbox",))
+    return result

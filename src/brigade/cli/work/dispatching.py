@@ -39,6 +39,10 @@ def dispatch(args) -> int:
 def _dispatch_impl(args) -> int:
     from ... import work_cmd
 
+    if args.work_command == "checks":
+        from ...work_checks_cmd import checks_command
+
+        return checks_command(target=args.target, since_days=args.since, group_by=args.group_by, json_output=args.json)
     if args.work_command == "status":
         return work_cmd.status(target=args.target, limit=args.limit)
     if args.work_command == "doctor":
