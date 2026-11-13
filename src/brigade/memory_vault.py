@@ -251,6 +251,24 @@ def build_index(target: Path) -> dict[str, Any]:
     }
 
 
+def _record_projected_reads(target: Path, notes: list[dict[str, Any]]) -> None:
+    """Protect identifiable projected cards. Ordinary notes and maps have no card to protect."""
+    try:
+        from . import memory_card_reads, memory_cmd
+        from .obsidian_vault import PROJECTION_FOLDER
+
+        ids = {str(note["id"]) for note in notes if PROJECTION_FOLDER in Path(str(note.get("relative_path", ""))).parts}
+        if not ids:
+            return
+        for path in memory_cmd._iter_cards(target, memory_cmd._config_or_default(target)):
+            rel = path.relative_to(target).as_posix()
+            text = path.read_text(encoding="utf-8")
+            if memory_cmd.card_identity_from_text(text, rel) in ids:
+                memory_card_reads.record_content(target, text, rel)
+    except Exception:  # noqa: BLE001 - accounting must never fail vault retrieval
+        pass
+
+
 def search_payload(
     target: Path,
     query: str,
@@ -279,6 +297,7 @@ def search_payload(
             continue
         hits.append(_hit(note, score=score, query_tokens=query_tokens))
     hits.sort(key=lambda item: (-item["score"], item["relative_path"], item["id"]))
+    _record_projected_reads(target, hits[:limit])
     return {
         "schema": SEARCH_SCHEMA,
         "query": query,
@@ -301,6 +320,7 @@ def show_payload(target: Path, note_id: str) -> dict[str, Any]:
     note = _resolve_note(notes, note_id.strip())
     live = _reread_note(config, note)
     source = live if live is not None else note
+    _record_projected_reads(target, [source])
     body = _redact(_collapse(str(source.get("body") or "")))
     truncated = False
     if len(body) > SHOW_BODY_CHARS:

@@ -659,3 +659,17 @@ def test_sibling_creates_under_shared_missing_parent_commit(tmp_path: Path) -> N
     assert receipt.terminal_state == "committed"
     assert first.read_bytes() == b"alpha\n"
     assert second.read_bytes() == b"beta\n"
+
+
+def test_supersede_preserves_before_images_and_refuses_forced_recovery(tmp_path):
+    workspace, plan = mixed_workspace(tmp_path)
+    projection.execute(plan, target=workspace, inject=projection.FailureInjector(crash_after=1))
+    op_dir = projection.operation_dir(workspace, plan.operation_id)
+    before = {p.name: p.read_bytes() for p in (op_dir / "before").iterdir()}
+    receipt = projection.supersede(plan.operation_id, target=workspace)
+    assert receipt.terminal_state == "superseded"
+    assert not projection.unfinished_operations(workspace)
+    assert {p.name: p.read_bytes() for p in (op_dir / "before").iterdir()} == before
+    snapshot = _snapshot(workspace)
+    assert projection.recover(plan.operation_id, target=workspace, force=True).terminal_state == "superseded"
+    assert _snapshot(workspace) == snapshot

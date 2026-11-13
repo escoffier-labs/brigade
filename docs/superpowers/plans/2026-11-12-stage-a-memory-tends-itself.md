@@ -149,6 +149,8 @@ Each PR merges green on its own. PR 2, 3 and 4 depend only on PR 1. PR 6 depends
 
 ### Task 1: Decision journal
 
+Care holds one bounded cross-process file lock across recovery, archive and undo. Decisions record original file modes. Undo drift abandons the decision while keeping both copies, so later care continues. Recovery conflicts retain kernel evidence and are reported once.
+
 **Files:**
 - Create: `src/brigade/memory_care_journal.py`
 - Test: `tests/test_memory_care_journal.py`
@@ -211,7 +213,9 @@ Expected: FAIL, `ModuleNotFoundError: brigade.memory_care_journal`.
 
 - [ ] **Step 3: Implement `memory_care_journal.py`**
 
-Decision ids are `<UTC yyyymmddThhmmssZ>-<kind>-<8 hex>`. Order inside `commit`: refuse read-only paths. Write `before/<n>.bin` and a `pending` `decision.json` under a private directory (fsync). Build one kernel plan whose mutations carry `expected_before=kernel.content_digest(change.before)`. Execute. Rewrite `decision.json` with `status: committed`. A kernel failure deletes the pending directory and raises `JournalConflict`. `applied=True` skips the kernel and only checks that current bytes equal `after`. `revert` builds the inverse changes and commits them as kind `undo`.
+Decision ids are `<UTC yyyymmddThhmmssZ>-<kind>-<8 hex>`. Archive and restore use two kernel plans under one decision id. Phase 1 writes `decision.json` with `phase: prepared`, before-bytes, index-line metadata and the recovery recipe, plus the archive copy. Nothing is removed. Only after that plan commits does phase 2 remove the original card, apply index-link edits and set `phase: committed`. Keep the prepared journal on failure so the next command can resolve it. Recover unfinished kernel operations before reading decision phases. Generic fixes still use `commit` with expected-before digests. `applied=True` only checks current bytes against `after`.
+
+`commit_phased(..., prepared_paths, metadata=None)` and `resolve_prepared(target)` provide the two-phase path. Before any other work, `tend`, `archive --from-file` and `undo` resolve prepared decisions. Matching original and archive digests complete phase 2. A changed original is preserved, the unchanged archive copy is removed, and the decision is marked `abandoned` and reported. A changed archive is never overwritten. Prepared copies stay excluded from card enumeration. Test interruption between phases and after the first kernel mutation, including a top-level card path that sorts before its archive.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -225,6 +229,8 @@ git commit -m "feat(memory-care): add a decision journal with before-bytes and u
 ```
 
 ### Task 2: Archive and restore, local and hub
+
+Archive accepts only canonical paths enumerated as cards. BOM and CRLF frontmatter is normalized for protection checks. Malformed frontmatter is refused. Mixed-content index lines stay in place and are reported. Undo restores exact index before-bytes when the after-digest matches, otherwise it uses the recorded line number as its insertion anchor. An abandoned archive keeps its safety copy when the original is missing and remains restorable.
 
 **Files:**
 - Create: `src/brigade/memory_archive.py`, `src/brigade/memory_care_hub.py`
@@ -285,7 +291,9 @@ Expected: FAIL, missing modules.
 
 - [ ] **Step 3: Implement `memory_archive.py` and `memory_care_hub.py`, and skip `memory/archive/` in `_iter_cards`**
 
-`archive_card` builds three kinds of `journal.Change`: archive path (absent to card bytes), card path (card bytes to absent), and each non-read-only index file (with the card's link lines removed). The removed lines and their line numbers go into `decision.json` under `index_lines` so `restore` can re-insert them line by line. After the local commit, `archive_card` calls `memory_care_hub.retire` and stores its result with `update_hub`. In `memory_cmd._iter_cards`, skip any path where `memory_archive.is_archived_path(rel)`. Keep the edit to three lines or fewer.
+`archive_card` builds three kinds of `journal.Change`: archive path (absent to card bytes), card path (card bytes to absent), and each non-read-only index file (with the card's link lines removed). Pass the archive path as `prepared_paths` to `commit_phased`. Save removed index lines and their neighbors in phase 1 metadata so recovery and restore can reinsert them while preserving unrelated edits. Send hub retire only after phase 2 commits. Hub failure leaves pending work without changing local state.
+
+Restore mirrors the order: phase 1 writes the original and restores index lines, with a prepared undo journal. Phase 2 removes the archive copy and marks the archive decision undone. An interrupted undo leaves both copies. The next entry point finishes it before other work. Revive is sent only after the original is back. Keep pending retire-before-revive ordering. Test both phase boundaries and hub unavailability. In `memory_cmd._iter_cards`, continue to skip `memory/archive/`, including while a decision is prepared.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -300,6 +308,8 @@ git commit -m "feat(memory-care): archive and restore cards, retiring them on th
 ```
 
 ### Task 3: Read ledger, retirement, `tend` and `undo`
+
+Hub retire, revive and read-stat lookup use push publication identities. Every revive checks push visibility rules, including retries, and reports withheld content as skipped while local undo succeeds. Pending puts replay the immutable decision after-image with the original event id. Manifest batches report failed rows and all committed decision ids without aborting on projection errors.
 
 **Files:**
 - Create: `src/brigade/memory_card_reads.py`, `src/brigade/memory_care_retire.py`, `src/brigade/memory_care_tend.py`
@@ -888,3 +898,22 @@ git commit -m "feat(memory-care): write a weekly summary of what care archived, 
 3. **Type consistency.** `journal.Change`, `journal.Decision`, `commit(..., applied=...)`, `revert`, `archive_card(target, card_rel, *, reason, config)`, `restore(target, decision)`, `TendConfig` fields, `STAGES` order, `Judge`, `Budget`, `reserve`, `pick_pair`, `run_payload(..., settings, seat_pair, reserve)` and `retire_to` are spelled the same in every task that uses them.
 4. **Review Focus.** Each of the five lines has its named test in its owning task (Tasks 1, 3, 2, 4, 8).
 5. **Proportion.** The plan carries signatures, decisions and test names, with no function bodies. It is longer than the spec section it implements because it also fixes eleven tasks' interfaces across seven pull requests.
+
+## PR 1 second review corrections
+
+- Convert validated hub read day integers from the Unix epoch. Skip and report
+  malformed responses and out-of-range days so explicit and automatic tend survive.
+- Reconcile pending hub operations in creation order. Later archives supersede
+  earlier revivals for the same card before any replay.
+- Use one frontmatter safety predicate for planning and archiving. Accept block
+  lists and indented continuations, refuse unterminated headers, and honor every
+  quoted or case-insensitive archive pin even when later keys disagree.
+- Count successful archives toward the steady-state cap. Refusals leave room for
+  later candidates.
+- Supersede abandoned kernel operations through the supported kernel API while
+  retaining before-images. Forced recovery cannot replay superseded operations.
+  This is the only kernel API addition authorized for this review round.
+- Abandon preparation when read-only policy changes, skip revival for abandoned
+  undo, refuse undo of undo, and list abandoned decisions that remain restorable.
+  Reject the repository root as a card root.
+- Verify CRLF pins through a manifest without relying on platform newline translation.

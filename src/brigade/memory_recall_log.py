@@ -103,6 +103,9 @@ def record_recall(
 
     if not _normalize_search_query(query):
         return
+    from .memory_card_reads import record
+
+    record(target, memory_cmd._search_log_card_ids(matches) + memory_cmd._search_log_aliases(matches))
     key = load_or_create_key(target)
     if key is None:
         return

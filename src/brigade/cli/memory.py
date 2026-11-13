@@ -80,6 +80,19 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
     )
     p_memory_care_scan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_care_scan.add_argument("--no-tend", action="store_true", help="Skip automatic care.")
+    for name in ("tend", "undo", "archive"):
+        command = memory_care_sub.add_parser(name, help=f"Memory care {name}.")
+        command.add_argument("--target", "-t", type=Path, default=Path("."))
+        command.add_argument("--json", action="store_true")
+        if name == "tend":
+            command.add_argument("--stage", action="append", choices=("hub", "retire"))
+            command.add_argument("--dry-run", action="store_true")
+        elif name == "undo":
+            command.add_argument("decision_id")
+        else:
+            command.add_argument("--from-file", type=Path, required=True)
+            command.add_argument("--limit", type=int)
     p_memory_care_plan_fixes = memory_care_sub.add_parser(
         "plan-fixes", help="Plan safe memory-care metadata fixes without writing files."
     )
@@ -578,8 +591,17 @@ def dispatch(args) -> int:
                 update_gitignore=not args.no_gitignore,
                 with_runbooks=args.with_runbooks,
             )
+        if args.memory_care_command in ("tend", "undo", "archive"):
+            from .. import memory_care_tend
+
+            return memory_care_tend.dispatch(args)
         if args.memory_care_command == "scan":
-            return memory_cmd.scan(target=args.target, json_output=args.json)
+            result = memory_cmd.scan(target=args.target, json_output=args.json)
+            if result == 0 and not args.no_tend:
+                from .. import memory_care_tend
+
+                memory_care_tend.after_command(args.target)
+            return result
         if args.memory_care_command == "backfill":
             return memory_cmd.backfill(target=args.target, apply=args.apply, json_output=args.json)
         if args.memory_care_command == "plan-fixes":
