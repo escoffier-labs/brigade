@@ -49,8 +49,10 @@ def _later_archive(snap: _Snapshot, decision: journal.Decision, path: str) -> bo
     """A later archive of this id that already settles the hub copy for this decision.
 
     The same file archived again always does. Another file sharing the id does
-    only once its own hub write is done and its archive still stands: a skipped,
-    pending or undone archive of a different file says nothing about this one.
+    once its own hub write is done or queued and its archive still stands: it
+    was decided with fewer holders, so it carries the write, and sending both
+    would make the second one a stale-base conflict. A skipped or undone archive
+    of a different file says nothing about this one.
     """
     for later in snap.decisions():
         if (
@@ -62,7 +64,7 @@ def _later_archive(snap: _Snapshot, decision: journal.Decision, path: str) -> bo
             continue
         if not path or path in later.paths:
             return True
-        if (later.hub or {}).get("status") == "done" and not later.undone_by:
+        if (later.hub or {}).get("status") in ("done", "pending") and not later.undone_by:
             return True
     return False
 
@@ -209,9 +211,10 @@ def _ownership(
 
     The hub copy follows the cards still in use. Archiving the last holder
     retires it. Archiving a card while exactly one other card holds the id
-    writes that holder's text to the hub when the record has no live owner left
-    among the holders: the archived card owns it, or its file is gone or
-    archived, or the record names no file. Either only happens for a record this
+    writes that holder's text to the hub when the record's own file is no longer
+    there: the archived card owns it, or its file is gone or archived, or the
+    record names no file. A named file that still exists keeps the record, even
+    when it no longer holds the id. Either only happens for a record this
     workspace wrote or whose text is text this workspace archived. A revive goes
     out only when no other card holds the id, and either this card owns the
     record or this hub and scope's last write for the id was a retire from here.
@@ -221,7 +224,9 @@ def _ownership(
         if not path:
             return "collision"
         if holders:
-            owner_gone = base is not None and base.get("path") not in {h["rel"] for h in holders}
+            named = str(base.get("path") or "") if base is not None else ""
+            # Absence is read from the named file itself, never from its missing among the holders.
+            owner_gone = base is not None and (not named or named == path or journal.current(target, named) is None)
             if len(holders) != 1 or not owner_gone:
                 return "collision"
         if base is not None:
@@ -313,6 +318,22 @@ def _send(
                 content_hash=content_hash,
                 snap=snap,
             )
+            if ownership == "handover":
+                # This put sends another card's text: read the cards again under the lock,
+                # so a holder edited or made private since the snapshot is judged as it is now.
+                holders = _holders(target, card_id, path)
+                ownership = _ownership(
+                    target,
+                    action,
+                    card_id,
+                    path,
+                    base,
+                    holders,
+                    identity=client.identity,
+                    scope=settings.scope,
+                    content_hash=content_hash,
+                    snap=snap,
+                )
             if ownership == "collision":
                 return {**pending, "status": "skipped", "reason": "card-id-collision"}
             if ownership == "not-owned":
@@ -331,6 +352,9 @@ def _send(
             # Replay a stored request only when it is the same kind of write for the same card.
             stored = request if request and ("text" in request) == (wire == "put") else None
             if stored and handover and (decision is None or (decision.hub or {}).get("holder") != written_path):
+                stored = None
+            # A holder edited since the request was stored gets a new write with its current text.
+            if stored and handover and stored.get("text") != body_text:
                 stored = None
             fields = (
                 dict(stored)

@@ -548,15 +548,17 @@ def test_three_files_offline_second_archive_hands_over_on_tend(tmp_path, monkeyp
     fake.unavailable = False
     fake.calls.clear()
     tend.run(tmp_path, stages=["hub"])
-    # Here the first decision reaches the hub first and carries the handover; the second finds C already owning.
+    # Rule: the queued later archive was decided with fewer holders, so it carries the handover
+    # with its stored event id, and the earlier skipped decision is settled by it.
     assert shared_text(fake) == text_of(tmp_path, C)
     assert record(tmp_path, fake)["path"] == C
-    assert len(sent(fake, "put")) == 1
+    assert [f["client_event_id"] for f in sent(fake, "put")] == [second.hub["request"]["client_event_id"]]
     assert not sent(fake, "retire")
     fake.calls.clear()
     tend.run(tmp_path, stages=["hub"])
     assert not quiet(fake)
-    assert (final(tmp_path, first)["status"], final(tmp_path, first)["action"]) == ("done", "handover")
+    assert (final(tmp_path, second)["status"], final(tmp_path, second)["action"]) == ("done", "handover")
+    assert (final(tmp_path, first)["status"], final(tmp_path, first)["reason"]) == ("superseded", "later-archive")
 
 
 def skip_as_an_older_release_did(tmp_path, d, rel):
@@ -752,8 +754,70 @@ def test_retry_reads_again_after_a_hub_write(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sync, "_local_cards", count_cards)
     hub.retry_pending(tmp_path)
-    # The first decision hands over to C and changes the record; the second is judged on fresh data.
+    # The first decision is settled by the queued second one, whose handover re-reads the cards before it sends.
     assert reads["cards"] >= 2
     assert shared_text(fake) == text_of(tmp_path, C)
     assert len(sent(fake, "put")) == 1
-    assert final(tmp_path, first)["status"] == "done"
+    assert final(tmp_path, first)["status"] == "superseded"
+
+
+def test_queued_handover_sends_the_holder_text_as_it_is_now(tmp_path, monkeypatch):
+    fake = two_cards(tmp_path, monkeypatch)
+    fake.unavailable = True
+    d = move(tmp_path, A)
+    stored = d.hub["request"]
+    assert stored["text"] == text_of(tmp_path, B)
+    # The holder is edited while the handover waits for the hub.
+    card(tmp_path, B, "B text, with the withdrawn line gone")
+    fake.unavailable = False
+    fake.calls.clear()
+    tend.run(tmp_path, stages=["hub"])
+    [put] = sent(fake, "put")
+    assert put["text"] == text_of(tmp_path, B)
+    assert put["client_event_id"] != stored["client_event_id"]
+    assert "B text\n" not in repr(fake.calls)
+    assert final(tmp_path, d)["status"] == "done"
+    assert record(tmp_path, fake)["content_hash"] == hash_of(tmp_path, B)
+
+
+def test_two_archives_queued_offline_send_one_retire_and_no_conflict(tmp_path, monkeypatch):
+    fake = two_cards(tmp_path, monkeypatch)
+    fake.unavailable = True
+    first = move(tmp_path, A)
+    second = move(tmp_path, B)
+    assert (first.hub["action"], second.hub["action"]) == ("handover", "retire")
+    fake.unavailable = False
+    fake.calls.clear()
+    result = tend.run(tmp_path, stages=["hub"])
+    # Rule: the later queued archive carries the write; sending both would refuse the second as stale.
+    assert [f["client_event_id"] for f in sent(fake, "retire")] == [second.hub["request"]["client_event_id"]]
+    assert not sent(fake, "put")
+    assert result["stages"]["hub"]["conflict"] == 0
+    assert final(tmp_path, second)["status"] == "done"
+    assert (final(tmp_path, first)["status"], final(tmp_path, first)["reason"]) == ("superseded", "later-archive")
+
+
+@pytest.mark.parametrize("front", ["card_id: elsewhere\n", "card_id: old\nvisibility: private\n"])
+def test_named_owner_still_on_disk_keeps_the_record(tmp_path, monkeypatch, front):
+    fake = three_cards(tmp_path, monkeypatch)
+    # The record's file stays live but stops holding the id: it changed id, or went private.
+    (tmp_path / A).write_bytes(f"---\n{front}---\nA text\n".encode())
+    d = move(tmp_path, B)
+    # Rule: only a named file that is gone or archived gives up the record.
+    assert (d.hub["status"], d.hub["reason"]) == ("skipped", "card-id-collision")
+    assert not quiet(fake)
+    assert record(tmp_path, fake)["path"] == A
+
+
+def test_handover_judges_the_holder_as_it_is_under_the_lock(tmp_path, monkeypatch):
+    fake = two_cards(tmp_path, monkeypatch)
+    snap = hub._Snapshot(tmp_path)
+    snap.cards()
+    # The holder goes private after the run read its cards.
+    card(tmp_path, B, "B text", visibility="private")
+    result = hub._send(
+        tmp_path, action="retire", card_id="old", reason="ended", path=A, content_hash=hash_of(tmp_path, A), snap=snap
+    )
+    assert (result["status"], result["action"]) == ("done", "retire")
+    assert not sent(fake, "put")
+    assert "B text" not in repr(fake.calls)
