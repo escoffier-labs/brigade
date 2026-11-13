@@ -1,6 +1,6 @@
 """Second review regressions, including real kernel crash recovery."""
 
-from datetime import date, timedelta
+from datetime import date
 
 import pytest
 
@@ -162,8 +162,13 @@ def test_hub_days_use_validated_client_response(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(hubc, "load_settings", lambda _: hubc.HubSettings(mode="sync", scope="fleet"))
     monkeypatch.setattr(hubc, "client_for", lambda _: Client())
-    assert reads.hub_last_reads(tmp_path) == {"old": date(1970, 1, 1) + timedelta(days=20000)}
-    assert "skipped" in capsys.readouterr().err
+    assert reads.hub_last_reads(tmp_path) is None
+    assert "hub read stats unavailable, retiring nothing on use grounds" in capsys.readouterr().err
+    setup_card(tmp_path, b"---\ncard_id: old\nexpires_at: 2000-01-01\n---\nEnded\n")
+    reads.record(tmp_path, [], today=date(2000, 1, 1))
+    planned = retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), tend.TendConfig(), today=date.today())
+    assert planned["candidates"] == []
+    assert planned["skipped"]["hub_reads_unavailable"] == 1
 
 
 def test_windows_crlf_manifest_pin(tmp_path):
