@@ -7,12 +7,13 @@ from pathlib import Path
 from typing import Any
 
 PACKAGE_ID = "brigade-claude-work-loop"
-PACKAGE_VERSION = "1.3.1"
+PACKAGE_VERSION = "1.4.0"
 PACKAGE_REF = f"{PACKAGE_ID}@{PACKAGE_VERSION}"
 COMMAND_PREFIX = "brigade work hook-run"
 DIRECT_ENTRY_COMMAND = "brigade-hook"
 MANAGED_EVENTS = (
     "SessionStart",
+    "PostModelSwitch",
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
@@ -46,6 +47,7 @@ def managed_groups() -> dict[str, list[dict[str, Any]]]:
 
     return {
         "SessionStart": [group("SessionStart")],
+        "PostModelSwitch": [group("PostModelSwitch")],
         "UserPromptSubmit": [group("UserPromptSubmit")],
         "PreToolUse": [group("PreToolUse", "Bash"), group("PreToolUse", "Edit|Write|NotebookEdit")],
         "PostToolUse": [group("PostToolUse", "Bash|Read|Edit|Write|NotebookEdit")],
@@ -137,6 +139,7 @@ def managed_user_groups(script_path: Path) -> dict[str, list[dict[str, Any]]]:
 
     return {
         "SessionStart": [group("SessionStart")],
+        "PostModelSwitch": [group("PostModelSwitch")],
         "UserPromptSubmit": [group("UserPromptSubmit")],
         "PreToolUse": [group("PreToolUse", "Bash"), group("PreToolUse", "Edit|Write|NotebookEdit")],
         "PostToolUse": [group("PostToolUse", "Bash|Read|Edit|Write|NotebookEdit")],

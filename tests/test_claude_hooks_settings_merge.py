@@ -122,6 +122,7 @@ def test_hooks_status_reports_complete_stale_package_as_installed(tmp_path: Path
     assert status["current"] is False
     assert status["managed_events"] == [
         "SessionStart",
+        "PostModelSwitch",
         "UserPromptSubmit",
         "PreToolUse",
         "PostToolUse",
@@ -155,7 +156,7 @@ def test_hooks_status_reports_a_pre_session_end_install_as_incomplete(tmp_path: 
     assert managed_command("SessionEnd") in session_end
     assert status_payload(target)["current"] is True
     sidecar = json.loads((target / ".brigade" / "claude-hooks.json").read_text())
-    assert sidecar["package_version"] == PACKAGE_VERSION == "1.3.1"
+    assert sidecar["package_version"] == PACKAGE_VERSION == "1.4.0"
 
 
 def test_hooks_status_reports_matcher_drift_as_stale(tmp_path: Path):
@@ -421,7 +422,7 @@ def test_is_legacy_handler_anchors_to_executable_position():
         is_legacy_handler(
             {
                 "type": "command",
-                "command": "python3 /home/u/.claude/hooks/brigade-work-loop.py --event PreToolUse",
+                "command": "python3 /work/example/.claude/hooks/brigade-work-loop.py --event PreToolUse",
             }
         )
         is True

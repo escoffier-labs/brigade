@@ -31,7 +31,7 @@ from . import (
     scorecard as scorecard_mod,
     verify_trial,
 )
-from .agent_identity import detect_harness
+from .agent_identity import detect_harness, map_receipt_identity
 from .outcome_discovery import (
     _artifact_content_path_at,
     _artifact_id_has_controls,
@@ -2035,6 +2035,8 @@ def capture(
         code_graph_delta = _compact_code_graph_delta(receipt)
         signal = core.signal_value(source, effective_status)
     manifest = context_manifest(run_agent)
+    if source == "verify" and isinstance(receipt.get("agent_identity"), dict):
+        manifest["agent_identity"] = map_receipt_identity(receipt["agent_identity"])
     route = route_manifest(route_run_payload, route_run_json)
     if signal is None:
         signal = core.signal_value(source, effective_status)
@@ -2640,10 +2642,8 @@ def record(
 
 
 def health(target: Path) -> dict:
-    """Surface whether the receipt-only verified-learning loop is actually being fed.
-
-    Scorecard eligibility is projected exclusively from verify receipts. Legacy
-    ``records.jsonl`` rows remain audit-only and are never joined for scoring.
+    """Surface whether the receipt-only verified-learning loop is being fed.
+    Scorecard eligibility uses verify receipts; legacy ledger rows remain audit-only.
     """
     target = target.expanduser().resolve()
     from . import scorecard as scorecard_mod

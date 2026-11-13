@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 LEGACY_OVERSIZED: dict[str, int] = {
     "src/brigade/runs_cmd.py": 3584,
-    "src/brigade/claude_hooks/runtime.py": 3354,
+    "src/brigade/claude_hooks/runtime.py": 3314,
     "src/brigade/work_cmd/scanners.py": 3332,
     "src/brigade/research_cmd.py": 3088,
     "src/brigade/outcome_cmd.py": 2903,
