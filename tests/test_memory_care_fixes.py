@@ -20,8 +20,9 @@ def card(target, kind):
         fields["last_reviewed"] = "2026-11-01"
     if kind != "missing-freshness":
         fields["fresh_until"] = "2027-01-01"
-    path.write_text(
-        "---\n" + "".join(f"{k}: {v}\n" for k, v in fields.items()) + "---\nUseful fact.\n", encoding="utf-8"
+    # Bytes, so the card has LF endings on every platform. CRLF cards are covered separately.
+    path.write_bytes(
+        ("---\n" + "".join(f"{k}: {v}\n" for k, v in fields.items()) + "---\nUseful fact.\n").encode("utf-8")
     )
     os.utime(path, (1793491200, 1793491200))
     (target / "README.md").write_text("Evidence.\n", encoding="utf-8")
@@ -368,6 +369,18 @@ def test_a_quoted_date_key_is_never_duplicated(tmp_path, kind, line):
 
     path = card(tmp_path, kind)
     path.write_bytes(path.read_bytes().replace(b"topic: A\n", b"topic: A\n" + line))
+    before = path.read_bytes()
+    result = fixes.apply_fixes(tmp_path, care._config_or_default(tmp_path), today=TODAY)
+    assert result["applied"] == 0
+    assert path.read_bytes() == before
+
+
+def test_a_card_with_windows_line_endings_is_reported_and_left_unchanged(tmp_path):
+    """Such a card is refused today. Supporting it is a recorded follow-up."""
+    from brigade import memory_care_fixes as fixes
+
+    path = card(tmp_path, "missing-freshness")
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
     before = path.read_bytes()
     result = fixes.apply_fixes(tmp_path, care._config_or_default(tmp_path), today=TODAY)
     assert result["applied"] == 0
