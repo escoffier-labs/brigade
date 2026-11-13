@@ -995,3 +995,14 @@ Pull request 2 merged with the record stored in the per-user state directory, ou
 - **Pull request 5 (first-pass report):** when rotation keeps failing because another process holds the old generation open, the active file can pass the reader's size limit and the reader then returns nothing from it. Read the newest part of an oversized file instead of rejecting it.
 - **Pull request 5:** each record is validated twice on read. Fold the two passes into one before reports read the file often.
 - Windows relies on the user profile's inherited access rules for the state directory. Revisit only if a shared state location becomes a supported setup.
+
+## Follow-ups from pull requests 3 and 4
+
+Claude Code and Codex capture are merged. Cursor capture was removed from pull request 4 and needs its own design.
+
+- **Cursor capture, new pull request.** Do not probe a binary for the version. Use the version Cursor reports in each hook payload, recorded by the hooks already installed, and install the failure event only when every reader seen is verified to accept it. Never write that event to the project-level hooks document, which other people's installs read. Without the failure event, record no Cursor checks at all, so the sample is never passes only.
+- **Codex reports no pass or fail.** Every Codex record has unknown status. A pass rate for Codex has to come from verify receipts or another source.
+- **Identity on a receipt is a label.** The cached model lives in workspace session state, so a receipt's identity is declared attribution, not proof of which model ran.
+- **Model names are shaped, not allowlisted.** They reach the tracked outcome ledger. Revisit if a repository with a tracked ledger is public.
+- **Timing-sensitive tests on Windows.** A hook-isolation test that starts a child brief process sits close to its timeout on the Windows runner, and an HTTP test file drops connections there intermittently. Give both a bound that scales, or fix the cause.
+- The per-check capture budget is 250 ms. A dropped record under load is possible and silent.

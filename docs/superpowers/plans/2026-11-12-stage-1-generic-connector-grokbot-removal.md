@@ -679,3 +679,12 @@ Task 2 merged. The retired `grokbot-memory` and `grokbot-inbox` ids print a remo
 - **Task 6:** `remove` needs the listener unit to exist. If only the watch service and timer remain, they must be deleted by hand. Say so in the guide.
 - **Tasks 3 to 5:** retained instance files are read for five fields only, with a size limit. When the remaining Grok-specific modules are deleted, keep `retired_instances.py` and the shared bounded reader it uses.
 - A fleet digest deadline test failed once on a shared runner during this task and passed on the next run. If it recurs, give it a scaling bound instead of a wall-clock one.
+
+## Follow-ups from the Task 3 reviews
+
+Task 3 merged: the three steward packs and their helpers are removed, about forty thousand lines.
+
+- **Task 4** deletes the shims Task 3 left, listed in that pull request's body, except where the hub server still needs them.
+- **Hub server routes stay until the contract change.** The job routes, enrollment and handlers on the hub server are unchanged in both hub implementations. Client-side removal happens now. Server-side removal happens with the next wire contract version.
+- **The job sweeper and the two projections that display stored jobs go together**, in Task 5, so a stale job never shows as owned forever.
+- **Task 6:** a leftover instance file reserves its configured port until deleted by hand, and the retired default ports stay reserved regardless. Say so in the migration guide.
