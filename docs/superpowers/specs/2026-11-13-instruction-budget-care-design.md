@@ -833,6 +833,11 @@ together.
     that meets drift reverses nothing and leaves the original looking active,
     so the policy notice would stay in the brief and a second undo would
     refuse for want of a pointer.
+    The same reconciliation runs when kernel recovery refuses an undo's
+    `prepare` (`src/brigade/projection/kernel.py:318-324`): the file is read
+    for the decision's pointers before the undo is abandoned, so a restore
+    that reached disk without its commit record is not mistaken for one that
+    never ran.
 
 Undo cases:
 
@@ -854,7 +859,7 @@ Undo cases:
 | Decision only added or removed pointers | Proceeds. Added pointer lines are removed by their exact bytes, and removed lines go back beside the saved neighbour line, as the archive finish does. No card is touched |
 | Undo puts the file back over act-at | Proceeds. The restored sections are pinned, so the next pass moves other candidates or reports `could-not-trim` with reason `nothing-movable` |
 | Undo crashed after `prepare`, then a card or the restored file was edited | Proceeds on recovery. The original is marked undone, unchanged cards are removed, edited cards stay and are listed |
-| Undo crashed during `prepare`, then the file was edited | Abandoned on recovery. The file was never restored, so the original stays in force and can be undone again |
+| Undo crashed during `prepare`, then the file was edited | Recovery first reads the file, because the kernel applies each change before it records the plan as committed, so the restore may already be on disk. If none of the decision's pointers is left in the file and each moved section's bytes are present, the restore was published: handled as the row above. If every pointer is still there, the restore never ran: the undo is abandoned and the original stays in force. If some pointers are gone and some remain, the undo is abandoned, the original is marked `needs_review`, and the brief names the file and the cards |
 | An undo was a mistake | An undo cannot be undone (`src/brigade/memory_care_journal.py:259-260`). Delete the undo pin and the next pass moves the section again |
 
 - **Visibility.** Every card created from an instruction file, moved or
@@ -1435,3 +1440,6 @@ Second revision, after the `claude` re-review and a Codex comment on
 - The first-pass table gives 5,945 bytes moved and 5,525 net of pointers, to
   match the JSON example (`claude`, small item).
 - The kernel sort citation is `kernel.py:408` (`claude`, small item).
+- Recovery of an undo that crashed during `prepare` reads the file for the
+  decision's pointers before abandoning it, so a restore already on disk is
+  finished and not treated as unapplied (Codex, third inline comment).
