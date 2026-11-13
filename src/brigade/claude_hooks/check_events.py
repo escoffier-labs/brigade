@@ -147,7 +147,7 @@ def failure_followup(
 def after_handling(event: str, payload: dict[str, Any], *, pin: Path | None) -> None:
     """Run once after all existing primary and secondary event handling."""
     try:
-        with observed_checks.capture_budget(1.0 if event in {"SessionStart", "PostModelSwitch"} else 0.1):
+        with observed_checks.capture_budget(1.0 if event in {"SessionStart", "PostModelSwitch"} else 0.25):
             rt = _rt()
             target = rt.effective_hook_target(payload, pin=pin)
             observed_checks.check_capture_deadline()

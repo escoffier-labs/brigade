@@ -10,6 +10,7 @@ import pytest
 
 from brigade import localio, observed_checks, work_mode
 from brigade.claude_hooks import check_events, runtime
+from tests._posix import requires_dirfd
 from tests.test_claude_hooks_check_events import target as _target
 
 from tests.test_work_mode import _bash, _payload, _set_mode, _write
@@ -98,7 +99,7 @@ def test_duration_over_one_day_is_null(target):
     assert observed_checks.read_checks(target)[0][0].duration_ms is None
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX no-follow and FIFO open flags")
+@requires_dirfd
 @pytest.mark.parametrize("kind", ["symlink", "fifo"])
 def test_env_swap_cannot_follow_or_block(target, tmp_path, monkeypatch, kind):
     env = tmp_path / "env.sh"

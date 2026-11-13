@@ -106,7 +106,7 @@ the strict gate's `BRIGADE_CLAUDE_SESSION`.
 Observed checks use separate private per-user storage and never store command
 text, command output, paths, prompt text, or raw session identifiers.
 
-Optional tool-event capture skips tree fingerprinting and uses a 100 ms
+Optional tool-event capture skips tree fingerprinting and uses a 250 ms
 cooperative deadline checked between steps, including identity, key, lock, and
 append access. Session start and model switches use a 1 second budget for
 identity caching and environment export.
