@@ -1,0 +1,1 @@
+- Add shared agent identity detection and a private, rotating observed-check log with redacted commands and tolerant readers. Hook capture and reports are not connected yet.
