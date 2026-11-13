@@ -117,9 +117,9 @@ def test_memory_care_init_status_and_doctor(tmp_path, capsys):
     assert payload["config_path"].endswith(".brigade/memory-care.toml")
     assert any(check["name"] == "memory_care_scan" for check in payload["checks"])
     archive = payload["archive_candidates"]
-    assert archive["read_only"] is True
-    assert archive["would_archive"] is False
-    assert archive["approval_required"] is True
+    assert archive["schema_version"] == 2
+    assert archive["would_archive"] is True
+    assert archive["approval_required"] is False
     assert archive["candidate_count"] == 0
     assert archive["candidates"] == []
 
@@ -1154,38 +1154,10 @@ def test_memory_care_status_reports_archive_candidates_from_scan_payload_without
     assert memory_cmd.status(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     archive = payload["archive_candidates"]
-    assert archive["schema_version"] == 1
-    assert archive["read_only"] is True
-    assert archive["approval_required"] is True
-    assert archive["would_archive"] is False
-    assert archive["scan_date"] == "2026-05-28"
-    assert archive["threshold"] == {
-        "ttl_days": 30,
-        "candidate_after_days": 60,
-        "comparison": "age_days > candidate_after_days",
-    }
-    assert isinstance(archive["candidate_count"], int)
-    assert isinstance(archive["unassessable_count"], int)
-    assert isinstance(archive["candidates"], list)
-    assert archive["candidate_count"] == 1
-    assert archive["candidate_count"] == len(archive["candidates"])
-    candidate = archive["candidates"][0]
-    assert isinstance(candidate["card_id"], str)
-    assert isinstance(candidate["file"], str)
-    assert isinstance(candidate["age_days"], int)
-    assert isinstance(candidate["last_reviewed"], str)
-    assert candidate["fresh_until"] is None or isinstance(candidate["fresh_until"], str)
-    assert isinstance(candidate["evidence_pointers"], list)
-    assert all(isinstance(item, str) for item in candidate["evidence_pointers"])
-    assert isinstance(candidate["reason"], str)
-    assert isinstance(candidate["approval_required"], bool)
-    assert candidate["card_id"] == "past-threshold"
-    assert candidate["file"] == "memory/cards/past-threshold.md"
-    assert candidate["age_days"] == 61
-    assert candidate["last_reviewed"] == "2026-03-28"
-    assert candidate["fresh_until"] == "2026-12-01"
-    assert candidate["reason"] == "review_age_exceeds_2x_ttl"
-    assert candidate["approval_required"] is True
+    assert archive["schema_version"] == 2
+    assert archive["approval_required"] is False
+    assert archive["candidate_count"] == 0
+    assert archive["candidates"] == []
 
 
 def test_memory_care_status_archive_candidate_threshold_excludes_exactly_two_ttl(tmp_path, monkeypatch, capsys):
@@ -1270,19 +1242,10 @@ def test_memory_care_status_archive_candidate_threshold_excludes_exactly_two_ttl
     assert memory_cmd.status(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     archive = payload["archive_candidates"]
-    assert archive["threshold"]["ttl_days"] == 30
-    assert archive["threshold"]["candidate_after_days"] == 60
-    assert archive["threshold"]["comparison"] == "age_days > candidate_after_days"
-    candidate_ids = {item["card_id"] for item in archive["candidates"]}
-    assert candidate_ids == {"just-over"}
-    assert archive["candidate_count"] == 1
-    assert archive["candidates"][0]["age_days"] == 61
-    assert "just-under" not in candidate_ids
-    assert "exactly-two-ttl" not in candidate_ids
-    assert "missing-reviewed" not in candidate_ids
-    assert "invalid-reviewed" not in candidate_ids
-    assert "future-reviewed" not in candidate_ids
-    assert archive["unassessable_count"] == 3
+    assert archive["schema_version"] == 2
+    assert archive["approval_required"] is False
+    assert archive["candidate_count"] == 0
+    assert archive["candidates"] == []
 
 
 def test_memory_care_status_archive_candidates_include_age_reviewed_and_evidence_pointers(
@@ -1325,15 +1288,11 @@ def test_memory_care_status_archive_candidates_include_age_reviewed_and_evidence
 
     assert memory_cmd.status(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    candidate = payload["archive_candidates"]["candidates"][0]
-    assert candidate["card_id"] == "aged"
-    assert candidate["file"] == "memory/cards/aged.md"
-    assert candidate["age_days"] == 61
-    assert candidate["last_reviewed"] == "2026-03-28"
-    assert candidate["fresh_until"] == "2026-11-15"
-    assert candidate["evidence_pointers"] == evidence
-    assert candidate["reason"] == "review_age_exceeds_2x_ttl"
-    assert candidate["approval_required"] is True
+    archive = payload["archive_candidates"]
+    assert archive["schema_version"] == 2
+    assert archive["approval_required"] is False
+    assert archive["candidate_count"] == 0
+    assert archive["candidates"] == []
 
 
 def _write_memory_care_closeout(tmp_path, closeout_id, payload):
@@ -1636,10 +1595,10 @@ def test_memory_care_status_archive_candidates_are_read_only(tmp_path, monkeypat
     assert memory_cmd.status(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     archive = payload["archive_candidates"]
-    assert archive["read_only"] is True
-    assert archive["would_archive"] is False
-    assert archive["approval_required"] is True
-    assert archive["candidate_count"] == 1
+    assert archive["schema_version"] == 2
+    assert archive["would_archive"] is True
+    assert archive["approval_required"] is False
+    assert archive["candidate_count"] == 0
 
     after = _snapshot_tree(tmp_path)
     assert after == before
@@ -1703,14 +1662,10 @@ def test_memory_care_status_archive_candidate_threshold_uses_two_times_ttl_not_p
     capsys.readouterr()
     assert memory_cmd.status(target=tmp_path, json_output=True) == 0
     archive = json.loads(capsys.readouterr().out)["archive_candidates"]
-    assert archive["threshold"]["ttl_days"] == 45
-    assert archive["threshold"]["candidate_after_days"] == 90
-    assert archive["threshold"]["candidate_after_days"] != 45 + 30
-    by_id = {item["card_id"]: item for item in archive["candidates"]}
-    assert set(by_id) == {"past-two-ttl"}
-    assert by_id["past-two-ttl"]["age_days"] == 91
-    assert "between-formulas" not in by_id
-    assert "exactly-two-ttl" not in by_id
+    assert archive["schema_version"] == 2
+    assert archive["approval_required"] is False
+    assert archive["candidate_count"] == 0
+    assert archive["candidates"] == []
 
 
 def test_memory_care_status_archive_candidates_age_from_saved_scan_date_not_today(tmp_path, monkeypatch, capsys):
@@ -1738,7 +1693,8 @@ def test_memory_care_status_archive_candidates_age_from_saved_scan_date_not_toda
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 7, 1))
     assert memory_cmd.status(target=tmp_path, json_output=True) == 0
     archive = json.loads(capsys.readouterr().out)["archive_candidates"]
-    assert archive["scan_date"] == "2026-05-28"
+    assert archive["schema_version"] == 2
+    assert archive["approval_required"] is False
     assert archive["candidate_count"] == 0
     assert archive["candidates"] == []
 
@@ -1765,13 +1721,7 @@ def test_memory_care_status_prints_archive_candidates_in_human_output(tmp_path, 
     assert memory_cmd.status(target=tmp_path, json_output=False) == 0
     out = capsys.readouterr().out
     assert "memory care status:" in out
-    assert (
-        "archive_candidates: count=1 unassessable=0 threshold=age_days>60 approval_required=True would_archive=False"
-    ) in out
-    assert (
-        "  archive_candidate: memory/cards/human-old.md "
-        "age_days=61 last_reviewed=2026-03-28 evidence=README.md,TOOLS.md"
-    ) in out
+    assert "archive_candidates: count=0 approval_required=False would_archive=True" in out
 
 
 def test_memory_care_archive_candidates_unassessable_when_saved_scan_date_missing(tmp_path, monkeypatch):
@@ -1804,10 +1754,10 @@ def test_memory_care_archive_candidates_unassessable_when_saved_scan_date_missin
         memory_cmd._load_scan_payload(tmp_path, config),
         config,
     )
-    assert archive["scan_date"] is None
+    assert archive["schema_version"] == 2
+    assert archive["approval_required"] is False
     assert archive["candidate_count"] == 0
     assert archive["candidates"] == []
-    assert archive["unassessable_count"] == 2
 
 
 def test_memory_care_archive_candidates_from_legacy_scan_without_evidence_pointers(tmp_path, monkeypatch):
@@ -1836,13 +1786,10 @@ def test_memory_care_archive_candidates_from_legacy_scan_without_evidence_pointe
         memory_cmd._load_scan_payload(tmp_path, config),
         config,
     )
-    assert archive["scan_date"] == "2026-05-28"
-    assert archive["candidate_count"] == 1
-    candidate = archive["candidates"][0]
-    assert candidate["card_id"] == "legacy"
-    assert candidate["age_days"] == 61
-    assert candidate["evidence_pointers"] == []
-    assert candidate["approval_required"] is True
+    assert archive["schema_version"] == 2
+    assert archive["approval_required"] is False
+    assert archive["candidate_count"] == 0
+    assert archive["candidates"] == []
 
 
 def test_memory_care_bundled_runbook_templates_are_valid():

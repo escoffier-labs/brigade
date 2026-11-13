@@ -270,7 +270,7 @@ Contradiction detection is deliberately conservative. Brigade only flags explici
 
 `status` and JSON output summarize freshness metadata coverage: reviewed dates present, missing, and stale, freshness dates present, missing, and expired, confidence distribution, and evidence metadata present or missing. These checks only explain review needs. Brigade does not edit memory cards automatically.
 
-`status` also reports a read-only `archive_candidates` view derived from the saved scan payload (no second card-tree walk). A card is a candidate only when it has a parseable `last_reviewed` and `age_days > 2 * stale_after_days` (exactly 2x TTL is not a candidate). Missing, invalid, or future reviewed dates are unassessable and are never inferred from mtime or Git history. Each candidate includes age, last-reviewed, freshness context, and evidence pointers. The view sets `read_only`, `approval_required`, and `would_archive=false`; there is no `--apply` path and status never archives or writes state.
+`status` reports `archive_candidates` schema 2 from the latest tend result, without walking the card tree. It reports use-and-subject retirement candidates, `approval_required=false` and whether tending is enabled. Status itself never writes or archives cards.
 
 ## Card identity
 
@@ -329,7 +329,30 @@ Receipts with malformed fields are ignored rather than honored: only a `reviewed
 
 ## Boundary
 
-Memory care does not run a scheduler, mutate canonical memory, perform remote sync, or promote imports automatically. Card edits stay explicit: routine scan and plan commands never write card files. Only `brigade memory care backfill --apply` may add derived frontmatter, with a receipt. Refreshes stay explicit through reviewed work tasks or the existing Memory Handoff flow. Scheduling those care commands is the operator's job: see the [execution model](execution-model.md). Opt-in `brigade care install` can install target-namespaced systemd user timers on Linux or launchd agents on macOS without Brigade owning a daemon.
+Memory care archives eligible cards automatically and records every change with before-bytes and undo. It never deletes memory. Paths covered by `read_only_paths` and cards with frontmatter `archive: never` are exempt. Content guard, secret and credential scanning, and pre-push checks remain in force. Scheduling care commands is the operator's job: see the [execution model](execution-model.md).
+
+## Tending
+
+`brigade memory care tend` runs hub retries followed by retirement. Use `--stage hub` or `--stage retire` to select a stage, `--dry-run` to preview without writing, and `--json` for structured output. Successful CLI scans run tend afterwards. `memory care scan --no-tend` skips it once. Library scans remain read-only.
+
+Workspace `.brigade/memory-care.toml` accepts:
+
+```toml
+[tend]
+enabled = true
+unused_after_days = 120
+deadline_days = 14
+max_archives_per_run = 20
+```
+
+A read ledger records last-read days from search and prompt recall. Retirement requires a ledger at least 120 days old, no read within that window (including available hub read stats), and a past `expires_at` or `expires` date. `fresh_until` alone never means the subject ended. A new or reset ledger archives nothing on use grounds. This stage makes no model calls.
+
+Archive moves `memory/cards/x.md` to `memory/archive/cards/x.md`. Cards outside `memory/` keep their relative path under the archive. Archived cards leave search, recall, scan, proposals, hub push and retrieval evaluation. Writable index files lose only the card's link lines.
+
+`brigade memory care undo <decision-id>` restores the exact bytes and reinserts removed links without replacing unrelated index edits. It refuses when either card path changed after the decision. An occupied original path is never overwritten. The journal lives under `.brigade/memory-care/journal/` with owner-only before-images. In hub sync mode, published cards are retired and restored cards revived. Unavailable hub operations remain pending for retry. Local undo remains available. Hub revision conflicts enter the existing sync conflict path.
+
+To apply an external judgment, use `brigade memory care archive --from-file decisions.jsonl [--limit N]`. Each JSON line contains `card` (a target-relative card path) and a nonblank `reason`. The optional positive limit caps successful archives independently of the steady-state limit. Refused, missing, protected and duplicate cards are reported and skipped. Every accepted row uses the same archive journal and undo.
+
 
 ## Session-start and prompt recall (#466 Slice 1, #2196)
 

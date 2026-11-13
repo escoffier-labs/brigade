@@ -7,10 +7,12 @@ Brigade is a maintainer-led open-source project. Decisions are made in public wh
 Brigade favors:
 
 - local files over hosted state
-- explicit commands over background automation
-- review queues over silent promotion
+- reversible, journaled memory care with undo
+- automatic low-risk memory decisions with protected paths and before-images
 - receipts and evidence over trust-me status
 - small, reproducible fixes over speculative platform work
+
+Memory care archives eligible cards without waiting for approval. Archives never delete, and each decision has an undo. `read_only_paths` and `archive: never` are exempt. Content guard, secret and credential scanning, and pre-push checks are unchanged.
 
 Changes that preserve those principles can usually move through issues and pull requests. Changes that alter those boundaries need discussion first.
 
