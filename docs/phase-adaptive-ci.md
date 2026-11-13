@@ -393,10 +393,10 @@ on #2508 (run 43111993967).
   the worst run from 33.9 to 18.4. The slowest Windows affected job per run fell
   from a p90 of 1,567 to 783 seconds. This is #2440's sharding.
 - **Pull request cost: worse.** Runner median rose from 75.7 to 78.5, runner p90
-  from 83.8 to 115.8, and Windows runner p90 from 31.9 to 39.1. A large
-  selection now runs on up to three Windows runners, each with its own setup,
-  so the tail is paid for in runner minutes. `hub-rust` also ran in a larger
-  share of successful pull requests (48 of 92, against 9 of 19).
+  from 83.8 to 115.8, and Windows runner p90 from 31.9 to 39.1. `hub-rust`
+  also ran in a larger share of successful pull requests (48 of 92, against 9
+  of 19). The breakdown below shows this is a change in which pull requests
+  ran, not a higher cost for the same pull request.
 - **Merge queue cost: lower on average, not at the median.** The hub suite was
   skipped in 14 of 46 successful groups (2 of them documentation-only). A
   skipped group had a median of 11.0 wall and 100.9 runner minutes, against
@@ -409,6 +409,42 @@ on #2508 (run 43111993967).
 - **Failed queue runs: fewer.** 3 of 49 against 9 of 29, costing 340 runner
   minutes against 1,182. The baseline window's failures were not classified,
   so this records the change without attributing it.
+
+### Why pull request runner p90 rose
+
+Successful `pull_request` runs, split by whether `hub-rust` ran and whether
+the Windows affected-test jobs used more than 15 runner minutes. Computed from
+the per-run job list of the same capture (not in the committed aggregates).
+
+| `hub-rust` ran | Windows affected over 15 min | baseline n | baseline runner median | after n | after runner median |
+|---|---|---|---|---|---|
+| no | no | 6 | 53.7 | 32 | 55.0 |
+| no | yes | 4 | 76.1 | 12 | 69.9 |
+| yes | no | 7 | 78.0 | 29 | 82.8 |
+| yes | yes | 2 | 91.0 | 19 | 116.0 |
+
+- Three of the four rows moved by 6 minutes or less. The share of runs with
+  both expensive suites went from 2 of 19 (11%) to 19 of 92 (21%), and those
+  runs are the top of the distribution.
+- Sharding is not the cause. The shortest shard in the window took 71 seconds,
+  so an extra shard costs at most about 1.2 minutes of setup. A full
+  three-shard selection used 30 to 37 Windows minutes in total, against 26 to
+  33 for the single job on a broad selection in the baseline.
+- The five most expensive runs were all created after 02:00Z on 2026-11-13 and
+  each spent about 40 minutes outside the hub, Windows and test-shard jobs,
+  against about 17 normally. The extra was path-selected jobs (mesh, the Fleet
+  Hub container, feature configuration) on pull requests that touched those
+  areas.
+- The last row's baseline median is from two runs, so 91.0 against 116.0 is
+  weak evidence on its own.
+- Run records do not carry the number of selected tests, so a wider selection
+  for the same diff is not ruled out directly.
+
+The hub suite itself is the larger lever. In three pull request runs on
+2026-11-13 the `hub (Rust 1.85.0)` job took 13.9 to 15.5 minutes and repeated
+what `hub (Rust stable)` runs: `cargo test` (4.9 to 5.7 minutes) and the
+Python integration steps (8.2 to 8.8 minutes). Workstream 6 replaces it with
+a compile on 1.85.0 outside the nightly.
 
 ### Caveats
 
@@ -433,6 +469,7 @@ log. Add the PR link and move the status when a lane lands or stops.
 | 3 | `hub-rust` path filtering in the merge queue | merged 2026-11-09 16:55Z ([#2436](https://github.com/escoffier-labs/brigade/pull/2436)), live, measured 2026-11-13 (see After window) | [`docs/adaptive-ci/hub-merge-queue.md`](adaptive-ci/hub-merge-queue.md) |
 | 4 | Linux pull request test selection in shadow mode | merged 2026-11-09 17:47Z ([#2435](https://github.com/escoffier-labs/brigade/pull/2435)), collecting observations, skips nothing | [`docs/adaptive-ci/shadow-selection.md`](adaptive-ci/shadow-selection.md) |
 | 5 | Merge-group docs classifier loaded from trusted `main` (found while building lane 3) | merged 2026-11-09 17:41Z ([#2441](https://github.com/escoffier-labs/brigade/pull/2441)) | [`docs/adaptive-ci/docs-classifier-trust.md`](adaptive-ci/docs-classifier-trust.md) |
+| 6 | `hub-rust` compiles on 1.85.0 instead of repeating the suite there; the nightly keeps the full run | open | [`docs/adaptive-ci/hub-merge-queue.md`](adaptive-ci/hub-merge-queue.md#the-1850-toolchain) |
 
 The baseline and `scripts/ci_timing_report.py` merged 2026-11-09 19:14Z
 ([#2439](https://github.com/escoffier-labs/brigade/pull/2439)).

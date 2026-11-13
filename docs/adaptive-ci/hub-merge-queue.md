@@ -7,7 +7,8 @@ now skip `hub-rust` when no hub path changed. A trusted selector, loaded from
 ## Before
 
 - `hub-rust` calls the reusable `.github/workflows/hub.yml`: `hub (Rust stable)`,
-  `hub (Rust 1.85.0)` and `hub (linux-arm64)`.
+  `hub (Rust 1.85.0)` and `hub (linux-arm64)`. (Since 2026-11-13 the 1.85.0
+  job only compiles outside the nightly; see "The 1.85.0 toolchain".)
 - In `ci.yml`, the `changes` job skipped `dorny/paths-filter` for `merge_group`
   and forced every component output, `hub` included, to `'true'`.
 - `ci-gate` refused a skipped `hub-rust` in a merge group, even with
@@ -125,6 +126,44 @@ commits that passed the queue, since the ruleset has no bypass actors.
    on every open `hub-nightly` issue and closes each one. Only those two jobs have `issues: write`. `hub.yml` now sets `timeout-minutes` on both jobs (45 for
    the x86 toolchains against a measured max of 15.2 min, 30 for arm64), because a job
    that calls a reusable workflow cannot set its own limit.
+
+## The 1.85.0 toolchain
+
+Added 2026-11-13, after the after-window measurement.
+
+`hub.yml` used to run one job per toolchain, and both ran everything: fmt,
+clippy, `cargo test`, the release build and every Python integration step.
+The release binaries are built on stable (`publish.yml`), so 1.85.0 is a
+promise that the source still compiles on the oldest supported toolchain.
+
+- `hub.yml` takes a `msrv_full` input, default `false`.
+- With the default, which `ci.yml` uses for pull requests, pushes and merge
+  groups, the `hub` job runs the suite on stable only. A new `hub-msrv` job,
+  `hub (Rust 1.85.0 compile)`, runs clippy with warnings denied, builds every
+  test target and the binary (`cargo test --locked --no-run`) and checks the
+  build without the memory scanner (`cargo check --no-default-features`).
+- `hub-nightly.yml` passes `msrv_full: true`. The `hub` job then runs the
+  whole suite on both toolchains and `hub-msrv` is skipped, so the nightly is
+  unchanged.
+
+```mermaid
+flowchart TD
+  A[hub.yml called] --> B{msrv_full?}
+  B -- "false: ci.yml" --> C[hub: full suite on stable]
+  B -- "false: ci.yml" --> D[hub-msrv: clippy, build test targets, check on 1.85.0]
+  B -- "true: hub-nightly.yml" --> E[hub: full suite on stable and 1.85.0]
+  A --> F[hub-arm64: release build and acceptance]
+```
+
+What this gives up: a fault that compiles on 1.85.0 but behaves differently
+there at run time is found by the next nightly, not before merge. The nightly
+opens or updates the `hub-nightly` tracking issue when it fails.
+
+Measured before, from three pull request runs on 2026-11-13 (43405767266,
+43134200771, 43372269078): the 1.85.0 job took 13.9 to 15.5 minutes, of which
+`cargo test` was 4.9 to 5.7 and the Python integration steps 8.2 to 8.8. The
+after numbers go in the pull request that makes this change and in the Results
+log of `docs/phase-adaptive-ci.md`.
 
 ## Coverage of the path list
 
