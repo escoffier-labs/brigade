@@ -457,7 +457,7 @@ operator on 2026-11-12.
 
   Wanted behaviour, as part of memory care in Stage A:
   - The care pass measures each always-loaded file against its budget and
-    acts before the limit, at a set headroom, not after it.
+    acts before the limit, at a set headroom.
   - When a file is over headroom, the background model step moves the
     least-used sections into memory cards, leaves a one-line pointer, and
     records the move in the journal with undo.
