@@ -98,3 +98,23 @@ def test_undo_keeps_line_boundaries_for_an_unterminated_last_link(tmp_path):
     lines = index.read_text().splitlines()
     assert sorted(lines[1:]) == ["- [New](memory/cards/new.md)", "- [Old](memory/cards/old.md)"]
     assert lines[0] == "Header"
+
+
+def test_replica_read_of_a_card_without_an_id_blocks_retirement(tmp_path):
+    from brigade import memory_hub_sync
+
+    rel = "memory/cards/Old Note.md"
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True)
+    text = "---\nexpires_at: 2026-01-01\n---\nEnded\n"
+    path.write_text(text)
+    published = memory_hub_sync.publication_identity(text, rel)[0]
+    assert published not in (rel, memory_cmd.card_identity_from_text(text, rel))
+    reads.record(tmp_path, [], today=date(2026, 1, 1))
+    today = date(2026, 11, 12)
+    assert len(retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), tend.TendConfig(), today=today)["candidates"]) == 1
+    # A replica read is recorded under the publication id only.
+    reads.record(tmp_path, [published], today=date(2026, 11, 10))
+    plan = retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), tend.TendConfig(), today=today)
+    assert plan["candidates"] == []
+    assert plan["skipped"]["read_recently"] == 1

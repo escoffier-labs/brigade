@@ -56,7 +56,7 @@ def _replay_state(target: Path, decision: journal.Decision) -> dict[str, str]:
                 data = journal.current(target, archived)
                 if data is None or journal.kernel.content_digest(data) != decision.after_sha256.get(archived):
                     return {"status": "superseded", "reason": "archive-changed"}
-    except (OSError, ValueError):
+    except (OSError, ValueError, KeyError, TypeError):
         return {"status": "needs_review", "reason": "local-state-unreadable"}
     return {"status": "send"}
 

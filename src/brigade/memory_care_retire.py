@@ -46,12 +46,14 @@ def plan(target: Path, config: memory_cmd.MemoryCareConfig, tend: TendConfig, *,
             skipped["hub_reads_unavailable"] = skipped.get("hub_reads_unavailable", 0) + 1
             continue
         card_id = memory_cmd.card_identity_from_text(text, rel)
+        # Replica reads are recorded under the publication id, which is derived for a card without one.
+        published = memory_hub_sync.publication_identity(text, rel)[0]
         read = max(
             filter(
                 None,
                 [
-                    memory_card_reads.last_read(ledger, (card_id, rel)),
-                    hub_reads.get(memory_hub_sync.publication_identity(text, rel)[0]),
+                    memory_card_reads.last_read(ledger, (card_id, rel, published)),
+                    hub_reads.get(published),
                 ],
             ),
             default=None,
