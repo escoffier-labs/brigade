@@ -38,10 +38,15 @@ def compatibility(argv: list[str]) -> int | None:
                     from brigade.dot.retired_instances import remove_command
 
                     return remove_command(tail[1:], value)
-                return removed(
-                    " ".join((*prefix, value)),
-                    replacement=REPLACEMENT
-                    + f" Stop installed units: systemctl --user disable --now brigade-{value}.service "
-                    + f"brigade-{value}-watch.service brigade-{value}-watch.timer",
-                )
+                return removed_profile(value, " ".join((*prefix, value)))
     return None
+
+
+def removed_profile(value: str, command: str | None = None) -> int:
+    """The removal message for a retired profile, with how to stop its installed units."""
+    return removed(
+        command or value,
+        replacement=REPLACEMENT
+        + f" Stop installed units: systemctl --user disable --now brigade-{value}.service "
+        + f"brigade-{value}-watch.service brigade-{value}-watch.timer",
+    )

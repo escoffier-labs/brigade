@@ -240,3 +240,46 @@ def test_retired_cleanup_refuses_unowned_directory(dot_private_dir, name):
     with pytest.raises(registry.PackError, match="outside-owned-path"):
         remove_units(name, unit_dir=units, apply=True)
     assert list(units.iterdir())
+
+
+@pytest.mark.parametrize("name", BASE)
+@pytest.mark.parametrize("hostile", ["fifo", "oversized", "nested"])
+@requires_local_state
+def test_hostile_retained_instance_refuses_without_hanging(dot_private_dir, name, hostile):
+    """A retained file that blocks, is huge or nests deeply is a clear refusal."""
+    import os
+
+    from brigade.dot.runtime_config import CLOUD_AGENT_RUNTIME_SCHEMA
+
+    root = dot_private_dir.parent
+    runtime = parse_runtime(cloud_document(root), schema=CLOUD_AGENT_RUNTIME_SCHEMA)
+    instance = root / ".brigade/grokbot/packs" / (name + ".json")
+    instance.parent.mkdir(parents=True)
+    if hostile == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("no FIFO on this platform")
+        os.mkfifo(instance)
+    elif hostile == "oversized":
+        instance.write_text(json.dumps({"pad": "x" * 70_000}))
+    else:
+        instance.write_text("[" * 50_000)
+    with pytest.raises(DotError, match="not_isolated_from_dot"):
+        lifecycle._isolated_from_dot(root, runtime)
+    if hostile != "fifo":
+        with pytest.raises(registry.PackError, match="unsafe-path"):
+            grokbot_packs._occupied_setup_ports(root, exclude_pack_id="dot")
+
+
+@pytest.mark.parametrize("name", BASE)
+@pytest.mark.parametrize("argv", [["--id", "duet", "--unit-dir", "units", "--apply"], []])
+def test_retired_remove_without_its_own_units_prints_the_stop_instruction(tmp_path, capsys, name, argv):
+    from brigade.dot.retired_instances import remove_command
+
+    units = tmp_path / "units"
+    units.mkdir()
+    unit = units / f"brigade-{name}.service"
+    unit.write_text("unit")
+    argv = [a if a != "units" else str(units) for a in argv] or ["--id", name]
+    assert remove_command(argv, name) == 2
+    assert "systemctl --user disable --now" in capsys.readouterr().err
+    assert unit.exists()

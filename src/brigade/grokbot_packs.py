@@ -1387,14 +1387,14 @@ def _bind_port_from_existing_config(path: Path) -> int | None:
     if grokbot_ops._path_is_symlink(path) or path.is_symlink():
         raise PackError("unsafe-path")
     try:
-        raw = grokbot_ops._read_regular_text(path)
+        raw = grokbot_ops._read_regular_text(path, max_bytes=65_536)
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError) as exc:
         raise PackError("unsafe-path") from exc
     try:
         payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise PackError("unsafe-path") from exc
     if not isinstance(payload, dict):
         raise PackError("unsafe-path")

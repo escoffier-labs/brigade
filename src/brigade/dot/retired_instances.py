@@ -13,7 +13,7 @@ from types import MappingProxyType
 from brigade import grokbot_ops
 from . import connector_files as files
 from .contracts import DotError
-from .runtime_config import CLOUD_AGENT_RUNTIME_SCHEMA, Runtime
+from .runtime_config import CLOUD_AGENT_RUNTIME_SCHEMA, MAX_RUNTIME_BYTES, Runtime
 from .safe_state import private_directory, private_file
 
 # Historical schemas and paths only. These entries cannot start a listener.
@@ -26,7 +26,7 @@ RETIRED = MappingProxyType(
 
 
 def remove_command(argv: list[str], name: str) -> int:
-    from brigade.cli.removed_commands import removed
+    from brigade.cli.removed_commands import removed_profile
 
     parser = argparse.ArgumentParser(prog="brigade retired connector remove")
     parser.add_argument("--id", required=True)
@@ -34,8 +34,9 @@ def remove_command(argv: list[str], name: str) -> int:
     parser.add_argument("--unit-dir", "--out", type=Path)
     parser.add_argument("--apply", action="store_true")
     args, unknown = parser.parse_known_args(argv)
-    if unknown:
-        return removed(name)
+    # Anything but a cleanup of this profile's own units gets the removal message and stop instruction.
+    if unknown or args.id != name or args.unit_dir is None:
+        return removed_profile(name)
     try:
         result = remove_units(name, unit_dir=args.unit_dir, apply=args.apply)
     except (files.PackError, OSError):
@@ -74,7 +75,7 @@ def isolated_from_retired(target: Path, runtime: Runtime) -> bool:
         if not os.path.lexists(instance):
             continue
         try:
-            config = json.loads(grokbot_ops._read_regular_text(instance))
+            config = json.loads(grokbot_ops._read_regular_text(instance, max_bytes=MAX_RUNTIME_BYTES))
             if config["pack_id"] != name or config["schema"] != "brigade.grokbot.connector-instance.v1":
                 raise ValueError
             path = Path(config["runtime_path"])
@@ -83,7 +84,7 @@ def isolated_from_retired(target: Path, runtime: Runtime) -> bool:
             parent = private_directory(path.parent)
             try:
                 private_file(path.lstat())
-                raw = json.loads(grokbot_ops._read_regular_text(path))
+                raw = json.loads(grokbot_ops._read_regular_text(path, max_bytes=MAX_RUNTIME_BYTES))
             finally:
                 os.close(parent)
             if raw["schema"] != schema:
@@ -100,7 +101,7 @@ def isolated_from_retired(target: Path, runtime: Runtime) -> bool:
                 or not isinstance(resource, str)
             ):
                 raise ValueError
-        except (DotError, OSError, ValueError, KeyError, TypeError):
+        except (DotError, OSError, ValueError, KeyError, TypeError, RecursionError):
             raise DotError("not_isolated_from_dot", reason=f"cannot load the {name} instance") from None
         tokens = [runtime.hub.message_token_file]
         if runtime.auth.token_file is not None:

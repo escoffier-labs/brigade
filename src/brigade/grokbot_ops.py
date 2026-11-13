@@ -559,25 +559,34 @@ def _mkdir_windows_child(parent_fd: int, component: str) -> None:
         os.close(mkdir_parent)
 
 
-def _read_regular_text(path: Path) -> str:
-    """Read one regular file without traversing a symlink or reparse point."""
+def _read_regular_text(path: Path, *, max_bytes: int | None = None) -> str:
+    """Read one regular file without traversing a symlink or reparse point.
+
+    The open never blocks on a FIFO. With ``max_bytes`` a larger file is refused.
+    """
     parent = _open_parent_nofollow(path, create=False)
     descriptor = -1
     try:
         if os.name == "posix":
             descriptor = os.open(
                 path.name,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0),
                 dir_fd=parent,
             )
         else:
             from .work_cmd import nt_dirfd
 
             descriptor = nt_dirfd.open_file(parent, path.name, os.O_RDONLY)
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
             raise OSError("output is not a regular file")
-        with os.fdopen(os.dup(descriptor), "r", encoding="utf-8") as handle:
-            return handle.read()
+        if max_bytes is not None and metadata.st_size > max_bytes:
+            raise OSError("file is too large")
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            data = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
+        if max_bytes is not None and len(data) > max_bytes:
+            raise OSError("file is too large")
+        return data.decode("utf-8")
     finally:
         if descriptor != -1:
             os.close(descriptor)
