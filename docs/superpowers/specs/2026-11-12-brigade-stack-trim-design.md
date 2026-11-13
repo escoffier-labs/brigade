@@ -435,3 +435,10 @@ operator on 2026-11-12.
     as well as messages.
   Neither defends against a hub run by a third party for many people. That
   would need memory encryption too and is outside this design.
+- **(done)** The archive rule for shared and old card ids merged in #2537. The
+  hub copy follows the cards still in use: the last holder archived retires
+  it, one remaining holder takes it over, undo restores it, and the background
+  hub step repairs archives that were skipped earlier. The skips seen in the
+  field came from published records written by older releases with no source
+  path, not from two files sharing an id. One case is left open in #2539: a
+  takeover whose reply is lost, followed by the holder going private.
