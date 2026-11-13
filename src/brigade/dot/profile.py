@@ -16,6 +16,7 @@ from typing import Mapping
 
 from .contracts import TOOLS, DotError
 from .runtime_config import (
+    CLOUD_AGENT_RUNTIME_SCHEMA,
     DUET_RUNTIME_SCHEMA,
     GROKBOT_INBOX_RUNTIME_SCHEMA,
     GROKBOT_MEMORY_RUNTIME_SCHEMA,
@@ -329,8 +330,24 @@ GROKBOT_INBOX = ConnectorProfile(
     memory_push=False,
     strict_recipients=True,
 )
+CLOUD_AGENT_MEMORY_TOOLS = frozenset({"memory_search", "memory_card", "handoff_write"})
+CLOUD_AGENT_MESSAGE_TOOLS = frozenset({"inbox_list", "inbox_ack", "inbox_reply", "message_send"})
+CLOUD_AGENT = replace(
+    GROKBOT_MEMORY,
+    pack_id="cloud-agent",
+    label="Cloud agent",
+    service_name="cloud-agent-brigade",
+    runtime_schema=CLOUD_AGENT_RUNTIME_SCHEMA,
+    handoff_inbox=Path(".brigade/memory-handoffs"),
+    handoff_prefix="cloud-agent",
+    tools=CLOUD_AGENT_MEMORY_TOOLS,
+    operating_instructions="Search shared memory before using prior decisions. Submit durable findings with handoff_write. "
+    + GROKBOT_MEMORY_TRUST_NOTICE,
+    descriptions=MappingProxyType({**GROKBOT_MEMORY_DESCRIPTIONS, **GROKBOT_INBOX_DESCRIPTIONS}),
+)
 PROFILES = MappingProxyType(
     {
+        CLOUD_AGENT.pack_id: CLOUD_AGENT,
         DOT.pack_id: DOT,
         DUET.pack_id: DUET,
         GROKBOT_MEMORY.pack_id: GROKBOT_MEMORY,
@@ -359,7 +376,17 @@ DUET_DISPATCH_TOOLS = frozenset(
 )
 
 
-def runtime_profile(profile: ConnectorProfile, dispatch_enabled: bool) -> ConnectorProfile:
+def runtime_profile(
+    profile: ConnectorProfile, dispatch_enabled: bool, *, messaging_enabled: bool = False
+) -> ConnectorProfile:
+    if profile.pack_id == "cloud-agent" and messaging_enabled:
+        return replace(
+            profile,
+            tools=CLOUD_AGENT_MEMORY_TOOLS | CLOUD_AGENT_MESSAGE_TOOLS,
+            hub_inbox=True,
+            strict_recipients=True,
+            send_limit_per_hour=GROKBOT_SEND_LIMIT_PER_HOUR,
+        )
     if profile.pack_id == "duet" and dispatch_enabled:
         return replace(profile, tools=DUET_TOOLS | DUET_DISPATCH_TOOLS)
     return profile

@@ -3,7 +3,18 @@
 from .contracts import DotError, PACK_ID, TOOLS
 
 # Profiles load before lifecycle: lifecycle imports grokbot_packs, which reads them from this package.
-from .profile import DOT, DUET, GROKBOT_INBOX, GROKBOT_MEMORY, PROFILES, ConnectorProfile, profile_for
+from .profile import (
+    CLOUD_AGENT,
+    CLOUD_AGENT_MEMORY_TOOLS,
+    CLOUD_AGENT_MESSAGE_TOOLS,
+    DOT,
+    DUET,
+    GROKBOT_INBOX,
+    GROKBOT_MEMORY,
+    PROFILES,
+    ConnectorProfile,
+    profile_for,
+)
 from .runtime_config import validate_runtime_reference
 from .lifecycle import (
     build_listener_from_target,
@@ -31,6 +42,9 @@ __all__ = [
     "GROKBOT_MEMORY_TOOLS",
     "GROKBOT_INBOX_PACK_ID",
     "GROKBOT_INBOX_TOOLS",
+    "CLOUD_AGENT",
+    "CLOUD_AGENT_MEMORY_TOOLS",
+    "CLOUD_AGENT_MESSAGE_TOOLS",
     "DOT",
     "DUET",
     "GROKBOT_MEMORY",

@@ -20,12 +20,14 @@ from brigade.grokbot_t3.lifecycle import _write_rendered
 from brigade.isolated_exec import module_argv, trusted_cwd
 from . import contracts as c
 from . import access_auth
+from . import connector_registry
+from .token_auth import TokenVerifier, require_credential_isolation
 from .access_auth import AccessVerifier, METADATA_PATH, bounded_headers, unique_object
 from .adapter import DotTools, argument_problem, build_tools, validate_arguments
 from .events import EventService, EventsApp, IDENTITY
 from .hub_inbox import authenticated_authority
-from .profile import DOT, PROFILES, ConnectorProfile, profile_for
-from .runtime_config import Runtime, load_runtime
+from .profile import CLOUD_AGENT, DOT, PROFILES, ConnectorProfile, profile_for
+from .runtime_config import CLOUD_AGENT_RUNTIME_SCHEMA, Runtime, load_runtime
 from .safe_state import identity, require_local_platform
 from .server import register_tools
 from .state import BridgeState, call_label, client_label, summarize_arguments
@@ -55,13 +57,16 @@ class _DotGate:
         self,
         app: Any,
         config: DotListenerConfig,
-        verifier: AccessVerifier,
+        verifier: AccessVerifier | TokenVerifier,
         recorder: Any = None,
         *,
         profile: ConnectorProfile = DOT,
     ):
         self.app, self.config, self.verifier, self.recorder = app, config, verifier, recorder
         self.profile = profile
+        self._auth_failures: list[float] = []
+        self._auth_blocked_until = 0.0
+        self._auth_cooldown_recorded = False
 
     async def record(
         self,
@@ -99,12 +104,29 @@ class _DotGate:
 
     async def reject(self, send: Any, status: int) -> None:
         headers = [(b"content-type", b"application/json"), (b"cache-control", b"no-store")]
-        if status == 401:
+        if status == 401 and not isinstance(self.verifier, TokenVerifier):
             headers.append(
                 (b"www-authenticate", f'Bearer resource_metadata="{self.verifier.metadata_url}"'.encode("ascii"))
             )
         await send({"type": "http.response.start", "status": status, "headers": headers})
         await send({"type": "http.response.body", "body": b'{"error":"request_denied"}'})
+
+    async def auth_failed(self, now: float) -> None:
+        if self.profile.pack_id != "cloud-agent":
+            return
+        if now < self._auth_blocked_until:
+            # One audit row per cooldown: visible, never extending it, and bounded however many requests arrive.
+            if not self._auth_cooldown_recorded:
+                self._auth_cooldown_recorded = True
+                await self.record("authentication", False, now, error_code="authentication_required")
+            return
+        self._auth_failures = [t for t in self._auth_failures if now - t < 60]
+        self._auth_failures.append(now)
+        if len(self._auth_failures) >= 10:
+            self._auth_blocked_until = now + 60
+            self._auth_cooldown_recorded = False
+            self._auth_failures.clear()
+        await self.record("authentication", False, now, error_code="authentication_required")
 
     async def reject_arguments(self, send: Any, request_id: object, problem: str) -> None:
         """Refuse a tools/call before the SDK with a JSON-RPC invalid-params error the client can act on."""
@@ -141,6 +163,19 @@ class _DotGate:
         if not self.allowed_transport(scope):
             await self.reject(send, 403)
             return
+        now = time.monotonic()
+        if isinstance(self.verifier, TokenVerifier):
+            try:
+                c.require(self.profile.pack_id == "cloud-agent")
+                owner = await self.verifier.verify(scope)
+            except Exception:
+                refusal_status = 429 if now < self._auth_blocked_until else 401
+                await self.auth_failed(now)
+                await self.reject(send, refusal_status)
+                return
+        if path == METADATA_PATH and isinstance(self.verifier, TokenVerifier):
+            await self.reject(send, 404)
+            return
         if path == METADATA_PATH:
             metadata_body = json.dumps(
                 {"resource": self.verifier.resource, "authorization_servers": [self.verifier.authorization_server]}
@@ -156,10 +191,13 @@ class _DotGate:
             return
         try:
             c.require(self.verifier.validated is True)
-            owner = await self.verifier.verify(scope)
+            if not isinstance(self.verifier, TokenVerifier):
+                owner = await self.verifier.verify(scope)
             c.require(identity(owner) == self.verifier.config.approved_email)
         except Exception:
-            await self.reject(send, 401)
+            refusal_status = 429 if now < self._auth_blocked_until else 401
+            await self.auth_failed(now)
+            await self.reject(send, refusal_status)
             return
         body = bytearray()
         try:
@@ -265,13 +303,16 @@ def build_app(
     config: DotListenerConfig,
     tools: DotTools,
     service: EventService,
-    verifier: AccessVerifier,
+    verifier: AccessVerifier | TokenVerifier,
     *,
     events_enabled: bool = True,
     profile: ConnectorProfile = DOT,
 ) -> Callable[..., Any]:
     _, _, _, TransportSecuritySettings = grokbot_mcp._load_mcp()
     c.require(verifier.validated is True, "authentication_inactive")
+    # Judge by the profile argument and by the tools' own profile, so the two cannot disagree past this check.
+    cloud = "cloud-agent" in (profile.pack_id, getattr(getattr(tools, "profile", None), "pack_id", None))
+    c.require(not cloud or grokbot_mcp._is_loopback(config.bind_host), "invalid_config")
     server = _server(config, tools, profile)
     allowed = list(dict.fromkeys([*config.allowed_hosts, f"{config.bind_host}:{config.bind_port}"]))
     if grokbot_mcp._is_loopback(config.bind_host):
@@ -323,15 +364,20 @@ def _load_config(
     profile: ConnectorProfile = DOT,
 ) -> tuple[DotListenerConfig, Runtime]:
     require_local_platform()
-    instance = grokbot_packs._load_instance_config(target, profile.pack_id)
-    host, port = grokbot_packs._parse_default_bind(bind if bind is not None else instance["bind"])
+    instance = _instance_config(target, profile.pack_id)
+    chosen_bind = bind if bind is not None else instance["bind"]
+    host, port = connector_registry.files._parse_default_bind(chosen_bind)
+    if profile.pack_id != "cloud-agent" and not grokbot_mcp._is_loopback(host):
+        raise grokbot_packs.PackError("unsafe-bind")
     hosts = instance["allowed_hosts"] if allowed_hosts is None else allowed_hosts
     origins = instance["allowed_origins"] if allowed_origins is None else allowed_origins
     c.require(
         all(_valid_host(h) for h in hosts) and all(grokbot_mcp._valid_origin(o) for o in origins), "invalid_config"
     )
     config = DotListenerConfig(target.resolve(), host, port, tuple(hosts), tuple(origins), instance["runtime_path"])
-    return config, load_runtime(Path(config.runtime_path), schema=profile.runtime_schema)
+    runtime = load_runtime(Path(config.runtime_path), schema=profile.runtime_schema)
+    c.require(grokbot_mcp._is_loopback(host), "invalid_config")
+    return config, runtime
 
 
 def build_listener_from_target(
@@ -356,12 +402,21 @@ def build_listener_from_target(
 def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -> None:
     # Exported entry point: refuse before any import or startup, whatever built the config.
     require_local_platform()
+    # The loopback rule holds where the socket opens, not only where the CLI loads the config.
+    # The runtime and the tools must describe the same kind of connector before anything else happens.
+    tools_cloud = getattr(getattr(tools, "profile", None), "pack_id", None) == "cloud-agent"
+    runtime_cloud = runtime.schema == CLOUD_AGENT_RUNTIME_SCHEMA
+    c.require(tools is None or tools_cloud == runtime_cloud, "invalid_config")
+    c.require(not (tools_cloud or runtime_cloud) or grokbot_mcp._is_loopback(config.bind_host), "invalid_config")
+    if runtime.auth.token_file is not None:
+        require_credential_isolation(runtime.auth.token_file, runtime.hub.message_token_file)
     try:
         import uvicorn
     except ImportError:
         raise grokbot_mcp.OptionalDependencyError() from None
     # Fail startup when RS256 cannot be verified; otherwise every login would 401 behind a passing canary.
-    access_auth._jwt()
+    if runtime.auth.mode == "access":
+        access_auth._jwt()
     try:
         if not tools.profile.fleet_dispatch:
             tools.inbox.hub.require_identity()
@@ -389,7 +444,9 @@ def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -
             config,
             tools,
             service,
-            AccessVerifier(runtime.auth),
+            TokenVerifier(runtime.auth, hub_token_file=runtime.hub.message_token_file)
+            if runtime.auth.mode == "token"
+            else AccessVerifier(runtime.auth),
             events_enabled=runtime.events_enabled,
             profile=tools.profile,
         )
@@ -451,7 +508,8 @@ def doctor(target: Path, *, pack_id: str = c.PACK_ID) -> list[dict[str, str]]:
         grokbot_mcp._load_mcp()
         from .access_auth import _jwt
 
-        _jwt()
+        if profile.pack_id != "cloud-agent":
+            _jwt()
 
     record("dependency", dependencies)
     try:
@@ -470,8 +528,19 @@ def doctor(target: Path, *, pack_id: str = c.PACK_ID) -> list[dict[str, str]]:
 
     from brigade.fleet_client_message_credentials import read_message_token_file
 
+    if profile.pack_id == "cloud-agent" and runtime.auth.mode == "access":
+        record("access-dependency", access_auth._jwt)
     record("state", state_check)
-    record("access-config", lambda: AccessVerifier(runtime.auth))
+    if profile.pack_id == "cloud-agent":
+        checks.append({"check": "auth-mode", "status": "ok", "mode": runtime.auth.mode})
+    record(
+        "access-config" if runtime.auth.mode == "access" else "token-config",
+        lambda: (
+            AccessVerifier(runtime.auth)
+            if runtime.auth.mode == "access"
+            else TokenVerifier(runtime.auth, hub_token_file=runtime.hub.message_token_file)
+        ),
+    )
     record("hub-token", lambda: read_message_token_file(str(runtime.hub.message_token_file)))
 
     def fleet_check() -> bool:
@@ -512,20 +581,33 @@ def _isolated_from_dot(target: Path, runtime: Runtime) -> bool:
     for other in PROFILES.values():
         if other.runtime_schema == runtime.schema:
             continue
-        if not grokbot_packs.instance_config_path(target, other.pack_id).exists():
+        neighbor = _instance_path(target, other.pack_id)
+        if not neighbor.exists():
             continue
         try:
             _, other_runtime = _load_config(target, profile=other)
         except (c.DotError, grokbot_packs.PackError, OSError, ValueError):
-            # An unreadable neighbour cannot be shown to be isolated. Name it, so its fault is not read as this pack's.
+            # An unreadable neighbour cannot be shown to be isolated.
             raise c.DotError("not_isolated_from_dot", reason=f"cannot load the {other.pack_id} instance") from None
         if (
             runtime.hub.principal == other_runtime.hub.principal
             or _same_location(runtime.hub.message_token_file, other_runtime.hub.message_token_file)
             or _same_token(runtime.hub.message_token_file, other_runtime.hub.message_token_file)
             or _same_location(runtime.paths.state_dir, other_runtime.paths.state_dir)
-            or runtime.auth.audience == other_runtime.auth.audience
-            or runtime.auth.resource == other_runtime.auth.resource
+            or (
+                (
+                    (
+                        runtime.schema != CLOUD_AGENT.runtime_schema
+                        and other_runtime.schema != CLOUD_AGENT.runtime_schema
+                    )
+                    or runtime.auth.mode == other_runtime.auth.mode == "access"
+                )
+                and (
+                    runtime.auth.audience == other_runtime.auth.audience
+                    or runtime.auth.resource == other_runtime.auth.resource
+                )
+            )
+            or _shared_listener_tokens(runtime, other_runtime)
         ):
             return False
         if (
@@ -579,7 +661,9 @@ def canary(target: Path, *, pack_id: str = c.PACK_ID) -> dict[str, Any]:
     if _probe(_base(config) + "/mcp", method="POST")[0] != 401:
         return {**result, "reason": "auth"}
     status, metadata = _probe(_base(config) + METADATA_PATH)
-    if status != 200 or not isinstance(metadata, dict) or metadata.get("resource") != runtime.auth.resource:
+    if runtime.auth.mode == "access" and (
+        status != 200 or not isinstance(metadata, dict) or metadata.get("resource") != runtime.auth.resource
+    ):
         return {**result, "reason": "metadata"}
     try:
         tools, state, _ = build_tools(runtime, profile)
@@ -600,19 +684,19 @@ def _hardening() -> str:
     return "NoNewPrivileges=yes\nUMask=0077\nPrivateTmp=no\n"
 
 
-def render_unit(target: Path, *, python: str | None = None, pack_id: str = c.PACK_ID) -> str:
+def render_unit(target: Path, *, python: str | None = None, pack_id: str = c.PACK_ID, canonical: bool = False) -> str:
     profile = profile_for(pack_id)
     target = target.expanduser().resolve()
     require_local_platform()
-    instance = grokbot_packs._load_instance_config(target, profile.pack_id)
+    instance = _instance_config(target, profile.pack_id)
     load_runtime(Path(instance["runtime_path"]), schema=profile.runtime_schema)
     args = module_argv(
         "brigade",
-        "run",
-        "cloud",
-        "grokbot",
-        "serve",
-        "--pack",
+        *(
+            ["hub", "connector", "serve", "--id"]
+            if canonical or pack_id == "cloud-agent"
+            else ["run", "cloud", "grokbot", "serve", "--pack"]
+        ),
         profile.pack_id,
         "--target",
         str(target),
@@ -624,8 +708,9 @@ def render_unit(target: Path, *, python: str | None = None, pack_id: str = c.PAC
         for value in instance[key]:
             args += [flag, value]
     command = " ".join(grokbot_ops._systemd_quote(arg) for arg in args)
+    route = "hub connector" if canonical or pack_id == "cloud-agent" else "run cloud grokbot pack"
     return (
-        f"# Generated by brigade run cloud grokbot pack install-service.\n# Unit: {profile.unit_name}\n"
+        f"# Generated by brigade {route} install-service.\n# Unit: {profile.unit_name}\n"
         f"[Unit]\nDescription=Brigade {profile.label} MCP listener\nAfter=network.target\n\n"
         "[Service]\nType=simple\n"
         f"WorkingDirectory={grokbot_ops._systemd_quote(str(trusted_cwd()))}\n"
@@ -674,3 +759,25 @@ def write_watch_units(
         _write_rendered(out_dir / profile.watch_service, service, force=force),
         _write_rendered(out_dir / profile.watch_timer, timer, force=force),
     ]
+
+
+def _instance_path(target: Path, pack_id: str) -> Path:
+    if pack_id == "cloud-agent":
+        return connector_registry.instance_config_path(target, pack_id)
+    return grokbot_packs.instance_config_path(target, pack_id)
+
+
+def _instance_config(target: Path, pack_id: str) -> dict[str, Any]:
+    if pack_id == "cloud-agent":
+        return connector_registry.load_instance_config(target, pack_id)
+    return grokbot_packs._load_instance_config(target, pack_id)
+
+
+def _shared_listener_tokens(left: Runtime, right: Runtime) -> bool:
+    left_tokens = [left.hub.message_token_file]
+    right_tokens = [right.hub.message_token_file]
+    if left.auth.token_file is not None:
+        left_tokens.append(left.auth.token_file)
+    if right.auth.token_file is not None:
+        right_tokens.append(right.auth.token_file)
+    return any(_same_location(a, b) or _same_token(a, b) for a in left_tokens for b in right_tokens)

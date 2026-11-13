@@ -37,6 +37,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade handoff`: 17 command path(s)
 - `brigade handoff-template`: 1 command path(s)
 - `brigade harness`: 5 command path(s)
+- `brigade hub`: 9 command path(s)
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
@@ -327,6 +328,15 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade harness install`
 - `brigade harness sync`
 - `brigade harness uninstall`
+- `brigade hub connector canary`
+- `brigade hub connector doctor`
+- `brigade hub connector install-service`
+- `brigade hub connector list`
+- `brigade hub connector remove`
+- `brigade hub connector serve`
+- `brigade hub connector setup`
+- `brigade hub connector show`
+- `brigade hub connector update`
 - `brigade ingest`
 - `brigade init`
 - `brigade learn closeout` (extras)

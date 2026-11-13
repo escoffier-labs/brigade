@@ -28,9 +28,9 @@ These override anything below that conflicts with them.
      time against the profile's own protected token file. That file is
      distinct from the hub principal token, is validated with the existing
      protected-file checks, and is never the node credential. A missing,
-     malformed or wrong token gets 401 with no detail. The default bind stays
-     loopback, and a non-loopback bind in token mode requires an explicit
-     allowed-hosts list.
+     malformed or wrong token gets 401 with no detail. Both modes require a loopback bind. Remote access uses the operator's
+     TLS tunnel or reverse proxy connecting to loopback. The prior allowance
+     for a non-loopback bind with an allowed-hosts list is withdrawn.
    - `mode: "access"`: today's signed-identity verification, unchanged, with
      its audience check.
    Dot and Duet keep requiring Access. Only `cloud-agent` gains token mode.
@@ -38,7 +38,7 @@ These override anything below that conflicts with them.
 3. **Tests for amendment 2 belong to Task 1:** token accepted, wrong token
    refused, missing header refused, token file shared with another profile
    or with the hub principal refused at configuration time, non-loopback bind
-   without allowed hosts refused, and Access mode behavior unchanged. Add to
+   refused in both modes even with allowed hosts, and Access mode behavior unchanged. Add to
    Review Focus: a token-mode listener must not accept an Access assertion in
    place of the token, and must not log the token.
 4. **Task 1's pull request gets a security review** on its current head

@@ -30,6 +30,7 @@ class CommandEntry(NamedTuple):
 EXTRAS_STUB_HELP = "(extras, disabled) enable with `brigade extras on`"
 
 COMMANDS: tuple[CommandEntry, ...] = (
+    CommandEntry("hub", "hub_connector", "Manage hub connectors."),
     CommandEntry("init", "init", "Materialize a selection into a target directory."),
     CommandEntry("doctor", "doctor", "Verify a target workspace (target-scoped checks only unless --operator)."),
     CommandEntry("bug", "bug", "Prepare and submit a redacted bug report."),

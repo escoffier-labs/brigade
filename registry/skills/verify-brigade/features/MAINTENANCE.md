@@ -157,6 +157,7 @@ extras               no feature file yet
 fleet *              stand-in only: tests/test_fleet_*.py; only `fleet serve` is driven (hub-contract.md, storage-parity.md)
 friction             no feature file yet; extras surface
 governance           no feature file yet
+hub connector *      only list and setup preview are driven (hub-connector.md)
 handoff-template     no feature file yet
 harness              no feature file yet
 ingest               no feature file yet
