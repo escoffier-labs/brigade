@@ -247,6 +247,13 @@ below describe the larger scope under review, not a settled removal list.
 - Fleet is the largest area: 153 modules and about 71,000 lines, with 101
   command paths.
 - Keep ownership (claims), presence, and the memory hub.
+- **(decided)** The hub's web dashboards (deck, boards, capacity, projects,
+  admin pages) are not used and not necessary. They go.
+- **(proposed)** One small page replaces them, served by the hub daemon: what
+  is connected and healthy, a memory browser (search, read, archived cards,
+  restore), the list of what memory care changed on its own, and later the
+  observe-mode reports. It is a viewer over data the core already keeps, with
+  no state of its own.
 - Everything else in fleet is judged by the stage 0 table. Hub messaging is
   the main open item, because cloud agents use it today.
 
