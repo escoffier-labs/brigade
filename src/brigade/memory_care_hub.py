@@ -61,6 +61,56 @@ def _replay_state(target: Path, decision: journal.Decision) -> dict[str, str]:
     return {"status": "send"}
 
 
+def _holders(target: Path, card_id: str, path: str) -> list[dict[str, Any]]:
+    """Live, publishable local cards (other than `path`) whose publication id is `card_id`."""
+    return [
+        card
+        for card in sync._local_cards(target)
+        if card["card_id"] == card_id and card["rel"] != path and not card["private"]
+    ]
+
+
+def _retired_here(target: Path, card_id: str) -> bool:
+    """This workspace's journal says the last completed hub write for the id was a retire."""
+    retired = False
+    for d in sorted(journal.entries(target), key=lambda d: d.created_at):
+        saved = d.hub or {}
+        if d.card_id == card_id and saved.get("status") == "done" and saved.get("action") in ("retire", "put"):
+            retired = saved["action"] == "retire"
+    return retired
+
+
+def _ownership(
+    target: Path,
+    action: str,
+    card_id: str,
+    path: str,
+    base: dict[str, Any] | None,
+    holders: list[dict[str, Any]],
+) -> str:
+    """What the hub copy does with this card: "send", "handover" or "collision".
+
+    The hub copy follows the cards still in use. Archiving the last holder
+    retires it. Archiving the owner while one other holder remains hands
+    ownership to it, so the regular sync publishes that card. A revive goes
+    out only when no other card holds the id, and either this card owns the
+    record or this workspace retired the id. Anything else is a collision.
+    """
+    if action == "retire":
+        if not path:
+            return "collision"
+        if not holders:
+            return "send"
+        if base is not None and base.get("path") == path and len(holders) == 1:
+            return "handover"
+        return "collision"
+    if holders:
+        return "collision"
+    if not path or base is None or base.get("path") == path or _retired_here(target, card_id):
+        return "send"
+    return "collision"
+
+
 def _send(
     target: Path,
     *,
@@ -111,10 +161,15 @@ def _send(
             state = store.published(target)
             base = state.get(client.identity, {}).get(settings.scope, {}).get(card_id)
             # A revive must respect ownership too, or undo could overwrite the card that owns the id.
-            if (action == "retire" and not path) or (
-                path and sync.publication_collision(card_id, path, sync._local_cards(target), base)
-            ):
+            holders = _holders(target, card_id, path)
+            ownership = _ownership(target, action, card_id, path, base, holders)
+            if ownership == "collision":
                 return {**pending, "status": "skipped", "reason": "card-id-collision"}
+            if ownership == "handover" and base:
+                # No hub write: the one remaining holder now owns the record, and sync publishes its text.
+                state[client.identity][settings.scope][card_id] = {**base, "path": holders[0]["rel"]}
+                store.save_published(target, state)
+                return {**pending, "status": "skipped", "reason": "card-id-handover"}
             if not base:
                 return {"status": "skipped"}
             fields = (
@@ -176,6 +231,19 @@ def revive(target: Path, *, card_id: str, path: str, text: str) -> dict[str, Any
     return _send(target, action="put", card_id=card_id, path=path, text=text)
 
 
+def _skipped_retire(d: journal.Decision) -> bool:
+    """An archive still in force whose retire was skipped for a card-id collision."""
+    hub = d.hub or {}
+    return (
+        d.kind == "archive"
+        and not d.undone_by
+        and hub.get("status") == "skipped"
+        and hub.get("reason") == "card-id-collision"
+        and hub.get("action") == "retire"
+        and bool(hub.get("path"))
+    )
+
+
 @journal.serialized
 def retry_pending(target: Path) -> dict[str, Any]:
     counts: dict[str, Any] = {
@@ -204,6 +272,25 @@ def retry_pending(target: Path) -> dict[str, Any]:
         if hub.get("status") == "needs_review":
             counts["needs_review"] += 1
             counts["review_items"].append({"decision_id": d.decision_id, "reason": hub.get("reason")})
+            continue
+        if _skipped_retire(d):
+            # Earlier releases skipped these on a path mismatch. Retire when no holder is left.
+            result = _send(
+                target,
+                action="retire",
+                card_id=d.card_id or "",
+                reason=d.reason,
+                path=str(hub.get("path") or ""),
+                decision=d,
+            )
+            if result.get("status") == "skipped" and result.get("reason") in (None, "card-id-collision"):
+                continue
+            journal.update_hub(target, d.decision_id, result)
+            counts[result["status"]] += 1
+            if result["status"] == "skipped":
+                counts["skipped_items"].append({"decision_id": d.decision_id, "reason": result.get("reason")})
+            if result["status"] == "needs_review":
+                counts["review_items"].append({"decision_id": d.decision_id, "reason": result.get("reason")})
             continue
         if hub.get("status") != "pending":
             continue

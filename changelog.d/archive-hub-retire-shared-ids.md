@@ -1,0 +1,1 @@
+- Memory care archive and undo now follow the cards still in use when several share an id: the hub copy is retired when the last holder is archived (including records written without a path), ownership passes to the one remaining holder, undo revives it when it is the only holder left, and the tend hub stage retires earlier archives that were skipped for a collision.
