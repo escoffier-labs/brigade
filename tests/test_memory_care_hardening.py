@@ -37,6 +37,11 @@ from tests.test_memory_care_fixes import card, TODAY
         "a_b-c: ok\n",
         "topic: 'it''s fine'\n",
         'topic: "a\\"b"\n',
+        "topic: Operator's workflow\n",
+        "topic: don't and can't\n",
+        'topic: say "hi" there\n',
+        "tags: [it's, ok]\n",
+        "tags: ['a, b', \"c]\"]\n",
     ],
 )
 def test_plain_accepted(fields):

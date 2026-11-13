@@ -92,7 +92,9 @@ def plain_frontmatter(text: str) -> dict[str, str]:
             elif char == "#" and (index == 0 or value[index - 1].isspace()):
                 value = value[:index].rstrip()
                 break
-            elif char in "\"'":
+            elif char in "\"'" and (index == 0 or (stack and value[:index].rstrip()[-1:] in "[,{:")):
+                # A quote opens a quoted scalar only where a scalar starts. Elsewhere, as in
+                # a possessive, it is an ordinary character.
                 quote = char
             elif char in "[{":
                 stack.append({"[": "]", "{": "}"}[char])
