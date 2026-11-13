@@ -148,8 +148,8 @@ or `!/path/to/helper auth git-credential` when that absolute path resolves to
 the trusted `gh` executable. It also accepts one custom helper written as a
 bare absolute path such as `/path/to/helper`, with no leading `!` and no
 arguments. The custom helper must be a regular executable file owned by root
-or the operator. Every ancestor directory must be owned by root or the
-operator and must not be writable by group or others. Any other form refuses
+or the operator. The file and every ancestor directory must be owned by root
+or the operator and must not be writable by group or others. Any other form refuses
 with `unsafe-git-config`. The usual fixes are to write a custom helper as a
 bare absolute path and to remove group and other write permission from its
 directories.
