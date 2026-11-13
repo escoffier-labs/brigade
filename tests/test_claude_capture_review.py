@@ -13,7 +13,7 @@ from brigade.claude_hooks import check_events, runtime
 from tests._posix import requires_dirfd
 from tests.test_claude_hooks_check_events import target as _target
 
-from tests.test_work_mode import _bash, _payload, _set_mode, _write
+from tests.test_work_mode import _bash, _payload, _set_mode, _wired, _write
 
 target = _target
 
@@ -64,7 +64,7 @@ def test_existing_write_handling_precedes_capture(target, monkeypatch, slow):
     def capture(*args):
         seen.append(runtime.read_session_state(target, "s1").get("write_observed"))
         if slow:
-            time.sleep(0.12)
+            time.sleep(0.3)
         raise RuntimeError("optional capture failed")
 
     monkeypatch.setattr(check_events, "_on_event", capture)
@@ -209,7 +209,7 @@ def test_pending_command_cleared_before_capture(target, monkeypatch, slow):
     def capture(*args):
         seen.append("pending_bash_fingerprint" in runtime.read_session_state(target, "s1"))
         if slow:
-            time.sleep(0.12)
+            time.sleep(0.3)
         raise RuntimeError("optional capture failed")
 
     monkeypatch.setattr(check_events, "_on_event", capture)
@@ -301,3 +301,17 @@ def test_stale_tool_snapshot_preserves_identity(target, monkeypatch, switch_firs
     runtime.handle_payload("SessionStart", _payload(target, "SessionStart", model="claude-sonnet-4-6"))
     state = runtime.read_session_state(target, "s1")
     assert (state["model"], state["model_source"]) == ("claude-sonnet-4-6", "hook-session-start")
+
+
+def test_pin_applies_to_every_capture_destination(target, tmp_path, capsys):
+    other = _wired(tmp_path, name="other")
+    _set_mode(other, "observe", capsys)
+    command = f"cd {other.as_posix()} && pytest"
+    # Unpinned, the command's own workspace is recorded.
+    runtime.handle_payload("PostToolUse", _bash(target, "PostToolUse", command))
+    assert len(observed_checks.read_checks(other)[0]) == 1
+    # Pinned to the first workspace, nothing is written outside the pin.
+    runtime.handle_payload("PostToolUse", _bash(target, "PostToolUse", command), pin=target)
+    assert len(observed_checks.read_checks(other)[0]) == 1
+    runtime.handle_payload("PostToolUse", _bash(target, "PostToolUse", "pytest"), pin=target)
+    assert len(observed_checks.read_checks(target)[0]) == 1

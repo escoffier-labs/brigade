@@ -316,7 +316,7 @@ def redact_command(command: str) -> str:
 
 
 @contextmanager
-def capture_budget(seconds: float = 0.1):
+def capture_budget(seconds: float = 0.25):
     """Hook capture gives up promptly when another process owns storage."""
     deadline = _CAPTURE_DEADLINE.set(_capture_clock() + seconds)
     token = _CAPTURE_LOCK_SECONDS.set(0.01)

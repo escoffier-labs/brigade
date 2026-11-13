@@ -48,7 +48,9 @@ def claude_status(event: str, payload: Mapping[str, Any]) -> tuple[str, int | No
     return ("failed", int(match[1])) if match else ("unknown", None)
 
 
-def _on_event(event: str, payload: dict[str, Any], target: Path, session_id: str, state: dict[str, Any]) -> None:
+def _on_event(
+    event: str, payload: dict[str, Any], target: Path, session_id: str, state: dict[str, Any], pin: Path | None = None
+) -> None:
     observed_checks.check_capture_deadline()
     rt = _rt()
     rt._enforce_hook_stdin_shape(payload)
@@ -72,7 +74,7 @@ def _on_event(event: str, payload: dict[str, Any], target: Path, session_id: str
             env_file = os.environ.get("CLAUDE_ENV_FILE", "")
             if env_file and Path(env_file).is_absolute():
                 observed_checks.check_capture_deadline()
-                flags = os.O_WRONLY | getattr(os, "O_NONBLOCK", 0)
+                flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_NONBLOCK", 0)
                 fd = dirfd.open_file_nofollow(Path(env_file), flags, 0o600)
                 try:
                     if stat.S_ISREG(os.fstat(fd).st_mode):
@@ -93,6 +95,9 @@ def _on_event(event: str, payload: dict[str, Any], target: Path, session_id: str
     duration = duration if type(duration) is int and duration >= 0 else None
     for governed, mode in verification_mode.governing_modes(command, payload.get("cwd"), target):
         if mode == "observe":
+            # The pin and home policy apply to every destination, as they do for write tracking.
+            if governed != target and rt.effective_hook_target({"cwd": str(governed)}, pin=pin) != governed:
+                continue
             observed_checks.check_capture_deadline()
             identity = claude_identity(payload, state)
             observed_checks.check_capture_deadline()
@@ -155,6 +160,6 @@ def after_handling(event: str, payload: dict[str, Any], *, pin: Path | None) -> 
             if target is not None and isinstance(session_id, str) and session_id:
                 state = rt.read_session_state(target, session_id)
                 observed_checks.check_capture_deadline()
-                _on_event(event, payload, target, session_id, state)
+                _on_event(event, payload, target, session_id, state, pin)
     except Exception:
         pass
