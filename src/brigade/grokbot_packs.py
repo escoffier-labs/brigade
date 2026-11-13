@@ -479,18 +479,10 @@ def apply_update(target: Path, pack_id: str) -> dict[str, Any]:
 
 
 def preview_remove(target: Path, pack_id: str, *, unit_dir: Path | None = None) -> dict[str, Any]:
-    if pack_id in {DOT_PACK_ID, DUET_PACK_ID}:
-        from .dot import connector_registry
-
-        return connector_registry.preview_remove(target, pack_id, unit_dir=unit_dir)
     return _remove(target, pack_id, apply=False, unit_dir=unit_dir)
 
 
 def apply_remove(target: Path, pack_id: str, *, unit_dir: Path | None = None) -> dict[str, Any]:
-    if pack_id in {DOT_PACK_ID, DUET_PACK_ID}:
-        from .dot import connector_registry
-
-        return connector_registry.apply_remove(target, pack_id, unit_dir=unit_dir)
     return _remove(target, pack_id, apply=True, unit_dir=unit_dir)
 
 
@@ -592,18 +584,6 @@ def _setup(
     else:
         raise PackError("unexpected-key")
     _validate_instance_config(payload, pack_id)
-    if pack_id in {DOT_PACK_ID, DUET_PACK_ID}:
-        from .dot import connector_registry
-
-        action = connector_registry.apply_setup if apply else connector_registry.preview_setup
-        return action(
-            target,
-            pack_id,
-            bind=bind,
-            allowed_hosts=allowed_hosts,
-            allowed_origins=allowed_origins,
-            runtime_path=runtime_path,
-        )
     _assert_setup_bind_available(target, pack_id, chosen_bind)
     writes = [str(instance_config_path(Path("."), pack_id))]
     if pack["kind"] == "queue-role":

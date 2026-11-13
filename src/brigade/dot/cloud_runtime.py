@@ -14,7 +14,7 @@ from .runtime_config import (
     _boolean,
     _absolute_path,
 )
-from .token_auth import read_token
+from .token_auth import read_token, require_credential_isolation
 
 
 def parse_cloud_runtime(payload: object) -> Runtime:
@@ -39,12 +39,7 @@ def parse_cloud_runtime(payload: object) -> Runtime:
     if hub.principal != "agent:cloud-agent":
         raise _invalid()
     if auth.token_file is not None:
-        from .lifecycle import _same_location, _same_token
-
-        if _same_location(auth.token_file, hub.message_token_file) or _same_token(
-            auth.token_file, hub.message_token_file
-        ):
-            raise _invalid()
+        require_credential_isolation(auth.token_file, hub.message_token_file)
     return Runtime(
         auth=auth,
         paths=paths,

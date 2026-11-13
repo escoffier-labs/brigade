@@ -43,18 +43,19 @@ def test_canonical_unit_argv(dot_private_dir):
     assert "example-listener-credential" not in unit
 
 
-def test_nonloopback_requires_explicit_hosts(dot_private_dir):
+def test_nonloopback_refused_even_with_explicit_hosts(dot_private_dir):
     tmp_path = dot_private_dir.parent
     runtime = setup_runtime(tmp_path)
     with pytest.raises(registry.PackError):
         registry.preview_setup(tmp_path, "cloud-agent", runtime_path=runtime, bind="0.0.0.0:8783")
-    registry.preview_setup(
-        tmp_path,
-        "cloud-agent",
-        runtime_path=runtime,
-        bind="0.0.0.0:8783",
-        allowed_hosts=["connector.example.test:8783"],
-    )
+    with pytest.raises(registry.PackError, match="unsafe-bind"):
+        registry.preview_setup(
+            tmp_path,
+            "cloud-agent",
+            runtime_path=runtime,
+            bind="0.0.0.0:8783",
+            allowed_hosts=["connector.example.test:8783"],
+        )
 
 
 @pytest.mark.parametrize("shared", ["token", "hub-token", "state", "principal", "audience"])

@@ -21,7 +21,7 @@ from brigade.isolated_exec import module_argv, trusted_cwd
 from . import contracts as c
 from . import access_auth
 from . import connector_registry
-from .token_auth import TokenVerifier
+from .token_auth import TokenVerifier, require_credential_isolation
 from .access_auth import AccessVerifier, METADATA_PATH, bounded_headers, unique_object
 from .adapter import DotTools, argument_problem, build_tools, validate_arguments
 from .events import EventService, EventsApp, IDENTITY
@@ -64,6 +64,8 @@ class _DotGate:
     ):
         self.app, self.config, self.verifier, self.recorder = app, config, verifier, recorder
         self.profile = profile
+        self._auth_failures: list[float] = []
+        self._auth_blocked_until = 0.0
 
     async def record(
         self,
@@ -108,6 +110,16 @@ class _DotGate:
         await send({"type": "http.response.start", "status": status, "headers": headers})
         await send({"type": "http.response.body", "body": b'{"error":"request_denied"}'})
 
+    async def auth_failed(self, now: float) -> None:
+        if self.profile.pack_id != "cloud-agent":
+            return
+        self._auth_failures = [t for t in self._auth_failures if now - t < 60]
+        self._auth_failures.append(now)
+        if len(self._auth_failures) >= 10:
+            self._auth_blocked_until = now + 60
+            self._auth_failures.clear()
+        await self.record("authentication", False, now, error_code="authentication_required")
+
     async def reject_arguments(self, send: Any, request_id: object, problem: str) -> None:
         """Refuse a tools/call before the SDK with a JSON-RPC invalid-params error the client can act on."""
         if isinstance(request_id, bool) or not (
@@ -143,11 +155,16 @@ class _DotGate:
         if not self.allowed_transport(scope):
             await self.reject(send, 403)
             return
+        now = time.monotonic()
+        if self.profile.pack_id == "cloud-agent" and now < self._auth_blocked_until:
+            await self.reject(send, 429)
+            return
         if isinstance(self.verifier, TokenVerifier):
             try:
                 c.require(self.profile.pack_id == "cloud-agent")
                 await self.verifier.verify(scope)
             except Exception:
+                await self.auth_failed(now)
                 await self.reject(send, 401)
                 return
         if path == METADATA_PATH and isinstance(self.verifier, TokenVerifier):
@@ -171,6 +188,7 @@ class _DotGate:
             owner = await self.verifier.verify(scope)
             c.require(identity(owner) == self.verifier.config.approved_email)
         except Exception:
+            await self.auth_failed(now)
             await self.reject(send, 401)
             return
         body = bytearray()
@@ -336,7 +354,10 @@ def _load_config(
 ) -> tuple[DotListenerConfig, Runtime]:
     require_local_platform()
     instance = _instance_config(target, profile.pack_id)
-    host, port = connector_registry.files._parse_default_bind(bind if bind is not None else instance["bind"])
+    chosen_bind = bind if bind is not None else instance["bind"]
+    host, port = connector_registry.files._parse_default_bind(chosen_bind)
+    if profile.pack_id != "cloud-agent" and not grokbot_mcp._is_loopback(host):
+        raise grokbot_packs.PackError("unsafe-bind")
     hosts = instance["allowed_hosts"] if allowed_hosts is None else allowed_hosts
     origins = instance["allowed_origins"] if allowed_origins is None else allowed_origins
     c.require(
@@ -344,7 +365,7 @@ def _load_config(
     )
     config = DotListenerConfig(target.resolve(), host, port, tuple(hosts), tuple(origins), instance["runtime_path"])
     runtime = load_runtime(Path(config.runtime_path), schema=profile.runtime_schema)
-    c.require(grokbot_mcp._is_loopback(host) or (profile.pack_id == "cloud-agent" and bool(hosts)), "invalid_config")
+    c.require(grokbot_mcp._is_loopback(host), "invalid_config")
     return config, runtime
 
 
@@ -370,6 +391,8 @@ def build_listener_from_target(
 def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -> None:
     # Exported entry point: refuse before any import or startup, whatever built the config.
     require_local_platform()
+    if runtime.auth.token_file is not None:
+        require_credential_isolation(runtime.auth.token_file, runtime.hub.message_token_file)
     try:
         import uvicorn
     except ImportError:
@@ -404,7 +427,9 @@ def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -
             config,
             tools,
             service,
-            TokenVerifier(runtime.auth) if runtime.auth.mode == "token" else AccessVerifier(runtime.auth),
+            TokenVerifier(runtime.auth, hub_token_file=runtime.hub.message_token_file)
+            if runtime.auth.mode == "token"
+            else AccessVerifier(runtime.auth),
             events_enabled=runtime.events_enabled,
             profile=tools.profile,
         )
@@ -466,7 +491,7 @@ def doctor(target: Path, *, pack_id: str = c.PACK_ID) -> list[dict[str, str]]:
         grokbot_mcp._load_mcp()
         from .access_auth import _jwt
 
-        if profile.pack_id != "cloud-agent" or _load_config(target, profile=profile)[1].auth.mode == "access":
+        if profile.pack_id != "cloud-agent":
             _jwt()
 
     record("dependency", dependencies)
@@ -486,12 +511,18 @@ def doctor(target: Path, *, pack_id: str = c.PACK_ID) -> list[dict[str, str]]:
 
     from brigade.fleet_client_message_credentials import read_message_token_file
 
+    if profile.pack_id == "cloud-agent" and runtime.auth.mode == "access":
+        record("dependency", access_auth._jwt)
     record("state", state_check)
     if profile.pack_id == "cloud-agent":
         checks.append({"check": "auth-mode", "status": "ok", "mode": runtime.auth.mode})
     record(
         "access-config" if runtime.auth.mode == "access" else "token-config",
-        lambda: AccessVerifier(runtime.auth) if runtime.auth.mode == "access" else TokenVerifier(runtime.auth),
+        lambda: (
+            AccessVerifier(runtime.auth)
+            if runtime.auth.mode == "access"
+            else TokenVerifier(runtime.auth, hub_token_file=runtime.hub.message_token_file)
+        ),
     )
     record("hub-token", lambda: read_message_token_file(str(runtime.hub.message_token_file)))
 
@@ -533,11 +564,26 @@ def _isolated_from_dot(target: Path, runtime: Runtime) -> bool:
     for other in PROFILES.values():
         if other.runtime_schema == runtime.schema:
             continue
-        if not _instance_path(target, other.pack_id).exists():
+        neighbor = _instance_path(target, other.pack_id)
+        if not neighbor.exists():
+            continue
+        try:
+            raw = json.loads(grokbot_ops._read_regular_text(neighbor))
+            if (
+                not isinstance(raw, dict)
+                or raw.get("schema") != connector_registry.INSTANCE_SCHEMA
+                or raw.get("pack_id") != other.pack_id
+            ):
+                continue
+        except (OSError, ValueError):
             continue
         try:
             _, other_runtime = _load_config(target, profile=other)
-        except (c.DotError, grokbot_packs.PackError, OSError, ValueError):
+        except grokbot_packs.PackError as error:
+            if error.reason in {"unexpected-key", "unsafe-bind"}:
+                continue
+            raise c.DotError("not_isolated_from_dot", reason=f"cannot load the {other.pack_id} instance") from None
+        except (c.DotError, OSError, ValueError):
             # An unreadable neighbour cannot be shown to be isolated. Name it, so its fault is not read as this pack's.
             raise c.DotError("not_isolated_from_dot", reason=f"cannot load the {other.pack_id} instance") from None
         if (
@@ -653,8 +699,9 @@ def render_unit(target: Path, *, python: str | None = None, pack_id: str = c.PAC
         for value in instance[key]:
             args += [flag, value]
     command = " ".join(grokbot_ops._systemd_quote(arg) for arg in args)
+    route = "hub connector" if canonical or pack_id == "cloud-agent" else "run cloud grokbot pack"
     return (
-        f"# Generated by brigade hub connector install-service.\n# Unit: {profile.unit_name}\n"
+        f"# Generated by brigade {route} install-service.\n# Unit: {profile.unit_name}\n"
         f"[Unit]\nDescription=Brigade {profile.label} MCP listener\nAfter=network.target\n\n"
         "[Service]\nType=simple\n"
         f"WorkingDirectory={grokbot_ops._systemd_quote(str(trusted_cwd()))}\n"

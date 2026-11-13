@@ -13,6 +13,7 @@ from . import connector_files as files
 from .connector_files import PackError as PackError
 from .profile import profile_for
 from .runtime_config import load_runtime
+from .contracts import DotError
 
 _IDS = ("dot", "duet", "cloud-agent")
 _BINDS = dict(zip(_IDS, ("127.0.0.1:8779", "127.0.0.1:8780", "127.0.0.1:8783"), strict=True))
@@ -52,11 +53,21 @@ def list_packs(target: Path | None = None) -> list[dict[str, Any]]:
     packs = list(packaged_manifests())
     for pack in packs:
         path = instance_config_path(target or Path("."), pack["id"])
-        port = files._bind_port_from_existing_config(path)
         pack["installed_bind"] = None
-        if port is not None:
-            pack["installed_bind"] = json.loads(grokbot_ops._read_regular_text(path))["bind"]
-        pack["reachability"] = "host-local" if port is not None else None
+        pack["reachability"] = None
+        try:
+            if path.exists():
+                raw = json.loads(grokbot_ops._read_regular_text(path))
+                if not isinstance(raw, dict):
+                    raise PackError("unexpected-key")
+                bind = raw.get("bind")
+                if not isinstance(bind, str):
+                    raise PackError("unexpected-key")
+                files._parse_default_bind(bind)
+                pack["installed_bind"] = raw["bind"]
+                pack["reachability"] = "host-local"
+        except (PackError, OSError, ValueError, TypeError):
+            pack["status"] = "invalid"
     return packs
 
 
@@ -101,7 +112,7 @@ def _validate(payload: Any, pack_id: str) -> dict[str, Any]:
         load_runtime(path, schema=profile.runtime_schema)
     except Exception:
         raise PackError("unsafe-path") from None
-    if not grokbot_mcp._is_loopback(host) and (pack_id != "cloud-agent" or not hosts):
+    if not grokbot_mcp._is_loopback(host):
         raise PackError("unsafe-bind")
     return dict(payload)
 
@@ -109,6 +120,8 @@ def _validate(payload: Any, pack_id: str) -> dict[str, Any]:
 def load_instance_config(target: Path, pack_id: str) -> dict[str, Any]:
     try:
         return _validate(json.loads(grokbot_ops._read_regular_text(instance_config_path(target, pack_id))), pack_id)
+    except PackError:
+        raise
     except (OSError, ValueError, TypeError):
         raise PackError("unsafe-path") from None
 
@@ -147,6 +160,20 @@ def _setup(
         public_route="",
         runtime_path=str(runtime_path),
     )
+    generated = None
+    if pack_id == "cloud-agent" and apply:
+        from .token_auth import ensure_listener_token
+
+        try:
+            raw = json.loads(grokbot_ops._read_regular_text(Path(payload["runtime_path"])))
+            if raw.get("auth", {}).get("mode", "token") == "token":
+                token_path = Path(raw["auth"]["token_file"])
+                if not token_path.is_absolute():
+                    raise ValueError
+                if ensure_listener_token(token_path):
+                    generated = str(token_path)
+        except (DotError, OSError, ValueError, KeyError, TypeError):
+            raise PackError("unsafe-path") from None
     _validate(payload, pack_id)
     port = files._parse_default_bind(payload["bind"])[1]
     # Include old installed profiles and queue listeners without importing their registry.
@@ -167,11 +194,18 @@ def _setup(
             reserved.add(occupied)
     if port in reserved:
         raise PackError("duplicate-port")
-    runtime = load_runtime(Path(payload["runtime_path"]), schema=_profile(pack_id).runtime_schema)
+    try:
+        runtime = load_runtime(Path(payload["runtime_path"]), schema=_profile(pack_id).runtime_schema)
+    except DotError:
+        raise PackError("unsafe-path") from None
     from .lifecycle import _isolated_from_dot
 
-    if not _isolated_from_dot(target, runtime):
-        raise PackError("not-isolated")
+    if pack_id == "cloud-agent":
+        try:
+            if not _isolated_from_dot(target, runtime):
+                raise PackError("not-isolated")
+        except DotError:
+            raise PackError("not-isolated") from None
     result = dict(
         action="setup",
         apply=apply,
@@ -179,6 +213,8 @@ def _setup(
         bind=payload["bind"],
         writes=[str(instance_config_path(Path("."), pack_id))],
     )
+    if generated is not None:
+        result["writes"].append(generated)
     if apply:
         _write(target, pack_id, payload)
     return result
@@ -238,7 +274,8 @@ def apply_update(target: Path, pack_id: str) -> dict[str, Any]:
 def preview_remove(target: Path, pack_id: str, *, unit_dir: Path | None = None) -> dict[str, Any]:
     paths = [instance_config_path(target, pack_id)]
     if unit_dir is not None:
-        if not files._owned_unit_dir(unit_dir, pack_id):
+        unit = unit_dir / _profile(pack_id).unit_name
+        if unit_dir.is_symlink() or not unit_dir.is_dir() or unit.is_symlink() or not unit.is_file():
             raise PackError("outside-owned-path")
         paths.append(unit_dir / _profile(pack_id).unit_name)
     present = [p for p in paths if files._exists_or_link(p)]
@@ -250,7 +287,10 @@ def preview_remove(target: Path, pack_id: str, *, unit_dir: Path | None = None) 
 def apply_remove(target: Path, pack_id: str, *, unit_dir: Path | None = None) -> dict[str, Any]:
     result = preview_remove(target, pack_id, unit_dir=unit_dir)
     for path in result["paths"]:
-        grokbot_ops.remove_regular_file(Path(path))
+        try:
+            grokbot_ops.remove_regular_file(Path(path))
+        except OSError:
+            raise PackError("unsafe-path") from None
     return {**result, "apply": True}
 
 
