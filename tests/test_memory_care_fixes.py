@@ -310,3 +310,17 @@ def test_fix_crash_recovers_and_remains_undoable(tmp_path, monkeypatch, phase):
     assert b"fresh_until:" in path.read_bytes()
     tend.undo(tmp_path, d.decision_id)
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("kind,nested", [("missing-freshness", "fresh_until"), ("missing-reviewed", "last_reviewed")])
+def test_nested_text_that_looks_like_a_date_field_is_never_overwritten(tmp_path, kind, nested):
+    from brigade import memory_care_fixes as fixes
+
+    path = card(tmp_path, kind)
+    # An empty value is what makes the scanner treat the field as missing.
+    note = f"notes: |\n  {nested}:\n  keep this sentence\n".encode()
+    path.write_bytes(path.read_bytes().replace(b"topic: A\n", b"topic: A\n" + note))
+    before = path.read_bytes()
+    result = fixes.apply_fixes(tmp_path, care._config_or_default(tmp_path), today=TODAY)
+    assert result["applied"] == 0
+    assert path.read_bytes() == before

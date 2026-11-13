@@ -103,6 +103,19 @@ def prepare(target: Path, config: care.MemoryCareConfig, item: dict[str, Any], t
     )
     if len(keys) != len(set(keys)) or any(len(set(keys) & group) > 1 for group in aliases):
         raise FixRefused("ambiguous")
+    # The field writer matches a key on any line. An indented line that looks like one of
+    # these keys is nested or block-scalar content, which the writer would overwrite.
+    nested = (
+        [
+            line.partition(":")[0].strip().strip("\"'").lower()
+            for line in lines[1 : lines.index("---", 1)]
+            if line and line[0].isspace() and ":" in line
+        ]
+        if lines and lines[0] == "---"
+        else []
+    )
+    if any(key in group for key in nested for group in aliases):
+        raise FixRefused("ambiguous")
     meta, header = care._parse_frontmatter(text)
     if not header:
         raise FixRefused("frontmatter-refused")
