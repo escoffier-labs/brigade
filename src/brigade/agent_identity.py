@@ -71,7 +71,8 @@ MODEL_FAMILIES = ("claude-", "gpt-", "gemini-", "kimi-", "glm-", "composer-", "m
 
 def map_identity(harness: Any, model: Any, agent_type: Any) -> dict[str, str]:
     """Map untrusted identity fields to closed names or a shaped model id."""
-    model = model.lower() if isinstance(model, str) else ""
+    # Drop a harness variant suffix such as a context-window tag in square brackets.
+    model = re.sub(r"\[[a-z0-9]{1,8}\]$", "", model.lower()) if isinstance(model, str) else ""
     return {
         "harness": harness if isinstance(harness, str) and harness in (*KNOWN_HARNESSES, "claude-code") else UNKNOWN,
         "model": model if re.fullmatch(r"[a-z0-9.-]{3,48}", model) and model.startswith(MODEL_FAMILIES) else UNKNOWN,

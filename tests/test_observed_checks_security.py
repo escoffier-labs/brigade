@@ -177,8 +177,13 @@ def test_untrusted_state_is_unavailable(tmp_path, monkeypatch, capsys, kind):
     path = checks.digest_key_path(target)
     assert path is not None
     if kind == "git":
-        path.parent.parent.mkdir(parents=True)
-        (path.parent.parent / ".git").write_text("gitdir: elsewhere")
+        # State inside the workspace's own work tree.
+        (target / ".git").mkdir(parents=True)
+        set_home(monkeypatch, target / "home")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(target / "state"))
+        monkeypatch.setenv("LOCALAPPDATA", str(target / "state"))
+        assert checks.digest_key_path(target) is None
+        assert checks.read_checks(target) == ([], 0)
     else:
         assert checks.command_digest("pytest", target) != checks.DIGEST_UNAVAILABLE
         if os.name == "nt":
@@ -274,3 +279,62 @@ def test_leftover_temporary_key_and_workspace_records_are_ignored(tmp_path):
     assert checks.append_check(target, check)
     assert checks.read_checks(target) == ([check], 0)
     assert old.read_bytes() == b"obsolete"
+
+
+def test_state_under_an_unrelated_repository_records_and_ignores_itself(tmp_path):
+    """A home directory kept in Git still records; the state directory ignores itself."""
+    target = tmp_path / "workspace"
+    key = checks.digest_key_path(target)
+    key.parent.parent.parent.mkdir(parents=True)
+    key.parent.parent.parent.chmod(0o775)
+    (key.parent.parent.parent / ".git").mkdir()
+    check = record(target)
+    assert check.command_digest != checks.DIGEST_UNAVAILABLE
+    assert checks.append_check(target, check)
+    assert checks.read_checks(target) == ([check], 0)
+    assert (key.parent / ".gitignore").read_bytes() == b"*\n"
+
+
+def test_writable_state_ancestor_is_unavailable(tmp_path):
+    if os.name == "nt":
+        pytest.skip("POSIX ownership and permissions")
+    target = tmp_path / "workspace"
+    key = checks.digest_key_path(target)
+    assert checks.command_digest("pytest", target) != checks.DIGEST_UNAVAILABLE
+    for directory, mode in ((key.parent.parent, 0o770), (key.parent.parent.parent, 0o777)):
+        directory.chmod(mode)
+        try:
+            assert checks.command_digest("pytest", target) == checks.DIGEST_UNAVAILABLE
+            assert not checks.append_check(target, record(target))
+        finally:
+            directory.chmod(0o700)
+
+
+def test_key_with_a_leftover_second_name_recovers(tmp_path):
+    target = tmp_path / "workspace"
+    first = checks.command_digest("pytest", target)
+    key = checks.digest_key_path(target)
+    os.link(key, key.with_name(".key-crashed"))
+    assert checks.command_digest("pytest", target) == first != checks.DIGEST_UNAVAILABLE
+    assert not key.with_name(".key-crashed").exists()
+
+
+def test_failed_rotation_still_appends(tmp_path, monkeypatch):
+    target = tmp_path / "workspace"
+    check = record(target)
+    assert checks.append_check(target, check)
+    monkeypatch.setattr(checks, "ROTATE_BYTES", 1)
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(checks.dirfd, "replace_children", refuse)
+    assert checks.append_check(target, check)
+    assert checks.read_checks(target) == ([check, check], 0)
+    assert not checks.digest_key_path(target).with_name(checks.CHECKS_FILE + ".1").exists()
+
+
+def test_model_variant_suffix_is_dropped():
+    mapped = agent_identity.map_identity("claude-code", "claude-fable-5-2[1m]", "main")
+    assert mapped["model"] == "claude-fable-5-2"
+    assert agent_identity.map_identity("codex", "gpt-6[secret value]", "main")["model"] == "unknown"

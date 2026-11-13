@@ -317,25 +317,47 @@ def digest_key_path(target: Path) -> Path | None:
     if root is None:
         return None
     name = hashlib.sha256(work_mode.repository_key(target).encode("utf-8")).hexdigest()
-    return root.parent / "observed" / name / "digest.key"
+    path = root.parent / "observed" / name / "digest.key"
+    # State inside the workspace's own work tree could be committed with it.
+    return None if work_mode._record_in_target_repository(path, target) else path
 
 
 def _state_directory(path: Path, *, create: bool = False) -> int:
     """Trust one private directory for keys and records, outside every work tree."""
     path = path.absolute()
-    for ancestor in (path, *path.parents):
-        if os.path.lexists(ancestor / ".git"):
-            raise OSError("observed state unavailable")
+    owned = (path.parent.parent, path.parent)
     if create:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.mkdir(mode=0o700, exist_ok=True)
+        owned[0].parent.mkdir(parents=True, exist_ok=True)
+        for directory in (*owned, path):
+            directory.mkdir(mode=0o700, exist_ok=True)
     fd = dirfd.open_directory_chain(path)
-    metadata = os.fstat(fd)
-    # Windows relies on the user profile's inherited ACL.
-    if os.name != "nt" and (metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077):
+    try:
+        # Windows relies on the user profile's inherited ACL.
+        if os.name != "nt":
+            user = os.geteuid()
+            metadata = os.fstat(fd)
+            if metadata.st_uid != user or metadata.st_mode & 0o077:
+                raise OSError("observed state unavailable")
+            # The shared config directory may be group-writable under a private-group umask.
+            for directory, writable in zip(owned, (0o002, 0o022), strict=True):
+                metadata = os.lstat(directory)
+                if metadata.st_uid != user or metadata.st_mode & writable:
+                    raise OSError("observed state unavailable")
+        if create:
+            # A home directory kept in Git must not pick these files up.
+            try:
+                ignore = dirfd.open_child_file(fd, ".gitignore", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except OSError:
+                pass
+            else:
+                try:
+                    os.write(ignore, b"*\n")
+                finally:
+                    os.close(ignore)
+        return fd
+    except BaseException:
         os.close(fd)
-        raise OSError("observed state unavailable")
-    return fd
+        raise
 
 
 def _digest_key(target: Path) -> bytes:
@@ -345,6 +367,9 @@ def _digest_key(target: Path) -> bytes:
     parent = _state_directory(path.parent, create=True)
     try:
         with held_file_lock(_lock_path(path.with_name(CHECKS_FILE)), deadline_seconds=LOCK_SECONDS):
+            # A crash between link and unlink leaves a second name on the key.
+            for stale in path.parent.glob(".key-*"):
+                stale.unlink(missing_ok=True)
             if not path.exists():
                 fd, temporary = tempfile.mkstemp(prefix=".key-", dir=path.parent)
                 try:
@@ -475,8 +500,12 @@ def append_jsonl(path: Path, payload: Mapping[str, Any]) -> bool:
                     if os.fstat(fd).st_size >= ROTATE_BYTES:
                         os.close(fd)
                         fd = -1
-                        dirfd.replace_children(parent, path.name, path.name + ".1", replace=True)
-                        fd = _open_regular(parent, path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_APPEND)
+                        try:
+                            dirfd.replace_children(parent, path.name, path.name + ".1", replace=True)
+                        except OSError:
+                            # Another open handle can block the rename; keep the record, rotate next time.
+                            pass
+                        fd = _open_regular(parent, path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND)
                     if os.lseek(fd, 0, os.SEEK_END):
                         os.lseek(fd, -1, os.SEEK_END)
                         if os.read(fd, 1) != b"\n" and os.write(fd, b"\n") != 1:
