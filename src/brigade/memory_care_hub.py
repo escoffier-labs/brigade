@@ -70,14 +70,44 @@ def _holders(target: Path, card_id: str, path: str) -> list[dict[str, Any]]:
     ]
 
 
-def _retired_here(target: Path, card_id: str) -> bool:
-    """This workspace's journal says the last completed hub write for the id was a retire."""
-    retired = False
+_WRITES = ("retire", "put", "handover")
+
+
+def _retired_here(target: Path, card_id: str, identity: str, scope: str, base: dict[str, Any]) -> bool:
+    """This hub and scope's last completed write for the id from this workspace was a retire.
+
+    Only journal results recorded against this hub identity and scope count. A
+    result that stored the revision it produced must also match the record's
+    current revision, so a later write by anyone else voids the evidence.
+    Results from older releases carry no revision and fall back to hub and scope.
+    """
+    last: dict[str, Any] | None = None
     for d in sorted(journal.entries(target), key=lambda d: d.created_at):
         saved = d.hub or {}
-        if d.card_id == card_id and saved.get("status") == "done" and saved.get("action") in ("retire", "put"):
-            retired = saved["action"] == "retire"
-    return retired
+        if d.card_id != card_id or saved.get("status") != "done" or saved.get("action") not in _WRITES:
+            continue
+        if saved.get("hub") != identity or (saved.get("request") or {}).get("scope") != scope:
+            continue
+        last = saved
+    if last is None or last["action"] != "retire":
+        return False
+    if base.get("revision") is not None and last.get("revision") is not None:
+        return bool(last["revision"] == base["revision"] and last.get("log_epoch") in (None, base.get("log_epoch")))
+    return True
+
+
+def _archived_hash(target: Path, decision: journal.Decision, path: str) -> str | None:
+    """Hash of the card text this decision archived, as sync hashes a card. None when it cannot be read."""
+    try:
+        data = journal.before_bytes(target, decision, path)
+        return None if data is None else hubc.content_hash(data.decode("utf-8"))
+    except (OSError, ValueError, KeyError, UnicodeError, journal.JournalConflict):
+        return None
+
+
+def _authorized(base: dict[str, Any], content_hash: str | None) -> bool:
+    """This workspace wrote the record, or the hub copy at that revision is exactly the archived text."""
+    return base.get("written") is True or (content_hash is not None and base.get("content_hash") == content_hash)
 
 
 def _ownership(
@@ -87,26 +117,31 @@ def _ownership(
     path: str,
     base: dict[str, Any] | None,
     holders: list[dict[str, Any]],
+    *,
+    identity: str,
+    scope: str,
+    content_hash: str | None = None,
 ) -> str:
-    """What the hub copy does with this card: "send", "handover" or "collision".
+    """What the hub copy does with this card: "send", "handover", "collision" or "not-owned".
 
     The hub copy follows the cards still in use. Archiving the last holder
-    retires it. Archiving the owner while one other holder remains hands
-    ownership to it, so the regular sync publishes that card. A revive goes
-    out only when no other card holds the id, and either this card owns the
-    record or this workspace retired the id. Anything else is a collision.
+    retires it. Archiving the owner while one other holder remains writes that
+    holder's text to the hub. Either only happens for a record this workspace
+    wrote or whose text is the archived text. A revive goes out only when no
+    other card holds the id, and either this card owns the record or this
+    hub and scope's last write for the id was a retire from here.
     """
     if action == "retire":
         if not path:
             return "collision"
-        if not holders:
-            return "send"
-        if base is not None and base.get("path") == path and len(holders) == 1:
-            return "handover"
-        return "collision"
+        if holders and not (base is not None and base.get("path") == path and len(holders) == 1):
+            return "collision"
+        if base is not None and not _authorized(base, content_hash):
+            return "not-owned"
+        return "handover" if holders else "send"
     if holders:
         return "collision"
-    if not path or base is None or base.get("path") == path or _retired_here(target, card_id):
+    if not path or base is None or base.get("path") == path or _retired_here(target, card_id, identity, scope, base):
         return "send"
     return "collision"
 
@@ -122,6 +157,7 @@ def _send(
     request: dict[str, Any] | None = None,
     recorded_hub: str | None = None,
     decision: journal.Decision | None = None,
+    content_hash: str | None = None,
 ) -> dict[str, Any]:
     if action == "put":
         reason_withheld = sync.withheld(text)
@@ -131,6 +167,8 @@ def _send(
                 reason_withheld = reason_withheld or sync.withheld(live.decode("utf-8"))
         if reason_withheld:
             return {"status": "skipped", "reason": reason_withheld}
+    if action == "retire" and content_hash is None and decision is not None:
+        content_hash = _archived_hash(target, decision, path)
     pending: dict[str, Any] = {
         "status": "pending",
         "action": action,
@@ -140,6 +178,8 @@ def _send(
     }
     if request:
         pending.update(request=request, hub=recorded_hub)
+        if decision is not None and (decision.hub or {}).get("holder"):
+            pending["holder"] = (decision.hub or {})["holder"]
     try:
         settings = hubc.load_settings(target)
         if settings.mode != "sync" or not settings.scope:
@@ -162,19 +202,39 @@ def _send(
             base = state.get(client.identity, {}).get(settings.scope, {}).get(card_id)
             # A revive must respect ownership too, or undo could overwrite the card that owns the id.
             holders = _holders(target, card_id, path)
-            ownership = _ownership(target, action, card_id, path, base, holders)
+            ownership = _ownership(
+                target,
+                action,
+                card_id,
+                path,
+                base,
+                holders,
+                identity=client.identity,
+                scope=settings.scope,
+                content_hash=content_hash,
+            )
             if ownership == "collision":
                 return {**pending, "status": "skipped", "reason": "card-id-collision"}
-            if ownership == "handover" and base:
-                # No hub write: the one remaining holder now owns the record, and sync publishes its text.
-                state[client.identity][settings.scope][card_id] = {**base, "path": holders[0]["rel"]}
-                store.save_published(target, state)
-                return {**pending, "status": "skipped", "reason": "card-id-handover"}
+            if ownership == "not-owned":
+                return {**pending, "status": "skipped", "reason": "card-id-not-owned"}
             if not base:
                 return {"status": "skipped"}
+            # The wire action is a put for a handover: the remaining holder's text replaces the archived text.
+            handover = ownership == "handover"
+            wire = "put" if handover else action
+            body_text = holders[0]["text"] if handover else text
+            written_path = holders[0]["rel"] if handover else path or base.get("path")
+            if handover:
+                pending.update(action="handover", holder=written_path)
+            else:
+                pending.pop("holder", None)
+            # Replay a stored request only when it is the same kind of write for the same card.
+            stored = request if request and ("text" in request) == (wire == "put") else None
+            if stored and handover and (decision is None or (decision.hub or {}).get("holder") != written_path):
+                stored = None
             fields = (
-                dict(request)
-                if request
+                dict(stored)
+                if stored
                 else {
                     "scope": settings.scope,
                     "card_id": card_id,
@@ -183,25 +243,28 @@ def _send(
                     "client_event_id": hubc.event_id(),
                 }
             )
-            if action == "retire":
+            if wire == "retire":
                 fields["reason"] = reason
-            else:
-                fields.update(text=text, origin="interactive")
+            elif not (stored and handover):
+                fields.update(text=body_text, origin="interactive")
             pending.update(request=fields, hub=client.identity)
             # Persist the event id before sending, so a lost reply replays the same write.
-            for decision in journal.entries(target):
-                saved = decision.hub or {}
-                if decision.card_id == card_id and saved.get("status") == "pending" and saved.get("action") == action:
-                    journal.update_hub(target, decision.decision_id, pending)
+            if decision is not None:
+                journal.update_hub(target, decision.decision_id, pending)
+            else:
+                for other in journal.entries(target):
+                    saved = other.hub or {}
+                    if other.card_id == card_id and saved.get("status") == "pending" and saved.get("action") == action:
+                        journal.update_hub(target, other.decision_id, pending)
             hubc.refuse_admin(client.call("status"))
             try:
-                reply = client.call(action, **fields)
+                reply = client.call(wire, **fields)
             except hubc.HubRefusal as exc:
                 if exc.status in (401, 429) or exc.status >= 500:
                     return pending
                 proposal = store.propose(
                     target,
-                    {"hub": client.identity, "action": action, **fields, "path": path},
+                    {"hub": client.identity, "action": wire, **fields, "path": written_path},
                     reason=exc.code,
                     hub_reply=exc.body,
                 )
@@ -213,18 +276,34 @@ def _send(
                 **base,
                 "revision": event["revision"],
                 "log_epoch": reply["log_epoch"],
-                "path": path or base.get("path"),
+                "path": written_path,
                 "written": True,
-                "content_hash": hubc.content_hash(text) if action == "put" else base.get("content_hash"),
+                "content_hash": hubc.content_hash(fields["text"]) if wire == "put" else base.get("content_hash"),
             }
             store.save_published(target, state)
-            return {**pending, "status": "done"}
+            return {**pending, "status": "done", "revision": event["revision"], "log_epoch": reply["log_epoch"]}
     except (hubc.HubUnavailable, hubc.HubConfigError, hubc.HubRefusal, OSError):
         return pending
 
 
-def retire(target: Path, *, card_id: str, reason: str, path: str = "") -> dict[str, Any]:
-    return _send(target, action="retire", card_id=card_id, reason=reason, path=path)
+def retire(
+    target: Path,
+    *,
+    card_id: str,
+    reason: str,
+    path: str = "",
+    content_hash: str | None = None,
+    decision: journal.Decision | None = None,
+) -> dict[str, Any]:
+    return _send(
+        target,
+        action="retire",
+        card_id=card_id,
+        reason=reason,
+        path=path,
+        content_hash=content_hash,
+        decision=decision,
+    )
 
 
 def revive(target: Path, *, card_id: str, path: str, text: str) -> dict[str, Any]:
@@ -327,7 +406,8 @@ def retry_pending(target: Path) -> dict[str, Any]:
             text = base64.b64decode(data).decode("utf-8")
         result = _send(
             target,
-            action=str(hub.get("action", "retire")),
+            # A pending handover replays through the retire path, which decides again who owns the id.
+            action="retire" if hub.get("action") == "handover" else str(hub.get("action", "retire")),
             card_id=d.card_id or "",
             reason=d.reason,
             path=path,

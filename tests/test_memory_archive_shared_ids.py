@@ -7,7 +7,7 @@ R2: while any live local card holds the id, and this workspace published it, the
 import pytest
 
 from brigade import memory_archive as archive, memory_care_hub as hub, memory_care_journal as journal
-from brigade import memory_care_tend as tend, memory_hub_store as store
+from brigade import memory_care_tend as tend, memory_hub_client as hubc, memory_hub_store as store
 from tests.test_memory_archive import setup_card
 from tests.test_memory_archive_review import configure_hub, move
 
@@ -36,6 +36,14 @@ def set_record(target, fake, **fields):
         store.save_published(target, state)
 
 
+def text_of(target, rel):
+    return (target / rel).read_text(encoding="utf-8")
+
+
+def hash_of(target, rel):
+    return hubc.content_hash(text_of(target, rel))
+
+
 def sent(fake, action):
     return [f for a, f in fake.calls if a == action]
 
@@ -49,7 +57,8 @@ def two_cards(tmp_path, monkeypatch, owner=A):
 def test_record_without_path_retires_the_sole_holder(tmp_path, monkeypatch):
     setup_card(tmp_path)
     fake = configure_hub(tmp_path, monkeypatch)
-    set_record(tmp_path, fake)  # an older release wrote no path
+    # An older release wrote no path and no `written`; the hub text is the archived text.
+    set_record(tmp_path, fake, content_hash=hash_of(tmp_path, A))
     d = move(tmp_path)
     assert d.hub["status"] == "done"
     assert len(sent(fake, "retire")) == 1
@@ -69,10 +78,84 @@ def test_record_without_path_beside_another_holder_is_left_alone(tmp_path, monke
 def test_archiving_the_owner_beside_one_holder_hands_over(tmp_path, monkeypatch):
     fake = two_cards(tmp_path, monkeypatch)
     d = move(tmp_path, A)
-    assert d.hub["status"] == "skipped"
-    assert d.hub["reason"] == "card-id-handover"
-    assert not [a for a, _ in fake.calls if a != "status"]
+    assert d.hub["status"] == "done"
+    assert d.hub["action"] == "handover"
+    assert d.hub["holder"] == B
+    assert not sent(fake, "retire")
+    puts = sent(fake, "put")
+    assert len(puts) == 1
+    assert puts[0]["text"] == text_of(tmp_path, B)
+    assert (puts[0]["base_revision"], puts[0]["base_epoch"], puts[0]["origin"]) == (1, "epoch", "interactive")
+    saved = record(tmp_path, fake)
+    assert (saved["path"], saved["revision"], saved["written"]) == (B, 3, True)
+    assert saved["content_hash"] == hash_of(tmp_path, B)
+    # The decision keeps the request it sent.
+    assert journal.load(tmp_path, d.decision_id).hub["request"]["client_event_id"] == puts[0]["client_event_id"]
+
+
+def test_handover_offline_stays_pending_and_replays_the_same_event(tmp_path, monkeypatch):
+    fake = two_cards(tmp_path, monkeypatch)
+    fake.unavailable = True
+    d = move(tmp_path, A)
+    assert d.hub["status"] == "pending"
+    assert d.hub["action"] == "handover"
+    event_id = d.hub["request"]["client_event_id"]
+    assert not sent(fake, "put")  # the hub was unreachable, so the persisted request is all there is
+    assert record(tmp_path, fake)["path"] == A  # unchanged until the hub acknowledges the put
+    fake.unavailable = False
+    fake.calls.clear()
+    result = tend.run(tmp_path, stages=["hub"])
+    assert result["stages"]["hub"]["done"] == 1
+    puts = sent(fake, "put")
+    assert [(f["client_event_id"], f["text"]) for f in puts] == [(event_id, text_of(tmp_path, B))]
+    assert not sent(fake, "retire")
+    assert journal.load(tmp_path, d.decision_id).hub["status"] == "done"
     assert record(tmp_path, fake)["path"] == B
+    tend.run(tmp_path, stages=["hub"])
+    assert len(sent(fake, "put")) == 1
+
+
+@pytest.mark.parametrize("visibility", ["private", "secret"])
+def test_handover_holder_gone_private_before_retry_retires_instead(tmp_path, monkeypatch, visibility):
+    fake = two_cards(tmp_path, monkeypatch)
+    fake.unavailable = True
+    d = move(tmp_path, A)
+    fake.unavailable = False
+    fake.calls.clear()
+    card(tmp_path, B, "B text", visibility=visibility)
+    tend.run(tmp_path, stages=["hub"])
+    assert not sent(fake, "put")
+    assert len(sent(fake, "retire")) == 1
+    assert "B text" not in repr(fake.calls)
+    assert journal.load(tmp_path, d.decision_id).hub["status"] == "done"
+    assert journal.load(tmp_path, d.decision_id).hub["action"] == "retire"
+    assert "holder" not in journal.load(tmp_path, d.decision_id).hub
+
+
+def test_handover_put_refused_as_a_conflict_becomes_a_proposal(tmp_path, monkeypatch):
+    fake = two_cards(tmp_path, monkeypatch)
+    real = fake.call
+
+    def refuse(action, **fields):
+        if action == "put":
+            fake.calls.append((action, fields))
+            raise hubc.HubRefusal(409, {"code": "memory_base_mismatch", "error": "stale"})
+        return real(action, **fields)
+
+    monkeypatch.setattr(fake, "call", refuse)
+    d = move(tmp_path, A)
+    assert d.hub["status"] == "conflict"
+    assert d.hub["proposal_id"]
+    assert record(tmp_path, fake)["path"] == A
+
+
+def test_handover_is_refused_for_a_record_this_workspace_did_not_write(tmp_path, monkeypatch):
+    fake = two_cards(tmp_path, monkeypatch)
+    set_record(tmp_path, fake, path=A, content_hash="f" * 64)  # adopted head with other text
+    d = move(tmp_path, A)
+    assert d.hub["reason"] == "card-id-not-owned"
+    assert not [a for a, _ in fake.calls if a != "status"]
+    assert record(tmp_path, fake)["path"] == A
 
 
 def test_archiving_both_owner_first_retires_once_on_the_second(tmp_path, monkeypatch):
@@ -200,20 +283,20 @@ def test_withheld_cards_never_reach_the_hub_in_the_new_branches(tmp_path, monkey
     card(tmp_path, B, "B text")
     fake = configure_hub(tmp_path, monkeypatch)
     d = move(tmp_path, A)
-    assert not sent(fake, "put")
+    assert [p["text"] for p in sent(fake, "put")] == [text_of(tmp_path, B)]  # only the public holder's text
     undo = archive.restore(tmp_path, d)
-    assert not sent(fake, "put")
+    assert "secret" not in repr(fake.calls)
     assert undo.hub["status"] == "skipped"
     # Revive: a withheld sole holder is never put, even when the record names another file.
     (tmp_path / B).unlink()
     set_record(tmp_path, fake, path=B)
     moved = move(tmp_path, A)
     restored = archive.restore(tmp_path, moved)
-    assert not sent(fake, "put")
+    assert "secret" not in repr(fake.calls)
     assert restored.hub["reason"].startswith("visibility-")
     # Repair: a withheld archived card is not put on the hub by tend either.
     tend.run(tmp_path, stages=["hub"])
-    assert not sent(fake, "put")
+    assert "secret" not in repr(fake.calls)
 
 
 @pytest.mark.parametrize("visibility", ["private", "secret"])
@@ -235,3 +318,149 @@ def test_withheld_sole_holder_still_retires_without_text(tmp_path, monkeypatch):
     # A retire carries no card text, so it still removes any copy published before the card went private.
     assert d.hub["status"] == "done"
     assert "secret" not in repr(fake.calls)
+
+
+def test_adopted_record_with_other_text_is_not_retired(tmp_path, monkeypatch):
+    setup_card(tmp_path, b"---\ncard_id: old\n---\nA text\n")
+    fake = configure_hub(tmp_path, monkeypatch)
+    set_record(tmp_path, fake, path=A, content_hash="f" * 64)
+    d = move(tmp_path, A)
+    assert d.hub["status"] == "skipped"
+    assert d.hub["reason"] == "card-id-not-owned"
+    assert not [a for a, _ in fake.calls if a != "status"]
+    # A later run leaves the decision alone.
+    tend.run(tmp_path, stages=["hub"])
+    assert not [a for a, _ in fake.calls if a != "status"]
+    assert journal.load(tmp_path, d.decision_id).hub["reason"] == "card-id-not-owned"
+
+
+@pytest.mark.parametrize("with_path", [True, False])
+def test_adopted_record_with_the_archived_text_is_retired(tmp_path, monkeypatch, with_path):
+    setup_card(tmp_path, b"---\ncard_id: old\n---\nA text\n")
+    fake = configure_hub(tmp_path, monkeypatch)
+    fields = {"path": A} if with_path else {}
+    set_record(tmp_path, fake, content_hash=hash_of(tmp_path, A), **fields)
+    d = move(tmp_path, A)
+    assert d.hub["status"] == "done"
+    assert len(sent(fake, "retire")) == 1
+
+
+def test_written_record_is_retired_whatever_its_hash(tmp_path, monkeypatch):
+    setup_card(tmp_path, b"---\ncard_id: old\n---\nA text\n")
+    fake = configure_hub(tmp_path, monkeypatch)
+    set_record(tmp_path, fake, path=A, written=True, content_hash="f" * 64)
+    d = move(tmp_path, A)
+    assert d.hub["status"] == "done"
+    assert len(sent(fake, "retire")) == 1
+
+
+def test_tend_repair_uses_the_journal_bytes_for_authority(tmp_path, monkeypatch):
+    fake = two_cards(tmp_path, monkeypatch)
+    card(tmp_path, C, "C text")
+    set_record(tmp_path, fake, path=A, content_hash=hubc.content_hash("---\ncard_id: old\n---\nA text\n"))
+    d = move(tmp_path, A)
+    assert d.hub["reason"] == "card-id-collision"
+    (tmp_path / B).unlink()
+    (tmp_path / C).unlink()
+    tend.run(tmp_path, stages=["hub"])
+    assert journal.load(tmp_path, d.decision_id).hub["status"] == "done"
+    assert len(sent(fake, "retire")) == 1
+
+
+def test_tend_repair_refuses_a_record_it_cannot_prove_and_stays_final(tmp_path, monkeypatch):
+    fake = two_cards(tmp_path, monkeypatch)
+    card(tmp_path, C, "C text")
+    set_record(tmp_path, fake, path=A, content_hash="f" * 64)
+    d = move(tmp_path, A)
+    (tmp_path / B).unlink()
+    (tmp_path / C).unlink()
+    tend.run(tmp_path, stages=["hub"])
+    tend.run(tmp_path, stages=["hub"])
+    saved = journal.load(tmp_path, d.decision_id).hub
+    assert (saved["status"], saved["reason"]) == ("skipped", "card-id-not-owned")
+    assert not [a for a, _ in fake.calls if a != "status"]
+
+
+def retired_in_fleet(tmp_path, monkeypatch):
+    setup_card(tmp_path, b"---\ncard_id: old\n---\nA text\n")
+    fake = configure_hub(tmp_path, monkeypatch)
+    d = move(tmp_path, A)
+    assert d.hub["status"] == "done"
+    fake.calls.clear()
+    return fake, d
+
+
+def test_a_retire_in_another_scope_does_not_authorize_a_revive(tmp_path, monkeypatch):
+    fake, d = retired_in_fleet(tmp_path, monkeypatch)
+    monkeypatch.setattr(hubc, "load_settings", lambda _: hubc.HubSettings(mode="sync", scope="other"))
+    with store.locked(tmp_path):
+        state = store.published(tmp_path)
+        state[fake.identity]["other"] = {"old": {"revision": 1, "log_epoch": "epoch", "path": "memory/cards/x.md"}}
+        store.save_published(tmp_path, state)
+    undo = archive.restore(tmp_path, d)
+    assert not sent(fake, "put")
+    assert undo.hub["reason"] == "card-id-collision"
+
+
+def test_a_retire_on_another_hub_does_not_authorize_a_revive(tmp_path, monkeypatch):
+    fake, d = retired_in_fleet(tmp_path, monkeypatch)
+
+    class OtherHub(type(fake)):
+        identity = "other-hub"
+
+    other = OtherHub()
+    monkeypatch.setattr(hubc, "client_for", lambda _: other)
+    with store.locked(tmp_path):
+        state = store.published(tmp_path)
+        state["other-hub"] = {"fleet": {"old": {"revision": 1, "log_epoch": "epoch", "path": "memory/cards/x.md"}}}
+        store.save_published(tmp_path, state)
+    undo = archive.restore(tmp_path, d)
+    assert not sent(other, "put")
+    assert undo.hub["reason"] == "card-id-collision"
+
+
+def test_a_later_write_to_the_record_voids_the_retire_evidence(tmp_path, monkeypatch):
+    fake, d = retired_in_fleet(tmp_path, monkeypatch)
+    # Someone else wrote the id after this workspace retired it: the base moved past the retire's revision.
+    set_record(tmp_path, fake, path="memory/cards/x.md", revision=7)
+    undo = archive.restore(tmp_path, d)
+    assert not sent(fake, "put")
+    assert undo.hub["reason"] == "card-id-collision"
+
+
+def test_an_older_retire_result_without_a_revision_still_authorizes(tmp_path, monkeypatch):
+    fake, d = retired_in_fleet(tmp_path, monkeypatch)
+    saved = {k: v for k, v in journal.load(tmp_path, d.decision_id).hub.items() if k not in ("revision", "log_epoch")}
+    journal.update_hub(tmp_path, d.decision_id, saved)
+    undo = archive.restore(tmp_path, d)
+    assert undo.hub["status"] == "done"
+    assert len(sent(fake, "put")) == 1
+
+
+def test_repair_persists_its_event_id_before_sending(tmp_path, monkeypatch):
+    fake = two_cards(tmp_path, monkeypatch)
+    card(tmp_path, C, "C text")
+    d = move(tmp_path, A)
+    assert d.hub["reason"] == "card-id-collision"
+    (tmp_path / B).unlink()
+    (tmp_path / C).unlink()
+    real = store.save_published
+    crashed = []
+
+    def crash_after_the_hub_accepts(target, state):
+        if sent(fake, "retire") and not crashed:
+            crashed.append(True)
+            raise RuntimeError("process died")
+        return real(target, state)
+
+    monkeypatch.setattr(store, "save_published", crash_after_the_hub_accepts)
+    with pytest.raises(RuntimeError):
+        hub.retry_pending(tmp_path)
+    saved = journal.load(tmp_path, d.decision_id).hub
+    assert saved["status"] == "pending"
+    event_id = saved["request"]["client_event_id"]
+    assert [f["client_event_id"] for f in sent(fake, "retire")] == [event_id]
+    result = hub.retry_pending(tmp_path)
+    assert result["done"] == 1
+    assert [f["client_event_id"] for f in sent(fake, "retire")] == [event_id, event_id]
+    assert journal.load(tmp_path, d.decision_id).hub["status"] == "done"

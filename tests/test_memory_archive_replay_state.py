@@ -43,7 +43,7 @@ def test_changed_local_state_supersedes_queued_write(tmp_path, monkeypatch, chan
         ("undo-pair", "done"),
         ("private-recorded", "skipped"),
         ("private-live", "skipped"),
-        ("shared-id", "skipped"),
+        ("shared-id", "done"),
         ("hub-changed", "needs_review"),
         ("scope-changed", "needs_review"),
     ],
@@ -87,3 +87,6 @@ def test_replay_current_state_table(tmp_path, monkeypatch, state, expected):
         assert ("put" if undo else "retire") not in actions
     if state == "undo-pair":
         assert actions == ["retire", "put"]
+    if state == "shared-id":
+        # The owner was archived and one other holder remains: the hub is given that card's text, not retired.
+        assert actions == ["put"]

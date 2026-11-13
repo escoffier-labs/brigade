@@ -24,7 +24,13 @@ def test_retire_revive_and_pending(tmp_path, monkeypatch):
     with store.locked(tmp_path):
         store.save_published(
             tmp_path,
-            {"fake-hub": {"fleet": {"old": {"revision": 1, "log_epoch": "epoch", "path": "memory/cards/old.md"}}}},
+            {
+                "fake-hub": {
+                    "fleet": {
+                        "old": {"revision": 1, "log_epoch": "epoch", "path": "memory/cards/old.md", "written": True}
+                    }
+                }
+            },
         )
     fake.unavailable = True
     pending = bridge.retire(tmp_path, card_id="old", reason="ended", path="memory/cards/old.md")
@@ -55,7 +61,13 @@ def test_pending_retire_then_offline_undo_retries_in_order(tmp_path, monkeypatch
     with store.locked(tmp_path):
         store.save_published(
             tmp_path,
-            {"fake-hub": {"fleet": {"old": {"revision": 1, "log_epoch": "epoch", "path": "memory/cards/old.md"}}}},
+            {
+                "fake-hub": {
+                    "fleet": {
+                        "old": {"revision": 1, "log_epoch": "epoch", "path": "memory/cards/old.md", "written": True}
+                    }
+                }
+            },
         )
     fake.unavailable = True
     d = memory_archive.archive_card(
