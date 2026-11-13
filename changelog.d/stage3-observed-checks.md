@@ -1,2 +1,3 @@
 - Add shared agent identity detection and a private, rotating observed-check log with command digests and tolerant readers. Command text is never stored. Hook capture and reports are not connected yet.
 - Redact commands before hashing and constrain tool labels and observed identity fields. Skip and count legacy command-text records. Serialize rotation and appends with bounded OS locks, recover after partial lines, and count unlocked reader fallbacks. Tighten owner-only storage permissions where supported.
+- Protect observed-check grouping with per-workspace HMAC keys outside repositories, refuse linked and special record files, bound record readers, validate identity fields and keep records ignored in partially installed workspaces.

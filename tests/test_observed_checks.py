@@ -86,11 +86,19 @@ def test_command_is_redacted_and_bounded(tmp_path, monkeypatch):
     assert "ghp_" not in stored and str(tmp_path / "home") not in stored and len(stored) <= 1000
 
 
+@pytest.fixture(autouse=True)
+def isolated_digest_state(tmp_path_factory, monkeypatch):
+    tmp_path = tmp_path_factory.mktemp("identity-state")
+    set_home(monkeypatch, tmp_path / "home")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "state"))
+
+
 def test_append_and_read_round_trip(tmp_path):
     check = _check(tmp_path)
     assert observed_checks.append_check(tmp_path, check)
     assert observed_checks.read_checks(tmp_path) == ([check], 0)
-    assert check.tool == "pytest" and check.command_digest == observed_checks.command_digest("pytest -q")
+    assert check.tool == "pytest" and check.command_digest == observed_checks.command_digest("pytest -q", tmp_path)
 
 
 def test_rotation_keeps_one_generation(tmp_path, monkeypatch):
@@ -234,10 +242,15 @@ def test_legacy_command_records_are_skipped(tmp_path):
 
 def test_digest_hashes_only_redacted_input(tmp_path, monkeypatch):
     import hashlib
+    import hmac
 
+    key = bytes(range(32))
+    monkeypatch.setattr(observed_checks, "_digest_key", lambda _: key)
     monkeypatch.setattr(observed_checks, "redact_command", lambda _: "masked")
-    assert _check(tmp_path, "raw").command_digest == hashlib.sha256(b"masked").hexdigest()[:16]
+    assert _check(tmp_path, "raw").command_digest == hmac.new(key, b"masked", hashlib.sha256).hexdigest()[:16]
 
 
-def test_secret_value_changes_preserve_digest():
-    assert observed_checks.command_digest("TOKEN=one pytest") == observed_checks.command_digest("TOKEN=two pytest")
+def test_secret_value_changes_preserve_digest(tmp_path):
+    assert observed_checks.command_digest("TOKEN=one pytest", tmp_path) == observed_checks.command_digest(
+        "TOKEN=two pytest", tmp_path
+    )

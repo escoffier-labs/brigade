@@ -14,6 +14,15 @@ import pytest
 
 from brigade import agent_identity, observed_checks as checks
 from brigade.inbox_lock import held_file_lock
+from tests._home import set_home
+
+
+@pytest.fixture(autouse=True)
+def isolated_digest_state(tmp_path_factory, monkeypatch):
+    tmp_path = tmp_path_factory.mktemp("identity-state")
+    set_home(monkeypatch, tmp_path / "home")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "state"))
 
 
 def _record(target, command="pytest"):
@@ -111,7 +120,7 @@ def test_unsafe_identity_is_unknown(tmp_path, value):
 def test_rotation_error_still_appends(tmp_path, monkeypatch, error):
     path = tmp_path / "checks.jsonl"
 
-    def fail(_path):
+    def fail(*_args):
         raise error("simulated rotation failure")
 
     monkeypatch.setattr(checks, "_rotate", fail)
@@ -163,15 +172,15 @@ def test_reader_opens_generations_under_lock(tmp_path, monkeypatch):
         finally:
             held = False
 
-    original = Path.open
+    original = checks.dirfd.open_child_file
 
-    def opening(source, *args, **kwargs):
-        if source in (path, path.with_name(path.name + ".1")):
+    def opening(parent, source, *args, **kwargs):
+        if source in (path.name, path.name + ".1"):
             assert held
-        return original(source, *args, **kwargs)
+        return original(parent, source, *args, **kwargs)
 
     monkeypatch.setattr(checks, "held_file_lock", lock, raising=False)
-    monkeypatch.setattr(Path, "open", opening)
+    monkeypatch.setattr(checks.dirfd, "open_child_file", opening)
     assert checks.read_jsonl(path) == ([{"record": 1}], 0)
 
 
@@ -231,10 +240,10 @@ def test_stale_rotation_lock_is_never_inspected(tmp_path, monkeypatch):
 
 
 def test_unreadable_parent_is_counted(tmp_path, monkeypatch):
-    def denied(_path):
+    def denied(*_args, **_kwargs):
         raise PermissionError("simulated inaccessible parent")
 
-    monkeypatch.setattr(Path, "exists", denied)
+    monkeypatch.setattr(checks.dirfd, "open_directory_chain", denied)
     assert checks.read_jsonl(tmp_path / "checks.jsonl") == ([], 1)
 
 
@@ -260,7 +269,7 @@ def test_reader_retains_generation_during_concurrent_rotation(tmp_path, monkeypa
     monkeypatch.setattr(checks, "ROTATE_BYTES", 1)
     assert checks.append_jsonl(path, {"record": "old"})
     assert checks.append_jsonl(path, {"record": "current"})
-    original = Path.open
+    original = checks.dirfd.open_child_file
     started = Event()
     future = None
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -269,18 +278,18 @@ def test_reader_retains_generation_during_concurrent_rotation(tmp_path, monkeypa
             started.set()
             return checks.append_jsonl(path, {"record": "new"})
 
-        def opening(source, *args, **kwargs):
+        def opening(parent, source, *args, **kwargs):
             nonlocal future
-            if source == path and future is None:
+            if source == path.name and future is None:
                 future = pool.submit(writer)
                 assert started.wait(5)
                 try:
                     future.result(timeout=0.2)
                 except TimeoutError:
                     pass
-            return original(source, *args, **kwargs)
+            return original(parent, source, *args, **kwargs)
 
-        monkeypatch.setattr(Path, "open", opening)
+        monkeypatch.setattr(checks.dirfd, "open_child_file", opening)
         records, skipped = checks.read_jsonl(path)
         assert future is not None and future.result(timeout=5)
     assert skipped == 0
