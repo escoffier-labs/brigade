@@ -400,8 +400,10 @@ on #2508 (run 43111993967).
 - **Merge queue cost: lower on average, not at the median.** The hub suite was
   skipped in 14 of 46 successful groups (2 of them documentation-only). A
   skipped group had a median of 11.0 wall and 100.9 runner minutes, against
-  15.2 and 129.2 for a group that ran it, about 28 runner minutes saved per
-  skip and about 394 over the window. Because 70% of groups still ran the hub
+  15.2 and 129.2 for a group that ran it. The three hub jobs' medians add up
+  to 1,688 seconds, so a skip saves about 28 runner minutes and the 14 skips
+  saved about 394 over the window (about 396 from the difference of the two
+  group medians). Because 70% of groups still ran the hub
   suite, the median group is a hub group and the runner median did not move
   down (123.6 to 127.2). The mean fell from 124.3 to 116.6.
 - **Failed queue runs: fewer.** 3 of 49 against 9 of 29, costing 340 runner
@@ -490,7 +492,9 @@ chunk boundary, and the second asserts a ratio within 1.5
 
 The two failures cost different amounts. #2437's group failed, but #2439's
 group, built on top of it, passed, and with `HEADGREEN` that green group merged
-#2437 and #2439 together at 19:14:39Z. Nothing was re-queued; the failed 12.9 minute run still counts in the window's `all` view. #2446's
+#2437 and #2439 together at 19:14:39Z. Nothing was re-queued. The failed 12.9 minute run (42679377812, created
+about 19:01Z) falls between the baseline window and the after window, so
+neither capture counts it. #2446's
 failed group had no green group behind it, so #2446 left the queue and needs
 another run. A failed queue entry that is re-queued starts a new workflow run
 with its own run id, not another attempt of the failed run. Its cost therefore shows up as extra `merge_group`
