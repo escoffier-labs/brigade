@@ -1721,6 +1721,15 @@ def test_vale_proposal_root_config_ignored_without_base_config(landing, monkeypa
         "StylesPath = styles\n[DEFAULT]\nStylesPath = other\n",
         "StylesPath = styles\na/../b = 1\n",
         "StylesPath = nowhere\n",
+        "StylesPath = 'styles'\n",
+        'StylesPath = "styles"\n',
+        "StylesPath = styles\nVocab = 'x'\n",
+        "StylesPath = styles\nbad key = 1\n",
+        "StylesPath = styles\n[a`b]\n",
+        'StylesPath = styles\n["a"]\n',
+        "StylesPath = styles\n[a] ; note\n",
+        "StylesPath = st\u00e9les\n",
+        "StylesPath = styles\n-key = 1\n",
     ],
 )
 def test_vale_parser_mismatch_forms_refused(landing, tmp_path, config):
@@ -1820,3 +1829,105 @@ def test_vale_unwritable_config_directory_refused(landing, tmp_path, monkeypatch
     with pytest.raises(codex_cloud_land.LandError, match="unsafe-vale-config"):
         codex_cloud_land.land(caller, "task_example", 2473)
     assert not any(argv[0] == "vale" for argv, _ in calls)
+
+
+def test_vale_fallback_uses_operator_config(landing, tmp_path, monkeypatch):
+    caller, state, calls = landing
+    operator = tmp_path / "home" / ".vale.ini"
+    operator.write_text("MinAlertLevel = error\n")
+    seen = _vale_probe(monkeypatch)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    argv = seen[0][0]
+    assert argv[1:3] == ["--config", str(operator)]
+
+
+def test_vale_fallback_ignores_symlinked_operator_config(landing, tmp_path, monkeypatch):
+    caller, state, calls = landing
+    elsewhere = tmp_path / "elsewhere.ini"
+    elsewhere.write_text("MinAlertLevel = error\n")
+    (tmp_path / "home" / ".vale.ini").symlink_to(elsewhere)
+    seen = _vale_probe(monkeypatch)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    argv, files, _, _ = seen[0]
+    assert argv[2].endswith("vale-config/.vale.ini")
+    assert files[".vale.ini"] == "MinAlertLevel = suggestion\n"
+
+
+def test_vale_fallback_synthesized_when_no_config_anywhere(landing, monkeypatch):
+    caller, state, calls = landing
+    seen = _vale_probe(monkeypatch)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    argv, files, _, _ = seen[0]
+    assert argv[2].endswith("vale-config/.vale.ini") and files == {".vale.ini": "MinAlertLevel = suggestion\n"}
+
+
+def test_vale_operator_config_never_beats_base_config(landing, tmp_path, monkeypatch):
+    caller, state, calls = landing
+    (tmp_path / "home" / ".vale.ini").write_text("MinAlertLevel = error\n")
+    _publish_base(caller, tmp_path, {".vale.ini": "StylesPath = styles\n", "styles/A.yml": "x\n"})
+    seen = _vale_probe(monkeypatch)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert seen[0][0][2].endswith("vale-config/.vale.ini")
+
+
+@pytest.mark.parametrize("limit,value", [("_VALE_FILE_COUNT", 1), ("_VALE_TOTAL_LIMIT", 3)])
+def test_vale_styles_size_caps(landing, tmp_path, monkeypatch, limit, value):
+    caller, state, calls = landing
+    _publish_base(
+        caller,
+        tmp_path,
+        {".vale.ini": "StylesPath = styles\n", "styles/A.yml": "aaaa\n", "styles/B.yml": "bbbb\n"},
+    )
+    monkeypatch.setattr(codex_cloud_land, limit, value)
+    with pytest.raises(codex_cloud_land.LandError, match="unsafe-vale-config"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[0] == "vale" for argv, _ in calls)
+
+
+REAL_VALE = shutil.which("vale")
+HOSTILE_VALE_INI = [
+    "StylesPath = `/etc`\n",
+    '"StylesPath" = /etc\n',
+    "`StylesPath` = /etc\n",
+    "\ufeffStylesPath = /etc\n",
+    "StylesPath: /etc ;=y\n",
+    "StylesPath: /etc # c\n",
+    "StylesPath = /etc\\\n",
+    "StylesPath = styles\nStylesPath = /etc\n",
+    "StylesPath = styles\n[DEFAULT]\nStylesPath = /etc\n",
+    "StylesPath = /etc\n",
+    "StylesPath = ../etc\n",
+    "StylesPath = styles/../../etc\n",
+    "StylesPath = ..#x\n",
+    "StylesPath = styles\n",
+]
+
+
+@pytest.mark.skipif(REAL_VALE is None, reason="vale is not installed")
+@pytest.mark.parametrize("text", HOSTILE_VALE_INI)
+def test_real_vale_agrees_with_validator(tmp_path, text):
+    """Either the validator refuses the ini, or real Vale resolves StylesPath inside its directory."""
+    try:
+        codex_cloud_land._check_vale_ini(text)
+    except codex_cloud_land.LandError as exc:
+        assert str(exc) == "unsafe-vale-config"
+        return
+    directory = tmp_path / "config"
+    (directory / "styles").mkdir(parents=True)
+    ini = directory / ".vale.ini"
+    ini.write_text(text, encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    result = subprocess.run(
+        [REAL_VALE, "ls-config", "--config", str(ini)],
+        cwd=directory,
+        env={"PATH": os.environ.get("PATH", ""), "HOME": str(home)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    found = [v for k, v in json.loads(result.stdout).items() if k.lower() == "stylespath"]
+    assert found, "ls-config did not report StylesPath"
+    resolved = (directory / found[0]).resolve()
+    assert resolved.is_relative_to(directory.resolve())
