@@ -834,7 +834,7 @@ together.
     so the policy notice would stay in the brief and a second undo would
     refuse for want of a pointer.
     The same reconciliation runs when kernel recovery refuses an undo's
-    `prepare` (`src/brigade/projection/kernel.py:318-324`): the file is read
+    `prepare` (`src/brigade/projection/kernel.py:322-328`): the file is read
     for the decision's pointers before the undo is abandoned, so a restore
     that reached disk without its commit record is not mistaken for one that
     never ran.
