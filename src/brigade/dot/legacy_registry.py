@@ -1,10 +1,4 @@
-"""First-party Grok Bot connector-pack registry and preview-first lifecycle.
-
-The registry is closed: only packaged queue-role manifests are accepted. Local
-instance config stores secret references, never secret values. Apply may write
-owned config and an explicitly selected unit file. This module does not start,
-stop, or reload services.
-"""
+"""Dot and Duet lifecycle compatibility for historical pack invocation paths."""
 
 from __future__ import annotations
 
@@ -18,14 +12,11 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit
 
-from . import (
-    grokbot_mcp,
-    grokbot_operations_relay,
-    grokbot_ops,
-    dot,
-)
+from brigade import dot
 
-from .dot.connector_files import (
+from . import transport as grokbot_mcp, service_render as grokbot_ops
+
+from .connector_files import (
     PackError,
     _assert_config_destination_safe,
     _assert_removable,
@@ -42,7 +33,6 @@ PACK_SCHEMA = "brigade.grokbot.connector-pack.v1"
 INSTANCE_SCHEMA = "brigade.grokbot.connector-instance.v1"
 INSTANCE_DIR = Path(".brigade") / "grokbot" / "packs"
 PACK_KEYS = frozenset({"schema", "id", "version", "kind", "instance", "default_bind", "public_route", "tools"})
-LIST_PACK_KEYS = PACK_KEYS | {"installed_bind", "reachability"}
 BIND_DRIFT_CHECK = "bind-drift"
 INGRESS_PORT_MISMATCH_CHECK = "ingress-port-mismatch"
 ALLOWED_HOST_MISSING_CHECK = "allowed-host-missing"
@@ -68,53 +58,17 @@ INSTANCE_KEYS = frozenset(
     }
 )
 INSTANCE_OPTIONAL_KEYS = frozenset({"host_local"})
-DEFAULT_BINDS = {
-    "implementation-worker": "127.0.0.1:8768",
-    "operator": "127.0.0.1:8766",
-    "repository-scout": "127.0.0.1:8767",
-}
-CONNECTOR_DEFAULT_BINDS = {
-    "dot": "127.0.0.1:8779",
-    "duet": "127.0.0.1:8780",
-    "operations-relay": "127.0.0.1:8777",
-}
-OPERATIONS_RELAY_PACK_ID = "operations-relay"
+CONNECTOR_DEFAULT_BINDS = {"dot": "127.0.0.1:8779", "duet": "127.0.0.1:8780"}
 DOT_PACK_ID = "dot"
 DUET_PACK_ID = "duet"
-# Packs that run the Dot connector code under their own profile and Cloudflare Access application.
 DOT_FAMILY_PACK_IDS = frozenset({DOT_PACK_ID, DUET_PACK_ID})
-FLEET_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
-    {
-        "runtime_path",
-        "ledger_path",
-        "action_state_path",
-        "approval_dir",
-    }
-)
-OPERATIONS_RELAY_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"owner_workspace"})
 DOT_INSTANCE_KEYS = (INSTANCE_KEYS - {"bearer"}) | frozenset({"runtime_path"})
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 PACK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 PUBLIC_ROUTE_RE = re.compile(r"^$|^/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*$")
-SECRET_BEARER_KEYS = frozenset({"value", "token", "secret", "password", "bearer"})
-
-
-def _queue_pack(instance: str) -> dict[str, Any]:
-    return {
-        "schema": PACK_SCHEMA,
-        "id": instance,
-        "version": "1.0.0",
-        "kind": "queue-role",
-        "instance": instance,
-        "default_bind": DEFAULT_BINDS[instance],
-        "public_route": "",
-        "tools": sorted(grokbot_mcp.tools_for_instance(instance)),
-    }
 
 
 def _connector_tools(pack_id: str) -> frozenset[str]:
-    if pack_id == OPERATIONS_RELAY_PACK_ID:
-        return grokbot_operations_relay.TOOLS
     if pack_id in DOT_FAMILY_PACK_IDS:
         return dot.profile_for(pack_id).tools
     return frozenset()
@@ -138,10 +92,7 @@ def _connector_pack(pack_id: str) -> dict[str, Any]:
     }
 
 
-_PACKAGED = tuple(
-    [_queue_pack(instance) for instance in sorted(DEFAULT_BINDS)]
-    + [_connector_pack(pack_id) for pack_id in sorted(CONNECTOR_DEFAULT_BINDS)]
-)
+_PACKAGED = tuple(_connector_pack(pack_id) for pack_id in sorted(DOT_FAMILY_PACK_IDS))
 
 
 def packaged_manifests() -> tuple[dict[str, Any], ...]:
@@ -275,11 +226,7 @@ def apply_setup(
 
 def doctor(target: Path, pack_id: str, *, service_result: bool = False) -> list[dict[str, str]]:
     pack = show_pack(pack_id, target)
-    if pack["kind"] == "queue-role":
-        checks = grokbot_ops.doctor(target, pack["instance"])
-    elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
-        checks = grokbot_operations_relay.doctor(target)
-    elif pack["id"] in DOT_FAMILY_PACK_IDS:
+    if pack["id"] in DOT_FAMILY_PACK_IDS:
         checks = dot.doctor(target, **_profile_kwargs(pack["id"]))
     else:
         raise PackError("unknown-pack")
@@ -292,10 +239,6 @@ def doctor(target: Path, pack_id: str, *, service_result: bool = False) -> list[
 
 def canary(target: Path, pack_id: str) -> dict[str, Any]:
     pack = show_pack(pack_id)
-    if pack["kind"] == "queue-role":
-        return grokbot_ops.canary(target, pack["instance"])
-    if pack["id"] == OPERATIONS_RELAY_PACK_ID:
-        return grokbot_operations_relay.canary(target)
     if pack["id"] in DOT_FAMILY_PACK_IDS:
         return dot.canary(target, **_profile_kwargs(pack["id"]))
     raise PackError("unknown-pack")
@@ -313,11 +256,6 @@ def _raise_platform_refusal(exc: Exception) -> None:
 def render_install_service(target: Path, pack_id: str) -> str:
     pack = show_pack(pack_id)
     try:
-        if pack["kind"] == "queue-role":
-            config = grokbot_ops.load_config(target, pack["instance"])
-            return grokbot_ops.render_unit(config, python=sys.executable, exec_root=target)
-        if pack["id"] == OPERATIONS_RELAY_PACK_ID:
-            return grokbot_operations_relay.render_unit(target, python=sys.executable)
         if pack["id"] in DOT_FAMILY_PACK_IDS:
             if pack["id"] == DOT_PACK_ID:
                 return dot.render_unit(target, python=sys.executable)
@@ -329,32 +267,15 @@ def render_install_service(target: Path, pack_id: str) -> str:
         raise PackError("unsafe-path") from exc
     except Exception as exc:
         _raise_platform_refusal(exc)
-        if isinstance(
-            exc,
-            (
-                grokbot_operations_relay.OperationsRelayError,
-                dot.DotError,
-            ),
-        ):
+        if isinstance(exc, (dot.DotError,)):
             raise PackError("unsafe-path") from exc
         raise
 
 
-def apply_install_service(
-    target: Path,
-    pack_id: str,
-    *,
-    out_dir: Path,
-    force: bool = False,
-) -> dict[str, Any]:
+def apply_install_service(target: Path, pack_id: str, *, out_dir: Path, force: bool = False) -> dict[str, Any]:
     pack = show_pack(pack_id)
     try:
-        if pack["kind"] == "queue-role":
-            config = grokbot_ops.load_config(target, pack["instance"])
-            path = grokbot_ops.write_unit(config, out_dir, exec_root=target, force=force)
-        elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
-            path = grokbot_operations_relay.write_unit(target, out_dir, force=force)
-        elif pack["id"] in DOT_FAMILY_PACK_IDS:
+        if pack["id"] in DOT_FAMILY_PACK_IDS:
             path = dot.write_unit(target, out_dir, force=force, **_profile_kwargs(pack["id"]))
         else:
             raise PackError("unknown-pack")
@@ -364,13 +285,7 @@ def apply_install_service(
         raise PackError("unsafe-path") from exc
     except Exception as exc:
         _raise_platform_refusal(exc)
-        if isinstance(
-            exc,
-            (
-                grokbot_operations_relay.OperationsRelayError,
-                dot.DotError,
-            ),
-        ):
+        if isinstance(exc, (dot.DotError,)):
             raise PackError("unsafe-path") from exc
         raise
     return {"action": "install-service", "apply": True, "pack_id": pack_id, "unit": path.name}
@@ -412,11 +327,7 @@ def _setup(
     pack = show_pack(pack_id)
     if pack_id in DOT_FAMILY_PACK_IDS and any(value is not None for value in (bearer_env, bearer_file, bearer)):
         raise PackError("unexpected-key")
-    reference = (
-        None
-        if pack_id in DOT_FAMILY_PACK_IDS
-        else _bearer_reference(bearer_env=bearer_env, bearer_file=bearer_file, bearer=bearer)
-    )
+    reference = None
     chosen_bind = bind or pack["default_bind"]
     _parse_default_bind(chosen_bind)
     hosts = sorted(set(allowed_hosts or []))
@@ -432,15 +343,7 @@ def _setup(
     }
     if reference is not None:
         payload["bearer"] = reference
-    fleet_paths = (runtime_path, ledger_path, action_state_path, approval_dir)
-    if pack["kind"] == "queue-role":
-        if owner_workspace is not None or any(path is not None for path in fleet_paths):
-            raise PackError("unexpected-key")
-    elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
-        if any(path is not None for path in fleet_paths):
-            raise PackError("unexpected-key")
-        payload["owner_workspace"] = _operations_relay_owner_reference(owner_workspace)
-    elif pack["id"] in DOT_FAMILY_PACK_IDS:
+    if pack["id"] in DOT_FAMILY_PACK_IDS:
         if (
             owner_workspace is not None
             or ledger_path is not None
@@ -454,8 +357,6 @@ def _setup(
     _validate_instance_config(payload, pack_id)
     _assert_setup_bind_available(target, pack_id, chosen_bind)
     writes = [str(instance_config_path(Path("."), pack_id))]
-    if pack["kind"] == "queue-role":
-        writes.append(str(grokbot_ops.config_path(Path("."), pack["instance"])))
     result = {"action": "setup", "apply": apply, "pack_id": pack_id, "bind": chosen_bind, "writes": writes}
     if not apply:
         return result
@@ -488,24 +389,9 @@ def _apply_setup_configs(
     pack_path = instance_config_path(target, pack_id)
     destinations: list[Path] = [pack_path]
     _assert_config_destination_safe(pack_path)
-    if kind == "queue-role":
-        legacy_path = grokbot_ops.config_path(target, instance)
-        _assert_config_destination_safe(legacy_path)
-        destinations.append(legacy_path)
     snapshots = [_snapshot_regular_file(path) for path in destinations]
     try:
         _write_instance_config(target, pack_id, payload)
-        if kind == "queue-role":
-            assert reference is not None
-            grokbot_ops.save_config(
-                target,
-                instance=instance,
-                bind=bind,
-                allowed_hosts=hosts,
-                allowed_origins=origins,
-                bearer_env=reference["name"] if reference["kind"] == "env" else None,
-                bearer_file=Path(reference["path"]) if reference["kind"] == "file" else None,
-            )
     except (grokbot_mcp.ConfigurationError, OSError, PackError) as exc:
         rollback_failed = False
         for dest, snap in zip(destinations, snapshots, strict=True):
@@ -570,10 +456,6 @@ def _removal_paths(target: Path, pack: Mapping[str, Any], unit_dir: Path | None)
     pack_path = instance_config_path(target, pack["id"])
     if _exists_or_link(pack_path):
         candidates.append((pack_path, True))
-    if pack["kind"] == "queue-role":
-        legacy = grokbot_ops.config_path(target, pack["instance"])
-        if _exists_or_link(legacy):
-            candidates.append((legacy, True))
     if unit_dir is not None:
         candidates.append((unit_dir / grokbot_ops.unit_name(pack["instance"]), False))
     paths: list[Path] = []
@@ -591,10 +473,9 @@ def _assert_setup_bind_available(target: Path, pack_id: str, chosen_bind: str) -
 
 
 def _occupied_setup_ports(target: Path, *, exclude_pack_id: str) -> set[int]:
-    from .dot.connector_registry import instance_config_path as connector_path
+    from .connector_registry import instance_config_path as connector_path
 
-    ports: set[int] = {8771, 8773, 8778, 8781, 8782, 8783}
-    # Retained listener files still reserve their ports without loading a retired profile.
+    ports: set[int] = {8766, 8767, 8768, 8771, 8773, 8777, 8778, 8781, 8782, 8783}
     for name in ("grokbot-memory", "grokbot-inbox", "fleet-steward", "obsidian-operator", "t3-dispatch"):
         path = target / INSTANCE_DIR / f"{name}.json"
         if path != instance_config_path(target, exclude_pack_id):
@@ -604,18 +485,19 @@ def _occupied_setup_ports(target: Path, *, exclude_pack_id: str) -> set[int]:
     generic_port = _bind_port_from_existing_config(connector_path(target, "cloud-agent"))
     if generic_port is not None:
         ports.add(generic_port)
-    for pack in list_packs(target):
-        if pack["id"] == exclude_pack_id:
+    # Preserve the former registry's sorted reservation reads and error precedence.
+    for name in ("dot", "duet", "implementation-worker", "operations-relay", "operator", "repository-scout"):
+        if name == exclude_pack_id:
             continue
-        _host, port = _parse_default_bind(pack["default_bind"])
-        ports.add(port)
-        pack_port = _bind_port_from_existing_config(instance_config_path(target, pack["id"]))
-        if pack_port is not None:
-            ports.add(pack_port)
-        if pack["kind"] == "queue-role":
-            legacy_port = _bind_port_from_existing_config(grokbot_ops.config_path(target, pack["instance"]))
-            if legacy_port is not None:
-                ports.add(legacy_port)
+        if name in CONNECTOR_DEFAULT_BINDS:
+            ports.add(_parse_default_bind(CONNECTOR_DEFAULT_BINDS[name])[1])
+        port = _bind_port_from_existing_config(instance_config_path(target, name))
+        if port is not None:
+            ports.add(port)
+        if name in {"operator", "repository-scout", "implementation-worker"}:
+            port = _bind_port_from_existing_config(grokbot_ops.config_path(target, name))
+            if port is not None:
+                ports.add(port)
     return ports
 
 
@@ -657,11 +539,7 @@ def _validate_pack(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise PackError("unexpected-key")
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         raise PackError("invalid-version")
-    if kind == "queue-role":
-        if instance != pack_id or instance not in grokbot_mcp.INSTANCES:
-            raise PackError("unexpected-key")
-        expected_tools = grokbot_mcp.tools_for_instance(instance)
-    elif kind == "connector":
+    if kind == "connector":
         if pack_id not in CONNECTOR_DEFAULT_BINDS or instance != pack_id:
             raise PackError("unexpected-key")
         expected_tools = _connector_tools(pack_id)
@@ -690,9 +568,8 @@ def _validate_pack(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[str, Any]:
-    # Retained fleet instances are read only by the Task 4 relay. They are not packaged.
-    pack = {"id": pack_id, "kind": "connector"} if pack_id == "fleet-steward" else show_pack(pack_id)
-    expected_keys = FLEET_INSTANCE_KEYS if pack_id == "fleet-steward" else _instance_keys(pack)
+    pack = show_pack(pack_id)
+    expected_keys = _instance_keys(pack)
     present = set(payload)
     optional = present & INSTANCE_OPTIONAL_KEYS
     if present - optional != expected_keys or payload.get("schema") != INSTANCE_SCHEMA:
@@ -720,77 +597,15 @@ def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[
         raise PackError("unexpected-key")
     if not isinstance(route, str) or not PUBLIC_ROUTE_RE.fullmatch(route):
         raise PackError("unexpected-key")
-    if "bearer" in expected_keys:
-        _validate_bearer_reference(payload.get("bearer"))
-    if pack_id == "fleet-steward":
-        from .grokbot_fleet.contracts import FleetError
-        from .grokbot_fleet.retained_paths import validate_disjoint_state_paths
-
-        fields = ("runtime_path", "ledger_path", "action_state_path", "approval_dir")
-        if any(payload[key] is None for key in fields):
-            raise PackError("missing-path-reference")
-        try:
-            validate_disjoint_state_paths(*(str(payload[key]) for key in fields))
-        except FleetError as exc:
-            raise PackError("unsafe-path") from exc
-    if pack["id"] == OPERATIONS_RELAY_PACK_ID:
-        _operations_relay_owner_reference(payload.get("owner_workspace"))
-    elif pack["id"] in DOT_FAMILY_PACK_IDS:
+    if pack["id"] in DOT_FAMILY_PACK_IDS:
         _dot_runtime_reference(payload.get("runtime_path"), pack["id"])
     return dict(payload)
 
 
-def _bearer_reference(
-    *,
-    bearer_env: str | None,
-    bearer_file: Path | None,
-    bearer: dict[str, Any] | None,
-) -> dict[str, str]:
-    if bearer is not None:
-        if bearer_env is not None or bearer_file is not None:
-            raise PackError("missing-secret-reference")
-        return _validate_bearer_reference(bearer)
-    if (bearer_env is None) == (bearer_file is None):
-        raise PackError("missing-secret-reference")
-    if bearer_env is not None:
-        return _validate_bearer_reference({"kind": "env", "name": bearer_env})
-    assert bearer_file is not None
-    return _validate_bearer_reference({"kind": "file", "path": str(bearer_file.expanduser().resolve())})
-
-
-def _validate_bearer_reference(reference: object) -> dict[str, str]:
-    if not isinstance(reference, dict) or set(reference) & SECRET_BEARER_KEYS:
-        raise PackError("weak-secret-reference")
-    kind = reference.get("kind")
-    if kind == "env" and set(reference) == {"kind", "name"}:
-        name = reference.get("name")
-        if isinstance(name, str) and grokbot_mcp.ENVIRONMENT_NAME_RE.fullmatch(name):
-            return {"kind": "env", "name": name}
-    if kind == "file" and set(reference) == {"kind", "path"}:
-        path = reference.get("path")
-        if isinstance(path, str) and path and "\x00" not in path:
-            grokbot_ops._systemd_quote(path)
-            return {"kind": "file", "path": path}
-    raise PackError("weak-secret-reference")
-
-
 def _instance_keys(pack: Mapping[str, Any]) -> frozenset[str]:
-    if pack["kind"] == "queue-role":
-        return INSTANCE_KEYS
-    if pack["id"] == OPERATIONS_RELAY_PACK_ID:
-        return OPERATIONS_RELAY_INSTANCE_KEYS
     if pack["id"] in DOT_FAMILY_PACK_IDS:
         return DOT_INSTANCE_KEYS
     raise PackError("unknown-pack")
-
-
-def _operations_relay_owner_reference(owner_workspace: object) -> str:
-    if owner_workspace is None:
-        raise PackError("missing-path-reference")
-    try:
-        return grokbot_operations_relay.validate_owner_workspace(owner_workspace)
-    except grokbot_operations_relay.OperationsRelayError as exc:
-        raise PackError("unsafe-path") from exc
 
 
 def _dot_runtime_reference(runtime_path: object, pack_id: str = DOT_PACK_ID) -> str:
@@ -1076,7 +891,7 @@ def _origin_port(service: str) -> int | None:
 def _fetch_json(url: str) -> dict[str, Any] | None:
     request = urllib.request.Request(url, method="GET")
     try:
-        with grokbot_ops._open_http(request, _PROBE_TIMEOUT_SECONDS) as response:
+        with grokbot_mcp._open_http(request, _PROBE_TIMEOUT_SECONDS) as response:
             body = response.read(_MAX_CONFIG_BYTES + 1)
     except urllib.error.HTTPError:
         return None
@@ -1095,7 +910,7 @@ def _http_status(url: str, *, host_header: str) -> int | None:
     request = urllib.request.Request(url, method="GET")
     request.add_unredirected_header("Host", host_header)
     try:
-        with grokbot_ops._open_http(request, _PROBE_TIMEOUT_SECONDS) as response:
+        with grokbot_mcp._open_http(request, _PROBE_TIMEOUT_SECONDS) as response:
             response.read(256)
             return int(response.status)
     except urllib.error.HTTPError as exc:
@@ -1121,54 +936,6 @@ def _routes_overlap(left: str, right: str) -> bool:
     right_parts = right.split("/")
     length = min(len(left_parts), len(right_parts))
     return left_parts[:length] == right_parts[:length]
-
-
-def preview_relay_setup(target: Path, owner_workspace: Path) -> dict[str, Any]:
-    from . import grokbot_pack_relay
-
-    return grokbot_pack_relay.preview_relay_setup(target, owner_workspace)
-
-
-def apply_relay_setup(target: Path, owner_workspace: Path) -> dict[str, Any]:
-    from . import grokbot_pack_relay
-
-    return grokbot_pack_relay.apply_relay_setup(target, owner_workspace)
-
-
-def load_relay_config(target: Path) -> dict[str, str]:
-    from . import grokbot_pack_relay
-
-    return grokbot_pack_relay.load_relay_config(target)
-
-
-def preview_relay(target: Path, limit: int = 1) -> dict[str, Any]:
-    from . import grokbot_pack_relay
-
-    return grokbot_pack_relay.preview_configured_relay(target, limit=limit)
-
-
-def apply_relay(target: Path, limit: int = 1) -> dict[str, Any]:
-    from . import grokbot_pack_relay
-
-    return grokbot_pack_relay.apply_configured_relay(target, limit=limit)
-
-
-def relay_doctor(target: Path) -> list[dict[str, str]]:
-    from . import grokbot_pack_relay
-
-    return grokbot_pack_relay.relay_doctor(target)
-
-
-def render_relay_units(target: Path) -> dict[str, str]:
-    from . import grokbot_pack_relay
-
-    return grokbot_pack_relay.render_relay_units(target, python=sys.executable)
-
-
-def write_relay_units(target: Path, out_dir: Path, *, force: bool = False) -> list[Path]:
-    from . import grokbot_pack_relay
-
-    return grokbot_pack_relay.write_relay_units(target, out_dir, force=force)
 
 
 def _bind_port_from_existing_config(path: Path) -> int | None:

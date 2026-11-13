@@ -171,3 +171,40 @@ def test_retained_grokbot_help_snapshot(path, monkeypatch):
         parser = _subparsers_action(parser).choices[command]
     snapshot = Path(__file__).parent / "fixtures" / ("grokbot_" + "_".join(path) + "_help.txt")
     assert parser.format_help() == snapshot.read_text(encoding="utf-8")
+
+
+def test_removed_queue_parser_help_names_removal_version(monkeypatch):
+    from brigade.cli.removed_commands import REMOVED_IN
+
+    monkeypatch.setenv("COLUMNS", "80")
+    parser = cli._build_parser()
+    for name in ("run", "cloud", "grokbot"):
+        parser = _subparsers_action(parser).choices[name]
+    # The column layout of long subcommand names differs between Python patch releases,
+    # so check the rendered words rather than an exact snapshot.
+    rendered = " ".join(parser.format_help().split())
+    assert f"enqueue Removed in {REMOVED_IN}." in rendered
+    assert f"reconcile-findings Removed in {REMOVED_IN}." in rendered
+    actions = _subparsers_action(parser)
+    removed = [action for action in actions._choices_actions if action.dest not in {"serve", "pack"}]
+    assert removed
+    assert all(action.help == f"Removed in {REMOVED_IN}." for action in removed)
+    pack = _subparsers_action(actions.choices["pack"])
+    assert all(
+        action.help == f"Removed in {REMOVED_IN}."
+        for action in pack._choices_actions
+        if action.dest.startswith(("relay", "install-relay"))
+    )
+
+
+def test_removed_fleet_enrollment_help_names_removal_version():
+    from brigade.cli.removed_commands import REMOVED_IN
+
+    fleet = _subparsers_action(cli._build_parser()).choices["fleet"]
+    action = _subparsers_action(fleet)
+    assert next(item.help for item in action._choices_actions if item.dest == "grokbot") == f"Removed in {REMOVED_IN}."
+    grokbot = _subparsers_action(action.choices["grokbot"])
+    assert (
+        next(item.help for item in grokbot._choices_actions if item.dest == "enroll-actor")
+        == f"Removed in {REMOVED_IN}."
+    )

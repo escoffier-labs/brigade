@@ -2,15 +2,9 @@
 
 from __future__ import annotations
 
-import builtins
-import os
 from pathlib import Path
 
 import pytest
-
-from brigade import grokbot_feed, grokbot_findings, grokbot_scout_feed
-from brigade.grokbot_fleet import ledger as fleet_ledger
-from brigade.grokbot_fleet.contracts import FleetError
 
 
 REASON = "secure-owner-read-unavailable"
@@ -26,76 +20,9 @@ def _filesystem_accessed(*args, **kwargs):
     raise AssertionError("private read reached the filesystem before owner security was established")
 
 
-def _read_cases(path_text: str):
-    return (
-        (lambda: grokbot_findings._read_manifest_snapshot(Path(path_text)), grokbot_findings.FindingsError, None),
-        (
-            lambda: grokbot_findings._open_queue_child_readonly(Path(path_text), "findings"),
-            grokbot_findings.FindingsError,
-            None,
-        ),
-        (lambda: fleet_ledger.FleetLedger(path_text)._ensure_state_dir(), FleetError, "unavailable"),
-        (lambda: fleet_ledger.FleetLedger(path_text)._load_document(), FleetError, "unavailable"),
-        (lambda: grokbot_feed._read_manifest_snapshot(Path(path_text)), grokbot_feed.FeedError, None),
-        (lambda: grokbot_scout_feed._read_policy_snapshot(Path(path_text)), grokbot_scout_feed.ScoutFeedError, None),
-    )
-
-
-def _assert_no_filesystem_access(monkeypatch: pytest.MonkeyPatch, path_text: str) -> None:
-    with monkeypatch.context() as filesystem:
-        filesystem.setattr(Path, "lstat", _filesystem_accessed)
-        filesystem.setattr(Path, "read_text", _filesystem_accessed)
-        filesystem.setattr(Path, "mkdir", _filesystem_accessed)
-        filesystem.setattr(Path, "exists", _filesystem_accessed)
-        filesystem.setattr(Path, "is_symlink", _filesystem_accessed)
-        filesystem.setattr(Path, "is_dir", _filesystem_accessed)
-        filesystem.setattr(Path, "open", _filesystem_accessed)
-        filesystem.setattr(builtins, "open", _filesystem_accessed)
-        filesystem.setattr(os, "fstat", _filesystem_accessed)
-        filesystem.setattr(os, "lstat", _filesystem_accessed)
-        filesystem.setattr(os, "listdir", _filesystem_accessed)
-        filesystem.setattr(os, "open", _filesystem_accessed)
-        filesystem.setattr(os, "scandir", _filesystem_accessed)
-        filesystem.setattr(os, "stat", _filesystem_accessed)
-        for read, error_type, code in _read_cases(path_text):
-            with pytest.raises(error_type) as error:
-                read()
-            assert str(error.value) == REASON
-            if code is not None:
-                assert error.value.code == code
-
-
-@pytest.mark.parametrize("path_text", UNSAFE_PATHS)
-def test_private_readers_fail_closed_before_filesystem_access(monkeypatch: pytest.MonkeyPatch, path_text: str) -> None:
-    """Linux simulates the unavailable Windows ownership capability per module."""
-    modules = (
-        grokbot_findings,
-        fleet_ledger,
-        grokbot_feed,
-        grokbot_scout_feed,
-    )
-    for module in modules:
-        monkeypatch.setattr(module, "SECURE_OWNER_READ_AVAILABLE", False)
-    _assert_no_filesystem_access(monkeypatch, path_text)
-
-
 def test_filesystem_spies_restore_before_failure_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(AssertionError, match="filesystem before owner security"):
         with monkeypatch.context() as filesystem:
             filesystem.setattr(Path, "exists", _filesystem_accessed)
             Path("missing").exists()
     assert Path("missing").name == "missing"
-
-
-def test_native_windows_capabilities_are_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Native Windows uses the same typed reason, while Linux uses injection above."""
-    if os.name != "nt":
-        pytest.skip("native Windows assertion")
-    for module in (
-        grokbot_findings,
-        fleet_ledger,
-        grokbot_feed,
-        grokbot_scout_feed,
-    ):
-        assert module.SECURE_OWNER_READ_AVAILABLE is False
-    _assert_no_filesystem_access(monkeypatch, UNSAFE_PATHS[0])

@@ -5,7 +5,8 @@ import stat
 from pathlib import Path
 
 import pytest
-from brigade import cli, grokbot_packs
+from brigade import cli
+from brigade.dot import legacy_registry as grokbot_packs
 from brigade.dot import connector_registry as registry, lifecycle
 from brigade.dot.contracts import DotError
 from brigade.dot.runtime_config import DUET_RUNTIME_SCHEMA, parse_runtime
@@ -179,7 +180,7 @@ def test_stray_pack_json_does_not_break_setup(dot_private_dir, name):
 def test_current_setup_references():
     root = Path(__file__).resolve().parents[1]
     assert "docs/grokbot-memory-connector.md" not in (root / "README.md").read_text()
-    text = (root / "registry/skills/verify-brigade/features/grokbot-pack-lifecycle.md").read_text()
+    text = (root / "registry/skills/verify-brigade/features/README.md").read_text()
     assert "`grokbot-memory`" not in text and "`grokbot-inbox`" not in text
 
 

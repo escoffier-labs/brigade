@@ -126,10 +126,10 @@ Then install dev dependencies:
 pip install -e ".[dev]"
 ```
 
-`tests/test_grokbot_mcp.py` contains MCP-server tests that require the optional `grokbot` extra (which pulls in `mcp`, and therefore `starlette` transitively). To run the full test suite locally, install with the extra included:
+`tests/test_cloud_agent_profile.py tests/test_dot_transport.py` contains MCP-server tests that require the optional `connector` extra (which pulls in `mcp`, and therefore `starlette` transitively). To run the full test suite locally, install with the extra included:
 
 ```bash
-pip install -e ".[dev,grokbot]"
+pip install -e ".[dev,connector]"
 ```
 
 On PEP 668-managed Python (many Linux distributions), installing into the system interpreter fails. A virtual environment avoids that.

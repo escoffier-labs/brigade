@@ -1,0 +1,3 @@
+- Removed client job submission, feeds, workers, reconciliation, operations relay and their CLI paths. Historical commands return the 0.32.0 removal message for one release and leave user files untouched.
+- Added the `connector` install extra. `grokbot` resolves to the same dependencies for one release and expires with the other retired names.
+- Kept the hub job wire contract, stored rows, expiry sweeper and ownership/cloud projections unchanged pending the contract change.

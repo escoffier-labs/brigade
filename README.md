@@ -84,7 +84,6 @@ Generated agent instructions and CLI suggestions still use `brigade`. On a bridg
 | --- | --- |
 | **Codex, Claude Code, Cursor, OpenCode** | Workspace instructions, handoff inboxes, and tool and skill configuration. Hooks vary by tool. |
 | **T3 Code** | Remote execution and session visibility. Full child-task governance is in progress. |
-| **Grok Bot** | Role-scoped connector packs for bounded jobs. |
 | **OpenClaw, Hermes** | Memory-owner workflows, writer handoffs, and memory care. |
 | **Dot** | Memory, skills, Hub messaging, and authorized T3 fleet dispatch. |
 | **Duet** (0.31 beta) | Memory, skills, Hub messaging, and read-only fleet views. |

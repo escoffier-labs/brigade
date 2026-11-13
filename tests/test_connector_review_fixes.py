@@ -240,7 +240,7 @@ def test_legacy_flow_matches_base(dot_private_dir, monkeypatch, capsys):
 @pytest.mark.parametrize("name", ["dot", "duet"])
 @requires_local_state
 def test_legacy_setup_skips_isolation(dot_private_dir, monkeypatch, name):
-    from brigade import grokbot_packs
+    from brigade.dot import legacy_registry as grokbot_packs
     from tests.test_dot_runtime import _document
     from tests.test_duet_profile import _duet_document
 
@@ -256,7 +256,8 @@ def test_legacy_setup_skips_isolation(dot_private_dir, monkeypatch, name):
 
 @requires_local_state
 def test_legacy_remove_oserror(dot_private_dir, monkeypatch):
-    from brigade import grokbot_packs, grokbot_ops
+    from brigade.dot import legacy_registry as grokbot_packs
+    from brigade.dot import service_render as grokbot_ops
 
     root = dot_private_dir.parent
     instance = grokbot_packs.instance_config_path(root, "dot")
@@ -358,7 +359,7 @@ def test_loopback_probes(dot_private_dir, monkeypatch, mode):
 @pytest.mark.parametrize("name", ["dot", "duet"])
 @requires_local_state
 def test_legacy_setup_with_unreadable_neighbor_runtime(dot_private_dir, name):
-    from brigade import grokbot_packs
+    from brigade.dot import legacy_registry as grokbot_packs
     from tests.test_dot_runtime import _document
     from tests.test_duet_profile import _duet_document
 

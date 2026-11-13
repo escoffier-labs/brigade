@@ -12,7 +12,6 @@ from brigade import (
     center_cmd,
     cli,
     daily_cmd,
-    grokbot_jobs,
     handoff_cmd,
     phases_cmd,
     release_cmd,
@@ -23,6 +22,7 @@ from brigade import (
     runs_cmd,
     work_cmd,
 )
+from tests import legacy_job_seed as grokbot_jobs
 from brigade.roster import Agent, Roster
 
 

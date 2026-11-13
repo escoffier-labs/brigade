@@ -142,7 +142,7 @@ def test_a_real_marker_grants_local_to_handoff_show(
     assert _memory_json(capsys)["audience"] == CONNECTOR
 
 
-@pytest.mark.parametrize("route", ["default", "adapter", "aboyeur", "native-t3-child", "grokbot-refs"])
+@pytest.mark.parametrize("route", ["default", "adapter", "aboyeur", "native-t3-child"])
 def test_other_dispatch_paths_stay_connector_on_an_opted_in_host(tmp_path, monkeypatch, hub_memory, route):  # noqa: F811
     target = _private_hub(tmp_path, hub_memory)
     _opt_in(monkeypatch)
@@ -158,12 +158,5 @@ def test_other_dispatch_paths_stay_connector_on_an_opted_in_host(tmp_path, monke
     elif route == "native-t3-child":
         built = dispatch_memory.block_text(target, "hub deploy")
         text = dispatch_memory.for_remote(f"Sub-task header\n{built}\nDo the work.")
-    else:
-        monkeypatch.setattr(
-            dispatch_memory, "grokbot_memory_authority", lambda: ("https://hub.invalid", "fixture-bot-token")
-        )
-        refs = dispatch_memory.job_refs(target, "hub deploy")
-        assert [ref["card_id"] for ref in refs] == ["deploy-notes"]
-        return
 
     _assert_private_withheld(text)

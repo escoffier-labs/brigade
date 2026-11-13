@@ -131,6 +131,71 @@
           ".brigade/grokbot/packs/dot.json"
         ]
       },
+      "queue_relay_neighbors": {
+        "implementation-workerinstance0.0.0.0:8996": {
+          "error": "unsafe-bind"
+        },
+        "implementation-workerinstance127.0.0.1:8996": {
+          "error": "duplicate-port"
+        },
+        "implementation-workerinstance42": {
+          "error": "unsafe-path"
+        },
+        "implementation-workerlistener0.0.0.0:8996": {
+          "error": "unsafe-bind"
+        },
+        "implementation-workerlistener127.0.0.1:8996": {
+          "error": "duplicate-port"
+        },
+        "implementation-workerlistener42": {
+          "error": "unsafe-path"
+        },
+        "operations-relayinstance0.0.0.0:8996": {
+          "error": "unsafe-bind"
+        },
+        "operations-relayinstance127.0.0.1:8996": {
+          "error": "duplicate-port"
+        },
+        "operations-relayinstance42": {
+          "error": "unsafe-path"
+        },
+        "operatorinstance0.0.0.0:8996": {
+          "error": "unsafe-bind"
+        },
+        "operatorinstance127.0.0.1:8996": {
+          "error": "duplicate-port"
+        },
+        "operatorinstance42": {
+          "error": "unsafe-path"
+        },
+        "operatorlistener0.0.0.0:8996": {
+          "error": "unsafe-bind"
+        },
+        "operatorlistener127.0.0.1:8996": {
+          "error": "duplicate-port"
+        },
+        "operatorlistener42": {
+          "error": "unsafe-path"
+        },
+        "repository-scoutinstance0.0.0.0:8996": {
+          "error": "unsafe-bind"
+        },
+        "repository-scoutinstance127.0.0.1:8996": {
+          "error": "duplicate-port"
+        },
+        "repository-scoutinstance42": {
+          "error": "unsafe-path"
+        },
+        "repository-scoutlistener0.0.0.0:8996": {
+          "error": "unsafe-bind"
+        },
+        "repository-scoutlistener127.0.0.1:8996": {
+          "error": "duplicate-port"
+        },
+        "repository-scoutlistener42": {
+          "error": "unsafe-path"
+        }
+      },
       "remaining": [
         "brigade-dot.service"
       ],
@@ -263,6 +328,71 @@
         "writes": [
           ".brigade/grokbot/packs/duet.json"
         ]
+      },
+      "queue_relay_neighbors": {
+        "implementation-workerinstance0.0.0.0:8996": {
+          "error": "unsafe-bind"
+        },
+        "implementation-workerinstance127.0.0.1:8996": {
+          "error": "duplicate-port"
+        },
+        "implementation-workerinstance42": {
+          "error": "unsafe-path"
+        },
+        "implementation-workerlistener0.0.0.0:8996": {
+          "error": "unsafe-bind"
+        },
+        "implementation-workerlistener127.0.0.1:8996": {
+          "error": "duplicate-port"
+        },
+        "implementation-workerlistener42": {
+          "error": "unsafe-path"
+        },
+        "operations-relayinstance0.0.0.0:8996": {
+          "error": "unsafe-bind"
+        },
+        "operations-relayinstance127.0.0.1:8996": {
+          "error": "duplicate-port"
+        },
+        "operations-relayinstance42": {
+          "error": "unsafe-path"
+        },
+        "operatorinstance0.0.0.0:8996": {
+          "error": "unsafe-bind"
+        },
+        "operatorinstance127.0.0.1:8996": {
+          "error": "duplicate-port"
+        },
+        "operatorinstance42": {
+          "error": "unsafe-path"
+        },
+        "operatorlistener0.0.0.0:8996": {
+          "error": "unsafe-bind"
+        },
+        "operatorlistener127.0.0.1:8996": {
+          "error": "duplicate-port"
+        },
+        "operatorlistener42": {
+          "error": "unsafe-path"
+        },
+        "repository-scoutinstance0.0.0.0:8996": {
+          "error": "unsafe-bind"
+        },
+        "repository-scoutinstance127.0.0.1:8996": {
+          "error": "duplicate-port"
+        },
+        "repository-scoutinstance42": {
+          "error": "unsafe-path"
+        },
+        "repository-scoutlistener0.0.0.0:8996": {
+          "error": "unsafe-bind"
+        },
+        "repository-scoutlistener127.0.0.1:8996": {
+          "error": "duplicate-port"
+        },
+        "repository-scoutlistener42": {
+          "error": "unsafe-path"
+        }
       },
       "remaining": [
         "brigade-duet.service"

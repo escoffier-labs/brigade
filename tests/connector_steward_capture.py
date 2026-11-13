@@ -6,7 +6,7 @@ import sys
 from unittest.mock import patch
 
 from brigade.dot import connector_registry as registry, lifecycle
-from brigade import grokbot_packs as packs
+from brigade.dot import legacy_registry as packs
 from tests.test_cloud_agent_profile import cloud_document
 from tests.connector_legacy_capture import capture as legacy_capture
 

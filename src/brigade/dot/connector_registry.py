@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from brigade import grokbot_mcp, grokbot_ops
+from . import transport as grokbot_mcp, service_render as grokbot_ops
 from . import connector_files as files
 from .connector_files import PackError as PackError
 from .profile import profile_for

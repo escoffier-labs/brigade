@@ -7,7 +7,17 @@ import sys
 REMOVED_IN = "0.32.0"
 # Remove this compatibility table in the next ordinary release after REMOVED_IN.
 RETIRED_PROFILES = frozenset({"grokbot-memory", "grokbot-inbox"})
-RETIRED_PACKS = frozenset({"fleet-steward", "obsidian-operator", "t3-dispatch"})
+RETIRED_PACKS = frozenset(
+    {
+        "fleet-steward",
+        "obsidian-operator",
+        "t3-dispatch",
+        "operations-relay",
+        "operator",
+        "repository-scout",
+        "implementation-worker",
+    }
+)
 COMMAND_PATHS = (
     (("dot",), "--pack"),
     (("run", "cloud", "grokbot", "pack"), "--id"),
@@ -42,6 +52,36 @@ def compatibility(argv: list[str]) -> int | None:
 
                     return remove_command(tail[1:], value)
                 return removed_profile(value, " ".join((*prefix, value)))
+    queue_prefix = ("run", "cloud", "grokbot")
+    if tuple(argv[:3]) == queue_prefix and len(argv) > 3:
+        command = argv[3]
+        if command in {"--help", "-h"} or (command == "serve" and argv[4:] in (["--help"], ["-h"])):
+            return None
+        if command not in {"pack", "serve"} or (
+            command == "pack" and len(argv) > 4 and argv[4].startswith(("relay", "install-relay"))
+        ):
+            return removed(
+                " ".join(argv[:5] if command == "pack" else argv[:4]),
+                replacement=REPLACEMENT
+                + " Stop installed units: systemctl --user disable --now brigade-grokbot-findings-relay.timer brigade-grokbot-findings-relay.service brigade-grokbot-operator.service brigade-grokbot-repository-scout.service brigade-grokbot-implementation-worker.service"
+                + _client_unit_commands(("operator", "repository-scout", "implementation-worker")),
+            )
+        if command == "serve":
+            tail = argv[4:]
+            selected = None
+            for index, item in enumerate(tail):
+                option, separator, attached = item.partition("=")
+                if option.startswith("--") and len(option) > 2 and "--pack".startswith(option):
+                    selected = attached if separator else (tail[index + 1] if index + 1 < len(tail) else None)
+            if selected not in {"dot", "duet"}:
+                return removed(
+                    "run cloud grokbot serve",
+                    replacement=REPLACEMENT
+                    + " Stop installed units: systemctl --user disable --now brigade-grokbot-operator.service brigade-grokbot-repository-scout.service brigade-grokbot-implementation-worker.service"
+                    + _client_unit_commands(("operator", "repository-scout", "implementation-worker")),
+                )
+    if argv[:2] == ["fleet", "grokbot"]:
+        return removed("fleet grokbot enroll-actor")
     return None
 
 
@@ -58,5 +98,19 @@ def removed_profile(value: str, command: str | None = None) -> int:
         units = f"brigade-{value}.service brigade-{value}-watch.service brigade-{value}-watch.timer"
     return removed(
         command or value,
-        replacement=REPLACEMENT + " Stop installed units: systemctl --user disable --now " + units,
+        replacement=REPLACEMENT
+        + " Stop installed units: systemctl --user disable --now "
+        + units
+        + (
+            _client_unit_commands((value,))
+            if value in {"operator", "repository-scout", "implementation-worker"}
+            else ""
+        ),
+    )
+
+
+def _client_unit_commands(roles: tuple[str, ...]) -> str:
+    patterns = " ".join(f"'brigade-grokbot-{role}-*.service'" for role in roles)
+    return (
+        "\nClient-scoped units:\nsystemctl --user stop " + patterns + "\nsystemctl --user list-unit-files " + patterns
     )

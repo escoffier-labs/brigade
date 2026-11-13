@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from types import MappingProxyType
 
-from brigade import grokbot_ops
+from . import service_render as grokbot_ops
 from . import connector_files as files
 from .contracts import DotError
 from .runtime_config import CLOUD_AGENT_RUNTIME_SCHEMA, MAX_RUNTIME_BYTES, Runtime

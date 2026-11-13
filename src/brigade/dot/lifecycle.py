@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from brigade import grokbot_mcp, grokbot_ops, grokbot_packs
+from . import transport as grokbot_mcp, service_render as grokbot_ops, legacy_registry as grokbot_packs
 from brigade.dot.rendered_files import _write_rendered
 from brigade.isolated_exec import module_argv, trusted_cwd
 from . import contracts as c

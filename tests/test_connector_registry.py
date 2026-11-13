@@ -7,7 +7,7 @@ from pathlib import Path
 from brigade.dot.contracts import DotError
 import pytest
 from brigade.dot import connector_registry as registry
-from brigade import grokbot_packs
+from brigade.dot import legacy_registry as grokbot_packs
 from tests.test_cloud_agent_profile import cloud_document
 
 
@@ -149,7 +149,7 @@ def test_collision_and_remove_preserve_runtime(dot_private_dir):
 
 @requires_local_state
 def test_failed_write_restores_instance(dot_private_dir, monkeypatch):
-    from brigade import grokbot_ops
+    from brigade.dot import service_render as grokbot_ops
 
     root = dot_private_dir.parent
     runtime = setup_runtime(root)
@@ -168,7 +168,7 @@ def test_failed_write_restores_instance(dot_private_dir, monkeypatch):
 
 @requires_local_state
 def test_collision_with_legacy_listener_config(dot_private_dir):
-    from brigade import grokbot_ops
+    from brigade.dot import service_render as grokbot_ops
 
     root = dot_private_dir.parent
     runtime = setup_runtime(root)

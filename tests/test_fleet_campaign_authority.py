@@ -81,7 +81,7 @@ def test_inspect_exact_local_lineage_is_read_only(lineage, capsys, monkeypatch):
 
     monkeypatch.setattr(fleet_client, "load_fleet_config", forbidden)
     monkeypatch.setattr(fleet_client, "repo_claim", forbidden)
-    monkeypatch.setattr(grokbot_jobs, "enqueue", forbidden)
+    monkeypatch.setattr(grokbot_jobs, "enqueue", forbidden, raising=False)
     monkeypatch.setattr(actions_dispatch, "actions_dispatch_apply", forbidden)
     monkeypatch.setattr(actions_dispatch, "_write_actions", forbidden)
     monkeypatch.setattr(ledger, "_write_imports", forbidden)

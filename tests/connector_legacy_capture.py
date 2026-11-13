@@ -3,7 +3,8 @@ import os
 from unittest.mock import patch
 import sys
 from pathlib import Path
-from brigade import grokbot_packs as packs, grokbot_ops
+from brigade.dot import legacy_registry as packs
+from brigade.dot import service_render as grokbot_ops
 from tests.test_dot_runtime import _document
 from tests.test_duet_profile import _duet_document
 
@@ -86,6 +87,28 @@ def capture(root):
                 outcome = {"error": error.reason}
             row["unsafe_neighbors"][kind] = outcome
             neighbor.unlink()
+        row["queue_relay_neighbors"] = {}
+        for retired in ("operator", "repository-scout", "implementation-worker", "operations-relay"):
+            for location in ("instance", "listener"):
+                neighbor = (
+                    packs.instance_config_path(target, retired)
+                    if location == "instance"
+                    else grokbot_ops.config_path(target, retired)
+                )
+                if retired == "operations-relay" and location == "listener":
+                    continue
+                neighbor.parent.mkdir(parents=True, exist_ok=True)
+                for bind in ("127.0.0.1:8996", "0.0.0.0:8996", 42):
+                    neighbor.write_text(json.dumps({"bind": bind}), encoding="utf-8")
+                    neighbor.chmod(0o600)
+                    before = neighbor.read_bytes()
+                    try:
+                        outcome = packs.preview_setup(target, name, runtime_path=runtime, bind="127.0.0.1:8996")
+                    except packs.PackError as error:
+                        outcome = {"error": error.reason}
+                    row["queue_relay_neighbors"][retired + location + str(bind)] = outcome
+                    assert neighbor.read_bytes() == before
+                neighbor.unlink()
         units = root / (name + "-units")
         row["install"] = packs.apply_install_service(target, name, out_dir=units)
         row["unit"] = next(units.glob("*.service")).read_text()
@@ -102,7 +125,7 @@ def capture(root):
         for text, replacement in (
             (str(root), "<ROOT>"),
             (sys.executable, "<PYTHON>"),
-            (str(Path(packs.__file__).resolve().parents[2]), "<CWD>"),
+            (str(Path(packs.__file__).resolve().parents[3]), "<CWD>"),
         ):
             row = json.loads(json.dumps(row).replace(text, replacement))
         result[name] = row

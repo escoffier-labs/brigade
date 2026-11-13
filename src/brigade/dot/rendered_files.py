@@ -1,7 +1,7 @@
 """Safe rendered unit writes shared by connector profiles."""
 
 from pathlib import Path
-from brigade import grokbot_ops
+from . import service_render as grokbot_ops
 
 
 def _write_rendered(path: Path, rendered: str, *, force: bool) -> Path:

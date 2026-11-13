@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
 import json
 import os
 import stat
 import sys
 from pathlib import Path
-from typing import Any, ContextManager, NamedTuple
+from typing import Any
+
+from .removed_commands import REMOVED_IN
 
 _PROMPT_FILE_MAX_BYTES = 64 * 1024
 _LAUNCH_LABEL_MAX = 120
@@ -180,7 +181,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         help="Codex Cloud environment selector to validate (Codex Cloud only).",
     )
 
-    p_grokbot = cloud_sub.add_parser("grokbot", help="Manage the private local Grok Bot job queue.")
+    p_grokbot = cloud_sub.add_parser("grokbot", help=f"Removed in {REMOVED_IN}.")
     grokbot_sub = p_grokbot.add_subparsers(dest="grokbot_command", metavar="<grokbot-command>")
     grokbot_sub.required = True
 
@@ -188,12 +189,12 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         command.add_argument("--target", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true")
 
-    p_enqueue = grokbot_sub.add_parser("enqueue", help="Queue a Grok Bot envelope from a JSON file.")
+    p_enqueue = grokbot_sub.add_parser("enqueue", help=f"Removed in {REMOVED_IN}.")
     add_target(p_enqueue)
     p_enqueue.add_argument("--spec", type=Path, required=True, help="Path to the private task envelope JSON file.")
     p_enqueue.add_argument("--idempotency-key", required=True)
 
-    p_feed = grokbot_sub.add_parser("feed", help="Validate or enqueue an approved Grok Bot feed manifest.")
+    p_feed = grokbot_sub.add_parser("feed", help=f"Removed in {REMOVED_IN}.")
     add_target(p_feed)
     p_feed.add_argument("--manifest", type=Path, required=True, help="Path to the approved private feed manifest.")
     p_feed.add_argument("--limit", type=int, default=1, help="Maximum newly created jobs (1-10). Defaults to 1.")
@@ -203,9 +204,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         help="Enqueue after validation. Default is validate only. A private wake webhook is notified after each new job.",
     )
 
-    p_scout_feed = grokbot_sub.add_parser(
-        "scout-feed", help="Select one approved GitHub issue for Grok Bot Repository Scout."
-    )
+    p_scout_feed = grokbot_sub.add_parser("scout-feed", help=f"Removed in {REMOVED_IN}.")
     add_target(p_scout_feed)
     p_scout_feed.add_argument("--policy", type=Path, required=True, help="Path to the approved private scout policy.")
     p_scout_feed.add_argument(
@@ -214,13 +213,11 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         help="Enqueue after selection. Default is preview only. A private wake webhook is notified after a new job.",
     )
 
-    from . import run_cloud_build_feed
-
-    run_cloud_build_feed.register(grokbot_sub, add_target)
+    grokbot_sub.add_parser("build-feed", help=f"Removed in {REMOVED_IN}.")
 
     p_reconcile = grokbot_sub.add_parser(
         "reconcile-reports",
-        help="Preview or draft canonical-owner Memory Handoffs from completed scout reports.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     add_target(p_reconcile)
     p_reconcile.add_argument("--owner", type=Path, required=True, help="Owner workspace that receives handoff drafts.")
@@ -234,7 +231,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_findings = grokbot_sub.add_parser(
         "reconcile-findings",
-        help="Preview or draft canonical-owner Memory Handoffs from a private findings manifest.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     add_target(p_findings)
     p_findings.add_argument("--owner", type=Path, required=True, help="Owner workspace that receives handoff drafts.")
@@ -244,7 +241,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_convert = grokbot_sub.add_parser(
         "convert-findings",
-        help="Convert live normalized findings into a private generic manifest.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     add_target(p_convert)
     p_convert.add_argument("--input", type=Path, required=True, help="Path to the live normalized findings file.")
@@ -252,7 +249,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_relay = grokbot_sub.add_parser(
         "relay-findings",
-        help="Preview or relay private findings to Fleet Hub and owner-review drafts.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     add_target(p_relay)
     p_relay.add_argument("--owner", type=Path, required=True, help="Owner workspace that receives handoff drafts.")
@@ -262,41 +259,34 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         "--apply", action="store_true", help="Write drafts and report events. Default is preview only."
     )
 
-    for name, help_text in (("claim", "Claim a queued job."), ("renew", "Renew a current job lease.")):
-        command = grokbot_sub.add_parser(name, help=help_text)
+    for name in ("claim", "renew"):
+        command = grokbot_sub.add_parser(name, help=f"Removed in {REMOVED_IN}.")
         add_target(command)
         command.add_argument("--job-id", required=True)
         command.add_argument("--bot-id", required=True)
         command.add_argument("--lease-id", required=True)
         command.add_argument("--lease-seconds", required=True, type=int)
 
-    for name, help_text in (
-        ("start", "Mark a claimed job running."),
-        ("fail", "Mark a live job failed."),
-        ("ack-cancel", "Acknowledge a requested cancellation."),
-    ):
-        command = grokbot_sub.add_parser(name, help=help_text)
+    for name in ("start", "fail", "ack-cancel"):
+        command = grokbot_sub.add_parser(name, help=f"Removed in {REMOVED_IN}.")
         add_target(command)
         command.add_argument("--job-id", required=True)
         command.add_argument("--bot-id", required=True)
         command.add_argument("--lease-id", required=True)
 
-    p_complete = grokbot_sub.add_parser("complete", help="Complete a running job with artifact references.")
+    p_complete = grokbot_sub.add_parser("complete", help=f"Removed in {REMOVED_IN}.")
     add_target(p_complete)
     p_complete.add_argument("--job-id", required=True)
     p_complete.add_argument("--bot-id", required=True)
     p_complete.add_argument("--lease-id", required=True)
     p_complete.add_argument("--artifact", type=Path, required=True, help="Path to the completion artifact JSON file.")
 
-    for name, help_text in (
-        ("cancel", "Cancel a queued job or request cancellation."),
-        ("expire", "Expire a deadline or lease-expired job."),
-    ):
-        command = grokbot_sub.add_parser(name, help=help_text)
+    for name in ("cancel", "expire"):
+        command = grokbot_sub.add_parser(name, help=f"Removed in {REMOVED_IN}.")
         add_target(command)
         command.add_argument("--job-id", required=True)
 
-    p_grokbot_status = grokbot_sub.add_parser("status", help="Show safe Grok Bot job projections.")
+    p_grokbot_status = grokbot_sub.add_parser("status", help=f"Removed in {REMOVED_IN}.")
     add_target(p_grokbot_status)
     p_grokbot_status.add_argument("--job-id", default=None)
 
@@ -338,7 +328,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         command.add_argument("--json", action="store_true")
         add_client_id(command)
 
-    p_setup = grokbot_sub.add_parser("setup", help="Write non-secret role-scoped listener configuration.")
+    p_setup = grokbot_sub.add_parser("setup", help=f"Removed in {REMOVED_IN}.")
     add_target(p_setup)
     add_client_id(p_setup)
     p_setup.add_argument("--instance", required=True, choices=("operator", "repository-scout", "implementation-worker"))
@@ -355,20 +345,18 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         help="Protected absolute Fleet Hub node-token file for this worker role (reference only).",
     )
 
-    p_doctor = grokbot_sub.add_parser(
-        "doctor", help="Sanitized dependency/config/permission/queue/endpoint diagnostics."
-    )
+    p_doctor = grokbot_sub.add_parser("doctor", help=f"Removed in {REMOVED_IN}.")
     add_instance(p_doctor)
 
-    p_canary = grokbot_sub.add_parser("canary", help="Bounded non-mutating authentication and inventory check.")
+    p_canary = grokbot_sub.add_parser("canary", help=f"Removed in {REMOVED_IN}.")
     add_instance(p_canary)
 
-    p_install = grokbot_sub.add_parser("install-service", help="Render or install a role-scoped systemd unit.")
+    p_install = grokbot_sub.add_parser("install-service", help=f"Removed in {REMOVED_IN}.")
     add_instance(p_install)
     p_install.add_argument("--out", type=Path, default=None, help="Directory to render the unit into.")
     p_install.add_argument("--force", action="store_true", help="Allow overwriting this role's own unit file.")
 
-    from .. import grokbot_packs
+    from ..dot import legacy_registry as grokbot_packs
 
     pack_ids = tuple(pack["id"] for pack in grokbot_packs.packaged_manifests())
     p_pack = grokbot_sub.add_parser("pack", help="Inspect and manage first-party Grok Bot connector packs.")
@@ -438,18 +426,18 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_pack_relay_setup = pack_sub.add_parser(
         "relay-setup",
-        help="Preview or apply first-party finding-relay owner configuration.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     add_target(p_pack_relay_setup)
     p_pack_relay_setup.add_argument("--owner", type=Path, required=True, help="Absolute owner workspace.")
     p_pack_relay_setup.add_argument("--apply", action="store_true", help="Write local config. Default is preview only.")
 
-    p_pack_relay_doctor = pack_sub.add_parser("relay-doctor", help="Sanitized first-party finding-relay diagnostics.")
+    p_pack_relay_doctor = pack_sub.add_parser("relay-doctor", help=f"Removed in {REMOVED_IN}.")
     add_target(p_pack_relay_doctor)
 
     p_pack_relay = pack_sub.add_parser(
         "relay",
-        help="Preview or relay first-party steward findings to owner review and Fleet Hub.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     add_target(p_pack_relay)
     p_pack_relay.add_argument("--limit", type=int, default=1, help="Maximum new drafts (1-50). Defaults to 1.")
@@ -459,7 +447,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_pack_install_relay = pack_sub.add_parser(
         "install-relay-service",
-        help="Render or install the first-party findings-relay systemd units.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     add_target(p_pack_install_relay)
     p_pack_install_relay.add_argument("--out", type=Path, default=None, help="Directory to render the units into.")
@@ -1059,428 +1047,47 @@ def _grokbot_bearer_valid(args, pack_id: str | None) -> bool:
 
 
 def _dispatch_grokbot(args, target: Path) -> int:
-    """Dispatch local queue operations without loading envelopes into CLI arguments."""
-    from .. import grokbot_jobs, grokbot_mcp
+    from ..dot import transport, legacy_registry, service_render
+    from .removed_commands import removed
 
-    command = args.grokbot_command
-    if command == "pack":
+    if args.grokbot_command == "pack":
         return _dispatch_grokbot_pack(args, target)
-    if command in {"setup", "doctor", "canary", "install-service"}:
-        return _dispatch_grokbot_ops(args, target)
-    if command == "feed":
-        return _dispatch_grokbot_feed(args, target)
-    if command == "scout-feed":
-        return _dispatch_grokbot_scout_feed(args, target)
-    if command == "build-feed":
-        from . import run_cloud_build_feed
+    if args.grokbot_command != "serve" or args.pack not in ("dot", "duet"):
+        return removed("run cloud grokbot " + args.grokbot_command)
+    if not _grokbot_bearer_valid(args, args.pack):
+        return 2
+    try:
+        if args.client_id is not None:
+            raise transport.ConfigurationError("invalid")
+        from .. import dot
 
-        return run_cloud_build_feed.dispatch(args, target)
-    if command == "reconcile-reports":
-        return _dispatch_grokbot_reconcile(args, target)
-    if command == "reconcile-findings":
-        return _dispatch_grokbot_findings(args, target)
-    if command == "convert-findings":
-        return _dispatch_grokbot_convert_findings(args)
-    if command == "relay-findings":
-        return _dispatch_grokbot_relay_findings(args, target)
-    if command == "serve":
-        if not _grokbot_bearer_valid(args, getattr(args, "pack", None)):
-            return 2
-        from .. import grokbot_mcp
+        dot_config, dot_tools, dot_runtime = dot.build_listener_from_target(
+            target,
+            bind=args.bind,
+            # Omitted flags keep the allowlists stored by `pack setup`.
+            allowed_hosts=args.allow_host or None,
+            allowed_origins=args.allow_origin or None,
+            # Dot keeps its original call; other profiles name themselves.
+            **({} if args.pack == "dot" else {"pack_id": args.pack}),
+        )
+        dot.run_listener(dot_config, dot_tools, dot_runtime)
+    except transport.OptionalDependencyError:
+        print(
+            "error: Grok Bot listener requires pip install brigade-cli[connector]. The grokbot extra remains an alias during the removal window",
+            file=sys.stderr,
+        )
+        return 2
+    except (transport.ConfigurationError, legacy_registry.PackError, service_render.ServiceRenderError):
+        print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        from ..dot import DotError
 
-        try:
-            if getattr(args, "pack", None):
-                if args.client_id is not None:
-                    raise grokbot_mcp.ConfigurationError("invalid")
-                listener_kwargs = {
-                    "bind": args.bind,
-                    "allowed_hosts": args.allow_host,
-                    "allowed_origins": args.allow_origin,
-                    "bearer_file": args.bearer_file,
-                    "bearer_env": args.bearer_env,
-                }
-                if args.pack == "operations-relay":
-                    from .. import grokbot_operations_relay
-
-                    operations_config, operations_tools = grokbot_operations_relay.build_listener_from_target(
-                        target, **listener_kwargs
-                    )
-                    grokbot_operations_relay.run_listener(operations_config, operations_tools)
-                elif args.pack in ("dot", "duet"):
-                    from .. import dot
-
-                    dot_config, dot_tools, dot_runtime = dot.build_listener_from_target(
-                        target,
-                        bind=args.bind,
-                        # Omitted flags keep the allowlists stored by `pack setup`.
-                        allowed_hosts=args.allow_host or None,
-                        allowed_origins=args.allow_origin or None,
-                        # Dot keeps its original call; other profiles name themselves.
-                        **({} if args.pack == "dot" else {"pack_id": args.pack}),
-                    )
-                    dot.run_listener(dot_config, dot_tools, dot_runtime)
-                else:
-                    # A pack added to the choices without its own branch must not serve another pack's tools.
-                    raise grokbot_mcp.ConfigurationError("invalid")
-            else:
-                config = grokbot_mcp.build_listener_config(
-                    target=target,
-                    instance=args.instance,
-                    client_id=args.client_id,
-                    bind=args.bind or "127.0.0.1:8766",
-                    allowed_hosts=args.allow_host,
-                    allowed_origins=args.allow_origin,
-                    bearer_file=args.bearer_file,
-                    bearer_env=args.bearer_env,
-                )
-                grokbot_mcp.run_listener(config)
-        except grokbot_mcp.OptionalDependencyError:
-            print("error: Grok Bot listener requires pip install brigade-cli[grokbot]", file=sys.stderr)
-            return 2
-        except grokbot_mcp.ConfigurationError:
+        if isinstance(exc, DotError):
             print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
             return 2
-        except Exception as exc:
-            from .. import (
-                grokbot_operations_relay,
-                grokbot_packs,
-                dot,
-            )
-
-            if isinstance(
-                exc,
-                (
-                    grokbot_operations_relay.OperationsRelayError,
-                    grokbot_packs.PackError,
-                    dot.DotError,
-                ),
-            ):
-                print("error: Grok Bot listener configuration is invalid", file=sys.stderr)
-                return 2
-            raise
-        return 0
-    try:
-        token = grokbot_mcp.load_direct_queue_listener_token()
-        identity: ContextManager[None] = nullcontext()
-        if token is not None:
-            from .. import fleet_client_grokbot
-
-            identity = fleet_client_grokbot.listener_identity(token)
-        with identity:
-            if command == "enqueue":
-                result = grokbot_jobs.enqueue(target, _read_json_object(args.spec, "--spec"), args.idempotency_key)
-            elif command == "claim":
-                result = grokbot_jobs.claim(target, args.job_id, args.bot_id, args.lease_id, args.lease_seconds)
-            elif command == "renew":
-                result = grokbot_jobs.renew(target, args.job_id, args.bot_id, args.lease_id, args.lease_seconds)
-            elif command == "start":
-                result = grokbot_jobs.transition(target, args.job_id, args.bot_id, args.lease_id, "running")
-            elif command == "complete":
-                result = grokbot_jobs.transition(
-                    target,
-                    args.job_id,
-                    args.bot_id,
-                    args.lease_id,
-                    "completed",
-                    artifact=_read_json_object(args.artifact, "--artifact"),
-                )
-            elif command == "fail":
-                result = grokbot_jobs.transition(target, args.job_id, args.bot_id, args.lease_id, "failed")
-            elif command == "cancel":
-                result = grokbot_jobs.cancel(target, args.job_id)
-            elif command == "ack-cancel":
-                result = grokbot_jobs.acknowledge_cancel(target, args.job_id, args.bot_id, args.lease_id)
-            elif command == "expire":
-                result = grokbot_jobs.expire(target, args.job_id)
-            elif command == "status":
-                result = grokbot_jobs.status(target, args.job_id)
-            else:  # argparse makes this unreachable.
-                print(f"error: unknown Grok Bot command: {command}", file=sys.stderr)
-                return 2
-    except grokbot_jobs.GrokbotJobError as exc:
-        print(f"error: {exc.reason}", file=sys.stderr)
-        return 2
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
-    if args.json:
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
-    _print_grokbot_result(result)
+        raise
     return 0
-
-
-def _dispatch_grokbot_feed(args, target: Path) -> int:
-    """Validate or apply an approved feed without printing private task context."""
-    from .. import grokbot_feed, grokbot_mcp
-
-    actor_kind: str | None = None
-    try:
-        if args.apply:
-            identity = _feed_hub_identity(target)
-            actor_kind = identity.actor_kind
-            with identity.context:
-                result = grokbot_feed.apply(target, args.manifest, limit=args.limit)
-        else:
-            result = grokbot_feed.preflight(target, args.manifest, limit=args.limit)
-    except grokbot_mcp.ConfigurationError:
-        print("error: Grok Bot feed configuration is invalid", file=sys.stderr)
-        return 2
-    except grokbot_feed.FeedError as exc:
-        if exc.action is not None and exc.actor_kind is None:
-            exc.actor_kind = actor_kind
-        print(f"error: {exc.public_detail()}", file=sys.stderr)
-        return 2
-
-    if args.json:
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
-    _print_feed_result(result)
-    return 0
-
-
-def _print_feed_result(result: dict) -> None:
-    """Render feed counts and safe job handles only."""
-    parts = [f"valid={result['valid']}", f"known={result['known']}", f"limit={result['limit']}"]
-    if "created" in result:
-        parts.insert(2, f"created={result['created']}")
-        parts.insert(3, f"skipped={result['skipped']}")
-    print("grokbot feed: " + " ".join(parts))
-    for job in result.get("jobs", []):
-        print(f"job {job['job_id']} state={job['state']}")
-
-
-class _FeedIdentity(NamedTuple):
-    """The bound feed context plus the actor kind it speaks as, when bound."""
-
-    context: ContextManager[None]
-    actor_kind: str | None
-
-
-def _feed_hub_identity(target: Path) -> _FeedIdentity:
-    """Bind the dedicated feed actor for Hub mutations, with no fallback."""
-    from .. import fleet_client_grokbot, grokbot_jobs, grokbot_mcp
-
-    if not grokbot_jobs.hub_authority(target):
-        return _FeedIdentity(nullcontext(), None)
-    token = grokbot_mcp.load_feed_hub_token()
-    if token is None:
-        raise grokbot_mcp.ConfigurationError("invalid")
-    return _FeedIdentity(fleet_client_grokbot.listener_identity(token), "feed")
-
-
-def _dispatch_grokbot_scout_feed(args, target: Path) -> int:
-    """Preview or enqueue one approved scout without exposing policy content."""
-    from .. import grokbot_mcp, grokbot_scout_feed
-
-    actor_kind: str | None = None
-    try:
-        if args.apply:
-            identity = _feed_hub_identity(target)
-            actor_kind = identity.actor_kind
-            with identity.context:
-                result = grokbot_scout_feed.apply(target, args.policy)
-        else:
-            result = grokbot_scout_feed.preflight(target, args.policy)
-    except grokbot_mcp.ConfigurationError:
-        print("error: Grok Bot feed configuration is invalid", file=sys.stderr)
-        return 2
-    except grokbot_scout_feed.ScoutFeedError as exc:
-        if exc.action is not None and exc.actor_kind is None:
-            exc.actor_kind = actor_kind
-        print(f"error: {exc.public_detail()}", file=sys.stderr)
-        return 2
-
-    if args.json:
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
-    _print_scout_feed_result(result)
-    return 0
-
-
-def _print_scout_feed_result(result: dict) -> None:
-    """Render the safe scout selection projection without policy or issue contents."""
-    parts = [f"created={result['created']}", f"reason={result['reason']}"]
-    if result["issue_number"] is not None:
-        parts.append(f"issue={result['issue_number']}")
-    parts += [
-        f"known={result['known']}",
-        f"terminal_retry_candidates={result['terminal_retry_candidates']}",
-        f"retry_exhausted={result['retry_exhausted']}",
-    ]
-    if "listing" in result:
-        parts.append(f"listing={result['listing']}")
-    print("grokbot scout-feed: " + " ".join(parts))
-    handle = result.get("handle")
-    if handle is not None:
-        print(f"job {handle['job_id']} state={handle['state']}")
-
-
-def _reconcile_hub_identity(target: Path) -> _FeedIdentity:
-    """Bind the operator or feed actor for hub-authority report listing."""
-    from .. import fleet_client_grokbot, grokbot_jobs, grokbot_mcp
-
-    if not grokbot_jobs.hub_authority(target):
-        return _FeedIdentity(nullcontext(), None)
-    token = grokbot_mcp.load_hub_token(instance="operator")
-    actor = "operator"
-    if token is None:
-        token = grokbot_mcp.load_feed_hub_token()
-        actor = "feed"
-    if token is None:
-        token = grokbot_mcp.load_direct_queue_listener_token()
-        actor = "operator"
-    if token is None:
-        return _FeedIdentity(nullcontext(), None)
-    return _FeedIdentity(fleet_client_grokbot.listener_identity(token), actor)
-
-
-def _dispatch_grokbot_reconcile(args, target: Path) -> int:
-    """Preview or draft canonical-owner handoffs without printing report text."""
-    # Reconciliation reads completed report bytes and writes the owner inbox.
-    # Under hub authority the operator or feed identity lists completed scout
-    # jobs with include_all; the control actor has only enqueue/whoami and
-    # cannot stand in for that listing.
-    from .. import grokbot_mcp, grokbot_reconcile
-
-    try:
-        identity = _reconcile_hub_identity(target)
-        with identity.context:
-            if args.apply:
-                result = grokbot_reconcile.apply(target, args.owner, inbox=args.inbox, limit=args.limit)
-            else:
-                result = grokbot_reconcile.preview(target, args.owner, inbox=args.inbox, limit=args.limit)
-    except grokbot_mcp.ConfigurationError:
-        print("error: Grok Bot hub configuration is invalid", file=sys.stderr)
-        return 2
-    except grokbot_reconcile.ReconcileError as exc:
-        print(f"error: {exc.reason}", file=sys.stderr)
-        return 2
-
-    if args.json:
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
-    _print_reconcile_result(result)
-    return 0
-
-
-def _dispatch_grokbot_findings(args, target: Path) -> int:
-    """Preview or draft canonical-owner handoffs without printing finding text."""
-    from .. import grokbot_findings
-
-    try:
-        if args.apply:
-            result = grokbot_findings.apply(target, args.owner, args.manifest, limit=args.limit)
-        else:
-            result = grokbot_findings.preview(target, args.owner, args.manifest, limit=args.limit)
-    except grokbot_findings.FindingsError as exc:
-        print(f"error: {exc.reason}", file=sys.stderr)
-        return 2
-
-    if args.json:
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
-    _print_findings_result(result)
-    return 0
-
-
-def _dispatch_grokbot_relay_findings(args, target: Path) -> int:
-    """Preview or relay findings without printing finding text or credentials."""
-    from .. import grokbot_findings, grokbot_findings_relay
-
-    try:
-        payload = grokbot_findings.load_manifest(args.manifest)
-        if args.apply:
-            result = grokbot_findings_relay.relay_apply(payload["entries"], target, args.owner, limit=args.limit)
-        else:
-            result = grokbot_findings_relay.relay_preview(payload["entries"], target, args.owner, limit=args.limit)
-    except grokbot_findings.FindingsError as exc:
-        print(f"error: {exc.reason}", file=sys.stderr)
-        return 2
-
-    if args.json:
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
-    _print_relay_findings_result(result)
-    return 0
-
-
-def _print_relay_findings_result(result: dict) -> None:
-    """Render relay counts and irreversible relay IDs only."""
-    parts = [
-        f"eligible={result['eligible']}",
-        f"known={result['known']}",
-        f"created={result['created']}",
-        f"limit={result['limit']}",
-    ]
-    if "skipped" in result:
-        parts.insert(2, f"skipped={result['skipped']}")
-    if "pending" in result:
-        parts.append(f"pending={result['pending']}")
-    if "reported" in result:
-        parts.append(f"reported={result['reported']}")
-    print("grokbot relay-findings: " + " ".join(parts))
-    for relay_id in result.get("relays", []):
-        print(f"relay {relay_id}")
-
-
-def _dispatch_grokbot_convert_findings(args) -> int:
-    """Convert live records into a generic manifest without printing finding text."""
-    from .. import grokbot_findings
-
-    try:
-        result = grokbot_findings.convert_live_findings(args.input, args.output)
-    except grokbot_findings.FindingsError as exc:
-        print(f"error: {exc.reason}", file=sys.stderr)
-        return 2
-
-    if args.json:
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
-    _print_convert_findings_result(result)
-    return 0
-
-
-def _print_convert_findings_result(result: dict) -> None:
-    """Render conversion counts and safe identity handles only."""
-    print(f"grokbot convert-findings: converted={result['converted']}")
-    for finding in result.get("findings", []):
-        print(f"finding {finding['producer']} {finding['finding_id']} revision={finding['revision']}")
-
-
-def _print_findings_result(result: dict) -> None:
-    """Render findings counts and safe identity handles only."""
-    parts = [
-        f"eligible={result['eligible']}",
-        f"known={result['known']}",
-        f"created={result['created']}",
-        f"limit={result['limit']}",
-    ]
-    if "skipped" in result:
-        parts.insert(2, f"skipped={result['skipped']}")
-    print("grokbot reconcile-findings: " + " ".join(parts))
-    for finding in result.get("findings", []):
-        print(f"finding {finding['producer']} {finding['finding_id']} revision={finding['revision']}")
-
-
-def _print_reconcile_result(result: dict) -> None:
-    """Render reconcile counts and safe job handles only."""
-    parts = [
-        f"eligible={result['eligible']}",
-        f"known={result['known']}",
-        f"unavailable={result['unavailable']}",
-        f"created={result['created']}",
-        f"limit={result['limit']}",
-    ]
-    if "skipped" in result:
-        parts.insert(3, f"skipped={result['skipped']}")
-    reasons = result.get("unavailable_reasons") or {}
-    for reason, count in sorted(reasons.items()):
-        parts.append(f"{reason}={count}")
-    print("grokbot reconcile-reports: " + " ".join(parts))
-    for job in result.get("jobs", []):
-        print(f"job {job['job_id']} state={job['state']}")
 
 
 _DOCTOR_NON_FAILING_STATUSES = frozenset({"ok", "skipped"})
@@ -1493,11 +1100,13 @@ def _doctor_exit_code(checks: list[dict[str, str]]) -> int:
 
 def _dispatch_grokbot_pack(args, target: Path) -> int:
     """Preview-first connector-pack lifecycle without printing secret values."""
-    from .. import grokbot_mcp, grokbot_ops, grokbot_packs
+    from ..dot import transport as grokbot_mcp, service_render as grokbot_ops, legacy_registry as grokbot_packs
 
     command = args.grokbot_pack_command
     if command in {"relay-setup", "relay-doctor", "relay", "install-relay-service"}:
-        return _dispatch_grokbot_pack_relay(args, target)
+        from .removed_commands import removed
+
+        return removed("run cloud grokbot pack " + command)
     try:
         if command == "list":
             result = {"packs": grokbot_packs.list_packs()}
@@ -1575,158 +1184,6 @@ def _dispatch_grokbot_pack(args, target: Path) -> int:
         return 0
     print(f"grokbot pack {command}: apply={result.get('apply', False)} pack={result.get('pack_id', args.pack_id)}")
     return 0
-
-
-def _dispatch_grokbot_pack_relay(args, target: Path) -> int:
-    """Preview-first first-party finding relay without printing finding text."""
-    from .. import grokbot_pack_relay, grokbot_packs
-
-    command = args.grokbot_pack_command
-    try:
-        if command == "relay-setup":
-            result = (
-                grokbot_packs.apply_relay_setup(target, args.owner)
-                if args.apply
-                else grokbot_packs.preview_relay_setup(target, args.owner)
-            )
-        elif command == "relay-doctor":
-            checks = grokbot_packs.relay_doctor(target)
-            if args.json:
-                print(json.dumps({"checks": checks}, indent=2, sort_keys=True))
-            else:
-                for check in checks:
-                    print(f"{check['check']}: {check['status']}")
-            return 1 if any(check["status"] != "ok" for check in checks) else 0
-        elif command == "relay":
-            result = (
-                grokbot_packs.apply_relay(target, limit=args.limit)
-                if args.apply
-                else grokbot_packs.preview_relay(target, limit=args.limit)
-            )
-        elif command == "install-relay-service":
-            if args.out is None:
-                units = grokbot_packs.render_relay_units(target)
-                for name in (grokbot_pack_relay.RELAY_SERVICE_UNIT, grokbot_pack_relay.RELAY_TIMER_UNIT):
-                    sys.stdout.write(f"# {name}\n{units[name]}")
-                    if not units[name].endswith("\n"):
-                        sys.stdout.write("\n")
-                return 0
-            written = grokbot_packs.write_relay_units(target, Path(args.out), force=args.force)
-            result = {"action": "install-relay-service", "apply": True, "units": [path.name for path in written]}
-        else:
-            print(f"error: unknown Grok Bot pack command: {command}", file=sys.stderr)
-            return 2
-    except grokbot_pack_relay.PackRelayError as exc:
-        print(f"error: {exc.reason}", file=sys.stderr)
-        return 2
-    except (OSError, ValueError):
-        print("error: Grok Bot pack relay operation failed", file=sys.stderr)
-        return 2
-
-    if args.json or command == "relay":
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
-    print(f"grokbot pack {command}: apply={result.get('apply', False)}")
-    return 0
-
-
-def _dispatch_grokbot_ops(args, target: Path) -> int:
-    """Setup, doctor, canary, and install-service for the Grok Bot listener."""
-    from .. import grokbot_mcp, grokbot_ops
-
-    instance = args.instance
-    command = args.grokbot_command
-    try:
-        if command == "setup":
-            grokbot_ops.save_config(
-                target,
-                instance=instance,
-                bind=args.bind,
-                allowed_hosts=args.allow_host,
-                allowed_origins=args.allow_origin,
-                bearer_env=args.bearer_env,
-                bearer_file=args.bearer_file,
-                hub_token_file=args.hub_token_file,
-                client_id=args.client_id,
-            )
-            print(f"grokbot config saved: role={instance}")
-            return 0
-
-        if command == "doctor":
-            from .. import grokbot_memory_credential
-
-            checks = grokbot_ops.doctor(target, instance, client_id=args.client_id)
-            for check in checks:
-                print(f"{check['check']}: {check['status']}")
-            # Host-wide: whether feeds attach memory_refs, and the fixed reason. Never the token or its path.
-            memory_refs = grokbot_memory_credential.doctor_check()
-            print(f"{memory_refs['check']}: {memory_refs['status']} ({memory_refs['detail']})")
-            return _doctor_exit_code([*checks, memory_refs])
-
-        if command == "canary":
-            result = grokbot_ops.canary(target, instance, client_id=args.client_id)
-            if args.json:
-                print(json.dumps(result, indent=2, sort_keys=True))
-            else:
-                print(f"canary: {'ok' if result['ok'] else 'fail'}")
-                if not result["ok"]:
-                    print(f"reason: {result.get('reason', 'unknown')}")
-            return 0 if result["ok"] else 1
-
-        if command == "install-service":
-            config = grokbot_ops.load_config(target, instance, args.client_id)
-            if args.out is None:
-                sys.stdout.write(grokbot_ops.render_unit(config, python=sys.executable, exec_root=target))
-                return 0
-            path = grokbot_ops.write_unit(config, Path(args.out), exec_root=target, force=args.force)
-            print(f"unit written: {path.name}")
-            return 0
-    except grokbot_mcp.ConfigurationError:
-        print("error: Grok Bot configuration is invalid", file=sys.stderr)
-        return 2
-    except grokbot_ops.ServiceRenderError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    except (OSError, ValueError) as exc:
-        print("error: Grok Bot operation failed", file=sys.stderr)
-        del exc
-        return 2
-    return 2
-
-
-def _read_json_object(path: Path, option: str) -> dict:
-    """Load a command payload only from a regular JSON file."""
-    if not path.is_file():
-        raise ValueError(f"{option} is not a file: {path}")
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid JSON object in {option}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError(f"invalid JSON object in {option}")
-    return payload
-
-
-def _print_grokbot_result(result: dict) -> None:
-    """Render safe queue projections without exposing task envelope content."""
-    if "jobs" in result:
-        jobs = result["jobs"]
-        print(f"grokbot jobs: {len(jobs)}")
-        for job in jobs:
-            print(_format_grokbot_job_line(job))
-        return
-    print(_format_grokbot_job_line(result))
-
-
-def _format_grokbot_job_line(job: dict) -> str:
-    line = f"job {job['job_id']} state={job['state']}"
-    claimant = job.get("claimant_worker") or job.get("claimant_node")
-    if claimant:
-        line += f" claimant={claimant}"
-    label = job.get("worker_label")
-    if label:
-        line += f" worker_label={label}"
-    return line
 
 
 if __name__ == "__main__":  # pragma: no cover

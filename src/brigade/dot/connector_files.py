@@ -6,7 +6,7 @@ import os
 import stat
 import re
 from pathlib import Path
-from brigade import grokbot_ops, grokbot_mcp
+from . import service_render as grokbot_ops, transport as grokbot_mcp
 
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 

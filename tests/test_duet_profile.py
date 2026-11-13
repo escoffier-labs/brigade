@@ -13,7 +13,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from brigade import fleet_client, fleet_client_messages, fleet_hub, fleet_hub_messages, grokbot_packs
+from brigade import fleet_client, fleet_client_messages, fleet_hub, fleet_hub_messages
+from brigade.dot import legacy_registry as grokbot_packs
 from brigade.dot import lifecycle as m
 from brigade.dot import watch as w
 from brigade.dot.access_auth import AccessVerifier, AuthError

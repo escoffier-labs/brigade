@@ -1,53 +1,13 @@
-"""Hub-authority listing and report-pairing helpers for Grok Bot jobs.
-
-Queue storage and lease mutations stay in ``grokbot_jobs``. This sibling lists
-hub jobs, projects safe rows, and pairs local artifacts and snapshots by
-``job_id``. ``grokbot_jobs`` re-exports every name so callers and tests keep
-the same bindings.
-"""
+"""Read-only hub projections retained for Task 5."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from .grokbot_job_validation import (
-    JOB_ID_RE,
     WORKER_LABEL_RE,
     GrokbotJobError,
-    validate_job_id as _validate_job_id,
 )
-
-
-def _read_hub_report_from_storage(storage: Any, job: dict[str, Any]) -> dict[str, Any]:
-    """Verify one hub-listed report against its local artifact bytes."""
-    from . import grokbot_jobs
-
-    job_id = _validate_job_id(job["job_id"])
-    expected = job.get("artifact_digest")
-    if not isinstance(expected, str) or not expected:
-        raise GrokbotJobError("missing-digest")
-    data = grokbot_jobs._read_bytes_file(
-        storage.artifacts, f"{job_id}.md", maximum=grokbot_jobs.MAX_REPORT_BYTES, missing_reason="report-missing"
-    )
-    return grokbot_jobs._verified_report(job_id, data, expected)
-
-
-def _snapshots_by_job_id(storage: Any) -> dict[str, dict[str, Any]]:
-    """Index private task snapshots by job_id for hub-authority pairing."""
-    from . import grokbot_jobs
-
-    if storage.snapshots is None:
-        return {}
-    index: dict[str, dict[str, Any]] = {}
-    for name in grokbot_jobs._list_names(storage.snapshots, prefix="grokbot-", suffix=".json"):
-        payload = grokbot_jobs._read_json_file(storage.snapshots, name, missing_ok=True)
-        if not isinstance(payload, dict) or payload.get("schema") != grokbot_jobs.SNAPSHOT_SCHEMA:
-            continue
-        job_id = payload.get("job_id")
-        name_id = name[: -len(".json")]
-        if isinstance(job_id, str) and JOB_ID_RE.fullmatch(job_id) and job_id == name_id:
-            index[job_id] = payload
-    return index
 
 
 def _hub_unavailable_row() -> dict[str, Any]:
@@ -87,10 +47,6 @@ def _hub_tracker_artifact(job: dict[str, Any], kind: object) -> dict[str, Any]:
     return artifact if len(artifact) > 1 else {}
 
 
-def _hub_job(job_id: str) -> dict[str, Any]:
-    return _hub_projection(_require_hub("status", job_id=job_id))
-
-
 def _hub_jobs(*, role: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:
     from . import fleet_client_grokbot
 
@@ -100,26 +56,10 @@ def _hub_jobs(*, role: str | None = None, include_all: bool = False) -> list[dic
     return [_hub_projection_job(job) for job in decision.jobs]
 
 
-def _require_hub(action: str, job_id: str | None = None, **fields: Any) -> Any:
-    from . import fleet_client_grokbot
-
-    operation = getattr(fleet_client_grokbot, action)
-    decision = operation(job_id, **fields) if job_id is not None else operation(**fields)
-    if not decision.granted:
-        raise GrokbotJobError(decision.reason, action=action)
-    return decision
-
-
 def _default_queue_ttl_seconds() -> int:
     from .grokbot_jobs import DEFAULT_QUEUE_TTL_SECONDS
 
     return DEFAULT_QUEUE_TTL_SECONDS
-
-
-def _hub_projection(decision: Any) -> dict[str, Any]:
-    if decision.job is None:
-        raise GrokbotJobError(decision.reason)
-    return _hub_projection_job(decision.job)
 
 
 def _hub_projection_job(job: dict[str, Any]) -> dict[str, Any]:

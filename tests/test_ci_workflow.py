@@ -913,15 +913,15 @@ def test_ci_workflow_test_shards_installs_grokbot_extra_on_python312():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     section = _workflow_job_section(text, "test-shards")
 
-    grokbot_step = _workflow_step_section(text, "test-shards", "Install with grokbot extra")
+    grokbot_step = _workflow_step_section(text, "test-shards", "Install with connector extra")
     assert "if: matrix.python == '3.12'" in grokbot_step
-    assert 'python -m pip install -e ".[dev,grokbot]"' in grokbot_step
+    assert 'python -m pip install -e ".[dev,connector]"' in grokbot_step
 
     default_step = _workflow_step_section(text, "test-shards", "Install")
     assert "if: matrix.python != '3.12'" in default_step
     assert 'python -m pip install -e ".[dev]"' in default_step
 
-    assert section.index("      - name: Install\n") < section.index("      - name: Install with grokbot extra\n")
+    assert section.index("      - name: Install\n") < section.index("      - name: Install with connector extra\n")
 
 
 def test_ci_workflow_uses_sysmon_only_on_python312_covered_shard_step():
@@ -935,14 +935,14 @@ def test_ci_workflow_uses_sysmon_only_on_python312_covered_shard_step():
 
 def test_ci_workflow_test_shards_asserts_grokbot_mcp_tests_run_without_skips():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
-    step = _workflow_step_section(text, "test-shards", "Assert grokbot MCP tests run without skips")
+    step = _workflow_step_section(text, "test-shards", "Assert connector MCP tests run without skips")
 
     assert "if: matrix.python == '3.12' && matrix.shard == 0\n" in step
-    assert "tests/test_grokbot_mcp.py" in step
+    assert "tests/test_cloud_agent_profile.py tests/test_dot_transport.py" in step
     assert "pytest_exit=$?" in step
     assert "[ $pytest_exit -ne 0 ]" in step
     assert "grep -q 'skipped'" in step
-    assert "grokbot MCP tests were skipped" in step
+    assert "connector MCP tests were skipped" in step
     assert "exit 1" in step
 
 
@@ -3117,7 +3117,16 @@ def test_shadow_junit_is_requested_only_on_pull_request_python312_shards():
     assert "--dist=worksteal $SHADOW_JUNIT --cov=" in step
     # The plain (non-coverage) shard step and the grokbot assertion never write junit.
     assert "junit" not in _workflow_step_section(text, "test-shards", "Pytest shard")
-    assert "junit" not in _workflow_step_section(text, "test-shards", "Assert grokbot MCP tests run without skips")
+    assert "junit" not in _workflow_step_section(text, "test-shards", "Assert connector MCP tests run without skips")
     upload = _workflow_step_section(text, "test-shards", "Upload shadow junit")
     assert "continue-on-error: true" in upload
     assert "github.event_name == 'pull_request'" in upload
+
+
+def test_connector_extra_keeps_one_release_grokbot_alias():
+    import tomllib
+    from pathlib import Path
+
+    project = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    extras = project["project"]["optional-dependencies"]
+    assert extras["connector"] == extras["grokbot"]
