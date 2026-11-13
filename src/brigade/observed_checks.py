@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import tempfile
 import stat
 import json
 import os
@@ -18,12 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from . import dirfd, guard, localio, work_mode
-from .agent_identity import MODEL_SOURCES, AgentIdentity
+from .agent_identity import MODEL_SOURCES, AgentIdentity, map_identity
 from .claude_hooks.envelope import redact_paths
 from .guard.types import ScanOptions
 from .inbox_lock import InboxLockTimeout, held_file_lock_descriptor as held_file_lock
 
-OBSERVED_DIR_REL = Path(".brigade/work/observed")
 CHECKS_FILE = "checks.jsonl"
 CHECK_SCHEMA = "brigade.observed_check.v1"
 STATUSES = ("ok", "failed", "unknown")
@@ -38,7 +38,6 @@ LOCK_SECONDS = 2.0
 REDACTED = "[REDACTED]"
 _SENSITIVE_OPTION = re.compile(r"key|token|secret|pass|pwd|auth|cred|bearer", re.I)
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_SAFE_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+-]{0,79}\Z")
 CHECK_KINDS = ("tests", "lint", "types", "build", "checks")
 
 
@@ -88,9 +87,8 @@ class ObservedCheck:
             return None
         if not re.fullmatch(r"[0-9a-f]{16}", data["command_digest"]) or data["tool"] not in _TOOL_LABELS:
             return None
-        for key in ("harness", "model", "agent_type"):
-            if _safe_identity(data[key]) != data[key]:
-                return None
+        data = dict(data)
+        data.update(map_identity(data["harness"], data["model"], data["agent_type"]))
         if not _valid_fingerprint(data["session_fingerprint"], 16):
             return None
         if data["tree_fingerprint"] is not None and not _valid_fingerprint(data["tree_fingerprint"], 40):
@@ -185,7 +183,7 @@ def _normalize_tokens(tokens: list[str]) -> str:
     name = Path(tokens[0]).name
     module = rt._python_module_invocation(tokens)
     if module:
-        return str(module[0]) if module[0] in _BARE_TOOLS else "other"
+        return _normalize_tokens([module[0], *module[1]])
     if name in {"uv", "poetry", "npm", "pnpm", "yarn", "bun"}:
         tail, ambiguous = rt._strip_runner_global_options(name, tokens[1:])
         if ambiguous:
@@ -196,6 +194,8 @@ def _normalize_tokens(tokens: list[str]) -> str:
             tail, ambiguous = rt._strip_runner_run_options(name, tail[1:])
             return "other" if ambiguous else _normalize_tokens(tail)
         script = rt._package_runner_script(tail)
+        if name in {"pnpm", "yarn", "bun"} and tail and tail[0] in _TOOL_TARGETS[name]:
+            script = tail[0]
         return _tool_label(name, script, ":")
     if name == "npx":
         tail, ambiguous = rt._strip_npx_options(tokens[1:])
@@ -217,10 +217,6 @@ def normalize_tool(command: str) -> str:
     rt = _rt()
     try:
         segment = rt._shell_tokens(rt._first_verifier_command(command))
-        if not rt._segment_is_verifier(segment):
-            tokens = rt._strip_env(segment)
-            name = Path(tokens[0]).name if tokens else "other"
-            return name if name in _TOOL_TARGETS else "other"
         label = _normalize_tokens(segment)
         return label if label in _TOOL_LABELS else "other"
     except (ValueError, RecursionError):
@@ -316,50 +312,65 @@ def redact_command(command: str) -> str:
 
 
 def digest_key_path(target: Path) -> Path | None:
-    """Locate the workspace key beside the per-user rails record, never in a repo."""
+    """Locate a workspace's private state beside the per-user rails record."""
     root = work_mode.rails_record_path()
     if root is None:
         return None
     name = hashlib.sha256(work_mode.repository_key(target).encode("utf-8")).hexdigest()
-    path = root.parent / "observed-keys" / (name + ".key")
-    if work_mode._record_in_target_repository(path, target):
-        return None
-    return path
+    return root.parent / "observed" / name / "digest.key"
+
+
+def _state_directory(path: Path, *, create: bool = False) -> int:
+    """Trust one private directory for keys and records, outside every work tree."""
+    path = path.absolute()
+    for ancestor in (path, *path.parents):
+        if os.path.lexists(ancestor / ".git"):
+            raise OSError("observed state unavailable")
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.mkdir(mode=0o700, exist_ok=True)
+    fd = dirfd.open_directory_chain(path)
+    metadata = os.fstat(fd)
+    # Windows relies on the user profile's inherited ACL.
+    if os.name != "nt" and (metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077):
+        os.close(fd)
+        raise OSError("observed state unavailable")
+    return fd
 
 
 def _digest_key(target: Path) -> bytes:
     path = digest_key_path(target)
     if path is None:
-        raise OSError("workspace key unavailable")
-    parent = dirfd.open_directory_chain(path.parent.absolute(), create=True)
+        raise OSError("observed state unavailable")
+    parent = _state_directory(path.parent, create=True)
     try:
-        if os.name != "nt":
-            os.fchmod(parent, 0o700)
-        try:
-            fd = _open_regular(parent, path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-        except FileExistsError:
+        with held_file_lock(_lock_path(path.with_name(CHECKS_FILE)), deadline_seconds=LOCK_SECONDS):
+            if not path.exists():
+                fd, temporary = tempfile.mkstemp(prefix=".key-", dir=path.parent)
+                try:
+                    try:
+                        if os.write(fd, secrets.token_bytes(32)) != 32:
+                            raise OSError("incomplete workspace key")
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                    try:
+                        os.link(temporary, path)
+                    except FileExistsError:
+                        pass
+                finally:
+                    os.unlink(temporary)
             fd = _open_regular(parent, path.name, os.O_RDONLY)
-        else:
             try:
-                key = secrets.token_bytes(32)
-                if os.write(fd, key) != 32:
-                    raise OSError("incomplete workspace key")
-                os.fsync(fd)
+                metadata = os.fstat(fd)
+                if os.name != "nt" and (metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600):
+                    raise OSError("observed state unavailable")
+                key = os.read(fd, 33)
+                if len(key) != 32:
+                    raise OSError("invalid workspace key")
+                return key
             finally:
                 os.close(fd)
-            # The Windows backend grants creation handles write access only.
-            fd = _open_regular(parent, path.name, os.O_RDONLY)
-        try:
-            metadata = os.fstat(fd)
-            if os.name != "nt" and metadata.st_mode & 0o077:
-                raise OSError("workspace key is not private")
-            os.lseek(fd, 0, os.SEEK_SET)
-            key = os.read(fd, 33)
-            if len(key) != 32:
-                raise OSError("invalid workspace key")
-            return key
-        finally:
-            os.close(fd)
     finally:
         os.close(parent)
 
@@ -368,7 +379,7 @@ def command_digest(command: str, target: Path) -> str:
     """Group redacted commands within one workspace using a private HMAC key.
 
     All-zero hex means unavailable and must never be used as a grouping key.
-    Key failure still permits recording, without an unkeyed fallback.
+    Unavailable private state disables recording, without an unkeyed fallback.
     """
     try:
         return hmac.new(_digest_key(target), redact_command(command).encode("utf-8"), hashlib.sha256).hexdigest()[:16]
@@ -380,11 +391,13 @@ def _valid_fingerprint(value: Any, length: int) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{" + str(length) + "}", value) is not None
 
 
-def _safe_identity(value: Any) -> str:
-    if not isinstance(value, str) or not _SAFE_IDENTITY.fullmatch(value):
-        return "unknown"
-    redacted = redact_command(value)
-    return redacted if _SAFE_IDENTITY.fullmatch(redacted) else "unknown"
+def _session_digest(target: Path, session_id: str) -> str:
+    try:
+        return hmac.new(_digest_key(target), b"observed-session\0" + session_id.encode(), hashlib.sha256).hexdigest()[
+            :16
+        ]
+    except (OSError, ValueError, UnicodeError):
+        return DIGEST_UNAVAILABLE
 
 
 def build_check(
@@ -398,16 +411,14 @@ def build_check(
     duration_ms: int | None = None,
 ) -> ObservedCheck:
     tree = localio.tree_fingerprint(target)
-    if not _valid_fingerprint(session_fingerprint, 16) or (tree is not None and not _valid_fingerprint(tree, 40)):
+    if tree is not None and not _valid_fingerprint(tree, 40):
         raise ValueError("invalid observed-check fingerprint")
     return ObservedCheck(
         schema=CHECK_SCHEMA,
         ts=localio.utc_now_iso(),
-        harness=_safe_identity(identity.harness),
-        model=_safe_identity(identity.model),
+        **map_identity(identity.harness, identity.model, identity.agent_type),
         model_source=identity.model_source,
-        agent_type=_safe_identity(identity.agent_type),
-        session_fingerprint=session_fingerprint,
+        session_fingerprint=_session_digest(target, session_fingerprint),
         tree_fingerprint=tree,
         tool=normalize_tool(command),
         command_digest=command_digest(command, target),
@@ -443,119 +454,50 @@ def _open_regular(parent: int, name: str, flags: int) -> int:
         raise
 
 
-def _ensure_ignore(parent: int) -> None:
-    try:
-        fd = _open_regular(parent, ".gitignore", os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-    except FileExistsError:
-        fd = _open_regular(parent, ".gitignore", os.O_RDONLY)
-        try:
-            if os.read(fd, 3) != b"*\n":
-                raise OSError("unexpected observed ignore content")
-        finally:
-            os.close(fd)
-    else:
-        try:
-            if os.write(fd, b"*\n") != 2:
-                raise OSError("incomplete ignore file")
-        finally:
-            os.close(fd)
-
-
-def _generation(parent: int, name: str, schema: Any = None) -> int | None:
-    try:
-        fd = _open_regular(parent, name, os.O_RDONLY)
-    except FileNotFoundError:
-        return None
-    try:
-        # A generation must be a bounded JSONL stream produced by this writer.
-        # Schema-bearing check records also pass the typed validator.
-        records, skipped = _decode(fd, MAX_FILE_BYTES, MAX_LINE_BYTES, MAX_RECORDS)
-        if (
-            skipped
-            or not records
-            or any((schema == CHECK_SCHEMA or "schema" in r) and ObservedCheck.from_dict(r) is None for r in records)
-        ):
-            raise OSError("unrecognized record generation")
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise
-
-
-def _rotate(path: Path, parent: int, fd: int, older: int | None) -> bool:
-    """Rotate validated entries under the single writer lock."""
-    if os.fstat(fd).st_size < ROTATE_BYTES:
-        return False
-    for name, descriptor in ((path.name, fd), (path.name + ".1", older)):
-        if descriptor is not None:
-            named, held = dirfd.stat_child(parent, name), os.fstat(descriptor)
-            if (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino):
-                raise OSError("record entry changed")
-    # Replacing the validated generation avoids a Windows delete-pending name
-    # while its descriptor (or a reader's descriptor) is still open.
-    dirfd.replace_children(parent, path.name, path.name + ".1", replace=older is not None)
-    return True
-
-
 def _lock_path(path: Path) -> Path:
     return path.with_name(path.name + ".lock")
 
 
 def append_jsonl(path: Path, payload: Mapping[str, Any]) -> bool:
-    """Serialize size check, rotation and append on local filesystems.
-
-    POSIX uses held no-follow directory descriptors; Windows uses the shared
-    handle-relative reparse-refusing backend, with inherited ACLs, not chmod.
-    A busy reader can postpone rotation on Windows until a later append.
-    The single OS lock has a two-second bound. Short writes are separated by
-    a newline on the next append. No fsync or network durability is promised.
-    """
+    """Hold one OS lock across descriptor size check, rotation and append."""
     try:
         line = (json.dumps(dict(payload), ensure_ascii=True, allow_nan=False) + "\n").encode("utf-8")
         if len(line) > MAX_LINE_BYTES:
             return False
-        parent = dirfd.open_directory_chain(path.parent.absolute(), create=True)
-        with ExitStack() as stack:
-            stack.callback(os.close, parent)
-            if os.name != "nt":
-                os.fchmod(parent, 0o700)
+        parent = _state_directory(path.parent, create=True)
+        try:
             with held_file_lock(_lock_path(path), deadline_seconds=LOCK_SECONDS) as held:
                 held.verify()
-                if held.parent is not None:
-                    anchor, lock_parent = os.fstat(parent), os.fstat(held.parent)
-                    if (anchor.st_dev, anchor.st_ino) != (lock_parent.st_dev, lock_parent.st_ino):
-                        raise OSError("record directory changed")
-                _ensure_ignore(parent)
-                older = _generation(parent, path.name + ".1", payload.get("schema"))
-                if older is not None:
-                    stack.callback(os.close, older)
-                    if os.name != "nt":
-                        os.fchmod(older, 0o600)
                 fd = _open_regular(parent, path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND)
-                stack.callback(os.close, fd)
-                if os.name != "nt":
-                    os.fchmod(fd, 0o600)
                 try:
-                    rotated = _rotate(path, parent, fd, older)
-                except OSError:
-                    rotated = False
-                if rotated:
-                    fd = _open_regular(parent, path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_APPEND)
-                    stack.callback(os.close, fd)
-                if os.lseek(fd, 0, os.SEEK_END):
-                    os.lseek(fd, -1, os.SEEK_END)
-                    if os.read(fd, 1) != b"\n" and os.write(fd, b"\n") != 1:
-                        return False
-                return os.write(fd, line) == len(line)
+                    if os.name != "nt":
+                        os.fchmod(fd, 0o600)
+                    if os.fstat(fd).st_size >= ROTATE_BYTES:
+                        os.close(fd)
+                        fd = -1
+                        dirfd.replace_children(parent, path.name, path.name + ".1", replace=True)
+                        fd = _open_regular(parent, path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_APPEND)
+                    if os.lseek(fd, 0, os.SEEK_END):
+                        os.lseek(fd, -1, os.SEEK_END)
+                        if os.read(fd, 1) != b"\n" and os.write(fd, b"\n") != 1:
+                            return False
+                    return os.write(fd, line) == len(line)
+                finally:
+                    if fd != -1:
+                        os.close(fd)
+        finally:
+            os.close(parent)
     except (OSError, ValueError, TypeError, RecursionError):
         return False
 
 
 def _decode(fd: int, byte_cap: int, line_cap: int, record_cap: int) -> tuple[list[dict[str, Any]], int]:
-    records: list[dict[str, Any]] = []
+    from collections import deque
+
+    records: deque[dict[str, Any]] = deque(maxlen=record_cap)
     skipped = 0
     if os.fstat(fd).st_size > byte_cap:
-        return records, 1
+        return [], 1
     with os.fdopen(os.dup(fd), "rb") as stream:
         remaining = byte_cap
         while remaining > 0:
@@ -563,9 +505,12 @@ def _decode(fd: int, byte_cap: int, line_cap: int, record_cap: int) -> tuple[lis
             if not line:
                 break
             remaining -= len(line)
-            if len(line) > line_cap or remaining < 0 or len(records) >= record_cap:
+            if len(line) > line_cap or remaining < 0:
                 skipped += 1
-                break
+                while line and not line.endswith(b"\n") and remaining > 0:
+                    line = stream.readline(min(line_cap, remaining) + 1)
+                    remaining -= len(line)
+                continue
             try:
                 if not line.endswith(b"\n"):
                     raise ValueError("partial or oversized line")
@@ -579,7 +524,7 @@ def _decode(fd: int, byte_cap: int, line_cap: int, record_cap: int) -> tuple[lis
                 records.append(record)
             except (ValueError, UnicodeError, RecursionError):
                 skipped += 1
-    return records, skipped
+    return list(reversed(records)), skipped
 
 
 def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
@@ -591,7 +536,7 @@ def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
     records: list[dict[str, Any]] = []
     skipped = 0
     try:
-        parent = dirfd.open_directory_chain(path.parent.absolute())
+        parent = _state_directory(path.parent)
         with ExitStack() as streams:
             streams.callback(os.close, parent)
             with ExitStack() as locking:
@@ -600,7 +545,7 @@ def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
                 except (InboxLockTimeout, OSError):
                     skipped += 1
                 opened = []
-                for name in (path.name + ".1", path.name):
+                for name in (path.name, path.name + ".1"):
                     try:
                         fd = _open_regular(parent, name, os.O_RDONLY)
                         streams.callback(os.close, fd)
@@ -609,10 +554,11 @@ def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
                         continue
                     except OSError:
                         skipped += 1
-            for fd in opened:
-                batch, lost = _decode(fd, MAX_FILE_BYTES, MAX_LINE_BYTES, MAX_RECORDS - len(records))
-                records.extend(batch)
-                skipped += lost
+                for fd in opened:
+                    batch, lost = _decode(fd, MAX_FILE_BYTES, MAX_LINE_BYTES, MAX_RECORDS - len(records))
+                    records.extend(batch)
+                    skipped += lost
+                streams.close()
     except FileNotFoundError:
         pass
     except OSError:
@@ -624,16 +570,22 @@ def append_check(target: Path, check: ObservedCheck) -> bool:
     # Validate the closed label vocabulary even for directly constructed records.
     payload = check.to_dict()
     payload["tool"] = check.tool if check.tool in _TOOL_LABELS else "other"
-    payload["harness"] = _safe_identity(check.harness)
-    payload["model"] = _safe_identity(check.model)
-    payload["agent_type"] = _safe_identity(check.agent_type)
+    payload.update(map_identity(check.harness, check.model, check.agent_type))
     if ObservedCheck.from_dict(payload) is None:
         return False
-    return append_jsonl(target / OBSERVED_DIR_REL / CHECKS_FILE, payload)
+    try:
+        _digest_key(target)
+        key_path = digest_key_path(target)
+        return key_path is not None and append_jsonl(key_path.with_name(CHECKS_FILE), payload)
+    except (OSError, ValueError):
+        return False
 
 
 def read_checks(target: Path) -> tuple[list[ObservedCheck], int]:
-    records, skipped = read_jsonl(target / OBSERVED_DIR_REL / CHECKS_FILE)
+    path = digest_key_path(target)
+    if path is None:
+        return [], 0
+    records, skipped = read_jsonl(path.with_name(CHECKS_FILE))
     checks = []
     for record in records:
         check = ObservedCheck.from_dict(record)

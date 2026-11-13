@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
+from typing import Any
 
 from . import localio
+from .selection import KNOWN_HARNESSES
 
 UNKNOWN = "unknown"
 MODEL_SOURCES = ("hook-session-start", "hook-model-switch", "hook-event", "env", UNKNOWN)
@@ -58,3 +61,19 @@ def env_model(environ: Mapping[str, str] | None = None) -> tuple[str, str]:
 def session_fingerprint(harness: str, session_id: str) -> str:
     key = "claude_session_id" if harness == "claude-code" else f"{harness}_session_id"
     return localio.stable_hash({key: session_id})
+
+
+# Hook defaults plus memory_verify_seat.CLAUDE_BUILTIN_AGENTS. Custom names stay unknown.
+AGENT_TYPES = frozenset((UNKNOWN, "main", "subagent", "claude", "Explore", "Plan", "general-purpose"))
+# Families listed by the harness/model catalog, without provider paths or free text.
+MODEL_FAMILIES = ("claude-", "gpt-", "gemini-", "kimi-", "glm-", "composer-", "muse-")
+
+
+def map_identity(harness: Any, model: Any, agent_type: Any) -> dict[str, str]:
+    """Map untrusted identity fields to closed names or a shaped model id."""
+    model = model.lower() if isinstance(model, str) else ""
+    return {
+        "harness": harness if isinstance(harness, str) and harness in (*KNOWN_HARNESSES, "claude-code") else UNKNOWN,
+        "model": model if re.fullmatch(r"[a-z0-9.-]{3,48}", model) and model.startswith(MODEL_FAMILIES) else UNKNOWN,
+        "agent_type": agent_type if isinstance(agent_type, str) and agent_type in AGENT_TYPES else UNKNOWN,
+    }

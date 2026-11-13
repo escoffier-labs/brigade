@@ -1,3 +1,3 @@
-- Add shared agent identity detection and a private, rotating observed-check log with command digests and tolerant readers. Command text is never stored. Hook capture and reports are not connected yet.
-- Redact commands before hashing and constrain tool labels and observed identity fields. Skip and count legacy command-text records. Serialize rotation and appends with bounded OS locks, recover after partial lines, and count unlocked reader fallbacks. Tighten owner-only storage permissions where supported.
-- Protect observed-check grouping with per-workspace HMAC keys outside repositories, refuse linked and special record files, bound record readers, validate identity fields and keep records ignored in partially installed workspaces.
+- Add shared agent identity and unsigned observed checks, separate from verification receipts. Hook capture and reports remain for later changes.
+- Store records and atomic HMAC keys in private per-user workspace directories outside every Git work tree. Map identity fields to closed values and key session fingerprints with a separate HMAC domain.
+- Rotate without parsing generations, recover after torn lines, and return the newest bounded records. Classify supported Python modules and package-runner checks by their underlying tools.

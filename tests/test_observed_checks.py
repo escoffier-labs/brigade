@@ -8,8 +8,6 @@ from pathlib import Path
 import pytest
 
 from brigade import agent_identity, guard, observed_checks
-from brigade.install import build_gitignore_block
-from brigade.selection import Selection
 from tests._home import set_home
 
 
@@ -106,16 +104,16 @@ def test_rotation_keeps_one_generation(tmp_path, monkeypatch):
     checks = [_check(tmp_path, command=f"pytest {i}") for i in range(10)]
     for check in checks:
         assert observed_checks.append_check(tmp_path, check)
-    path = tmp_path / observed_checks.OBSERVED_DIR_REL / observed_checks.CHECKS_FILE
+    path = observed_checks.digest_key_path(tmp_path).with_name(observed_checks.CHECKS_FILE)
     assert path.exists() and path.with_name(path.name + ".1").exists()
     assert not path.with_name(path.name + ".2").exists()
-    assert observed_checks.read_checks(tmp_path) == (checks[-2:], 0)
+    assert observed_checks.read_checks(tmp_path) == (list(reversed(checks[-2:])), 0)
 
 
 def test_read_skips_corrupt_lines_and_counts_them(tmp_path):
     check = _check(tmp_path)
     observed_checks.append_check(tmp_path, check)
-    path = tmp_path / observed_checks.OBSERVED_DIR_REL / observed_checks.CHECKS_FILE
+    path = observed_checks.digest_key_path(tmp_path).with_name(observed_checks.CHECKS_FILE)
     with path.open("ab") as stream:
         stream.write(b'{"half": \nnull\n[]\n\xff\n')
         stream.write((json.dumps(check.to_dict()) + "\n").encode())
@@ -148,12 +146,6 @@ def test_record_reader_validates_every_field(tmp_path):
         assert observed_checks.ObservedCheck.from_dict(dict(data, **{key: value})) is None
 
 
-def test_append_failure_returns_false_without_raising(tmp_path):
-    (tmp_path / ".brigade").mkdir()
-    (tmp_path / ".brigade/work").write_text("blocked")
-    assert not observed_checks.append_check(tmp_path, _check(tmp_path))
-
-
 def test_observed_file_is_not_a_receipt(tmp_path):
     observed_checks.append_check(tmp_path, _check(tmp_path))
     assert not (tmp_path / ".brigade/work/verify-runs").exists()
@@ -163,13 +155,12 @@ def test_observed_file_is_not_a_receipt(tmp_path):
     )
 
 
-def test_observed_file_passes_guard_scan_and_is_gitignored(tmp_path):
+def test_observed_file_passes_guard_scan(tmp_path):
     # content-guard: allow bare-token-prefix
     command = 'pytest -H "Authorization: Bearer ghp_' + "A" * 36 + '"'
     observed_checks.append_check(tmp_path, _check(tmp_path, command))
-    path = tmp_path / observed_checks.OBSERVED_DIR_REL / observed_checks.CHECKS_FILE
+    path = observed_checks.digest_key_path(tmp_path).with_name(observed_checks.CHECKS_FILE)
     assert guard.scan_text(path.read_text()).findings == []
-    assert ".brigade/work/" in build_gitignore_block(Selection(depth="workspace", harnesses=("codex",)))
 
 
 def test_private_creation_and_existing_mode_preserved(tmp_path):
@@ -193,7 +184,7 @@ def test_obsolete_rotation_lock_does_not_control_writers(tmp_path, monkeypatch):
     assert path.with_name(path.name + ".1").exists()
     assert observed_checks.append_jsonl(path, {"three": 3})
     assert lock.read_text() == "obsolete lock"
-    assert observed_checks.read_jsonl(path) == ([{"two": 2}, {"three": 3}], 0)
+    assert observed_checks.read_jsonl(path) == ([{"three": 3}, {"two": 2}], 0)
 
 
 def _append_many(path):
@@ -229,7 +220,7 @@ def test_direct_record_rejects_invalid_digest(tmp_path):
 
 def test_legacy_command_records_are_skipped(tmp_path):
     check = _check(tmp_path)
-    path = tmp_path / observed_checks.OBSERVED_DIR_REL / observed_checks.CHECKS_FILE
+    path = observed_checks.digest_key_path(tmp_path).with_name(observed_checks.CHECKS_FILE)
     legacy = check.to_dict()
     legacy["command"] = "pytest"
     assert observed_checks.append_jsonl(path, legacy)
@@ -254,3 +245,90 @@ def test_secret_value_changes_preserve_digest(tmp_path):
     assert observed_checks.command_digest("TOKEN=one pytest", tmp_path) == observed_checks.command_digest(
         "TOKEN=two pytest", tmp_path
     )
+
+
+@pytest.mark.parametrize(
+    "command,tool,kind",
+    [
+        ("python -m mypy src", "mypy", "types"),
+        ("python3 -m mypy src", "mypy", "types"),
+        ("python -m ruff check .", "ruff check", "lint"),
+        ("python -m pytest", "pytest", "tests"),
+        ("uv run mypy src", "mypy", "types"),
+        ("uv run ruff check .", "ruff check", "lint"),
+        ("npx eslint .", "eslint", "lint"),
+        ("npm run build", "npm:build", "build"),
+        ("pnpm build", "pnpm:build", "build"),
+        ("yarn build", "yarn:build", "build"),
+    ],
+)
+def test_wrapped_tool_classification(tmp_path, command, tool, kind):
+    check = _check(tmp_path, command)
+    assert check.tool == tool
+    assert observed_checks.check_kind(check.tool) == kind
+
+
+def test_real_size_two_rotations_keep_newest_records(tmp_path):
+    from dataclasses import replace
+
+    check = _check(tmp_path)
+    assert observed_checks.append_check(tmp_path, check)
+    path = observed_checks.digest_key_path(tmp_path).with_name(observed_checks.CHECKS_FILE)
+    # Bulk uses the exact serialization from real producing functions. Public
+    # appends straddle each real 4 MiB boundary, without changing either limit.
+    line = (json.dumps(check.to_dict(), ensure_ascii=True, allow_nan=False) + "\n").encode()
+    count = observed_checks.ROTATE_BYTES // len(line) + 1
+    newest = replace(check, duration_ms=123)
+    for _ in range(2):
+        with path.open("wb") as stream:
+            stream.write(line * count)
+        assert observed_checks.append_check(tmp_path, newest)
+    assert observed_checks.append_check(tmp_path, replace(newest, duration_ms=456))
+    records, skipped = observed_checks.read_checks(tmp_path)
+    assert skipped == 0
+    assert len(records) == observed_checks.MAX_RECORDS
+    assert [r.duration_ms for r in records[:3]] == [456, 123, None]
+    assert path.with_name(path.name + ".1").exists()
+    assert not path.with_name(path.name + ".2").exists()
+
+
+@pytest.mark.parametrize("generation", ["checks.jsonl", "checks.jsonl.1"])
+def test_torn_generation_does_not_block_append(tmp_path, generation):
+    check = _check(tmp_path)
+    assert observed_checks.append_check(tmp_path, check)
+    path = observed_checks.digest_key_path(tmp_path).with_name(generation)
+    with path.open("wb") as stream:
+        stream.write((json.dumps(check.to_dict()) + "\n").encode() + b'{"torn":')
+    assert observed_checks.append_check(tmp_path, check)
+    records, skipped = observed_checks.read_checks(tmp_path)
+    assert len(records) == (2 if generation == "checks.jsonl" else 3)
+    assert skipped == 1
+
+
+def test_reader_skips_oversized_line_between_valid_records(tmp_path):
+    check = _check(tmp_path)
+    assert observed_checks.append_check(tmp_path, check)
+    path = observed_checks.digest_key_path(tmp_path).with_name(observed_checks.CHECKS_FILE)
+    with path.open("ab") as stream:
+        stream.write(b"x" * (observed_checks.MAX_LINE_BYTES + 1) + b"\n")
+    assert observed_checks.append_check(tmp_path, check)
+    assert observed_checks.read_checks(tmp_path) == ([check, check], 1)
+
+
+def test_append_does_not_open_or_parse_previous_generation(tmp_path, monkeypatch):
+    check = _check(tmp_path)
+    assert observed_checks.append_check(tmp_path, check)
+    path = observed_checks.digest_key_path(tmp_path).with_name(observed_checks.CHECKS_FILE)
+    path.with_name(path.name + ".1").write_bytes(b'{"torn":')
+    original = observed_checks._open_regular
+
+    def opening(parent, name, flags):
+        assert not name.endswith(".1")
+        return original(parent, name, flags)
+
+    def decode(*args):
+        pytest.fail("appending must not parse generations")
+
+    monkeypatch.setattr(observed_checks, "_decode", decode)
+    monkeypatch.setattr(observed_checks, "_open_regular", opening)
+    assert observed_checks.append_check(tmp_path, check)

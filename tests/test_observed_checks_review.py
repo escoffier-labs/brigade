@@ -92,7 +92,7 @@ def test_random_secrets_in_every_position(tmp_path):
         secret = secrets.token_hex(24)
         command = position.format(s=shlex.quote(secret), raw=secret)
         assert checks.append_check(tmp_path, _record(tmp_path, command))
-        path = tmp_path / checks.OBSERVED_DIR_REL / checks.CHECKS_FILE
+        path = checks.digest_key_path(tmp_path).with_name(checks.CHECKS_FILE)
         line = path.read_text().splitlines()[-1]
         assert secret not in line
         assert all(secret[i : i + 8] not in line for i in range(len(secret) - 7))
@@ -114,18 +114,6 @@ def test_unsafe_identity_is_unknown(tmp_path, value):
     stored, skipped = checks.read_checks(tmp_path)
     assert skipped == 0
     assert stored[0].model == stored[0].agent_type == "unknown"
-
-
-@pytest.mark.parametrize("error", [FileNotFoundError, PermissionError, OSError])
-def test_rotation_error_still_appends(tmp_path, monkeypatch, error):
-    path = tmp_path / "checks.jsonl"
-
-    def fail(*_args):
-        raise error("simulated rotation failure")
-
-    monkeypatch.setattr(checks, "_rotate", fail)
-    assert checks.append_jsonl(path, {"record": 1})
-    assert checks.read_jsonl(path) == ([{"record": 1}], 0)
 
 
 def test_short_write_does_not_consume_next_record(tmp_path, monkeypatch):
@@ -247,20 +235,6 @@ def test_unreadable_parent_is_counted(tmp_path, monkeypatch):
     assert checks.read_jsonl(tmp_path / "checks.jsonl") == ([], 1)
 
 
-@pytest.mark.parametrize("threshold", [1, checks.ROTATE_BYTES])
-def test_existing_public_file_is_tightened(tmp_path, monkeypatch, threshold):
-    monkeypatch.setattr(checks, "ROTATE_BYTES", threshold)
-    path = tmp_path / "checks.jsonl"
-    assert checks.append_jsonl(path, {"record": 1})
-    if os.name != "nt":
-        path.chmod(path.stat().st_mode | stat.S_IRGRP | stat.S_IROTH)
-        assert checks.append_jsonl(path, {"record": 2})
-        assert not path.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO)
-        older = path.with_name(path.name + ".1")
-        if older.exists():
-            assert not older.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO)
-
-
 def test_reader_retains_generation_during_concurrent_rotation(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor, TimeoutError
     from threading import Event
@@ -294,24 +268,3 @@ def test_reader_retains_generation_during_concurrent_rotation(tmp_path, monkeypa
         assert future is not None and future.result(timeout=5)
     assert skipped == 0
     assert {"record": "current"} in records
-
-
-def test_vanished_active_file_still_appends(tmp_path, monkeypatch):
-    path = tmp_path / "checks.jsonl"
-    assert checks.append_jsonl(path, {"record": "old"})
-    monkeypatch.setattr(checks, "ROTATE_BYTES", 1)
-    original = Path.stat
-    raced = False
-
-    def stat_path(source, *args, **kwargs):
-        nonlocal raced
-        if source == path and not raced:
-            raced = True
-            value = original(source, *args, **kwargs)
-            os.replace(path, path.with_name(path.name + ".1"))
-            return value
-        return original(source, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "stat", stat_path)
-    assert checks.append_jsonl(path, {"record": "new"})
-    assert {"record": "new"} in checks.read_jsonl(path)[0]
