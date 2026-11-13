@@ -76,26 +76,33 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     mode_group = p_init.add_mutually_exclusive_group()
     mode_group.add_argument(
+        "--off",
         "--yolo",
+        dest="off",
         action="store_true",
         help="Keep shared context (brief, recall, Fleet Hub, handoffs on request) without verification "
-        "enforcement. Switch back with `brigade work mode set engineer`.",
+        "enforcement. Switch back with `brigade work mode set strict`.",
     )
     mode_group.add_argument(
+        "--strict",
         "--engineer",
+        dest="strict",
         action="store_true",
-        help="Engineer mode (the default for new installs): route checks through `brigade work verify run` "
-        "and keep the Stop receipt gate. Switches an existing yolo install back.",
+        help="Strict mode (the default for new installs): route checks through `brigade work verify run` "
+        "and keep the Stop receipt gate. Switches an existing unenforced install back.",
     )
+    mode_group.add_argument("--observe", action="store_true", help="Observe mode: no verification enforcement.")
     p_init.set_defaults(func=dispatch)
 
 
 def _requested_work_mode(args: argparse.Namespace) -> str | None:
-    """``yolo`` or ``engineer`` when a mode flag was passed; None keeps the recorded mode."""
-    if getattr(args, "yolo", False):
-        return "yolo"
-    if getattr(args, "engineer", False):
-        return "engineer"
+    """``off`` or ``strict`` when a mode flag was passed; None keeps the recorded mode."""
+    if getattr(args, "off", False):
+        return "off"
+    if getattr(args, "strict", False):
+        return "strict"
+    if getattr(args, "observe", False):
+        return "observe"
     return None
 
 

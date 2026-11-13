@@ -270,8 +270,12 @@ def test_strict_workspace_cd_into_observe_repo_is_allowed(repos):
     assert not verification_mode.verification_enforced("cd observed && pytest", repos.strict_root, repos.strict_root)
 
 def test_governing_modes_reports_each_verifier_target(repos):
-    modes = verification_mode.governing_modes("pytest && cd observed && pytest", repos.strict_root, repos.strict_root)
-    assert modes == [(repos.strict_root, "strict"), (repos.observed, "observe")]
+    modes = verification_mode.governing_modes("pytest && cd ./observed && pytest", repos.strict_root, repos.strict_root)
+    assert modes == [(repos.strict_root, "strict")]
+    assert verification_mode.governing_modes(
+        "cd ./observed && pytest", repos.strict_root, repos.strict_root
+    ) == [(repos.observed, "observe")]
+    assert verification_mode.governing_modes("echo done", repos.strict_root, repos.strict_root) == []
 ```
 
 Adjust the `repos` fixture to build one workspace and children in each mode. Keep every existing case's expectation, with `yolo` read as `off`.

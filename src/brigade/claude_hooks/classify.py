@@ -89,15 +89,15 @@ def classify(target: Path) -> dict[str, Any] | None:
     skill_present, skill_current = _skill_current(target)
     instruction_current = _instruction_import_current(target)
     integrity_issue = None
-    yolo = work_mode.is_yolo(target)
+    mode = work_mode.resolve_mode(target)
     try:
-        # The integrity scan runs in every mode; only dormancy depends on yolo.
+        # The integrity scan runs in every mode; only dormancy depends on strict mode.
         recent_unreceipted = _recent_write_without_receipt(target)
     except SessionIntegrityError as exc:
         recent_unreceipted = False
         integrity_issue = f"session directory integrity refused: {exc}"
-    # Yolo mode opts out of receipts, so a missing one is not dormancy (#2233).
-    dormant = recent_unreceipted and not yolo
+    # Unenforced modes opt out of receipts, so a missing one is not dormancy (#2233).
+    dormant = recent_unreceipted and mode == work_mode.MODE_STRICT
 
     issues: list[str] = []
     if not instruction_current:
@@ -121,8 +121,8 @@ def classify(target: Path) -> dict[str, Any] | None:
     if integrity_issue is not None:
         state = "error"
         issues.append(integrity_issue)
-    elif yolo:
-        state = "yolo"
+    elif mode != work_mode.MODE_STRICT:
+        state = mode
     elif dormant:
         state = "dormant"
         issues.append("recent work has no verification receipt")
