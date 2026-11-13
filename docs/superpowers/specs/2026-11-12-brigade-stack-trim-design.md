@@ -400,3 +400,26 @@ operator on 2026-11-12.
 3. When observe-and-score becomes the default, do existing installs stay
    strict? Proposed: yes, by writing their current mode explicitly at
    upgrade.
+
+## Decisions and findings recorded on 2026-11-13
+
+- **(decided)** Message encryption is cut in two steps. Step 1, the client
+  side, merged in #2536. Step 2 removes the hub storage, routes, schema and
+  the Rust hub code with the next hub contract version. Until then the hub
+  restore text and the hub architecture doc still describe statement signing.
+- **(decided)** `0.32.0` is the removal version for every removed command.
+- **(found)** Archiving against a live hub works with a 0.31.0 sync running
+  beside it. Cards whose hub id collides with another card are archived
+  locally and skipped on the hub, so the hub can keep a live card under the
+  shared id. The archive step needs a rule for that case.
+- **(found)** The archive folder sits inside the tree that another memory
+  search on the same machine may index. Archived cards leave Brigade search
+  and the hub but can still surface there. The archive location or an ignore
+  marker needs a decision.
+- **(found)** The built-in handoff ingester reads local folders only. A
+  machine that collects handoffs from other hosts cannot switch to it until
+  handoffs travel through the hub. Held review drafts written by another
+  ingester are not readable by the inbox drain.
+- **(found)** A one-time model triage cleared a 359-draft review inbox with
+  one item left for the owner. The same triage, run on a schedule under the
+  quota cap, is the design for the background model step in Stage A.
