@@ -63,6 +63,9 @@ def review_date(target: Path, rel: str, today: date) -> tuple[str, str]:
         raise FixRefused("date-unavailable")
     if value > today:
         raise FixRefused("date-future")
+    if source == "file-mtime" and value == today:
+        # A file written today, by an undo or anything else, says nothing about a review.
+        raise FixRefused("date-too-recent")
     return value.isoformat(), source
 
 
@@ -84,6 +87,15 @@ def prepare(target: Path, config: care.MemoryCareConfig, item: dict[str, Any], t
     digest = journal.kernel.content_digest(before)
     if item.get("content_digest") and item["content_digest"] != digest:
         raise FixRefused("changed")
+    # An undone fix stays undone while the card is still as the undo left it.
+    for decision in journal.entries(target):
+        if decision.kind == "fix" and decision.undone_by and rel in decision.paths and f"{kind}:" in decision.reason:
+            try:
+                restored = journal.before_bytes(target, decision, rel)
+            except (OSError, ValueError):
+                restored = None
+            if restored is None or restored == before:
+                raise FixRefused("undone")
     text = before.decode("utf-8")
     if memory_archive.frontmatter_refusal(text):
         raise FixRefused("frontmatter-refused")
@@ -163,7 +175,11 @@ def apply_fixes(
     grouped: dict[str, list[dict[str, Any]]] = {}
     for item in plan["items"]:
         if item.get("blockers"):
-            reason = item["blockers"][0] if item["blockers"][0] in {"date-future", "date-unavailable"} else "blocked"
+            reason = (
+                item["blockers"][0]
+                if item["blockers"][0] in {"date-future", "date-unavailable", "date-too-recent", "undone"}
+                else "blocked"
+            )
             result["skipped"] += 1
             result["reasons"][reason] = result["reasons"].get(reason, 0) + 1
             continue

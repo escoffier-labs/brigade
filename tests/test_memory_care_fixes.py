@@ -184,6 +184,21 @@ def test_relative_target_cli_and_tend_stage(tmp_path, monkeypatch, capsys):
     assert b"fresh_until:" in path.read_bytes()
     assert tend.STAGES.index("fixes") < tend.STAGES.index("retire")
     tend.undo(target, journal.entries(target)[0].decision_id)
+    undone = path.read_bytes()
+    assert undone == before
+    # The undo sticks: the next run reports the fix as undone and leaves the card alone.
+    result = tend.run(Path("ws"), stages=["fixes"], today=TODAY)
+    assert result["stages"]["fixes"]["applied"] == 0
+    assert path.read_bytes() == undone
+    from brigade import memory_care_fixes as fixes
+
+    item = {"card_file": "memory/cards/a.md", "issue_type": "missing-freshness"}
+    with pytest.raises(fixes.FixRefused, match="undone"):
+        fixes.prepare(target.resolve(), care._config_or_default(target), item, TODAY)
+    # Once the card is edited, the earlier undo no longer speaks for it.
+    path.write_bytes(undone.replace(b"Useful fact.", b"Useful fact, revised."))
+    os.utime(path, (1793491200, 1793491200))
+    assert care.scan(target=target, json_output=True) == 0
     result = tend.run(Path("ws"), stages=["fixes"], today=TODAY)
     assert result["stages"]["fixes"]["applied"] == 1
 
@@ -324,3 +339,18 @@ def test_nested_text_that_looks_like_a_date_field_is_never_overwritten(tmp_path,
     result = fixes.apply_fixes(tmp_path, care._config_or_default(tmp_path), today=TODAY)
     assert result["applied"] == 0
     assert path.read_bytes() == before
+
+
+def test_a_file_written_today_is_not_a_review_date(tmp_path):
+    from brigade import memory_care_fixes as fixes
+
+    path = card(tmp_path, "missing-reviewed")
+    stamp = datetime(TODAY.year, TODAY.month, TODAY.day, 12, tzinfo=timezone.utc).timestamp()
+    os.utime(path, (stamp, stamp))
+    before = path.read_bytes()
+    result = fixes.apply_fixes(tmp_path, care._config_or_default(tmp_path), today=TODAY)
+    assert result["applied"] == 0
+    assert path.read_bytes() == before
+    item = {"card_file": "memory/cards/a.md", "issue_type": "missing-reviewed"}
+    with pytest.raises(fixes.FixRefused, match="date-too-recent"):
+        fixes.prepare(tmp_path, care._config_or_default(tmp_path), item, TODAY)
