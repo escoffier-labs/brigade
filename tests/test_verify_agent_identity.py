@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from brigade import agent_identity, cli, localio, outcome_cmd
+from brigade import agent_identity, cli, localio, outcome_cmd, observed_checks
 from brigade.claude_hooks import runtime
 from tests._home import set_home
 from tests.test_work_mode import _payload, _wired
@@ -32,6 +32,7 @@ def test_receipt_and_outcome_identity(tmp_path, monkeypatch, capsys, source):
     if source == "env":
         monkeypatch.setenv("BRIGADE_CONTEXT_MODEL", "claude-sonnet-4-6")
     if source == "session":
+        monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
         monkeypatch.setattr(runtime, "_run_brief", lambda *_a, **_k: "brief")
         runtime.handle_payload("SessionStart", _payload(target, "SessionStart", model="claude-sonnet-4-6"))
         monkeypatch.setenv("BRIGADE_AGENT_SESSION", runtime._session_fingerprint("s1"))

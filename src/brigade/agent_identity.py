@@ -117,3 +117,16 @@ def stamp_verify_identity(receipt: dict[str, Any], target: Path) -> None:
     claude_session = os.environ.get("BRIGADE_CLAUDE_SESSION")
     if claude_session and re.fullmatch(r"[0-9a-f]{16}", claude_session):
         receipt["harness_session"] = {"harness": "claude", "fingerprint": claude_session}
+
+
+def map_receipt_identity(identity: Mapping[str, Any]) -> dict[str, str]:
+    """Revalidate declared attribution before copying it into a tracked outcome."""
+    source = identity.get("model_source")
+    harness_source = identity.get("harness_source")
+    return {
+        **map_identity(identity.get("harness"), identity.get("model"), identity.get("agent_type")),
+        "model_source": source if isinstance(source, str) and source in MODEL_SOURCES else UNKNOWN,
+        "harness_source": harness_source
+        if isinstance(harness_source, str) and harness_source in ("env", "auto", "hook-event")
+        else UNKNOWN,
+    }

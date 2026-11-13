@@ -12,7 +12,14 @@ from tests.test_work_mode import _bash, _payload, _set_mode, _wired, _write
 
 
 @pytest.fixture
-def target(tmp_path, monkeypatch, capsys):
+def target(tmp_path, monkeypatch, capsys, request):
+    if request.node.originalname in {
+        "test_identity_survives_switch_write_and_epoch",
+        "test_capture_status_identity_and_private_record",
+        "test_export_and_managed_event",
+        "test_unknown_model_switch_does_not_reuse_previous_identity",
+    }:
+        monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
     set_home(monkeypatch, tmp_path / "home")
     repo = _wired(tmp_path)
     _set_mode(repo, "observe", capsys)
@@ -74,9 +81,11 @@ def test_capture_exception_is_silent(target, monkeypatch, capsys):
 
 def test_export_and_managed_event(target, tmp_path, monkeypatch):
     env = tmp_path / "env.sh"
+    env.write_text("")
     monkeypatch.setenv("CLAUDE_ENV_FILE", str(env))
     runtime.handle_payload("SessionStart", _payload(target, "SessionStart"))
-    assert env.read_text() == f"export BRIGADE_AGENT_SESSION={runtime._session_fingerprint('s1')}\n"
+    expected = f"export BRIGADE_AGENT_SESSION={runtime._session_fingerprint('s1')}\n"
+    assert env.read_text() == expected
     assert "PostModelSwitch" in package.MANAGED_EVENTS
     hooks = json.loads((target / ".claude/settings.json").read_text())["hooks"]
     assert "PostModelSwitch" in hooks

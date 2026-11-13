@@ -95,7 +95,22 @@ independent security review required by issue #1238 remain merge gates.
 Claude Code session state also caches `model` and `model_source` from
 `SessionStart` and `PostModelSwitch`. Values pass through the shared identity
 mapper. They survive state normalization and task-epoch resets. Session start
-exports `BRIGADE_AGENT_SESSION` to an absolute `CLAUDE_ENV_FILE` for verify
-identity lookup. This does not set the strict gate's `BRIGADE_CLAUDE_SESSION`.
+exports `BRIGADE_AGENT_SESSION` in strict and observe modes to an absolute
+`CLAUDE_ENV_FILE` for verify identity lookup. The constant `export NAME=value`
+form also qualifies as a plain assignment for PowerShell commands in Claude
+Code v2.1.296 or later. Hooks running in
+PowerShell do not receive this file variable, so those sessions use declared
+environment attribution or unknown.
+Off mode skips these new identity and environment writes. This does not set
+the strict gate's `BRIGADE_CLAUDE_SESSION`.
 Observed checks use separate private per-user storage and never store command
 text, command output, paths, prompt text, or raw session identifiers.
+
+Optional tool-event capture skips tree fingerprinting and uses a 100 ms
+cooperative deadline checked between steps, including identity, key, lock, and
+append access. Session start and model switches use a 1 second budget for
+identity caching and environment export.
+The bound is the deadline plus one bounded step. Capture runs after existing
+event handling and silently drops records when the deadline expires.
+A literal `cd` from an unwired session into a wired workspace is discovered:
+observe mode records the check and strict mode retains its existing enforcement.

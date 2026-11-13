@@ -2252,6 +2252,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
     hub_recall.start_event(_hook_timeout_seconds())  # recall gets only what the brief leaves (S24)
     pin = pin if pin is not None else _hook_pin_from_env()
     result = write_attribution.handle_event(event, payload, pin=pin)
+    check_events.after_handling(event, payload, pin=pin)
     # Live Fleet Hub inbox delivery rides on prompt and tool events of wired sessions.
     # It only gets what the event left of the hook budget, so a slow brief still
     # returns its claim path to the parent before the outer timeout kills the worker.
@@ -2295,8 +2296,6 @@ def _handle_event(
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
     if event not in {"Stop", "SessionEnd"}:
         _touch_session_targets(session_id, target, payload, task_epoch=task_epoch)
-    if target_override is None or target_override == effective_hook_target(payload, pin=pin):
-        check_events.on_event(event, payload, target, session_id, state)
     if event == "SessionEnd":
         if presence_target is not None:
             heartbeat.on_event("SessionEnd", presence_target, session_id)

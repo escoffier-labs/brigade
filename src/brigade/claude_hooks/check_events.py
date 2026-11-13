@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .. import agent_identity, observed_checks
+from .. import agent_identity, observed_checks, work_mode, dirfd
 from . import verification_mode
 
 IDENTITY_FIELDS = ("model", "model_source")
@@ -48,21 +48,17 @@ def claude_status(event: str, payload: Mapping[str, Any]) -> tuple[str, int | No
     return ("failed", int(match[1])) if match else ("unknown", None)
 
 
-def on_event(event: str, payload: dict[str, Any], target: Path, session_id: str, state: dict[str, Any]) -> None:
-    try:
-        with observed_checks.capture_budget():
-            _on_event(event, payload, target, session_id, state)
-    except Exception:
-        pass
-
-
 def _on_event(event: str, payload: dict[str, Any], target: Path, session_id: str, state: dict[str, Any]) -> None:
+    observed_checks.check_capture_deadline()
     rt = _rt()
     rt._enforce_hook_stdin_shape(payload)
     if not isinstance(session_id, str) or not session_id or len(session_id) > 4096:
         return
     target = target.resolve()
     if event in {"SessionStart", "PostModelSwitch"}:
+        if work_mode.resolve_mode(target) == "off":
+            return
+        observed_checks.check_capture_deadline()
         field = "model" if event == "SessionStart" else "to_model"
         model = agent_identity.map_identity("claude-code", payload.get(field), "main")["model"]
         if isinstance(payload.get(field), str):
@@ -75,13 +71,15 @@ def _on_event(event: str, payload: dict[str, Any], target: Path, session_id: str
         if event == "SessionStart":
             env_file = os.environ.get("CLAUDE_ENV_FILE", "")
             if env_file and Path(env_file).is_absolute():
-                # Never wait on a pipe or other non-regular environment file.
-                import stat
-
-                if os.path.lexists(env_file) and not stat.S_ISREG(os.lstat(env_file).st_mode):
-                    return
-                with open(env_file, "a", encoding="utf-8") as stream:
-                    stream.write(f"export {AGENT_SESSION_ENV}={shlex.quote(rt._session_fingerprint(session_id))}\n")
+                observed_checks.check_capture_deadline()
+                flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NONBLOCK", 0)
+                fd = dirfd.open_file_nofollow(Path(env_file), flags, 0o600)
+                try:
+                    if stat.S_ISREG(os.fstat(fd).st_mode):
+                        observed_checks.check_capture_deadline()
+                        os.write(fd, f"export {AGENT_SESSION_ENV}={rt._session_fingerprint(session_id)}\n".encode())
+                finally:
+                    os.close(fd)
         return
     if event not in {"PostToolUse", "PostToolUseFailure"} or payload.get("tool_name") != "Bash":
         return
@@ -94,6 +92,9 @@ def _on_event(event: str, payload: dict[str, Any], target: Path, session_id: str
     duration = duration if type(duration) is int and duration >= 0 else None
     for governed, mode in verification_mode.governing_modes(command, payload.get("cwd"), target):
         if mode == "observe":
+            observed_checks.check_capture_deadline()
+            identity = claude_identity(payload, state)
+            observed_checks.check_capture_deadline()
             observed_checks.append_check(
                 governed,
                 observed_checks.build_check(
@@ -102,7 +103,8 @@ def _on_event(event: str, payload: dict[str, Any], target: Path, session_id: str
                     status=status,
                     exit_code=code,
                     duration_ms=duration,
-                    identity=claude_identity(payload, state),
+                    identity=identity,
+                    fingerprint_tree=False,
                     session_fingerprint=session_id,
                 ),
             )
@@ -139,3 +141,19 @@ def failure_followup(
             ],
         )
     return None
+
+
+def after_handling(event: str, payload: dict[str, Any], *, pin: Path | None) -> None:
+    """Run once after all existing primary and secondary event handling."""
+    try:
+        with observed_checks.capture_budget(1.0 if event in {"SessionStart", "PostModelSwitch"} else 0.1):
+            rt = _rt()
+            target = rt.effective_hook_target(payload, pin=pin)
+            observed_checks.check_capture_deadline()
+            session_id = payload.get("session_id")
+            if target is not None and isinstance(session_id, str) and session_id:
+                state = rt.read_session_state(target, session_id)
+                observed_checks.check_capture_deadline()
+                _on_event(event, payload, target, session_id, state)
+    except Exception:
+        pass

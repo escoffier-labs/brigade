@@ -394,7 +394,7 @@ def doctor_checks(target: Path) -> list[tuple[str, str, str]]:
     checks = [("INFO", "work mode", mode_detail)]
     from .observed_checks import recording_unavailable_reason
 
-    reason = recording_unavailable_reason(target)
+    reason = recording_unavailable_reason(target) if mode == MODE_OBSERVE else None
     if reason is not None:
         checks.append(("WARN", "observed checks", f"recording unavailable: {reason}"))
     settings, path = _work_settings_with_source(target)

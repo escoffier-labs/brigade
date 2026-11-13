@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shlex
+from time import monotonic as _capture_clock
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from collections.abc import Mapping
@@ -37,6 +38,7 @@ ROTATE_BYTES = 4 * 1024 * 1024
 COMMAND_MAX_CHARS = 1000
 LOCK_SECONDS = 2.0
 _CAPTURE_LOCK_SECONDS: ContextVar[float] = ContextVar("observed_lock_seconds", default=LOCK_SECONDS)
+_CAPTURE_DEADLINE: ContextVar[float | None] = ContextVar("observed_deadline", default=None)
 REDACTED = "[REDACTED]"
 _SENSITIVE_OPTION = re.compile(r"key|token|secret|pass|pwd|auth|cred|bearer", re.I)
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -314,13 +316,22 @@ def redact_command(command: str) -> str:
 
 
 @contextmanager
-def capture_budget():
+def capture_budget(seconds: float = 0.1):
     """Hook capture gives up promptly when another process owns storage."""
+    deadline = _CAPTURE_DEADLINE.set(_capture_clock() + seconds)
     token = _CAPTURE_LOCK_SECONDS.set(0.01)
     try:
         yield
     finally:
         _CAPTURE_LOCK_SECONDS.reset(token)
+        _CAPTURE_DEADLINE.reset(deadline)
+
+
+def check_capture_deadline() -> None:
+    """Cooperative budget: at most the deadline plus one bounded step."""
+    deadline = _CAPTURE_DEADLINE.get()
+    if deadline is not None and _capture_clock() >= deadline:
+        raise OSError("optional capture deadline exceeded")
 
 
 class _StateUnavailable(OSError):
@@ -381,13 +392,17 @@ def _state_directory(path: Path, *, create: bool = False) -> int:
                 metadata = os.lstat(directory)
             except FileNotFoundError:
                 continue
-            if metadata.st_uid != user or metadata.st_mode & writable:
+            if metadata.st_uid != user:
+                raise _StateUnavailable("a parent directory owned by another user")
+            if metadata.st_mode & writable:
                 raise _StateUnavailable("a parent directory writable by other users")
     fd = dirfd.open_directory_chain(path)
     try:
         if os.name != "nt":
             metadata = os.fstat(fd)
-            if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+            if metadata.st_uid != os.geteuid():
+                raise _StateUnavailable("a parent directory owned by another user")
+            if metadata.st_mode & 0o077:
                 raise _StateUnavailable("a parent directory writable by other users")
         if create:
             # A home directory kept in Git must not pick these files up.
@@ -407,11 +422,13 @@ def _state_directory(path: Path, *, create: bool = False) -> int:
 
 
 def _digest_key(target: Path) -> bytes:
+    check_capture_deadline()
     path = digest_key_path(target)
     if path is None:
         raise OSError("observed state unavailable")
     parent = _state_directory(path.parent, create=True)
     try:
+        check_capture_deadline()
         with held_file_lock(_lock_path(path.with_name(CHECKS_FILE)), deadline_seconds=_CAPTURE_LOCK_SECONDS.get()):
             # A crash between link and unlink leaves a second name on the key.
             for stale in path.parent.glob(".key-*"):
@@ -480,8 +497,10 @@ def build_check(
     session_fingerprint: str,
     exit_code: int | None = None,
     duration_ms: int | None = None,
+    fingerprint_tree: bool = True,
 ) -> ObservedCheck:
-    tree = localio.tree_fingerprint(target)
+    check_capture_deadline()
+    tree = localio.tree_fingerprint(target) if fingerprint_tree else None
     if tree is not None and not _valid_fingerprint(tree, 40):
         raise ValueError("invalid observed-check fingerprint")
     return ObservedCheck(
@@ -495,7 +514,7 @@ def build_check(
         command_digest=command_digest(command, target),
         status=status if status in STATUSES else "unknown",
         exit_code=exit_code,
-        duration_ms=duration_ms,
+        duration_ms=duration_ms if type(duration_ms) is int and 0 <= duration_ms <= 86400000 else None,
     )
 
 
@@ -537,6 +556,7 @@ def append_jsonl(path: Path, payload: Mapping[str, Any]) -> bool:
             return False
         parent = _state_directory(path.parent, create=True)
         try:
+            check_capture_deadline()
             with held_file_lock(_lock_path(path), deadline_seconds=_CAPTURE_LOCK_SECONDS.get()) as held:
                 held.verify()
                 fd = _open_regular(parent, path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND)
@@ -552,6 +572,7 @@ def append_jsonl(path: Path, payload: Mapping[str, Any]) -> bool:
                             # Another open handle can block the rename; keep the record, rotate next time.
                             pass
                         fd = _open_regular(parent, path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND)
+                    check_capture_deadline()
                     if os.lseek(fd, 0, os.SEEK_END):
                         os.lseek(fd, -1, os.SEEK_END)
                         if os.read(fd, 1) != b"\n" and os.write(fd, b"\n") != 1:
