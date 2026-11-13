@@ -1,5 +1,6 @@
 """Retrieval protects cards, while bulk listings do not count as use."""
 
+import os
 from datetime import date, timedelta
 
 import pytest
@@ -42,6 +43,7 @@ def test_dispatch_local_context_records_reads(tmp_path):
     assert reads.last_read(reads.load(tmp_path), ["memory/cards/old.md"]) == date.today()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="vault containment checks are unavailable on Windows")
 @pytest.mark.parametrize("operation", ["search", "show"])
 def test_vault_projection_reads_protect_canonical_card(tmp_path, operation, capsys):
     _write_card(tmp_path, "alpha", title="Alpha", body="rotation policy", tags=["rotation"])
