@@ -1,0 +1,1 @@
+- Remove unfinished client-side message encryption and the mesh extra. The fleet keys commands report removal in 0.32.0. Plain messaging is unchanged. Hub sealed storage, key routes and schema remain until the next hub contract version.

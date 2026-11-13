@@ -63,7 +63,6 @@
   "test_fleet_hub_sealed.py": 20,
   "test_fleet_inbox_delivery.py": 29,
   "test_fleet_mcp.py": 25,
-  "test_fleet_mesh_transport.py": 63,
   "test_fleet_messages.py": 30,
   "test_fleet_model_admission.py": 59,
   "test_fleet_nodes.py": 11,

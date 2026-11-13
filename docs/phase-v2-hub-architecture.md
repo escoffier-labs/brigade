@@ -19,7 +19,9 @@ drive (#2204, [phase-hub-contract.md](phase-hub-contract.md)), contract v2
 (#2187), hub work dependency edges (#2210), native engine distribution
 (#2148), the engine rename plan (#2213,
 [phase-engine-rename.md](phase-engine-rename.md)), the native PCRE2 guard
-(#2212), and sealed messages (#2005, [phase-agent-mesh.md](phase-agent-mesh.md)).
+(#2212), and sealed messages (#2005, [hub contract](phase-hub-contract.md)).
+Client-side sealing no longer ships. The hub side remains scheduled for removal
+with the next contract version.
 
 Revision 2 (2026-11-03) answers two independent design reviews of the first
 draft. Both asked for targeted rework. The largest changes: every commit stays
@@ -3539,10 +3541,10 @@ new ledger record. The advances, each computed from that base:
   The policy revision travels in every roster envelope as the authority
   version, nodes record it in their high-water record, and memory decisions
   bind to it, so a rewound number could name two different documents.
-- Mesh statements. Nodes keep a floor for each signed statement and refuse
-  an older one as `signed_statement_rollback` (`fleet_mesh_trust.py`), and
-  the hub keeps only the newest statement of each kind with its signer's
-  sequence. Signers sign them, so the restore cannot advance them. The
+- Mesh statements. The client no longer ships signed-statement trust or
+  sealing. The hub keeps only the newest statement of each kind with its
+  signer's sequence until removal with the next contract version. Signers
+  sign them, so the restore cannot advance them. The
   runbook has each signer publish its newest membership, manifest and
   revocation statements again from its own copy, and the hub identity record
   if it changed after the copy, before clients reconnect. Until a signer

@@ -990,8 +990,8 @@ Operator authority currently depends on hub-returned fields. Questions and
 answers are stored in plaintext in `fleet_questions`, and the reply trigger
 copies the message body into `answer`. A compromised hub or anyone with write
 access to its database could fabricate an operator-authenticated answer.
-Signed, sealed answers are planned in the [agent mesh design, slice 7b
-(PR #2013)](https://github.com/escoffier-labs/brigade/pull/2013).
+Signed, sealed answers were planned with client-side message encryption,
+which no longer ships. Treat an answer as only as trustworthy as the hub.
 
 The wait uses the existing inbox long-poll in slices of at most 20 seconds and
 never acknowledges unrelated messages. The hub permits two pending questions
