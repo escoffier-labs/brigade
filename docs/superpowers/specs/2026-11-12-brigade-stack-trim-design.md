@@ -242,6 +242,50 @@ below describe the larger scope under review, not a settled removal list.
   one agent connected to shared memory, then a second one benefiting.
 - Remove doc pages for removed areas. The doc count is part of the budget.
 
+## Automation: nothing waits on a person forever
+
+**(decided)** Brigade should work in the background without the user having
+to act, understand how it works, or intervene. The model is the way a coding
+agent remembers from its own chats. An earlier rule that forbade unattended
+self-editing of skills, instructions or canonical memory is dropped.
+
+**(proposed)** Every place Brigade stops for a person gets one of four
+treatments:
+
+- **Apply automatically** when the change is easy to reverse and low risk.
+- **Apply, then check** when it is reversible but worth a second look, with
+  an automatic rollback if the check fails.
+- **Expire** when nobody acting means it was not important.
+- **Stay human** only when the action is irreversible or outward-facing:
+  publishing, deleting, credentials, spending.
+
+Unattended jobs follow the same rule. A scheduled job that keeps failing is
+fixed, reported once, or switched off. It does not fail quietly for weeks.
+
+### Stage A: memory tends itself
+
+This runs alongside stages 1 to 3 and does not wait for the scorecard.
+
+**(decided)** Memory care is fully automatic. Cards that are uncertain do not
+sit waiting for the user. Cards that no longer matter, such as notes for a
+course the user has finished, are archived without being asked.
+
+**(proposed)**
+
+- Archive, never delete. An archived card leaves search and recall but can be
+  restored, so every automatic decision is reversible.
+- An uncertain card resolves itself: it is checked against available evidence
+  and either confirmed, corrected or archived within a fixed time.
+- Staleness is judged from use and subject, not age alone: cards nobody has
+  read, and cards about work that has ended.
+- The user gets a short periodic summary of what was archived, merged or
+  corrected. Reading it is optional.
+- Self-editing of instructions and skills follows later, after stage 3,
+  because it needs trustworthy measurement.
+
+Open for the stage design: which model does the background work, on whose
+quota, and under what cap.
+
 ## How success is measured
 
 - **Size:** the four budget numbers at each stage. No overall target is set
