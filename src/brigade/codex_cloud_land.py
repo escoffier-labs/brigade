@@ -840,6 +840,9 @@ def _land_locked(
         base = git.git(
             ["rev-parse", "--verify", "--quiet", f"{recorded}^{{commit}}"], git.repository, "inspect-failed"
         ).strip()
+        # The commit was built directly on the recorded base, so that base can never be the proposal.
+        if git.git(["rev-parse", f"{commit}^"], git.repository, "inspect-failed").strip() != base:
+            raise LandError("inspect-failed")
     else:
         base = _fetch_base(git, canonical)
     config = _materialize_vale_config(git, root, base)
@@ -987,7 +990,7 @@ def _fetch_base(git: _LandingGit, canonical: str) -> str:
 
 
 _VALE_FILE_LIMIT = 4 * 1024 * 1024
-_VALE_PATH_KEYS = {"stylespath", "transform"}
+_VALE_PATH_KEYS = {"stylespath", "transform", "vocab"}
 
 
 def _git_blob_bytes(git: _LandingGit, sha: str) -> bytes:
@@ -998,6 +1001,7 @@ def _git_blob_bytes(git: _LandingGit, sha: str) -> bytes:
     if not size.isdigit() or int(size) > _VALE_FILE_LIMIT:
         raise LandError("unsafe-vale-config")
     git._assert_config(git.repository)
+    # Raw bytes are needed, which proc.run cannot return. The size is bounded before and after.
     try:
         result = subprocess.run(  # noqa: S603 - pinned git binary, fixed argv
             [git.tools["git"], "--no-pager", "cat-file", "blob", sha],
@@ -1016,6 +1020,9 @@ def _git_blob_bytes(git: _LandingGit, sha: str) -> bytes:
 
 def _check_vale_ini(text: str) -> PurePosixPath | None:
     """Validate a base .vale.ini the way Vale's go-ini reader would see it. Returns StylesPath."""
+    # A BOM or control character is read differently by go-ini than by this check.
+    if re.search("[\ufeff\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text):
+        raise LandError("unsafe-vale-config")
     styles: PurePosixPath | None = None
     seen: set[tuple[str, str]] = set()
     section = ""
@@ -1023,19 +1030,26 @@ def _check_vale_ini(text: str) -> PurePosixPath | None:
         line = raw.strip()
         if not line or line[0] in "#;":
             continue
+        # go-ini joins a line ending in a backslash with the next one.
+        if line.endswith("\\"):
+            raise LandError("unsafe-vale-config")
         if line.startswith("["):
             if ".." in line:
                 raise LandError("unsafe-vale-config")
-            section = line.lower()
+            # go-ini treats [DEFAULT] as the root section.
+            section = "" if line.lower() == "[default]" else line.lower()
             continue
         # go-ini splits at the first "=" or ":" and strips inline comments.
         found = re.match(r"([^=:]*?)\s*[=:]\s*(.*)", line)
         if not found or not found[1].strip():
             raise LandError("unsafe-vale-config")
         key, value = found[1].strip().lower(), found[2].strip()
+        # go-ini accepts quoted keys and quoted multi-line values that this check does not model.
+        if key.startswith(('"', "`")) or ".." in re.split(r"[/\\]", key) or "`" in value or '"""' in value:
+            raise LandError("unsafe-vale-config")
         if key in {"include", "includes", "import", "imports"} or (section, key) in seen:
             raise LandError("unsafe-vale-config")
-        if re.search(r"\s[;#]", value):
+        if re.search(r"\s[;#]", value) or (key in _VALE_PATH_KEYS and re.search("[;#]", value)):
             raise LandError("unsafe-vale-config")
         seen.add((section, key))
         # go-ini also unquotes backtick values, so strip them before the path checks.
@@ -1046,7 +1060,8 @@ def _check_vale_ini(text: str) -> PurePosixPath | None:
             if ".." in re.split(r"[/\\]", part):
                 raise LandError("unsafe-vale-config")
         if key == "stylespath":
-            if "\\" in value or not value:
+            # Vale reads StylesPath only from the root section.
+            if section or "\\" in value or not value:
                 raise LandError("unsafe-vale-config")
             styles = PurePosixPath(value)
             if styles.is_absolute() or ".." in styles.parts or not [p for p in styles.parts if p != "."]:
@@ -1094,7 +1109,7 @@ def _copy_vale_styles(git: _LandingGit, base: str, directory: Path, styles: Pure
     for index in range(1, len(styles.parts) + 1):
         prefix = "/".join(styles.parts[:index])
         entry = git.git(["ls-tree", "-z", base, "--", prefix], git.repository, "inspect-failed")
-        if entry and not entry.startswith("040000 tree "):
+        if not entry.startswith("040000 tree "):
             raise LandError("unsafe-vale-config")
     destination = (directory / Path(*styles.parts)).resolve()
     if not destination.is_relative_to(directory.resolve()):

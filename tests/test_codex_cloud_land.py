@@ -1712,6 +1712,15 @@ def test_vale_proposal_root_config_ignored_without_base_config(landing, monkeypa
         "StylesPath = styles\nTransform = /abs.xsl\n",
         "StylesPath = `/etc/x`\n",
         'StylesPath = """/etc/x"""\n',
+        '"StylesPath" = /etc\n',
+        "`StylesPath` = /etc\n",
+        "\ufeffStylesPath = /etc\n",
+        "StylesPath = ..#x\n",
+        "StylesPath = styles\nTransform = a\\\nb/../../x = 1\n",
+        "StylesPath = styles\n[*.md]\nStylesPath = other\n",
+        "StylesPath = styles\n[DEFAULT]\nStylesPath = other\n",
+        "StylesPath = styles\na/../b = 1\n",
+        "StylesPath = nowhere\n",
     ],
 )
 def test_vale_parser_mismatch_forms_refused(landing, tmp_path, config):
