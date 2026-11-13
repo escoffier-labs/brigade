@@ -1093,7 +1093,11 @@ def _operator_vale_config(git: _LandingGit) -> Path | None:
     """The operator's own $HOME/.vale.ini, when it is a plain file the operator owns."""
     path = git.home / ".vale.ini"
     try:
-        if path.is_symlink() or not path.is_file() or path.stat().st_uid != os.getuid():
+        if path.is_symlink() or not path.is_file():
+            return None
+        status = path.stat()
+        # A hardlink could alias a file outside the operator's control.
+        if status.st_uid != os.getuid() or status.st_nlink != 1:
             return None
         if any(path.resolve().is_relative_to(root) for root in git.roots):
             return None
@@ -1142,6 +1146,8 @@ def _materialize_vale_config(git: _LandingGit, root: Path, base: str) -> Path:
 
 
 def _copy_vale_styles(git: _LandingGit, base: str, directory: Path, styles: PurePosixPath) -> None:
+    # Style YAML is copied as is. Fields such as ignore, dicpath or script can name absolute
+    # files, and that is accepted because the style files come from the trusted base commit.
     # Every component of StylesPath must be a plain directory in the base tree.
     for index in range(1, len(styles.parts) + 1):
         prefix = "/".join(styles.parts[:index])

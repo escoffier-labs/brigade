@@ -1867,6 +1867,16 @@ def test_vale_fallback_synthesized_when_no_config_anywhere(landing, monkeypatch)
     assert argv[2].endswith("vale-config/.vale.ini") and files == {".vale.ini": "MinAlertLevel = suggestion\n"}
 
 
+def test_vale_fallback_ignores_hardlinked_operator_config(landing, tmp_path, monkeypatch):
+    caller, state, calls = landing
+    elsewhere = tmp_path / "elsewhere.ini"
+    elsewhere.write_text("MinAlertLevel = error\n")
+    os.link(elsewhere, tmp_path / "home" / ".vale.ini")
+    seen = _vale_probe(monkeypatch)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert seen[0][0][2].endswith("vale-config/.vale.ini")
+
+
 def test_vale_operator_config_never_beats_base_config(landing, tmp_path, monkeypatch):
     caller, state, calls = landing
     (tmp_path / "home" / ".vale.ini").write_text("MinAlertLevel = error\n")
@@ -1914,6 +1924,13 @@ HOSTILE_VALE_INI = [
     "StylesPath = styles\n[DEFAULT]\nMinAlertLevel = error\n",
     "# c\rStylesPath = styles\n",
     "[default]\nStylesPath = styles\n",
+    "StylesPath = styles\n[*.md]\nBasedOnStyles = Vale\n",
+    "StylesPath = styles\r\n[*.md]\r\nBasedOnStyles = Vale\r\n",
+    "StylesPath = styles\r#/../../etc\n",
+    "StylesPath = styles\u0085#/../../etc\n",
+    "StylesPath = styles\u2028#/../../etc\n",
+    "StylesPath = styles\u2029#/../../etc\n",
+    "StylesPath = styles\n[DEFAULT]\nTransform = styles\r;/../..\n",
 ]
 
 
@@ -1941,7 +1958,22 @@ def test_real_vale_agrees_with_validator(tmp_path, text):
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
-    found = [v for k, v in json.loads(result.stdout).items() if k.lower() == "stylespath"]
-    assert found, "ls-config did not report StylesPath"
-    resolved = (directory / found[0]).resolve()
-    assert resolved.is_relative_to(directory.resolve())
+    report = json.loads(result.stdout)
+
+    def locations(value):
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, dict):
+            return [item for entry in value.values() for item in locations(entry)]
+        if isinstance(value, list):
+            return [item for entry in value for item in locations(entry)]
+        return []
+
+    # ls-config reports resolved style locations under Paths and Transform under Stylesheets.
+    # A missing key is an empty list. Vale's own default styles directory lives under HOME.
+    allowed = (directory.resolve(), home.resolve())
+    for key in ("Paths", "Stylesheets"):
+        for location in locations(report.get(key)):
+            resolved = (directory / location).resolve()
+            roots = allowed if key == "Paths" else allowed[:1]
+            assert any(resolved.is_relative_to(root) for root in roots), (key, location)
