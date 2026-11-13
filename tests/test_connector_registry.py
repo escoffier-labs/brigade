@@ -66,26 +66,27 @@ def test_nonloopback_refused_even_with_explicit_hosts(dot_private_dir):
 @requires_local_state
 def test_cloud_agent_rejects_shared_identity(dot_private_dir, shared):
     tmp_path = dot_private_dir.parent
-    from tests.test_grokbot_memory_profile import _memory_document
-    from brigade.dot.runtime_config import GROKBOT_MEMORY_RUNTIME_SCHEMA
+    from tests.cloud_agent_support import _memory_document
+    from brigade.dot.runtime_config import DUET_RUNTIME_SCHEMA
 
     other = tmp_path / "other"
     other.mkdir(mode=0o700)
     data = cloud_document(other)
-    data["schema"] = GROKBOT_MEMORY_RUNTIME_SCHEMA
-    data["hub"]["principal"] = "agent:grokbot-memory"
+    data["schema"] = DUET_RUNTIME_SCHEMA
+    data["messaging_enabled"] = False
+    data["hub"]["principal"] = "agent:duet"
     data["auth"] = _memory_document()["auth"]
     Path(data["hub"]["message_token_file"]).write_text("other-example-hub-credential-00000000000000000")
     other_runtime = other / "runtime.json"
     other_runtime.write_text(json.dumps(data))
     other_runtime.chmod(0o600)
-    instance = tmp_path / ".brigade/grokbot/packs/grokbot-memory.json"
+    instance = tmp_path / ".brigade/grokbot/packs/duet.json"
     instance.parent.mkdir(parents=True)
     instance.write_text(
         json.dumps(
             dict(
                 schema=registry.INSTANCE_SCHEMA,
-                pack_id="grokbot-memory",
+                pack_id="duet",
                 pack_version="1.0.0",
                 bind="127.0.0.1:8781",
                 allowed_hosts=[],

@@ -1,5 +1,10 @@
 # Grok Bot inbox connector pack
 
+> This profile is retired. Use `brigade hub connector setup --id cloud-agent`
+> with independent credentials. Enable messaging in its runtime only when needed.
+> Existing configuration and state files are retained.
+
+
 The `grokbot-inbox` pack gives Grok Bot a Fleet Hub inbox and a bounded way to
 send messages. It runs the Dot connector code under its own profile, shares
 Dot's origin verification, wire schemas and state handling, and shares none of

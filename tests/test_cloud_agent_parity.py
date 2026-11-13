@@ -1,10 +1,12 @@
-"""Paired deletion gate: legacy profiles and their generic replacement coexist."""
+"""Fixed generic contracts retained after the paired profile deletion gate."""
 
 import asyncio
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timezone
 import io
+import json
+from pathlib import Path
 import os
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,7 +17,7 @@ from brigade import cli, fleet_client, memory_hub_client as hubc
 from brigade.dot import lifecycle
 from brigade.dot.memory_tools import MemoryTools
 from brigade.dot.process import CommandResult
-from brigade.dot.profile import CLOUD_AGENT, GROKBOT_MEMORY, GROKBOT_INBOX, runtime_profile
+from brigade.dot.profile import CLOUD_AGENT, runtime_profile
 from tests.dot_support import requires_local_state
 from tests.test_dot_adapter import HANDOFF, NOW, FakeRunner, lint_report
 from tests.test_dot_lifecycle import config
@@ -41,15 +43,16 @@ def inventory(profile):
 
 
 def test_cloud_agent_memory_parity():
-    assert inventory(CLOUD_AGENT) == inventory(GROKBOT_MEMORY)
+    snapshot = json.loads((Path(__file__).parent / "fixtures/dot_tools_snapshot.json").read_text())["tools"]
+    assert inventory(CLOUD_AGENT) == {name: snapshot[name]["inputSchema"] for name in CLOUD_AGENT.tools}
     assert set(inventory(CLOUD_AGENT)) == {"memory_search", "memory_card", "handoff_write"}
 
 
 def test_cloud_agent_message_schema_parity():
     enabled = runtime_profile(CLOUD_AGENT, False, messaging_enabled=True)
-    old = inventory(GROKBOT_INBOX)
-    assert set(old) == {"inbox_list", "inbox_ack", "inbox_reply", "message_send"}
-    assert {name: schema for name, schema in inventory(enabled).items() if name in old} == old
+    snapshot = json.loads((Path(__file__).parent / "fixtures/dot_tools_snapshot.json").read_text())["tools"]
+    names = {"memory_search", "memory_card", "handoff_write", "inbox_list", "inbox_ack", "inbox_reply", "message_send"}
+    assert inventory(enabled) == {name: snapshot[name]["inputSchema"] for name in names}
 
 
 @pytest.fixture
@@ -64,7 +67,7 @@ def paired_memory(dot_private_dir, monkeypatch):
     for card in fake.cards.values():
         card["trust"] = "reviewed"
     tools = []
-    for profile in (GROKBOT_MEMORY, CLOUD_AGENT):
+    for profile in (CLOUD_AGENT,):
         root = dot_private_dir / profile.pack_id
         root.mkdir(mode=0o700, parents=True)
         token = root / "token"
@@ -90,12 +93,12 @@ def paired_memory(dot_private_dir, monkeypatch):
 def test_cloud_agent_search_and_card_parity(paired_memory):
     tools, fake, _ = paired_memory
     answers = [(tool.memory_search("release"), tool.memory_card("public-card", scope="fleet")) for tool in tools]
-    assert answers[0] == answers[1]
+    assert len(answers) == 1
     search, card = answers[0]
     assert [row["card_id"] for row in search["matches"]] == ["public-card"]
     assert search["matches"][0]["content_trust"] == "untrusted"
     assert card["content_trust"] == "untrusted" and card["content"] == "release notes\n"
-    assert {fake.principals[token] for token in fake.tokens} >= {"agent:grokbot-memory", "agent:cloud-agent"}
+    assert {fake.principals[token] for token in fake.tokens} >= {"agent:cloud-agent"}
 
 
 @requires_local_state
@@ -108,12 +111,12 @@ def test_cloud_agent_private_cards_withheld(paired_memory):
         denied = tool.memory_card("private-card", scope="principal:other")
         assert "content" not in denied and "error" in denied
         answers.append((found, denied))
-    assert answers[0] == answers[1]
+    assert len(answers) == 1
 
 
 @requires_local_state
 def test_cloud_agent_handoff_untrusted(paired_memory, monkeypatch):
-    from tests.test_grokbot_s26_profiles import FakeHubClient
+    from tests.test_cloud_agent_memory_contract import FakeHubClient
 
     tools, _, target = paired_memory
     monkeypatch.setattr(hubc, "MemoryHubClient", FakeHubClient)
@@ -127,8 +130,8 @@ def test_cloud_agent_handoff_untrusted(paired_memory, monkeypatch):
         assert result["state"] == "pending_review" and result["destination"] == "memory_handoffs"
         assert result == tool.handoff_write("parity", HANDOFF)
         results.append(result)
-    assert results[0] == results[1]
-    assert FakeHubClient.calls == [FakeHubClient.calls[0]] * 4
+    assert len(results) == 1
+    assert FakeHubClient.calls == [FakeHubClient.calls[0]] * 2
     assert FakeHubClient.calls[0]["text"] == HANDOFF
     assert set(FakeHubClient.calls[0]) == {"action", "text", "kind", "client_event_id"}
     assert {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()} == before
@@ -160,7 +163,7 @@ def test_cloud_agent_inbox_parity(dot_private_dir, monkeypatch, message_hub):  #
     dot_private_dir.mkdir(mode=0o700)
     base, node_token, _, db = message_hub
     monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": base})
-    profiles = (GROKBOT_INBOX, runtime_profile(CLOUD_AGENT, False, messaging_enabled=True))
+    profiles = (runtime_profile(CLOUD_AGENT, False, messaging_enabled=True),)
     outcomes = []
     for profile in profiles:
         principal = "agent:" + profile.pack_id
@@ -209,4 +212,4 @@ def test_cloud_agent_inbox_parity(dot_private_dir, monkeypatch, message_hub):  #
             ack = call("inbox_ack", ids=[incoming["message"]["id"]])
             assert call("inbox_list")["messages"] == []
             outcomes.append(normalized([listed, sent, reply, ack], principal))
-    assert outcomes[0] == outcomes[1]
+    assert len(outcomes) == 1

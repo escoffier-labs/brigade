@@ -149,6 +149,7 @@ def _setup(
     allowed_origins: list[str] | None,
     runtime_path: str | Path | None,
 ) -> dict[str, Any]:
+    target = target.resolve()
     _profile(pack_id)
     payload: dict[str, Any] = dict(
         schema=INSTANCE_SCHEMA,
@@ -226,7 +227,7 @@ def _setup(
                 created = ensure_listener_token(Path(generated))
             _validate(payload, pack_id)
             _write(target, pack_id, payload)
-        except (DotError, OSError, PackError) as exc:
+        except Exception as exc:
             if created and generated is not None:
                 try:
                     Path(generated).unlink()

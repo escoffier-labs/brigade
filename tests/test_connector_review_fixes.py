@@ -15,7 +15,7 @@ from brigade.dot.runtime_config import CLOUD_AGENT_RUNTIME_SCHEMA, parse_runtime
 from brigade.dot.token_auth import TokenVerifier
 from tests.test_cloud_agent_profile import cloud_document
 from tests.test_dot_lifecycle import config, request
-from tests.test_grokbot_memory_profile import _memory_document
+from tests.cloud_agent_support import _memory_document
 
 
 @pytest.fixture(autouse=True)
@@ -206,11 +206,35 @@ def test_registry_converts_isolation_error(dot_private_dir, monkeypatch):
 
 
 @requires_local_state
-def test_legacy_flow_matches_base(dot_private_dir):
+def test_legacy_flow_matches_base(dot_private_dir, monkeypatch, capsys):
     from tests.connector_legacy_capture import capture
 
     expected = json.loads((Path(__file__).parent / "fixtures/connector_legacy_base.json").read_text())
     assert capture(dot_private_dir.parent / "capture") == expected
+
+    from brigade import cli, dot
+
+    seen = []
+
+    def build(target, **kwargs):
+        seen.append((target, kwargs))
+        return None, None, None
+
+    monkeypatch.setattr(dot, "build_listener_from_target", build)
+    monkeypatch.setattr(dot, "run_listener", lambda *args: None)
+    for name in ("dot", "duet"):
+        target = dot_private_dir.parent / "capture" / name
+        assert cli.main(["run", "cloud", "grokbot", "serve", "--pack", name, "--target", str(target)]) == 0
+        assert capsys.readouterr().out == ""
+        assert seen[-1] == (
+            target,
+            {
+                **({} if name == "dot" else {"pack_id": name}),
+                "bind": None,
+                "allowed_hosts": None,
+                "allowed_origins": None,
+            },
+        )
 
 
 @pytest.mark.parametrize("name", ["dot", "duet"])
@@ -276,7 +300,7 @@ def test_loopback_probes(dot_private_dir, monkeypatch, mode):
 
     root = dot_private_dir.parent
     path = runtime_file(root, mode)
-    registry.apply_setup(root, "cloud-agent", runtime_path=path, allowed_hosts=["grokbot-memory.example.test"])
+    registry.apply_setup(root, "cloud-agent", runtime_path=path, allowed_hosts=["cloud-agent.example.test"])
     listener, runtime = lifecycle._load_config(root, profile=CLOUD_AGENT)
     verifier = (
         TokenVerifier(runtime.auth, hub_token_file=runtime.hub.message_token_file)

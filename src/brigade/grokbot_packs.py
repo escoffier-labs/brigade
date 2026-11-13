@@ -80,8 +80,6 @@ CONNECTOR_DEFAULT_BINDS = {
     "fleet-steward": "127.0.0.1:8771",
     "dot": "127.0.0.1:8779",
     "duet": "127.0.0.1:8780",
-    "grokbot-memory": "127.0.0.1:8781",
-    "grokbot-inbox": "127.0.0.1:8782",
     "obsidian-operator": "127.0.0.1:8773",
     "operations-relay": "127.0.0.1:8777",
     "t3-dispatch": "127.0.0.1:8778",
@@ -92,10 +90,8 @@ OPERATIONS_RELAY_PACK_ID = "operations-relay"
 T3_DISPATCH_PACK_ID = "t3-dispatch"
 DOT_PACK_ID = "dot"
 DUET_PACK_ID = "duet"
-GROKBOT_MEMORY_PACK_ID = "grokbot-memory"
-GROKBOT_INBOX_PACK_ID = "grokbot-inbox"
 # Packs that run the Dot connector code under their own profile and Cloudflare Access application.
-DOT_FAMILY_PACK_IDS = frozenset({DOT_PACK_ID, DUET_PACK_ID, GROKBOT_MEMORY_PACK_ID, GROKBOT_INBOX_PACK_ID})
+DOT_FAMILY_PACK_IDS = frozenset({DOT_PACK_ID, DUET_PACK_ID})
 FLEET_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
     {
         "runtime_path",
@@ -716,7 +712,13 @@ def _assert_setup_bind_available(target: Path, pack_id: str, chosen_bind: str) -
 def _occupied_setup_ports(target: Path, *, exclude_pack_id: str) -> set[int]:
     from .dot.connector_registry import instance_config_path as connector_path
 
-    ports: set[int] = {8783}
+    ports: set[int] = {8781, 8782, 8783}
+    # Retained listener files still reserve their ports without loading a retired profile.
+    for path in (target / INSTANCE_DIR).glob("*.json"):
+        if path != instance_config_path(target, exclude_pack_id):
+            port = _bind_port_from_existing_config(path)
+            if port is not None:
+                ports.add(port)
     generic_port = _bind_port_from_existing_config(connector_path(target, "cloud-agent"))
     if generic_port is not None:
         ports.add(generic_port)

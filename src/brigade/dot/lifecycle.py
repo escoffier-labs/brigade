@@ -404,7 +404,13 @@ def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -
     require_local_platform()
     # The loopback rule holds where the socket opens, not only where the CLI loads the config.
     # The runtime and the tools must describe the same kind of connector before anything else happens.
-    tools_cloud = getattr(getattr(tools, "profile", None), "pack_id", None) == "cloud-agent"
+    tools_profile = getattr(tools, "profile", None)
+    identity = getattr(tools_profile, "pack_id", None)
+    if tools is not None:
+        if not isinstance(identity, str):
+            raise c.DotError("invalid_config")
+        identity = profile_for(identity.strip().casefold()).pack_id
+    tools_cloud = identity == "cloud-agent"
     runtime_cloud = runtime.schema == CLOUD_AGENT_RUNTIME_SCHEMA
     c.require(tools is None or tools_cloud == runtime_cloud, "invalid_config")
     c.require(not (tools_cloud or runtime_cloud) or grokbot_mcp._is_loopback(config.bind_host), "invalid_config")

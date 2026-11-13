@@ -109,7 +109,7 @@ def test_periodic_import_refused(tmp_path, unit):
 @pytest.mark.parametrize("mode", ["token", "access"])
 def test_valid_auth_during_sustained_failures(tmp_path, monkeypatch, mode):
     from brigade.dot.access_auth import AccessVerifier, AuthError
-    from tests.test_grokbot_memory_profile import _memory_document
+    from tests.cloud_agent_support import _memory_document
 
     data = cloud_document(tmp_path)
     if mode == "access":
@@ -187,7 +187,7 @@ def test_short_import_refused(tmp_path):
 
 
 def test_access_dependency_row_is_unique(dot_private_dir, monkeypatch):
-    from tests.test_grokbot_memory_profile import _memory_document
+    from tests.cloud_agent_support import _memory_document
 
     data = cloud_document(dot_private_dir.parent)
     data["auth"] = {**_memory_document()["auth"], "mode": "access"}
@@ -197,3 +197,42 @@ def test_access_dependency_row_is_unique(dot_private_dir, monkeypatch):
     checks = lifecycle.doctor(dot_private_dir.parent, pack_id="cloud-agent")
     names = [row["check"] for row in checks]
     assert names.count("dependency") == names.count("access-dependency") == 1
+
+
+@pytest.mark.parametrize("identity", [" CLOUD-AGENT ", None, [], "unknown"])
+def test_library_profile_identity_cannot_bypass_loopback(tmp_path, monkeypatch, identity):
+    from types import SimpleNamespace
+    from brigade.dot.runtime_config import RUNTIME_SCHEMA
+
+    runtime = parse_runtime(cloud_document(tmp_path), schema=CLOUD_AGENT_RUNTIME_SCHEMA)
+    runtime = replace(runtime, schema=RUNTIME_SCHEMA)
+    tools = SimpleNamespace(profile=replace(CLOUD_AGENT, pack_id=identity))
+    listener = replace(config(), bind_host="0.0.0.0")
+    with pytest.raises(DotError, match="invalid_config"):
+        lifecycle.run_listener(listener, tools, runtime)
+
+
+def test_setup_rolls_back_token_after_unexpected_exception(dot_private_dir, monkeypatch):
+    root = dot_private_dir.parent
+    path = runtime_file(root)
+    token = root / "listener-token"
+    token.unlink()
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("unexpected failure")
+
+    monkeypatch.setattr(registry, "_write", fail)
+    with pytest.raises(registry.PackError, match="unsafe-path"):
+        registry.apply_setup(root, "cloud-agent", runtime_path=path)
+    assert not token.exists()
+    assert not registry.instance_config_path(root, "cloud-agent").exists()
+
+
+def test_relative_target_setup(dot_private_dir, monkeypatch):
+    root = dot_private_dir.parent
+    path = runtime_file(root)
+    monkeypatch.chdir(root)
+    target = Path("relative-target")
+    target.mkdir(mode=0o700)
+    registry.apply_setup(target, "cloud-agent", runtime_path=path)
+    assert registry.load_instance_config(target, "cloud-agent")["pack_id"] == "cloud-agent"
