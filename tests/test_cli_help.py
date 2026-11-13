@@ -173,16 +173,18 @@ def test_retained_grokbot_help_snapshot(path, monkeypatch):
     assert parser.format_help() == snapshot.read_text(encoding="utf-8")
 
 
-def test_removed_queue_parser_help_names_removal_version():
+def test_removed_queue_parser_help_names_removal_version(monkeypatch):
     from brigade.cli.removed_commands import REMOVED_IN
 
+    monkeypatch.setenv("COLUMNS", "80")
     parser = cli._build_parser()
     for name in ("run", "cloud", "grokbot"):
         parser = _subparsers_action(parser).choices[name]
-    from pathlib import Path
-
-    expected = (Path(__file__).parent / "fixtures/grokbot_help.txt").read_text(encoding="utf-8")
-    assert parser.format_help() == expected
+    # The column layout of long subcommand names differs between Python patch releases,
+    # so check the rendered words rather than an exact snapshot.
+    rendered = " ".join(parser.format_help().split())
+    assert f"enqueue Removed in {REMOVED_IN}." in rendered
+    assert f"reconcile-findings Removed in {REMOVED_IN}." in rendered
     actions = _subparsers_action(parser)
     removed = [action for action in actions._choices_actions if action.dest not in {"serve", "pack"}]
     assert removed
