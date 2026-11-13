@@ -1613,11 +1613,31 @@ def test_vale_base_config_materialized(landing, tmp_path, monkeypatch):
     assert sum(argv[:2] == ["git", "fetch"] and "refs/heads/main" in argv for argv, _ in calls) == 1
 
 
-def test_vale_without_base_config_keeps_user_config(landing, monkeypatch):
+def test_vale_without_base_config_uses_synthesized_config(landing, monkeypatch):
     caller, state, calls = landing
     seen = _vale_probe(monkeypatch)
     codex_cloud_land.land(caller, "task_example", 2473)
-    assert "--config" not in seen[0][0] and len(seen[0][0]) == 2
+    argv, files, mode, _ = seen[0]
+    assert argv[1] == "--config" and argv[2].endswith("vale-config/.vale.ini") and len(argv) == 4
+    assert files == {".vale.ini": "MinAlertLevel = suggestion\n"} and mode == "0o700"
+    assert "--no-global" not in argv
+
+
+@pytest.mark.parametrize("with_base_config", [False, True])
+def test_vale_fallback_root_never_reaches_caller_config(landing, tmp_path, monkeypatch, with_base_config):
+    caller, state, calls = landing
+    if with_base_config:
+        _publish_base(caller, tmp_path, {".vale.ini": "StylesPath = styles\n", "styles/A.yml": "x\n"})
+    (caller / ".vale.ini").write_text("StylesPath = /evil\n")
+    (caller / "_vale.ini").write_text("StylesPath = /evil\n")
+    monkeypatch.delenv("XDG_RUNTIME_DIR")
+    seen = _vale_probe(monkeypatch)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    argv, files, mode, _ = seen[0]
+    config = Path(argv[argv.index("--config") + 1])
+    assert config.name == ".vale.ini" and config.parent.name == "vale-config" and mode == "0o700"
+    assert caller.resolve() in config.resolve().parents  # private root fell back under the target
+    assert "/evil" not in files[".vale.ini"]
 
 
 @pytest.mark.parametrize("styles", ["/etc/styles", "../styles", "a/../../styles", "~/styles", "C:/styles", "."])
@@ -1671,7 +1691,7 @@ def test_vale_proposal_root_config_ignored_without_base_config(landing, monkeypa
     state["extra_files"] = {".vale.ini": "StylesPath = evil\n", "evil/E.yml": "evil\n"}
     seen = _vale_probe(monkeypatch)
     codex_cloud_land.land(caller, "task_example", 2473)
-    assert "--config" not in seen[0][0]
+    assert seen[0][1] == {".vale.ini": "MinAlertLevel = suggestion\n"}
 
 
 @pytest.mark.parametrize(
@@ -1683,6 +1703,13 @@ def test_vale_proposal_root_config_ignored_without_base_config(landing, monkeypa
         "StylesPath: ../x\n",
         "StylesPath = styles\ninclude = other.ini\n",
         "StylesPath = styles\nVocab = ../v\n",
+        "StylesPath: /abs #=x\n",
+        "StylesPath = styles ; note\n",
+        "StylesPath = styles # note\n",
+        "StylesPath = styles\nstylespath = other\n",
+        "StylesPath = styles\nimport = other\n",
+        "StylesPath = styles\n[../x]\nMinAlertLevel = error\n",
+        "StylesPath = styles\nTransform = /abs.xsl\n",
     ],
 )
 def test_vale_parser_mismatch_forms_refused(landing, tmp_path, config):
@@ -1714,3 +1741,71 @@ def test_vale_retry_uses_recorded_base(landing, tmp_path, monkeypatch):
     codex_cloud_land.land(caller, "task_example", 2473)
     assert "styles/Old.yml" in seen[0][1] and "styles/New.yml" not in seen[0][1]
     assert sum(argv[:2] == ["git", "fetch"] and "refs/heads/main" in argv for argv, _ in calls) == fetches
+
+
+def test_vale_backslash_regex_values_accepted(landing, tmp_path, monkeypatch):
+    caller, state, calls = landing
+    config = "StylesPath = styles\nTokenIgnores = \\$[^$]+\\$\nBlockIgnores = \\{\\{.*?\\}\\}\n"
+    _publish_base(caller, tmp_path, {".vale.ini": config, "styles/A.yml": "x\n"})
+    seen = _vale_probe(monkeypatch)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert seen[0][1][".vale.ini"] == config
+
+
+def test_vale_gitlink_in_styles_refused(landing, tmp_path):
+    caller, state, calls = landing
+    _publish_base(caller, tmp_path, {".vale.ini": "StylesPath = styles\n", "styles/A.yml": "x\n"})
+    remote = tmp_path / "remote"
+    head = git(remote, "rev-parse", "HEAD")
+    git(remote, "update-index", "--add", "--cacheinfo", f"160000,{head},styles/sub")
+    git(remote, "commit", "-m", "test: gitlink")
+    with pytest.raises(codex_cloud_land.LandError, match="unsafe-vale-config"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[0] == "vale" for argv, _ in calls)
+
+
+def test_vale_style_files_materialize_byte_for_byte(landing, tmp_path, monkeypatch):
+    caller, state, calls = landing
+    _publish_base(caller, tmp_path, {".vale.ini": "StylesPath = styles\n"})
+    data = b"\xff\xfe\x00caf\xe9\nr\xc3\x28\n"
+    dic = tmp_path / "remote" / "styles" / "config" / "Vocab.dic"
+    dic.parent.mkdir(parents=True)
+    dic.write_bytes(data)
+    git(tmp_path / "remote", "add", ".")
+    git(tmp_path / "remote", "commit", "-m", "test: binary style")
+    captured = {}
+    inner = proc.run
+
+    def run(argv, **kwargs):
+        if Path(argv[0]).name == "vale":
+            directory = Path(argv[argv.index("--config") + 1]).parent
+            captured["data"] = (directory / "styles" / "config" / "Vocab.dic").read_bytes()
+        return inner(argv, **kwargs)
+
+    monkeypatch.setattr(proc, "run", run)
+    codex_cloud_land.land(caller, "task_example", 2473)
+    assert captured["data"] == data
+
+
+def test_vale_oversized_style_file_refused(landing, tmp_path, monkeypatch):
+    caller, state, calls = landing
+    monkeypatch.setattr(codex_cloud_land, "_VALE_FILE_LIMIT", 16)
+    _publish_base(caller, tmp_path, {".vale.ini": "StylesPath = styles\n", "styles/Big.yml": "x" * 64})
+    with pytest.raises(codex_cloud_land.LandError, match="unsafe-vale-config"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[0] == "vale" for argv, _ in calls)
+
+
+def test_vale_unwritable_config_directory_refused(landing, tmp_path, monkeypatch):
+    caller, state, calls = landing
+    real_mkdir = Path.mkdir
+
+    def mkdir(self, *args, **kwargs):
+        if self.name == "vale-config":
+            raise PermissionError("denied")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    with pytest.raises(codex_cloud_land.LandError, match="unsafe-vale-config"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[0] == "vale" for argv, _ in calls)
