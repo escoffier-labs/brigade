@@ -1038,7 +1038,8 @@ def _check_vale_ini(text: str) -> PurePosixPath | None:
         if re.search(r"\s[;#]", value):
             raise LandError("unsafe-vale-config")
         seen.add((section, key))
-        value = value.strip("\"'")
+        # go-ini also unquotes backtick values, so strip them before the path checks.
+        value = value.strip("\"'`")
         for part in re.split(r"[,\s]+", value):
             if key in _VALE_PATH_KEYS and (part.startswith(("/", "~", "\\")) or re.match(r"[A-Za-z]:", part)):
                 raise LandError("unsafe-vale-config")

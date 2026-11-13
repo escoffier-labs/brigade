@@ -1710,6 +1710,8 @@ def test_vale_proposal_root_config_ignored_without_base_config(landing, monkeypa
         "StylesPath = styles\nimport = other\n",
         "StylesPath = styles\n[../x]\nMinAlertLevel = error\n",
         "StylesPath = styles\nTransform = /abs.xsl\n",
+        "StylesPath = `/etc/x`\n",
+        'StylesPath = """/etc/x"""\n',
     ],
 )
 def test_vale_parser_mismatch_forms_refused(landing, tmp_path, config):
