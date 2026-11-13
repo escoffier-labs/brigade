@@ -34,7 +34,7 @@ def plan(
         rel = path.relative_to(target).as_posix()
         text = path.read_text(encoding="utf-8")
         fm, _ = memory_cmd._parse_frontmatter(text)
-        if memory_cmd._is_read_only(config, rel) or str(fm.get("archive", "")).lower() == "never":
+        if memory_cmd._is_read_only(config, rel) or memory_archive.frontmatter_refusal(text):
             skipped["exempt"] += 1
             continue
         if (today - ledger.tracking_since).days < tend.unused_after_days:
@@ -83,10 +83,12 @@ def apply(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     payload = plan(target, config, tend, today=today, judge=judge)
-    decisions = []
+    decisions: list[str] = []
     refused = []
     if tend.enabled and not dry_run:
-        for candidate in payload["candidates"][: tend.max_archives_per_run]:
+        for candidate in payload["candidates"]:
+            if len(decisions) >= tend.max_archives_per_run:
+                break
             try:
                 d = memory_archive.archive_card(target, candidate["file"], reason=candidate["signal"], config=config)
                 decisions.append(d.decision_id)

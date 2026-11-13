@@ -26,10 +26,40 @@ def is_archived_path(rel: str) -> bool:
     return rel == ARCHIVE_ROOT or rel.startswith(ARCHIVE_ROOT + "/")
 
 
-def _malformed_value(value: str) -> bool:
-    value = value.split("#", 1)[0].strip()
-    pairs = {"[": "]", "{": "}", "'": "'", '"': '"'}
-    return bool(value and value[0] in pairs and (len(value) < 2 or not value.endswith(pairs[value[0]])))
+_ARCHIVE_LINE = re.compile(r"""^\s*(['"]?)archive\1\s*:(.*)$""", re.IGNORECASE)
+
+
+def frontmatter_refusal(text: str) -> str | None:
+    """Shared archive safety check for planning and application.
+
+    Brigade reads a YAML subset. Block lists and indented continuations are
+    valid after a key. Plain scalars may contain balanced bracketed words.
+    """
+    normalized = text.removeprefix("\ufeff").replace("\r\n", "\n").lstrip("\n")
+    if not normalized.lstrip().startswith("---"):
+        return None
+    lines = normalized.splitlines()
+    end = next((n for n in range(1, len(lines)) if lines[n].strip() == "---"), None)
+    if lines[0] != "---" or end is None:
+        return "malformed frontmatter"
+    have_key = False
+    for line in lines[1:end]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = _ARCHIVE_LINE.match(line)
+        if match and match[2].strip().lstrip("\"'").lower().startswith("never"):
+            return "archive: never"
+        if line[0].isspace() and have_key:
+            continue
+        key, sep, value = line.partition(":")
+        if not sep or not key.strip():
+            return "malformed frontmatter"
+        have_key = True
+        value = value.split("#", 1)[0].strip()
+        pairs = {"[": "]", "{": "}", "'": "'", '"': '"'}
+        if value and value[0] in pairs and pairs[value[0]] not in value[1:]:
+            return "malformed frontmatter"
+    return None
 
 
 @journal.serialized
@@ -46,20 +76,9 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
         if before is None:
             raise ArchiveRefused(f"{card_rel}: missing card")
         text = before.decode("utf-8")
-        normalized = text.removeprefix("\ufeff").replace("\r\n", "\n")
-        front, parsed = memory_cmd._parse_frontmatter(normalized)
-        if normalized.lstrip().startswith("---"):
-            lines = normalized.splitlines()
-            end = next((n for n in range(1, len(lines)) if lines[n].strip() == "---"), len(lines))
-            if not parsed or any(
-                line.strip()
-                and not line.lstrip().startswith("#")
-                and (":" not in line or not line.split(":", 1)[0].strip() or _malformed_value(line.split(":", 1)[1]))
-                for line in lines[1:end]
-            ):
-                raise ArchiveRefused(f"{card_rel}: malformed frontmatter")
-        if str(front.get("archive", "")).split("#", 1)[0].strip().strip("\"'").lower() == "never":
-            raise ArchiveRefused(f"{card_rel}: archive: never")
+        refusal = frontmatter_refusal(text)
+        if refusal:
+            raise ArchiveRefused(f"{card_rel}: {refusal}")
         dest = archive_rel(card_rel)
         if journal.current(target, dest) is not None or memory_cmd._is_read_only(config, dest):
             raise ArchiveRefused(f"{dest}: occupied or read-only")
@@ -181,6 +200,8 @@ def restore(target: Path, decision: journal.Decision) -> journal.Decision:
             hub={"status": "pending", "action": "put", "path": card_rel},
             prepared_paths=[c.path for c in changes if c.after is not None],
         )
+        if journal._payload(target, undo.decision_id).get("phase") == "abandoned":
+            return journal.update_hub(target, undo.decision_id, {"status": "skipped", "reason": "undo abandoned"})
         withheld = memory_hub_sync.withheld(original.decode("utf-8"))
         if withheld:
             return journal.update_hub(target, undo.decision_id, {"status": "skipped", "reason": withheld})

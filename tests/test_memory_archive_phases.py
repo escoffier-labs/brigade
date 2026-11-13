@@ -47,7 +47,7 @@ def test_archive_crash_resolves_before_next_command(tmp_path, monkeypatch, entry
     assert path.read_bytes() == original
     assert (tmp_path / "memory/archive/cards/cards.md").read_bytes() == original
     assert journal.before_bytes(tmp_path, journal.load(tmp_path, p["decision_id"]), "memory/cards/cards.md") == original
-    cards = memory_cmd._iter_cards(tmp_path, memory_cmd.MemoryCareConfig(card_roots=(".", "memory")))
+    cards = memory_cmd._iter_cards(tmp_path, memory_cmd.MemoryCareConfig(card_roots=("memory/cards", "memory")))
     assert cards.count(path) == 1
     assert tmp_path / "memory/archive/cards/cards.md" not in cards
     assert "- [Old]" in (tmp_path / "MEMORY.md").read_text()

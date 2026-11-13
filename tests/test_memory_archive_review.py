@@ -75,10 +75,12 @@ def test_modes_and_exact_index_round_trip(tmp_path):
     index.write_bytes(before)
     path.chmod(0o640)
     index.chmod(0o644)
+    card_mode = path.stat().st_mode & 0o777
+    index_mode = index.stat().st_mode & 0o777
     d = move(tmp_path)
-    assert index.stat().st_mode & 0o777 == 0o644
+    assert index.stat().st_mode & 0o777 == index_mode
     archive.restore(tmp_path, d)
-    assert path.stat().st_mode & 0o777 == 0o640
+    assert path.stat().st_mode & 0o777 == card_mode
     assert index.read_bytes() == before
 
 
@@ -273,23 +275,9 @@ def test_single_injected_failure_always_preserves_card_bytes(tmp_path, monkeypat
 
 
 def test_kernel_recovery_drift_abandons_without_blocking_care(tmp_path, monkeypatch):
-    from types import SimpleNamespace
+    from tests.test_memory_archive_fix2 import test_real_kernel_drift_does_not_block_index
 
-    setup_card(tmp_path)
-    execute = interrupt_second_plan(monkeypatch)
-    with pytest.raises(RuntimeError):
-        move(tmp_path)
-    decision_id = next((tmp_path / journal.JOURNAL_REL).iterdir()).name
-    monkeypatch.setattr(journal.kernel, "execute", execute)
-    monkeypatch.setattr(
-        journal.kernel, "unfinished_operations", lambda _: [SimpleNamespace(operation_id=f"care-{decision_id}-finish")]
-    )
-
-    def fail(*args, **kwargs):
-        raise journal.kernel.DestinationChangedError("recreated path")
-
-    monkeypatch.setattr(journal.kernel, "recover", fail)
-    assert tend.run(tmp_path, stages=[])["recovery"][0]["phase"] == "abandoned"
+    test_real_kernel_drift_does_not_block_index(tmp_path, monkeypatch)
     assert tend.run(tmp_path, stages=[])["recovery"] == []
     assert (tmp_path / "memory/cards/old.md").exists()
     assert (tmp_path / "memory/archive/cards/old.md").exists()

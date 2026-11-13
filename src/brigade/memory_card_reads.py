@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -74,11 +75,28 @@ def hub_last_reads(target: Path) -> dict[str, date]:
         while True:
             body = hubc.read_stats(client, settings.scope, limit=500, after=after)
             for row in body["rows"]:
-                if row.get("last_read_day"):
-                    result[row["card_id"]] = date.fromisoformat(row["last_read_day"])
+                try:
+                    day = row["last_read_day"]
+                    if type(day) is not int or day < 0 or not isinstance(row["card_id"], str):
+                        raise ValueError("invalid read day")
+                    if day:
+                        result[row["card_id"]] = date(1970, 1, 1) + timedelta(days=day)
+                except (TypeError, ValueError, OverflowError, KeyError):
+                    print("memory care: skipped unexpected hub read-stat row", file=sys.stderr)
             following = body.get("next_after")
             if not following or following == after:
                 return result
             after = following
-    except (hubc.HubConfigError, hubc.HubUnavailable, hubc.HubRefusal, OSError, ValueError, KeyError):
+    except (
+        hubc.HubConfigError,
+        hubc.HubUnavailable,
+        hubc.HubRefusal,
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        OverflowError,
+    ) as exc:
+        print(f"memory care: skipped hub read stats: {exc}", file=sys.stderr)
         return {}

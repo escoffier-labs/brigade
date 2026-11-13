@@ -107,10 +107,21 @@ def revive(target: Path, *, card_id: str, path: str, text: str) -> dict[str, Any
 
 @journal.serialized
 def retry_pending(target: Path) -> dict[str, int]:
-    counts = {"done": 0, "pending": 0, "conflict": 0, "skipped": 0}
-    for d in journal.entries(target):
+    counts = {"done": 0, "pending": 0, "conflict": 0, "skipped": 0, "superseded": 0}
+    decisions = sorted(journal.entries(target), key=lambda d: d.created_at)
+    for n, d in enumerate(decisions):
         hub = d.hub or {}
+        if journal._payload(target, d.decision_id).get("phase") == "abandoned":
+            continue
         if hub.get("status") != "pending":
+            continue
+        if any(
+            later.card_id == d.card_id and later.kind == "archive"
+            for later in decisions[n + 1 :]
+            if journal._payload(target, later.decision_id).get("phase") != "abandoned"
+        ):
+            journal.update_hub(target, d.decision_id, {**hub, "status": "superseded"})
+            counts["superseded"] += 1
             continue
         if d.undoes:
             predecessor = journal.load(target, d.undoes)

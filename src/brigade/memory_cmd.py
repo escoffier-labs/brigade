@@ -230,6 +230,8 @@ def load_config(target: Path) -> MemoryCareConfig | None:
     ):
         for item in paths:
             _relative_path(item, field=field)
+    if any(Path(root).as_posix() == "." for root in card_roots):
+        raise ValueError("card_roots cannot include the repository root")
     return MemoryCareConfig(
         card_roots=card_roots,
         index_paths=index_paths,
@@ -442,6 +444,8 @@ def _is_read_only(config: MemoryCareConfig, rel: str) -> bool:
 def _iter_cards(target: Path, config: MemoryCareConfig) -> list[Path]:
     paths: list[Path] = []
     for root_text in config.card_roots:
+        if Path(root_text).as_posix() == ".":
+            raise ValueError("card_roots cannot include the repository root")
         root = target / root_text
         if not root.is_dir():
             continue

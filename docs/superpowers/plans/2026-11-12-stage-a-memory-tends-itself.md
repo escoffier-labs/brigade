@@ -898,3 +898,22 @@ git commit -m "feat(memory-care): write a weekly summary of what care archived, 
 3. **Type consistency.** `journal.Change`, `journal.Decision`, `commit(..., applied=...)`, `revert`, `archive_card(target, card_rel, *, reason, config)`, `restore(target, decision)`, `TendConfig` fields, `STAGES` order, `Judge`, `Budget`, `reserve`, `pick_pair`, `run_payload(..., settings, seat_pair, reserve)` and `retire_to` are spelled the same in every task that uses them.
 4. **Review Focus.** Each of the five lines has its named test in its owning task (Tasks 1, 3, 2, 4, 8).
 5. **Proportion.** The plan carries signatures, decisions and test names, with no function bodies. It is longer than the spec section it implements because it also fixes eleven tasks' interfaces across seven pull requests.
+
+## PR 1 second review corrections
+
+- Convert validated hub read day integers from the Unix epoch. Skip and report
+  malformed responses and out-of-range days so explicit and automatic tend survive.
+- Reconcile pending hub operations in creation order. Later archives supersede
+  earlier revivals for the same card before any replay.
+- Use one frontmatter safety predicate for planning and archiving. Accept block
+  lists and indented continuations, refuse unterminated headers, and honor every
+  quoted or case-insensitive archive pin even when later keys disagree.
+- Count successful archives toward the steady-state cap. Refusals leave room for
+  later candidates.
+- Supersede abandoned kernel operations through the supported kernel API while
+  retaining before-images. Forced recovery cannot replay superseded operations.
+  This is the only kernel API addition authorized for this review round.
+- Abandon preparation when read-only policy changes, skip revival for abandoned
+  undo, refuse undo of undo, and list abandoned decisions that remain restorable.
+  Reject the repository root as a card root.
+- Verify CRLF pins through a manifest without relying on platform newline translation.

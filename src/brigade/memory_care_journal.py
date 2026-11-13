@@ -232,7 +232,7 @@ def entries(target: Path, *, since: datetime | None = None) -> list[Decision]:
         if not (directory / "decision.json").exists():
             continue
         p = _payload(target, directory.name)
-        if p.get("status") != "committed":
+        if p.get("status") != "committed" and not p.get("restorable"):
             continue
         d = load(target, directory.name)
         if since is None or datetime.fromisoformat(d.created_at) >= since:
@@ -242,6 +242,8 @@ def entries(target: Path, *, since: datetime | None = None) -> list[Decision]:
 
 def revert(target: Path, decision_id: str, *, reason: str) -> Decision:
     d = load(target, decision_id)
+    if d.kind == "undo":
+        raise JournalConflict("cannot undo an undo decision")
     if d.undone_by:
         raise JournalConflict("decision already undone")
     changes = []
@@ -402,18 +404,22 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
         changes = rebased
     prepared = set(p["prepared_paths"])
     drift = [c.path for c in changes if current(target, c.path) != (c.after if c.path in prepared else c.before)]
-    if any(read_only_pattern(c.path, config.read_only_paths) for c in changes):
-        raise ReadOnlyPath("prepared decision now touches a read-only path")
-    if drift:
+    protected = any(read_only_pattern(c.path, config.read_only_paths) for c in changes)
+    if drift or protected:
         # Discard only our unchanged safety copy. Never overwrite an edited card or archive.
-        final = {**p, "phase": "abandoned", "status": "abandoned", "abandoned_reason": f"changed: {', '.join(drift)}"}
+        final = {
+            **p,
+            "phase": "abandoned",
+            "status": "abandoned",
+            "abandoned_reason": ("read-only paths changed" if protected else f"changed: {', '.join(drift)}"),
+        }
         original_missing = any(
             c.before is not None and c.after is None and current(target, c.path) is None for c in changes
         )
         final["restorable"] = d.kind == "archive" and original_missing
         pending = (
             []
-            if d.kind == "undo" or original_missing
+            if protected or d.kind == "undo" or original_missing
             else [Change(c.path, c.after, c.before) for c in changes if c.path in prepared and c.path not in drift]
         )
     else:
@@ -447,16 +453,19 @@ def resolve_prepared(target: Path) -> list[dict[str, str]]:
         except JournalConflict:
             p = {}
         if p.get("phase") == "abandoned":
+            kernel.supersede(operation.operation_id, target=target)
             continue
         try:
             receipt = kernel.recover(operation.operation_id, target=target)
             if receipt.terminal_state != "restored":
                 raise JournalConflict(f"kernel {receipt.terminal_state}")
-        except (JournalConflict, kernel.ProjectionError) as exc:
+        except (JournalConflict, kernel.ProjectionError):
             if not p:
                 raise
-            annotate(target, decision_id, phase="abandoned", status="abandoned", abandoned_reason=str(exc))
-            resolved.append({"decision_id": decision_id, "phase": "abandoned", "reason": str(exc)})
+            kernel.supersede(operation.operation_id, target=target)
+            reason = "kernel recovery could not complete safely. Operation superseded, before-images retained"
+            annotate(target, decision_id, phase="abandoned", status="abandoned", abandoned_reason=reason)
+            resolved.append({"decision_id": decision_id, "phase": "abandoned", "reason": reason})
     root = target / JOURNAL_REL
     if root.exists():
         for directory in sorted(root.iterdir()):

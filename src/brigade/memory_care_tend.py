@@ -73,6 +73,8 @@ def undo(target: Path, decision_id: str) -> journal.Decision:
         if item["phase"] == "abandoned":
             print(f"memory care: abandoned {item['decision_id']}: {item['reason']}", file=sys.stderr)
     d = journal.load(target, decision_id)
+    if d.kind == "undo":
+        raise journal.JournalConflict("cannot undo an undo decision")
     if d.undone_by:
         return journal.load(target, d.undone_by)
     return (
