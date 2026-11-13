@@ -636,9 +636,9 @@ def _assert_setup_bind_available(target: Path, pack_id: str, chosen_bind: str) -
 def _occupied_setup_ports(target: Path, *, exclude_pack_id: str) -> set[int]:
     from .dot.connector_registry import instance_config_path as connector_path
 
-    ports: set[int] = {8781, 8782, 8783}
+    ports: set[int] = {8771, 8773, 8778, 8781, 8782, 8783}
     # Retained listener files still reserve their ports without loading a retired profile.
-    for name in ("grokbot-memory", "grokbot-inbox"):
+    for name in ("grokbot-memory", "grokbot-inbox", "fleet-steward", "obsidian-operator", "t3-dispatch"):
         path = target / INSTANCE_DIR / f"{name}.json"
         if path != instance_config_path(target, exclude_pack_id):
             port = _bind_port_from_existing_config(path)

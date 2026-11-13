@@ -360,5 +360,47 @@
         "to_version": "1.0.0"
       }
     }
+  },
+  "legacy_collisions": {
+    "dot": {
+      "8771": {
+        "error": "duplicate-port"
+      },
+      "8773": {
+        "error": "duplicate-port"
+      },
+      "8778": {
+        "error": "duplicate-port"
+      },
+      "fleet-steward": {
+        "error": "duplicate-port"
+      },
+      "obsidian-operator": {
+        "error": "duplicate-port"
+      },
+      "t3-dispatch": {
+        "error": "duplicate-port"
+      }
+    },
+    "duet": {
+      "8771": {
+        "error": "duplicate-port"
+      },
+      "8773": {
+        "error": "duplicate-port"
+      },
+      "8778": {
+        "error": "duplicate-port"
+      },
+      "fleet-steward": {
+        "error": "duplicate-port"
+      },
+      "obsidian-operator": {
+        "error": "duplicate-port"
+      },
+      "t3-dispatch": {
+        "error": "duplicate-port"
+      }
+    }
   }
 }

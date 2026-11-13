@@ -6,6 +6,7 @@ import sys
 from unittest.mock import patch
 
 from brigade.dot import connector_registry as registry, lifecycle
+from brigade import grokbot_packs as packs
 from tests.test_cloud_agent_profile import cloud_document
 from tests.connector_legacy_capture import capture as legacy_capture
 
@@ -14,6 +15,29 @@ def capture(root):
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     root.chmod(0o700)
     result = {"legacy": legacy_capture(root / "legacy")}
+    collisions = {}
+    for name in ("dot", "duet"):
+        target = root / "legacy" / name
+        runtime = target / "runtime.json"
+        row = {}
+        for port in (8771, 8773, 8778):
+            try:
+                row[str(port)] = packs.preview_setup(target, name, runtime_path=runtime, bind=f"127.0.0.1:{port}")
+            except packs.PackError as error:
+                row[str(port)] = {"error": error.reason}
+        for retired in ("fleet-steward", "obsidian-operator", "t3-dispatch"):
+            instance = packs.instance_config_path(target, retired)
+            instance.write_text(json.dumps({"bind": "127.0.0.1:8997"}))
+            instance.chmod(0o600)
+            before = instance.read_bytes()
+            try:
+                row[retired] = packs.preview_setup(target, name, runtime_path=runtime, bind="127.0.0.1:8997")
+            except packs.PackError as error:
+                row[retired] = {"error": error.reason}
+            assert instance.read_bytes() == before
+            instance.unlink()
+        collisions[name] = row
+    result["legacy_collisions"] = collisions
     target = root / "cloud"
     target.mkdir(mode=0o700)
     runtime = target / "runtime.json"
