@@ -199,3 +199,14 @@ def test_version_detection_isolates_binary_side_effects(tmp_path, monkeypatch):
     assert compat.detect_version() == "2026.10.01-e373342"
     assert not Path.home().exists()
     assert not profiles[0].exists()
+
+
+def test_mode_show_keeps_invalid_list_config_fail_safe(tmp_path, capsys):
+    from brigade import cli
+
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade/config.json").write_text("[]")
+    assert cli.main(["work", "mode", "show", "--target", str(tmp_path), "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["mode"] == "strict"
+    assert report["observe_hooks"] == {"codex": False}

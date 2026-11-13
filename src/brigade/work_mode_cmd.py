@@ -58,7 +58,7 @@ def mode_command(*, target: Path, action: str, mode: str | None = None, json_out
 
     try:
         cfg = load_config(target)
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, AttributeError):
         cfg = None
     if action == "set" and work_mode.is_observe(target) and cfg is not None and "codex" in cfg.selection.harnesses:
         error = install_codex_observe_hooks(target)
