@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-import time
+import re
+import shlex
+from contextlib import ExitStack
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
@@ -14,6 +16,7 @@ from typing import Any
 from . import guard, localio
 from .agent_identity import MODEL_SOURCES, AgentIdentity
 from .claude_hooks.envelope import redact_paths
+from .inbox_lock import InboxLockTimeout, held_file_lock
 
 OBSERVED_DIR_REL = Path(".brigade/work/observed")
 CHECKS_FILE = "checks.jsonl"
@@ -21,6 +24,11 @@ CHECK_SCHEMA = "brigade.observed_check.v1"
 STATUSES = ("ok", "failed", "unknown")
 ROTATE_BYTES = 4 * 1024 * 1024
 COMMAND_MAX_CHARS = 1000
+LOCK_SECONDS = 2.0
+REDACTED = "[REDACTED]"
+_SENSITIVE_OPTION = re.compile(r"key|token|secret|pass|pwd|auth|cred|bearer", re.I)
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_SAFE_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+-]{0,79}\Z")
 CHECK_KINDS = ("tests", "lint", "types", "build", "checks")
 
 
@@ -119,6 +127,8 @@ def _normalize_tokens(tokens: list[str]) -> str:
 
 
 def normalize_tool(command: str) -> str:
+    if not isinstance(command, str):
+        return "other"
     rt = _rt()
     try:
         segment = rt._shell_tokens(rt._first_verifier_command(command))
@@ -166,8 +176,55 @@ def check_kind(tool: str) -> str:
     return _KIND_BY_TOOL.get(tool, "checks")
 
 
+def _command_secrets(command: str) -> str:
+    """Mask shell credential positions before content and path redaction.
+
+    Invalid shell syntax loses the entire command through a conservative regex
+    fallback. Markers never depend on the secret's contents or length.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return re.sub(r"[\s\S]+", lambda _: REDACTED, command)
+    hide_next = False
+    result = []
+    for token in tokens:
+        if hide_next:
+            result.append(REDACTED)
+            hide_next = False
+            continue
+        if _ASSIGNMENT.match(token):
+            result.append(token.split("=", 1)[0] + "=" + REDACTED)
+            continue
+        option, equals, _ = token.partition("=")
+        if (option.startswith("-") and _SENSITIVE_OPTION.search(option)) or option in {
+            "-p",
+            "-u",
+            "-H",
+            "--header",
+            "--user",
+        }:
+            result.append(option + "=" + REDACTED if equals else option)
+            hide_next = not equals
+            continue
+        if token.startswith(("-H", "-u")) and len(token) > 2:
+            result.append(token[:2] + REDACTED)
+            continue
+        result.append(re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/]*@", lambda m: m[1] + REDACTED + "@", token))
+    return shlex.join(result)
+
+
 def redact_command(command: str) -> str:
-    return redact_paths(guard.redact_text(command))[:COMMAND_MAX_CHARS]
+    if not isinstance(command, str):
+        return REDACTED
+    return redact_paths(guard.redact_text(_command_secrets(command)))[:COMMAND_MAX_CHARS]
+
+
+def _safe_identity(value: Any) -> str:
+    if not isinstance(value, str) or not _SAFE_IDENTITY.fullmatch(value):
+        return "unknown"
+    redacted = redact_command(value)
+    return redacted if _SAFE_IDENTITY.fullmatch(redacted) else "unknown"
 
 
 def build_check(
@@ -184,9 +241,9 @@ def build_check(
         schema=CHECK_SCHEMA,
         ts=localio.utc_now_iso(),
         harness=identity.harness,
-        model=identity.model,
+        model=_safe_identity(identity.model),
         model_source=identity.model_source,
-        agent_type=identity.agent_type,
+        agent_type=_safe_identity(identity.agent_type),
         session_fingerprint=session_fingerprint,
         tree_fingerprint=localio.tree_fingerprint(target),
         tool=normalize_tool(command),
@@ -198,51 +255,85 @@ def build_check(
 
 
 def _rotate(path: Path) -> None:
-    if not path.exists() or path.stat().st_size < ROTATE_BYTES:
-        return
-    lock = path.with_name(path.name + ".rotate.lock")
+    """Rotate under the caller's OS lock, keeping only one older generation."""
     try:
-        if time.time() - lock.stat().st_mtime > 60:
-            lock.unlink()
+        if path.stat().st_size >= ROTATE_BYTES:
+            os.replace(path, path.with_name(path.name + ".1"))
     except FileNotFoundError:
         pass
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        return
-    os.close(fd)
-    try:
-        if path.exists() and path.stat().st_size >= ROTATE_BYTES:
-            try:
-                os.replace(path, path.with_name(path.name + ".1"))
-            except PermissionError:
-                # Windows may refuse replacement while another appender has it open.
-                pass
-    finally:
-        lock.unlink(missing_ok=True)
+
+
+def _lock_path(path: Path) -> Path:
+    return path.with_name(path.name + ".lock")
 
 
 def append_jsonl(path: Path, payload: Mapping[str, Any]) -> bool:
-    """Append one encoded line in one write; storage errors never escape."""
+    """Serialize size check, best-effort rotation and append on local filesystems.
+
+    Cooperating processes use flock / msvcrt with a two-second acquisition
+    bound. Timeout writes nothing. A short write can lose its own record, but
+    the next append separates it with a newline. No fsync durability or network
+    filesystem lock/append guarantees are provided. Only two generations remain.
+    """
     try:
         line = (json.dumps(dict(payload), ensure_ascii=True, allow_nan=False) + "\n").encode("utf-8")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _rotate(path)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0), 0o600)
-        try:
-            return os.write(fd, line) == len(line)
-        finally:
-            os.close(fd)
-    except (OSError, ValueError, TypeError):
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with held_file_lock(_lock_path(path), deadline_seconds=LOCK_SECONDS):
+            if os.name != "nt":
+                path.parent.chmod(0o700)
+                try:
+                    path.chmod(0o600)
+                except FileNotFoundError:
+                    pass
+            try:
+                _rotate(path)
+            except OSError:
+                pass
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0), 0o600)
+            try:
+                if os.name != "nt":
+                    os.fchmod(fd, 0o600)
+                if os.lseek(fd, 0, os.SEEK_END):
+                    os.lseek(fd, -1, os.SEEK_END)
+                    if os.read(fd, 1) != b"\n" and os.write(fd, b"\n") != 1:
+                        return False
+                return os.write(fd, line) == len(line)
+            finally:
+                os.close(fd)
+    except (OSError, ValueError, TypeError, RecursionError):
         return False
 
 
 def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
+    """Open both retained generations under the writer lock, then decode.
+
+    Timeout falls back to unlocked reading and adds one to the skipped count.
+    That fallback may miss a generation during rotation. Network filesystems
+    may not honor the OS locking semantics used here.
+    """
     records: list[dict[str, Any]] = []
     skipped = 0
-    for source in (path.with_name(path.name + ".1"), path):
-        try:
-            with source.open("rb") as stream:
+    try:
+        if not path.parent.exists():
+            return records, skipped
+    except OSError:
+        return records, 1
+    with ExitStack() as streams:
+        with ExitStack() as locking:
+            try:
+                locking.enter_context(held_file_lock(_lock_path(path), deadline_seconds=LOCK_SECONDS))
+            except (InboxLockTimeout, OSError):
+                skipped += 1
+            opened = []
+            for source in (path.with_name(path.name + ".1"), path):
+                try:
+                    opened.append(streams.enter_context(source.open("rb")))
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    skipped += 1
+        for stream in opened:
+            try:
                 for line in stream:
                     try:
                         if not line.endswith(b"\n"):
@@ -253,10 +344,8 @@ def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
                         records.append(record)
                     except (ValueError, UnicodeError, RecursionError):
                         skipped += 1
-        except FileNotFoundError:
-            continue
-        except OSError:
-            skipped += 1
+            except OSError:
+                skipped += 1
     return records, skipped
 
 
@@ -264,6 +353,8 @@ def append_check(target: Path, check: ObservedCheck) -> bool:
     # Redact at the storage boundary too, even for a directly constructed record.
     payload = check.to_dict()
     payload["command"] = redact_command(check.command)
+    payload["model"] = _safe_identity(check.model)
+    payload["agent_type"] = _safe_identity(check.agent_type)
     if ObservedCheck.from_dict(payload) is None:
         return False
     return append_jsonl(target / OBSERVED_DIR_REL / CHECKS_FILE, payload)

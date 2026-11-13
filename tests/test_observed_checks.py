@@ -1,7 +1,6 @@
 import json
 import os
 import stat
-import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -164,25 +163,24 @@ def test_private_creation_and_existing_mode_preserved(tmp_path):
     path = tmp_path / "checks.jsonl"
     assert observed_checks.append_jsonl(path, {"one": 1})
     if os.name != "nt":
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.stat().st_mode) == (stat.S_IRUSR | stat.S_IWUSR)
     path.chmod(0o600)
     before = stat.S_IMODE(path.stat().st_mode)
     assert observed_checks.append_jsonl(path, {"two": 2})
     assert stat.S_IMODE(path.stat().st_mode) == before
 
 
-def test_rotation_lock_and_stale_lock(tmp_path, monkeypatch):
+def test_obsolete_rotation_lock_does_not_control_writers(tmp_path, monkeypatch):
     monkeypatch.setattr(observed_checks, "ROTATE_BYTES", 1)
     path = tmp_path / "checks.jsonl"
     observed_checks.append_jsonl(path, {"one": 1})
     lock = path.with_name(path.name + ".rotate.lock")
-    lock.touch()
+    lock.write_text("obsolete lock")
     assert observed_checks.append_jsonl(path, {"two": 2})
-    assert not path.with_name(path.name + ".1").exists()
-    os.utime(lock, (time.time() - 120,) * 2)
+    assert path.with_name(path.name + ".1").exists()
     assert observed_checks.append_jsonl(path, {"three": 3})
-    assert not lock.exists()
-    assert observed_checks.read_jsonl(path) == ([{"one": 1}, {"two": 2}, {"three": 3}], 0)
+    assert lock.read_text() == "obsolete lock"
+    assert observed_checks.read_jsonl(path) == ([{"two": 2}, {"three": 3}], 0)
 
 
 def _append_many(path):
