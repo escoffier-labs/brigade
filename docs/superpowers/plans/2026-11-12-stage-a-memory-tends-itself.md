@@ -65,7 +65,7 @@ The owner did not decide these. Each is a reviewer checkpoint.
 
 ## Global Constraints
 
-- All pull requests target `overhaul`, not `main`. Conventional commits. Each commit made by an agent ends with `Co-Authored-By: Claude <noreply@anthropic.com>` (or the executing agent's approved trailer).
+- All pull requests target `overhaul`, not `main`. Conventional commits. Each commit made by an agent ends with the executing agent's approved co-author trailer.
 - One changelog fragment per user-visible PR under `changelog.d/<slug>.md`, `- ` bullets only. Never edit `CHANGELOG.md`. Check with `python3 scripts/changelog_fragments.py check`.
 - Checks run through Brigade: `brigade work verify run --target . --argv-json '["./scripts/verify-focused","<pytest-selector>"]' --capture brigade-work`. Never raw pytest for evidence. Required CI supplies the full suite and coverage.
 - Module ceiling 2,000 lines, enforced by `tests/test_module_size_ratchet.py`. Current sizes: `memory_cmd.py` 1,957 (43 lines of headroom), `care_cmd.py` 2,075 against a frozen cap of 2,084, `ingest.py` 1,208, `memory_verify_run.py` 1,287, `memory_verify_contract.py` 1,293, `memory_verify_seat.py` 709, `cli/memory.py` 677. New logic goes in new modules. `care_cmd.py` is not touched by this plan. Any edit to `memory_cmd.py` must be net-neutral or smaller.
