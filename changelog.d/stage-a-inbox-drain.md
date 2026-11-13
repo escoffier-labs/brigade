@@ -1,0 +1,1 @@
+- Drain the handoff review inbox after CLI ingest and during memory care tend. Resolve already-applied drafts, retry transient failures with journal-first recovery, and archive expired safe drafts with undo. Retain trust and security holds, preserve evidence paths, report unsafe input, and sweep redundant abandoned before-images while retaining unique bytes.

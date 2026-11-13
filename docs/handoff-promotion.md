@@ -126,3 +126,12 @@ Normalized receipts preserve warning events, malformed handoff paths, unreachabl
 Source coverage issues for uncovered writer inboxes include stable source keys and fingerprints. If an operator dismisses an unchanged uncovered-inbox import, Brigade does not recreate it; when the pending inbox coverage state changes, the source fingerprint changes and the repair import can resurface.
 
 This receipt surface is observability only. It does not run the ingestor, edit canonical memory, promote cards, route documents, or summarize draft content.
+
+
+## Automatic review-inbox drain
+
+Memory care resolves already-applied drafts, retries transient ingest failures
+and expires other safe drafts after the configured deadline. Trust and security
+holds stay in place with a recorded reason. Evidence-linked drafts retain their
+paths and use a resolved ledger. See [Review inbox](memory-care.md#review-inbox)
+for the disposition table, safe skips and undo behavior.

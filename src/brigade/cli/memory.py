@@ -86,7 +86,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true")
         if name == "tend":
-            command.add_argument("--stage", action="append", choices=("hub", "retire"))
+            command.add_argument("--stage", action="append", choices=("hub", "retire", "inbox"))
             command.add_argument("--dry-run", action="store_true")
         elif name == "undo":
             command.add_argument("decision_id")

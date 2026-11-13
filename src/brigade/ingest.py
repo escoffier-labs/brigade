@@ -722,7 +722,7 @@ def _publish_promoted_card(
     dry_run: bool,
     expected_sha: str = "",
     card_ids: CardIdIndex | None = None,
-) -> None:
+) -> str:
     """Publish (or, in a dry run, simulate) one card and record its id in `card_ids`.
 
     The card is recorded as soon as the write returns, before the caller archives the
@@ -778,6 +778,8 @@ def _publish_promoted_card(
         # `built` is the text written, or in a dry run the text the same builder would
         # write, so an update-card that omits an id keeps the destination's id in both.
         card_ids.register((CARDS_RELATIVE / dest.name).as_posix(), built)
+
+    return built
 
 
 def _append_document_nofollow(target: Path, dest: Path, text: str) -> None:
@@ -1206,3 +1208,10 @@ def _report(stats: IngestStats, dry_run: bool) -> None:
     elif stats.processed == 0:
         print(f"{tag}NO_UPDATES")
     print(f"{tag}Status {stats.status}")
+
+
+def reprocess_review_draft(owner: Path, draft: Path, *, card_ids: CardIdIndex | None = None) -> Action:
+    """Retry a review draft through durable prepare-then-finish publication."""
+    from .memory_inbox_retry import reprocess
+
+    return reprocess(owner, draft, card_ids=card_ids)
