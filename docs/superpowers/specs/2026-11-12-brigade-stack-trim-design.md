@@ -442,3 +442,28 @@ operator on 2026-11-12.
   field came from published records written by older releases with no source
   path, not from two files sharing an id. One case is left open in #2539: a
   takeover whose reply is lost, followed by the holder going private.
+- **(decided)** Keeping the always-loaded instruction files inside their size
+  budget is Brigade background work, with no person involved. The owner has
+  done this trim by hand about a dozen times in a year. Today a separate
+  checker reports sizes weekly and nothing acts on the report. Found in the
+  field on 2026-11-13:
+  - A file sat 520 bytes under its soft limit and was reported as fine, so
+    every later append to it was refused and held for review.
+  - A shared rules file was 4,500 bytes over its hard limit for at least a
+    week. The check failed each time and told nobody.
+  - The checker's own trim command could not run: it had no model configured.
+  - A test script for the budget sent real agent turns and tested for text
+    that no longer existed.
+
+  Wanted behaviour, as part of memory care in Stage A:
+  - The care pass measures each always-loaded file against its budget and
+    acts before the limit, at a set headroom, not after it.
+  - When a file is over headroom, the background model step moves the
+    least-used sections into memory cards, leaves a one-line pointer, and
+    records the move in the journal with undo.
+  - A handoff aimed at an always-loaded file is routed to a card with a
+    pointer when the file has no room. It is never held for a person.
+  - A rules file that a person tunes by hand is trimmed only by moving whole
+    sections to a linked file, verbatim, never by rewording.
+  - A failed or skipped pass raises one alert through the configured route.
+  - The summary reports what moved and how to undo it.
