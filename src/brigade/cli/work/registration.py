@@ -18,11 +18,28 @@ from .dispatching import dispatch
 from .phases import _register_phases
 
 
+def _check_days(value: str) -> int:
+    try:
+        days = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("days must be an integer from 0 to 365000") from None
+    if not 0 <= days <= 365000:
+        raise argparse.ArgumentTypeError("days must be an integer from 0 to 365000")
+    return days
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     # work
     p_work = sub.add_parser("work", help="Inspect and manage a daily Brigade work session.")
     work_sub = p_work.add_subparsers(dest="work_command", metavar="<work-command>")
     work_sub.required = True
+    p_checks = work_sub.add_parser("checks", help="Report observed first-pass checks.")
+    p_checks.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace to inspect.")
+    p_checks.add_argument("--since", type=_check_days, default=None, help="Include first attempts in the last N days.")
+    p_checks.add_argument(
+        "--group-by", choices=("harness", "model"), default="model", help="Group by harness or harness and model."
+    )
+    p_checks.add_argument("--json", action="store_true", help="Print brigade.work_checks.v1 JSON.")
     p_work_status = work_sub.add_parser("status", help="Show current repo and dogfood work state.")
     p_work_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_status.add_argument("--limit", type=int, default=12, help="Maximum dirty file entries to show.")

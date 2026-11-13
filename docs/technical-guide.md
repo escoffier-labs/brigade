@@ -2687,3 +2687,50 @@ Claude session cache selected by `BRIGADE_AGENT_SESSION`, then
 `BRIGADE_CLAUDE_SESSION`. Missing identity becomes `unknown`. Outcome capture
 copies this identity to `context.agent_identity`. Capability cohorts remain
 unchanged. Observed checks remain separate from signed verify receipts.
+
+### Observed first-pass checks
+
+`brigade work checks --target .` prints retained first attempts by harness and
+model. Use `--group-by harness` to combine models, `--since 7` for first attempts
+in the last seven days, or `--json` for the versioned JSON object below.
+Relative and absolute targets select the same per-user store.
+
+The label is `observed, not independently verified`. These counts do not measure
+agent quality. Codex has no reported pass rate. Hook capture is available only
+where the harness supports it. Records belong to one machine and one user.
+A record can be dropped under load. Capture and rotation retain a bounded
+history, so the earliest retained attempt may follow an attempt already lost.
+The report reads at most two generations and 10,000 records, through an unlocked
+snapshot that can miss a concurrent rotation. It never writes state, runs a
+process, makes a network request, or changes mode.
+
+A first attempt is the earliest retained record for a harness, session, tool and
+command digest. Later records with that key are retries. Unavailable session
+fingerprints or digests enter `ungrouped`, outside the table. The tree
+fingerprint is unused. The time window applies after first-attempt selection,
+so filtering does not promote a retry. Unknown models keep their own row.
+
+The fixed columns are `harness model n passed failed unknown rate`. Harness-only
+rows use `*` for model. Unknown statuses never enter a rate denominator. Groups
+with only unknowns say `no result reported`. Below `MIN_RESULTS = 5` reported
+results, counts appear with `insufficient results` instead of a percentage.
+Every row includes the unknown count beside the rate. Reader skips, retries and
+ungrouped records appear as counts. An oversized generation contributes one
+skip for its discarded leading fragment.
+
+JSON schema `brigade.work_checks.v1` has these stable fields:
+
+- `schema`, `label`: strings identifying the shape and observation label.
+- `group_by`: `model` (harness and model) or `harness`.
+- `min_results`: integer threshold for displaying a rate, currently 5.
+- `rows`: objects with `harness`, `model`, `samples`, `passed`, `failed`,
+  `unknown`, and `rate`. Model is null for harness-only grouping. Counts are
+  integers. Rate is a fraction from 0 to 1, or null below the threshold.
+- `observed_read`: valid records read before the time filter.
+- `skipped_lines`: reader skips, including unreadable data or generations.
+- `ungrouped`: records in the time window with an unavailable grouping key.
+- `retries`: later attempts in the time window with an available grouping key.
+
+This command includes only observed checks. Signed verify receipts and claim
+comparison are outside this report. Empty text output is one line naming
+`brigade work mode set observe`, with any reader skip count on that line.
