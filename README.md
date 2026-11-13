@@ -89,7 +89,7 @@ Generated agent instructions and CLI suggestions still use `brigade`. On a bridg
 | **Dot** | Memory, skills, Hub messaging, and authorized T3 fleet dispatch. |
 | **Duet** (0.31 beta) | Memory, skills, Hub messaging, and read-only fleet views. |
 
-Hosted connectors need explicit setup. See the [technical guide](docs/technical-guide.md), [Dot guide](docs/grokbot-dot.md), [Duet guide](docs/duet-connector.md), and [Grok Bot memory guide](docs/grokbot-memory-connector.md).
+Hosted connectors need explicit setup. See the [technical guide](docs/technical-guide.md), [Dot guide](docs/grokbot-dot.md), [Duet guide](docs/duet-connector.md), and [generic connector guide](docs/duet-connector.md#generic-cloud-agent-profile).
 
 ## MCP servers
 

@@ -222,7 +222,7 @@ def test_setup_rolls_back_token_after_unexpected_exception(dot_private_dir, monk
         raise RuntimeError("unexpected failure")
 
     monkeypatch.setattr(registry, "_write", fail)
-    with pytest.raises(registry.PackError, match="unsafe-path"):
+    with pytest.raises(RuntimeError, match="unexpected failure"):
         registry.apply_setup(root, "cloud-agent", runtime_path=path)
     assert not token.exists()
     assert not registry.instance_config_path(root, "cloud-agent").exists()

@@ -624,7 +624,9 @@ def _isolated_from_dot(target: Path, runtime: Runtime) -> bool:
             and _same_location(runtime.paths.fleet_config, other_runtime.paths.fleet_config)
         ):
             return False
-    return True
+    from .retired_instances import isolated_from_retired
+
+    return isolated_from_retired(target, runtime)
 
 
 def _same_location(left: Path, right: Path) -> bool:

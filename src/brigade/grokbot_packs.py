@@ -714,7 +714,8 @@ def _occupied_setup_ports(target: Path, *, exclude_pack_id: str) -> set[int]:
 
     ports: set[int] = {8781, 8782, 8783}
     # Retained listener files still reserve their ports without loading a retired profile.
-    for path in (target / INSTANCE_DIR).glob("*.json"):
+    for name in ("grokbot-memory", "grokbot-inbox"):
+        path = target / INSTANCE_DIR / f"{name}.json"
         if path != instance_config_path(target, exclude_pack_id):
             port = _bind_port_from_existing_config(path)
             if port is not None:

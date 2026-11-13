@@ -149,7 +149,6 @@ def _setup(
     allowed_origins: list[str] | None,
     runtime_path: str | Path | None,
 ) -> dict[str, Any]:
-    target = target.resolve()
     _profile(pack_id)
     payload: dict[str, Any] = dict(
         schema=INSTANCE_SCHEMA,
@@ -237,7 +236,9 @@ def _setup(
                 raise PackError("rollback-failed") from None
             if isinstance(exc, PackError) and exc.reason == "rollback-failed":
                 raise
-            raise PackError("unsafe-path") from None
+            if isinstance(exc, (PackError, DotError, OSError)):
+                raise PackError("unsafe-path") from None
+            raise
     return result
 
 

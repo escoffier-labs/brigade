@@ -34,5 +34,14 @@ def compatibility(argv: list[str]) -> int | None:
                 else (tail[index + 1] if item == flag and index + 1 < len(tail) else None)
             )
             if value in RETIRED_PROFILES:
-                return removed(" ".join((*prefix, value)))
+                if tail[0:1] == ["remove"] and flag == "--id":
+                    from brigade.dot.retired_instances import remove_command
+
+                    return remove_command(tail[1:], value)
+                return removed(
+                    " ".join((*prefix, value)),
+                    replacement=REPLACEMENT
+                    + f" Stop installed units: systemctl --user disable --now brigade-{value}.service "
+                    + f"brigade-{value}-watch.service brigade-{value}-watch.timer",
+                )
     return None
