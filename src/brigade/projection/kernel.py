@@ -281,6 +281,8 @@ def _execute(plan: Plan, *, target: Path, inject: FailureInjector | None = None)
     _assert_no_overlap(target, {spec.destination for spec in plan.mutations}, exclude=plan.operation_id)
     op_dir = operation_dir(target, plan.operation_id)
     if op_dir.exists():
+        if _read_journal(op_dir).get("status") == "superseded":
+            raise ProjectionError("cannot reuse a superseded operation id")
         shutil.rmtree(op_dir)
     op_dir.mkdir(parents=True)
     try:
@@ -348,9 +350,11 @@ def _recover(operation_id: str, *, target: Path, force: bool = False) -> Receipt
 def supersede(operation_id: str, *, target: Path) -> Receipt:
     """Retire an unfinished operation without touching destinations or before-images.
 
+    Callers must hold a lock that excludes the operation's writer.
     The caller owns reconciliation of the partial result. Recovery, including
     forced recovery, must never replay a superseded operation.
     """
+    target = target.expanduser().resolve()
     op_dir = operation_dir(target, operation_id)
     journal = _read_journal(op_dir)
     status = str(journal.get("status") or "")

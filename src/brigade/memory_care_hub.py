@@ -20,6 +20,8 @@ def _send(
     path: str = "",
     text: str = "",
     request: dict[str, Any] | None = None,
+    recorded_hub: str | None = None,
+    replay: bool = False,
 ) -> dict[str, Any]:
     if action == "put":
         reason_withheld = sync.withheld(text)
@@ -36,11 +38,30 @@ def _send(
         "reason": reason,
         "path": path,
     }
+    if request:
+        pending.update(request=request, hub=recorded_hub)
     try:
         settings = hubc.load_settings(target)
         if settings.mode != "sync" or not settings.scope:
             return {"status": "skipped"}
         client = hubc.client_for(settings)
+        if request and (recorded_hub != client.identity or request.get("scope") != settings.scope):
+            return {
+                **pending,
+                "request": request,
+                "hub": recorded_hub,
+                "status": "needs_review",
+                "reason": "hub-changed" if recorded_hub != client.identity else "scope-changed",
+            }
+        if action == "put" and replay:
+            refusal = sync._replay_refusal(
+                target,
+                {"scope": settings.scope, **(request or {}), "card_id": card_id, "path": path},
+                sync._local_cards(target),
+                settings.scope,
+            )
+            if refusal:
+                return {**pending, "status": "superseded", "reason": refusal}
         with store.locked(target):
             state = store.published(target)
             base = state.get(client.identity, {}).get(settings.scope, {}).get(card_id)
@@ -106,12 +127,32 @@ def revive(target: Path, *, card_id: str, path: str, text: str) -> dict[str, Any
 
 
 @journal.serialized
-def retry_pending(target: Path) -> dict[str, int]:
-    counts = {"done": 0, "pending": 0, "conflict": 0, "skipped": 0, "superseded": 0}
+def retry_pending(target: Path) -> dict[str, Any]:
+    counts: dict[str, Any] = {
+        "needs_review": 0,
+        "review_items": [],
+        "done": 0,
+        "pending": 0,
+        "conflict": 0,
+        "skipped": 0,
+        "superseded": 0,
+    }
     decisions = sorted(journal.entries(target), key=lambda d: d.created_at)
     for n, d in enumerate(decisions):
         hub = d.hub or {}
-        if journal._payload(target, d.decision_id).get("phase") == "abandoned":
+        payload = journal._payload(target, d.decision_id)
+        if payload.get("phase") == "abandoned" and not (
+            payload.get("restorable")
+            and any(
+                journal.current(target, path) is None and payload["after_sha256"][path] is None
+                for path in d.paths
+                if path not in journal.index_paths(payload)
+            )
+        ):
+            continue
+        if hub.get("status") == "needs_review":
+            counts["needs_review"] += 1
+            counts["review_items"].append({"decision_id": d.decision_id, "reason": hub.get("reason")})
             continue
         if hub.get("status") != "pending":
             continue
@@ -123,13 +164,26 @@ def retry_pending(target: Path) -> dict[str, int]:
             journal.update_hub(target, d.decision_id, {**hub, "status": "superseded"})
             counts["superseded"] += 1
             continue
+        if hub.get("action") == "put":
+            refusal = sync._replay_refusal(
+                target,
+                {"scope": None, "card_id": d.card_id, "path": hub.get("path")},
+                sync._local_cards(target),
+                None,
+            )
+            if refusal in ("card-gone", "card-identity-changed", "card-id-duplicated", "card-unreadable"):
+                journal.update_hub(target, d.decision_id, {**hub, "status": "superseded", "reason": refusal})
+                counts["superseded"] += 1
+                continue
         if d.undoes:
             predecessor = journal.load(target, d.undoes)
             previous = predecessor.hub or {}
-            if previous.get("status") in ("pending", "conflict"):
-                result = {**hub, "status": previous["status"]}
+            if previous.get("status") in ("pending", "conflict", "needs_review"):
+                result = {**hub, "status": previous["status"], "reason": previous.get("reason", "retire unresolved")}
                 journal.update_hub(target, d.decision_id, result)
                 counts[result["status"]] += 1
+                if result["status"] == "needs_review":
+                    counts["review_items"].append({"decision_id": d.decision_id, "reason": result["reason"]})
                 continue
         path = str(hub.get("path") or "")
         text = ""
@@ -152,7 +206,11 @@ def retry_pending(target: Path) -> dict[str, int]:
             path=path,
             text=text,
             request=hub.get("request"),
+            recorded_hub=hub.get("hub"),
+            replay=True,
         )
         journal.update_hub(target, d.decision_id, result)
         counts[result["status"]] += 1
+        if result["status"] == "needs_review":
+            counts["review_items"].append({"decision_id": d.decision_id, "reason": result.get("reason")})
     return counts

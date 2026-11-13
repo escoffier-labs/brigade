@@ -1,2 +1,5 @@
 - Refuse non-card archive paths and pinned or malformed frontmatter, preserve file modes and index bytes on undo, serialize care recovery, and keep withheld cards off the hub during revival and retries.
 - Handle integer hub read days, supersede stale revivals, accept valid block frontmatter, honor all archive pins, count successful archives toward the cap, and release abandoned kernel operations without replaying recovery over recreated cards.
+- Preserve index identity through archive recovery, show partial recovery destinations, and retain undo access after completed removals.
+- Refuse replay into changed hub destinations or revival of missing or reidentified cards. List destination mismatches for review on every tend run.
+- Refuse unsafe reflection card roots before writing any state under those roots.

@@ -359,6 +359,46 @@ def commit_phased(
     return finish_prepared(target, decision_id)
 
 
+def index_paths(payload: dict[str, Any]) -> set[str]:
+    """Index identity survives removal of the final saved link row."""
+    return (
+        set(payload.get("index_paths", []))
+        | set(payload.get("index_before", {}))
+        | {row["path"] for row in payload.get("index_lines", [])}
+    )
+
+
+def _restorable(target: Path, payload: dict[str, Any]) -> bool:
+    return payload.get("kind") == "archive" and any(
+        current(target, path) is not None
+        and kernel.content_digest(current(target, path)) == payload["after_sha256"][path]
+        for path in payload.get("prepared_paths", [])
+    )
+
+
+def _repair_indexes(target: Path, decision_id: str) -> None:
+    """Retry safe link restoration after releasing a superseded overlap guard."""
+    import base64
+
+    from .memory_cmd import _config_or_default
+
+    p = _payload(target, decision_id)
+    changes = []
+    d = load(target, decision_id)
+    config = _config_or_default(target)
+    for path in p.get("repair_indexes", []):
+        live = current(target, path)
+        if read_only_pattern(path, config.read_only_paths) or kernel.content_digest(live) != p["after_sha256"][path]:
+            continue
+        saved = p.get("index_before", {}).get(path)
+        before = base64.b64decode(saved) if saved is not None else before_bytes(target, d, path)
+        if live != before:
+            changes.append(Change(path, live, before))
+    if changes:
+        _execute_phase(target, decision_id, "repair", changes)
+    annotate(target, decision_id, repair_indexes=[])
+
+
 def finish_prepared(target: Path, decision_id: str) -> Decision:
     import base64
 
@@ -378,7 +418,8 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
     ]
     if d.kind == "archive":
         # Rebase link removal on the live index, keeping unrelated edits.
-        indices = {row["path"] for row in p.get("index_lines", [])}
+        indices = index_paths(p)
+        p["index_paths"] = sorted(indices)
         rebased = []
         for c in changes:
             live = current(target, c.path)
@@ -416,12 +457,14 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
         original_missing = any(
             c.before is not None and c.after is None and current(target, c.path) is None for c in changes
         )
-        final["restorable"] = d.kind == "archive" and original_missing
+        final["restorable"] = _restorable(target, p)
         pending = (
             []
             if protected or d.kind == "undo" or original_missing
             else [Change(c.path, c.after, c.before) for c in changes if c.path in prepared and c.path not in drift]
         )
+        if any(c.path in prepared and c.after is None for c in pending):
+            final["restorable"] = False
     else:
         final = {**p, "phase": "undone" if d.kind == "undo" else "committed", "status": "committed"}
         pending = [c for c in changes if c.path not in prepared]
@@ -440,11 +483,13 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
 
 
 @serialized
-def resolve_prepared(target: Path) -> list[dict[str, str]]:
+def resolve_prepared(target: Path) -> list[dict[str, Any]]:
     """Recover our interrupted kernel plans before interpreting decision phases."""
     resolved = []
     for operation in kernel.unfinished_operations(target):
-        match = re.fullmatch(r"care-([0-9]{8}T[0-9]{6}Z-[a-z]+-[0-9a-f]{8})-(prepare|finish)", operation.operation_id)
+        match = re.fullmatch(
+            r"care-([0-9]{8}T[0-9]{6}Z-[a-z]+-[0-9a-f]{8})-(prepare|finish|repair)", operation.operation_id
+        )
         if not match:
             continue
         decision_id = match.group(1)
@@ -452,8 +497,17 @@ def resolve_prepared(target: Path) -> list[dict[str, str]]:
             p = _payload(target, decision_id)
         except JournalConflict:
             p = {}
-        if p.get("phase") == "abandoned":
+        if p.get("phase") == "abandoned" and match.group(2) != "repair":
             kernel.supersede(operation.operation_id, target=target)
+            _repair_indexes(target, decision_id)
+            resolved.append(
+                {
+                    "decision_id": decision_id,
+                    "phase": "abandoned",
+                    "reason": p.get("abandoned_reason", ""),
+                    "committed_destinations": p.get("committed_destinations", []),
+                }
+            )
             continue
         try:
             receipt = kernel.recover(operation.operation_id, target=target)
@@ -462,16 +516,40 @@ def resolve_prepared(target: Path) -> list[dict[str, str]]:
         except (JournalConflict, kernel.ProjectionError):
             if not p:
                 raise
-            kernel.supersede(operation.operation_id, target=target)
+            op = store.read_json(kernel.operation_dir(target, operation.operation_id) / "journal.json")
+            committed = [op["mutations"][n]["display_path"] for n in op.get("committed_indexes", [])]
             reason = "kernel recovery could not complete safely. Operation superseded, before-images retained"
-            annotate(target, decision_id, phase="abandoned", status="abandoned", abandoned_reason=reason)
-            resolved.append({"decision_id": decision_id, "phase": "abandoned", "reason": reason})
+            annotate(
+                target,
+                decision_id,
+                phase="abandoned",
+                status="abandoned",
+                abandoned_reason=reason,
+                restorable=_restorable(target, p),
+                committed_destinations=committed,
+                repair_indexes=[] if match.group(2) == "repair" else sorted(index_paths(p)),
+            )
+            kernel.supersede(operation.operation_id, target=target)
+            _repair_indexes(target, decision_id)
+            resolved.append(
+                {
+                    "decision_id": decision_id,
+                    "phase": "abandoned",
+                    "reason": reason,
+                    "committed_destinations": committed,
+                }
+            )
+        else:
+            if match.group(2) == "repair":
+                _repair_indexes(target, decision_id)
     root = target / JOURNAL_REL
     if root.exists():
         for directory in sorted(root.iterdir()):
             if not (directory / "decision.json").exists():
                 continue
             p = _payload(target, directory.name)
+            if p.get("phase") == "abandoned" and p.get("repair_indexes"):
+                _repair_indexes(target, directory.name)
             if p.get("phase") == "prepared":
                 finish_prepared(target, directory.name)
                 final = _payload(target, directory.name)

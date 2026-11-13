@@ -70,6 +70,8 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
         allowed = {p.relative_to(target).as_posix() for p in memory_cmd._iter_cards(target, config)}
         if card_rel not in allowed:
             raise ArchiveRefused(f"{card_rel}: not an enumerated card")
+        if card_rel in config.index_paths:
+            raise ArchiveRefused(f"{card_rel}: configured index")
         if is_archived_path(card_rel) or memory_cmd._is_read_only(config, card_rel):
             raise ArchiveRefused(f"{card_rel}: archived or read-only")
         before = journal.current(target, card_rel)
@@ -124,7 +126,11 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
             changes=changes,
             hub={"status": "pending", "action": "retire"},
             prepared_paths=[dest],
-            metadata={"index_lines": index_lines, "index_warnings": index_warnings},
+            metadata={
+                "index_paths": sorted({row["path"] for row in index_lines}),
+                "index_lines": index_lines,
+                "index_warnings": index_warnings,
+            },
         )
         if journal._payload(target, d.decision_id)["phase"] == "abandoned":
             raise ArchiveRefused(f"{card_rel}: decision abandoned after card changed")
@@ -148,7 +154,7 @@ def restore(target: Path, decision: journal.Decision) -> journal.Decision:
             raise ArchiveRefused("decision abandoned after card changed")
         if d.undone_by or d.kind != "archive":
             raise ArchiveRefused("decision is not an active archive")
-        indices = {row["path"] for row in metadata.get("index_lines", [])}
+        indices = journal.index_paths(metadata)
         changes = []
         card_rel = ""
         original = b""
@@ -208,11 +214,24 @@ def restore(target: Path, decision: journal.Decision) -> journal.Decision:
         # Flush a pending retire first using its original event id, then revive.
         if (d.hub or {}).get("status") == "pending":
             result = hub._send(
-                target, action="retire", card_id=d.card_id or "", reason=d.reason, request=(d.hub or {}).get("request")
+                target,
+                action="retire",
+                card_id=d.card_id or "",
+                reason=d.reason,
+                request=(d.hub or {}).get("request"),
+                recorded_hub=(d.hub or {}).get("hub"),
             )
             journal.update_hub(target, d.decision_id, result)
-            if result["status"] in ("pending", "conflict"):
-                return journal.update_hub(target, undo.decision_id, {**(undo.hub or {}), "status": result["status"]})
+            if result["status"] in ("pending", "conflict", "needs_review"):
+                return journal.update_hub(
+                    target,
+                    undo.decision_id,
+                    {
+                        **(undo.hub or {}),
+                        "status": result["status"],
+                        "reason": result.get("reason", "retire unresolved"),
+                    },
+                )
         return journal.update_hub(
             target,
             undo.decision_id,
