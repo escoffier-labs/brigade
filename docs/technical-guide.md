@@ -2675,3 +2675,15 @@ workspace's replica, but do not create or modify the output folder.
 
 Local edits are replaced on the next run. A future edit-to-proposal workflow
 would integrate with hub proposals and require explicit review.
+
+In observe mode, Claude Code records raw checks from `PostToolUse` and
+`PostToolUseFailure` in private per-user state. Capture is best effort and
+cannot change the hook result. Install the updated managed hooks with
+`brigade work hooks install` to capture `PostModelSwitch` events.
+
+Verify receipts include `agent_identity` with harness, model, their sources,
+and agent type. The explicit `BRIGADE_CONTEXT_MODEL` takes precedence over the
+Claude session cache selected by `BRIGADE_AGENT_SESSION`, then
+`BRIGADE_CLAUDE_SESSION`. Missing identity becomes `unknown`. Outcome capture
+copies this identity to `context.agent_identity`. Capability cohorts remain
+unchanged. Observed checks remain separate from signed verify receipts.

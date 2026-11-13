@@ -142,8 +142,8 @@ def test_brigade_hook_console_script_is_declared():
 
 
 def test_package_version_is_bumped_for_direct_entry():
-    assert PACKAGE_VERSION == "1.3.1"
-    assert PACKAGE_REF == f"{PACKAGE_ID}@1.3.1"
+    assert PACKAGE_VERSION == "1.4.0"
+    assert PACKAGE_REF == f"{PACKAGE_ID}@1.4.0"
 
 
 def test_unpinned_script_tries_brigade_hook_then_cli():

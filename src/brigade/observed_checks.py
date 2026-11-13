@@ -11,7 +11,9 @@ import json
 import os
 import re
 import shlex
-from contextlib import ExitStack
+from time import monotonic as _capture_clock
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
@@ -35,6 +37,8 @@ MAX_STRING_CHARS = 4096
 ROTATE_BYTES = 4 * 1024 * 1024
 COMMAND_MAX_CHARS = 1000
 LOCK_SECONDS = 2.0
+_CAPTURE_LOCK_SECONDS: ContextVar[float] = ContextVar("observed_lock_seconds", default=LOCK_SECONDS)
+_CAPTURE_DEADLINE: ContextVar[float | None] = ContextVar("observed_deadline", default=None)
 REDACTED = "[REDACTED]"
 _SENSITIVE_OPTION = re.compile(r"key|token|secret|pass|pwd|auth|cred|bearer", re.I)
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -311,19 +315,63 @@ def redact_command(command: str) -> str:
         return REDACTED
 
 
-def digest_key_path(target: Path) -> Path | None:
-    """Locate a workspace's private state beside the per-user rails record."""
+@contextmanager
+def capture_budget(seconds: float = 0.25):
+    """Hook capture gives up promptly when another process owns storage."""
+    deadline = _CAPTURE_DEADLINE.set(_capture_clock() + seconds)
+    token = _CAPTURE_LOCK_SECONDS.set(0.01)
+    try:
+        yield
+    finally:
+        _CAPTURE_LOCK_SECONDS.reset(token)
+        _CAPTURE_DEADLINE.reset(deadline)
+
+
+def check_capture_deadline() -> None:
+    """Cooperative budget: at most the deadline plus one bounded step."""
+    deadline = _CAPTURE_DEADLINE.get()
+    if deadline is not None and _capture_clock() >= deadline:
+        raise OSError("optional capture deadline exceeded")
+
+
+class _StateUnavailable(OSError):
+    pass
+
+
+def _key_path(target: Path) -> Path:
     root = work_mode.rails_record_path()
     if root is None:
-        return None
+        raise _StateUnavailable("other")
     name = hashlib.sha256(work_mode.repository_key(target).encode("utf-8")).hexdigest()
     path = root.parent / "observed" / name / "digest.key"
-    # State inside the workspace's own repository could be committed with it. Only the
-    # nearest work tree counts: an outer one, such as a home directory kept in Git, is
-    # handled by the state directory ignoring itself.
     real = Path(os.path.realpath(target))
     tree = next((d for d in (real, *real.parents) if os.path.lexists(d / ".git")), real)
-    return None if Path(os.path.realpath(path)).is_relative_to(tree) else path
+    if Path(os.path.realpath(path)).is_relative_to(tree):
+        raise _StateUnavailable("state directory inside the project's nearest work tree")
+    return path
+
+
+def recording_unavailable_reason(target: Path) -> str | None:
+    """Return a fixed, path-free cause using the writer's trust checks."""
+    try:
+        path = _key_path(target)
+        fd = _state_directory(path.parent)
+        os.close(fd)
+    except _StateUnavailable as exc:
+        return str(exc)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return "other"
+    return None
+
+
+def digest_key_path(target: Path) -> Path | None:
+    """Locate a workspace's private state beside the per-user rails record."""
+    try:
+        return _key_path(target)
+    except (OSError, ValueError):
+        return None
 
 
 def _state_directory(path: Path, *, create: bool = False) -> int:
@@ -334,19 +382,28 @@ def _state_directory(path: Path, *, create: bool = False) -> int:
         owned[0].parent.mkdir(parents=True, exist_ok=True)
         for directory in (*owned, path):
             directory.mkdir(mode=0o700, exist_ok=True)
+    for directory in (*reversed(path.parents), path):
+        if directory.is_symlink():
+            raise _StateUnavailable("config directory reached through a symbolic link")
+    if os.name != "nt":
+        user = os.geteuid()
+        for directory, writable in ((owned[0], 0o002), (owned[1], 0o022), (path, 0o077)):
+            try:
+                metadata = os.lstat(directory)
+            except FileNotFoundError:
+                continue
+            if metadata.st_uid != user:
+                raise _StateUnavailable("a parent directory owned by another user")
+            if metadata.st_mode & writable:
+                raise _StateUnavailable("a parent directory writable by other users")
     fd = dirfd.open_directory_chain(path)
     try:
-        # Windows relies on the user profile's inherited ACL.
         if os.name != "nt":
-            user = os.geteuid()
             metadata = os.fstat(fd)
-            if metadata.st_uid != user or metadata.st_mode & 0o077:
-                raise OSError("observed state unavailable")
-            # The shared config directory may be group-writable under a private-group umask.
-            for directory, writable in zip(owned, (0o002, 0o022), strict=True):
-                metadata = os.lstat(directory)
-                if metadata.st_uid != user or metadata.st_mode & writable:
-                    raise OSError("observed state unavailable")
+            if metadata.st_uid != os.geteuid():
+                raise _StateUnavailable("a parent directory owned by another user")
+            if metadata.st_mode & 0o077:
+                raise _StateUnavailable("a parent directory writable by other users")
         if create:
             # A home directory kept in Git must not pick these files up.
             try:
@@ -365,12 +422,14 @@ def _state_directory(path: Path, *, create: bool = False) -> int:
 
 
 def _digest_key(target: Path) -> bytes:
+    check_capture_deadline()
     path = digest_key_path(target)
     if path is None:
         raise OSError("observed state unavailable")
     parent = _state_directory(path.parent, create=True)
     try:
-        with held_file_lock(_lock_path(path.with_name(CHECKS_FILE)), deadline_seconds=LOCK_SECONDS):
+        check_capture_deadline()
+        with held_file_lock(_lock_path(path.with_name(CHECKS_FILE)), deadline_seconds=_CAPTURE_LOCK_SECONDS.get()):
             # A crash between link and unlink leaves a second name on the key.
             for stale in path.parent.glob(".key-*"):
                 stale.unlink(missing_ok=True)
@@ -438,8 +497,10 @@ def build_check(
     session_fingerprint: str,
     exit_code: int | None = None,
     duration_ms: int | None = None,
+    fingerprint_tree: bool = True,
 ) -> ObservedCheck:
-    tree = localio.tree_fingerprint(target)
+    check_capture_deadline()
+    tree = localio.tree_fingerprint(target) if fingerprint_tree else None
     if tree is not None and not _valid_fingerprint(tree, 40):
         raise ValueError("invalid observed-check fingerprint")
     return ObservedCheck(
@@ -453,7 +514,7 @@ def build_check(
         command_digest=command_digest(command, target),
         status=status if status in STATUSES else "unknown",
         exit_code=exit_code,
-        duration_ms=duration_ms,
+        duration_ms=duration_ms if type(duration_ms) is int and 0 <= duration_ms <= 86400000 else None,
     )
 
 
@@ -495,7 +556,8 @@ def append_jsonl(path: Path, payload: Mapping[str, Any]) -> bool:
             return False
         parent = _state_directory(path.parent, create=True)
         try:
-            with held_file_lock(_lock_path(path), deadline_seconds=LOCK_SECONDS) as held:
+            check_capture_deadline()
+            with held_file_lock(_lock_path(path), deadline_seconds=_CAPTURE_LOCK_SECONDS.get()) as held:
                 held.verify()
                 fd = _open_regular(parent, path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND)
                 try:
@@ -510,6 +572,7 @@ def append_jsonl(path: Path, payload: Mapping[str, Any]) -> bool:
                             # Another open handle can block the rename; keep the record, rotate next time.
                             pass
                         fd = _open_regular(parent, path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND)
+                    check_capture_deadline()
                     if os.lseek(fd, 0, os.SEEK_END):
                         os.lseek(fd, -1, os.SEEK_END)
                         if os.read(fd, 1) != b"\n" and os.write(fd, b"\n") != 1:
@@ -574,7 +637,9 @@ def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
             streams.callback(os.close, parent)
             with ExitStack() as locking:
                 try:
-                    locking.enter_context(held_file_lock(_lock_path(path), deadline_seconds=LOCK_SECONDS))
+                    locking.enter_context(
+                        held_file_lock(_lock_path(path), deadline_seconds=_CAPTURE_LOCK_SECONDS.get())
+                    )
                 except (InboxLockTimeout, OSError):
                     skipped += 1
                 opened = []

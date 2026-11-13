@@ -28,6 +28,7 @@ from .. import (
     runguard,
 )
 from .. import verification_contract, verify_manifest, verify_trial
+from ..agent_identity import stamp_verify_identity as _stamp_harness_session
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
@@ -1497,13 +1498,6 @@ def _git_with_index(target: Path, index_file: Path, *args: str) -> subprocess.Co
         return subprocess.CompletedProcess(["git"], 127, stdout="", stderr="git unavailable")
 
 
-def _stamp_harness_session(receipt: dict[str, Any]) -> None:
-    """Record the caller's Claude harness session when BRIGADE_CLAUDE_SESSION is valid 16-hex."""
-    claude_session = os.environ.get("BRIGADE_CLAUDE_SESSION")
-    if claude_session and re.fullmatch(r"[0-9a-f]{16}", claude_session):
-        receipt["harness_session"] = {"harness": "claude", "fingerprint": claude_session}
-
-
 def _capture_verify_identity(target: Path, run_dir: Path) -> dict[str, Any]:
     unavailable: dict[str, Any] = {
         "schema_version": receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION,
@@ -1576,7 +1570,7 @@ def _run_verify_commands(
             state.owned_receipt = (target, run_dir, receipt, started)
         receipt_schema.stamp_optional_producer_run_id(receipt)
         _stamp_verify_causal_receipt(receipt)
-        _stamp_harness_session(receipt)
+        _stamp_harness_session(receipt, target)
         _stamp_outcome_capture(receipt, capture, capture_kind)
         try:
             graph_delta_before = code_graph_delta.capture_before(target, run_dir, timeout=code_graph_timeout)
@@ -1732,7 +1726,7 @@ def _write_reused_receipt(
         state.owned_receipt = (target, run_dir, receipt, started)
     receipt_schema.stamp_optional_producer_run_id(receipt)
     _stamp_verify_causal_receipt(receipt)
-    _stamp_harness_session(receipt)
+    _stamp_harness_session(receipt, target)
     _stamp_outcome_capture(receipt, capture, capture_kind)
     reused_from = latest.get("run_id")
     if isinstance(reused_from, str) and reused_from:

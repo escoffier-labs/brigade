@@ -392,6 +392,11 @@ def doctor_checks(target: Path) -> list[tuple[str, str, str]]:
     else:
         mode_detail = "strict: checks route through `brigade work verify run` and the Stop gate wants a receipt"
     checks = [("INFO", "work mode", mode_detail)]
+    from .observed_checks import recording_unavailable_reason
+
+    reason = recording_unavailable_reason(target) if mode == MODE_OBSERVE else None
+    if reason is not None:
+        checks.append(("WARN", "observed checks", f"recording unavailable: {reason}"))
     settings, path = _work_settings_with_source(target)
     readable = True
     if path is not None:
