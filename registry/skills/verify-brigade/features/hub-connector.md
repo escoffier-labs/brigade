@@ -3,6 +3,7 @@ status: active
 proof: drive
 surfaces: hub connector list, hub connector setup
 drive: hub-connector
+last-drive: 2026-11-13 920319587
 ---
 
 # Hub connector discovery and setup preview
