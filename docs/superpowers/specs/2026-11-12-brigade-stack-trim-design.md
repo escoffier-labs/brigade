@@ -283,8 +283,39 @@ course the user has finished, are archived without being asked.
 - Self-editing of instructions and skills follows later, after stage 3,
   because it needs trustworthy measurement.
 
-Open for the stage design: which model does the background work, on whose
-quota, and under what cap.
+**(decided)** The background work may spend the user's subscription quota
+without asking each time, under a cap the user sets once.
+
+Open for the stage design: which model does the background work and what the
+default cap is.
+
+### Stage B: the hub is core and easy to run
+
+**(decided)** The hub owns memory and talks to every agent, so it is a core
+part of the product, not an optional add-on. Nobody should need an LXC
+container to run it. A small daemon or a first-class local Docker setup is
+wanted, and it must not be complicated.
+
+**(proposed)**
+
+- **Default: a small local daemon.** One command starts the hub as a
+  background service for the current user, with a local database, bound to
+  this machine only, with no token or config for the user to prepare. Agents
+  on the same machine find it without setup.
+- **Second supported path: one published container image** with a short run
+  command. The current Compose recipe (holder namespace, HTTPS front, setup
+  script, secrets files, locally built image) stays as an advanced hardening
+  guide, not the way in.
+- **Adding a machine is one step:** a pairing code or a single address and
+  token. Brigade does not try to solve private networking. The user brings
+  whatever they already use to reach their own machines.
+- **One memory path.** Memory always goes through the hub, including on a
+  single machine. This would retire the separate hubless memory path and the
+  sync, mirror, push and pull commands between the two. Open: needs the
+  operator.
+- Known gap: the native hub binary installs on Linux only today and still
+  runs the Python hub as a child process. macOS and Windows users would get
+  the Python hub until that changes.
 
 ## How success is measured
 
