@@ -117,13 +117,16 @@ class InstructionFile:
     bootstrap_names: tuple[str, ...] = ()  # OpenClaw bootstrap names that resolve to this file, sorted
 
 
+CODEX_HOME_OUTSIDE = "codex-home-outside-home"
+
+
 @dataclass(frozen=True)
 class OverrideNote:
     """A `[instructions.files]` entry that was rejected or ignored, and why."""
 
     name: str  # display form of the configured path
     reason: str  # "outside-target-and-home" | "absolute-path-not-discovered" | "home-dot-path-not-discovered"
-    # | "matches-no-file" | "exclude-matches-no-file"
+    # | "matches-no-file" | "exclude-matches-no-file" | "codex-home-outside-home"
     action: str  # "forced-report" | "ignored"
 
 
@@ -495,6 +498,13 @@ def discover(
         if custom_codex_home:
             # The Codex cap is read from this home, so its instruction file is the one in it.
             instruction_path = Path(custom_codex_home) / "AGENTS.md"
+            real_custom = _strict(instruction_path)
+            if real_custom is not None and _under_home(real_custom, home) is None:
+                # An environment value must not enroll a file outside the user's home for tending:
+                # the real file decides, so a link inside the home that leaves it is refused too.
+                add(instruction_path, harness=profile.harness, rejected=CODEX_HOME_OUTSIDE)
+                notes.append(OverrideNote("CODEX_HOME", CODEX_HOME_OUTSIDE, "forced-report"))
+                continue
         add(instruction_path, harness=profile.harness)
     standard.update(groups)  # what discovery finds without any configuration
     for name, _override in config.files:
@@ -546,6 +556,11 @@ def discover(
             ("act_at_percent", config.act_at_percent != defaults.act_at_percent),
             ("trim_to_percent", config.trim_to_percent != defaults.trim_to_percent),
             ("default_limit_bytes", config.default_limit_bytes != defaults.default_limit_bytes),
+            (
+                # The request is kept in the note: the limit itself never goes above the built-in default.
+                f"default_limit_bytes-clamped-from-{config.default_limit_bytes}",
+                config.default_limit_bytes > budgets.DEFAULT_LIMIT_BYTES,
+            ),
             ("enabled", not config.enabled),
             ("index_paths", index_configured),
         )
@@ -578,11 +593,20 @@ def _unique_keys(files: list[InstructionFile]) -> list[InstructionFile]:
         ]
         if len({item.key for item in suffixed}) == len(suffixed):
             return suffixed
-    # Unreachable in practice (a 256-bit digest). Never raise: number the rows in path order.
-    ordered = sorted(files, key=lambda item: str(item.real_path))
-    return [
-        replace(item, key=f"{item.key}-{number}") if item.key in shared else item for number, item in enumerate(ordered)
-    ]
+    # Unreachable in practice (a 256-bit digest). Never raise: number the shared rows in
+    # path order, skipping any number whose key another row already holds.
+    taken = {item.key for item in files if item.key not in shared}
+    numbered: list[InstructionFile] = []
+    for item in sorted(files, key=lambda item: str(item.real_path)):
+        if item.key not in shared:
+            numbered.append(item)
+            continue
+        number = 0
+        while f"{item.key}-{number}" in taken:
+            number += 1
+        taken.add(f"{item.key}-{number}")
+        numbered.append(replace(item, key=f"{item.key}-{number}"))
+    return numbered
 
 
 def _build(
@@ -630,7 +654,10 @@ def _build(
     if table_budget is not None:
         target_budget, target_source = table_budget, "target:table"
     else:
-        target_budget, target_source = config.default_limit_bytes, "target:default"
+        # The default can be lowered by configuration and never raised: it is the only
+        # ceiling a file with no table target and no loader cap has.
+        target_budget = min(config.default_limit_bytes, budgets.DEFAULT_LIMIT_BYTES)
+        target_source = "target:default"
     limit_clamped = False
     if override is not None and override.limit_bytes is not None:
         if override.limit_bytes < target_budget:

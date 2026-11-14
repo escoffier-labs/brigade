@@ -720,7 +720,65 @@ def test_config_values_that_move_limits_are_listed_on_the_inventory(tmp_path):
     assert plain.config_notes == () and plain.loader_reason is None
     config = InstructionsConfig(enabled=False, act_at_percent=99, trim_to_percent=98, default_limit_bytes=10**12)
     inv = discover(ws, config, home=home, environ=env)
-    assert inv.config_notes == ("act_at_percent", "default_limit_bytes", "enabled", "trim_to_percent")
+    assert inv.config_notes == (
+        "act_at_percent",
+        "default_limit_bytes",
+        f"default_limit_bytes-clamped-from-{10**12}",
+        "enabled",
+        "trim_to_percent",
+    )
+
+
+def test_the_default_limit_can_be_lowered_and_never_raised(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    sized(ws / "notes" / "extra.md", 100)
+    files = (("notes/extra.md", FileOverride()),)
+    raised = find(
+        discover(ws, InstructionsConfig(default_limit_bytes=10**9, files=files), home=home, environ=env),
+        "notes/extra.md",
+    )
+    # Rule: the built-in default is the ceiling for a file with no table target and no loader cap.
+    assert (raised.limit, raised.limit_source) == (20_000, "target:default")
+    lowered = find(
+        discover(ws, InstructionsConfig(default_limit_bytes=5_000, files=files), home=home, environ=env),
+        "notes/extra.md",
+    )
+    assert lowered.limit == 5_000
+    assert discover(ws, InstructionsConfig(default_limit_bytes=5_000), home=home, environ=env).config_notes == (
+        "default_limit_bytes",
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+@pytest.mark.parametrize("escape", ["absolute", "symlink"])
+def test_a_codex_home_outside_the_user_home_is_report_only(tmp_path, escape):
+    ws, home, env = field_workspace(tmp_path)
+    outside = tmp_path / "elsewhere" / "codex"
+    sized(outside / "AGENTS.md", 700)
+    if escape == "absolute":
+        custom = outside
+    else:
+        custom = home / "linked-codex"
+        custom.symlink_to(outside, target_is_directory=True)
+    inv = discover(ws, InstructionsConfig(), home=home, environ={**env, "CODEX_HOME": str(custom)})
+    (row,) = [item for item in inv.files if "codex:user" in item.loaders]
+    # Rule: an environment value cannot enroll a file outside the home for tending.
+    assert (row.file_class, row.class_source, row.size) == ("report", "rejected-override", 700)
+    assert [(n.name, n.reason, n.action) for n in inv.override_notes] == [
+        ("CODEX_HOME", "codex-home-outside-home", "forced-report")
+    ]
+
+
+def test_numbered_keys_skip_a_key_another_row_holds(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    for name in ("notes/a-b.md", "notes/a/b.md", "notes/a-b-0.md"):
+        sized(ws / name, 50)
+    files = tuple((name, FileOverride()) for name in ("notes/a-b.md", "notes/a/b.md", "notes/a-b-0.md"))
+    # Force the last-resort path: every digest is the same, so no digest width separates the rows.
+    monkeypatch.setattr(instruction_inventory, "_digest", lambda _path: "0" * 64)
+    inv = discover(ws, InstructionsConfig(files=files), home=home, environ=env)
+    keys = [item.key for item in inv.files]
+    assert len(set(keys)) == len(keys)
 
 
 def test_a_configured_memory_index_is_listed_on_the_inventory(tmp_path):
