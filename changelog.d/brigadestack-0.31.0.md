@@ -1,0 +1,1 @@
+- The `brigadestack` bridge packages now pin Brigade 0.31.0, and the install docs use 0.31.0 for npm and the bridge.

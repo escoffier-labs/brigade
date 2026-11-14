@@ -53,5 +53,5 @@ The root README is a short landing page. Every topic that left the previous READ
 
 | Line | Meaning |
 | --- | --- |
-| Stable v0.31.0 | Published PyPI release `brigade-cli==0.31.0`. npm `@escoffier-labs/brigade` and the `brigadestack` bridge still serve 0.30.0 until promotion |
+| Stable v0.31.0 | Published release `brigade-cli==0.31.0` on PyPI, `@escoffier-labs/brigade@0.31.0` on npm, and `brigadestack` 0.31.0 |
 | Current main / 0.32 beta | Features on origin/main after v0.31.0 and `0.32.0.devYYYYMMDD` wheels. Labeled beside README capabilities and in this docs set |

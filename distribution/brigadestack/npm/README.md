@@ -1,6 +1,6 @@
 # Brigade Stack
 
-`brigadestack@0.30.0` installs stable `@escoffier-labs/brigade@0.30.0` and adds
+`brigadestack@0.31.0` installs stable `@escoffier-labs/brigade@0.31.0` and adds
 the `brigadestack` command. Existing packages and the `brigade` command remain
 supported. This package exposes only `brigadestack`, so installing it globally
 leaves an existing global `brigade` executable in place.
@@ -12,7 +12,7 @@ Python and may need network access. Supported runtimes are Linux with glibc
 (x64 or arm64), macOS (x64 or arm64), and Windows x64.
 
 ```sh
-npm install --global brigadestack@0.30.0
+npm install --global brigadestack@0.31.0
 brigadestack --version
 brigadestack --help
 ```
@@ -20,14 +20,14 @@ brigadestack --help
 For a project-local install:
 
 ```sh
-npm install brigadestack@0.30.0
+npm install brigadestack@0.31.0
 npm exec -- brigadestack --help
 ```
 
 For a one-off invocation:
 
 ```sh
-npm exec --yes --package=brigadestack@0.30.0 -- brigadestack --version
+npm exec --yes --package=brigadestack@0.31.0 -- brigadestack --version
 ```
 
 The launcher resolves its installed dependency independently of your working
@@ -38,7 +38,7 @@ its PID, process group, controlling terminal, and shell job control. The depende
 receives signals directly and owns runtime cleanup. On Windows, an attached child
 inherits the console and receives console events directly.
 
-The CLI reports Brigade 0.30.0. Commands, Python imports, workspace files, and
+The CLI reports Brigade 0.31.0. Commands, Python imports, workspace files, and
 storage formats keep their existing identities.
 
 [Homepage](https://brigade.tools) |

@@ -17,7 +17,7 @@ function fixture(t, script) {
   const launcher = path.join(pkg, 'launcher.cjs');
   fs.copyFileSync(path.join(__dirname, 'launcher.cjs'), launcher);
   fs.writeFileSync(path.join(dependency, 'package.json'), JSON.stringify({
-    name: '@escoffier-labs/brigade', version: '0.30.0', bin: { brigade: 'launcher.cjs' },
+    name: '@escoffier-labs/brigade', version: '0.31.0', bin: { brigade: 'launcher.cjs' },
   }));
   fs.writeFileSync(path.join(dependency, 'launcher.cjs'), script);
   return { root, launcher, dependency };

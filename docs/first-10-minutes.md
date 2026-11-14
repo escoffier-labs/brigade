@@ -1,18 +1,18 @@
 # First 10 Minutes With Brigade Stack
 
-Start with one Git repository you control. This walkthrough uses the published 0.30.0 bridge and records a check you can inspect afterward. It needs no model credentials, services, or schedulers.
+Start with one Git repository you control. This walkthrough uses the published 0.31.0 bridge and records a check you can inspect afterward. It needs no model credentials, services, or schedulers.
 
 ## 1. Install and check the command
 
 Choose an install route in [Quickstart](../QUICKSTART.md#1-install). For npm:
 
 ```bash
-npm install --global brigadestack@0.30.0
+npm install --global brigadestack@0.31.0
 brigadestack --version
 brigadestack --help
 ```
 
-Expected version: `brigade 0.30.0`. The bridge exposes `brigadestack` and delegates to the compatible Brigade CLI. Existing users can use their `brigade` command throughout. With npx, prefix every invocation as described in [Quickstart](../QUICKSTART.md#npm).
+Expected version: `brigade 0.31.0`. The bridge exposes `brigadestack` and delegates to the compatible Brigade CLI. Existing users can use their `brigade` command throughout. With npx, prefix every invocation as described in [Quickstart](../QUICKSTART.md#npm).
 
 ## 2. Pick a target
 
