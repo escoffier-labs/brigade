@@ -217,3 +217,13 @@ def test_whole_section_spans_give_each_match_location():
     assert whole_section_spans(doc, one + two) == ((5, 5 + len(one + two)),)
     assert whole_section_spans(doc, b"## C\nz\n") == ((5 + len(one + two), len(doc.data)),)
     assert whole_section_spans(doc, b"nope") == ()
+
+
+def test_frontmatter_is_fixed_text():  # review of #2567: a `#` comment in YAML is not a heading
+    data = b"---\n## Metadata\nname: x\n" + POINTER + b"---\n# Title\n\n## A\nbody\n"
+    doc = parse(data)
+    assert [u.heading for u in doc.units] == [b"## A"]
+    assert data[: doc.fixed_end].startswith(b"---\n## Metadata\nname: x\n") and b"# Title" in data[: doc.fixed_end]
+    assert [span.in_block for span in pointer_spans(data)] == [True]  # a pointer-shaped line in it is inert
+    # A lone `---` with no closing line is a thematic break, not frontmatter.
+    assert [u.heading for u in parse(b"---\n## A\nbody\n").units] == [b"## A"]

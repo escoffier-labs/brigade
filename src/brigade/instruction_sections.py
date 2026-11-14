@@ -112,15 +112,34 @@ def _marker(text: bytes) -> tuple[str, tuple[str, bytes]] | None:
     return None
 
 
+def _frontmatter_lines(raw_lines: list[bytes]) -> int:
+    """How many leading lines form a YAML frontmatter block: a first line `---` closed by a later `---` or `...`
+    line. 0 when there is none, so a lone `---` stays an ordinary thematic break."""
+    if not raw_lines or raw_lines[0].rstrip(b"\r\n") != b"---":
+        return 0
+    for index, raw in enumerate(raw_lines[1:], start=1):
+        if raw.rstrip(b"\r\n") in (b"---", b"..."):
+            return index + 1
+    return 0
+
+
 def _scan(data: bytes) -> _Scan:
     lines: list[_Line] = []
     stack: list[tuple[str, bytes]] = []
     unbalanced = False
     fence: tuple[int, int] | None = None  # (character, length)
     offset = 0
-    for raw in data.splitlines(keepends=True):
+    raw_lines = data.splitlines(keepends=True)
+    # Frontmatter is fixed text: a `#` comment in it is not a heading, and nothing in it ever moves.
+    front = _frontmatter_lines(raw_lines)
+    for number, raw in enumerate(raw_lines):
         text = raw[:-1] if raw.endswith(b"\n") else raw
         clean = text.rstrip(b"\r")
+        if number < front:
+            kind = "pointer" if POINTER_LINE.fullmatch(text) else "other"  # a pointer here is in a block: inert
+            lines.append(_Line(offset, offset + len(raw), text, kind, True, False))
+            offset += len(raw)
+            continue
         in_block = fence is not None or bool(stack)
         in_managed = bool(stack)
         kind = "other"
