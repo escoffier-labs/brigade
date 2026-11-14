@@ -7,7 +7,6 @@ the date, the decision id and every set the plan depends on (see the slice 2 pla
 from __future__ import annotations
 
 import functools
-
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -435,7 +434,7 @@ def check(
     `today` and `limits` come from the caller, never from the plan: `today` judges `until=` pins, so a plan
     cannot release a pin with a forged pointer date, and `limits` bounds the result. `size` verifies a known
     reason, no change to the file when the reason says nothing was done, and, when the plan changes the
-    file, that `after` is within `limits.limit`.
+    file and leaves it over `limits.limit`, that it shrank and that no overflow pointer was added.
     """
     before, after = plan.before, plan.after
     failed: list[str] = []
@@ -487,6 +486,9 @@ def check(
     # A plan may leave a file far over the limit still over it (partial progress), but never grow a file
     # that is over the limit.
     if after != before and len(after) > limits.limit and len(after) >= len(before):
+        size_ok = False
+    # Overflow pointers are added only when the result fits, whatever the source of the plan.
+    if plan.added and len(after) > limits.limit:
         size_ok = False
     if not size_ok:
         failed.append("size")

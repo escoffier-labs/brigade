@@ -499,13 +499,14 @@ def test_a_changed_file_over_the_limit_fails_the_size_check():  # review of #256
     assert check(plan, cards, config_pins=(), today=TODAY, limits=LIMITS) == []
     exact = dataclasses.replace(LIMITS, limit=len(plan.after))
     assert check(plan, cards, config_pins=(), today=TODAY, limits=exact) == []
-    # Over a tighter limit but smaller than before: partial progress, which check allows.
-    tight = dataclasses.replace(LIMITS, limit=len(plan.after) - 1)
-    assert len(plan.after) < len(plan.before)
-    assert check(plan, cards, config_pins=(), today=TODAY, limits=tight) == []
+    # Moves only, over a tighter limit but smaller than before: partial progress, which check allows.
+    moves = _plan(owner_user_md())
+    assert not moves.added and len(moves.after) < len(moves.before)
+    tight = dataclasses.replace(LIMITS, limit=len(moves.after) - 1)
+    assert check(moves, _cards(moves), config_pins=(), today=TODAY, limits=tight) == []
     # A plan that grows a file that ends over the limit fails.
-    grown = dataclasses.replace(plan, before=plan.after[: len(plan.after) - 200])
-    assert "size" in check(grown, cards, config_pins=(), today=TODAY, limits=tight)
+    grown = dataclasses.replace(moves, before=moves.after[: len(moves.after) - 200])
+    assert "size" in check(grown, _cards(moves), config_pins=(), today=TODAY, limits=tight)
 
 
 def test_an_unchanged_file_over_the_limit_is_not_a_size_failure():
@@ -588,3 +589,10 @@ def test_yaml_loaders_read_special_keys_as_strings(key):
     front = yaml.safe_load(card.split("---\n")[1])
     assert front["title"] == f"{key}--notes" and front["tags"] == ["moved-instructions", key, "moved"]
     assert front["source_file"] == "USER.md"
+
+
+def test_overflow_pointers_over_the_limit_fail_size_even_when_the_file_shrank():  # review of #2567
+    plan = _plan(owner_user_md(), overflow=(PREF,))
+    assert plan.added and len(plan.after) < len(plan.before)
+    tight = dataclasses.replace(LIMITS, limit=len(plan.after) - 1)
+    assert check(plan, _cards(plan), config_pins=(), today=TODAY, limits=tight) == ["size"]
