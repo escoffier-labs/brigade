@@ -114,7 +114,7 @@ Kind `fix`: the test fails until this plan's change exists. Kind `guard`: existi
 | W26 | Two card-append ids in the same second, the later one sorting lower | Both found | Cursor compares timestamps, inclusive | fix | M `test_same_second_overflow_ids_are_both_found` |
 | W27 | A second undo after an abandoned restore | Removes the unchanged cards whose sections are back whole, marks the original undone | `plan_restore` cards-only result | fix | U `test_second_undo_after_abandoned_restore_removes_the_cards` |
 | W28 | `read_only_paths` names a link that resolves to the tended file | Not written, reason `read-only` | `tendable` checks every alias in `file.paths` | fix | M `test_read_only_alias_protects_the_real_file` |
-| W29 | A pointer-only move on a file with no final newline, then undo | The added `\n` is recorded as the `separator` flag, outside the pointer bytes. Undo gives the file back byte for byte. With text appended after the pointer, the newline stays | `AddedPointer.separator`, separator rule | fix | R `test_overflow_separator_removed_with_its_pointer`, U `test_pointer_only_move_and_undo_keep_a_file_without_final_newline` |
+| W29 | A pointer-only move on a file with no final newline, then undo | The added `\n` is recorded as the `separator` flag, outside the pointer bytes. Undo gives the file back byte for byte. With text appended after the pointer, the newline stays | `AddedPointer.separator`, separator rule | fix | T `test_separator_byte_counts_against_the_limit`, R `test_overflow_separator_removed_with_its_pointer`, U `test_pointer_only_move_and_undo_keep_a_file_without_final_newline` |
 | C1 | Move: crash after before-images, before the `prepare` plan | Nothing visible. Next pass plans again under a new id | Nothing to recover | guard | J `test_move_crash_before_prepare_leaves_nothing` |
 | C2 | Move: crash inside `prepare` after the record or some cards | Kernel recovery removes them | Existing forward recovery | fix | J `test_move_crash_inside_prepare_restores_clean` (two cards, so three prepare mutations: `crash_after` 1 and 2) |
 | C3 | Move: crash between `prepare` and `finish` | Recovery finishes it under the document lock | Pending row, `document_undo` | guard | J `test_move_crash_between_phases_finishes_under_the_document_lock` (C13 pins that the stage sets the flag) |
@@ -698,6 +698,11 @@ def test_overflow_pointer_that_would_cross_the_limit_waits():             # matr
     plan = _plan(owner_user_md(), overflow=cards)                            # 3,660 + 138 + 140 = 3,938, then 4,078
     assert [len(p.data) for p in plan.added] == [138, 140] and len(plan.after) == 3938
 
+def test_separator_byte_counts_against_the_limit():                       # matrix W29
+    # A file with no final newline whose size plus one pointer is exactly the limit: the separator
+    # would make it one byte over, so the pointer waits and its card stays pending.
+    ...
+
 def test_pointer_line_at_the_caps_fits():                                 # matrix S15
     card = card_rel("k" * 64, "s" * 48, 99)
     assert len(pointer_line(card, today=TODAY, decision_id=ID)) == 224
@@ -1172,3 +1177,4 @@ One line per change, with the input it answers.
 - Security review of revision 7: `finish_prepared` reads `append_guards` paths through `_live`, so a guarded file replaced by a symlink after a crash abandons the cards-only commit instead of making every recovery raise (C17).
 - Fifth code review: `RecordedPointer` carries `separator` too, the citations item names `main` as the base, and `pending_pointers` ids are documented as unstable across passes.
 - Sixth code review: the decision payload's `pointers` entries carry `separator` (missing reads as `False`), `check` removes the separator when it puts the file back, and both size rules count the separator byte.
+- Seventh code review: a T test pins that the separator byte counts against the limit.
