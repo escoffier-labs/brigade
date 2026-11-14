@@ -271,6 +271,10 @@ def _isolate_user_brigade_dir(_isolation_temp_root, monkeypatch):
     # Codex otherwise prefers an inherited operator config over synthetic HOME.
     # Individual tests may opt back in with their own synthetic CODEX_HOME.
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    # The same for OpenClaw: an inherited operator config path or state dir would
+    # point instruction-cap discovery at the real OpenClaw install.
+    monkeypatch.delenv("OPENCLAW_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("OPENCLAW_STATE_DIR", raising=False)
     monkeypatch.setenv("BRIGADE_USER_DIR", str(user_dir))
     monkeypatch.setenv("BRIGADE_HOME", str(user_dir))
 

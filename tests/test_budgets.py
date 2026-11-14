@@ -52,3 +52,25 @@ def test_budgets_check_fails_oversized_bootstrap_file(tmp_path: Path, capsys):
     payload = json.loads(capsys.readouterr().out)
     tools = [row for row in payload["checks"] if row["name"] == "TOOLS.md"][0]
     assert tools["status"] == "fail"
+
+
+def test_thresholds_match_the_design_examples():
+    assert budgets.threshold(4000, budgets.ACT_AT_PERCENT) == 3400
+    assert budgets.threshold(4000, budgets.TRIM_TO_PERCENT) == 2800
+    assert budgets.threshold(12_000, budgets.TRIM_TO_PERCENT) == 8400
+    assert budgets.threshold(20_000, budgets.ACT_AT_PERCENT) == 17_000
+
+
+def test_limit_for_takes_the_smallest_cap_and_names_it():
+    caps = [("loader:openclaw:defaults-max-chars", 40_000), ("loader:openclaw:user-md-fixed-cap", 4000)]
+    assert budgets.limit_for(8000, "target:table", caps) == (4000, "loader:openclaw:user-md-fixed-cap")
+    assert budgets.limit_for(12_000, "target:table", caps[:1]) == (12_000, "target:table")
+    assert budgets.limit_for(20_000, "target:default", []) == (20_000, "target:default")
+    # A tie goes to the loader, since a harness enforces it.
+    assert budgets.limit_for(4000, "target:config", caps[1:]) == (4000, "loader:openclaw:user-md-fixed-cap")
+
+
+def test_limit_for_breaks_a_tie_between_loader_caps_by_the_smaller_label():
+    tied = [("loader:b", 4000), ("loader:a", 4000)]
+    assert budgets.limit_for(20_000, "target:default", tied) == (4000, "loader:a")
+    assert budgets.limit_for(20_000, "target:default", tied[::-1]) == (4000, "loader:a")
