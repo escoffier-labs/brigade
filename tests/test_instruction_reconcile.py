@@ -593,6 +593,7 @@ def test_restore_of_an_unterminated_tail_keeps_a_line_boundary():  # review of #
     later = b"## Later\nlater text\n"
     result = plan_restore(head + line + b"\n" + later, (run,), (), {rel: card}, file_key=KEY)
     assert isinstance(result, Restore) and result.after == head + tail + b"\n" + later
+    assert result.remove_cards == (rel,)
     # Still at the end of the file: byte for byte, no newline added.
     at_end = plan_restore(head + line + b"\n", (run,), (), {rel: card}, file_key=KEY)
     assert isinstance(at_end, Restore) and at_end.after == head + tail
@@ -603,3 +604,16 @@ def test_reconcile_of_an_unterminated_tail_keeps_a_line_boundary():  # review of
     later = b"## Later\nlater text\n"
     result = reconcile(head + line + b"\n" + later, (run,), (), {rel: None}, file_key=KEY)
     assert result.restored == (rel,) and result.after == head + tail + b"\n" + later
+    assert result.completed == (ID,)
+
+
+def test_interrupted_restore_of_an_unterminated_tail_is_cleaned_by_reconcile():  # review of #2567
+    head, tail, line, run, rel, card = _tail_move()
+    later = b"## Later\nlater text\n"
+    restored = plan_restore(head + line + b"\n" + later, (run,), (), {rel: card}, file_key=KEY)
+    assert isinstance(restored, Restore)
+    # The file was written but the card was not removed yet: reconcile finishes it.
+    result = reconcile(restored.after, (run,), (), {rel: card}, file_key=KEY)
+    assert result.remove_cards == (rel,) and result.completed == (ID,) and result.after == restored.after
+    again = plan_restore(restored.after, (run,), (), {rel: card}, file_key=KEY)
+    assert isinstance(again, Restore) and again.after == restored.after and again.remove_cards == (rel,)

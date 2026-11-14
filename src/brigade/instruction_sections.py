@@ -151,7 +151,8 @@ def _scan(data: bytes) -> _Scan:
             kind = "pointer" if POINTER_LINE.fullmatch(text) else "other"
             lines.append(_Line(offset, offset + len(raw), text, kind, True, bool(stack)))
             offset += len(raw)
-            comment = b"-->" not in clean or _opens_comment(clean)  # `b --> <!-- c` closes one and opens another
+            close = clean.find(b"-->")  # HTML ends a comment at its first `-->`
+            comment = close == -1 or _opens_comment(clean[close + 3 :])  # `b --> <!-- c` closes and reopens
             continue
         in_block = fence is not None or bool(stack)
         in_managed = bool(stack)
@@ -327,7 +328,10 @@ def whole_section_spans(doc: SectionDocument, body: bytes) -> tuple[tuple[int, i
         last = first
         while units[last].end < stop and last + 1 < len(units) and units[last].end == units[last + 1].start:
             last += 1
-        if units[last].end == stop:
+        # A section moved from the end of a file with no final newline comes back with one when text follows
+        # it (`instruction_reconcile._put_back`), so that one added newline still counts as the same section.
+        tail = not body.endswith(b"\n") and doc.data[stop : stop + 1] == b"\n"
+        if units[last].end == stop or (tail and units[last].end == stop + 1):
             found.append((unit.start, stop))
     return tuple(found)
 

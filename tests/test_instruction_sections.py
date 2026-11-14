@@ -285,3 +285,9 @@ def test_an_indented_fence_is_indented_code_not_a_fence():  # review of #2567: p
     doc = parse(data)
     assert [u.heading for u in doc.units] == [b"## A", b"## Pinned"] and doc.units[1].pin == "marker"
     assert doc.eof_in_fence is False
+
+
+def test_a_comment_closes_at_its_first_end_marker():  # review of #2567
+    # Backticks mean nothing inside a comment: its first `-->` closes it, even between backticks.
+    data = b"# T\nintro\n<!-- a\nb <!-- `c --> d` e\n## Live\nbody\n"
+    assert [u.heading for u in parse(data).units] == [b"## Live"]
