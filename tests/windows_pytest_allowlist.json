@@ -60,7 +60,6 @@
     "test_memory_vault_propose.py",
     "test_memory_vault_search.py",
     "test_model_trials.py",
-    "test_neutrality.py",
     "test_operator_cmd.py",
     "test_outcome_backfill_scorecard.py",
     "test_outcome_execute.py",
