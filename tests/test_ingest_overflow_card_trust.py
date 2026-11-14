@@ -549,3 +549,20 @@ def test_config_is_read_through_the_care_configuration_the_ingest_uses(tmp_path)
     _cap_cards(ws, 777)
     assert memory_cmd._config_or_default(ws).max_card_bytes == 777
     assert route(ws, "USER.md", NOTE, "preference", home=home, environ=env).card_limit == 777
+
+
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), reason="POSIX permission bits")
+def test_a_card_that_cannot_be_opened_holds_the_handoff_instead_of_opening_the_next_card(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    _cap_cards(ws, 400)
+    full = sized(ws / CARD, 400, head=CARD_HEAD + "\n" + NOTE + "\n")  # already holds the content, and is full
+    full.chmod(0)
+    try:
+        assert _ingest(ws) == 0
+        # Rule: a card the duplicate scan cannot open may hold this content, so nothing is published.
+        assert not (ws / CARD_2).exists()
+        (draft,) = _drafts(ws)
+        assert "overflow-card-untrusted" in draft.read_text()
+    finally:
+        full.chmod(0o600)

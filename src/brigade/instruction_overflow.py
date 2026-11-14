@@ -265,6 +265,9 @@ def _with_card(target: Path, file: InstructionFile, reason: str, kind: str, cont
             size = limit  # unreadable: treat as full and open the next card
         if size > INSPECTION_CEILING and unreadable is None:
             unreadable = f"{rel} is over {INSPECTION_CEILING} bytes, so it cannot be searched for duplicates"
+        elif unreadable is None and read_regular_file(target / rel, max_bytes=INSPECTION_CEILING).data is None:
+            # A card the duplicate scan cannot open may already hold this content.
+            unreadable = f"{rel} cannot be read, so it cannot be searched for duplicates"
         if chosen is None and size + extra <= limit:
             chosen, chosen_exists = rel, True
     if chosen is None:

@@ -126,10 +126,16 @@ def _expectation(payload: dict[str, Any], item: dict[str, Any], data: bytes) -> 
 
 
 def _refuse(target: Path, decision_id: str, payload: dict[str, Any], exc: Any) -> None:
-    """Record that this decision's append was refused, and give the handoff back to the review inbox."""
-    journal.annotate(target, decision_id, append_refused=f"{exc.code}: {exc.reason}")
+    """Give the handoff back to the review inbox, then record that this decision's append was refused.
+
+    The record comes last. Recovery skips a decision once it carries `append_refused`, so a run
+    interrupted between the two steps must find the draft already restored: with the record written
+    first, the handoff would be in neither the card nor the inbox and nothing would look again.
+    Every step before the record can be repeated safely.
+    """
     draft = next((item["draft"] for item in payload.get("appends", []) if item.get("draft")), None)
     if draft is None:
+        journal.annotate(target, decision_id, append_refused=f"{exc.code}: {exc.reason}")
         return  # ingest holds its own handoff when this error reaches it
     from .memory_inbox_io import append
 
@@ -147,7 +153,10 @@ def _refuse(target: Path, decision_id: str, payload: dict[str, Any], exc: Any) -
                 hub={},
             )
     for row in retractions(payload):
-        append(target, row["path"], base64.b64decode(row["data"]))
+        data = base64.b64decode(row["data"])
+        if not _contains(target, row["path"], data):  # a repeated refusal never withdraws twice
+            append(target, row["path"], data)
+    journal.annotate(target, decision_id, append_refused=f"{exc.code}: {exc.reason}")
 
 
 def undo_changes(target: Path, payload: dict[str, Any]) -> list[journal.Change]:

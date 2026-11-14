@@ -455,3 +455,36 @@ def test_retry_reads_a_card_larger_than_a_draft_may_be(tmp_path, monkeypatch):
     result = drain.drain(ws, today=TODAY, deadline_days=14)
     assert result["retried"] == 1, result
     assert (ws / CARD).read_text().endswith(f"\n{NOTE}\n") and not draft.exists() and not (ws / CARD_2).exists()
+
+
+def test_an_interrupted_refusal_has_already_returned_the_draft(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+    original = draft.read_bytes()
+    real = _interrupt_first_publication(monkeypatch)
+    assert drain.drain(ws, today=TODAY, deadline_days=14)["skipped"] == 1 and not draft.exists()
+    planted = _plant(ws, PUBLIC + "\nplanted\n")
+    before = planted.read_bytes()
+    monkeypatch.setattr(ingest, "_append_document_nofollow", real)
+    annotate, crashed = journal.annotate, []
+
+    def crash_after_recording(target, decision_id, **fields):
+        annotate(target, decision_id, **fields)
+        if "append_refused" in fields and not crashed:
+            crashed.append(1)
+            raise RuntimeError("interrupted right after the refusal was recorded")
+
+    monkeypatch.setattr(journal, "annotate", crash_after_recording)
+    try:
+        journal.resolve_prepared(ws)
+    except RuntimeError:
+        pass
+    assert crashed, "the refusal path was not reached"
+    # Rule: the draft is back before the refusal is recorded, so an interruption cannot lose it.
+    assert draft.read_bytes() == original and planted.read_bytes() == before
+    monkeypatch.setattr(journal, "annotate", annotate)
+    journal.resolve_prepared(ws)
+    planted.unlink()
+    assert drain.drain(ws, today=TODAY, deadline_days=14)["retried"] == 1
+    assert (ws / CARD).read_text().count(NOTE) == 1 and not draft.exists()
