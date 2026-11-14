@@ -312,3 +312,8 @@ def test_a_unit_holding_one_tag_of_an_html_pair_is_blocked():  # review of #2567
     blocked = {u.heading: u.blocked for u in doc.units}
     assert blocked == {b"## A": "html-block", b"## Inner": "html-block", b"## B": None}
     assert parse(b"# T\n## A\n<div>x</div>\n## B\nb\n").units[0].blocked is None  # a balanced pair is fine
+
+
+def test_only_the_exact_end_tag_closes_a_raw_block():  # review of #2567
+    data = b"# T\nintro\n<pre>\n</preview> is not the end\n## Example\n</pre>\n## Live\nbody\n"
+    assert [u.heading for u in parse(data).units] == [b"## Live"]

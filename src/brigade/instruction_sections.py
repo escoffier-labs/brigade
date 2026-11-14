@@ -165,7 +165,7 @@ def _scan(data: bytes) -> _Scan:
             kind = "pointer" if POINTER_LINE.fullmatch(text) else "other"
             lines.append(_Line(offset, offset + len(raw), text, kind, True, bool(stack)))
             offset += len(raw)
-            if b"</" + raw_tag in clean.lower():
+            if _closes_raw(clean, raw_tag):
                 raw_tag = None
             continue
         in_block = fence is not None or bool(stack)
@@ -177,7 +177,7 @@ def _scan(data: bytes) -> _Scan:
                 fence = None
         elif (raw_open := _RAW_OPEN.match(clean)) is not None:
             tag = raw_open.group(1).lower()
-            if b"</" + tag not in clean.lower()[raw_open.end() :]:
+            if not _closes_raw(clean[raw_open.end() :], tag):
                 raw_tag = tag
             in_block = True
         else:
@@ -219,6 +219,12 @@ def _scan(data: bytes) -> _Scan:
 
 
 _CODE_SPAN = re.compile(rb"(`+)(?:(?!\1).)*?\1")
+
+
+def _closes_raw(text: bytes, tag: bytes) -> bool:
+    """Whether `text` holds the exact end tag `</tag>` (any case, spaces allowed before `>`), so `</preview>`
+    does not end a `<pre>` block."""
+    return re.search(rb"</" + tag + rb"\s*>", text.lower()) is not None
 
 
 def _opens_comment(clean: bytes) -> bool:
