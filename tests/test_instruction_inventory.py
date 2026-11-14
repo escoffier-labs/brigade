@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from brigade import instruction_inventory
 from brigade.install import install_selection
 from brigade.instruction_inventory import (
     FileOverride,
@@ -173,14 +174,14 @@ def test_an_override_records_what_was_requested_beside_what_applies(tmp_path):
     assert plain.class_source == "default"
 
 
-def test_a_configured_limit_can_only_lower_never_raise_above_a_loader_cap(tmp_path):
+def test_a_configured_limit_can_only_lower_the_baseline_never_raise_it(tmp_path):
     ws, home, env = field_workspace(tmp_path)
-    files = (
-        ("USER.md", FileOverride(None, 50000)),
-        ("AGENTS.md", FileOverride(None, 50000)),
-        ("SOUL.md", FileOverride(None, 1000)),
-    )
     sized(ws / "SOUL.md", 10)
+    files = (
+        ("USER.md", FileOverride(None, 50000)),  # loader cap 4000 is below the table target
+        ("AGENTS.md", FileOverride(None, 50000)),  # table target 12000, Codex cap 32768
+        ("SOUL.md", FileOverride(None, 1000)),  # lower than the table target: applies
+    )
     inv = discover(ws, InstructionsConfig(files=files), home=home, environ=env)
     user, agents, soul = find(inv, "USER.md"), find(inv, "AGENTS.md"), find(inv, "SOUL.md")
     assert (user.limit, user.limit_source, user.requested_limit_bytes) == (
@@ -188,8 +189,61 @@ def test_a_configured_limit_can_only_lower_never_raise_above_a_loader_cap(tmp_pa
         "loader:openclaw:user-md-fixed-cap",
         50000,
     )
-    assert (agents.limit, agents.limit_source) == (32768, "loader:codex:project-doc-max-bytes")
-    assert (soul.limit, soul.limit_source) == (1000, "target:config")
+    # The table target 12,000 is the baseline: 50,000 is clamped to it, not to the Codex cap.
+    assert (agents.target_budget, agents.target_source) == (12000, "target:table")
+    assert (agents.limit, agents.limit_source) == (12000, "target:table")
+    assert (agents.requested_limit_bytes, agents.limit_clamped) == (50000, True)
+    assert (soul.limit, soul.limit_source, soul.limit_clamped) == (1000, "target:config", False)
+
+
+def test_a_configured_limit_cannot_raise_a_file_with_only_the_default(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    sized(ws / "notes" / "extra.md", 100)
+    sized(ws / "notes" / "small.md", 100)
+    files = (
+        ("notes/extra.md", FileOverride("append", 90000)),
+        ("notes/small.md", FileOverride("append", 15000)),
+    )
+    inv = discover(ws, InstructionsConfig(files=files), home=home, environ=env)
+    extra, small = find(inv, "notes/extra.md"), find(inv, "notes/small.md")
+    assert (extra.target_budget, extra.target_source, extra.limit, extra.limit_clamped) == (
+        20000,
+        "target:default",
+        20000,
+        True,
+    )
+    assert extra.requested_limit_bytes == 90000
+    assert (small.target_budget, small.target_source, small.limit, small.limit_clamped) == (
+        15000,
+        "target:config",
+        15000,
+        False,
+    )
+
+
+def test_a_configured_limit_cannot_raise_a_user_level_file(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    sized(home / ".codex" / "AGENTS.md", 500)
+    raised = InstructionsConfig(files=(("~/.codex/AGENTS.md", FileOverride(None, 10**12)),))
+    row = find(discover(ws, raised, home=home, environ=env), "~/.codex/AGENTS.md")
+    assert (row.limit, row.limit_source, row.limit_clamped) == (20000, "target:default", True)
+    assert "codex:user" in row.loaders
+    lowered = InstructionsConfig(files=(("~/.codex/AGENTS.md", FileOverride(None, 8000)),))
+    row = find(discover(ws, lowered, home=home, environ=env), "~/.codex/AGENTS.md")
+    assert (row.limit, row.limit_source, row.limit_clamped) == (8000, "target:config", False)
+
+
+def test_a_capless_workspace_file_is_clamped_to_its_table_target(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    sized(ws / "CLAUDE.md", 100)
+    config = InstructionsConfig(files=(("CLAUDE.md", FileOverride(None, 10**12)),))
+    row = find(discover(ws, config, home=home, environ=env), "CLAUDE.md")
+    assert (row.limit, row.limit_source, row.limit_clamped, row.requested_limit_bytes) == (
+        6000,
+        "target:table",
+        True,
+        10**12,
+    )
 
 
 def test_an_override_outside_the_target_and_home_is_rejected_and_listed(tmp_path):
@@ -277,7 +331,9 @@ def test_the_user_md_cap_is_for_the_workspace_user_md_only(tmp_path):
 
 
 def test_user_md_keeps_its_cap_when_the_config_matches_no_agent(tmp_path):
-    other = {"agents": {"list": [{"id": "other", "workspace": "/nowhere/else"}]}}
+    # An absolute path on every platform: "/nowhere/else" has no drive on Windows, so Path
+    # there calls it relative and the agent's workspace would be invalid, not unmatched.
+    other = {"agents": {"list": [{"id": "other", "workspace": str(tmp_path / "nowhere" / "else")}]}}
     ws, home, env = field_workspace(tmp_path, config=other, install=True)
     user = find(discover(ws, InstructionsConfig(), home=home, environ=env), "USER.md")
     assert (user.limit, user.limit_source, user.limit_reason) == (
@@ -471,3 +527,240 @@ def test_discovery_starts_no_subprocess(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     refuse_subprocess(monkeypatch)
     assert discover(ws, InstructionsConfig(), home=home, environ=env).files
+
+
+# --- discovery reads the care configuration once, through the bounded helper ----
+
+
+@pytest.mark.skipif(not HAS_FIFO, reason="POSIX FIFOs")
+def test_the_care_config_is_not_reopened_after_the_bounded_read(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    sized(ws / "SOUL.md", 100)
+    _care_config(ws).write_text('index_paths = ["SOUL.md"]\n')
+    real_read = instruction_inventory.read_regular_file
+
+    def read_then_swap(path, **kwargs):
+        got = real_read(path, **kwargs)
+        if Path(path).name == "memory-care.toml":
+            Path(path).unlink()
+            os.mkfifo(path)  # swapped after the bounded read, before any second open
+        return got
+
+    original = Path.is_file
+    monkeypatch.setattr(instruction_inventory, "read_regular_file", read_then_swap)
+    monkeypatch.setattr(Path, "is_file", lambda self: True if self.name == "memory-care.toml" else original(self))
+    with deadline():  # raises a BaseException if any second open blocks on the FIFO
+        inv = discover(ws, InstructionsConfig(), home=home, environ=env)
+    assert find(inv, "SOUL.md").class_source == "memory-index"  # the index came from the bytes already read
+
+
+def test_index_paths_come_from_the_bytes_the_bounded_read_returned(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    sized(ws / "SOUL.md", 100)
+    _care_config(ws).write_text('index_paths = ["SOUL.md"]\n')
+    soul = find(discover(ws, InstructionsConfig(), home=home, environ=env), "SOUL.md")
+    assert (soul.file_class, soul.class_source) == ("report", "memory-index")
+
+
+def test_deeply_nested_care_config_does_not_raise_out_of_discover(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    _care_config(ws).write_text("index_paths = " + "[" * 200_000 + "]" * 200_000 + "\n")
+    inv = discover(ws, InstructionsConfig(), home=home, environ=env)  # must not raise
+    assert find(inv, "USER.md").limit == 4000
+
+
+@pytest.mark.parametrize(
+    ("text", "depth"),
+    [
+        ("[]", False),
+        ("[" * 200_000 + "]" * 200_000, False),
+        ('{"version": 99, "depth": "repo"}', False),
+        ("not json", False),
+        ("\xff\xfe", False),
+        # Only `version` and `depth` are read, so an unrelated wrong type neither raises nor hides the depth.
+        ('{"version": 1, "depth": "repo", "harnesses": 5}', True),
+    ],
+)
+def test_a_malformed_repository_config_does_not_raise_out_of_discover(tmp_path, text, depth):
+    ws, home, env = field_workspace(tmp_path)
+    (ws / ".brigade").mkdir()
+    (ws / ".brigade" / "config.json").write_bytes(text.encode("latin-1"))
+    inv = discover(ws, InstructionsConfig(), home=home, environ=env)
+    assert inv.repository_depth is depth
+
+
+def test_an_oversized_repository_config_is_not_read_whole(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    (ws / ".brigade").mkdir()
+    (ws / ".brigade" / "config.json").write_text(
+        '{"version": 1, "depth": "repo", "harnesses": [], "pad": "' + "x" * (2 * 1024 * 1024) + '"}'
+    )
+    assert discover(ws, InstructionsConfig(), home=home, environ=env).repository_depth is False
+
+
+@pytest.mark.skipif(not HAS_FIFO, reason="POSIX FIFOs")
+def test_a_repository_config_swapped_for_a_fifo_does_not_block(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    (ws / ".brigade").mkdir()
+    os.mkfifo(ws / ".brigade" / "config.json")
+    original = Path.is_file
+    monkeypatch.setattr(Path, "is_file", lambda self: True if self.name == "config.json" else original(self))
+    with deadline():
+        inv = discover(ws, InstructionsConfig(), home=home, environ=env)
+    assert inv.repository_depth is False
+
+
+def test_discovery_does_not_call_the_unbounded_loaders(tmp_path, monkeypatch):
+    from brigade import config as brigade_config
+    from brigade import memory_cmd
+
+    ws, home, env = field_workspace(tmp_path)
+    install_selection(ws, Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[]))
+    _care_config(ws).write_text('index_paths = ["MEMORY.md"]\n')
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("an unbounded loader was called")
+
+    monkeypatch.setattr(brigade_config, "load_config", refuse)
+    monkeypatch.setattr(memory_cmd, "load_config", refuse)
+    monkeypatch.setattr(memory_cmd, "_config_or_default", refuse)
+    assert discover(ws, InstructionsConfig(), home=home, environ=env).repository_depth is True
+
+
+# --- keys are unique and stable ----------------------------------------------
+
+
+def test_colliding_slugs_get_distinct_stable_keys_and_plain_keys_stay_plain(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    sized(ws / "notes" / "a-b.md", 10)
+    sized(ws / "notes" / "a" / "b.md", 10)
+    sized(ws / "notes" / "a_b.md", 10)
+    files = tuple((name, FileOverride("append", None)) for name in ("notes/a-b.md", "notes/a/b.md", "notes/a_b.md"))
+    config = InstructionsConfig(files=files)
+    first = discover(ws, config, home=home, environ=env)
+    keys = [item.key for item in first.files]
+    assert len(keys) == len(set(keys))
+    colliding = {name: find(first, name).key for name, _ in files}
+    assert all(key.startswith("notes-a-b-md-") for key in colliding.values())
+    assert find(first, "USER.md").key == "user-md" and find(first, "AGENTS.md").key == "agents-md"
+    again = discover(ws, config, home=home, environ=env)
+    assert {name: find(again, name).key for name, _ in files} == colliding
+
+
+def test_a_lone_file_keeps_its_plain_key(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    sized(ws / "notes" / "a-b.md", 10)
+    config = InstructionsConfig(files=(("notes/a-b.md", FileOverride("append", None)),))
+    assert find(discover(ws, config, home=home, environ=env), "notes/a-b.md").key == "notes-a-b-md"
+
+
+# --- a malformed programmatic override never raises --------------------------
+
+
+def test_a_nul_byte_in_an_override_or_exclusion_is_recorded_as_matching_no_file(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    config = InstructionsConfig(exclude=("bad\0name",), files=(("bad\0path.md", FileOverride("append", 10)),))
+    inv = discover(ws, config, home=home, environ=env)  # must not raise
+    reasons = {(n.reason, n.action) for n in inv.override_notes}
+    assert ("matches-no-file", "ignored") in reasons
+    assert find(inv, "AGENTS.md") is not None
+
+
+def test_a_nul_byte_in_the_openclaw_workspace_does_not_raise(tmp_path):
+    config = {"agents": {"list": [{"id": "main", "workspace": "/ws\u0000x"}]}}
+    ws, home, env = field_workspace(tmp_path, config=config)
+    assert find(discover(ws, InstructionsConfig(), home=home, environ=env), "AGENTS.md") is not None
+
+
+# --- loader totals count every loaded name -----------------------------------
+
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="hard links")
+def test_two_bootstrap_names_for_one_file_count_twice_in_the_loader_total(tmp_path):
+    ws = tmp_path / "ws"
+    sized(ws / "AGENTS.md", 100)
+    os.link(ws / "AGENTS.md", ws / "USER.md")  # the loader reads both names
+    config = {"agents": {"defaults": {"workspace": str(ws), "bootstrapTotalMaxChars": 150}}}
+    home, env = openclaw_home(tmp_path, config)
+    inv = discover(ws, InstructionsConfig(), home=home, environ=env)
+    (row,) = [f for f in inv.files if f.level == "workspace"]
+    assert row.size == 100 and row.bootstrap_names == ("AGENTS.md", "USER.md")
+    assert [(t.loader, t.total, t.cap) for t in inv.totals] == [("openclaw:main", 200, 150)]
+
+
+def test_one_bootstrap_name_counts_once(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    (total,) = discover(ws, InstructionsConfig(), home=home, environ=env).totals
+    assert total.total == 8241 + 12200
+
+
+# --- a custom Codex home -----------------------------------------------------
+
+
+def test_codex_home_moves_the_user_instruction_file_with_the_cap(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    sized(home / ".codex" / "AGENTS.md", 300)  # the default home, unused when CODEX_HOME is set
+    custom = home / "custom-codex"
+    sized(custom / "AGENTS.md", 700)
+    (custom / "config.toml").write_text("project_doc_max_bytes = 5000\n")
+    inv = discover(ws, InstructionsConfig(), home=home, environ={**env, "CODEX_HOME": str(custom)})
+    assert find(inv, "~/.codex/AGENTS.md") is None
+    row = find(inv, "~/custom-codex/AGENTS.md")
+    assert (row.size, row.level, "codex:user" in row.loaders) == (700, "user", True)
+    plain = discover(ws, InstructionsConfig(), home=home, environ=env)
+    assert find(plain, "~/.codex/AGENTS.md") is not None and find(plain, "~/custom-codex/AGENTS.md") is None
+
+
+# --- configuration that changes limits leaves a trace -------------------------
+
+
+def test_config_values_that_move_limits_are_listed_on_the_inventory(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    plain = discover(ws, InstructionsConfig(), home=home, environ=env)
+    assert plain.config_notes == () and plain.loader_reason is None
+    config = InstructionsConfig(enabled=False, act_at_percent=99, trim_to_percent=98, default_limit_bytes=10**12)
+    inv = discover(ws, config, home=home, environ=env)
+    assert inv.config_notes == ("act_at_percent", "default_limit_bytes", "enabled", "trim_to_percent")
+
+
+def test_a_configured_memory_index_is_listed_on_the_inventory(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    _care_config(ws).write_text('index_paths = ["AGENTS.md", "CLAUDE.md"]\n')
+    inv = discover(ws, InstructionsConfig(), home=home, environ=env)
+    assert inv.config_notes == ("index_paths",)
+
+
+def test_the_openclaw_reason_reaches_the_inventory(tmp_path):
+    ws, home, env = field_workspace(tmp_path, config="{not json", install=True)
+    assert discover(ws, InstructionsConfig(), home=home, environ=env).loader_reason == "config-not-strict-json"
+
+
+# --- home paths and exclusions ------------------------------------------------
+
+
+def test_a_home_dot_path_is_rejected_however_it_is_spelled(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    sized(home / ".ssh" / "config", 100)
+    sized(home / ".bashrc", 100)
+    files = (
+        ("~/.ssh/config", FileOverride("policy", 50)),
+        ("~/.bashrc", FileOverride("append", 50)),
+    )
+    inv = discover(ws, InstructionsConfig(files=files), home=home, environ=env)
+    rows = [f for f in inv.files if f.override_reason]
+    assert {f.display for f in rows} == {"~/.ssh/config", "~/.bashrc"}
+    assert {(f.override_reason, f.file_class, f.class_source) for f in rows} == {
+        ("home-dot-path-not-discovered", "report", "rejected-override")
+    }
+    assert {n.reason for n in inv.override_notes} == {"home-dot-path-not-discovered"}
+    assert all(f.target_source == "target:default" for f in rows)
+
+
+def test_an_exclusion_that_matches_no_file_is_listed(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    config = InstructionsConfig(exclude=("SOUL.md", "AGENTS.md"))
+    inv = discover(ws, config, home=home, environ=env)
+    assert [(n.name, n.reason, n.action) for n in inv.override_notes] == [
+        ("SOUL.md", "exclude-matches-no-file", "ignored")
+    ]
+    assert find(inv, "AGENTS.md").excluded

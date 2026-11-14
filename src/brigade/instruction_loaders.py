@@ -170,7 +170,7 @@ def _workspace_candidates(
 def _resolved(path: Path) -> Path:
     try:
         return path.resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):  # ValueError: an embedded NUL byte
         return path
 
 
