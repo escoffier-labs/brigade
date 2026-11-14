@@ -14,6 +14,8 @@ report off must not turn the guard off with it.
 
 from __future__ import annotations
 
+import stat
+
 import os
 import re
 from collections.abc import Mapping
@@ -95,13 +97,19 @@ class OverflowRoute:
     block_problem: str | None = None
     card_limit: int = 0  # effective bytes per card: max_card_bytes, never above what the duplicate scan reads
     limit_requested: int | None = None  # the configured max_card_bytes when it was clamped, else None
+    # The card `card_untrusted` is about. It is not always `card_rel`: an earlier card in the chain
+    # that cannot be searched holds the append, while `card_rel` is where the append would have gone.
+    untrusted_card_rel: str | None = None
 
     def hold(self) -> Held | None:
         """The reason this append must not be written, or None when it may be."""
         if self.card_problem:
             return Held(code="document-destination-unsafe", reason=self.card_problem)
         if self.card_untrusted:
-            return Held(code="overflow-card-untrusted", reason=f"{self.card_rel}: {self.card_untrusted}")
+            return Held(
+                code="overflow-card-untrusted",
+                reason=f"{self.untrusted_card_rel or self.card_rel}: {self.card_untrusted}",
+            )
         if self.block_problem:
             return Held(code="overflow-block-too-large", reason=self.block_problem)
         return None
@@ -243,6 +251,7 @@ def _with_card(target: Path, file: InstructionFile, reason: str, kind: str, cont
     numbers = _card_numbers(target, file.key, kind)
     cards: list[str] = []
     unreadable: str | None = None
+    unreadable_rel: str | None = None
     chosen: str | None = None
     problem: str | None = None
     chosen_exists = False
@@ -265,17 +274,21 @@ def _with_card(target: Path, file: InstructionFile, reason: str, kind: str, cont
             size = limit  # unreadable: treat as full and open the next card
         if size > INSPECTION_CEILING and unreadable is None:
             unreadable = f"{rel} is over {INSPECTION_CEILING} bytes, so it cannot be searched for duplicates"
-        elif unreadable is None and read_regular_file(target / rel, max_bytes=INSPECTION_CEILING).data is None:
+            unreadable_rel = rel
+        elif unreadable is None and not _openable(target / rel):
             # A card the duplicate scan cannot open may already hold this content.
             unreadable = f"{rel} cannot be read, so it cannot be searched for duplicates"
+            unreadable_rel = rel
         if chosen is None and size + extra <= limit:
             chosen, chosen_exists = rel, True
     if chosen is None:
         chosen, problem = f"{CARDS_REL}/{card_name(file.key, kind, _MAX_CARDS)}", "overflow card chain is too long"
     untrusted = unreadable
+    untrusted_rel = unreadable_rel
     block_problem: str | None = None
-    if problem is None and chosen_exists:
-        untrusted = untrusted or _untrusted_card(target, chosen)
+    if problem is None and chosen_exists and untrusted is None:
+        untrusted = _untrusted_card(target, chosen)
+        untrusted_rel = chosen if untrusted else None
     elif problem is None:
         first, _ = _first_block(target, file, content, kind, today=date.today())
         if len(first) > limit:
@@ -287,7 +300,28 @@ def _with_card(target: Path, file: InstructionFile, reason: str, kind: str, cont
             not_a_card = card_trust_problem(first.decode("utf-8", "replace"))
             if not_a_card:
                 block_problem = f"the content would not read back as a private overflow card: {not_a_card}"
-    return OverflowRoute(file, chosen, reason, problem, tuple(cards), untrusted, block_problem, limit, requested)
+    return OverflowRoute(
+        file, chosen, reason, problem, tuple(cards), untrusted, block_problem, limit, requested, untrusted_rel
+    )
+
+
+def _openable(path: Path) -> bool:
+    """Whether a card can be opened for reading. It opens and closes the file and reads nothing.
+
+    The duplicate scan reads every card afterwards. Reading them here as well would double the
+    work of every routing decision over a long chain.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, flags | getattr(os, "O_BINARY", 0))
+    except OSError:
+        return False
+    try:
+        return stat.S_ISREG(os.fstat(descriptor).st_mode)
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
 
 
 def _untrusted_card(target: Path, rel: str) -> str | None:

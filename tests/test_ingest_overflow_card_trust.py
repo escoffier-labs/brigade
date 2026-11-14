@@ -564,5 +564,29 @@ def test_a_card_that_cannot_be_opened_holds_the_handoff_instead_of_opening_the_n
         assert not (ws / CARD_2).exists()
         (draft,) = _drafts(ws)
         assert "overflow-card-untrusted" in draft.read_text()
+        # The record names the card that holds the draft, not the one the append would have joined.
+        from brigade import instruction_overflow_blocked as blocked
+
+        assert [(row["path"], row["held_drafts"]) for row in blocked.load(ws)] == [(CARD, 1)]
     finally:
         full.chmod(0o600)
+
+
+def test_choosing_a_card_reads_no_card_content(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    _cap_cards(ws, 400)
+    sized(ws / CARD, 400, head=CARD_HEAD)
+    sized(ws / CARD_2, 100, head=CARD_HEAD)
+    file = instruction_overflow.find(RouteContext(ws, home, env).load()[0], "USER.md")
+    reads = []
+    real = instruction_overflow.read_regular_file
+
+    def counting(path, **kwargs):
+        reads.append(path.name)
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(instruction_overflow, "read_regular_file", counting)
+    chosen = instruction_overflow._with_card(ws, file, "over-act-at", "preference", NOTE)
+    # Rule: the chain is opened to see that it can be searched, and only the chosen card is read here.
+    assert chosen.card_rel == CARD_2 and reads == [CARD_2.rsplit("/", 1)[1]]

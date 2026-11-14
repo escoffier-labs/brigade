@@ -66,8 +66,10 @@ def refresh(target: Path, *, routing: instruction_overflow.RouteContext | None =
             continue
         if outcome.code != CODE or outcome.overflow is None or not outcome.overflow.card_untrusted:
             continue
-        counts[outcome.overflow.card_rel] += 1
-        problems[outcome.overflow.card_rel] = outcome.overflow.card_untrusted
+        # The card that holds the drafts, which is not always the one the append would join.
+        blocking = outcome.overflow.untrusted_card_rel or outcome.overflow.card_rel
+        counts[blocking] += 1
+        problems[blocking] = outcome.overflow.card_untrusted
     cards = [{"path": rel, "problem": problems[rel], "held_drafts": counts[rel]} for rel in sorted(counts)]
     path = journal.safe_path(target, BLOCKED_REL)
     if cards or path.exists():
@@ -86,9 +88,10 @@ def load(target: Path) -> list[dict[str, Any]]:
     # workspace: the read is bounded, and anything unreadable or oversized is no record.
     try:
         value = read_json(journal.safe_path(target, BLOCKED_REL), max_bytes=RECORD_MAX_BYTES)
-    except (OSError, ValueError, RuntimeError, RecursionError):
+    except (OSError, ValueError, RuntimeError, RecursionError, MemoryError):
         return []
-    if not isinstance(value, dict) or value.get("version") != 1:
+    version = value.get("version") if isinstance(value, dict) else None
+    if type(version) is not int or version != 1:  # `True == 1`, so the type is checked too
         return []
     cards = value.get("cards")
     return [row for row in cards[:RECORD_MAX_ROWS] if isinstance(row, dict)] if isinstance(cards, list) else []

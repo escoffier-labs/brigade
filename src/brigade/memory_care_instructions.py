@@ -490,7 +490,7 @@ def blocked_card_lines(target: Path) -> list[str]:
         from . import instruction_overflow_blocked as blocked
 
         cards = blocked.load(target)
-    except (OSError, ValueError, TypeError, KeyError, RuntimeError, RecursionError):
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, RecursionError, MemoryError):
         return []
     lines = []
     for card in cards if isinstance(cards, list) else []:

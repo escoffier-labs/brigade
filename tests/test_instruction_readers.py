@@ -324,6 +324,7 @@ def test_the_brief_names_a_blocked_overflow_card_by_id_and_count(tmp_path, monke
         + "x" * 70_000
         + '"}',
         "[" * 5000,
+        '{"version": true, "cards": [{"path": "memory/cards/instructions/a--overflow-note.md", "held_drafts": 1}]}',
     ],
 )
 def test_a_damaged_blocked_card_record_adds_no_line_and_never_raises(tmp_path, monkeypatch, content):
