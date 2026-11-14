@@ -273,3 +273,18 @@ def test_failed_mode_reader_keeps_deny_and_close_out_friction(tmp_path, reader_o
     assert (state / "friction.reported").exists()
     assert (state / "substantive").exists()
     assert "friction add" in (tmp_path / "state" / "logs" / "session-1.log").read_text()
+
+
+@pytest.mark.parametrize(("mode", "decision"), [(None, "deny"), ("observe", "allow")])
+def test_byte_order_mark_config_is_read_like_the_cli(tmp_path: Path, mode, decision):
+    # A leading UTF-8 byte-order mark must not hide the project from fallback discovery (fail open)
+    # or hide its work mode, as brigade.config.load_config and work_mode read it.
+    target = tmp_path / "repo"
+    _write_config(target, ["grok"])
+    config_path = target / ".brigade" / "config.json"
+    config = json.loads(config_path.read_text())
+    if mode is not None:
+        config["work"] = {"mode": mode}
+    config_path.write_bytes(b"\xef\xbb\xbf" + json.dumps(config).encode())
+    result = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
+    assert json.loads(result.stdout)["decision"] == decision
