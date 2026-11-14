@@ -36,7 +36,12 @@ from . import (
     write_attribution,
 )
 from .fingerprint import repo_worktree_fingerprint
-from .handoff_close import closes_nothing_durable as _closes_nothing_durable, handoff_stop_note as _handoff_stop_note
+from .handoff_close import (
+    closes_nothing_durable as _closes_nothing_durable,
+    handoff_since as _handoff_since,
+    handoff_stop_note as _handoff_stop_note,
+    handoff_stop_record as _handoff_stop_record,
+)
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
 from .session_state import (
@@ -2067,22 +2072,6 @@ def _receipt_since(target: Path, started_at: object, *, session_fingerprint: str
     return False
 
 
-def _handoff_since(target: Path, started_at: object) -> bool:
-    started = localio.parse_iso_datetime(started_at)
-    if started is None:
-        return False
-    for path in (p for inbox in handoff_worktrees.handoff_inboxes(target) for p in inbox.glob("*.md")):
-        if path.name == "TEMPLATE.md":
-            continue
-        try:
-            modified = path.stat().st_mtime
-        except OSError:
-            continue
-        if modified >= started.timestamp():
-            return True
-    return False
-
-
 def _additional_context(
     event: str,
     text: str,
@@ -2492,6 +2481,7 @@ def _handle_event(
         blocking_failures: list[str] = []
         shared_tree_notes: list[str] = []
         handoff_target: Path | None = None
+        unverified_handoff: Path | None = None
         context_target: Path | None = None
         closed_without_handoff = _closes_nothing_durable(payload)
         for stop_target in _stop_targets(payload, session_id, task_epoch=task_epoch):
@@ -2501,7 +2491,12 @@ def _handle_event(
             stop_state = _normalize_state(
                 stop_target, session_id, stop_state, task_epoch=task_epoch, fingerprint=event_fingerprint
             )
-            if not stop_state.get("write_observed") or not work_mode.is_strict(stop_target):
+            if not stop_state.get("write_observed"):
+                continue
+            if not work_mode.is_strict(stop_target):
+                # observe and off skip the receipt gate but keep the handoff note; strict targets win.
+                if handoff_target is None and not _handoff_since(stop_target, stop_state.get("started_at")):
+                    handoff_target = unverified_handoff = stop_target
                 continue
             fingerprint = stop_state.get("session_fingerprint")
             if not isinstance(fingerprint, str):
@@ -2564,7 +2559,7 @@ def _handle_event(
                 "",
                 target=handoff_target,
                 session_id=session_id,
-                records=[f"Verification is recorded. {_handoff_stop_note(handoff_target)}"],
+                records=[_handoff_stop_record(handoff_target, verified=handoff_target != unverified_handoff)],
             )
     return None
 
