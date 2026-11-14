@@ -16,6 +16,7 @@ from .guard.types import ScanOptions
 from .instruction_overflow import card_trust_problem
 from .instruction_reconcile import card_body
 from .instruction_sections import (
+    FILE_KEY,
     POINTER_LINE,
     SectionDocument,
     Unit,
@@ -33,6 +34,14 @@ CARD_DIR = "memory/cards/instructions/"
 _UNCHANGED = frozenset({"within", "unbalanced-markers", "not-utf8", "pinned-heading-missing"})
 _REASONS = _UNCHANGED | {None, "nothing-movable", "still-over-after-moves"}
 _NON_SLUG = re.compile(r"[^a-z0-9]+")
+# Card frontmatter values. A card name is a slug of at most 48 characters plus a `-<n>` name number, and the
+# card id is the form `card_identity.mint_card_id` makes. `fullmatch` is used throughout: `$` would let a
+# trailing newline through.
+_CARD_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
+_CARD_SLUG_MAX = SLUG_MAX + 4
+_DECISION_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[a-z]+-[0-9a-f]{8}")
+_FRESH_UNTIL = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_CARD_ID = re.compile(r"card-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _POINTER_DATE = re.compile(rb"memory (\d{4}-\d{2}-\d{2}):")
 
 
@@ -284,6 +293,21 @@ def plan_append(
     return TrimPlan(data, after, runs, added, reason, tuple(sorted(skipped)))
 
 
+def _check_card_values(*, file_key: str, slug: str, decision_id: str, fresh_until: str | None, card_id: str) -> None:
+    if FILE_KEY.fullmatch(file_key) is None:
+        raise ValueError("file_key is not a safe key")
+    if len(slug) > _CARD_SLUG_MAX or _CARD_SLUG.fullmatch(slug) is None:
+        raise ValueError("slug is not a card name part")
+    if _DECISION_ID.fullmatch(decision_id) is None:
+        raise ValueError("decision_id is not a decision id")
+    if _CARD_ID.fullmatch(card_id) is None:
+        raise ValueError("card_id is not a card id")
+    if fresh_until is not None:
+        if _FRESH_UNTIL.fullmatch(fresh_until) is None:
+            raise ValueError("fresh_until is not a date")
+        date.fromisoformat(fresh_until)  # a ValueError of its own for 2026-13-45
+
+
 def card_bytes(
     *,
     file_key: str,
@@ -295,8 +319,13 @@ def card_bytes(
     fresh_until: str | None,
     card_id: str,
 ) -> bytes:
-    """The private card for one moved run: frontmatter, then the run's bytes unchanged. No heading text enters it."""
+    """The private card for one moved run: frontmatter, then the run's bytes unchanged. No heading text enters it.
+    Every frontmatter value is checked, so no string can add a line or a field. Raises `ValueError` otherwise."""
     from .memory_care_instructions import encode_value
+
+    _check_card_values(
+        file_key=file_key, slug=slug, decision_id=decision_id, fresh_until=fresh_until, card_id=card_id
+    )
 
     lines = [
         "---",

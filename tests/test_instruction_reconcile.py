@@ -28,6 +28,7 @@ LIMITS = Limits(limit=4000, act_at=3400, trim_to=2800)
 DIR = "memory/cards/instructions/"
 PREF = DIR + "user-md--overflow-preference.md"
 KEY = "user-md"
+CARD_ID = "card-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 
 
 class Moved(NamedTuple):
@@ -67,7 +68,7 @@ def _moved(data: bytes | None = None, *, overflow: tuple[str, ...] = ()) -> Move
             decision_id=ID,
             today=TODAY,
             fresh_until=None,
-            card_id="c-1",
+            card_id=CARD_ID,
         )
     pointers = tuple(RecordedPointer(ID, a.card_rel, a.data, a.separator) for a in plan.added)
     return Moved(data, plan.after, tuple(runs), pointers, cards)
