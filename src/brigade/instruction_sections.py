@@ -149,7 +149,7 @@ def _scan(data: bytes) -> _Scan:
             kind = "pointer" if POINTER_LINE.fullmatch(text) else "other"
             lines.append(_Line(offset, offset + len(raw), text, kind, True, bool(stack)))
             offset += len(raw)
-            comment = b"-->" not in clean
+            comment = b"-->" not in clean or _opens_comment(clean)  # `b --> <!-- c` closes one and opens another
             continue
         in_block = fence is not None or bool(stack)
         in_managed = bool(stack)

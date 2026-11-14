@@ -253,3 +253,8 @@ def test_multiline_html_comment_is_never_a_section_boundary():  # review of #256
 def test_frontmatter_after_a_byte_order_mark_is_fixed_text():  # review of #2567
     data = b"\xef\xbb\xbf---\n## Metadata\nname: x\n---\n# Title\n\n## A\nbody\n"
     assert [u.heading for u in parse(data).units] == [b"## A"]
+
+
+def test_a_line_that_closes_one_comment_and_opens_another():  # review of #2567
+    data = b"# T\nintro\n<!-- a\nb --> <!-- c\n## Hidden\nd -->\n## A\nbody\n"
+    assert [u.heading for u in parse(data).units] == [b"## A"]
