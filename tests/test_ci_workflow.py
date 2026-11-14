@@ -2662,6 +2662,12 @@ def test_authoritative_event_range_includes_all_changes(history, event):
         ("SECURITY.md", True),
         ("docs/guide with spaces.md", True),
         ("docs/diagram.png", True),
+        ("changelog.d/2542.md", True),
+        ("changelog.d/ci-docs-only-fragments.md", True),
+        ("changelog.d/sub/x.md", False),
+        ("changelog.d/x.py", False),
+        ("changelog.d/.hidden.md", False),
+        ("changelog.d/.md", False),
         ("docs/phase-agent-mesh.md", False),
         ("docs/AGENTS.md", False),
         ("AGENTS.md", False),
@@ -2680,6 +2686,50 @@ def test_documentation_allowlist(history, path, expected):
     head = commit(repo, git, path)
     result = classify(repo, "push", {"before": base, "after": head}, head)
     assert result["docs_only"] == str(expected).lower()
+
+
+def test_a_documentation_file_with_its_changelog_fragment_is_documentation_only(history):
+    repo, git, base = history
+    (repo / "docs").mkdir(exist_ok=True)
+    (repo / "docs/guide.md").write_text("new\n")
+    (repo / "changelog.d").mkdir(exist_ok=True)
+    (repo / "changelog.d/1.md").write_text("- Doc.\n")
+    git("add", "--", "docs/guide.md", "changelog.d/1.md")
+    git("commit", "-qm", "docs and fragment")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "true"
+
+
+def test_a_fragment_beside_code_is_not_documentation_only(history):
+    repo, git, base = history
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "src/mod.py").write_text("x = 1\n")
+    (repo / "changelog.d").mkdir(exist_ok=True)
+    (repo / "changelog.d/1.md").write_text("- Fix.\n")
+    git("add", "--", "src/mod.py", "changelog.d/1.md")
+    git("commit", "-qm", "code and fragment")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "false"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable bits and symlinks")
+def test_an_executable_or_symlinked_fragment_is_not_documentation_only(history):
+    repo, git, base = history
+    head = commit(repo, git, "changelog.d/1.md", "- Doc.\n")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "true"
+    base = head
+    (repo / "changelog.d/1.md").chmod(0o755)
+    git("add", "changelog.d/1.md")
+    git("commit", "-qm", "executable fragment")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "false"
+    base = head
+    (repo / "changelog.d/1.md").unlink()
+    (repo / "changelog.d/1.md").symlink_to("../README.md")
+    git("add", "changelog.d/1.md")
+    git("commit", "-qm", "symlink fragment")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "false"
 
 
 def test_deletion_and_both_sides_of_renames(history):
