@@ -7,6 +7,14 @@ of a FIFO without a writer blocks forever. This helper opens once, with
 `fstat`, refuses anything that is not a regular file, and reads at most a fixed
 number of bytes. Size and bytes both come from that one descriptor. It never
 raises: every failure comes back as a short reason code.
+
+Limitation on a platform with no `O_NONBLOCK`: the type of the path is checked
+with `stat` before the open, so a path swapped for a FIFO between that `stat`
+and the `open` leaves a race the helper cannot close. If that FIFO has no writer
+the open blocks. Such a platform is Windows, where a directory entry cannot be a
+FIFO, so nothing there can be swapped in. A platform that lacks `O_NONBLOCK` but
+has FIFOs is unsupported. When the open does return, the `fstat` of the opened
+descriptor still refuses anything that is not a regular file.
 """
 
 from __future__ import annotations

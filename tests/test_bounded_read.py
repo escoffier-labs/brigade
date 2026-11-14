@@ -69,3 +69,47 @@ def test_a_file_that_changes_during_the_read_fails_only_when_stability_is_requir
     assert read_regular_file(path, max_bytes=100, require_stable=True).reason == "changed"
     path.write_bytes(b"first")
     assert read_regular_file(path, max_bytes=100).reason is None
+
+
+def _swap_after_first_stat(monkeypatch, path, decoy):
+    """Make the first `os.stat` of `path` report `decoy`, a regular file, as if `path` were swapped afterwards."""
+    real_stat = os.stat
+    seen = []
+
+    def stat(target, *args, **kwargs):
+        if str(target) == str(path) and not seen:
+            seen.append(target)
+            return real_stat(decoy)
+        return real_stat(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat)
+
+
+def test_without_o_nonblock_a_path_swapped_for_a_directory_after_the_stat_is_refused(tmp_path, monkeypatch):
+    monkeypatch.delattr(os, "O_NONBLOCK", raising=False)  # as on Windows
+    decoy = tmp_path / "decoy.txt"
+    decoy.write_bytes(b"ok")
+    swapped = tmp_path / "swapped"
+    swapped.mkdir()
+    _swap_after_first_stat(monkeypatch, swapped, decoy)
+    got = read_regular_file(swapped, max_bytes=10)
+    # The descriptor check after the open still refuses what the early stat let through.
+    assert (got.data, got.reason) == (None, "not-regular")
+
+
+@pytest.mark.skipif(not HAS_FIFO, reason="POSIX FIFOs")
+def test_without_o_nonblock_a_swapped_fifo_that_does_not_block_the_open_is_refused(tmp_path, monkeypatch):
+    monkeypatch.delattr(os, "O_NONBLOCK", raising=False)
+    decoy = tmp_path / "decoy.txt"
+    decoy.write_bytes(b"ok")
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    writer = os.open(fifo, os.O_RDWR)  # a writer is present, so the plain open returns
+    try:
+        _swap_after_first_stat(monkeypatch, fifo, decoy)
+        with deadline():
+            got = read_regular_file(fifo, max_bytes=10)
+    finally:
+        os.close(writer)
+    # A FIFO with no writer would block this open: that limitation is documented in the helper.
+    assert (got.data, got.reason) == (None, "not-regular")
