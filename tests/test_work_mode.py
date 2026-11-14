@@ -1052,3 +1052,16 @@ def test_a_byte_order_mark_does_not_hide_the_work_settings(tmp_path: Path) -> No
     assert work_mode.resolve_mode(target) == work_mode.MODE_OBSERVE
     assert work_mode.repo_rails_setting(target) == path
     assert not any(row[1] == "work.mode" and "cannot be read" in row[2] for row in work_mode.doctor_checks(target))
+
+
+def test_a_byte_order_mark_without_a_mode_stays_strict_and_is_not_rewritten(tmp_path: Path) -> None:
+    # The pin step reads strict utf-8, so it leaves a file with a byte-order mark alone.
+    target = tmp_path / "repo"
+    path = target / config.CONFIG_REL_PATH
+    path.parent.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    original = b"\xef\xbb\xbf" + json.dumps({"version": 1}).encode()
+    path.write_bytes(original)
+    assert work_mode.resolve_mode(target) == work_mode.MODE_STRICT
+    assert work_mode.pin_explicit_mode(target) is None
+    assert path.read_bytes() == original
