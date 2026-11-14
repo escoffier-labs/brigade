@@ -113,9 +113,11 @@ def _marker(text: bytes) -> tuple[str, tuple[str, bytes]] | None:
 
 
 def _frontmatter_lines(raw_lines: list[bytes]) -> int:
-    """How many leading lines form a YAML frontmatter block: a first line `---` closed by a later `---` or `...`
-    line. 0 when there is none, so a lone `---` stays an ordinary thematic break."""
-    if not raw_lines or raw_lines[0].rstrip(b"\r\n") != b"---":
+    """How many leading lines form a YAML frontmatter block: a first line `---` (after an optional UTF-8
+    byte-order mark) closed by a later `---` or `...` line. 0 when there is none, so a lone `---` stays an
+    ordinary thematic break. A file that opens with a thematic break and has another `---` later is read as
+    frontmatter up to it, which only keeps more text fixed."""
+    if not raw_lines or raw_lines[0].removeprefix(b"\xef\xbb\xbf").rstrip(b"\r\n") != b"---":
         return 0
     for index, raw in enumerate(raw_lines[1:], start=1):
         if raw.rstrip(b"\r\n") in (b"---", b"..."):

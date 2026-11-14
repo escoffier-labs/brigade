@@ -248,3 +248,8 @@ def test_multiline_html_comment_is_never_a_section_boundary():  # review of #256
     # An unclosed comment at the end hides what follows: no heading after it, and appended text would be hidden.
     open_end = parse(b"# T\n## A\nx\n<!--\n## B\ny\n")
     assert [u.heading for u in open_end.units] == [b"## A"] and open_end.eof_in_fence is True
+
+
+def test_frontmatter_after_a_byte_order_mark_is_fixed_text():  # review of #2567
+    data = b"\xef\xbb\xbf---\n## Metadata\nname: x\n---\n# Title\n\n## A\nbody\n"
+    assert [u.heading for u in parse(data).units] == [b"## A"]
