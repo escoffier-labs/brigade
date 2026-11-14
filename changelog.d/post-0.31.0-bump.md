@@ -1,0 +1,1 @@
+- Move main and the beta update base to 0.32.0 after the 0.31.0 release, so `brigade update --channel beta` selects `0.32.0.devYYYYMMDD` wheels once the first one publishes and fails closed until then.

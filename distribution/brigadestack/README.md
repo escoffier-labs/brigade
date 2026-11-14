@@ -1,13 +1,13 @@
 # Brigade Stack bridge packages
 
-Brigade Stack 0.30.0 adds the `brigadestack` command to stable Brigade 0.30.0.
+Brigade Stack 0.31.0 adds the `brigadestack` command to stable Brigade 0.31.0.
 Choose either the Python or npm package. Existing `brigade-cli`,
 `@escoffier-labs/brigade`, and the `brigade` command remain supported.
 
 | Package | Exact dependency | Command added |
 | --- | --- | --- |
-| PyPI `brigadestack==0.30.0` | `brigade-cli==0.30.0` | `brigadestack` |
-| npm `brigadestack@0.30.0` | `@escoffier-labs/brigade@0.30.0` | `brigadestack` |
+| PyPI `brigadestack==0.31.0` | `brigade-cli==0.31.0` | `brigadestack` |
+| npm `brigadestack@0.31.0` | `@escoffier-labs/brigade@0.31.0` | `brigadestack` |
 
 The Python distribution contains metadata and a console entry point to the
 dependency's `brigade.cli:process_main`. The npm distribution runs the dependency's
@@ -42,14 +42,14 @@ The workflow accepts no inputs and runs only in `escoffier-labs/brigade` on
 `refs/heads/main`. Review the selected source commit before dispatch.
 
 The unprivileged job builds only `distribution/brigadestack/pypi`, checks the
-0.30.0 wheel and sdist, and installs the wheel with the actual stable
-`brigade-cli==0.30.0` dependency to exercise `brigadestack --version` and `--help`.
+0.31.0 wheel and sdist, and installs the wheel with the actual stable
+`brigade-cli==0.31.0` dependency to exercise `brigadestack --version` and `--help`.
 It passes those two checked artifacts to a separate publish job in the `pypi`
 environment. Only that job can request an OIDC token. The root development
 package and native release assets are outside this workflow's build path.
 
 Publication runs are serialized. Before dispatch or retry, inspect PyPI for
-`brigadestack==0.30.0` and stop if it already exists. Duplicate uploads fail.
+`brigadestack==0.31.0` and stop if it already exists. Duplicate uploads fail.
 After a successful run, the controller must download and install the published
 artifacts in a fresh environment and check identity, hashes and CLI behavior.
 The npm bridge has a separate manual publication step owned by the controller.

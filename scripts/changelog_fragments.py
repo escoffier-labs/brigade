@@ -39,6 +39,12 @@ UNRELEASED_RE = re.compile(r"^## \[Unreleased\]\s*$")
 RELEASE_HEADING_RE = re.compile(r"^## \[\d+\.\d+\.\d+[^\]]*\] - \d{4}-\d{2}-\d{2}\s*$")
 
 
+# Git for Windows cannot check out these device names, with or without an extension.
+WINDOWS_RESERVED = frozenset(
+    {"con", "prn", "aux", "nul", *(f"com{n}" for n in range(1, 10)), *(f"lpt{n}" for n in range(1, 10))}
+)
+
+
 class FragmentError(ValueError):
     """A fragment or changelog is malformed."""
 
@@ -79,6 +85,8 @@ def validate_names(names: list[str]) -> list[str]:
     for name in names:
         if not NAME_RE.fullmatch(name):
             problems.append(f"{FRAGMENT_DIR}/{name}: name must match {NAME_RE.pattern}")
+        if name.split(".", 1)[0].casefold() in WINDOWS_RESERVED:
+            problems.append(f"{FRAGMENT_DIR}/{name}: name is a Windows reserved device name")
         folded = name.casefold()
         if folded in seen:
             problems.append(f"{FRAGMENT_DIR}/{name}: duplicates {FRAGMENT_DIR}/{seen[folded]}")

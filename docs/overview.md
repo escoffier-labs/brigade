@@ -10,8 +10,8 @@ The full tour: every component, diagram, and workflow. The [README](../README.md
 | Website | [brigade.tools](https://brigade.tools) |
 | PyPI | [`brigade-cli`](https://pypi.org/project/brigade-cli/) |
 | Command | `brigade` |
-| Stable release | v0.30.0 |
-| Preview line | 0.31 beta (`0.31.0.devYYYYMMDD` wheels) |
+| Stable release | v0.31.0 (`brigade-cli` on PyPI, `@escoffier-labs/brigade` on npm) |
+| Preview line | 0.32 beta (`0.32.0.devYYYYMMDD` wheels) |
 
 This Brigade Stack is the AI-agent operator CLI from Escoffier Labs. It is not the archived CNCF/Microsoft Kubernetes Brigade, Spinabot Brigade, or the 2017 Python package that became Nornir.
 
@@ -88,7 +88,7 @@ Standalone brigade-code-graph or brigade-evidence installs are replaced by `brig
 Install:
 
 ```bash
-npm install --global @escoffier-labs/brigade@0.30.0   # needs Node.js 22+ and npm
+npm install --global @escoffier-labs/brigade@0.31.0   # needs Node.js 22+ and npm
 # alternatives: pipx install brigade-cli, or uv tool install brigade-cli
 brigade setup
 ```
@@ -247,7 +247,7 @@ flowchart LR
 
 ### Keeping Cards Fresh
 
-Memory degrades. Cards go stale, lose their backing evidence, or get superseded. `brigade memory care scan` is a read-only sweep over the card roots that checks freshness metadata (`reviewed`, `fresh_until`, confidence, evidence) and flags stale, expired, undersourced, contradictory, orphaned, and oversized cards. Flagged cards land in a refresh queue that routes into the work inbox, so a card that needs review shows up in the daily plan instead of rotting unnoticed. The scan writes findings and queue state without editing cards. An assigned agent or the operator can use those findings to refresh a card with supporting evidence or archive it and update the index. Autonomous memory reflection is planned in [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
+Memory degrades. Cards go stale, lose their backing evidence, or get superseded. `brigade memory care scan` is a read-only sweep over the card roots that checks freshness metadata (`reviewed`, `fresh_until`, confidence, evidence) and flags stale, expired, undersourced, contradictory, orphaned, and oversized cards. Flagged cards land in a refresh queue that routes into the work inbox, so a card that needs review shows up in the daily plan instead of rotting unnoticed. The scan writes findings and queue state without editing cards. An assigned agent or the operator can use those findings to refresh a card with supporting evidence or archive it and update the index. `brigade memory reflect` proposes consolidations from evidence. When a hub policy enables it and every Tier 0 gate passes, including a bound retrieval evaluation, an allowlisted reflect principal can have the hub apply two low-risk operation classes without human review: appending evidence and merging exact duplicates. That switch is off by default, and a failed gate leaves the proposal for a reviewer. [Memory operations](memory-operations.md) lists the gates, and the remaining work is tracked in [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
 
 ```mermaid
 flowchart LR

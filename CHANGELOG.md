@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-11-14
+
 - Add explicit opt-in Duet dispatch with seven fleet tools, repository and prompt bounds, and atomic open-request and daily-attempt limits in private state. Approval, answer and doctor relays remain unavailable; default discovery stays at 22 tools.
 
 - Answer a Dot-family `tools/call` with out-of-range or unsupported arguments (for example `inbox_list` with `limit` above 50) with a JSON-RPC `-32602` error that names the argument, instead of an opaque `request_denied`, and record the allowlisted argument summary in the call log.
@@ -268,6 +270,758 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unscoped Worklore histories omit external ownership events before pagination, while preserving legacy event fields and cursors.
 
 - Keep external Worklore scopes reserved across later legacy events, and refuse expiry cleanup of unsupported ownership histories.
+
+### Changed
+
+- Explain that older Fleet Hubs need an upgrade when they reject unread-count requests as an unsupported action.
+- Bound the optional local full verification gate to one run per user per host with at most four shard workers. The admission slots live in an owner-only directory under `/tmp`, shared across linked worktrees and separate clones, and `verify-fast` now delegates to the same gate. Required CI is unchanged and is not throttled.
+- Add node-authenticated Fleet reservation acceptance (`reservation-accept`) with current target, policy, expiry, bound work eligibility and model-retirement checks. A work item that was blocked, held or deleted after routing is refused without accepting the reservation. Exact retries preserve the original reservation and expiry.
+- Fleet reservation acceptance now replays an already accepted reservation without re-checking machine capacity, so a retry no longer fails once the accepting launch reports as running.
+- Add yolo work mode (`brigade init --yolo`, `brigade work mode set yolo|enforced`). It keeps the work brief, memory recall, Fleet Hub messages and handoffs on request, and drops the raw-verification deny, the failed-verification nag and the Stop receipt gate in the Claude and Grok hooks. Adoption reports a yolo repo as `yolo`, never `bypassed`. Add a separate safety-rails switch (`brigade work rails on|off`), on by default in both modes. With rails off, the `hooks/pre-push` template skips the content guard and history scans. Guard policies and baselines are left unchanged. The rails-off choice lives in a per-user record outside every repository, keyed by the repository's real path, so no committed file can turn the rails off. An in-repo `work.rails` value is ignored and reported. `brigade status`, `brigade doctor` and adoption show both settings. Existing `hooks/pre-push` copies keep scanning until refreshed from the template.
+- Yolo mode now follows the directory a verification command runs in. A session that starts in an enforced workspace and runs `cd <yolo-repo> && pytest -q` is no longer denied, while a session in a yolo repo that runs a check in an enforced repo still is. A check whose directory cannot be resolved (a variable, `cd -`, a subshell or `||` around the `cd`, or an unwired directory) keeps enforcement. Stop-gate behavior for writes into enforced repos is unchanged.
+- Retire the `chef` role key in favor of `orchestrator`, with one release of read aliases and a hidden deprecated `--chef` flag. Hub schema 48 preserves preference rows while renaming the column. Deploy the Hub first. Rollback requires restoring a consistent pre-upgrade database backup. Frozen v1 preference responses retain `chef` for older clients.
+- The Rust hub front starts its Python upstream with a per-start key, uses the front's client address throughout the upstream, disables upstream automatic WAL checkpoints, derives message-list deadlines from the body, and probes readiness outside the proxy pool.
+- Upstream mode now runs interim Python checkpoint maintenance until S4b takes ownership, preventing unbounded WAL growth while automatic checkpoints are disabled.
+- Invalid upstream header keys are rejected at startup without exposing their value.
+- Proxied message-list waits allow 10 seconds of header slack for Python write-lock waits before and after polling. The front retains a parsed upstream header key and rejects an empty managed key.
+- Setup installs canonical engine names with verified legacy compatibility links or copies. Release manifests pin canonical assets while releases continue publishing both asset sets through v0.32.
+- Before downgrading an upgraded home to v0.30, run v0.31 `brigade setup --rollback`. For a fresh v0.31 home, move `installed.json` aside before v0.30 setup. The published v0.30 setup otherwise exits with `invalid installed state`. Legacy data remains readable. Fresh canonical data is invisible to v0.30 and is never merged automatically.
+- The Rust hub front validates credentials before admitting bodies, isolates credential, browser and anonymous proxy lanes, caps body reservations per credential, forwards large unvalidated bodies by headers only, and buffers bounded JSON responses before sending headers.
+- Trusted forwarded HTTPS now reaches enrollment origin and Secure cookie checks while enrollment retains anonymous admission. Native database and token-file reads expand home-relative paths consistently with Python.
+- Legacy engine entry points, environment overrides, the legacy timeout config key and hidden CLI aliases now print stderr deprecation notices naming their replacements and removal in v0.33.0. Canonical calls remain silent, and version banners and MCP identities still follow the invoked executable name.
+- Remove the retired `check`, `refire`, and `taste` skills from Brigade's shadcn registry. `npx shadcn@latest add @brigade/check` (and `@brigade/refire`, `@brigade/taste`) no longer resolves. Use the Superpowers replacements instead: `superpowers:verification-before-completion`, `superpowers:systematic-debugging`, and `superpowers:test-driven-development`. The `reduce` skill now points at those skills. Skills already installed in a project keep working.
+- Add bounded Rust hub reader and CPU pools, Python schema compatibility checks, and independent WAL maintenance with disk-pressure admission for event and session writes. Route answers still come from Python.
+- When the Rust hub manages the Python upstream, Rust owns checkpoints and the Python checkpoint thread stays off. Credential admission uses the shared reader pool, and the default database path comes from Python even when HOME is unset. An external upstream keeps its own checkpoint owner.
+- Accept the exact optional schemas created by MCP reports, model inventory, skills review, project boards, and policy migration without changing Python startup or fresh storage snapshots. Refuse changed optional structures and unknown tables.
+- Accept complete Python-migrated schema variants, including legacy nullable message columns, while refusing unrecorded hybrid layouts. Lockstep now covers historical schemas, release captures and legacy regression builders.
+- Add an unwired Rust hub writer with FULL group commits, command savepoints, bounded admission, hub and memory write turns, and storage fault tests.
+- Connect writer startup to the shared audit and structural schema check, use shared change detection, and provide bounded maintenance sweep admission while leaving checkpoints with the maintenance owner.
+- Rename the evidence engine Go module to its canonical Brigade module path.
+- Add a development-only hub load harness with open and closed loop modes, per-attempt JSON reports, and a disposable Python and Rust proxy matrix with verified 1 vCPU / 512 MiB server scopes.
+- Use canonical engine names throughout current documentation, shipped skills and templates. Move the MCP wiring guide to its canonical path with a compatibility redirect.
+- Require reviewed path and literal exceptions for retired engine names, and fail at version 0.33.0 while removable shim allowances remain.
+- Update active skillet skill citations to fix-findings and repo-audit while preserving recorded evidence and historical IDs.
+- Add v2 hub route modes, read-only shadow comparison, admin-authenticated metrics text and structured request logs.
+- Expose pending writer and queue measurements as explicitly unavailable until their owning slices wire them.
+- Add the Python hub findings ledger with atomic report reservations, stable report keys, canonical HMAC fingerprints, and explicit principal grants.
+- Add charter findings selectors, open findings in owners holdings, and an 18-case findings contract profile. Upgrade the required hub schema from 48 to 49.
+- Add opt-in native hub registration, credential validation, node enrollment and revocation, and message principal enrollment, grants and generation checks through the durable group writer.
+- Fence finding resolution against live reservations and expired former holders. Normalize charter aliases, separate fingerprint and report HMAC keys, publish the key file atomically, and preserve URL port zero.
+- The memory hits pushed on `inbox_list` and `fleet_digest` are now scanned with the local guard default rules and the invisible and bidi character check, and a failing hit is dropped instead of returned.
+- The Rust hub's `/metrics` now reports real values for the writer queue depth, batch size, apply, commit and lock-wait times, aborted batches, and the reader and CPU pool queue depths. The proxy front starts no writer, so its writer metrics stay `NaN` with a help line that says so.
+- The S6a load harness fills its `queue_depth`, `batch_sizes` and `checkpoint_stalls` telemetry columns from the `/metrics` samples it collects, and decodes metrics text. Report `schema_version` stays 1.
+- Pin the native guard's PCRE2 crates exactly (`pcre2 =0.2.11`, `pcre2-sys =0.2.10`) and force the bundled PCRE2 10.46 build from the repository `.cargo/config.toml`, so the guard regex engine no longer depends on the host's system libpcre2. A unit test fails if the linked PCRE2 or Unicode database version drifts from the pin.
+- Run the native guard benchmark in CI as a bounded smoke job (`scripts/benchmark-guard-native.py --smoke`) and upload its numbers as the `guard-native-benchmark-smoke` artifact. No timing threshold gates the job.
+- Added `brigade fleet backup`, which writes integrity-checked online copies of the hub's SQLite files into a 0700 directory, keeps 48 hourly and 14 daily copies, and refuses a copy that would leave the volume under its free-space floor.
+- Added `brigade fleet restore`, which restores a copy and advances the message sequence, roster and policy revisions and a claim recovery floor past anything an earlier restore from the same copy issued, using a recovery ledger kept outside every database.
+- Claim generations are now allocated above the recovery floor, and the hub schema is version 50 so a hub that predates the floor refuses a restored file.
+- `BRIGADE_FLEET_FINDINGS_KEY_FILE` supplies the findings HMAC key as a read-only secret file.
+- `brigade fleet serve` now exits cleanly with status 0 on SIGTERM, as `docker stop` and a host shutdown send, and logs "brigade fleet hub stopped cleanly".
+- `brigade fleet restore` publishes the restored file with a call that never replaces an existing name (`os.link` on POSIX, `os.rename` on Windows), checks the target's `-wal`, `-shm` and `-journal` files again just before publishing, holds a lock on the staging name so two restores to one target cannot delete each other's files, and creates a missing ledger file only under `--assert-no-prior-restore`.
+- Backup manifests and recovery ledger records name files relative to the backup directory instead of by absolute host path. Older records with absolute paths still parse.
+- Add opt-in native hub claims (`--route-mode claims=native`): acquire, renew, release and inspect with generation fencing, retired holders, lease expiry and claim.expired events, plus the claims listing, through the shared durable writer.
+- The Rust hub has a memory v2 store in its own SQLite file (`fleet-hub-memory.db`): an
+  append-only event log, cards keyed by scope and id with per-card revisions, compare-and-set
+  on revision guarded by `log_epoch`, idempotent writes by `client_event_id`, per-scope grants,
+  and trust that only an import with a clean scan can raise. Every memory commit runs under
+  the hub write lock after re-reading the caller's credential, and the power-cut tests cover
+  the memory file and that protocol. No route serves it yet.
+- The Fleet Hub Compose recipe publishes no port: a holder container owns the network namespace, the hub and the HTTPS front join it, and the GPU embedder runs only under the `gpu` profile on an internal network.
+- `ops/fleet-hub/bin/hub-setup.py` defaults to BM25 mode and probes a local GPU with an R1 model, then a remote endpoint, only with explicit hybrid opt-in, writes the config and both secrets, and switches modes either way.
+- The recipe ships a front wrapper and a host watchdog that restart a container left with loopback only, a boot unit, hourly backup and watchdog timers, reserved slice templates, and `checks/s31_checks.py` for the S31 host acceptance items.
+- New runbook `docs/runbooks/fleet-hub-dogfood.md` and `ops/fleet-hub/HOST-ACTIONS.md`. The Proxmox runbook records the LXC hub's 256 MB swap and 8 GB root disk.
+- `brigade.slice` now carries the I/O latency target on the database device, since the kernel applies `io.latency` only between peers and agent work runs in its peers `user.slice` and `system.slice`. `s31_checks.py restart --case hub-kill` now SIGKILLs the hub's serve process inside the container instead of running `docker kill`, so the restart policy is what brings the hub back, and it restores service when recovery fails.
+- `s31_checks.py restore --drive` reads the claim recovery floor from the restored database and passes it to the contract drive as the new `hub-contract --claim-floor`, so the claim-fencing cases expect a restored hub's first generation at floor + 1 instead of 1. Without the option the drive still expects generation 1 on a fresh hub.
+- `brigade-hub --route-mode memory=native` serves `POST /memory` from the new memory store.
+  A hub without a memory route mode still answers `404 {"error": "not found"}`, and a memory
+  store that cannot open answers `503` with reason `memory-unavailable` while the rest of the
+  hub keeps serving. `/metrics` reports memory batches, hub-lock residence and the residence
+  bucket.
+- The verify-brigade hub contract drive has a `--profile memory` mode with the S13a memory
+  cases, and `--memory-absent` for a hub without memory.
+- Every memory refusal now carries its memory error code. A chunked body gets `411`, a declared
+  length over 8 MiB gets `413 memory_card_too_large`, and an incomplete or timed-out body gets
+  `memory_request_invalid`. The `405` for a method other than `POST` sends `Allow: POST`.
+- Under disk pressure, the memory `card`, `log` and `status` reads keep answering. Memory writes
+  still get `503 disk-pressure`.
+- `--route-mode memory=native` with `--upstream` now refuses to start. In external upstream mode
+  nothing checkpoints or sweeps the memory file.
+- A memory retention sweep keeps running bounded 256-row batches until the expired
+  idempotency rows are gone. Before, it stopped after one batch a minute.
+- The memory drive profile adds a per-run suffix to its card ids and repository scopes, so it
+  passes when run twice against the same `--hub-url`.
+- The memory drive profile starts its log checks at the `seq` from the run's first `status`
+  call and follows `next_seq` for the principal check, so it passes against a reused
+  `--hub-url` with more than 5,000 earlier events.
+- A memory retention sweep whose `COMMIT` fails now rolls the transaction back. Before, the
+  open transaction made every later memory write fail with `storage-error`.
+- Fix a race in the run-lock stale claim that could rename a live lock out of sight, which surfaced as a FileNotFoundError on the task-ledger lock and could let two writers hold it. The claim now takes only the lock it judged stale.
+- Serialize stale-lock recovery behind an OS file lock beside each lock (`.<name>.recovery-gate`), so two recoverers of a dead lock can no longer move the winner's freshly published lock, strand it under a claim name, or give a claim-mode reaper a second holder. A Windows sharing violation on the claim rename now backs off instead of raising, and a failed restore no longer escapes as an OSError.
+- Add a checkpoint-attempt counter to the hub upstream checkpoint thread so tests wait for a checkpoint instead of sleeping.
+- The hub's pinned-reader checkpoint test now checks that a checkpoint never stalls the writer, instead of passing or failing on timing.
+- A busy stale-recovery gate no longer makes a dead run-lock owner look active: `brigade runs recover` and run acquisition wait up to two seconds for the other recoverer, then report "stale lock recovery in progress". A recovery gate that cannot be opened or locked now fails with an error that names the gate file and how to clear it.
+- When stale-lock recovery gives up on a busy gate, the "stale lock recovery in progress" message now names the recovery gate file and says the gate may be held by a stopped process or sit on a slow filesystem, and on Windows that it may never lock (for example on a share without byte-range locks), with how to clear each. `brigade runs recover` no longer reports a dead run's owner as still active when another recoverer took over the lock for a different run during the wait.
+- Fixed a port race in the verify-brigade hub launchers: a hub that exits because its port was taken is now relaunched on a fresh port, up to five attempts within the startup timeout.
+- The hook hang test no longer latches the hook off when its baseline run is slow on a loaded runner.
+- The dogfood hub Compose recipe runs the Rust hub, `brigade-hub`, in managed mode in front of the Python hub, with `--route-mode memory=native` and the memory file in the hourly backups.
+- `ops/fleet-hub/checks/s31_checks.py memory` checks that `POST /memory` with the admin token answers the `status` action with 200.
+- `brigade-hub` now sends its managed Python upstream SIGTERM after the drain and kills it only if it is still running 10 s later. It exits 0 only when the upstream exited 0, so the dogfood recipe's `stopped cleanly` line means both hubs shut down cleanly.
+- A stop signal during `brigade-hub` startup (the descriptor-limit re-exec, the upstream wait, the bind and the store opens) no longer kills it by the default action: it ends the upstream the same way and exits 2.
+- The dogfood backup job copies `fleet-hub.db` and `fleet-hub-memory.db` in separate `brigade fleet backup` calls, the memory copies under `memory/`. A missing memory file is logged and skipped instead of failing the hub file's backup.
+- The fleet hub Containerfile's stage defaults match the Compose pin, so `--target dogfood` builds without build args. The Quadlet build and the container smoke pass their own pin in full.
+- `brigade-hub` starts its managed Python hub in its own process group with an empty signal mask, so a Ctrl-C or a signal to the whole group stops the Python hub once, through `brigade-hub`. The Python hub also ignores a second stop signal while its shutdown runs, and it gets SIGTERM if `brigade-hub` dies first.
+- A startup error after the Python hub is ready, such as a port that is already taken, now stops it with SIGTERM instead of SIGKILL.
+- The container entrypoint starts `brigade-hub` with SIGTERM and SIGINT blocked, so a stop that lands during the spawn waits for its handlers.
+- `hub-setup.py init` takes `--brigade-version` with `--brigade-ref` and writes `BRIGADE_VERSION`, so the image's version label follows the ref.
+- The S31 `backups` check fails when the memory file exists on the state volume but no memory copy was ever made, and the backup job exits 128+N when a call dies by signal N.
+- The dogfood image's default `BRIGADE_REF` moves to `d3b38d4b6`, the commit with these fixes, so the default build runs the fixed `brigade-hub`.
+- `POST /memory` with `action: "search"` now answers on a hub with `--route-mode memory=native`,
+  where it used to return `501`. It scores with BM25 (k1=1.2, b=0.75) over the live cards in
+  the scopes the caller can read, using the local scorer's tokenizer and card fields, and
+  breaks ties by `cards/<card_id>.md`. A `min_seq` waits up to 500 ms for the index and
+  otherwise answers with `retrieval.stale: true`. `status` reports `indexed_seq`.
+- The hub builds its lexical index from the memory file at start, updates it after every
+  commit and rebuilds it in the background. If the index falls behind a commit, searches
+  answer from the last good snapshot marked stale until the rebuild finishes. `/metrics`
+  reports the indexed and committed `seq`, the lag, the stale flag and rebuild counts.
+- `engines/hub/tests/memory.py` checks lexical parity (gate R0) with the local `bm25` scorer
+  on `evals/memory-retrieval`, and the `--profile memory` drive has `memory-search` cases.
+- A card whose front matter nests brackets more than 200 deep no longer crashes the hub while it
+  is indexed or at restart. The hub keeps the raw text, as Python does past its own limit.
+- Front-matter lists now match Python for `0x`, `0o` and `0b` integers, lone surrogate escapes
+  (shown as U+FFFD), trailing `#` comments and integers over 4,300 digits. A `\N{name}` escape
+  still keeps the raw text, a difference the hub README documents.
+- A search with no word characters reads at most 1,000 cards or 4 MiB of card text and reports
+  `retrieval.truncated: true` when it stops early. A query over 4,096 bytes as sent gets its own
+  refusal message, apart from the 256-character limit after normalization.
+- The index also rebuilds past 64 delta segments or once a quarter of its documents are dead,
+  streams cards from the store while it builds, and retries a failed rebuild with a backoff
+  instead of waiting for the next write.
+- A literal search reads the visible cards in answer order and stops at `limit` matches, so a
+  truncated answer holds the same cards as a full scan's first `limit` and does not change
+  after a rebuild. `match_count` is a lower bound when `retrieval.truncated` is true.
+- Small commits merge their delta segments in tiers of 8 instead of rebuilding the whole index
+  every 65 commits. A full rebuild starts only past 10% delta documents or a quarter dead.
+- The rebuild retry loop ends when the memory writer closes its channel after a failed reopen,
+  a new index failure cuts a rebuild's backoff short, and closing the store joins the rebuild
+  thread and interrupts a load in progress.
+- A literal hub memory search reports every match in `match_count`, as the local scorer does, when the visible cards fit the scan budget, and sets `retrieval.truncated` only when the budget stops the scan.
+- Fleet Hub (Rust): `--route-mode messages=native` serves `POST /messages` `send`, `reply`, `ack`, `list` with native long polls, `sent`, `sent_lookup`, `count`, `identity`, `keys_get`, `manifests_get` and the `question_*` actions, byte for byte with the Python hub. Native reads never return sealed ciphertext past its 7-day lifetime. `who`, `claims`, `keys_publish` and `events_*` stay on the Python upstream.
+- Fleet Hub (Rust): a native long poll is watched before its first read, so a message another process commits before the poll registers wakes it at once instead of at its deadline.
+- Fleet Hub (Rust): native long polls count only waiters against the waiter caps, so idle keep-alive connections no longer refuse a wait with `message_wait_capped`.
+- Fleet Hub (Rust): a native long poll whose principal gets a new token while it waits ends with `message_sender_inactive`. Python's `list` checks only that the principal is active.
+- Fleet Hub (Rust): a waiting native `list` releases its request body and body-byte reservation once parsed.
+- Fleet Hub (Rust): native message writes and the retention sweep delete at most 1,024 expired messages per command, so a large retention backlog drains without holding writes at 503.
+- Fleet Hub (Rust): an expired sealed row with a corrupt envelope reads as `content_expired` with no envelope instead of returning its stored bytes.
+- Fleet Hub (Rust): with more expired messages than one native command deletes, the recipient and sender-to-recipient unacked quotas and the sealed storage quotas count only messages inside the retention window, so a send no longer gets a false `429` while the backlog drains.
+- Fleet Hub (Rust): a native send whose `client_id` matches an expired message that is still stored deletes that message and inserts a new one, as Python does after its prune, instead of answering `409 message_client_id_conflict` or replaying the expired message.
+- Fleet Hub (Rust): a waiting native `list` keeps only `after`, `unacked` and `wait_ms` once its body reservation is released, so padded keys are freed before the wait.
+- Fleet Hub (Rust): when the external-commit watcher's query fails, the next tick reads the same rows again, so the waiters for those messages still wake.
+- Fleet Hub (Rust): a native `reply` retry whose expired parent is still stored behind a retention backlog finds the accepted reply and answers `201` with it, as Python does, instead of `404 message not found`.
+- `brigade memory hub status|pull|push|import|card` reads and publishes hub memory on a Rust hub. A `[hub]` table in `.brigade/memory-care.toml` sets the mode (`off` by default, `read`, `sync`) and the publish scope (S14).
+- In `read` and `sync` mode, `memory search` fuses hub and local matches, labels where each came from, and falls back to local cards and the per-host replica when the hub is unavailable. `off` mode output is unchanged.
+- Writes the hub cannot take right now are spooled and replayed with the same `client_event_id`. A conflicting offline edit becomes a local proposal instead of overwriting the hub. A spooled write replays only into the current `[hub] scope` and only onto the same readable, public card at the same path. A write spooled under another scope becomes a local proposal that is never sent, and so does a write for a card that turned private, was renamed, moved, re-identified, duplicated, deleted or made unreadable. Dot and Duet memory tools follow the same mode.
+- Hub memory reads stay inside the workspace's read scopes: `[hub] read_scopes`, which defaults to `[scope]`, limits every hub search, card read and the replica, so Dot and Duet can no longer read other scopes the credential can read. The client uses only the node token and never falls back to the admin token.
+- The replica belongs to the principal the hub's `status` names, which now reports `principal`, `credential` and, for a `scopes` list, `readable_scopes`. A different principal rebuilds the replica, and a scope that is no longer readable is dropped at the next pull.
+- A refused hub search (401, 403 or another coded answer) answers from local cards only and never from the replica. Redirects, 408 and 429 count as unavailable, so writes spool instead of becoming proposals, and a 401 at the push preflight spools too. A write-only credential can push.
+- `memory hub proposals list|drop` lists open proposals and closes one after review. `drop` needs `--keep-local` (the next push writes the local card over the hub head) or `--keep-hub` (the local card file takes the hub head), and refuses unless the replica is current for this hub, principal and `log_epoch` and holds the card head the hub's `card` answers now, so a replica pulled before the conflicting write is refused. `--keep-hub` finds the local card by id, rewrites a moved card where it is, and refuses when the card file is not UTF-8. Both refuse when two files hold the id or the proposal's scope is not the current `[hub] scope`, and `--keep-local` says when the next push sends nothing. `--keep-hub` refuses a private local card. A dropped or resolved proposal moves to `.brigade/memory/hub/proposals/dropped/` with its text. A proposal also resolves on its own when the local card takes the hub head the conflict reported, the replica agrees, and the hub's `card` answers that head under the replica's `log_epoch` at push time. Spool entries for another hub no longer block cards or count against the cap.
+- `push` and proposal changes hold a lock on the workspace's hub state, which now lives in its own `.brigade/memory/hub/` directory. `pull` holds its own lock and takes the state lock only while it changes the replica, so a long pull no longer blocks a push, and a run that waits too long for a lock exits 75 saying another push or pull is running. Pulls check the epoch on every card answer and again before saving, write `heads.json` a few times per rebuild instead of once per page, and fetch cards left out for the cap once space frees.
+- Dot and Duet `memory_card` take an optional `scope`, so a card held in two read scopes can be opened. Search reports the hub's `match_count`, warns when `--limit` exceeds the hub's 20, and keeps the same bytes in two scopes apart.
+- `status`, `pull`, `push`, `import`, `card` and `proposals drop` refuse when the hub reports that the node-token slot holds its admin token, so Dot and Duet `memory_card` refuse it too. Search makes no `status` call and cannot tell. `memory hub card --all` refuses to join chunks from two `log_epoch`s or text that does not match the card's `content_hash`, and while the hub is unavailable `memory hub card` and Dot and Duet `memory_card` read the card from the replica, never from a read scope the hub refused the card in during that read, and not at all after a `status` 403, a `log_epoch` move during the read, or an answer in the read that names another principal or `log_epoch` than the replica's.
+- A spooled write sends the card as it is now. When the card changed while the write waited, the spooled text is dropped and the current text goes out in the same push on the same base, so a line the user removed offline never reaches the hub. If the old write already committed, the current text becomes a proposal. A write that reached the hub cannot be taken back.
+- Push, spool replay and import withhold a card unless its `visibility` is absent or `public`. A byte-order mark, an inline comment, another casing or a duplicate `visibility` line no longer lets a private card through, an unknown or empty value is skipped as `visibility-unrecognized`, and so is a `visibility:` line in a leading block that does not parse as frontmatter.
+- `proposals drop --keep-local` after another writer retired the card keeps the retired head's revision as the base, so the next push revives the card with the local text instead of conflicting again.
+- When the hub refuses a scope's `card` read during a pull, the pull drops every head already pulled in that scope and does not mark it readable.
+- Push adopts a replica head as a card's base only when the replica was pulled under the hub's current `log_epoch`, and skips the card as `replica-stale` otherwise. `import` names a replica base only when the replica belongs to the principal and `log_epoch` the hub reports now.
+- A pull refused every read grant discards the hub's replica, a scope refused during a pull is saved at once, and a card published under an older `log_epoch` is sent again after a restore instead of counting as synchronized.
+- Gate merges on the Rust hub suite. `ci.yml` now calls `hub.yml` as the `hub-rust` job and `ci-gate` requires it, so a PR that touches hub paths can no longer merge with a red hub job. A PR that touches no hub paths may skip it, and the merge queue always runs it. `hub.yml` is now callable only and no longer triggers on its own.
+- The S31 `access` check now probes only the hub's own listeners, found by the
+  hub processes' socket inodes, so the front's tailscaled peerapi in the shared
+  namespace no longer fails it.
+- A reachable host loopback listener at a hub port still fails `access`. An
+  operator can exempt one with
+  `--allow-loopback-listener PORT=EXE_REALPATH//REASON` when running the check
+  as root. The exemption applies only when a complete census of the host's
+  processes, taken while none vanished, finds that every holder of the socket
+  runs exactly that executable and is not the hub, and the hub's network
+  container publishes no port. The record keeps the path, the reason, the census result, each
+  holder's pid, executable and command name, and the listener's status line
+  and headers.
+- The S31 checks append to `--record` without following a symlink, refuse a
+  non-regular file, and as root refuse a record file owned by any account other
+  than root or the one that ran `sudo`.
+- Scan hub memory writes with the pinned native guard. Block unsafe content without echoing it, store warnings as flagged, and require a clean current scan for imports and internal push hits. Prompt recall replaces findings with rule-only placeholders. Builds without the scanner keep writes pending and refuse trust raises.
+- Preserve all line boundaries and normalize whitespace for every injection rule. Fold full-width ASCII and strip default-ignorable characters in scan copies. Block hidden selectors and bidi marks, match ASCII word boundaries locally, refuse per-input engine errors without storing bytes, and withhold prompt hits with empty rule lists.
+- Bound cross-line salutation matching and accept supported-size memory corpus inputs. Input-specific scan refusals report `retryable: false` and become local proposals without automatic retries.
+- The salutation rule bound (`.{0,256}`) also applies to the shared untrusted-text rules used by connectors.
+- Bound shared memory scan patterns to prevent long near-matches from stalling connectors or exhausting the hub match limit.
+- Keep over-bound secrets blocked with bundle v5, including large JWTs and PEM keys. Guard redaction now covers the full token run in Python and native paths, so the content guard and evidence redaction leave no secret tail.
+- Reduce Python connector scan cost with address prefilters and indexed assignment digits. Test prefilter parity and separate measured scan time from the subprocess safety timeout.
+- Keep PEM secret findings when expanded bodies overlap other detectors. Cap unterminated PEM masks at contiguous body lines and preserve paragraphs after header-only mentions.
+- Load adversarial test helpers by file path for individual Windows test runs. Anchor the reserved-email prefilter at the domain start and give Windows scan timing checks measured headroom.
+- Memoize PEM END searches and skip disjoint PEM overlap comparisons. Mask truncated bodies with consistent indentation, quote prefixes, escaped newlines or inline spaces. Keep later detector decisions independent of secret masking policy.
+- Reduce folded memory scan cost by skipping raw copies without required bundle literals and avoiding assignment indexes without a prefix. Preserve Unicode phone boundaries and filter parity.
+- Mask unterminated encrypted PEM bodies after consistently prefixed metadata and escaped JSON metadata. Accept literal `\r\n` separators and reject partial inline base64 tokens. Track the remaining overlap-check cost in #2310.
+- Check PEM header scan scaling across an 8x input step and memory corpus scaling across its existing 4x step, with separate hang caps for slower CI runners.
+- Add opt-in native heartbeat routes for event batches, run status and interactive
+  session presence through the shared `FULL` writer. Add wire and storage parity
+  checks, load measurements and a conductor-run deployment procedure.
+  Preserve Python fallback for unusual event integers, stored JSON and damaged
+  status storage. Reserve writer bytes for durable claims and messages, include
+  the commit histogram sum and log heartbeat configuration at startup. Make the
+  outbox parity check independent of dispatcher retention timing.
+- Batch queued claims, messages and registration ahead of ordinary heartbeat
+  work, so a claim behind 256 concurrent 1,000-event posts no longer waits
+  past the claim client's timeout. Add 1,000-event and multi-node options to
+  the S6 load harness, with claim latency in the mixed summary.
+- Bound ordinary writer work under sustained durable load. An expired heartbeat
+  or sweep at the head of the ordinary queue is answered `503 writer-timeout`
+  at the next pick, and one that has used half its budget runs first in the
+  next batch. The writer queue depth gauge now counts commands taken off
+  the channel during a batch.
+- The native hub messages test for padded waiters no longer fails on slow runners. The waiters now
+  run to the 20-second wait maximum until a send wakes them, and a waiter refused by a probe that
+  briefly held a waiter slot is started again, so a probe refusal always means two waiters are parked.
+- Add `brigade memory hub mirror --out DIR` to export readable hub cards as a disposable Markdown folder with stable filenames, scan and privacy filtering, a scope index, atomic writes, dry runs and owned-file cleanup.
+- Include scan state, writer and update time in hub card reads and preserve them in S14 replicas.
+- Add the hub memory embedding transport with endpoint policy, secret-file authentication, outgoing scanning, batching, deadlines and a query breaker with a background probe.
+- Add explicit lexical retrieval configuration and retrieval mode, effective mode and state in memory status and metrics.
+- Add leased embedding jobs, vector validation and storage, shared-vector lineage collection, and a pull-mode memory embed-worker.
+- Add segmented dense retrieval with RRF, safe lexical and hybrid switches, coverage reporting, and idempotent memory reindex with targeted drop.
+- Stop storing embedding lease replies in memory idempotency, so retired card text cannot be replayed.
+- Retry failed embedding documents alone with backoff, park them after five attempts, and add the embed_failed call for pull workers.
+- Count only embeddable cards toward hybrid coverage, and embed only clean text.
+- Queue embedding jobs from put and retire, replay dense changes from a vector log, and back the scheduler off when idle.
+- Refuse dropping the active embedder, validate drop ids, and drop in bounded writer turns.
+- Refresh hybrid coverage when a lease parks text, back the pull worker off while its endpoint is down, and back off documents a worker already retried alone.
+- Report hybrid status as degraded with `all-embeddings-failed`, and answer search lexically, when every embeddable card has parked on an embedding failure and none has a vector.
+- Refuse a `memory.embedder.pull` value that is not a boolean, and report a malformed embedding reply as an endpoint fault instead of stopping the pull worker.
+- Load the dense matrix on its own connection at startup so a slow or failed first load leaves the hub serving lexically with a `dense-load-failed` reason, report `dense-not-loaded` instead of hybrid until a matrix exists, and show memory hub status coverage over eligible cards.
+- Retry the first dense load without holding the writer lock, leave that load to startup and the scheduler instead of the writer thread, and skip the embedding call when the installed matrix has no rows.
+- Hub memory can use its own hub. Add a `[memory_hub]` table with `hub_url` and `node_token_file` to `~/.brigade/fleet.toml`, or set `BRIGADE_MEMORY_HUB_URL` and `BRIGADE_MEMORY_HUB_TOKEN_FILE`, and memory commands use that hub and token while `brigade fleet` keeps using `[fleet]`. The override refuses a fleet node or admin token, a URL with a user name or password, and a relative token path.
+- A workspace `[hub]` table that sets `hub_url` or `node_token_file` is refused, so a workspace file never chooses where a credential goes.
+- `brigade memory hub status` reports which hub memory uses and where it came from (`env`, `[memory_hub]` or `fleet`), and never shows the token or URL credentials.
+- Dot and Duet pass `BRIGADE_HOME` to the `brigade` commands they run, so those commands read the same `fleet.toml`. A Dot service that sets `BRIGADE_HOME` now keeps its local memory store under that directory instead of `~/.brigade`.
+- Hub memory scan bundle `brigade-memory-scan.v6` adds a `private` class for network addresses, ports, local host names, root, home and Windows paths, email addresses, phone numbers, U+034F and U+200C. Private cards are stored, imported, searchable and loaded into local prompts, and every connector path refuses them with `memory_content_private`. The model providers behind the operator's own local harnesses are inside the boundary. The publication guard keeps its severities.
+- Memory schema version 3 lets scan state `private` be stored, on top of version 2 (the S15b embedding tables). A version 1 or version 2 memory file migrates on open with every row kept.
+- Embedding queues and leases a private card only when the configured endpoint is loopback (push mode, where the hub embeds in process). For any other endpoint a private card is unembeddable in `coverage`, neither eligible nor failed, and a lease-time rescan that finds private text parks the job as `content-private`, which is not transient. `embed-worker` accepts a `private` receipt only for a numeric loopback endpoint and reports anything else as `content-private`.
+- U+FE0E or U+FE0F after an emoji base, and U+FE0F in a keycap, no longer block. U+FE00 to U+FE0D block after any character.
+- Local prompt recall strips U+034F and U+200C from the fields it renders. Stored bytes and content hashes keep them.
+- `classic-injection` matches "exfiltrate" only as an order: at a line or sentence start (after markdown marks, a checkbox, a list number, a non-ASCII symbol such as an emoji, or urgency words), after a short address or an if/when/for clause and a comma, addressed to the agent ("make sure to", "you are required to"), with a destination such as a bare domain, or as a compound order that opens a line with an imperative verb. `scan_untrusted` and the handoff injection lint use the same pattern. Its repeats cannot overlap, so a run of Unicode spaces no longer exhausts the native match limit and fails the scan. The compound order stays on one line in the line copies. `scan_untrusted`, the handoff injection lint, `learn` and the security scan search a copy with Unicode spaces folded and indents stripped, so an order set off by a no-break space, U+3000 or an indent flags on any line, as it does in the hub.
+- A memory migration step that another hub process already applied is skipped.
+- The S15a embedder sends private text only to an endpoint whose pinned address is loopback, and refuses any other endpoint with `content-private` before a lookup or connection. A stored `private` version embeds only for a loopback endpoint.
+- `memory hub mirror` exports cards whose scan is private.
+- Pull mode no longer lets the hub's query endpoint decide the private gate, because documents go to the worker. Private cards are never queued or leased to a pull worker unless `[memory.embedder] pull_private = true`, which asserts that every worker holding the embed grant runs on the operator's own machines. Without it they count as unembeddable in `coverage`. The key must be a bool, needs `pull = true`, and shows in `memory status`.
+- A worker that reports `content-private` or `content-blocked` parks the job at once instead of going through the retries that lease the text again.
+- Dot and Duet `memory_search` and `memory_card` now run the same prompt-load scan as Grok Bot memory. A card with private-network, path, email or phone text returns `{card_id, blocked, code: "memory_content_private"}` with no text, and a blocked or injection-shaped card returns `{card_id, blocked}`. `memory_search` still lists a refused match by id (and hub scope) without its title, summary or tags, so the card can be opened locally.
+- `brigade memory hub import` takes folders as well as files and plans before it sends. `--dry-run` needs only read on the scope, lists exactly what the real run appends and writes nothing. It refuses when the hub's scan ruleset differs from this client's.
+- Import keeps a frontmatter card id the hub accepts and otherwise derives a stable id from the note's path relative to one root: `--root`, else the nearest `.obsidian/` ancestor, else the common ancestor of the arguments. It skips dot folders, any folder at or under the hub mirror's marker, symlinks and `--exclude` globs, and skips `visibility: private` notes with the push rules.
+- Import deduplicates by the hub's content hash and reports each note as `import`, `unchanged`, `duplicate`, `changed`, `revive`, `unknown-head`, `private`, `visibility-unrecognized`, `blocked`, `flagged`, `collision` or `error`, with rule ids only. A second run appends nothing, and `--update` overwrites a changed card from its current revision and brings back a retired one. A dead hub scanner stops the run after three retryable refusals.
+- Hub memory scan bundle `brigade-memory-scan.v7` adds an NFKC scan copy beside the v6 full-width fold copy, in the Python scanner and in the native hub (`unicode-normalization =0.1.26`). Math alphanumerics, ligatures, superscripts, circled letters and full-width forms now match the same rules as their plain spellings. NFKC runs only on code points Unicode 14.0.0 assigns, so Python 3.11 and later and the crate agree. Keeping the fold copy makes every verdict at least as severe as v6. The ruleset digest changes.
+- The test suite resets the once-per-process engine deprecation notice before each test, so receipts tests that use a legacy command spelling no longer depend on test order and assert the exact notice on stderr.
+- `memory search` and the other memory-care readers decode `.brigade/memory-care.toml` as UTF-8 on every platform instead of the locale encoding, and ignore a leading byte-order mark. Bytes that are not UTF-8 now fail with `invalid memory-care config` on Windows as well. The vault config reader accepts a byte-order mark too.
+- The managed Claude hook wrapper no longer passes a crashed handler's exit status through to Claude Code. Any non-zero status from `brigade-hook` now becomes exit 1 with a stderr warning, so a pipx reinstall racing the hook no longer shows up as a blocked prompt (exit 2). Run `brigade work hooks update --scope user` to refresh the installed script.
+- Dot, Duet and Grok Bot memory tools no longer send absolute local paths to the remote connector. `memory_search` returns the workspace directory name and workspace-relative match paths, and `memory_card` returns `memory/cards/<name>.md`. A match path that cannot be shown relative to the workspace is refused as `malformed-match`.
+- Hub fields in those payloads are checked before they leave. `source`, `trust`, `scope`, `revision` and `sha256` keep only known values and become `null` otherwise, `retrieval` keeps only its documented keys and values, and `warning` is one of three codes instead of the CLI text.
+- Fixed a port race in the hub transport tests: the fronts now start on port 0 and report the bound port, and the stub upstreams hold their socket, so no test releases a port before using it.
+- The hub's first dense matrix load now replays vectors committed while it scanned, so they rank without waiting for another write.
+- Memory status reports `effective: lexical` while the loaded matrix has no live row, and search skips the embedder query call in that case.
+- Hub memory accepts a `collection:<name>` scope for imported note collections, such as an
+  Obsidian vault. Node tokens get no default access to it and the `*` and `repo:*` grants never
+  match it, so only an admin grant naming the exact scope opens read, import, put or embed.
+  `[hub] scope`, `read_scopes` and `memory hub import --scope` accept the form, and
+  `docs/memory-operations.md` lists each scope form with its default access.
+- `scan_text` now finds overlapping detector spans with a sorted sweep instead of comparing every pair, and joins redaction edits in one pass, so scan time grows linearly with the number of findings. Findings and redacted output are unchanged.
+- Restore the task module namespace after replay reload tests so later native T3 contract tests retain matching task class identities.
+- Add a same-process regression that runs replay reload tests before native T3 intent validation.
+- Add repeatable `brigade memory hub mirror --exclude-scope` to omit exact scopes and remove their previously generated notes and index sections. Dry-run and JSON reports include excluded scopes and skipped card counts.
+- `brigade memory hub import` skips a folder holding the vault projection marker (`.brigade-memory-projection.json`), checked in the argument's folder, every folder above it and its resolved real path, and counts it under `projection_dirs` in the discovery line. The projection writer now creates that marker, so a vault's Brigade Memory folder is never imported back into the hub.
+- `handoff_write` and `fleet_policy` now return workspace-relative paths for connector profiles with the prompt-load scan, and `null` when a path cannot be made relative or does not scan clean. Profiles without the scan keep the absolute paths.
+- The Grok Bot memory profile now lists memory_search, memory_card and handoff_write, reads hub memory under its own principal when hub memory is on, and files handoffs to the hub review queue instead of a file inbox.
+- A new grokbot-inbox pack (message_send, inbox_list, inbox_ack, inbox_reply) runs under its own principal, and a send outside its allowlist returns message_recipient_not_permitted.
+- The vault-backed cerebro-memory pack, its five cerebro_* tools and the --cli-executable and --workdir setup flags are removed.
+- The Grok Bot memory profile never serves a local card, pins its memory calls to the credential its listener authenticated at startup, and serves offline results only from a replica its own principal pulled.
+- Add reviewed hub memory proposals with whole-submission validation, per-target scope authorization, pinned blocks, atomic multi-card decisions, and separately reviewed rollback proposals.
+- Upgrade memory schema v3 to v4 without changing existing cards or the log epoch. Automatic apply remains disabled.
+- Require read access for proposal targets and a different reviewer for non-admin acceptance. Preserve opaque-block bytes, reject multiline metadata edits, and record held scan decisions and current rollback snapshots.
+- Include scan rule ids in held proposal responses and decision events.
+- Keep truncated PEM masking across bare quoted blank lines and body lines with trailing spaces, and stop escaped metadata at JSON string quotes.
+- Add a negative test for ordinary text with the same layout shapes.
+- Derive valid memory push ids with import's path helper, preserve valid legacy ids and refuse collisions.
+- Exit 1 when memory push refuses writes or parks proposals, while publishing good cards and printing final outcome counts.
+- Document push exit codes and partial failures in scheduled sync services.
+- Compute hub proposal tiers from current scopes, trust, scans and pinned card inputs, ignoring submitted tiers and keeping uncertain edits at Tier 2.
+- Add a digest-bound fleet policy memory section and record the current policy on every explicit proposal decision. Require a fresh decision after a policy change.
+- Keep all tiers behind explicit review and refuse memory auto-apply policy settings until evidence attestation is available.
+- Keep duplicate merges at Tier 2 when front matter differs outside aliases and evidence. Strip client tier claims before storing ops.
+- Require the current expected policy digest before re-deciding a policy-stale proposal, with authorization and revision checks repeated before apply.
+- Keep duplicate merges at Tier 2 when front matter contains line boundaries that disagree with the shared metadata reader.
+- Escape reader line boundaries in every front matter JSON write and require lower-tier ops to preserve all protected metadata. Keep decoded boundary values in rewritten lists at Tier 2.
+- Prevent storage parity checks from accepting a competing hub during startup.
+- Make zenity timeout rounding checks independent of runner scheduling.
+- Memory scan ruleset IDs now cover both scanner implementations, with scanner tests kept outside the pinned Rust source. CI checks source pins and shared Python and Rust verdicts.
+- Add admin-only `memory rescan` to refresh current ruleset receipts in bounded batches without changing card bytes, trust or revisions. Update the client and hub together, then run rescan with `--until-done`. Failed blobs get non-clean receipts so the remaining hashes can drain.
+- Rescan separates corrupt storage from scanner failures, logs corruption hashes, and reports a failed exit after a corrupt drain. Admins can use `--retry-failed` to retry scanner failures under the same ruleset ID.
+- Prevent the Rust hub's Python helpers from importing modules planted in the working directory or PYTHONPATH.
+- Preserve relative command-line paths while isolated Python helpers use a fixed working directory.
+- Preserve relative deck configuration and findings key paths from the environment, with command-line deck configuration taking precedence.
+- Keep the read-only audit launcher active with isolated Python startup and reject benchmark interpreters that load a different Brigade copy.
+- Preserve relative interpreter paths, expand home paths in the findings key setting and treat a whitespace-only findings key setting as unset.
+- Require isolated interpreter startup before the read-only audit can certify a hub.
+- Add read-only hub Tier 0 preflight reports and recheck gates inside reviewed apply transactions.
+- Enforce Tier 0 op-class and proposer policy allowlists while keeping automatic apply disabled.
+- Remove the policy metadata test's dependency on timestamp clock resolution.
+- Add the optional `memory-reflect` care schedule for hub memory proposals, with a persisted pause after three failures and status and recovery commands.
+- Add hub-backed `memory reflect run` with zero hub writes during dry runs and `memory reflect rollback` for compensating proposals that need a separate decision.
+- Add hub evidence attestation with exact workspace identities, freshness checks and live credential revocation checks.
+- Add curation ownership policy, a persistent admin kill switch and audited Tier 0 automatic apply. Production apply remains held until retrieval evaluation is bound.
+- Redact automatic replies and replays for callers without review on every target. Enforce clean evidence, attachment caps and admin tombstones, with card-wide contrary holds and independent principal sources for newly added evidence.
+- Hub search collapses scoped supersession and merge chains, preserves reachable revision references, and sorts unreviewed automation after interactive results.
+- The retrieval eval harness supports hub lexical and hybrid adapters, configurable RRF weights, R0 parity, and public R1 reports with stable index, scorer, policy, mode and candidate bindings.
+- Lineage accepts trusted same-scope proposal links, preserves separate terminal heads and applies push eligibility to the complete chain. External evals bind the full scope and report coverage timeouts explicitly.
+- Lineage requires trusted endpoints, resolves terminal cycles independently and preserves filename-like card ids. A 512-node budget falls back to uncollapsed hits and reports overflow.
+- Add admin-recorded retrieval evaluations that bind hub Tier 0 automatic apply to the live index and policy, with zero head-write drift and 24-hour expiry. Automatic apply remains off by default.
+- Report the persisted pending proposal state when an automatic attempt is held, and document how to record evaluations against the final policy revision before enabling apply.
+- Refuse retrieval records with stale evaluation order or inadmissible timestamps, and recheck R0/R1-public metrics before automatic apply.
+- Allow an optional policy fixture digest pin and document the global one-shot retrieval arm.
+- Hub automatic memory apply accepts scoped content and membership drift up to min(5, floor(min(snapshot cards, live cards) / 50)), while holding targets changed since indexing. Default ranking also counts in-scope head changes, including trust flips, reverts and same-bytes recreates. Raw lexical ranking keeps unrelated trust-only revisions free. Writes outside the bound scope do not consume the budget.
+- Retrieval evaluation records store member snapshots and evaluation timestamps. Newer valid reports can replace unreadable reports. Legacy records require a fresh evaluation after the schema 8 upgrade.
+- Preserve hub lineage, source-demotion, and ranking details in `brigade memory search --json` results.
+- Hub reflection selects scopes before card reads and uses bounds of 50,000 cards and 64 MiB of text per scope. Failures report specific codes and reasons without card text.
+- The optional memory-reflect care entry accepts one configured scope and retains it across reinstalls. Operator setup documents a dedicated reflect folder, replica and user-level credential drop-in.
+- Add `memory proposals list`, `show` and `decide` for reviewed hub proposals, with paged summaries, review-gated diffs and explicit policy digests. Credentials come from a private token file or explicit memory settings.
+- Proposal pagination uses opaque hub-local HMAC handles. Accepting a proposal requires an explicit policy digest from operator inspection, while rejecting remains available without a pin.
+- Reflection refuses oversized on-disk replicas before parsing and requires a dedicated replica for non-dry scoped runs. Existing scopes remain unchanged when that check refuses a run.
+- Windows reflect task replacements preserve the installed scope. Global proposal listing requires an explicit `list_proposals` operator grant, and per-principal cursor quotas prevent cross-principal eviction.
+- Reflection verifies stored counts with a bounded streaming scan before dictionary decoding, caps metadata reads, and enforces the 50,000-card replica bound on live cards once the log replay reaches its head, before fetching full bodies and before saving. Cards retired later in the log, including duplicates retired by an accepted proposal, no longer block a rebuild.
+- Replica snapshots are written with untranslated newlines, so the stored snapshot digest matches the file on Windows.
+- Replica saves name each heads snapshot by its digest and publish it by replacing the metadata that names it, so a save interrupted at any point leaves a consistent replica that the next scheduled reflection can load and update.
+- A replica whose metadata names a missing heads snapshot is no longer read as an empty, caught-up replica: search, `card` and `status` treat it as unusable, and the next pull rebuilds it, including reflection's bounded pull, so a scheduled reflection recovers without an unbounded pull. Replica saves sync the directory after each rename on POSIX and report directory I/O errors instead of ignoring them, and the memory operations guide documents deleting the replica and replica.building directories before a downgrade.
+- Bound hub proposal storage with configurable per principal and per scope pending and byte quotas, pending deduplication, and immutable terminal audits after seven days.
+- Run automatic apply diagnostics in budgeted read snapshots before writer locks, recheck compact freshness bindings under the lock, and rate-limit repeated attempts. Automatic apply remains off by default.
+- Bind hybrid retrieval evaluations to dense vector state and hold automatic apply when the vector snapshot changes.
+- Redact review-only proposal hashes and diagnostics from historical scope-reader event payloads. Upgrade hub memory storage to schema 9.
+- Let reviewers drain a proposal backlog that sits above a lowered or newly defaulted pending limit. Each quota dimension now passes when usage stays within its limit or does not grow, so admission stays strict and decisions still cannot push retained bytes past a limit.
+- Bound reflect log replay work and connect to Task Scheduler before replacing Windows care tasks.
+- Added `brigade memory anchor` to backfill claim anchors on local memory cards. It is a dry run by default and reports counts only. With `--apply` it anchors cards using the same function as proposal creation, so hub reflection and reviewed proposals can address their blocks.
+- Scheduled hub reflection now also finds near-duplicate cards. Cards whose claim bodies reach a word 5-gram Jaccard threshold (default 0.9, set from 0.5 to 1.0 with `[reflect] near_duplicate_threshold` in `memory-care.toml`) get `supersede_card` proposals that keep the least recently written card, so a new card or a rewrite never becomes the keeper. These proposals are Tier 2 and always wait for a reviewer.
+- Near-duplicate reflection opens at most 8 new proposals per run by default (`[reflect] near_duplicate_max_proposals`, 0 to 32) and queues exact merges first. Clusters take turns by least recently proposed and oldest first seen, keyed by card ids, so rewriting members cannot hold the same slots every run. Its index, pair expansion and verification work are bounded per run, and pair work is charged before dedupe.
+- A full hub proposal quota no longer fails scheduled reflection or counts toward its pause. The run stops proposing and counts the unsent submissions as `proposal_quota`. A duplicate pending refusal now records the existing proposal instead of storing a refusal.
+- Prune obsolete hub-reflection submission records so the scheduled state ledger remains bounded as cards change.
+- Docs only: added the design and slice plan for memory verification, a reviewed reflect pass that checks hub cards against their cited evidence, and per-card read counts that set how often each card is checked (`docs/phase-memory-verify.md`, `docs/phase-memory-verify-plan.md`). The design puts a hub-enforced review floor on verifier credentials, isolates evidence per scope, and requires two independent pieces of evidence for any correction.
+- Scheduled hub reflection now repairs broken `[[links]]` in anchored claim blocks. A link that names no live card in its scope is repointed with a `replace_block` proposal when exactly one live same-scope card is the clear target: the successor of an accepted supersede, or the one card whose id, alias, topic or title matches after case, whitespace and hyphen normalization. Alias, heading, folder prefix and extension are kept, and code spans and opaque blocks are never touched. Links with no target, several targets or only a cross-scope target are counted under `link_no_target`, `link_ambiguous_target` and `link_cross_scope_target` and left alone. A target or successor must be scan clean and share the source card's trust class, and malformed `aliases` metadata disqualifies a card, so those cases are counted and skipped. Titles, topics and aliases of retired cards follow the successor rule. Every proposal is Tier 2 and waits for a reviewer.
+- Link repair opens at most 8 new proposals per run by default (`[reflect] link_repair_max_proposals`, 0 to 32) after exact merges, alternates with near-duplicate proposals so neither starves the other, takes turns by least recently proposed, and reports counts without card text. Reflect reports now leave out the replacement wording of each op.
+- Fix verification receipt reuse after editing external or gitignored script arguments by binding file paths to SHA-256 hashes. Non-ignored in-tree directories remain covered by the tree fingerprint, and bare program names do not affect reuse. Unreadable files, uncovered directories, other non-regular files, and files over 16 MiB disable reuse. Reuse output names the source receipt and points to `--no-reuse`.
+- `brigade handoff draft` now publishes each draft atomically. It writes a private `.handoff-<random>.tmp` file in the inbox, fsyncs it, then renames it to the final `*.md` name without replacing an existing file, so a concurrent reader or worktree cleanup never sees a half-written handoff and an existing draft is never overwritten. The temp file is removed on any failure. The contract for harnesses that write handoffs directly is documented in `docs/handoff-promotion.md`.
+- Rust fleet hub startup now fails promptly when resolving `--host` times out or fails.
+- Bound the front matter parse that card search, hub sync, proposals, memory care and the doctor lint share. A bracketed value longer than 16 KiB or nested deeper than 32 levels is now kept as plain text instead of being evaluated, and any evaluator failure (including `MemoryError` and `RecursionError`) does the same. One card with a huge or hostile list value no longer slows or crashes `memory search`. The memory hub's native search applies the same bounds, so both engines index the same fields. Normal tag and alias lists parse exactly as before.
+- A scanner import is no longer rejected as "import file not found" when another process creates or removes a directory in the target or one of its parent directories while the import is being opened. Only a swapped path component still refuses the import.
+- `brigade handoff lint` and `brigade handoff draft` now refuse a `create-card` handoff whose card id (the `id`, else the `topic`, else the file name, as `memory hub push` derives it) already belongs to another card. The error is `card-id-collision` and names the existing file, so a new card can no longer make every later push refuse both cards. `update-card` on the card that holds the id stays allowed. `brigade ingest` routes the same collision to the review inbox and does not write the card, and lint and ingest read the card ids once per run.
+- Push card reads use a bounded, padded scope discovery budget so withheld copies cannot add revision and scan joins to a negative response. Scope-less reads of ids with more than 64 copies fail closed with the same 404 and require an explicit scope.
+- `brigade work import bd` and the ledger mirror now accept all 12 bd 1.3.4 link types. `conditional-blocks` becomes a `blocks` edge, the eight non-gating types are kept as `metadata.bd.links` and counted in the receipt, and any other type still fails with `unknown_edge_type`. bd 1.3.4 is added to the tested releases.
+- `brigade run cloud register`, `adopt`, `status` and `sync` now track Claude cloud sessions that a
+  conductor launched through a one-time routine. New `--routine-id`, `--issue`, `--session-url` and
+  `--observed-status` flags record the routine, the issue and the run state the conductor read.
+  Routine rows classify from GitHub branch and PR state plus that report, and registering one needs
+  no hub cloud lane. The `claude-cloud` source reports `conductor-routed` instead of
+  `disabled-by-policy`, `doctor --provider claude-cloud` passes offline, and
+  `launch --provider claude-cloud` refuses with a pointer to the conductor runbook in
+  `docs/claude-cloud-capabilities.md`.
+- Add `brigade run cloud land --provider codex-cloud --task-id ID --issue N` to apply a ready task in an isolated worktree and open a PR for conductor review. Refuse protected paths and apply conflicts, run content guard, and record the PR in cloud status and sync (#2473).
+- Isolate landing Git hooks and drivers, apply one hashed task attempt, reject unsafe paths and shallow targets, and resume publication from the recorded commit after push or PR failures. Keep guard receipts outside proposal trees and expose pending landing states.
+- Run landing Git operations in a private temporary repository fetched from canonical GitHub HTTPS. Preserve prepared commits there for publication retries. Use only operator global commit identity and one validated absolute credential helper, pin HTTPS and TLS verification, and reject unexpected effective config before Git operations. Landing ignores caller config, includes, object stores, and proxies. Proxies are unsupported. Landing refuses non-POSIX platforms with `unsupported-platform`.
+- Skip tracked submodule gitlinks in content guard and publish checks while retaining fatal errors for unreadable regular files.
+- Reconcile every private checkout before retrying preparation or publication. Reuse a registered checkout only when the recorded branch and commit match the pending step. Remove stale checkouts without following symlinks or overwriting a remote ref.
+- Accept a credential helper through an absolute symlink to the pinned trusted `gh` executable while retaining the exact `auth git-credential` arguments.
+- Read tracked symlink target text from its index blob across Git, publish, audit, and baseline scans without following the link. Keep unreadable regular and executable files fatal and reject unsupported index modes with `unsupported-index-mode`.
+- Discard inherited guard, Brigade, Python, and legacy engine path overrides and exported shell functions during landing. Use the embedded Python scanner and pinned policy copies for hooks and publication text. Scan the title, final commit message, and PR body before committing, recheck saved publication text on retry, and refuse blocked text with `title-refused`. Guard directory overrides are unsupported. Strict text scans include lines containing allow markers.
+- Refuse trusted-tool symlinks that resolve into any caller checkout or the private landing root.
+- `python -m brigade.dot runtime-template --pack dot|duet` prints a placeholder runtime document whose
+  `hub.recipients` lists a `conductor` alias, and the Dot and Duet guides name the alias, so a fresh
+  install keeps a way to start a message to the conductor.
+- `fleet_digest` carries an `unread` section: the connector's own pending inbox count, and its own sent
+  messages that each recipient has not acknowledged in the last 7 days. Both come from the connector
+  principal's own credential.
+- `brigade fleet msg sent --undelivered-after MINUTES` marks each sent message `acknowledged`, `pending`
+  or `undelivered`, and lists the ids that passed the deadline with no acknowledgement.
+- `inbox_list` and `fleet_digest` add `sender_alias` to a message whose Hub-authenticated sender is a
+  configured recipient. It authenticates provenance only.
+- `inbox_list` and `fleet_digest` add a connector-computed `assignment` object to a plain, unthreaded,
+  non-reply message from the configured `conductor` principal whose `ref` is exactly `owner/repo#N` with
+  the repository listed in the new `assignments.repositories` runtime key (default empty). The Dot and
+  Duet operating instructions let only that field authorize one branch, commits, a push and one pull
+  request for that issue. Message text authorizes nothing.
+- The connector `handoff_write` path now has an integration test over a temporary workspace: the
+  real handoff lint refuses a bad handoff, a valid one lands in the profile's writer inbox and is
+  never overwritten, and after `brigade ingest` the card is found by `brigade memory search`. The
+  Dot and Duet connector docs describe the path.
+- Message replies keep an immutable reply marker after retention cleanup removes their parent, so connectors cannot mistake an old conductor reply for a new assignment.
+- Reject delivery deadlines that are too large to calculate.
+- The Fleet Hub image now pins a Brigade revision with the Rust hub engine and hybrid retrieval support.
+- Planned hub stops accept a managed Python child terminated by SIGTERM after the Rust front signals it, preventing false systemd failures on routine restarts.
+- Correct the fleet hub runbook retrieval configuration and status description.
+- Preserve operator Compose overrides during Fleet Hub setup and mode switches. Hybrid creates an operator-owned empty stub for later edits and refuses custom file selections before writes. Legacy migration requires an exact generated document. Rollback restores setup files and removes newly created stubs. S31 checks the effective Compose merge in both modes.
+- The S6a dogfood bench probes now use their own credential (`--probe-token-env`) and a fresh claim holder per probe, release with the generation from the acquire reply, make the wake probe opt-in (`--wake-probe`), and report per-probe error counts in the summary.
+- Allow bounded reflection to replay up to 5,000,000 events independently of retained replica bytes, and name the preseed recovery and its security tradeoff when the limit is reached.
+- Restore the original Windows care task from its XML if replacement fails. If restoration fails, remove the placeholder and report both errors with the task name. Tolerate an absent task during fresh-install cleanup.
+- Default Fleet Hub setup to BM25 (`lexical`) without embedder probes for 0.31.0 after the local GPU branch missed latency targets under host load. Hybrid requires `init --retrieval hybrid` or `switch --to hybrid`. Explicit hybrid init refuses without writes when no embedder passes its probe (#2507).
+- Prevent concurrent commands from launching duplicate update checks by claiming each refresh before spawning it. Skip automatic refreshes when the cache cannot be written, and retry abandoned claims after one hour.
+- `brigade run cloud land` now lints the generated PR body with an explicit Vale config. It is the repository's `.vale.ini` and styles read from the fetched default branch (never from the proposal). Without a base config it is the operator's own `$HOME/.vale.ini` when that is a plain file they own, and otherwise a minimal config that lints nothing. Only a strict subset of INI is accepted. Anything else, plus unsafe `StylesPath` values, include or import keys, duplicate keys, inline comments, symlinks, gitlinks and oversized style trees (over 64 MiB or 2000 files), is refused as `unsafe-vale-config`. A retry reuses the recorded base without fetching again, and the operator's global Vale config still merges. Style files are copied as they are, so rule fields that name files are trusted because they come from the base commit.
+- Document the credential helper forms that `brigade run cloud land` accepts and how to fix unsafe custom helper paths.
+- Pull requests record changelog entries as `changelog.d/<pr-number-or-slug>.md` fragments instead of editing `CHANGELOG.md`, so sibling PRs no longer conflict on the shared `Unreleased` hunk. `scripts/changelog_fragments.py` checks fragments, guards against `CHANGELOG.md` edits outside a release commit, and assembles fragments into `Unreleased` during the release cut.
+- Pin every action in `publish.yml` and `hub.yml` to a full commit SHA, with the version tag in a trailing comment, and add a test that fails on any new tag reference in those two files (#2399).
+- Every `handoff_unavailable` answer from the Dot and Duet connectors' `handoff_write` now carries a `reason`: `inbox_untrusted`, `inbox_missing`, `lint_state_unavailable`, `lint_unavailable` or `inbox_write_failed`. An untrusted or missing inbox is returned as a result with its reason. `inbox_untrusted` adds a `hint`: remove group and world write from the inbox and its parent folders, which a umask of 0002 commonly leaves on. The trust rule is unchanged, so a group-writable inbox is still refused.
+- The Fleet Hub dogfood setup (`ops/fleet-hub/bin/hub-setup.py`) now also writes `secrets/operator-admin-token.txt`,
+  a mode-0600 copy of the admin token that `brigade memory rescan` and `brigade memory reindex` accept as
+  `--admin-token-file`. The container's 0444 copy is unchanged. Rerunning `init` adds the copy to an existing
+  install, rewrites it after the admin token changes and resets a drifted mode.
+- The default work mode is now called engineer mode: `brigade work mode set engineer|yolo`, and `brigade init --engineer` switches a yolo install back (it cannot be combined with `--yolo`). Engineer mode behaves exactly as the old `enforced` mode did, with verification on. `enforced` is still read from existing configs and accepted by `brigade work mode set`, so no config needs editing. JSON `mode` fields (`brigade work mode show --json`, `brigade work hooks status`, `brigade repos adoption --json` and the work brief) now report `engineer` where they reported `enforced`, so a script that tests for `enforced` should test for `engineer`. Hook wiring states such as the `enforced-idle` adoption state keep their names.
+- On Windows, `brigade run cloud launch --provider claude-cloud` and every other command that
+  resolves the user data, cache or config directory no longer starts a `ver` child process when
+  the system's WMI query fails. Brigade now detects Windows from the interpreter.
+- A Compose install of the Fleet Hub now reaches hybrid retrieval when setup picks it. `brigade fleet serve --engine rust` takes `--memory-config PATH` and passes it to `brigade-hub`, and `ops/fleet-hub/compose.yaml` names the `config/hub.toml` that `bin/hub-setup.py` writes. The hub logs one line at startup naming the memory configuration file it read and the retrieval mode. An image built from a `BRIGADE_REF` older than the flag keeps starting: `hub/entry.py` drops the flag with a warning and that hub runs in BM25 mode.
+- The hub container's entrypoint copies the mounted embedder token to `/run/brigade/embed_token`, owned by the hub's user with mode 0400, on a tmpfs private to the container, and refuses a symlink at the mount. The hub accepts an embedder token only from such a file, and a bind mount keeps the operator's ownership. Setup writes that path into `hub.toml`, writes both embedder token files with mode 0444 inside the 0700 `secrets/` directory so the container can read them, and resets a local token an earlier setup wrote with mode 0400. Setup creates `secrets/` with mode 0700 under any umask and never changes the mode of an existing one. When group or other users can enter an existing `secrets/`, setup writes nothing and says to tighten the directory to 0700 and rotate the admin token, the findings key and the embedder tokens those users could have read. A mounted token the entrypoint cannot copy, such as an operator-owned mode 0400 file that the container's UID 10001 cannot read, stops the hub only when `config/hub.toml` selects hybrid retrieval and its embedder reads that copy. With a lexical configuration, or an embedder that reads another token file, the hub starts, removes any earlier copy and logs a warning that says to rerun `bin/hub-setup.py`.
+- For the `api/embed` request shape, a reply that carries no model digest is now checked against the server's model listing at `/api/tags` on the same origin. The hub compares the listed digest with the pinned `model_digest` and refuses replies with `digest-mismatch` once a reading shows another digest or cannot vouch for the model. A document batch and the breaker's probe read the listing before the request and again after the reply, and the vectors are kept only when both readings report the pinned digest. Each reading has its own time limit, one fifth of the call's deadline and at most 2 s, so a listing route that stalls refuses such a reply with `embedder-timeout` without using up the deadline. An endpoint whose replies carry the digest is read once at most and then not at all, and a stalled listing does not stop it from embedding. A query takes one reading and reuses it for up to 30 s. A reply that carries a digest is decided by that digest alone. Before this, the hub refused every embedding from a local server that sends no digest.
+- Dot and Duet `memory_search`, `memory_card` and `memory_hits` go to the memory hub set by `[memory_hub]` in `~/.brigade/fleet.toml` again, with that table's read credential. Since S23 they had gone to `[fleet] hub_url`, which serves no memory, so hub search found nothing and every hub card read answered `card_not_found`. Connector searches still count as reads and still land in the search log.
+- A Dot or Duet host with hub memory on and no `[memory_hub]` now answers `memory_search` from local cards with `retrieval.reason: "no-memory-hub"`, and sends nothing to the fleet hub. The `BRIGADE_MEMORY_HUB_*` pair meant for the sync and mirror units no longer moves Dot or Duet to another hub or credential, and a relative `BRIGADE_HOME` gives them no memory hub instead of reading a `fleet.toml` under the working directory.
+- A relative `BRIGADE_HOME` no longer lets the working directory choose the fleet hub or credentials. Before, `BRIGADE_HOME=.brigade` read `.brigade/fleet.toml` from whatever repository a command ran in, so that repository could pick `hub_url` and the node and admin token files sent to it. Now strict fleet commands, message principals, `brigade fleet keys`, `fleet ci` and `fleet projects sync` stop with `BRIGADE_HOME must be an absolute path`. Best-effort reporting reads no `fleet.toml`, keeps only the `BRIGADE_FLEET_*` environment values and logs one warning. The spool, node identity, model admission cache and Worklore receipts also refuse a relative home. An absolute `BRIGADE_HOME` and the default `~/.brigade` work as before.
+- A relative `token_file` or `node_token_file` in `~/.brigade/fleet.toml` is now read from the directory that holds that `fleet.toml`, not from the directory a command runs in, so a repository can no longer supply the token. `~` still expands. On Windows a drive-relative (`C:node.token`) or root-relative (`\node.token`) token path is ignored.
+- Memory sync and mirror no longer read `[memory_hub]` from a `fleet.toml` chosen by a relative `BRIGADE_HOME`, so a repository can no longer pick the memory hub and the token sent to it.
+- Under a relative `BRIGADE_HOME`, `brigade run` takes no fleet claim, even with a hub set through `BRIGADE_FLEET_*`. It logs `fleet claim skipped for run directory ... (BRIGADE_HOME is relative)` and relies on the local run lock, as `--no-fleet-claim` does. `--require-fleet-claim` stops with the error instead, and Grok Bot leases are refused. `--no-fleet-claim` skips the claim key entirely. Model admission does not use its roster cache under a relative home. `brigade node --machine` and `brigade fleet claims --release --path` print the error instead of a traceback.
+- Under a relative `BRIGADE_HOME` no claim request leaves at all, including an acquire, renew, release or inspect that reuses a stored key or names a node. The claim answers `relative-brigade-home`. A Grok Bot lease whose key was stored earlier is no longer acquired, renewed, released or reported against the hub.
+- `brigade fleet serve --engine rust` no longer exits with `schema-changed` on a hub that Python upgraded across several releases. The schema gate now ignores whitespace that SQLite's ADD COLUMN leaves before a comma, and it accepts the `model_policy` column order produced by upgrading through v14, v15 and v21. Schemas with a missing column or a changed type are still refused.
+- `ops/fleet-hub/bin/hub-setup.py` now writes the `[memory.embedder]` table the Rust hub parses for both hybrid paths: the full request URL and its allowlist entry, `token_file`, `shape`, `name`, `model_digest`, `dimensions`, `input_chars`, `query_prefix` and `query_prefix_version`. The per-model values come from `ops/fleet-hub/r1-models.json`, now schema 2, which also records that `qwen3-embedding:8b` passed the public-fixture half of R1. Before this, the hub refused every hybrid configuration setup wrote.
+- The local GPU path gets its own embedder token file, `secrets/embed-local-token`, because the hub needs a token file for every endpoint. Both embedder token files are mode 0444 inside the 0700 `secrets/` directory, like the other mounted secrets. A probe that passes with a different remote token now replaces `secrets/embed-token`, and leaving the remote backend removes it. Setup removes the old token before it writes the configuration and installs the new one last, so `secrets/embed-token` never sits beside a configuration naming another endpoint, even if setup dies partway. If any step fails, setup restores every generated file. A rollback that itself fails leaves no remote token, so the hub answers in BM25 mode until setup is rerun. If the rollback cannot remove the token this run installed, it keeps this run's files in place, so that token stays beside its own endpoint. Probe failures no longer print the HTTP library's message, which could quote the token, and a token file whose token holds whitespace or control characters is refused before any request. The remote probe now reads the model digest where the hub reads it, the `model_digest` field or the `x-model-digest` header, and refuses an endpoint that reports two different digests.
+- The S31 `setup` check now starts `brigade-hub` with `--memory-config` on the configuration after `init` and after each switch direction, and requires `/ready` and the expected retrieval mode, with `degraded` for a hybrid embedder the host cannot reach. It fails when no hub binary is available. Pass `--hub-binary` and `--hub-python` to choose them.
+- Add `brigade-hub memory-restore-epoch --memory-db <file>`, which starts a new memory `log_epoch` on a `fleet-hub-memory.db` restored from a copy, before the hub serves it. Clients then rebuild their replicas on the next pull, and a write based on a revision from before the restore is refused with `409 memory_epoch_changed` instead of overwriting a reissued revision. The command refuses, changing nothing, for a symlinked path, while a process holds the file, when a stale `-wal` or `-journal` sits beside it, for a file that is not a memory file or has a newer schema, and when SQLite's `quick_check` fails. The dogfood runbook's restore steps now cover the memory file.
+- Hub push search now ranks and counts over push-eligible cards only. Corpus
+  size, average card length and term frequency leave out private, pending,
+  flagged and other writers' unreviewed cards, so adding or retiring a withheld
+  card no longer moves the scores, order or `match_count` a connector sees.
+- A push `card` read for an id with no card now does the same store lookup as
+  one whose copies are all withheld, so the time of a 404 does not tell them
+  apart.
+- On Windows, message, Dot, Duet and memory hub node token files are now opened without following a symlink or reparse point swapped in after the path check. A link at the token path is refused instead of read.
+- Give the hub manifest binding churn test a large writer deadline so a slow CI runner no longer answers 503 on `propose` before the retained budget refusal is reached (#2411).
+- Raise the recall time budget in the dispatch memory 2,000-card bounds test so a slow CI runner no longer answers with no packet before the bounds are checked. The budget keeps its own tests.
+- Test only: the abandoned recall worker cap test holds every worker in a stub search, so a thread that starts after its 0.1 s deadline on a loaded runner no longer frees its slot early and changes the worker count.
+- Test only: the abandoned recall worker cap test waits for the last worker to reach the hub before counting searches, so a slow thread start on a loaded runner no longer reads 3 of 4.
+- Remove the single-operator `wazuh-triage`, `n8n-operator`, and `backup-steward` Grok Bot packs. No replacement. Before upgrading, stop each installed unit and uninstall it with `brigade run cloud grokbot pack remove --id <pack-id> --target <target> --out <unit-directory> --apply`. The remove command deletes owned config and unit files but does not stop services.
+- Brigade now requires Python 3.11 or newer. Python 3.10 users should upgrade the interpreter before upgrading Brigade.
+- Remove `brigade runs diff` and unused internal modules. No replacement for run comparison or the deleted internal APIs.
+- Remove `brigade operator plan`, `operator init`, and `operator bootstrap-portable`. Use `brigade operator quickstart` (with `--dry-run` for planning) and `operator checkup`.
+- Remove `brigade work task claim`. Use `brigade work claim`.
+- Remove `brigade work task show`, `work task annotate`, `work task edge add`, `work task edge list`, and `work reassign`. No replacement for these leaves. Dependency creation through `work task add --deps` and readiness through `work ready` remain available.
+- Remove the deprecated `brigade run-cloud` alias. Use `brigade run cloud`.
+- Remove `brigade openclaw-fragments` and `brigade hermes-fragments`. Use `brigade harness fragments --harness openclaw` or `--harness hermes`.
+- Allow unused command paths to be removed at the next release without an alias. Paths with callers retain a deprecated alias until no later than the next major release.
+- Remove unused internal APIs in `aboyeur_artifacts`, `claude_actions_diagnostics`, `claude_actions_http`, `claude_actions_import`, `claude_actions_metadata`, `claude_review_history`, `claude_cloud`, `evidence_ack_acceptance`, `evidence_ack_protocol`, `evidence_ack_crypto`, `grokbot_fleet.app`, and the `memory_doctor` module CLI. No replacement. Move the projection conformance fixture into the test suite.
+- `brigade handoff draft` now runs the ingester's own checks before it writes and refuses a draft that would conflict at ingest, with one `draft refused, nothing written` line per problem and no file left behind. For `update-card` it reads the target card in `--workspace` (default `--target`) and fills a new `## Expected card SHA256` section. When the workspace is unreachable it names the flag to pass, `--workspace` or `--expected-sha`. `brigade handoff lint` shares the same rules through the new `handoff_ingest_rules` module, takes `--workspace`, and now fails an `update-card` without a valid SHA, a card without `title` or `topic`, `category` or `tags` frontmatter, an unsafe card name, a target document outside the ingester's allow-list, and a bootstrap append over budget. With a reachable workspace it also fails a stale SHA and a `create-card` that collides with an existing card. `brigade ingest` uses the same name, document and budget checks, accepts the new section, and sends an `update-card` whose SHA no longer matches the live card to review. The handoff templates, the handoff-flow card and the handoff docs now tell writers to use `brigade handoff draft`.
+- Ingest now rechecks an `update-card` handoff's expected SHA against the card bytes under the publication lock and routes a stale one to review, so a card edited after the decision is never overwritten. A routed document append refuses any symlink in the destination path, and writes through a held directory descriptor with no-follow. Frontmatter lists written with unindented entries (`tags:` then `- memory`) are accepted by lint and draft, and a repeated frontmatter key is reported without echoing it.
+- Publication now reads the destination card once through a no-follow descriptor and uses those exact bytes for the expected-SHA check and for the publish-boundary revision probes, so draft, lint and ingest all hash raw on-disk bytes and a CRLF card behaves the same on every platform. A routed document append fails closed to review when no descriptor-relative no-follow backend is available, and uses the Windows handle-relative backend when it is. Ingest refusal reasons no longer repeat handoff text, such as the duplicate anchor line, section names, card names, actions or injection excerpts. Trailing YAML comments outside quotes are ignored when lint and draft read card frontmatter.
+- Card publication now opens the destination's parent directory once with no-follow, then reads the card, stages the replacement and renames it over the card relative to that held handle, on POSIX and through the Windows handle-relative backend. Just before the rename it reopens the parent path and compares directory identities (`st_dev` and `st_ino`, which Windows reports as volume serial and file index), so a directory renamed away after it was held sends the handoff to review on every platform, and it checks that the card is still the revision it read. When no descriptor-relative backend exists the handoff goes to review and nothing is written, so the earlier path-based fallback is gone. Staged cards are written as exact bytes. Ingest, lint and draft refusal reasons now use fixed wording that leaves out fence languages, card names and `rules/<name>.md` targets. Lint, draft and ingest now read card frontmatter with one parser, the line-based reader ingest already uses for cards, with the card policy applied on top of what it returns: a `title` or `topic`, a `category`, a `tags` key and ISO dates (date-only or a timestamp). Multiline quoted values and multiline flow lists are accepted by all three, and a card that parser cannot read is refused by all three with fixed wording. Because that reader keeps a flow list as text, lint checks that `tags` is present, not that it is a list. `brigade ingest` now sends a card whose frontmatter is missing or never closed, or whose body is empty, to review, and it does not apply the title, category, tags and date policy.
+- Opening a card for publication, reading a card with `read_text_nofollow`, and appending to a routed document now use a non-blocking no-follow open on POSIX, check for a regular file, and then restore blocking mode. A card or document swapped for a FIFO goes to review instead of hanging ingest.
+- `brigade ingest` records an unreadable, unarchivable, non-UTF-8 or structurally malformed handoff as a failure, leaves it in place and ingests the rest of the batch. The report adds a `Failed` count, a `PARTIAL` line and `Status partial`, and `brigade repos ingest` carries the failed count and status. `PARTIAL` joins the default ingestor warning patterns. Guard and invariant failures still stop the run.
+- `brigade ingest` action lines and the `reason:` line of review drafts now carry a stable reason code (for example `[unsafe-card-name]`, `[near-match-proposal]  match=memory/cards/x.md similarity=0.91`) and a safely encoded handoff filename. They no longer quote target cards, target documents, handoff text, scan excerpts or exception text. Review draft filenames replace characters outside `A-Za-z0-9._-` with `_`, and a draft name that is already taken gets a numbered suffix instead of being overwritten.
+- `brigade ingest` also reads the handoff inboxes of linked git worktrees of each watched root. Worktrees come from `git worktree list` (output capped at 1 MiB and 256 records) and must share the root's common git dir. Each inbox component is opened without following links. A watched root below its checkout's top level maps to the same subdirectory in each linked checkout. A handoff whose content was already published, appended or archived in the same run is archived as a duplicate, so one handoff copied into several worktrees ingests once. A handoff skipped for a retry (for example a busy card publication lock) does not count. Each handoff is read once, and the digest, parse and every delivered copy come from those bytes. A handoff whose file changed before it was archived stays pending and is reported as `handoff-changed`.
+- Removing a worktree through Brigade (run cleanup, `brigade runs prune-worktrees`, model trials) first moves its pending handoffs into the main checkout's inbox, deduplicated by sha256. Rescue finds inboxes from `git ls-files --others -z` with one `:(glob)**/<inbox>/**` pathspec per writer inbox name (untracked files, ignored ones included, at any depth, capped at 8 MiB and 10 seconds, so a large ignored tree such as `node_modules` does not count against the budget) and delivers each to the same subdirectory of the main checkout. That subdirectory must already be a real directory reached without following links, and the destination stays open by descriptor from validation to the last write. The listing runs with the verified worktree git dir and work tree pinned, and with injected git config, location and pathspec environment variables removed. Inbox names match regardless of case, and a worktree whose `.git` marker is not a genuine, unlinked marker for that worktree is kept. A worktree holding an embedded repository or a populated submodule path (with or without its own `.git`) is always kept and reported as `embedded-repository`, because git does not list files inside it. Handoff filenames follow the same rule as ingest, so dot-prefixed handoffs such as `.pending.md` are rescued too. The destination must be the verified main checkout of the same repository. Only a handoff unmodified for 5 seconds is rescued. A newer one stays pending and keeps the worktree. Each source is claimed with an atomic no-replace rename to a private name, then copied under a temp name the ingesters ignore, fsynced, verified and published without replacing an existing file. Only content already archived in the destination's `processed/` counts as delivered. A matching pending copy can still change before ingest reads it, so rescue publishes its own copy and ingest's in-run dedupe handles the duplicate, and a rescued handoff is never published under a name the destination's git index tracks, even when that file was deleted. Unknown destination tracking fails the rescue. The claim is removed only after a bounded final check (size snapshot, hash and mtime, within the ingest cap and 10 seconds) still matches the delivered copy. If it changed, kept growing or the check ran out of time, the claim is renamed back to a pending handoff in the source inbox (or to a name ingest skips when it is over the ingest cap) and the worktree is kept. A handoff that appears during the rescue, a claim left by an interrupted one, or an oversize recovery file from an earlier pass also keeps the worktree, including under `force=True`, and the warning names the file. Warnings print the reason code first and shorten only the middle of a long path, never the file name. If any handoff cannot be delivered, or git tracking cannot be established, the worktree is kept and a warning names it.
+- In a linked worktree, the Stop hook's handoff note names the main checkout's `.claude/memory-handoffs/`, which survives the worktree's deletion. The note text is otherwise unchanged.
+- The verify-brigade `hub-contract` drive now checks message and question expiry, the
+  sealed-content lifecycle and the message `client_id` window on a second hub whose clock
+  it steps (`--clock-hub-cmd`), sweeps 60 more refusal paths, and compares the exact text
+  of every refusal and the sealed tombstones with a golden captured from the Python hub
+  (`--write-golden`).
+- `brigade fleet serve --engine rust` runs the Rust hub, `brigade-hub`, in front of the Python hub on the
+  same database. It migrates the file first, refuses a binary whose SHA-256 does not match its recorded
+  checksum, forwards stop signals, and exits non-zero after 3 failed `/health` checks so the service
+  manager restarts it. `--route-mode` sets `brigade-hub` route modes. Dropping `--engine rust` rolls back.
+- `brigade setup --component brigade-hub` installs the Rust hub on a Linux hub host. Releases publish it
+  for `linux-amd64` and `linux-arm64` after pre-publication acceptance on each target, a plain
+  `brigade setup` never downloads it, and a host that installed it keeps it on later setups and updates.
+- With a native route family, `brigade-hub` restarts a Python upstream that crashed, after 1 s and then
+  doubling to 30 s, while native routes keep serving. Proxied routes answer `502 upstream-down` and
+  `/ready` answers 503 until it is back. Native long polls answer at once when the hub starts its 25 s
+  shutdown drain.
+- The dogfood Compose recipe runs `fleet serve --engine rust` when its pinned Brigade has the engine,
+  with the watchdog also exiting when the hub's network namespace is left with only loopback, and
+  keeps its S31 wrapper for an older pin.
+- `fleet serve --engine rust` runs the exact file it checked: it opens the binary once, refuses a symlink,
+  a file owned by another user or one its group or others can write, and executes that descriptor.
+  `--port 0` works, since the watchdog uses the address `brigade-hub` reports binding.
+- Claude Code recall hooks read hub memory when the workspace's memory config is in `read` or
+  `sync` mode. Session-start and prompt recall fuse hub hits with local cards inside the existing
+  5 s recall child. With the hub stopped or hung they answer from local cards and the replica
+  without a warning line. Hub hits are named `hub:<scope>/<card_id>`, and only `reviewed`,
+  `policy-promoted` and `imported` hub versions are shown, so another principal's unreviewed card
+  in a shared scope never appears unasked.
+- Every recall line a hook injects, local cards included, now goes through the memory prompt-load
+  scan, each rendered field on its own and then the whole line. A blocking or warning finding
+  shows only `- <card_id> | blocked: <rule id>`. Private-class text is withheld with
+  `code: memory_content_private` unless the operator opted the host in with
+  `brigade work hooks install --recall-audience local` (or `update`), which writes a marker bound to
+  the host name, the machine id (required except on macOS) and the Brigade home's inode. On Windows
+  the Brigade home must sit inside the user's profile. Nothing
+  writes it by default. `--recall-audience connector` turns it off even when the file cannot be
+  removed, and exits 2 with the marker path if local recall may still be on. `CLAUDE_CODE_REMOTE` or a `BRIGADE_RECALL_AUDIENCE`
+  value other than `local` always means connector. `brigade doctor` warns "local recall not
+  enabled" with the command when a recall target is active. A scanner that cannot run injects no
+  recall.
+- Recall skips cards the SessionStart work brief already named, so a card is not shown twice. Ids
+  pasted into a prompt never hide a card.
+- The Stop hook sends hub memory a `recall.capture` event with a hashed session reference and the
+  card keys recall showed and the session opened with the Read tool (any card search lists, at any
+  depth under a card root), under the id card search gives it. It holds ids only. A batch the hub does not take stays pending and is retried with
+  the same event id at the next Stop.
+- At session start the work brief runs first under its own deadline, and memory recall gets only
+  the hook time the brief left. On a slow host recall is skipped instead of costing the brief its
+  injection.
+- Replace the always-write Memory Handoff rule with a judged one in the brief sections, installed instruction templates, `brigade-work` skill, Cursor rule and Stop hook note: write a handoff only for knowledge the repo, git history or an existing card does not hold, and otherwise end with `Nothing durable: <reason>`. The Claude Stop hook skips its handoff note when the final assistant line starts with `Nothing durable:`, and ignores that text in user prompts and tool output.
+- Hub memory has verifier principals. An admin sets or clears a principal's `verifier` flag
+  with a new memory action, and every credential carries a copy: native enrollment binds it
+  before issuing, refuses an unflagged credential for a verifier principal with
+  `memory_verifier_credential_unflagged`, and a request whose copy differs from the principal
+  is refused with `403 memory_verifier_flag_mismatch`. Revocation and removal keep the flag.
+  Memory schema moves to 11.
+- Every proposal from a verifier principal is Tier 2 at submit, preflight and every decision.
+  Preflight reports a `verifier_floor` hold and `auto_apply` refuses the proposal. A fleet
+  policy that lists a verifier in `memory.reflect_principals` is refused with
+  `memory_policy_verifier_listed`, and so is flagging a listed principal. A flag change that
+  cannot publish the verifier list for the policy writer is rolled back and refused. The list
+  is written durably and carries the memory file's generation, which must equal the one the hub
+  records before each flag change, so a policy write refuses a stale list or one left by
+  restoring either database, and hub memory does not start until it can republish it. Memory
+  `status` reports both generations, and the admin `verifier_resync` action repairs a mismatch
+  after a restore. Memory `status`
+  reports the caller's `verifier` and `reflect_principal` booleans and a `verifier_floor`
+  capability.
+- Verifier attachments are now bound to the proposal they support. A verifier's record must
+  be a `memory-verify-manifest` for the attested card, or attach refuses it with
+  `memory_manifest_card_mismatch`. The record starts in `pending_review`, never holds
+  automatic apply and never counts as proof. `propose` binds it only to the attaching
+  principal's proposal for the exact scope, card and base revision the manifest checked, and
+  otherwise refuses the whole proposal with `422 memory_manifest_binding_invalid`. Accepting the
+  proposal makes the record `active`. Rejection, staleness, compaction and the 24 hour unbound
+  sweep make it `inert`, which frees its quota slot. Memory schema moves to 12.
+- Verifier records that are pending or inert count against a retained-storage budget of
+  16 MiB and 1,024 records per principal and 64 MiB and 4,096 records per scope, refused with
+  `429 memory_evidence_retained_principal_quota` or `memory_evidence_retained_scope_quota`.
+  The idle sweep purges a record 35 days after it went inert through the `evidence.purge`
+  tombstone, keeping its hash and logging the purge.
+- `proposal_show` returns a `verifier_manifests` list of bound manifest hashes to callers with
+  `review` on every target and every bound record's scope, and omits the key for everyone
+  else. Memory `status` advertises a `verifier_manifests` capability.
+- `proposal_show` no longer panics on a compacted proposal. Compaction drops a proposal's pins,
+  and the reply now lists them as empty instead of failing the read.
+- Memory verification now has its prompt contract and reply checks: versioned
+  instructions with per-call nonce markers, a strict `brigade.memory-verify.v1`
+  reply validator, the deterministic evidence, novelty and supersede checks,
+  and op-level agreement between the propose and confirm seats. Nothing calls
+  it yet. The run command arrives in a later slice.
+- Memory verification can now check an abbreviated commit id against git. The new resolver fetches each allowed
+  remote-tracking ref over https in the same run, and expands an abbreviation only when exactly one object
+  matches, that object is a commit, and an allowed ref can reach it. It refuses repositories whose local config
+  holds includes, hooks, helpers, aliases, URL rewrites, proxies or any `http.*` setting, and it refuses shallow
+  clones, partial clones and grafts. The minimum abbreviation drops from 12 to 7 hex characters.
+- The resolver runs only a root-owned git from `/usr/bin`, `/bin` or `/usr/local/bin`, executed from a held
+  descriptor, with an environment built from scratch. git's https helpers must pass the same ownership, mode and
+  native-binary checks before any fetch, and reachability is checked against the commit ids the fetch proved. Commit expansion is POSIX-only for now: on Windows every
+  abbreviation abstains with `verify_resolver_unsupported_platform`.
+- `[[verify.workspace]]` accepts an optional `commit_refs` list of fully qualified `refs/remotes/<remote>/<branch>`
+  refs. Without it, the resolver uses the single ref that `refs/remotes/origin/HEAD` names.
+- `memory verify run` now expands abbreviated commit ids through the hardened git resolver instead of
+  abstaining on every one. Each non-dry run opens one resolver run that all its cards share, so they share one
+  fetch per repository, and closes it when the run ends, even after a failure or an early return.
+- A dry run runs no git, because the resolver's fetch writes remote-tracking refs. Its commit expansions abstain
+  with `verify_commit_unresolved`. On a platform where the resolver cannot run, a non-dry run reports
+  `verify_resolver_unsupported_platform` once under `skipped`.
+- `brigade memory verify run` now runs the verification pass: it checks the
+  hub's verifier floor and principal flags before any model call, calls both
+  seats, attaches a manifest and opens one pinned proposal per corrected card,
+  and keeps an owner-only review packet for each proposal for 14 days after it
+  settles. Commit-id corrections stay off until the git resolver lands.
+- `brigade memory care install --entry memory-verify` schedules the pass at
+  11:00 and refuses the reflect job's folder and fleet credentials.
+- A rate-limited verify scope is now scored from the last complete read count
+  snapshot when it is at most two days old.
+- Verify submissions are staged on disk before they are sent. A crash after a
+  proposal opens no longer loses its review packet, and a submission that met
+  a transient error is replayed with the same request id by the next run
+  instead of waiting out the card's cooldown. A run that only skipped no
+  longer clears the pause counter.
+- Verify stages expire 7 days after creation and are never replayed when their
+  ops no longer match the ledger or their scope is no longer bound. A
+  transient attach error is retried instead of treated as final, and a
+  duplicate pending reply publishes a packet only when the hub lists its
+  manifest as bound to that proposal.
+- An expired verify stage keeps its request id as a tombstone for 90 days, so
+  identical ops are resent under the same id instead of a new one. With 512
+  live tombstones the pass opens no new proposal until one ages out.
+- `[verify] enabled = false` now stops every verify run that would call a seat,
+  scheduled runs included, with `verify_disabled` before any hub request.
+- A verify card whose earlier request may have opened an unnamed proposal is
+  held until that request's tombstone ages out, so it never gets a second
+  proposal. Corrections deferred by the per-run cap, the pending ceiling or a
+  quota stop are checked again next run instead of waiting out a cooldown.
+  `memory verify doctor` probes no seat while `[verify] enabled = false`.
+- A verify replay whose manifest is 23 hours old or more, or that the hub
+  refuses as unbindable, is checked afresh with a new manifest instead of being
+  cached as a final refusal. A full packet directory defers the card without
+  a cooldown.
+- Only a verify request that may have opened a proposal keeps a tombstone and
+  its card's hold. A request the hub refused or quota-stopped is forgotten
+  when its stage is discarded, so the card is checked again.
+- Verify saves a tombstone before deleting its stage, saves a proposal id
+  together with whether this request opened it, and holds the card of any
+  unsettled request found without a stage, so a crash between steps cannot
+  reopen a card or publish an unbound packet.
+- `brigade memory verify status` and `brigade memory verify run --dry-run --no-model` score and
+  select hub cards for evidence-checked verification and print only card ids, scores, lanes
+  and skip counts. A quarter of each run's slots, rounded up, goes to the cards with the
+  oldest verification. A never-read count stays null until read counting covers its window.
+  `[verify]` in `.brigade/memory-care.toml` binds each scope to one workspace root and an
+  explicit archive project list. Roots must exist and are compared by directory identity, so
+  roots bound to two scopes and nested roots are refused even through case-only spellings or
+  symlinks, and so are roots without a stable inode and hub URL or credential keys. A scope
+  that `read_stats` rate limits is skipped for the run, and cached counts are never used in
+  place of a reply. Card history is bound to the hub, principal and log epoch and ignored when
+  any of them changes, and the per-scope card bound applies to bound scopes only. Verify keeps
+  its own replica under `.brigade/memory/verify/hub/` and never touches the shared hub replica. The verify state file has an 8 MiB limit and fails closed with a
+  fixed reason. The reflect lanes and verification share one fairness order helper.
+- Memory verification now assembles each card's evidence per scope. Every bound workspace root
+  is opened once as a held directory handle and checked against its pinned identity, and cited
+  paths resolve under that handle one no-follow component at a time, so a root swapped, linked
+  or recreated after the check is never read. Paths under no root, under two roots, under
+  another scope's root or outside the evidence directories, bundles from an unlisted or shared
+  archive project, and attested evidence ids are `evidence_unreachable`. Only verify receipts
+  whose bytes match the evidence archive's recorded digest rank as authenticated, and only for
+  the fields Brigade writes. Their command output is a separate medium item. Every item is cut
+  on a UTF-8 boundary and scanned, and flagged items are dropped with their rule ids. A card
+  without an authenticated receipt and a second independent item gets no model call.
+- `brigade memory verify doctor` resolves `propose_seat` and `confirm_seat` from the local
+  roster and probes each one. Seats whose prompts would reach a cloud provider, hosted chat
+  session or other connector audience are refused with `verify_seat_connector` before any
+  prompt is written, and so are seats only the hub knows about. Only `claude` seats have an
+  isolation profile in v1. `ollama:` seats are refused because Ollama tags are mutable and no
+  model can be launched by digest. Script launchers, seats that pin no exact model, and two
+  seats on one model are refused too.
+- Every Claude verify call runs with tools, hooks, settings, plugins, MCP servers and slash
+  commands switched off, and is refused unless the CLI's own init event confirms it. The seat
+  runs in an empty private directory under a temporary root with no instruction files above
+  it. Its executable is hashed and checked again before every call. A passing probe is
+  recorded per fingerprint, so a changed seat or an upgraded CLI must be probed again. The
+  verified executable is launched from its open descriptor, so a binary swapped after the
+  check never runs.
+- Verify prompts and replies live only in owner-only work areas that are removed after every
+  call, including after a timeout or interrupt. A failed removal is reported and blocks new
+  calls until the leftover can be removed.
+- Count per-card daily search hits and first-chunk card reads on the hub, without storing a principal, query or time of day. Counts are batched in memory and flushed by the memory writer only while no write is queued, with per-principal limits, flush and sweep budgets, table row caps and 35-day retention under `memory.read_counts`. Upgrade hub memory storage to schema 10. No read action returns the counts yet (#2387).
+- Hub memory has a `read_stats` action that returns per-card read aggregates for one scope.
+  It needs one grant on that exact scope holding both `read` and a new `read_stats` right
+  (wildcards, node defaults and `reflect` do not open it), pages at most 1,000 rows through
+  a 15-minute cursor bound to the caller and scope, and allows one request per second and
+  600 per day per principal. Each admitted request gets an audit row in the hub audit log,
+  refusals are merged into one summary row per principal per hour, and the hub writes at
+  most 20,000 such rows a day. `memory_hub_client.read_stats` reads a page and refuses the
+  admin credential.
+- The scheduled hub reflection docs now say that a scan metadata refresh against a hub that
+  predates scan metadata fails the run and pauses the job after three failures, and that stored
+  non-retryable refusals such as `memory_content_blocked` do not expire when hub policy or the
+  scan ruleset is relaxed, with the ways to clear them.
+- The code graph engine takes its identity from the name it was invoked as. `brigade-code-graph --version` now prints `brigade-code-graph 0.4.0` and the canonical MCP server reports `serverInfo.name` `brigade-code-graph`. The legacy entry points keep their old banner, server name and stderr output. Their deprecation line arrives with the release that installs the canonical executables.
+- New repositories get their code graph index at `.brigade/code-graph/code-graph.db`, with a matching `.gitignore` entry. A repository indexed by an older release keeps using its existing index in place, with no reindex and no copy. When both exist, the new location wins.
+- The engine reads `BRIGADE_CODE_GRAPH_DB` and `BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT` first. The older variable names still work with a stderr warning, and setting old and new names to different values is refused.
+- `brigade code export --format dot` names the graph `code_graph`.
+- Brigade features that read the code graph index (context packs, run briefs, work footprints and partitions, verify ranking, `brigade code export`, the unseen-dependents hook, search and operator status, and `brigade doctor`) resolve it with the same rule as the engine, so they find an index in either location and honor `BRIGADE_CODE_GRAPH_DB`. Conflicting database variables are reported instead of guessed.
+- The evidence engine now takes its identity from the name it was invoked as.
+  `brigade-evidence` prints `brigade-evidence 0.6.0`, names itself in usage text
+  and reports `brigade-evidence` as its MCP `serverInfo.name`. The legacy entry
+  point keeps its old banner, server name and stderr output. `doctor --mcp`
+  accepts either server name.
+- A fresh home now stores evidence in `<data>/brigade/evidence/evidence.db`,
+  with config and cache under `brigade/evidence/` in their XDG roots. An
+  existing archive in the legacy directory is still opened and written in
+  place, together with its bundle MAC key, and no canonical directory is created
+  beside it.
+- `brigade evidence crawl memory` accepts either engine banner when it checks
+  the engine version floor.
+- Brigade looks up `brigade-code-graph`, `brigade-code-graph-mcp` and `brigade-evidence` before the older executable names. When one directory holds both names, the new name wins.
+- `brigade doctor` reports engine names that are still in use. It shows a WARN with both paths and their modification times when both the old and the new code graph index, or both evidence directories, exist. An older engine environment variable name, or the old name of the code graph timeout config key, shows as INFO. Old and new variables set to different values show as WARN and are still refused.
+- The older environment variable names no longer print a warning on stderr. The notice returns, together with the notice for the older executable names, in the release that installs the new executables. Until then, Windows PowerShell callers that treat any stderr output as an error keep working.
+- New command and flag names: `brigade receipts export evidence`, `brigade work verify run --code-graph-timeout` and `brigade work import context --from-evidence`. The older spellings still work and are hidden from `--help`. `.brigade/config.json` now stores `code_graph_delta_timeout_seconds`. The old key is still read when the new one is absent.
+- `brigade init` adds `.brigade/code-graph/` to the managed `.gitignore` block.
+- Station ids are now `brigade-code-graph` and `brigade-evidence`, and the older ids still resolve. `brigade search status --json` and `brigade operator checkup` emit both the new and the old keys with equal values.
+- New Cursor user installs use the MCP server keys `brigade-code-graph` and `brigade-evidence`. Keys that Brigade already wrote are kept and get a rename notice. `brigade harness install cursor --scope user --rename-legacy-servers` and `brigade mcp sync --rename-legacy-servers` rename the keys Brigade owns. Entries you wrote yourself are never renamed. A rename goes ahead only where the new key can be installed. If another entry already holds the new key, the old entry stays in place and keeps working, and the command reports the conflict. `brigade mcp sync --rename-legacy-servers --harness <name>` can rename one harness at a time, and later runs clean up the other harnesses. After a rename, update tool permission patterns to the new server names, for example `mcp__brigade-code-graph__*`.
+- Memory verify seats no longer inherit a descriptor to their own executable. The held
+  descriptor is closed on exec, so the seat process and anything it starts never see it.
+- Dot and Duet `inbox_list` and `fleet_digest` push memory hits from hub memory when the
+  workspace's `[hub]` mode is `read` or `sync`. The connector asks the hub as its own message
+  principal, so only that principal's grants apply, and the runbook grants Dot and Duet read on
+  `fleet`. Hits keep the one `memory_hits` object and add `scope`, `card_id`, a short `hash`,
+  `trust`, `score` and `source: "hub"`, with the title, summary and tags wrapped as untrusted
+  text. A local card is never pushed in these modes, and an unavailable or refusing hub leaves
+  the field out.
+- `fleet_digest` carries up to 5 hits and `inbox_list` up to 3, the wrapped card text stays
+  within 300 characters, and the whole `memory_hits` object stays within 4 KiB, dropping
+  trailing hits to fit.
+- Hub memory `search` accepts `query_source: "push"`. It answers only reviewed,
+  policy-promoted and imported cards, plus unreviewed cards to the credential that wrote them,
+  after re-reading each head and its current clean scan receipt, so a retired, lowered or
+  superseded card in a stale index snapshot is dropped. Private-class and flagged text never
+  leaves on this path. `eval` and `ranking: "raw"` are refused with it.
+- Dot and Duet `memory_card` read hub cards as the connector's own principal with the hub's new
+  `card` `push: true` mode, never with the host node's credential or the replica. The hub serves
+  only a live head with a current clean scan receipt and push trust, so a card id an agent is
+  given or guesses opens no more than `memory_hits` could send.
+- With hub memory on, Dot and Duet `memory_search` search the hub with `query_source: "connector"` as
+  the connector principal, never with the host node credential, an admin token in its slot or the
+  replica, so a search returns no card text `memory_hits` could not send. Local workspace cards
+  come back apart as `local_matches`. The Grok Bot memory profile stays grant-scoped.
+  `connector` applies the push filter and counts its matches as reads, as any explicit search
+  does. The unsolicited `memory_hits` searches (`push`) are not counted. Explicit connector
+  searches still append their search-log record, from the matches they show, so follow-up and
+  redundancy metrics keep counting them.
+- A push `card` read without a scope considers only push-eligible copies, so withheld copies
+  never cause `memory_card_ambiguous` or appear in its scope list.
+- Dispatch packets carry a bounded `memory_context` block: `brigade run` planner, worker and
+  synthesis prompts, Grok Bot T3 adapter prompts, native T3 child tasks and
+  `brigade fleet work handoff show`. Each block holds at most 5 card references (scope, card id,
+  title, a summary of at most 300 characters, a short content hash, trust, score, source and how
+  to read it) within 4 KiB, never a card body, and says memory text is data, not instructions. A
+  hub card is read with `memory_card` or `brigade memory hub card`. A local card, readable only on
+  the same host, never appears in a connector packet.
+- Selection uses the `memory search` ranking and asks the hub as an unsolicited push, so dispatch
+  counts no card reads. It keeps only reviewed, policy-promoted and imported hub cards, the node's
+  own unreviewed cards included in the drop, re-reads each hub card's head and drops stale ones, and scans every field on its own and
+  then the rendered block. A hub that is stopped, slow or refusing adds no block and never delays
+  dispatch past a 2 s budget, and at most one recall runs at a time. Every packet is built for a
+  connector audience, so private-class cards never appear in one.
+- Grok Bot feed jobs can carry up to 5 hub card references (`memory_refs`: scope, card id and short
+  hash), searched with the Grok Bot memory principal's own credential so they name only cards it
+  may read. No references are computed until that credential has a user-level location. They ride
+  in the private job envelope, returned with the claim's execution context. Hub job payloads are
+  unchanged and hold no task text.
+- Grok Bot feeds can attach `memory_refs` to new jobs. Name the Grok Bot memory principal's token
+  file in the user-level `~/.brigade/fleet.toml` under `[grokbot_memory] token_file`. The file must
+  be an absolute path to a private regular file owned by the feed user, not a symlink, at most
+  4 KiB, and the fleet hub must confirm the token as `agent:grokbot-memory`. A workspace file never
+  sets the path, and a relative `BRIGADE_HOME` turns references off. Windows is not supported.
+  Without the key, or when anything is refused, references stay off, and
+  `brigade run cloud grokbot doctor` prints a `memory-refs` line with the reason and never the token.
+- `brigade fleet work handoff show` now builds its `memory_context` for the local audience on a
+  host the operator opted in with `brigade work hooks install --recall-audience local`, so the
+  operator's own terminal sees private-class card summaries there. A missing, unreadable or
+  refused marker, or a session the environment marks as remote, keeps the connector audience.
+  Every other dispatch packet (aboyeur briefs, native T3 children, cloud seats and Grok Bot
+  jobs) stays connector.
+- The verify-brigade hub contract drive has a `--profile prod-readonly` mode: an exact list of
+  operations that a SQLite authorizer audit proves write nothing on the Python hub and on the
+  Rust front in managed proxy mode, with a whole-database digest and no retention exception.
+  A case outside the list stops the run before any request, and the Proxmox hub runbook names
+  it as the only drive run allowed against production.
+  An inotify watch on the database path fails the audit when anything opens the database
+  outside the audit hooks, and the audit reports the front as not certified where the watch
+  cannot run.
+- Scanner imports distinguish missing files, read failures, and invalid UTF-8, preserving the cause of non-missing read failures.
 
 ## [0.30.0] - 2026-10-20
 
@@ -2338,7 +3092,8 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.30.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/escoffier-labs/brigade/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/escoffier-labs/brigade/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/escoffier-labs/brigade/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/escoffier-labs/brigade/compare/v0.27.0...v0.28.0

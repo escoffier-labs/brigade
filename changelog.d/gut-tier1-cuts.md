@@ -1,8 +1,0 @@
-- Remove `brigade runs diff` and unused internal modules. No replacement for run comparison or the deleted internal APIs.
-- Remove `brigade operator plan`, `operator init`, and `operator bootstrap-portable`. Use `brigade operator quickstart` (with `--dry-run` for planning) and `operator checkup`.
-- Remove `brigade work task claim`. Use `brigade work claim`.
-- Remove `brigade work task show`, `work task annotate`, `work task edge add`, `work task edge list`, and `work reassign`. No replacement for these leaves. Dependency creation through `work task add --deps` and readiness through `work ready` remain available.
-- Remove the deprecated `brigade run-cloud` alias. Use `brigade run cloud`.
-- Remove `brigade openclaw-fragments` and `brigade hermes-fragments`. Use `brigade harness fragments --harness openclaw` or `--harness hermes`.
-- Allow unused command paths to be removed at the next release without an alias. Paths with callers retain a deprecated alias until no later than the next major release.
-- Remove unused internal APIs in `aboyeur_artifacts`, `claude_actions_diagnostics`, `claude_actions_http`, `claude_actions_import`, `claude_actions_metadata`, `claude_review_history`, `claude_cloud`, `evidence_ack_acceptance`, `evidence_ack_protocol`, `evidence_ack_crypto`, `grokbot_fleet.app`, and the `memory_doctor` module CLI. No replacement. Move the projection conformance fixture into the test suite.

@@ -281,7 +281,7 @@ See [`docs/workflow-rules.md`](workflow-rules.md) for the public-safe repo workf
 ## Install
 
 ```bash
-npm install --global @escoffier-labs/brigade@0.30.0   # Node.js 22+ and npm
+npm install --global @escoffier-labs/brigade@0.31.0   # Node.js 22+ and npm
 ```
 
 The npm package runs the published `brigade-cli` wheel on a managed Python that it downloads on first launch. Upgrade it with npm, because `brigade update` refuses npm-managed installs. Runtime, cache, and platform details: [`npm/feasibility/README.md`](../npm/feasibility/README.md).
@@ -2013,7 +2013,7 @@ See [QUICKSTART.md](../QUICKSTART.md) for setup, verification, and the ingest fl
 
 ## Managed components
 
-The `brigade components` catalog command is unreleased, targeted for the next 0.31.x release. Stable 0.30 uses `brigade stations` with the same subcommands. See the [component reference](station-contract.md) for alias and manifest compatibility.
+The `brigade components` catalog command shipped in 0.31.0. On 0.30 and earlier, use `brigade stations` with the same subcommands. See the [component reference](station-contract.md) for alias and manifest compatibility.
 
 > **In plain terms:** "components" group built-in capabilities and optional tools Brigade Stack can install and wire for you. Managed tools run as separate command-line processes. Content Guard is embedded in Brigade Stack, so `brigade add guard` only offers the optional Plating helper.
 

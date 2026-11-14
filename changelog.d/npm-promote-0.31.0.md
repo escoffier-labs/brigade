@@ -1,0 +1,1 @@
+- Point the stable npm package at Brigade 0.31.0 by pinning its PyPI wheel, release component manifest and checksums, and cover the Linux-only `brigade-hub` component in the payload audit tests.

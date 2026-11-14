@@ -11,6 +11,7 @@ import re
 import shutil
 import shlex
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path, PurePosixPath
@@ -127,6 +128,8 @@ class _LandingGit:
         for gitdir in (common / "worktrees").glob("*/gitdir"):
             roots.append(Path(gitdir.read_text(encoding="utf-8").strip()).parent.resolve())
         home = _operator_directory(environment.get("HOME", str(Path.home())), roots)
+        self.home = home
+        self.roots = roots
         xdg = _operator_directory(os.environ.get("XDG_CONFIG_HOME", str(home / ".config")), roots)
         pinned = {
             "HOME": str(home),
@@ -829,9 +832,31 @@ def _land_locked(
         "Conductor review and merge required.\n",
         encoding="utf-8",
     )
-    git.tool("vale", [str(body)], git.repository, "pr-body-lint-failed")
+    # Vale configuration comes only from the trusted base commit. A retry (landing_commit
+    # already recorded) lints against the base recorded when the commit was built and never
+    # fetches main again. Only a landing with no recorded base fetches.
+    recorded = str(entry.get("landing_base") or "") if commit else ""
+    if recorded:
+        if not re.fullmatch(r"[0-9a-f]{40}", recorded):
+            raise LandError("inspect-failed")
+        base = git.git(
+            ["rev-parse", "--verify", "--quiet", f"{recorded}^{{commit}}"], git.repository, "inspect-failed"
+        ).strip()
+        # The commit was built directly on the recorded base, so that base can never be the proposal.
+        if git.git(["rev-parse", f"{commit}^"], git.repository, "inspect-failed").strip() != base:
+            raise LandError("inspect-failed")
+    else:
+        base = _fetch_base(git, canonical)
+    config = _materialize_vale_config(git, root, base)
+    # Vale always gets an explicit --config: the validated base .vale.ini copy, else the
+    # operator's own $HOME/.vale.ini when it is a plain file they own, else a synthesized
+    # minimal ini that lints nothing. Without --config Vale searches upward from its working
+    # directory, which can reach the caller checkout when the private root falls back to a
+    # directory under the target. --no-global is deliberately not passed, so the
+    # operator-owned global Vale config still merges.
+    git.tool("vale", ["--config", str(config), str(body)], git.repository, "pr-body-lint-failed")
     if not commit:
-        commit = _prepare(target, entry, issue, git, root, branch, canonical)
+        commit = _prepare(target, entry, issue, git, root, branch, base)
     else:
         git.scan_publication_text(
             entry["landing_title"],
@@ -962,8 +987,201 @@ def _validate_pr_url(url: str, repo: str) -> None:
         raise LandError("invalid-pr-url")
 
 
+def _fetch_base(git: _LandingGit, canonical: str) -> str:
+    git.git(["fetch", "--no-tags", canonical, "refs/heads/main"], git.repository, "fetch-failed")
+    return git.git(["rev-parse", "FETCH_HEAD"], git.repository, "inspect-failed").strip()
+
+
+_VALE_FILE_LIMIT = 4 * 1024 * 1024
+_VALE_TOTAL_LIMIT = 64 * 1024 * 1024
+_VALE_FILE_COUNT = 2000
+_VALE_PATH_KEYS = {"stylespath", "transform", "vocab"}
+
+
+def _git_blob_bytes(git: _LandingGit, sha: str) -> bytes:
+    """Read one blob as raw bytes, bounded by _VALE_FILE_LIMIT."""
+    if not re.fullmatch(r"[0-9a-f]{40,64}", sha):
+        raise LandError("unsafe-vale-config")
+    size = git.git(["cat-file", "-s", sha], git.repository, "inspect-failed").strip()
+    if not size.isdigit() or int(size) > _VALE_FILE_LIMIT:
+        raise LandError("unsafe-vale-config")
+    git._assert_config(git.repository)
+    # Raw bytes are needed, which proc.run cannot return. The size is bounded before and after.
+    try:
+        result = subprocess.run(  # noqa: S603 - pinned git binary, fixed argv
+            [git.tools["git"], "--no-pager", "cat-file", "blob", sha],
+            cwd=git.repository,
+            env=git.env(),
+            capture_output=True,
+            timeout=240,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LandError("inspect-failed") from exc
+    if result.returncode or len(result.stdout) > _VALE_FILE_LIMIT:
+        raise LandError("unsafe-vale-config")
+    return result.stdout
+
+
+_VALE_KEY = re.compile(r"[A-Za-z][A-Za-z0-9._-]*\s*[=:]\s*(.*)")
+_VALE_SECTION = re.compile(r"\[[^\]`\"]+\]")
+_VALE_PATH_VALUE = re.compile(r"[A-Za-z0-9._/, -]+")
+
+
+def _check_vale_ini(text: str) -> PurePosixPath | None:
+    """Accept only a strict subset of INI that go-ini reads the way this check does.
+
+    Everything else is refused, because each form go-ini reads differently from a
+    hand-written parser is a way to point Vale outside the materialized directory.
+    Returns the StylesPath, if any.
+    """
+    # A BOM or control character is read differently by go-ini than by this check.
+    if re.search("[\ufeff\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text):
+        raise LandError("unsafe-vale-config")
+    # go-ini splits lines on LF only, so any other line break would be read differently here.
+    if re.search("\r(?!\n)|[\x85\u2028\u2029]", text):
+        raise LandError("unsafe-vale-config")
+    styles: PurePosixPath | None = None
+    seen: set[tuple[str, str]] = set()
+    section = ""
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line or line[0] in "#;":
+            continue
+        # go-ini joins a line ending in a backslash with the next one.
+        if line.endswith("\\"):
+            raise LandError("unsafe-vale-config")
+        if line.startswith("["):
+            if not _VALE_SECTION.fullmatch(line) or ".." in line:
+                raise LandError("unsafe-vale-config")
+            # go-ini treats exactly [DEFAULT] as the root section. Other casings are refused.
+            if line.lower() == "[default]" and line != "[DEFAULT]":
+                raise LandError("unsafe-vale-config")
+            section = "" if line == "[DEFAULT]" else line.lower()
+            continue
+        found = _VALE_KEY.fullmatch(line)
+        if not found:
+            raise LandError("unsafe-vale-config")
+        key = re.split(r"\s*[=:]", line, maxsplit=1)[0].lower()
+        value = found[1].strip()
+        if key in {"include", "includes", "import", "imports", "nlpendpoint"} or (section, key) in seen:
+            raise LandError("unsafe-vale-config")
+        seen.add((section, key))
+        if "`" in value or '"""' in value or re.search(r"\s[;#]", value):
+            raise LandError("unsafe-vale-config")
+        if key in _VALE_PATH_KEYS:
+            # Path values are a closed character set, checked before any splitting.
+            if not _VALE_PATH_VALUE.fullmatch(value):
+                raise LandError("unsafe-vale-config")
+            for part in re.split(r"[,\s]+", value):
+                if part.startswith("/") or ".." in part.split("/"):
+                    raise LandError("unsafe-vale-config")
+        elif any(".." in part.split("/") for part in re.split(r"[,\s]+", value.strip("\"'"))):
+            raise LandError("unsafe-vale-config")
+        if key == "stylespath":
+            # Vale reads StylesPath only from the root section.
+            if section:
+                raise LandError("unsafe-vale-config")
+            styles = PurePosixPath(value)
+            if styles.is_absolute() or ".." in styles.parts or not [p for p in styles.parts if p != "."]:
+                raise LandError("unsafe-vale-config")
+            styles = PurePosixPath(*[p for p in styles.parts if p != "."])
+    return styles
+
+
+def _operator_vale_config(git: _LandingGit) -> Path | None:
+    """The operator's own $HOME/.vale.ini, when it is a plain file the operator owns."""
+    path = git.home / ".vale.ini"
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        status = path.stat()
+        # A hardlink could alias a file outside the operator's control.
+        if status.st_uid != os.getuid() or status.st_nlink != 1:
+            return None
+        if any(path.resolve().is_relative_to(root) for root in git.roots):
+            return None
+    except OSError:
+        return None
+    return path
+
+
+def _materialize_vale_config(git: _LandingGit, root: Path, base: str) -> Path:
+    """Write the Vale config for the PR body lint into a fresh private directory.
+
+    With a base .vale.ini this is a validated copy plus its StylesPath subtree, read as bytes
+    from the base tree. Without one it is the operator's $HOME/.vale.ini when usable, else a
+    synthesized minimal ini. Nothing is read from the proposal, the caller's checkout or a
+    package download.
+    """
+    listing = git.git(["ls-tree", "-z", base, "--", ".vale.ini"], git.repository, "inspect-failed")
+    text = ""
+    styles: PurePosixPath | None = None
+    if listing:
+        if not listing.startswith("100644 blob ") and not listing.startswith("100755 blob "):
+            raise LandError("unsafe-vale-config")
+        text = git.git(["show", f"{base}:.vale.ini"], git.repository, "inspect-failed")
+        styles = _check_vale_ini(text)
+    elif operator := _operator_vale_config(git):
+        # No base config: lint with the operator's own file, as Vale's upward search did before.
+        return operator
+    directory = root / "vale-config"
+    # A retry reuses the private root, so rebuild the directory from the base.
+    try:
+        if directory.is_symlink():
+            raise LandError("unsafe-vale-config")
+        if directory.exists():
+            shutil.rmtree(directory)
+        if directory.exists() or directory.is_symlink():
+            raise LandError("unsafe-vale-config")
+        directory.mkdir(mode=0o700)
+        ini = directory / ".vale.ini"
+        # With neither a base nor an operator config this lints nothing: Vale reports 0 files.
+        ini.write_text(text if listing else "MinAlertLevel = suggestion\n", encoding="utf-8")
+        if styles is not None:
+            _copy_vale_styles(git, base, directory, styles)
+    except OSError as exc:
+        raise LandError("unsafe-vale-config") from exc
+    return ini
+
+
+def _copy_vale_styles(git: _LandingGit, base: str, directory: Path, styles: PurePosixPath) -> None:
+    # Style YAML is copied as is. Fields such as ignore, dicpath or script can name absolute
+    # files, and that is accepted because the style files come from the trusted base commit.
+    # Every component of StylesPath must be a plain directory in the base tree.
+    for index in range(1, len(styles.parts) + 1):
+        prefix = "/".join(styles.parts[:index])
+        entry = git.git(["ls-tree", "-z", base, "--", prefix], git.repository, "inspect-failed")
+        if not entry.startswith("040000 tree "):
+            raise LandError("unsafe-vale-config")
+    destination = (directory / Path(*styles.parts)).resolve()
+    if not destination.is_relative_to(directory.resolve()):
+        raise LandError("unsafe-vale-config")
+    tree = git.git(["ls-tree", "-r", "-z", base, "--", "/".join(styles.parts)], git.repository, "inspect-failed")
+    records = list(filter(None, tree.split("\0")))
+    if len(records) > _VALE_FILE_COUNT:
+        raise LandError("unsafe-vale-config")
+    total = 0
+    for record in records:
+        meta, _, name = record.partition("\t")
+        fields = meta.split()
+        if len(fields) != 3 or fields[0] not in {"100644", "100755"} or fields[1] != "blob":
+            raise LandError("unsafe-vale-config")
+        if ".." in PurePosixPath(name).parts:
+            raise LandError("unsafe-vale-config")
+        out = directory / Path(*PurePosixPath(name).parts)
+        if not out.resolve().is_relative_to(directory.resolve()):
+            raise LandError("unsafe-vale-config")
+        out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        data = _git_blob_bytes(git, fields[2])
+        total += len(data)
+        if total > _VALE_TOTAL_LIMIT:
+            raise LandError("unsafe-vale-config")
+        out.write_bytes(data)
+
+
 def _prepare(
-    target: Path, entry: dict[str, Any], issue: int, git: _LandingGit, root: Path, branch: str, canonical: str
+    target: Path, entry: dict[str, Any], issue: int, git: _LandingGit, root: Path, branch: str, base: str
 ) -> str:
     status = git.tool("codex", ["cloud", "status", entry["task_id"]], git.repository, "status-failed")
     if codex_cloud._verified_status(status) not in codex_cloud.TERMINAL_OK:
@@ -975,8 +1193,6 @@ def _prepare(
         title = "fix: " + re.sub(r"^[a-z]+(?:\([^)]+\))?:\s*", "", title) if title else f"fix: address #{issue}"
     message = f"{title}\n\nCo-Authored-By: Codex <codex@openai.com>"  # content-guard: allow pii/email
     git.scan_publication_text(title, message, (root / "pr-body.md").read_text(encoding="utf-8"))
-    git.git(["fetch", "--no-tags", canonical, "refs/heads/main"], git.repository, "fetch-failed")
-    base = git.git(["rev-parse", "FETCH_HEAD"], git.repository, "inspect-failed").strip()
     _update(target, entry, landing_base=base, landing_title=title, landing_attempt=1)
     tree = root / "worktree"
     git.git(["worktree", "add", "-b", branch, str(tree), base], git.repository, "worktree-failed")

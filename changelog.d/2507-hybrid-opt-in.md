@@ -1,1 +1,0 @@
-- Default Fleet Hub setup to BM25 (`lexical`) without embedder probes for 0.31.0 after the local GPU branch missed latency targets under host load. Hybrid requires `init --retrieval hybrid` or `switch --to hybrid`. Explicit hybrid init refuses without writes when no embedder passes its probe (#2507).

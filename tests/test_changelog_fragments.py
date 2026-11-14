@@ -67,6 +67,17 @@ def test_natural_order_sorts_pr_numbers_numerically():
     assert sorted(names, key=cf.natural_key) == ["99.md", "2231.md", "alpha.md", "b2.md", "b10.md"]
 
 
+@pytest.mark.parametrize("name", ["aux.md", "CON.md", "nul.md", "com1.md", "LPT9.md", "prn.v2.md"])
+def test_validate_names_rejects_windows_reserved_device_names(name):
+    # Upper case also fails the lowercase-only name rule, so look for the reserved-name problem.
+    assert any("Windows reserved device name" in problem for problem in cf.validate_names([name]))
+
+
+@pytest.mark.parametrize("name", ["com10.md", "console.md", "auxiliary.md", "lpt0.md", "my-con.md"])
+def test_validate_names_allows_names_that_only_resemble_device_names(name):
+    assert cf.validate_names([name]) == []
+
+
 def test_validate_names_rejects_bad_and_case_duplicate_names():
     assert cf.validate_names(["2231.md", "fix-thing.md", "a.b_c.md"]) == []
     problems = cf.validate_names(["Upper.md", "note.txt", "-dash.md", "dup.md", "DUP.md"])

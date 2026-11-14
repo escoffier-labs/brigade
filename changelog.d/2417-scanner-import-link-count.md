@@ -1,1 +1,0 @@
-- A scanner import is no longer rejected as "import file not found" when another process creates or removes a directory in the target or one of its parent directories while the import is being opened. Only a swapped path component still refuses the import.

@@ -2,10 +2,11 @@
 
 # Components reference
 
-`brigade components list|discover|verify` is unreleased, targeted for the next
-0.31.x release (preferably 0.31.0 if still unreleased at integration). Stable
-0.30 users should use `brigade stations list|discover|verify` instead. The
-`brigadestack` bridge accepts the same commands when backed by the new CLI.
+`brigade components list|discover|verify` shipped in 0.31.0 and is available
+from PyPI (`brigade-cli`), npm (`@escoffier-labs/brigade`) and the
+`brigadestack` bridge. On 0.30 and earlier, use
+`brigade stations list|discover|verify` instead.
+The bridge accepts the same commands when backed by a 0.31.0 or newer CLI.
 
 `stations` remains a supported quiet alias with identical arguments and exit
 codes, no warning, and no removal date. Root help advertises only `components`.

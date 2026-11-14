@@ -1,22 +1,22 @@
 # Brigade Stack Quickstart
 
-Install stable 0.30.0, then configure one repository and record a check. Brigade Stack is built by Escoffier Labs. The command reference and generated files retain the compatible `brigade` name.
+Install stable 0.31.0, then configure one repository and record a check. Brigade Stack is built by Escoffier Labs. The command reference and generated files retain the compatible `brigade` name.
 
 ## 1. Install
 
-Choose one route. Git is required for the repository walkthrough. These commands install the published stable bridge, while `main` contains the unreleased 0.31 preview. See [update channels](docs/update-channels.md) before choosing a development build.
+Choose one route. Git is required for the repository walkthrough. These commands install the published stable bridge (0.31.0), which matches `brigade-cli` 0.31.0 on PyPI. `main` is the 0.32 preview. See [update channels](docs/update-channels.md) before choosing a development build.
 
 ### npm
 
 Use Node.js `^22.15.0 || >=23.11.0` and npm on glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64. Other targets, including musl Linux and Windows ARM64, use Python.
 
 ```bash
-npm install --global brigadestack@0.30.0
+npm install --global brigadestack@0.31.0
 brigadestack --version
 brigadestack --help
 ```
 
-The bridge exposes `brigadestack`. Do not assume its dependency's `brigade` command is on PATH. Expected version output is `brigade 0.30.0`, the underlying CLI's version.
+The bridge exposes `brigadestack`. Do not assume its dependency's `brigade` command is on PATH. Expected version output is `brigade 0.31.0`, the underlying CLI's version.
 
 Generated agent instructions and printed next-step suggestions still use `brigade`. On a bridge-only install, run them as `brigadestack` and tell your agents to do the same. With npx, use the full prefix below. Existing `brigade` installs need no change.
 
@@ -25,17 +25,17 @@ The first launch needs network access to download a managed Python. Keep npm opt
 For a one-off invocation:
 
 ```bash
-npx --yes brigadestack@0.30.0 --version
+npx --yes brigadestack@0.31.0 --version
 ```
 
-On that route, replace `brigadestack` at the start of **every** command below with `npx --yes brigadestack@0.30.0`. It does not create a global command.
+On that route, replace `brigadestack` at the start of **every** command below with `npx --yes brigadestack@0.31.0`. It does not create a global command.
 
 ### Python with pipx
 
 Requires Python 3.11 or newer. Install pipx using its [platform install guide](https://pipx.pypa.io/latest/installation/), then:
 
 ```bash
-pipx install brigadestack==0.30.0
+pipx install brigadestack==0.31.0
 brigadestack --version
 brigadestack --help
 ```
@@ -47,7 +47,7 @@ On Linux, prefer your distribution's pipx package. The linked guide covers platf
 If you already use uv, the equivalent isolated tool install is:
 
 ```bash
-uv tool install brigadestack==0.30.0
+uv tool install brigadestack==0.31.0
 brigadestack --version
 ```
 
@@ -67,7 +67,7 @@ The stable install and walkthrough were replayed on Linux x64. macOS and Windows
 
 Keep your working install. Existing `brigade` commands, `brigade` Python imports, `.brigade/` data, and stored evidence remain compatible. You can follow the walkthrough using `brigade` wherever it says `brigadestack`. No uninstall or service migration is required to keep using it.
 
-If you choose the new bridge, install it with one route above and check `brigadestack --version`. The bridge delegates to stable 0.30.0. Avoid mixing commands from different versions on PATH. Updating a bridge is a package-manager operation with an exact version. The npm-managed CLI refuses `brigade update`. This walkthrough does not change existing services or schedulers.
+If you choose the new bridge, install it with one route above and check `brigadestack --version`. The bridge delegates to stable 0.31.0. Avoid mixing commands from different versions on PATH. Updating a bridge is a package-manager operation with an exact version. The npm-managed CLI refuses `brigade update`. This walkthrough does not change existing services or schedulers.
 
 On pipx or uv bridge installs, do not use `brigadestack update`: the stable updater targets a separate `brigade-cli` pipx app rather than updating the bridge. Manage the bridge through the package manager you used, with an exact version. The [update-channel guide](docs/update-channels.md) describes the legacy CLI's updater.
 
@@ -97,7 +97,7 @@ brigadestack setup --dry-run
 brigadestack setup
 ```
 
-On the stable 0.30.0 smoke host, setup returned exit 0 without output. Inspect evidence health with `brigadestack evidence status`, or see the code-graph interface with `brigadestack code --help`. Setup does not guarantee that a dependency command is available on PATH. The [technical guide](docs/technical-guide.md#managed-stations) covers the engine surfaces. No service or session setup is needed here.
+On the 0.30.0 smoke host, setup returned exit 0 without output. Inspect evidence health with `brigadestack evidence status`, or see the code-graph interface with `brigadestack code --help`. Setup does not guarantee that a dependency command is available on PATH. The [technical guide](docs/technical-guide.md#managed-stations) covers the engine surfaces. No service or session setup is needed here.
 
 ## Next steps
 
