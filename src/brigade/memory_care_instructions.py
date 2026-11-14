@@ -166,10 +166,14 @@ def loader_config_line(inventory: Inventory) -> str | None:
     Without it the limits fall back to Brigade's own targets, which can be looser than the
     harness's real cap, and a file the harness is already cutting would look within budget.
     """
-    reason = inventory.loader_reason
-    if reason is None or reason in QUIET_LOADER_REASONS:
+    # The inventory-level reason covers one harness. A cap another harness could not give
+    # (for example a platform where its configuration cannot be read safely) is on the rows.
+    found = {inventory.loader_reason, *(item.limit_reason for item in inventory.files if not item.excluded)}
+    reasons = sorted(reason for reason in found if reason and reason not in QUIET_LOADER_REASONS)
+    if not reasons:
         return None
-    return f"instruction_budget: {LOADER_CONFIG_UNREADABLE} reason={code(reason)} {_NEXT}"
+    joined = ",".join(code(reason) for reason in reasons)
+    return f"instruction_budget: {LOADER_CONFIG_UNREADABLE} reason={joined} {_NEXT}"
 
 
 def _resolved(path: Path) -> Path:

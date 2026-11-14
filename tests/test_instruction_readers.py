@@ -273,3 +273,17 @@ def test_a_readable_or_absent_harness_configuration_adds_no_loader_line(tmp_path
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
     assert not any("loader-config-unreadable" in line for line in brief_payload(ws)["alerts"])
+
+
+def test_the_brief_warns_when_another_harness_cap_is_unavailable(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    (home / ".codex").mkdir(exist_ok=True)
+    (home / ".codex" / "config.toml").write_text("project_doc_max_bytes = 4096\n", encoding="utf-8")
+    (ws / "AGENTS.md").unlink(missing_ok=True)
+    sized(ws / "AGENTS.md", 5000)  # over the harness's 4,096 cap, under the fallback target
+    monkeypatch.delattr(os, "O_NONBLOCK", raising=False)  # as on a platform that cannot read the file safely
+    alerts = brief_payload(ws)["alerts"]
+    # Rule: a cap that could not be read is named, whichever harness it belongs to.
+    (line,) = [item for item in alerts if "loader-config-unreadable" in item]
+    assert "config-nonblocking-unavailable" in line
