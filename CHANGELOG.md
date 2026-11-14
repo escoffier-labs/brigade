@@ -271,6 +271,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Keep external Worklore scopes reserved across later legacy events, and refuse expiry cleanup of unsupported ownership histories.
 
+### Changed
+
 - Explain that older Fleet Hubs need an upgrade when they reject unread-count requests as an unsupported action.
 - Bound the optional local full verification gate to one run per user per host with at most four shard workers. The admission slots live in an owner-only directory under `/tmp`, shared across linked worktrees and separate clones, and `verify-fast` now delegates to the same gate. Required CI is unchanged and is not throttled.
 - Add node-authenticated Fleet reservation acceptance (`reservation-accept`) with current target, policy, expiry, bound work eligibility and model-retirement checks. A work item that was blocked, held or deleted after routing is refused without accepting the reservation. Exact retries preserve the original reservation and expiry.
@@ -3090,7 +3092,8 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.30.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/escoffier-labs/brigade/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/escoffier-labs/brigade/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/escoffier-labs/brigade/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/escoffier-labs/brigade/compare/v0.27.0...v0.28.0
