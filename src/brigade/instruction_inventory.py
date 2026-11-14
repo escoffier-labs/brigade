@@ -609,6 +609,25 @@ def _unique_keys(files: list[InstructionFile]) -> list[InstructionFile]:
     return numbered
 
 
+_CLASS_STRICTNESS = {"report": 0, "policy": 1, "append": 2}
+
+
+def _merged_override(found: list[FileOverride]) -> FileOverride | None:
+    """One override for a file that several configured names reach: the strictest class and the smallest limit.
+
+    Hard links and symlinks let two entries name one file. Picking either by set order
+    would change the limit from run to run, so the result never depends on order.
+    """
+    if not found:
+        return None
+    classes = [item.file_class for item in found if item.file_class is not None]
+    limits = [item.limit_bytes for item in found if item.limit_bytes is not None]
+    return FileOverride(
+        file_class=min(classes, key=lambda name: _CLASS_STRICTNESS.get(name, 0)) if classes else None,
+        limit_bytes=min(limits) if limits else None,
+    )
+
+
 def _build(
     group: _Group,
     *,
@@ -641,8 +660,9 @@ def _build(
         loaders.add(codex_cap.loader)
         caps.append(codex_cap)
 
-    requested = next((found for found in map(overrides.get, group.reals) if found is not None), None) or next(
-        (found for path in group.candidates if (found := overrides.get(_resolved(path))) is not None), None
+    requested = _merged_override(
+        [found for found in map(overrides.get, group.reals) if found is not None]
+        + [found for path in group.candidates if (found := overrides.get(_resolved(path))) is not None]
     )
     # A rejected override is recorded but applies nothing.
     override = None if group.rejected else requested

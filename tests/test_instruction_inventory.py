@@ -835,3 +835,18 @@ def test_a_second_name_for_one_file_never_loosens_its_limit(tmp_path):
     (row,) = [item for item in discover(ws, InstructionsConfig(), home=home, environ=env).files if item.size == 7_000]
     # Rule: grouping two names into one row takes the smaller table target.
     assert row.target_budget <= alone.target_budget and row.limit <= alone.limit
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hard links to a fixture file")
+def test_two_overrides_for_one_file_give_the_strictest_class_and_smallest_limit(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    sized(ws / "notes" / "one.md", 3_000)
+    os.link(ws / "notes" / "one.md", ws / "notes" / "two.md")
+    seen = set()
+    for first, second in (("notes/one.md", "notes/two.md"), ("notes/two.md", "notes/one.md")):
+        files = ((first, FileOverride("append", 5_000)), (second, FileOverride("policy", 1_000)))
+        inv = discover(ws, InstructionsConfig(files=files), home=home, environ=env)
+        (row,) = [item for item in inv.files if item.size == 3_000]
+        seen.add((row.file_class, row.limit, row.requested_limit_bytes))
+    # Rule: the result never depends on which entry is read first.
+    assert seen == {("policy", 1_000, 1_000)}
