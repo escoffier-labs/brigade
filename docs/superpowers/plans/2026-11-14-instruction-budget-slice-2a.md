@@ -115,6 +115,7 @@ Kind `fix`: the test fails until this plan's change exists. Kind `guard`: existi
 | W27 | A second undo after an abandoned restore | Removes the unchanged cards whose sections are back whole, marks the original undone | `plan_restore` cards-only result | fix | U `test_second_undo_after_abandoned_restore_removes_the_cards` |
 | W28 | `read_only_paths` names a link that resolves to the tended file | Not written, reason `read-only` | `tendable` checks every alias in `file.paths` | fix | M `test_read_only_alias_protects_the_real_file` |
 | W29 | A pointer-only move on a file with no final newline, then undo | The added `\n` is recorded as the `separator` flag, outside the pointer bytes. Undo gives the file back byte for byte. With text appended after the pointer, the newline stays | `AddedPointer.separator`, separator rule | fix | T `test_separator_byte_counts_against_the_limit`, R `test_overflow_separator_removed_with_its_pointer`, U `test_pointer_only_move_and_undo_keep_a_file_without_final_newline` |
+| W30 | The file ends inside an unclosed code fence, an overflow card is due | No overflow pointer is added while the fence is open, the card stays in `pending_pointers`, and repeated passes add nothing. Undo of a later move restores byte for byte | `SectionDocument.eof_in_fence`, rule 7, `check` | fix | S `test_fences_and_setext_are_body_text`, T `test_no_overflow_pointer_when_the_file_ends_in_a_fence`, M `test_open_fence_at_the_end_gets_no_pointer_on_repeated_passes` |
 | C1 | Move: crash after before-images, before the `prepare` plan | Nothing visible. Next pass plans again under a new id | Nothing to recover | guard | J `test_move_crash_before_prepare_leaves_nothing` |
 | C2 | Move: crash inside `prepare` after the record or some cards | Kernel recovery removes them | Existing forward recovery | fix | J `test_move_crash_inside_prepare_restores_clean` (two cards, so three prepare mutations: `crash_after` 1 and 2) |
 | C3 | Move: crash between `prepare` and `finish` | Recovery finishes it under the document lock | Pending row, `document_undo` | guard | J `test_move_crash_between_phases_finishes_under_the_document_lock` (C13 pins that the stage sets the flag) |
@@ -148,7 +149,7 @@ Kind `fix`: the test fails until this plan's change exists. Kind `guard`: existi
 | P14 | A forged or damaged record whose before-image section does not hash to its `section_sha256` | No text restored. The pointer stays, the run is kept as `lost` | `reconcile`, `plan_restore` | fix | R `test_section_that_fails_its_digest_is_never_restored`, M `test_forged_record_with_a_wrong_digest_restores_nothing` |
 | P15 | A forged record names another file as its `file` | Only the tended file is written. The record is not read for that file | `records` filters by the tended file | fix | M `test_forged_record_for_another_file_writes_nothing_there` |
 | P16 | A crash between phases, then the tended file swapped for a link | Recovery abandons the decision. A second `resolve_prepared` returns no rows, and the inbox drain runs | `_live` in `finish_prepared` | fix | J `test_linked_file_after_prepare_does_not_block_recovery` |
-| P17 | A real pointer copied into a fence or a managed block, the original deleted | Restore refuses `pointer-in-block`, reconcile restores nothing there | `pointer_spans` `in_block` | fix | R `test_pointer_in_a_fence_or_managed_block_is_refused` |
+| P17 | A real pointer, run or overflow, copied into a fence or a managed block, the original deleted | Restore refuses `pointer-in-block` and nothing is marked undone, reconcile restores nothing there | `pointer_spans` `in_block` | fix | R `test_pointer_in_a_fence_or_managed_block_is_refused`, R `test_overflow_pointer_only_in_a_block_refuses_restore` |
 | P18 | A real pointer copied into another instruction file | Inert there. Restore writes only the recorded file | `restore` checks the recorded file | fix | M `test_pointer_copied_to_another_file_is_inert` |
 | P19 | `state.json` planted as a symlink, a FIFO or a file over 1 MiB | Read as missing, full scan, never written through a link | `safe_path`, `read_regular_file` | fix | M `test_planted_state_file_is_never_trusted` (symlink, FIFO, oversized) |
 | P20 | `state.json` cursor after the newest journal directory | Full scan | Cursor check | fix | M `test_cursor_ahead_of_the_journal_forces_a_full_scan` |
@@ -181,7 +182,7 @@ Kind `fix`: the test fails until this plan's change exists. Kind `guard`: existi
 | S18 | A card's text present in the file only inside a larger section, or inside a fence | The card is kept and its decision is not completed | Whole parsed section match | fix | R `test_card_text_inside_a_larger_section_keeps_the_card` |
 | S19 | Comment lines and the marker rule: `<!-- END of notes -->`, a lowercase `<!-- begin draft -->`, or a marker inside a longer line are body text. Any whole-line `<!-- NAME:START -->` (other tools' blocks such as a routing or banlist block are protected) still pairs, so a lone whole-line `<!-- foo:start -->` makes the file `unbalanced-markers` | The file parses, or is left alone when unbalanced | Task 1 marker rule | fix | S `test_marker_rule_body_text_and_unbalanced` |
 
-94 rows. Every row names a test. Twelve rows are guards: W2, W7, W12, W18, C1, C3, C5, C7, C9, P2, S6 and S11. Every other row fails without its change.
+95 rows. Every row names a test. Twelve rows are guards: W2, W7, W12, W18, C1, C3, C5, C7, C9, P2, S6 and S11. Every other row fails without its change.
 
 ### Design rows, mapped
 
@@ -242,6 +243,7 @@ class SectionDocument:
     units: tuple[Unit, ...]          # in file order
     fixed_end: int                   # end of the text before the first unit
     problem: str | None              # "not-utf8" | "unbalanced-markers" | None
+    eof_in_fence: bool               # the file ends inside an unclosed fence (row W30)
 
 @dataclass(frozen=True)
 class PointerSpan:
@@ -454,7 +456,7 @@ Tasks 1 to 4 touch disjoint files, so Task 4 can run beside Tasks 1 to 3. One pu
 **Interfaces:** produces everything in the first block of "Pure functions". Consumes nothing from Brigade except the `managed_block` marker patterns (`src/brigade/managed_block.py:57-66`), read as constants.
 
 Rules the parser pins:
-- Headings are ATX (`#` to `######` then a space or end of line), outside fenced code (```` ``` ```` or `~~~`, three or more, closed by the same character at least as long) and outside managed blocks. Setext headings are body text. An unclosed fence runs to the end of the file.
+- Headings are ATX (`#` to `######` then a space or end of line), outside fenced code (```` ``` ```` or `~~~`, three or more, closed by the same character at least as long) and outside managed blocks. Setext headings are body text. An unclosed fence runs to the end of the file, and `eof_in_fence` is then true.
 - Managed blocks: a marker is a line that holds only an HTML comment (whitespace around it allowed), outside fences. Pairing is by a name, compared as exact bytes:
   - `<!-- NAME:START -->` pairs with `<!-- NAME:END -->`, the suffix matched without regard to case, so the legacy `<!-- brigade:user-profile:start -->` and `<!-- brigade:user-profile:end -->` pair under the name `brigade:user-profile`.
   - `<!-- BEGIN BRIGADE NAME ... -->` pairs with `<!-- END BRIGADE NAME -->`, exactly as `managed_block._BEGIN_LOOSE_RE` and `_END_LOOSE_RE` recognise them and `_BEGIN_RE` and `_END_RE` name them (case-sensitive `BEGIN BRIGADE` and `END BRIGADE`). So `<!-- BEGIN BRIGADE INTEGRATION v:1 profile:full hash:<sha256> -->` has the name `INTEGRATION` and pairs with `<!-- END BRIGADE INTEGRATION -->`.
@@ -486,6 +488,7 @@ def test_h1_text_is_fixed_and_level_two_sections_are_units():
 def test_fences_and_setext_are_body_text():
     doc = parse(b"## A\n```\n## not a heading\n```\nText\n====\n## B\n")
     assert [u.heading for u in doc.units] == [b"## A", b"## B"]
+    assert doc.eof_in_fence is False and parse(b"## A\n```\ncode\n").eof_in_fence is True
 
 def test_pins_under_any_heading_of_the_unit():
     doc = parse(f"## A\n{KEEP}\nx\n## B\n### B1\n<!-- brigade:keep until=2026-12-14 -->\ny\n## C\nz\n".encode())
@@ -571,10 +574,10 @@ Rules:
   4. Add candidates one at a time while the projected size is over `trim_to` and fewer than `max_moves` units are chosen. Projected size: the data, less every run's bytes, plus every run's pointer, plus the overflow pointers and their separator byte when one is needed (row W29). Runs are maximal groups of chosen units whose spans touch, split before a unit that would take the run past `max_card_bytes - CARD_OVERHEAD`. A run's slug comes from its first unit.
   5. Drop each run whose bytes are under three times its pointer bytes, as skipped `small-run`.
   6. Names: `card_rel(file_key, slug, n)` with the first `n` from 1 whose file name is not in `taken` and not used earlier in the plan.
-  7. Overflow pointers go at the end, in the order given, each exactly `pointer_line(..., overflow=True)`, which already ends in its `\n`, with one `\n` first when the data does not end in one. That `\n` is not part of any pointer's `data`: the first added pointer carries `separator=True` instead, and the record stores it, so `records` still sees each pointer as one `POINTER_LINE` (row W29). A pointer that would take the result over `limits.limit`, counting its separator byte, is not added and is left out of `added`, so its card stays in `pending_pointers` (row W23). In the owner file a third overflow pointer would cross 4,000 bytes (3,660 + 138 + 140 + 140 = 4,078) and waits.
+  7. When `doc.eof_in_fence` is true, no overflow pointer is added and every overflow card stays in `pending_pointers`: a pointer appended there would sit inside the fence, where restore and reconcile never act and the card-path match never sees it (row W30). Otherwise overflow pointers go at the end, in the order given, each exactly `pointer_line(..., overflow=True)`, which already ends in its `\n`, with one `\n` first when the data does not end in one. That `\n` is not part of any pointer's `data`: the first added pointer carries `separator=True` instead, and the record stores it, so `records` still sees each pointer as one `POINTER_LINE` (row W29). A pointer that would take the result over `limits.limit`, counting its separator byte, is not added and is left out of `added`, so its card stays in `pending_pointers` (row W23). In the owner file a third overflow pointer would cross 4,000 bytes (3,660 + 138 + 140 + 140 = 4,078) and waits.
   8. Reason: `still-over-after-moves` when the result is over `trim_to` and a candidate is left unused, `nothing-movable` when it is over `act_at` and none is left, else `None`.
 - `card_bytes` writes the frontmatter fields from Global Constraints in that order, then `section` unchanged.
-- `check` returns one string per failed check, the design's seven: putting each run back and removing the added pointers, and the separator `\n` of the pointer that has one, gives `before` exactly. Each card body equals its run's bytes and `card_trust_problem` passes. Managed blocks are byte-identical in order and count. `after` starts with `before[:fixed_end]`, because a pointer for the first run lands right after that text and becomes part of the next parse's fixed text. Every pinned or config-pinned unit is byte-identical. The result parses with no problem and is UTF-8. Every pointer occurs once and is at most 240 bytes. The size is at or under trim-to, or the reason says why not.
+- `check` returns one string per failed check, the design's seven: putting each run back and removing the added pointers, and the separator `\n` of the pointer that has one, gives `before` exactly. Every added pointer is a `pointer_spans` entry of `after` with `in_block` false. Each card body equals its run's bytes and `card_trust_problem` passes. Managed blocks are byte-identical in order and count. `after` starts with `before[:fixed_end]`, because a pointer for the first run lands right after that text and becomes part of the next parse's fixed text. Every pinned or config-pinned unit is byte-identical. The result parses with no problem and is UTF-8. Every pointer occurs once and is at most 240 bytes. The size is at or under trim-to, or the reason says why not.
 
 - [ ] **Step 1: Write the failing tests** in `tests/test_instruction_trim.py`
 
@@ -698,6 +701,10 @@ def test_overflow_pointer_that_would_cross_the_limit_waits():             # matr
     plan = _plan(owner_user_md(), overflow=cards)                            # 3,660 + 138 + 140 = 3,938, then 4,078
     assert [len(p.data) for p in plan.added] == [138, 140] and len(plan.after) == 3938
 
+def test_no_overflow_pointer_when_the_file_ends_in_a_fence():             # matrix W30
+    # owner_user_md() plus "```\ncode\n" and one overflow card: plan.added == () and the card is pending.
+    ...
+
 def test_separator_byte_counts_against_the_limit():                       # matrix W29
     # A file with no final newline whose size plus one pointer is exactly the limit: the separator
     # would make it one byte over, so the pointer waits and its card stays pending. With one byte more
@@ -753,7 +760,7 @@ Rules:
   - A decision is `completed` when none of its run pointers and none of its recorded overflow pointers occurs, and each of its runs either has its section present as a whole section or is in `removed_by_edit`. A move whose overflow pointer is still live stays loaded, so a later deletion or undo of that overflow card can still drop the pointer (row P27). A decision completed with any run in `removed_by_edit` is reported once, as a count and its decision id, in the pass that completes it.
   - Two cards with the same body are both removed when that body is present once: the text stays in the file either way.
   - Replacements are applied from the end of the file to the start, so offsets stay valid.
-- `plan_restore` for one decision: no runs and no overflow pointer present gives `nothing-to-restore`. Each run is then in one of three states. Its pointer occurs once: it is restored, which needs the span outside any block (else `pointer-in-block`) and its card present (else `card-missing`) with a body digest equal to `section_sha256` (else `card-changed`), so the bytes put back always hash to the digest recorded at move time. Its pointer is absent and its section is present as a whole section: it is already back, and its card is removed when the body still matches, else kept. Anything else refuses with `pointer-missing` or `pointer-duplicated`. A recorded overflow pointer that occurs more than once outside any block also refuses `pointer-duplicated`, before anything is planned, so undo never marks a move undone while copies of its pointer stay in the file (row P5). When every run is already back, no card is left to remove and no recorded overflow pointer occurs, the answer is `already-restored`. When every run is already back and an overflow pointer still occurs, the result removes it (with its separator, row W29) and holds its card, as in any restore (row P27). When every run is already back, no overflow pointer occurs and some cards are left, the result has `after == file` and lists only those cards (row W27). The result swaps each pointer span for the card body, removes each recorded overflow pointer that occurs once outside any block, removes the cards named above, and fills `held` with the `sha256` of every unit of `parse(after)` whose span lies inside a span it put back or a section it found already back, one digest per unit (row W21), and `held_cards` with each overflow card whose pointer it removed.
+- `plan_restore` for one decision: no runs and no overflow pointer present gives `nothing-to-restore`. Each run is then in one of three states. Its pointer occurs once: it is restored, which needs the span outside any block (else `pointer-in-block`) and its card present (else `card-missing`) with a body digest equal to `section_sha256` (else `card-changed`), so the bytes put back always hash to the digest recorded at move time. Its pointer is absent and its section is present as a whole section: it is already back, and its card is removed when the body still matches, else kept. Anything else refuses with `pointer-missing` or `pointer-duplicated`. A recorded overflow pointer that occurs more than once outside any block also refuses `pointer-duplicated`, and one whose only occurrences are inside blocks refuses `pointer-in-block`, before anything is planned, so undo never marks a move undone while copies of its pointer stay in the file (row P5). When every run is already back, no card is left to remove and no recorded overflow pointer occurs, the answer is `already-restored`. When every run is already back and an overflow pointer still occurs, the result removes it (with its separator, row W29) and holds its card, as in any restore (row P27). When every run is already back, no overflow pointer occurs and some cards are left, the result has `after == file` and lists only those cards (row W27). The result swaps each pointer span for the card body, removes each recorded overflow pointer that occurs once outside any block, removes the cards named above, and fills `held` with the `sha256` of every unit of `parse(after)` whose span lies inside a span it put back or a section it found already back, one digest per unit (row W21), and `held_cards` with each overflow card whose pointer it removed.
 
 - [ ] **Step 1: Write the failing tests** in `tests/test_instruction_reconcile.py`. One helper `_moved(data)` runs Task 2's `plan_append` on `owner_user_md()` and returns `(after, runs, cards)` built the way Task 5 records them. Tests, each with the assertion in its name:
 
@@ -765,6 +772,7 @@ def test_replaced_card_is_never_read_back()                       # P3, S10: bod
 def test_pointer_shaped_line_is_inert()                           # P4: an extra valid-shaped line naming another card changes nothing
 def test_duplicated_pointer_refuses()                             # P5: pointer-duplicated from both functions, file unchanged
 def test_duplicated_overflow_pointer_refuses_restore()             # P5: move with sections and an overflow pointer, pointer copied once, plan_restore refuses
+def test_overflow_pointer_only_in_a_block_refuses_restore()        # P17: the overflow pointer moved into a fence, plan_restore refuses pointer-in-block
 def test_overflow_pointer_removed_when_its_card_is_gone()         # W13
 def test_restore_is_exact_when_nothing_changed()                  # restore of the owner plan returns owner_user_md() byte for byte
 def test_restore_keeps_later_edits()                              # text appended and inserted between pointers survives
@@ -973,6 +981,7 @@ def test_overflow_pointer_dropped_after_sections_came_back()            # P27
 def test_one_overflow_card_gets_one_pointer()                           # P28
 def test_overflow_card_keeps_a_pointer_after_its_creator_is_undone()    # P29
 def test_pointer_copy_in_a_fence_does_not_stop_the_real_pointer()       # card-path match ignores block spans
+def test_open_fence_at_the_end_gets_no_pointer_on_repeated_passes()     # W30: two passes 20 hours apart, no pointer, no checks-failed
 def test_cards_only_reconcile_abandons_when_the_file_changes()          # C17, edit before commit and after a crash past prepare
 def test_brief_prints_no_heading_text()                                 # S4
 def test_stage_json_holds_no_heading_text_paths_or_slugs()              # S5
@@ -1130,7 +1139,7 @@ The same amendments are written into the design document in this pull request, m
 ## Self-review
 
 1. **Coverage of the conductor's decisions.** 1: Follow-ups. 2: Task 2. 3: Task 7, with the `fail_fast` contradiction. 4: Task 2 and Task 5, plus the rollout section. 5: Tasks 4 and 6, with all three contradictions and where the guarantees do not hold. 6: Tasks 3 and 5, with the archive contradiction. 7: Tasks 2, 5 and 7. 8: Task 5. 9: Task 5.
-2. **Matrix.** 94 rows, every one names a test, and every test name in the matrix appears in a task. Twelve rows are guards, labelled in the Kind column.
+2. **Matrix.** 95 rows, every one names a test, and every test name in the matrix appears in a task. Twelve rows are guards, labelled in the Kind column.
 3. **Pure functions.** `parse`, `plan_append`, `check`, `reconcile` and `plan_restore` take bytes and plain values. No test of them touches the filesystem.
 4. **Numbers.** Every acceptance number is computed in "Acceptance fixture" from the pointer formula and the section table.
 5. **Citations.** Every `path:line` is checked against `main` at `acbc78d01`, the base of this plan. They were first read on `origin/overhaul` at `470d14aea`. Only `memory_care_tend.py` moved when the overhaul landed (one line, all its citations updated).
@@ -1181,3 +1190,4 @@ One line per change, with the input it answers.
 - Sixth code review: the decision payload's `pointers` entries carry `separator` (missing reads as `False`), `check` removes the separator when it puts the file back, and both size rules count the separator byte.
 - Seventh code review: a T test pins that the separator byte counts against the limit.
 - Codex on revision 8: `plan_restore` refuses `pointer-duplicated` when a recorded overflow pointer occurs more than once, so undo cannot mark a move undone and leave untracked copies (P5).
+- Codex on revision 11: overflow pointers wait while the file ends inside an unclosed fence, and `check` requires every added pointer outside blocks (W30). `plan_restore` refuses `pointer-in-block` for an overflow pointer found only inside blocks (P17).
