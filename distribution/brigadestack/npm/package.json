@@ -1,7 +1,7 @@
 {
   "name": "brigadestack",
   "version": "0.31.0",
-  "description": "Brigade Stack command alias for the stable Brigade CLI",
+  "description": "BrigadeStack command alias for the stable Brigade CLI",
   "license": "MIT",
   "engines": {
     "node": "^22.15.0 || >=23.11.0"

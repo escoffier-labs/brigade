@@ -1,6 +1,6 @@
-# Brigade Stack bridge packages
+# BrigadeStack bridge packages
 
-Brigade Stack 0.31.0 adds the `brigadestack` command to stable Brigade 0.31.0.
+BrigadeStack 0.31.0 adds the `brigadestack` command to stable Brigade 0.31.0.
 Choose either the Python or npm package. Existing `brigade-cli`,
 `@escoffier-labs/brigade`, and the `brigade` command remain supported.
 
@@ -37,7 +37,7 @@ through the authorized browser session. The workflow uses GitHub OIDC trusted
 publishing and needs no PyPI API token or local upload configuration.
 
 After the controller reviews and merges the bridge source and workflow, select
-**Brigade Stack PyPI publication** in GitHub Actions and run it on `main`.
+**BrigadeStack PyPI publication** in GitHub Actions and run it on `main`.
 The workflow accepts no inputs and runs only in `escoffier-labs/brigade` on
 `refs/heads/main`. Review the selected source commit before dispatch.
 

@@ -1,8 +1,8 @@
-# Brigade Stack trim: design
+# BrigadeStack trim: design
 
 Date: 2026-11-12. Status: draft for operator approval.
 
-This is the umbrella design for shrinking Brigade Stack to a small core. Each
+This is the umbrella design for shrinking BrigadeStack to a small core. Each
 stage below gets its own short design and plan before any code changes. This
 document fixes the direction, the order and the rules every stage follows.
 
@@ -11,7 +11,7 @@ are the author's calls and can be overruled.
 
 ## Intent
 
-Brigade Stack should be something an engineer who is not its author can adopt
+BrigadeStack should be something an engineer who is not its author can adopt
 in a day and keep using. Today the first thing a new engineer meets is its
 size. Measured on main at `60c0b3046`:
 
@@ -283,7 +283,7 @@ treatments:
 Unattended jobs follow the same rule. A scheduled job that keeps failing is
 fixed, reported once, or switched off. It does not fail quietly for weeks.
 
-**(decided, 2026-11-13)** Brigade Stack is used by agents, not by people, and
+**(decided, 2026-11-13)** BrigadeStack is used by agents, not by people, and
 setup follows from that:
 
 - Setup is one non-interactive command that an agent can run to the end. It

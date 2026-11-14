@@ -1,4 +1,4 @@
-# First 10 Minutes With Brigade Stack
+# First 10 Minutes With BrigadeStack
 
 Start with one Git repository you control. This walkthrough uses the published 0.31.0 bridge and records a check you can inspect afterward. It needs no model credentials, services, or schedulers.
 

@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="920" height="280" viewBox="0 0 920 280" role="img" aria-labelledby="title desc">
-  <title id="title">Brigade Stack by Escoffier Labs</title>
-  <desc id="desc">Brigade Stack in white type on a black background, with the Escoffier Labs attribution below.</desc>
+  <title id="title">BrigadeStack by Escoffier Labs</title>
+  <desc id="desc">BrigadeStack in white type on a black background, with the Escoffier Labs attribution below.</desc>
   <rect width="920" height="280" fill="#111111"/>
   <g fill="#ffffff" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">
-    <text x="460" y="146" font-size="88" font-weight="700">Brigade Stack</text>
+    <text x="460" y="146" font-size="88" font-weight="700">BrigadeStack</text>
     <text x="460" y="216" font-size="28">by Escoffier Labs</text>
   </g>
 </svg>

@@ -1,4 +1,4 @@
-name: Brigade Stack PyPI publication
+name: BrigadeStack PyPI publication
 
 on:
   workflow_dispatch:
