@@ -524,4 +524,46 @@ def test_restore_holds_a_unit_that_grew_around_the_restored_text():  # review of
     assert isinstance(result, Restore)
     assert result.after == b"# T\n## New parent\n" + child + b"## B\nb\n"
     parent = next(unit for unit in parse(result.after).units if unit.heading == b"## New parent")
-    assert parent.sha256 in result.held
+    assert result.held == (parent.sha256,)  # exactly the one unit the restored text sits in
+
+
+def test_editing_inside_a_widened_hold_releases_it():  # review of #2567: a hold only withholds a move
+    child = b"### Child\nchild text\n"
+    rel = DIR + f"{KEY}--child.md"
+    line = pointer_line(rel, today=TODAY, decision_id=ID)
+    run = RecordedRun(ID, rel, line, child, hashlib.sha256(child).hexdigest())
+    card = card_bytes(
+        file_key=KEY,
+        slug="child",
+        section=child,
+        source_name="USER.md",
+        decision_id=ID,
+        today=TODAY,
+        fresh_until=None,
+        card_id=CARD_ID,
+    )
+    sibling = b"### Sibling\n" + b"word " * 200 + b"\n"
+    file = b"# T\n## New parent\n" + sibling + line + b"\n## B\nb\n"
+    result = plan_restore(file, (run,), (), {rel: card}, file_key=KEY)
+    assert isinstance(result, Restore) and len(result.held) == 1
+    tiny = Limits(limit=600, act_at=500, trim_to=400)
+
+    def plan(data):
+        return plan_append(
+            parse(data),
+            file_key=KEY,
+            limits=tiny,
+            today=TODAY,
+            decision_id=ID,
+            taken=frozenset(),
+            held=frozenset(result.held),
+            config_pins=(),
+            overflow=(),
+            max_moves=8,
+            max_card_bytes=12_000,
+        )
+
+    held_plan = plan(result.after)
+    assert (0, "held") in held_plan.skipped and all(0 not in run.units for run in held_plan.runs)
+    edited = result.after.replace(b"### Sibling\n", b"### Sibling\nEdited after the undo.\n")
+    assert all(index != 0 for index, reason in plan(edited).skipped if reason == "held")
