@@ -208,6 +208,11 @@ def load_config(target: Path) -> MemoryCareConfig | None:
         data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:  # type: ignore[union-attr]
         raise ValueError(f"invalid memory-care config: {exc}") from exc
+    return config_from_mapping(data)
+
+
+def config_from_mapping(data: object) -> MemoryCareConfig:
+    """Validate parsed memory-care TOML. Pure: it reads no file, so callers that already hold the bytes can use it."""
     if not isinstance(data, dict):
         raise ValueError("memory-care config must be a TOML object")
     card_roots = _string_list(data.get("card_roots"), field="card_roots", default=("memory/cards",))

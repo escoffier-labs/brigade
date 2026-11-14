@@ -6,6 +6,7 @@ and logical source labels leave this module, never paths or parser diagnostics.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import importlib.util
 import os
@@ -49,9 +50,13 @@ def _stdlib_tomllib() -> ModuleType | None:
         return None
 
 
-def read_user_base_cap() -> UserBaseCap:
-    """Read a single top-level setting using the doctor's launch environment."""
-    custom = os.environ.get("CODEX_HOME", "")
+def read_user_base_cap(*, home: Path | None = None, environ: Mapping[str, str] | None = None) -> UserBaseCap:
+    """Read a single top-level setting using the doctor's launch environment.
+
+    With no arguments this reads the process environment and the real home. A
+    caller that needs isolation passes its own `home` and `environ`.
+    """
+    custom = (os.environ if environ is None else environ).get("CODEX_HOME", "")
     label = "$CODEX_HOME/config.toml" if custom else "~/.codex/config.toml"
 
     def unknown(reason: str) -> UserBaseCap:
@@ -66,7 +71,7 @@ def read_user_base_cap() -> UserBaseCap:
             if not stat.S_ISDIR(home_info.st_mode):
                 return unknown("config_home_not_directory")
         else:
-            home = Path.home() / ".codex"
+            home = (Path.home() if home is None else home) / ".codex"
         path = home / "config.toml"
         try:
             discovered = path.stat()
