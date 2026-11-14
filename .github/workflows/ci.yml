@@ -779,7 +779,7 @@ jobs:
       - name: Assert connector MCP tests run without skips
         if: matrix.python == '3.12' && matrix.shard == 0
         run: |
-          output=$(python -m pytest tests/test_cloud_agent_parity.py tests/test_cloud_agent_profile.py tests/test_connector_fix3.py tests/test_connector_registry.py tests/test_connector_review_fixes.py tests/test_dot_inbox_argument_errors.py tests/test_dot_lifecycle.py tests/test_dot_transport.py tests/test_duet_dispatch.py tests/test_duet_profile.py tests/test_steward_connector_parity.py -q --no-header -p no:cacheprovider 2>&1)
+          output=$(python -m pytest tests/test_cloud_agent_parity.py tests/test_cloud_agent_profile.py tests/test_connector_fix3.py tests/test_connector_registry.py tests/test_connector_review_fixes.py tests/test_dot_access_auth.py tests/test_dot_compat.py tests/test_dot_inbox_argument_errors.py tests/test_dot_lifecycle.py tests/test_dot_transport.py tests/test_duet_dispatch.py tests/test_duet_profile.py tests/test_steward_connector_parity.py -q --no-header -p no:cacheprovider 2>&1)
           pytest_exit=$?
           echo "$output"
           if [ $pytest_exit -ne 0 ]; then

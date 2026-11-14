@@ -39,6 +39,6 @@ def test_core_modules_hold_no_provider_sdk_or_key_handling():
     forbidden_imports = ("import anthropic", "import openai", "from anthropic", "from openai")
     forbidden_env = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
     for py in src.rglob("*.py"):
-        text = py.read_text()
+        text = py.read_text(encoding="utf-8")
         for needle in forbidden_imports + forbidden_env:
             assert needle not in text, f"{py.name} references {needle!r}"
