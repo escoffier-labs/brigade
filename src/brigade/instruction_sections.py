@@ -269,3 +269,25 @@ def whole_section_count(doc: SectionDocument, body: bytes) -> int:
         if units[last].end == stop:
             count += 1
     return count
+
+
+def heading_lines(data: bytes) -> tuple[bytes, ...]:
+    """Every heading line of `data`, outside fences and managed blocks, without its newline."""
+    return tuple(line.clean for line in _scan(data).lines if line.kind == "heading")
+
+
+def managed_blocks(data: bytes) -> tuple[bytes, ...]:
+    """The outermost managed blocks of `data` in file order, each from its start marker line to its end marker line."""
+    blocks: list[bytes] = []
+    lines = _scan(data).lines
+    index = 0
+    while index < len(lines):
+        if lines[index].kind != "marker" or lines[index].in_managed:
+            index += 1
+            continue
+        last = index
+        while last + 1 < len(lines) and lines[last + 1].in_managed:
+            last += 1
+        blocks.append(data[lines[index].start : lines[last].end])
+        index = last + 1
+    return tuple(blocks)

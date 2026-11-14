@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import random
 
-from brigade.instruction_sections import KEEP, PointerSpan, parse, pointer_spans, whole_section_count
+from brigade.instruction_sections import (
+    KEEP,
+    PointerSpan,
+    heading_lines,
+    managed_blocks,
+    parse,
+    pointer_spans,
+    whole_section_count,
+)
 
 POINTER = (
     b"- Moved to memory 2026-11-14: memory/cards/instructions/user-md--a.md"
@@ -163,3 +171,16 @@ def test_parse_never_raises_and_units_stay_ordered_and_disjoint():
             assert previous_end <= unit.start < unit.end <= len(data)
             previous_end = unit.end
         pointer_spans(data)
+
+
+def test_heading_lines_skip_fences_and_managed_blocks():
+    data = b"# T\n## A\n```\n## no\n```\n<!-- X:START -->\n## no\n<!-- X:END -->\n### B \n"
+    assert heading_lines(data) == (b"# T", b"## A", b"### B ")
+
+
+def test_managed_blocks_are_the_outermost_marker_to_marker_spans():
+    inner = b"<!-- B:START -->\nb\n<!-- B:END -->\n"
+    block = b"<!-- A:START -->\na\n" + inner + b"<!-- A:END -->\n"
+    other = b"<!-- BEGIN BRIGADE X v:1 profile:full hash:ab -->\nx\n<!-- END BRIGADE X -->\n"
+    assert managed_blocks(b"## A\n" + block + b"text\n" + other) == (block, other)
+    assert managed_blocks(b"## A\ntext\n") == ()
