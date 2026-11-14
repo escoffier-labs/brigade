@@ -56,12 +56,12 @@ separate Brigade stop subcommand for the foreground servers.
 | Memory MCP over HTTP | `brigade memory serve-mcp --http` | Ctrl+C, or stop the owning service. | Read-only card responses over loopback HTTP. No per-read verification receipt. |
 | Skills MCP over stdio | `brigade skills serve-mcp --stdio` | The MCP host closes stdin or terminates its child. Ctrl+C also stops an interactive process. | Read-only registry responses over stdout. No per-read verification receipt. |
 | Skills MCP over HTTP | `brigade skills serve-mcp --http` | Ctrl+C, or stop the owning service. | Read-only registry responses over loopback HTTP. No per-read verification receipt. |
-| Grok Bot MCP listener | `brigade run cloud grokbot serve --instance operator` or `brigade run cloud grokbot serve --pack <pack-id>` | Ctrl+C, or stop the owning service. | Role listeners journal call decisions to stderr and job transitions to the hub. Packs use their own records, such as the T3 dispatch SQLite ledger. |
+| Grok Bot MCP listener | `brigade run cloud grokbot serve --pack dot` or `--pack duet` | Ctrl+C, or stop the owning service. | Listeners journal call decisions to stderr. Packs keep their own records. Role instances and other pack ids were removed in 0.32.0 and exit 2. |
 | Dispatch watch | `brigade work dispatch --watch --worker <seat> --interval 5` | SIGTERM or Ctrl+C stops launches. Children detach by default. `--drain-wait` waits for them. | Holds `dispatch.lock` for the loop. Supervisor events link immutable tick plans and record launched and finalized intents, budget denials, and session close. |
 | Run watch | `brigade runs watch <run-id>` | Ends when the run reaches a terminal state, or stop with Ctrl+C. | Prints observations from run artifacts, or newline-delimited JSON with `--json`. It can recover stale artifact collection and update the affected run's records. |
 
 The shipped hub command is `brigade fleet serve`. The listener requires its
-configured credentials. Grok Bot listeners also require role or pack setup and
+configured credentials. Grok Bot listeners also require pack setup and
 protected bearer configuration. The HTTP memory and skills servers require
 `BRIGADE_MCP_HTTP_TOKEN`. See the [Grok Bot operating guide](grokbot-operating-guide.md)
 and [MCP transport guide](technical-guide.md#streamable-http-for-the-read-only-mcp-servers)

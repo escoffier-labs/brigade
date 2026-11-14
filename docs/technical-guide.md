@@ -166,31 +166,7 @@ work alongside migration of the three existing GitHub read implementations.
 
 ### Grok Bot local job queue
 
-`brigade run cloud grokbot` creates a private local queue contract. It does not call a live provider, commission Grok Bot, or add a synchronous roster seat. The Brigade Stack package now includes a role-scoped MCP listener for that queue. It runs as its own process while queue authority remains in the selected local Brigade Stack target. See [Grok Bot MCP listener](grokbot-mcp.md) for installation, operations, and Cloudflare boundaries, and [Grok Bot operating guide](grokbot-operating-guide.md) for the pack reference, queue actor authorization, lifecycle semantics, finding delivery, and Bot configuration.
-
-Queue data lives below `.brigade/cloud/grokbot/` with private file permissions. Submit a complete task envelope from a JSON file with `enqueue --spec`; do not put task instructions, verification commands, credentials, headers, environment values, or artifact bodies on the command line. The envelope identifies a bounded role, repository, base ref, owned paths, artifact kind, and timeout. Completion reads a second JSON file with `complete --artifact`; it accepts artifact references only, such as a GitHub draft-PR URL and branch, a branch and commit, or a report path and SHA-256.
-
-Jobs move through `queued`, `claimed`, `running`, `completed`, `failed`, `expired`, and `canceled`. A bot claims work with its own opaque bot and lease IDs plus a bounded lease duration. The same claim can be retried safely, and `renew` extends the current unexpired lease within the job deadline. `cancel` ends queued work immediately or records a cancellation request for a live lease. The lease holder uses `ack-cancel` to finish that cancellation. `expire` never requeues a job; it finalizes a job after its deadline or lease expires.
-
-Only safe projections are printed by `status` and mutation commands. They include job identity, state, timing, task hash, and artifact metadata, but never the envelope's `instructions` or `verification_commands`. The one exception is the authenticated worker MCP claim: after a successful role-matching claim, the worker receives the bounded validated envelope as its execution context so it can execute the task without the instructions being repeated in chat. The CLI `claim` command keeps returning the redacted projection.
-
-```bash
-brigade run cloud grokbot enqueue \
-  --target . \
-  --spec .brigade-inputs/grokbot-task.json \
-  --idempotency-key issue-1130-scout
-
-brigade run cloud grokbot claim \
-  --target . \
-  --job-id grokbot-0123456789abcdef01234567 \
-  --bot-id scout-01 \
-  --lease-id lease-01234567 \
-  --lease-seconds 300
-
-brigade run cloud grokbot status --target . --json
-```
-
-`brigade run cloud grokbot reconcile-reports --target QUEUE --owner OWNER` previews completed Repository Scout report jobs. Under hub authority it lists those jobs from the hub with the operator or feed identity and pairs each with the local artifact and snapshot by `job_id`. `--apply` writes at most `--limit` deterministic Memory Handoff drafts directly into the canonical owner's `memory/handoff-inbox` for review. Preview writes nothing. Report text is never printed. See [Grok Bot MCP listener](grokbot-mcp.md#report-reconciliation).
+Removed in 0.32.0. The local queue and its worker paths no longer ship. `brigade run cloud grokbot enqueue`, `claim`, `status` and `reconcile-reports` print migration guidance and exit 2. Use `brigade hub connector setup --id cloud-agent` with independent credentials. See [Generic cloud-agent profile](duet-connector.md#generic-cloud-agent-profile).
 
 For a remote T3 controller journal already available locally, configure an alias and a repo-relative journal path in `.brigade/center/agent-activity-sources.json`:
 

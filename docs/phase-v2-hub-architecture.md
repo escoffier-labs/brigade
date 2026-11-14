@@ -2757,6 +2757,8 @@ Invariant tests, in S19a to S19e:
 
 ### Interim connectivity
 
+> Superseded in 0.32.0: the `grokbot-memory` profile and `brigade run cloud grokbot doctor` named below are removed. The generic `cloud-agent` connector profile replaces them. This section is kept as the design record.
+
 The connectivity work is landing in parts, the first step of S23 and S26, so
 that the later slices only swap the source to hub memory. #2216 (merged) adds
 the `grokbot-memory` connector profile on the memory that exists today.
