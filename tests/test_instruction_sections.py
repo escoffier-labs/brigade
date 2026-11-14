@@ -258,3 +258,13 @@ def test_frontmatter_after_a_byte_order_mark_is_fixed_text():  # review of #2567
 def test_a_line_that_closes_one_comment_and_opens_another():  # review of #2567
     data = b"# T\nintro\n<!-- a\nb --> <!-- c\n## Hidden\nd -->\n## A\nbody\n"
     assert [u.heading for u in parse(data).units] == [b"## A"]
+
+
+@pytest.mark.parametrize("heading", [b"###\tPinned", b"   ### Pinned", b"## \tPinned"])
+def test_tab_and_indented_atx_headings_are_headings(heading):  # review of #2567: pins below them hold
+    data = b"# T\n## A\nbody\n" + heading + b"\n" + KEEP.encode() + b"\nkept\n"
+    doc = parse(data)
+    marker = data.index(KEEP.encode())
+    holder = next(unit for unit in doc.units if unit.start <= marker < unit.end)
+    assert holder.pin == "marker"  # the keep marker under that heading pins the unit that holds it
+    assert heading in heading_lines(data)

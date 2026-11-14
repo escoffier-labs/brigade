@@ -30,7 +30,8 @@ POINTER_LINE = re.compile(
 MAX_OPEN_BLOCKS = 32
 
 _KEEP = KEEP.encode("ascii")
-_HEADING = re.compile(rb"(#{1,6})(?: |$)")
+# ATX as CommonMark reads it: up to three spaces, one to six `#`, then a space, a tab or the end of the line.
+_HEADING = re.compile(rb" {0,3}(#{1,6})(?:[ \t]|$)")
 _FENCE_OPEN = re.compile(rb"[ \t]*(`{3,}|~{3,})(.*)")
 _COMMENT = re.compile(rb"<!--((?:(?!-->).)*)-->")
 _COLON_MARKER = re.compile(rb"(\S+):(start|end)", re.IGNORECASE)
