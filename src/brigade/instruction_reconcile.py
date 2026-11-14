@@ -9,6 +9,8 @@ whole parsed sections.
 
 from __future__ import annotations
 
+from collections import Counter
+
 import hashlib
 import re
 from collections.abc import Mapping, Sequence
@@ -102,6 +104,14 @@ def _swap_end(file: bytes, span: PointerSpan) -> int:
     return span.end + 1 if file[span.end : span.end + 1] == b"\n" else span.end
 
 
+def _repeated(runs: Sequence[RecordedRun], pointers: Sequence[RecordedPointer]) -> set[bytes]:
+    """Pointer bytes that more than one record claims. When such a pointer is in the file, each record would
+    find the same span and two edits on one range would corrupt the result, so those records are refused or
+    kept, never applied. Records whose shared pointer is gone edit nothing and are handled as usual."""
+    seen = Counter([run.pointer for run in runs] + [pointer.data for pointer in pointers])
+    return {data for data, count in seen.items() if count > 1}
+
+
 def _apply(file: bytes, edits: Sequence[_Edit]) -> tuple[bytes, list[_Edit]]:
     """`file` with every edit applied. A removed overflow pointer that carried a separator takes the "\n" before
     it too, but only when that "\n" is then the file's last byte (row W29). Returns the edits as applied."""
@@ -169,9 +179,13 @@ def reconcile(
     dropped: list[str] = []
     by_edit: list[str] = []
     kept: list[tuple[str, str]] = []
+    repeated = _repeated(good_runs, good_pointers)
     for run in good_runs:
         rel = run.card_rel
         found = _find(file, spans, run.pointer)
+        if found and run.pointer in repeated:
+            kept.append((rel, "pointer-duplicated"))
+            continue
         card = cards.get(rel)
         if not found:
             if card is not None:
@@ -197,6 +211,9 @@ def reconcile(
     for pointer in good_pointers:
         found = _find(file, spans, pointer.data)
         if cards.get(pointer.card_rel) is not None or not found:
+            continue
+        if pointer.data in repeated:  # found is non-empty here
+            kept.append((pointer.card_rel, "pointer-duplicated"))
             continue
         outside = [span for span in found if not span.in_block]  # a copy inside a block is inert (clarification b)
         if len(outside) > 1:
@@ -252,6 +269,12 @@ def plan_restore(
     doc = parse(file)
     if doc.problem is not None:
         return Refusal("pointer-in-block", None)
+    repeated = _repeated(good_runs, good_pointers)
+    for record_rel, data in [(run.card_rel, run.pointer) for run in good_runs] + [
+        (pointer.card_rel, pointer.data) for pointer in good_pointers
+    ]:
+        if data in repeated and _find(file, spans, data):
+            return Refusal("pointer-duplicated", record_rel)
     for pointer, found in found_pointers:
         outside = [span for span in found if not span.in_block]
         if len(outside) > 1:
@@ -289,8 +312,9 @@ def plan_restore(
             remove.append(rel)
     held_cards: list[str] = []
     for pointer, found in found_pointers:
-        if found:
-            edits.append(_Edit(found[0].start, found[0].end, b"", pointer.separator))
+        outside = [span for span in found if not span.in_block]  # exactly one, checked above
+        if outside:
+            edits.append(_Edit(outside[0].start, outside[0].end, b"", pointer.separator))
             held_cards.append(pointer.card_rel)
     if good_runs and not edits and not remove:
         return Refusal("already-restored", None)

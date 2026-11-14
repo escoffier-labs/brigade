@@ -387,3 +387,24 @@ def test_overflow_pointer_copy_in_a_block_does_not_keep_the_move_open():  # clar
     result = _reconcile(both, moved, {**moved.cards, PREF: None})
     assert result.dropped == (PREF,)
     assert result.after == fenced and result.completed == (ID,)
+
+
+def test_restore_removes_the_live_overflow_pointer_not_a_fenced_copy():  # matrix P17, review of #2567
+    moved = _moved(overflow=(PREF,))
+    data = moved.pointers[0].data
+    fixed = parse(moved.before).fixed_end
+    fenced = moved.before[:fixed] + b"```\n" + data + b"```\n" + moved.before[fixed:]
+    result = _restore(fenced + data, moved, {}, runs=(), pointers=moved.pointers)
+    assert not isinstance(result, Refusal)
+    assert result.after == fenced and result.held_cards == (PREF,)
+
+
+def test_records_sharing_pointer_bytes_are_refused_and_kept():  # forged duplicate records, review of #2567
+    moved = _moved()
+    run = moved.runs[0]
+    twin = dataclasses.replace(run, card_rel=run.card_rel.replace(".md", "-twin.md"))
+    runs = (run, twin)
+    assert _restore(moved.after, moved, runs=runs) == Refusal("pointer-duplicated", run.card_rel)
+    result = _reconcile(moved.after, moved, {**moved.cards, run.card_rel: None}, runs=runs)
+    assert result.after == moved.after
+    assert (run.card_rel, "pointer-duplicated") in result.kept and (twin.card_rel, "pointer-duplicated") in result.kept
