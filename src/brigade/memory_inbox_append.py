@@ -9,6 +9,9 @@ from typing import Any
 
 from . import memory_care_journal as journal
 
+# Writers whose bytes land in a workspace document through the no-follow appender.
+DOCUMENT_WRITERS = frozenset({"document", "card-append"})
+
 
 def plan_append(path: str, data: bytes, writer: str, **fields: Any) -> dict[str, Any]:
     return dict(
@@ -42,7 +45,7 @@ def publish(target: Path, decision_id: str) -> None:
         # The stored timestamp or decision-specific ledger row identifies this append.
         if _contains(target, item["path"], data):
             continue
-        if item["writer"] == "document" and journal.read_only_pattern(item["path"], read_only):
+        if item["writer"] in DOCUMENT_WRITERS and journal.read_only_pattern(item["path"], read_only):
             # Protected since the decision finished: leave the append pending until it is lifted.
             blocked = True
             continue
@@ -64,12 +67,21 @@ def undo_changes(target: Path, payload: dict[str, Any]) -> list[journal.Change]:
     """Match only our bytes; preserve every other block, including later appends."""
     changes = []
     for item in payload.get("appends", []):
-        if item["writer"] != "document":
+        if item["writer"] not in DOCUMENT_WRITERS:
             continue
         data = base64.b64decode(item["data"])
         live = journal.current(target, item["path"])
         if live is None or live.count(data) != 1 or hashlib.sha256(data).hexdigest() != item["sha256"]:
             raise journal.JournalConflict("appended block missing or changed; file left unchanged")
+        header = int(item.get("header_bytes") or 0)
+        if item["writer"] == "card-append" and item.get("created", True) and header:
+            # The creating block carries the frontmatter. It must still start the card.
+            if not live.startswith(data):
+                raise journal.JournalConflict("appended block missing or changed; file left unchanged")
+            # Later appends keep their frontmatter: remove only the body part of this block.
+            after = data[:header] + live[len(data) :]
+            changes.append(journal.Change(item["path"], live, after if len(live) > len(data) else None))
+            continue
         after = live.replace(data, b"", 1)
         # Remove the file only when this decision created it; an existing empty document stays.
         changes.append(journal.Change(item["path"], live, after if after or not item.get("created", True) else None))
@@ -96,3 +108,28 @@ def _contains(target: Path, rel: str, data: bytes) -> bool:
     if rel.endswith(".jsonl"):
         return any(line == data for line in rows(target, rel))
     return contains(target, rel, data)
+
+
+@journal.serialized
+def commit_card_append(owner: Path, card_rel: str, block: bytes, *, header_bytes: int, reason: str) -> journal.Decision:
+    """Journal one append to an overflow card and publish it with exact-block undo.
+
+    Callers hold ``ingest._document_lock(owner)`` first, the order retry and revert use.
+    """
+    before = journal.current(owner, card_rel)
+    decision = journal.commit_phased(
+        owner,
+        kind="inbox",
+        reason=reason,
+        card_id=None,
+        changes=[],
+        prepared_paths=[],
+        hub={},
+        metadata={
+            "appends": [plan_append(card_rel, block, "card-append", created=before is None, header_bytes=header_bytes)],
+            "append_guards": {card_rel: journal.kernel.content_digest(before)},
+        },
+    )
+    if journal._payload(owner, decision.decision_id).get("phase") != "committed":
+        raise journal.JournalConflict("card append abandoned")
+    return decision

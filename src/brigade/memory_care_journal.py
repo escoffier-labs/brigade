@@ -249,7 +249,9 @@ def revert(target: Path, decision_id: str, *, reason: str) -> Decision:
     from contextlib import nullcontext
     from .ingest import _document_lock
 
-    documents = any(item["writer"] == "document" for item in _payload(target, decision_id).get("appends", []))
+    from .memory_inbox_append import DOCUMENT_WRITERS
+
+    documents = any(item["writer"] in DOCUMENT_WRITERS for item in _payload(target, decision_id).get("appends", []))
     with _document_lock(target) if documents else nullcontext():
         return _revert_locked(target, decision_id, reason=reason)
 
@@ -505,8 +507,10 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
         if kernel.content_digest(current(target, path)) != digest
     )
     # Routed documents are written after finish, so they are not among the changes.
+    from .memory_inbox_append import DOCUMENT_WRITERS
+
     destinations = [c.path for c in changes] + [
-        a["path"] for a in p.get("appends", []) if a.get("writer") == "document"
+        a["path"] for a in p.get("appends", []) if a.get("writer") in DOCUMENT_WRITERS
     ]
     protected = any(read_only_pattern(path, config.read_only_paths) for path in destinations)
     if drift or protected:
