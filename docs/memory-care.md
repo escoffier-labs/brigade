@@ -1,6 +1,6 @@
 # Memory Care
 
-Brigade memory care scans durable memory cards and tends them. The scan is local and read-only. It detects cards that need review, writes a refresh queue, and routes review tasks into the existing work inbox. Tending then applies an allowlist of derived fixes, archives eligible cards and drains the review inbox. Every automatic change is recorded with undo. See [Safe Fix Planning](#safe-fix-planning), [Boundary](#boundary) and [Tending](#tending).
+Brigade memory care scans durable memory cards and tends them. The scan is local and never edits cards. It detects cards that need review, writes findings and a refresh queue, and routes review tasks into the existing work inbox. Tending then retries pending hub operations, applies an allowlist of derived fixes, archives eligible cards, drains the review inbox and reports instruction budgets. Every automatic card change is recorded with undo. Tending runs when you call `memory care tend`, and a successful CLI ingest runs its inbox stage. It is not on a schedule unless you add one. See [Safe Fix Planning](#safe-fix-planning), [Boundary](#boundary) and [Tending](#tending).
 
 ## Commands
 
@@ -292,7 +292,7 @@ Each match's `score` is a non-negative float rounded to 4 decimals. Higher ranks
 
 `brigade memory care backfill` handles the bulk version of the same repair for setups whose cards predate the freshness convention. It finds cards with frontmatter but no reviewed or freshness dates, derives `last_reviewed` from each card file's last git commit date (the last time anyone touched the fact, or file mtime outside git, labeled as the lower-confidence source), and proposes `fresh_until` as the reviewed date plus the configured stale window. It also backfills a missing content `fingerprint` (stable hash of normalized card body) so ingest reinforcement can match known facts, and mints a missing stable ID even when care dates and fingerprint are already present. It is dry-run by default and prints the full plan. `--apply` writes the derived values into card frontmatter, never overwrites an existing value, and records a receipt under `.brigade/memory-care/backfills/`. Backfilled dates are honest rather than flattering: an old card lands as stale immediately, which is the point, since the scan then ranks the refresh queue by real age instead of reporting unknowable gaps.
 
-`brigade memory care plan-fixes` reads the latest scan and reports proposed repairs without changing cards. Add `--apply` to apply the automatic allowlist. The `fixes` tend stage runs before retirement, including through existing scan triggers. `[tend] enabled = false` disables automatic fixes and retains the reviewed-date evidence-review blocker.
+`brigade memory care plan-fixes` reads the latest scan and reports proposed repairs without changing cards. Add `--apply` to apply the automatic allowlist. The `fixes` tend stage runs before retirement. It runs only through `memory care tend` or `plan-fixes --apply`. `[tend] enabled = false` disables automatic fixes and retains the reviewed-date evidence-review blocker.
 
 | Fix kind | Disposition | Reason |
 |---|---|---|
@@ -339,7 +339,7 @@ Memory care archives eligible cards automatically and records every change with 
 
 ## Tending
 
-`brigade memory care tend` runs hub retries, retirement and the review-inbox drain. Use `--stage hub`, `--stage retire` or `--stage inbox` to select a stage, `--dry-run` to preview without writing, and `--json` for structured output. CLI scans do not run automatic care or recover pending decisions. Use explicit `memory care tend` for those operations. `memory care scan --no-tend` remains accepted as a deprecated no-op. Library scans remain read-only.
+`brigade memory care tend` runs five stages in this order: `hub` retries pending hub operations, `fixes` applies the automatic allowlist from [Safe Fix Planning](#safe-fix-planning), `retire` archives eligible cards, `inbox` drains the [review inbox](#review-inbox), and `instructions` reports [instruction budgets](#instruction-budgets) without moving anything. Use `--stage` with one of those names to select a stage, `--dry-run` to preview without writing, and `--json` for structured output. CLI scans do not run automatic care or recover pending decisions. Use explicit `memory care tend` for those operations. `memory care scan --no-tend` remains accepted as a deprecated no-op. Library scans remain read-only.
 
 Workspace `.brigade/memory-care.toml` accepts:
 
