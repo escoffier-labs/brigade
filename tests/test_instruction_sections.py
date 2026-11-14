@@ -11,6 +11,7 @@ from brigade.instruction_sections import (
     MAX_OPEN_BLOCKS,
     PointerSpan,
     heading_lines,
+    html_balanced,
     managed_blocks,
     parse,
     pointer_spans,
@@ -317,3 +318,10 @@ def test_a_unit_holding_one_tag_of_an_html_pair_is_blocked():  # review of #2567
 def test_only_the_exact_end_tag_closes_a_raw_block():  # review of #2567
     data = b"# T\nintro\n<pre>\n</preview> is not the end\n## Example\n</pre>\n## Live\nbody\n"
     assert [u.heading for u in parse(data).units] == [b"## Live"]
+
+
+def test_a_unit_that_closes_one_pair_and_opens_another_is_blocked():  # review of #2567: order, not counts
+    data = b"# T\n<details>\n\n## Bridge\nx\n</details>\n<details>\n\n## After\ny\n</details>\n"
+    bridge = next(u for u in parse(data).units if u.heading == b"## Bridge")
+    assert bridge.blocked == "html-block"
+    assert html_balanced(b"<div>x</div>") and not html_balanced(b"</details>\nx\n<details>")

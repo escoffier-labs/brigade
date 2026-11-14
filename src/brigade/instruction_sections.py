@@ -369,13 +369,18 @@ def whole_section_count(doc: SectionDocument, body: bytes) -> int:
 
 
 def html_balanced(data: bytes) -> bool:
-    """Whether every tag in `HTML_BLOCK_TAGS` opens as often as it closes in `data` (raw bytes, any case).
-    A unit or a moved run that fails this would split an HTML pair, so it never moves."""
+    """Whether every tag in `HTML_BLOCK_TAGS` is closed in order in `data` (raw bytes, any case): reading left
+    to right, no end tag comes before its start tag and every start tag is closed. Equal counts are not
+    enough: `</details> ... <details>` would split two pairs. A unit or a moved run that fails this would
+    split an HTML pair, so it never moves."""
     lowered = data.lower()
     for tag in HTML_BLOCK_TAGS:
-        opens = len(re.findall(rb"<" + tag + rb"(?=[\s>/])", lowered))
-        closes = len(re.findall(rb"</" + tag + rb"\s*>", lowered))
-        if opens != closes:
+        depth = 0
+        for found in re.finditer(rb"<(/?)" + tag + rb"(?:(?<=/" + tag + rb")\s*>|(?=[\s>/]))", lowered):
+            depth += -1 if found.group(1) else 1
+            if depth < 0:
+                return False
+        if depth:
             return False
     return True
 
