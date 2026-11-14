@@ -85,3 +85,12 @@ def test_non_ascii_config_loads_under_a_non_utf8_locale(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "('memory/caf\\xe9',)"
+
+
+def test_tend_config_ignores_a_leading_byte_order_mark(tmp_path):
+    from brigade import memory_care_tend
+
+    _write(tmp_path, BOM + b"[tend]\nunused_after_days = 30\n")
+    assert memory_care_tend.load_config(tmp_path).unused_after_days == 30
+    _write(tmp_path, BOM + NON_ASCII.encode("utf-8"))
+    assert memory_care_tend.load_config(tmp_path) == memory_care_tend.TendConfig()

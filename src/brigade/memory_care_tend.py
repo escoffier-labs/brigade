@@ -28,7 +28,8 @@ class TendConfig:
 
 def load_config(target: Path) -> TendConfig:
     path = target / ".brigade/memory-care.toml"
-    with path.open(encoding="utf-8", newline="") if path.exists() else io.StringIO("") as handle:
+    # utf-8-sig matches memory_cmd.load_config: a leading byte-order mark is dropped.
+    with path.open(encoding="utf-8-sig", newline="") if path.exists() else io.StringIO("") as handle:
         table = tomllib.loads(handle.read()).get("tend", {})
     if not isinstance(table, dict):
         raise ValueError("tend must be a table")
