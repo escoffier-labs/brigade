@@ -9,6 +9,9 @@ Conservative by design:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import threading
+
 import hashlib
 import os
 import re
@@ -22,7 +25,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List
 
-from . import dirfd, handoff_worktrees
+from . import dirfd, handoff_worktrees, instruction_overflow
 from .card_fingerprint import (
     CardMatch,
     ensure_card_id_frontmatter,
@@ -38,7 +41,6 @@ from .handoff_ingest_rules import (
     EXPECTED_SHA_SECTION,
     SHA256_RE,
     CardIdIndex,
-    bootstrap_budget_problem,
     card_frontmatter_structure_problems,
     card_id_collision_problem,
     document_destination_problem,
@@ -48,6 +50,8 @@ from .handoff_ingest_rules import (
     sha256_hex,
     sha_matches,
 )
+from .bounded_read import read_regular_file
+from .instruction_inventory import INSPECTION_CEILING
 from .selection import WRITER_INBOXES
 from .untrusted import scan_untrusted
 
@@ -132,6 +136,9 @@ class IngestStats:
     # sha256 of every handoff handled this run, so one handoff copied into
     # several worktree inboxes is ingested once.
     seen_digests: set[str] = field(default_factory=set)
+    # Overflow cards that hold review drafts: [{"path", "problem", "held_drafts"}], also written to
+    # `.brigade/memory-care/inbox/blocked-cards.json` for the report to read.
+    blocked_cards: List[dict] = field(default_factory=list)
 
     @property
     def status(self) -> str:
@@ -286,6 +293,8 @@ def ingest_into(
     # Read the cards' ids once for the whole run. Each promoted card is added to it,
     # so two handoffs in one run cannot both claim an id.
     card_ids = CardIdIndex(owner)
+    # Discovery reads several files and resolves every instruction path: once per run, not per handoff.
+    routing = instruction_overflow.RouteContext(owner)
     for handoffs_dir in handoff_dirs:
         processed_dir = handoffs_dir / "processed"
         try:
@@ -326,6 +335,7 @@ def ingest_into(
                     promote_cards=promote_cards,
                     route_documents=route_documents,
                     card_ids=card_ids,
+                    routing=routing,
                 )
                 action = _execute(
                     outcome,
@@ -337,6 +347,9 @@ def ingest_into(
                     dry_run=dry_run,
                     snapshot=snapshot,
                     card_ids=card_ids,
+                    promote_cards=promote_cards,
+                    route_documents=route_documents,
+                    routing=routing,
                 )
             except TrackedHandoffError:
                 action = Action("skipped", _summary("skip", path.name, _TRACKED_SKIP_CODE))
@@ -365,6 +378,11 @@ def ingest_into(
                 stats.inboxed += 1
             elif action.kind == "skipped":
                 stats.skipped += 1
+    if not dry_run:
+        from . import instruction_overflow_blocked
+
+        # Level-triggered: recomputed from the review inbox every run, so a repaired card drops out.
+        stats.blocked_cards = instruction_overflow_blocked.refresh(owner, routing=routing)
     return 0
 
 
@@ -388,19 +406,15 @@ def parse(path: Path, data: bytes | None = None) -> Dict[str, str]:
 
 @dataclass
 class Outcome:
-    kind: str  # promoted | reinforced | routed | inboxed | skipped
+    kind: str  # promoted | reinforced | routed | routed-card | inboxed | skipped
     dest: Path | None = None
     reason: str = ""
     match: CardMatch | None = None
     # Stable reason code. `reason` can quote handoff fields and is never
     # written to logs, reports or review receipts; `code` is.
     code: str = ""
-
-
-def _normalize_for_dedupe(text: str) -> str:
-    """Collapse whitespace and drop blank lines for content-equality checks."""
-    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
-    return "\n".join(line for line in lines if line)
+    # Set for `routed-card`, and for a hold on an overflow card: the card the append goes to and why.
+    overflow: instruction_overflow.OverflowRoute | None = None
 
 
 def _first_meaningful_line(text: str) -> str:
@@ -418,6 +432,7 @@ def decide(
     promote_cards: bool,
     route_documents: bool,
     card_ids: CardIdIndex | None = None,
+    routing: instruction_overflow.RouteContext | None = None,
 ) -> Outcome:
     if "memory proposal notification" in sections:
         return Outcome(
@@ -529,8 +544,13 @@ def decide(
             return Outcome("inboxed", code="missing-target-document", reason="no-card handoff missing target document")
         if not safe_document_target(document):
             return Outcome("inboxed", code="unsafe-target-document", reason="target document not in safe list")
+        # Read-only: a known instruction file past its act-at, behind a link, or with an unreadable
+        # `[instructions]` table sends the append to its overflow card instead of a person.
+        overflow = instruction_overflow.route(
+            target, document, content, instruction_overflow.handoff_type(sections), context=routing
+        )
         destination_problem = document_destination_problem(document, target)
-        if destination_problem:
+        if destination_problem and overflow is None:
             return Outcome("inboxed", code="document-destination-unsafe", reason=destination_problem)
         if not content.strip():
             return Outcome("inboxed", code="empty-document-content", reason="empty document content")
@@ -542,16 +562,35 @@ def decide(
             )
         dest = target / document
         # Dedupe: never re-append content that is already present in the target.
-        # Without this, a re-routed handoff duplicates its content on every run.
-        existing = dest.read_text(encoding="utf-8") if dest.is_file() else ""
-        normalized_existing = _normalize_for_dedupe(existing)
-        normalized_suggested = _normalize_for_dedupe(content)
-        if normalized_suggested and normalized_suggested in normalized_existing:
+        # Without this, a re-routed handoff duplicates its content on every run. A routed
+        # append also looks in every overflow card of the file and type, so a block already
+        # published to card 1 is found when card 2 would be chosen.
+        # A known file's overflow cards are searched on both paths: a person may have trimmed the file
+        # after a block was published to a card and before a replay.
+        if overflow is None:
+            existing = dest.read_text(encoding="utf-8") if dest.is_file() else ""
+            held = [
+                existing,
+                *instruction_overflow.direct_card_text(
+                    target, document, instruction_overflow.handoff_type(sections), context=routing
+                ),
+            ]
+        else:
+            # The file may be reached through a link: read it bounded and never write to it.
+            read = read_regular_file(dest, max_bytes=INSPECTION_CEILING)
+            existing = read.data.decode("utf-8", "replace") if read.data is not None else ""
+            held = [existing, *instruction_overflow.existing_card_text(target, overflow)]
+        normalized_suggested = instruction_overflow.normalize_for_dedupe(content)
+        if normalized_suggested and any(
+            normalized_suggested in instruction_overflow.normalize_for_dedupe(text) for text in held
+        ):
             return Outcome(
                 "inboxed",
                 code="document-content-present",
                 reason="document content already present in the target document",
             )
+        # The anchor is a line match, and cards only grow: a line of an unrelated card must not hold
+        # a new handoff forever, so only the file itself is searched.
         anchor = _first_meaningful_line(content)
         if anchor and anchor in existing:
             return Outcome(
@@ -559,12 +598,6 @@ def decide(
                 code="document-anchor-present",
                 reason="document anchor already present in the target document",
             )
-        # Bootstrap files load into the session prefix every turn and silently
-        # truncate past ~12k chars. Refuse an append that would push the file
-        # over its budget; route to the inbox so a human trims or re-homes it.
-        budget_problem = bootstrap_budget_problem(document, content, target)
-        if budget_problem:
-            return Outcome("inboxed", code="bootstrap-budget-exceeded", reason=budget_problem)
         sig = scan_untrusted(content)
         if sig.flagged:
             return Outcome(
@@ -572,6 +605,8 @@ def decide(
                 code="document-injection-signal",
                 reason=f"injection signal in document content ({sig.count} marker(s))",
             )
+        if overflow is not None:
+            return _routed_card_outcome(target, overflow)
         return Outcome("routed", code="document-appended", dest=dest)
 
     if action == "":
@@ -614,6 +649,7 @@ def _decide_create_card_match(content: str, *, target: Path) -> Outcome | None:
 class Action:
     kind: str
     summary: str
+    destination: str | None = None
 
 
 def _read_card_child(parent: int, name: str) -> tuple[bytes, int] | None:
@@ -722,7 +758,7 @@ def _publish_promoted_card(
     dry_run: bool,
     expected_sha: str = "",
     card_ids: CardIdIndex | None = None,
-) -> None:
+) -> str:
     """Publish (or, in a dry run, simulate) one card and record its id in `card_ids`.
 
     The card is recorded as soon as the write returns, before the caller archives the
@@ -779,14 +815,86 @@ def _publish_promoted_card(
         # write, so an update-card that omits an id keeps the destination's id in both.
         card_ids.register((CARDS_RELATIVE / dest.name).as_posix(), built)
 
+    return built
 
-def _append_document_nofollow(target: Path, dest: Path, text: str) -> None:
+
+_DOCUMENT_HELD = threading.local()
+
+
+@contextmanager
+def _document_lock(target: Path):
+    from .inbox_lock import held_file_lock
+    from .memory_care_journal import safe_path
+
+    target = target.resolve()
+    held: set[Path] = getattr(_DOCUMENT_HELD, "targets", set())
+    if target in held:
+        yield
+        return
+    lock = safe_path(target, ".brigade/memory-care/document.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with held_file_lock(lock, deadline_seconds=1):
+        _DOCUMENT_HELD.targets = held | {target}
+        try:
+            yield
+        finally:
+            _DOCUMENT_HELD.targets = held
+
+
+class AppendRefused(OSError):
+    """The opened destination is not what the append was decided against. Nothing was written."""
+
+    def __init__(self, code: str, reason: str, *, full: bool = False, over_limit: bool = False) -> None:
+        super().__init__(reason)
+        self.code, self.reason, self.full, self.over_limit = code, reason, full, over_limit
+
+
+@dataclass(frozen=True)
+class AppendExpect:
+    """What the destination must be when it is opened, checked on the opened descriptor under the lock.
+
+    `created` True opens it exclusively (it must not exist), False refuses a missing file, None accepts
+    either. `identity` is the (st_dev, st_ino) the opened file must have; a pinned file may already have
+    several hard links, an unpinned one must have exactly one. `max_size` caps the file after the append.
+    `check` sees the exact bytes of the opened file (None for a file this open created).
+    """
+
+    created: bool | None = None
+    identity: tuple[int, int] | None = None
+    max_size: int | None = None
+    check: Callable[[bytes | None], instruction_overflow.WriteProblem | None] | None = None
+
+
+def _append_document_nofollow(target: Path, dest: Path, text: str, *, expect: AppendExpect | None = None) -> None:
+    from .inbox_lock import InboxLockTimeout
+
+    try:
+        with _document_lock(target):
+            _append_document_locked(target, dest, text, expect=expect)
+    except InboxLockTimeout as exc:
+        # Plain ingest catches OSError and preserves the source in its review inbox.
+        raise OSError("document publication busy") from exc
+
+
+def _opened_bytes(descriptor: int, size: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while size > 0 and (chunk := os.read(descriptor, min(size, 1 << 16))):
+        chunks.append(chunk)
+        size -= len(chunk)
+    return b"".join(chunks)
+
+
+def _append_document_locked(target: Path, dest: Path, text: str, *, expect: AppendExpect | None = None) -> None:
     """Append to a routed document without following a link anywhere below the workspace.
 
     The parent directory is opened by descriptor from the resolved workspace root, and
     the leaf is opened relative to it with no-follow, through the POSIX or the Windows
     handle-relative backend. When neither backend is available this raises OSError and
     nothing is written: a path-based append cannot close the check-then-write race.
+
+    Every invariant in `expect` is enforced on the opened descriptor, so the bytes checked are the
+    bytes appended to. A mismatch raises `AppendRefused` and writes nothing.
     """
     if not dirfd.available():
         raise OSError("no-follow descriptor operations are unavailable; refusing a path-based append")
@@ -796,22 +904,78 @@ def _append_document_nofollow(target: Path, dest: Path, text: str) -> None:
     if problem:
         raise OSError(problem)
     resolved = root / relative
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    data = text.encode("utf-8")
+    created = None if expect is None else expect.created
+    flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0)
+    if expect is not None and expect.check is not None:
+        flags = (flags & ~os.O_WRONLY) | os.O_RDWR  # the opened file is read back before it is written
+    if created is not False:
+        flags |= os.O_CREAT
+    if created is True:
+        flags |= os.O_EXCL
     if dirfd.posix_available():
         # O_NOFOLLOW; the Windows backend refuses reparse points itself. O_NONBLOCK makes a FIFO
         # fail the open (no reader) or the type check below instead of hanging.
         flags = dirfd.file_flags(flags | getattr(os, "O_NONBLOCK", 0))
     parent = dirfd.open_directory_chain(resolved.parent, create=True)
+    made = False
     try:
-        descriptor = dirfd.open_child_file(parent, resolved.name, flags, 0o644)
         try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            descriptor = dirfd.open_child_file(parent, resolved.name, flags, 0o644)
+        except FileExistsError as exc:
+            raise AppendRefused(
+                "document-destination-unwritable", "the destination appeared since it was decided"
+            ) from exc
+        except FileNotFoundError as exc:
+            if created is False:
+                raise AppendRefused(
+                    "document-destination-unwritable", "the destination disappeared since it was decided"
+                ) from exc
+            raise
+        made = created is True
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode):
                 raise OSError("target document is not a regular file")
+            pinned = expect is not None and expect.identity is not None
+            if opened.st_nlink != 1 and not pinned:
+                # A hard link swapped in after the destination check would send this append to another file.
+                raise OSError("target document has more than one hard link")
+            if pinned:
+                assert expect is not None and expect.identity is not None
+                if opened.st_ino and expect.identity[1] and (opened.st_dev, opened.st_ino) != expect.identity:
+                    raise AppendRefused("document-destination-unwritable", "the destination was replaced")
+            if expect is not None:
+                if expect.max_size is not None and opened.st_size + len(data) > expect.max_size:
+                    raise AppendRefused(
+                        "document-destination-unwritable",
+                        "the append would pass the size limit of the destination",
+                        over_limit=True,
+                    )
+                if expect.check is not None:
+                    if opened.st_size > INSPECTION_CEILING:
+                        raise AppendRefused("overflow-card-untrusted", "the card is too large to be checked")
+                    refused = expect.check(None if made else _opened_bytes(descriptor, opened.st_size))
+                    if refused is not None:
+                        raise AppendRefused(refused.code, refused.reason, full=refused.full)
             if dirfd.posix_available():
                 os.set_blocking(descriptor, True)
-            with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            made = False  # the file is ours to keep once the append starts
+            with os.fdopen(descriptor, "ab") as handle:
                 descriptor = -1
-                handle.write(text)
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            if made:
+                # This open created the file and nothing was written: do not leave an empty card behind.
+                closing, descriptor = descriptor, -1
+                try:
+                    os.close(closing)
+                    dirfd.unlink_child(parent, resolved.name)
+                except OSError:
+                    pass
+            raise
         finally:
             if descriptor != -1:
                 os.close(descriptor)
@@ -829,6 +993,9 @@ def _execute(
     dry_run: bool,
     snapshot: bytes | None = None,
     card_ids: CardIdIndex | None = None,
+    promote_cards: bool | None = None,
+    route_documents: bool | None = None,
+    routing: instruction_overflow.RouteContext | None = None,
 ) -> Action:
     from .inbox_lock import InboxLockTimeout
     from .memory_evidence_log import log_match
@@ -870,6 +1037,8 @@ def _execute(
                 processed_dir,
                 dry_run,
                 snapshot,
+                promote_cards=promote_cards,
+                route_documents=route_documents,
             )
         summary = _summary("promote", name, outcome.code)
         if not dry_run:
@@ -890,6 +1059,21 @@ def _execute(
             log_match(target, outcome.match, _archive(handoff_path, processed_dir, snapshot_sha))
         return Action("reinforced", summary)
 
+    if outcome.kind == "routed-card":
+        return _execute_routed_card(
+            outcome,
+            handoff_path,
+            target,
+            sections,
+            inbox_dir,
+            processed_dir,
+            dry_run,
+            snapshot,
+            card_ids,
+            promote_cards,
+            route_documents,
+        )
+
     if outcome.kind == "routed":
         dest = outcome.dest  # type: ignore[assignment]
         assert dest is not None
@@ -897,7 +1081,7 @@ def _execute(
         summary = _summary("append", name, outcome.code)
         if not dry_run:
             try:
-                _append_document_nofollow(target, dest, "\n\n" + content + "\n")
+                rerouted = _append_direct(target, dest, content, sections, routing)
             except OSError:
                 return _execute(
                     Outcome(
@@ -912,6 +1096,24 @@ def _execute(
                     processed_dir,
                     dry_run,
                     snapshot,
+                    promote_cards=promote_cards,
+                    route_documents=route_documents,
+                )
+            if rerouted is not None:
+                # The file reached its limit between the decision and the locked write: same run, same handoff.
+                return _execute(
+                    rerouted,
+                    handoff_path,
+                    target,
+                    sections,
+                    inbox_dir,
+                    processed_dir,
+                    dry_run,
+                    snapshot,
+                    card_ids,
+                    promote_cards,
+                    route_documents,
+                    routing,
                 )
             _archive(handoff_path, processed_dir, snapshot_sha)
         return Action("routed", summary)
@@ -931,6 +1133,9 @@ def _execute(
                 f"<!-- routed from {handoff_worktrees.safe_text(handoff_path.name)}\n"
                 f"     reason: {outcome.code}{_match_meta(outcome, target)}\n     routed-at: {slug} -->\n\n"
             )
+            if promote_cards is not None and route_documents is not None:
+                flags = f"promote={str(promote_cards).lower()} route={str(route_documents).lower()}"
+                header = header.replace(f"routed-at: {slug} -->", f"routed-at: {slug}\n     retry-flags: {flags} -->")
             dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
             log_match(target, outcome.match, dest)
             _archive(handoff_path, processed_dir, snapshot_sha)
@@ -938,6 +1143,185 @@ def _execute(
         return Action("inboxed", summary)
 
     return Action("skipped", _summary("skip", name, outcome.code))
+
+
+def _append_direct(
+    target: Path,
+    dest: Path,
+    content: str,
+    sections: Dict[str, str],
+    routing: instruction_overflow.RouteContext | None,
+) -> Outcome | None:
+    """Append to the document itself, or return the overflow route when it no longer fits.
+
+    Holding the document lock it measures the file again (two ingest runs can both have decided
+    that a block fits), pins the file's identity, and appends with the limit enforced on the
+    opened file, so the file never passes act-at and a swapped-in link is never written to.
+    """
+    document = dest.relative_to(target).as_posix()
+    kind = instruction_overflow.handoff_type(sections)
+    with _document_lock(target):
+        overflow = instruction_overflow.route(target, document, content, kind, context=routing)
+        if overflow is not None:
+            return _routed_card_outcome(target, overflow)
+        pin = instruction_overflow.direct_pin(target, document, context=routing)
+        try:
+            _append_document_nofollow(
+                target,
+                dest,
+                instruction_overflow.append_block(content).decode("utf-8"),
+                expect=AppendExpect(created=pin.identity is None, identity=pin.identity, max_size=pin.act_at),
+            )
+        except AppendRefused as exc:
+            if not exc.over_limit:
+                raise
+            overflow = instruction_overflow.route(target, document, content, kind, context=routing)
+            if overflow is None:
+                raise
+            return _routed_card_outcome(target, overflow)
+    return None
+
+
+def _routed_card_outcome(target: Path, overflow: instruction_overflow.OverflowRoute) -> Outcome:
+    held = overflow.hold()
+    if held is not None:
+        return Outcome("inboxed", code=held.code, reason=held.reason, overflow=overflow)
+    return Outcome(
+        "routed-card",
+        code="document-routed-to-card",
+        dest=target / overflow.card_rel,
+        reason="append goes to the file's private overflow card",
+        overflow=overflow,
+    )
+
+
+def _execute_routed_card(
+    outcome: Outcome,
+    handoff_path: Path,
+    target: Path,
+    sections: Dict[str, str],
+    inbox_dir: Path,
+    processed_dir: Path,
+    dry_run: bool,
+    snapshot: bytes | None,
+    card_ids: CardIdIndex | None,
+    promote_cards: bool | None,
+    route_documents: bool | None,
+) -> Action:
+    """Append the handoff's content to its file's overflow card through the journal."""
+    from .inbox_lock import InboxLockTimeout
+    from .memory_care_journal import JournalConflict, ReadOnlyPath
+    from .memory_inbox_append import CardFull, commit_card_append
+
+    overflow = outcome.overflow
+    assert overflow is not None and outcome.dest is not None
+    name = handoff_path.name
+    snapshot_sha = hashlib.sha256(snapshot).hexdigest() if snapshot is not None else None
+    summary = _summary("card-append", name, outcome.code)
+    if dry_run:
+        return Action("routed", summary)
+    content = sections.get("suggested document content", "")
+    kind = instruction_overflow.handoff_type(sections)
+    duplicate = False
+    held: Outcome | None = None
+    try:
+        # A card can fill between choosing it and writing to it (another run, or a person): the commit says so
+        # and the next pass chooses the next card. Three passes is a bound, not an expected count.
+        for _pass in range(3):
+            # The document lock comes first, as retry and revert take it, then the journal.
+            with _document_lock(target):
+                # decide() ran without the lock: read the cards again, so the block matches the card now,
+                # the card is still one this feature created, and a concurrent run that already
+                # published this content is not written over.
+                overflow = instruction_overflow.refresh(target, overflow, content, kind)
+                problem = overflow.hold()
+                if problem is not None:
+                    held = Outcome("inboxed", code=problem.code, reason=problem.reason, overflow=overflow)
+                    break
+                if instruction_overflow.contains_block(target, overflow, content):
+                    duplicate = True
+                    break
+                block, header_bytes = instruction_overflow.card_block(
+                    target, overflow, content, kind, today=date.today()
+                )
+                try:
+                    commit_card_append(
+                        target,
+                        overflow.card_rel,
+                        block,
+                        header_bytes=header_bytes,
+                        reason="ingest:document-routed-to-card",
+                        card_limit=overflow.card_limit,
+                        limit_requested=overflow.limit_requested,
+                    )
+                except CardFull:
+                    continue
+                except ValueError as exc:
+                    if isinstance(exc, JournalConflict):
+                        raise
+                    # A protected card path, or a care configuration that does not parse. Both are
+                    # retry codes: the drain delivers the handoff once the cause is fixed.
+                    cause = (
+                        "the card path is protected"
+                        if isinstance(exc, ReadOnlyPath)
+                        else "the memory care configuration could not be parsed"
+                    )
+                    held = Outcome(
+                        "inboxed",
+                        code="document-destination-unwritable",
+                        reason=f"{cause}; the handoff is retried automatically once that is fixed",
+                    )
+                break
+        else:
+            held = Outcome(
+                "inboxed",
+                code="document-destination-unwritable",
+                reason="overflow cards kept filling while the handoff was written; it is retried automatically",
+            )
+    except AppendRefused as exc:
+        # The card was not what the decision recorded when the bytes were about to be written: nothing was.
+        held = Outcome("inboxed", code=exc.code, reason=exc.reason)
+    except (OSError, InboxLockTimeout, JournalConflict):
+        held = Outcome(
+            "inboxed",
+            code="document-destination-unwritable",
+            reason="overflow card is linked, protected or unwritable; requires review",
+        )
+    if held is not None:
+        return _execute(
+            held,
+            handoff_path,
+            target,
+            sections,
+            inbox_dir,
+            processed_dir,
+            dry_run,
+            snapshot,
+            promote_cards=promote_cards,
+            route_documents=route_documents,
+        )
+    if duplicate:
+        return _execute(
+            Outcome("inboxed", code="document-content-present", reason="content already in an overflow card"),
+            handoff_path,
+            target,
+            sections,
+            inbox_dir,
+            processed_dir,
+            dry_run,
+            snapshot,
+            promote_cards=promote_cards,
+            route_documents=route_documents,
+        )
+    if card_ids is not None:
+        try:
+            card_ids.register(overflow.card_rel, (target / overflow.card_rel).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            pass  # the id index only guards later promotions in this run
+    # Outside the try: an archive failure after publication is an io-error and the handoff
+    # stays, so the duplicate check finds the block in the card on the next run.
+    _archive(handoff_path, processed_dir, snapshot_sha)
+    return Action("routed", summary)
 
 
 def _frontmatter(text: str) -> tuple[dict[str, str], bool]:
@@ -1152,8 +1536,10 @@ def _write_review_draft(inbox_dir: Path, base: str, text: str) -> Path:
     for index in range(_MAX_DRAFT_SUFFIX):
         dest = inbox_dir / (f"{base}.md" if index == 0 else f"{base}-{index}.md")
         try:
-            with dest.open("x", encoding="utf-8") as handle:
-                handle.write(text)
+            with dest.open("xb") as handle:
+                handle.write(text.encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
         except FileExistsError:
             continue
         return dest
@@ -1195,6 +1581,8 @@ def _report(stats: IngestStats, dry_run: bool) -> None:
     tag = "[dry-run] " if dry_run else ""
     for line in stats.actions:
         print(f"  {tag}{line}")
+    for card in stats.blocked_cards:
+        print(f"  {tag}blocked overflow card {card['path']}: {card['held_drafts']} draft(s) held ({card['problem']})")
     print()
     print(
         f"{tag}Processed {stats.processed}  Promoted {stats.promoted}  "
@@ -1206,3 +1594,10 @@ def _report(stats: IngestStats, dry_run: bool) -> None:
     elif stats.processed == 0:
         print(f"{tag}NO_UPDATES")
     print(f"{tag}Status {stats.status}")
+
+
+def reprocess_review_draft(owner: Path, draft: Path, *, card_ids: CardIdIndex | None = None) -> Action:
+    """Retry a review draft through durable prepare-then-finish publication."""
+    from .memory_inbox_retry import reprocess
+
+    return reprocess(owner, draft, card_ids=card_ids)

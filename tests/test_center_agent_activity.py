@@ -1,7 +1,8 @@
 import json
 from datetime import datetime, timedelta, timezone
 
-from brigade import center_cmd, grokbot_jobs
+from brigade import center_cmd
+from tests import legacy_job_seed as grokbot_jobs
 from brigade.center_cmd import agent_activity as activity_records
 from brigade.center_cmd.dashboard.views import agent_activity
 from tests._home import set_home

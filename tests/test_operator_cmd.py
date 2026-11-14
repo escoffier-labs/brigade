@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from brigade import cli, grokbot_jobs, install as install_mod, operator_cmd, work_cmd
+from brigade import cli, install as install_mod, operator_cmd, work_cmd
+from tests import legacy_job_seed as grokbot_jobs
 
 
 def _fake_surface_run(argv, timeout=8):

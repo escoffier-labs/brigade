@@ -60,7 +60,7 @@ def test_cli_offline_selection_and_no_effects(tmp_path, capsys, monkeypatch):
 
     monkeypatch.setattr(fleet_client, "load_fleet_config", forbidden)
     monkeypatch.setattr(fleet_client, "repo_claim", forbidden)
-    monkeypatch.setattr(grokbot_jobs, "enqueue", forbidden)
+    monkeypatch.setattr(grokbot_jobs, "enqueue", forbidden, raising=False)
     monkeypatch.setattr(actions_dispatch, "actions_dispatch_apply", forbidden)
     monkeypatch.setattr(actions_dispatch, "_write_actions", forbidden)
     path = fixture(tmp_path)

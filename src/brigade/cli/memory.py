@@ -80,12 +80,30 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
     )
     p_memory_care_scan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_care_scan.add_argument(
+        "--no-tend", action="store_true", help="Deprecated no-op. Scan does not run automatic care."
+    )
+    for name in ("tend", "undo", "archive"):
+        command = memory_care_sub.add_parser(name, help=f"Memory care {name}.")
+        command.add_argument("--target", "-t", type=Path, default=Path("."))
+        command.add_argument("--json", action="store_true")
+        if name == "tend":
+            command.add_argument(
+                "--stage", action="append", choices=("hub", "fixes", "retire", "inbox", "instructions")
+            )
+            command.add_argument("--dry-run", action="store_true")
+        elif name == "undo":
+            command.add_argument("decision_id")
+        else:
+            command.add_argument("--from-file", type=Path, required=True)
+            command.add_argument("--limit", type=int)
     p_memory_care_plan_fixes = memory_care_sub.add_parser(
         "plan-fixes", help="Plan safe memory-care metadata fixes without writing files."
     )
     p_memory_care_plan_fixes.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
     )
+    p_memory_care_plan_fixes.add_argument("--apply", action="store_true", help="Apply journaled low-risk fixes.")
     p_memory_care_plan_fixes.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_care_backfill = memory_care_sub.add_parser(
         "backfill",
@@ -578,12 +596,18 @@ def dispatch(args) -> int:
                 update_gitignore=not args.no_gitignore,
                 with_runbooks=args.with_runbooks,
             )
+        if args.memory_care_command in ("tend", "undo", "archive"):
+            from .. import memory_care_tend
+
+            return memory_care_tend.dispatch(args)
         if args.memory_care_command == "scan":
             return memory_cmd.scan(target=args.target, json_output=args.json)
         if args.memory_care_command == "backfill":
             return memory_cmd.backfill(target=args.target, apply=args.apply, json_output=args.json)
         if args.memory_care_command == "plan-fixes":
-            return memory_cmd.plan_fixes(target=args.target, json_output=args.json)
+            return memory_cmd.plan_fixes(
+                target=args.target, json_output=args.json, **({"apply": True} if args.apply else {})
+            )
         if args.memory_care_command == "status":
             return memory_cmd.status(target=args.target, json_output=args.json)
         if args.memory_care_command == "doctor":

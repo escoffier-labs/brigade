@@ -21,7 +21,7 @@ from brigade.dot.access_auth import (
     fetch_public_keys,
 )
 from brigade.dot.runtime_config import AuthConfig
-from brigade.grokbot_mcp import OptionalDependencyError
+from brigade.dot.transport import OptionalDependencyError
 from brigade.dot import access_auth
 
 AUTH = AuthConfig(

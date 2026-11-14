@@ -703,7 +703,6 @@ def test_sealed_operations_without_crypto_modules(tmp_path):
     code = """
 import sys
 sys.modules['cryptography'] = None
-sys.modules['brigade.fleet_mesh_crypto'] = None
 import runpy
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -883,47 +882,30 @@ def test_retention_without_message_operations(hub, monkeypatch, phase):
 
 
 @pytest.mark.parametrize("upgrade", [False, True])
-def test_sealed_reply_hint_survives_parent_expiry(hub, upgrade):
-    from brigade import fleet_mesh_crypto as mesh
+def test_sealed_reply_hint_survives_parent_expiry(hub, upgrade, monkeypatch):
+    from pathlib import Path
 
-    # Real signed bm1 header: the Hub still only parses/stores these bytes.
-    now = datetime.now(timezone.utc)
-    hub_id = "h_" + binary(bytes(16))
-    keys = [mesh.PrivateKeys(bytes([i]) * 32, bytes([i + 2]) * 32) for i in (1, 2)]
-    records = [
-        mesh.build_key_record(k, principal=p, hub=hub_id, created_at=now.isoformat())
-        for k, p in zip(keys, ("node-a", "node-b"), strict=True)
-    ]
+    fixture = json.loads((Path(__file__).parent / "fixtures/hub-sealed-reply.json").read_text(encoding="utf-8"))
+    from brigade import fleet_hub_sealed
+
+    now = datetime.fromisoformat(fixture["reply"]["created_at"])
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(messages, "datetime", Clock)
+    monkeypatch.setattr(fleet_hub_sealed, "datetime", Clock)
+    hub_id = fixture["original"]["hub"]
     hub.execute("DELETE FROM fleet_message_keys")
     hub.commit()
-    for key in records:
+    for key in fixture["records"]:
         publish(hub, key)
-    payload = {"subject": "subject", "body": "body", "ref": None, "thread": None, "sender_label": None}
-    original_raw = canonical(
-        mesh.seal(
-            payload,
-            sender=keys[0],
-            sender_record=records[0],
-            recipient_record=records[1],
-            retry_key=bytes(32),
-            client_id="original",
-            created_at=(now - timedelta(days=89)).isoformat(),
-        )
-    )
+    original_raw = canonical(fixture["original"])
     original = send(hub, original_raw)
     link = {"hub": hub_id, "from": "node-a", "client_id": "original"}
-    raw = canonical(
-        mesh.seal(
-            payload,
-            sender=keys[1],
-            sender_record=records[1],
-            recipient_record=records[0],
-            retry_key=bytes(32),
-            client_id="reply",
-            created_at=now.isoformat(),
-            in_reply_to=link,
-        )
-    )
+    raw = canonical(fixture["reply"])
     reply = send(hub, raw, caller="node-b", reply_to=original["id"])
     if upgrade:
         # A current-version DB can already have sealed columns and candidate
@@ -941,7 +923,7 @@ def test_sealed_reply_hint_survives_parent_expiry(hub, upgrade):
     stored = lookup(hub, "reply", "node-b")[1]["message"]
     assert stored["reply_to"] == original["id"]
     assert stored["envelope"] == raw
-    assert mesh.verify_signed_header(raw.encode("ascii"), records[1])["in_reply_to"] == link
+    assert json.loads(raw)["in_reply_to"] == link
     assert hub.execute("SELECT 1 FROM fleet_messages WHERE id=?", (original["id"],)).fetchone() is None
     assert messages.handle(hub, {"action": "list"}, caller="node-a")[1]["messages"] == [stored]
     assert messages.handle(hub, {"action": "sent"}, caller="node-b")[1]["messages"] == [stored]

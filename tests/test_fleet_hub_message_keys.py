@@ -573,7 +573,6 @@ def test_hub_routes_without_cryptography(tmp_path):
     code = """
 import sys
 sys.modules['cryptography'] = None
-sys.modules['brigade.fleet_mesh_crypto'] = None
 import runpy
 from pathlib import Path
 from tempfile import TemporaryDirectory

@@ -784,9 +784,6 @@ def test_ci_workflow_shadow_gate_covers_required_jobs_and_their_dependencies():
         "cosign-integration",
         "fleet-hub-container",
         "hub-rust",
-        "mesh-compatibility",
-        "mesh-cross-version",
-        "mesh-without-extra",
     }
     for name in needs:
         _workflow_job_section(text, name)
@@ -922,15 +919,15 @@ def test_ci_workflow_test_shards_installs_grokbot_extra_on_python312():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     section = _workflow_job_section(text, "test-shards")
 
-    grokbot_step = _workflow_step_section(text, "test-shards", "Install with grokbot extra")
+    grokbot_step = _workflow_step_section(text, "test-shards", "Install with connector extra")
     assert "if: matrix.python == '3.12'" in grokbot_step
-    assert 'python -m pip install -e ".[dev,grokbot]"' in grokbot_step
+    assert 'python -m pip install -e ".[dev,connector]"' in grokbot_step
 
     default_step = _workflow_step_section(text, "test-shards", "Install")
     assert "if: matrix.python != '3.12'" in default_step
     assert 'python -m pip install -e ".[dev]"' in default_step
 
-    assert section.index("      - name: Install\n") < section.index("      - name: Install with grokbot extra\n")
+    assert section.index("      - name: Install\n") < section.index("      - name: Install with connector extra\n")
 
 
 def test_ci_workflow_uses_sysmon_only_on_python312_covered_shard_step():
@@ -944,14 +941,14 @@ def test_ci_workflow_uses_sysmon_only_on_python312_covered_shard_step():
 
 def test_ci_workflow_test_shards_asserts_grokbot_mcp_tests_run_without_skips():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
-    step = _workflow_step_section(text, "test-shards", "Assert grokbot MCP tests run without skips")
+    step = _workflow_step_section(text, "test-shards", "Assert connector MCP tests run without skips")
 
     assert "if: matrix.python == '3.12' && matrix.shard == 0\n" in step
-    assert "tests/test_grokbot_mcp.py" in step
+    assert "tests/test_cloud_agent_profile.py tests/test_dot_transport.py" in step
     assert "pytest_exit=$?" in step
     assert "[ $pytest_exit -ne 0 ]" in step
     assert "grep -q 'skipped'" in step
-    assert "grokbot MCP tests were skipped" in step
+    assert "connector MCP tests were skipped" in step
     assert "exit 1" in step
 
 
@@ -1781,9 +1778,6 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
         "shadow-plan",
         "shadow-selection",
         "hub-rust",
-        "mesh-compatibility",
-        "mesh-cross-version",
-        "mesh-without-extra",
     }
     for job, name in EXISTING_CI_JOBS.items():
         section = _workflow_job_section(text, job)
@@ -2131,91 +2125,6 @@ def test_windows_nightly_report_uses_driver_policy(outcome, status, failed, expe
     assert report["summary"].startswith("windows pytest: files=2 regressions=")
 
 
-@pytest.mark.parametrize("job", ["mesh-compatibility", "mesh-cross-version"])
-def test_mesh_install_bounds_match_package_metadata(job):
-    import ast
-
-    metadata = (ROOT / "pyproject.toml").read_text()
-    requirements = []
-    for extra in ("mesh", "dev"):
-        match = re.search(rf"^{extra} = (\[.*\])$", metadata, re.MULTILINE)
-        assert match is not None
-        requirements.append(next(item for item in ast.literal_eval(match[1]) if item.startswith("cryptography")))
-    assert requirements[0] == requirements[1]
-    bounds = re.fullmatch(r"cryptography>=(\d+\.\d+\.\d+),(<\d+)", requirements[0])
-    assert bounds is not None
-    floor, ceiling = bounds.groups()
-    section = _workflow_job_section((ROOT / ".github/workflows/ci.yml").read_text(), job)
-    assert f"--only-binary cryptography 'cryptography=={floor}'" in section
-    assert f"--upgrade --only-binary cryptography 'cryptography>={floor},{ceiling}'" in section
-
-
-def test_mesh_jobs_are_protected_and_path_filtered():
-    text = (ROOT / ".github/workflows/ci.yml").read_text()
-    changes = _workflow_job_section(text, "changes")
-    assert (
-        "mesh: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || github.event_name == 'push' && 'true' || steps.filter.outputs.mesh }}"
-        in changes
-    )
-    mesh_filter = changes.split("            mesh:\n", 1)[1].split("            code_graph:", 1)[0]
-    for path in (
-        "src/brigade/fleet_mesh_*.py",
-        "tests/test_fleet_mesh_*.py",
-        "tests/mesh_hpke_reference.py",
-        "tests/fixtures/mesh/**",
-        "docs/phase-agent-mesh.md",
-        "pyproject.toml",
-    ):
-        assert "'" + path + "'" in mesh_filter
-    gate = _workflow_job_section(text, "ci-gate")
-    for job in ("mesh-compatibility", "mesh-cross-version", "mesh-without-extra"):
-        section = _workflow_job_section(text, job)
-        assert "needs.changes.outputs.mesh == 'true'" in section
-        assert job in gate
-    compatibility = _workflow_job_section(text, "mesh-compatibility")
-    assert "crypto: [floor, newest]" in compatibility
-    assert "os: [ubuntu-latest, macos-15, windows-latest]" in compatibility
-    assert "runner.os != 'Linux'" in compatibility
-    assert '"$MESH_PYTHON -m mypy src/brigade/fleet_mesh_crypto.py"' in compatibility
-    assert '"$MESH_PYTHON -m pytest -q tests/test_fleet_mesh_crypto.py"' in compatibility
-    assert "mesh_python=.venv/Scripts/python.exe" in compatibility
-    assert "mesh_python=.venv/bin/python" in compatibility
-    assert "MESH_PYTHON=$mesh_python" in compatibility
-    assert "MESH_ENV: present" in compatibility
-    for job in ("mesh-compatibility", "mesh-cross-version", "mesh-without-extra"):
-        section = _workflow_job_section(text, job)
-        assert "id: python" in section
-        assert '"${{ steps.python.outputs.python-path }}" -m venv .venv' in section
-        assert not re.search(r'(?m)(?:^\s*(?:run:\s*)?|--command\s+)["\']?(?:python3?|pip3?)["\']?\s', section)
-    cross = _workflow_job_section(text, "mesh-cross-version")
-    assert "MESH_ENV: present" in cross
-    absent = _workflow_job_section(text, "mesh-without-extra")
-    assert ".venv/bin/python -m pip uninstall -y cryptography" in absent
-    assert "MESH_ENV: absent" in absent
-    assert "tests/test_fleet_mesh_crypto.py::test_ci_mesh_environment" in absent
-
-
-@pytest.mark.parametrize("event", ["pull_request", "push", "merge_group"])
-@pytest.mark.parametrize("flag", ["true", "false", "", None])
-@pytest.mark.parametrize("job", ["mesh-compatibility", "mesh-cross-version", "mesh-without-extra"])
-def test_ci_gate_allows_mesh_skip_only_for_unchanged_pr(event, flag, job):
-    text = (ROOT / ".github/workflows/ci.yml").read_text()
-    gate = _workflow_job_section(text, "ci-gate")
-    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
-    names = re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE)
-    needs = {name: {"result": "success"} for name in names}
-    needs["changes"]["outputs"] = {"mesh": flag, "docs_only": "false"}
-    needs[job] = {"result": "skipped"}
-    script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
-    result = subprocess.run(
-        _workflow_bash_command(script),
-        env=dict(os.environ, NEEDS_JSON=json.dumps(needs), EVENT_NAME=event),
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == (0 if event == "pull_request" and flag == "false" else 1), result.stdout + result.stderr
-
-
 @pytest.mark.parametrize("event", ["pull_request", "push", "merge_group"])
 @pytest.mark.parametrize("flag", ["true", "false", "", None])
 @pytest.mark.parametrize("result", ["success", "skipped", "failure", "cancelled"])
@@ -2476,24 +2385,6 @@ def test_hub_nightly_recovery_comments_on_and_closes_every_open_tracking_issue(t
     assert calls == expected
 
 
-def test_mesh_actions_are_pinned_to_full_commits():
-    text = (ROOT / ".github/workflows/ci.yml").read_text()
-    for job in ("mesh-compatibility", "mesh-cross-version", "mesh-without-extra"):
-        section = _workflow_job_section(text, job)
-        actions = re.findall(r"uses: ([^\n]+)", section)
-        assert actions
-        assert all(re.fullmatch(r"actions/[a-z-]+@[0-9a-f]{40} # v[0-9.]+", action) for action in actions)
-
-
-def test_mesh_checkouts_do_not_persist_credentials():
-    text = (ROOT / ".github/workflows/ci.yml").read_text()
-    for job in ("mesh-compatibility", "mesh-cross-version", "mesh-without-extra"):
-        section = _workflow_job_section(text, job)
-        checkout = re.search(r"uses: actions/checkout@[^\n]+\n((?:        [^\n]*\n)*)", section)
-        assert checkout, job
-        assert "persist-credentials: false" in checkout.group(1), job
-
-
 @pytest.fixture
 def history(tmp_path):
     repo = tmp_path / "repo"
@@ -2671,6 +2562,7 @@ def test_authoritative_event_range_includes_all_changes(history, event):
         ("SECURITY.md", True),
         ("docs/guide with spaces.md", True),
         ("docs/diagram.png", True),
+        ("docs/phase-hub-contract.md", True),
         ("changelog.d/2542.md", True),
         ("changelog.d/ci-docs-only-fragments.md", True),
         ("changelog.d/README.md", True),
@@ -2678,7 +2570,6 @@ def test_authoritative_event_range_includes_all_changes(history, event):
         ("changelog.d/x.py", False),
         ("changelog.d/.hidden.md", False),
         ("changelog.d/.md", False),
-        ("docs/phase-agent-mesh.md", False),
         ("docs/AGENTS.md", False),
         ("AGENTS.md", False),
         ("src/brigade/templates/README.md", False),
@@ -3218,7 +3109,16 @@ def test_shadow_junit_is_requested_only_on_pull_request_python312_shards():
     assert "--dist=worksteal $SHADOW_JUNIT --cov=" in step
     # The plain (non-coverage) shard step and the grokbot assertion never write junit.
     assert "junit" not in _workflow_step_section(text, "test-shards", "Pytest shard")
-    assert "junit" not in _workflow_step_section(text, "test-shards", "Assert grokbot MCP tests run without skips")
+    assert "junit" not in _workflow_step_section(text, "test-shards", "Assert connector MCP tests run without skips")
     upload = _workflow_step_section(text, "test-shards", "Upload shadow junit")
     assert "continue-on-error: true" in upload
     assert "github.event_name == 'pull_request'" in upload
+
+
+def test_connector_extra_keeps_one_release_grokbot_alias():
+    import tomllib
+    from pathlib import Path
+
+    project = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    extras = project["project"]["optional-dependencies"]
+    assert extras["connector"] == extras["grokbot"]

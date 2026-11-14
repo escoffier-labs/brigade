@@ -74,6 +74,10 @@ CHECKS = (
 CONFIDENCE_RANK = {"unknown": 0, "low": 1, "medium": 2, "high": 3}
 
 
+class UnsafeCardRoot(ValueError):
+    """A configured root includes workspace instructions or internal state."""
+
+
 @dataclass(frozen=True)
 class MemoryCareConfig:
     card_roots: tuple[str, ...] = ("memory/cards",)
@@ -204,6 +208,11 @@ def load_config(target: Path) -> MemoryCareConfig | None:
         data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:  # type: ignore[union-attr]
         raise ValueError(f"invalid memory-care config: {exc}") from exc
+    return config_from_mapping(data)
+
+
+def config_from_mapping(data: object) -> MemoryCareConfig:
+    """Validate parsed memory-care TOML. Pure: it reads no file, so callers that already hold the bytes can use it."""
     if not isinstance(data, dict):
         raise ValueError("memory-care config must be a TOML object")
     card_roots = _string_list(data.get("card_roots"), field="card_roots", default=("memory/cards",))
@@ -230,6 +239,8 @@ def load_config(target: Path) -> MemoryCareConfig | None:
     ):
         for item in paths:
             _relative_path(item, field=field)
+    if any(Path(root).as_posix() == "." for root in card_roots):
+        raise UnsafeCardRoot("card_roots cannot include the repository root")
     return MemoryCareConfig(
         card_roots=card_roots,
         index_paths=index_paths,
@@ -442,6 +453,8 @@ def _is_read_only(config: MemoryCareConfig, rel: str) -> bool:
 def _iter_cards(target: Path, config: MemoryCareConfig) -> list[Path]:
     paths: list[Path] = []
     for root_text in config.card_roots:
+        if Path(root_text).as_posix() == ".":
+            raise UnsafeCardRoot("card_roots cannot include the repository root")
         root = target / root_text
         if not root.is_dir():
             continue
@@ -451,6 +464,8 @@ def _iter_cards(target: Path, config: MemoryCareConfig) -> list[Path]:
             if not path.is_file():
                 continue
             rel = path.relative_to(target).as_posix()
+            if rel.startswith("memory/archive/"):
+                continue
             if config.include_paths and not _path_matches(rel, config.include_paths):
                 continue
             if config.exclude_paths and _path_matches(rel, config.exclude_paths):
@@ -472,6 +487,13 @@ def _index_links(target: Path, config: MemoryCareConfig) -> set[str]:
             continue
         links.update(match.group("path") for match in pattern.finditer(text))
     return links
+
+
+def _moved_instructions(meta: dict[str, Any]) -> bool:
+    """True for an overflow card: content moved out of an instruction file is not a citation target."""
+    tags = meta.get("tags")
+    items = tags if isinstance(tags, (list, tuple)) else re.split(r"[\s,\[\]]+", str(tags or ""))
+    return "moved-instructions" in {str(item).strip().strip("'\"") for item in items}
 
 
 def _frontmatter_value(meta: dict[str, Any], *keys: str) -> Any:
@@ -762,7 +784,9 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         row["evidence_ref_count"] = len(evidence_refs)
         row["missing_evidence_ref_count"] = len(missing_evidence_refs)
         card_rows.append(row)
-        if "undersourced" in enabled and (weak_confidence or missing_evidence):
+        # Overflow cards are written by ingest from handoff content and carry no evidence block or index link.
+        moved = _moved_instructions(meta)
+        if "undersourced" in enabled and not moved and (weak_confidence or missing_evidence):
             evidence = []
             if weak_confidence:
                 evidence.append(f"confidence={confidence}")
@@ -806,7 +830,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
                     action="Split the card into smaller atomic topics and update MEMORY.md links.",
                 )
             )
-        if "orphaned-card" in enabled and linked and rel not in linked_existing:
+        if "orphaned-card" in enabled and not moved and linked and rel not in linked_existing:
             issues.append(
                 _issue(
                     target=target,
@@ -946,67 +970,13 @@ def _load_scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]
 
 
 def _archive_candidates_from_scan(scan_payload: dict[str, Any] | None, config: MemoryCareConfig) -> dict[str, Any]:
-    """Derive a read-only archive-candidate report from a saved scan payload.
-
-    Never walks the card tree. Cards are candidates only when last_reviewed is
-    parseable and age_days > 2 * stale_after_days (strict). Missing, invalid, or
-    future reviewed dates are unassessable and never inferred from mtime/git.
-    A saved scan without a parseable scan_date is fully unassessable; today is
-    never substituted for the saved-scan anchor.
-    """
-    ttl_days = int(config.stale_after_days)
-    candidate_after_days = ttl_days * 2
-    scan_date_raw = scan_payload.get("scan_date") if isinstance(scan_payload, dict) else None
-    scan_date = _parse_date(scan_date_raw) if scan_date_raw else None
-    cards_value = scan_payload.get("cards") if isinstance(scan_payload, dict) else None
-    cards = cards_value if isinstance(cards_value, list) else []
-    candidates: list[dict[str, Any]] = []
-    unassessable_count = 0
-    for card in cards:
-        if not isinstance(card, dict):
-            continue
-        reviewed = _parse_date(card.get("last_reviewed"))
-        if scan_date is None or reviewed is None:
-            unassessable_count += 1
-            continue
-        age_days = (scan_date - reviewed).days
-        if age_days < 0:
-            unassessable_count += 1
-            continue
-        if age_days <= candidate_after_days:
-            continue
-        evidence_value = card.get("evidence_pointers")
-        if isinstance(evidence_value, list):
-            evidence_pointers = [str(item).strip() for item in evidence_value if str(item).strip()]
-        else:
-            evidence_pointers = []
-        fresh_until = card.get("fresh_until")
-        candidates.append(
-            {
-                "card_id": str(card.get("card_id") or ""),
-                "file": str(card.get("file") or ""),
-                "age_days": age_days,
-                "last_reviewed": reviewed.isoformat(),
-                "fresh_until": fresh_until if isinstance(fresh_until, str) or fresh_until is None else str(fresh_until),
-                "evidence_pointers": evidence_pointers,
-                "reason": "review_age_exceeds_2x_ttl",
-                "approval_required": True,
-            }
-        )
+    """Legacy callers have no workspace or use ledger, so cannot infer retirement."""
     return {
-        "schema_version": 1,
-        "read_only": True,
-        "approval_required": True,
+        "schema_version": 2,
+        "approval_required": False,
         "would_archive": False,
-        "scan_date": scan_date.isoformat() if scan_date is not None else None,
-        "threshold": {
-            "ttl_days": ttl_days,
-            "candidate_after_days": candidate_after_days,
-            "comparison": "age_days > candidate_after_days",
-        },
-        "candidate_count": len(candidates),
-        "unassessable_count": unassessable_count,
-        "candidates": candidates,
+        "candidate_count": 0,
+        "candidates": [],
     }
 
 
@@ -1040,10 +1010,10 @@ def scan(*, target: Path, json_output: bool = False) -> int:
     return 0
 
 
-def plan_fixes(*, target: Path, json_output: bool = False) -> int:
+def plan_fixes(*, target: Path, json_output: bool = False, apply: bool = False) -> int:
     from . import memory_care_plan
 
-    return memory_care_plan.plan_fixes(target=target, json_output=json_output)
+    return memory_care_plan.plan_fixes(target=target, json_output=json_output, apply=apply)
 
 
 def _load_json_file(path: Path) -> dict[str, Any] | None:
@@ -1216,7 +1186,9 @@ def health(target: Path) -> dict[str, Any]:
     )
     autofix_items_value = autofix_plan.get("items")
     autofix_items = autofix_items_value if isinstance(autofix_items_value, list) else []
-    archive_candidates = _archive_candidates_from_scan(scan_payload if isinstance(scan_payload, dict) else None, config)
+    from .memory_care_retire import status_view
+
+    archive_candidates = status_view(target, config)
     return {
         "target": str(target),
         "config_path": str(config_path(target)),
@@ -1771,6 +1743,11 @@ def _record_search_log(
     ts: str | None = None,
 ) -> None:
     """Append one search event; fail-open so logging never breaks search."""
+    from .memory_card_reads import record
+
+    # The read ledger counts every returned card, whatever the search log caps or skips.
+    shown = [m for m in matches if isinstance(m, dict)] if isinstance(matches, list) else []
+    record(target, _search_log_card_ids(shown, top_k=len(shown)) + _search_log_aliases(shown, top_k=len(shown)))
     if not _should_log_search(query):
         return
     entry = {

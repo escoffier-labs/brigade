@@ -305,7 +305,7 @@ def parse_full_log(text: str, index: int, sha: str) -> dict:
         if re.fullmatch(r"##\[error\]Process completed with exit code \d+\.", line) or line == "Post job cleanup.":
             active = False
         elif line.startswith("##[group]"):
-            active = line.startswith("##[group]Run output=$(python -m pytest tests/test_grokbot_mcp.py ")
+            active = line.startswith("##[group]Run output=$(python -m pytest tests/test_cloud_agent_profile.py tests/test_dot_transport.py ")
             if active:
                 frames.append([])
         elif active:

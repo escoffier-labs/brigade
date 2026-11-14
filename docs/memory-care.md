@@ -1,6 +1,6 @@
 # Memory Care
 
-Brigade memory care is a local, read-only scanner for durable memory cards. It detects cards that need review, writes a refresh queue, and routes review tasks into the existing work inbox.
+Brigade memory care scans durable memory cards and tends them. The scan is local and never edits cards. It detects cards that need review, writes findings and a refresh queue, and routes review tasks into the existing work inbox. Tending then retries pending hub operations, applies an allowlist of derived fixes, archives eligible cards, drains the review inbox and reports instruction budgets. Every automatic card change is recorded with undo. Tending runs when you call `memory care tend`, and a successful CLI ingest runs its inbox stage. It is not on a schedule unless you add one. See [Safe Fix Planning](#safe-fix-planning), [Boundary](#boundary) and [Tending](#tending).
 
 ## Commands
 
@@ -268,9 +268,9 @@ Ingest appends body-free near-match, opposite-polarity, and reinforcement record
 
 Contradiction detection is deliberately conservative. Brigade only flags explicit duplicate card identities or metadata hints, not LLM-inferred factual conflicts.
 
-`status` and JSON output summarize freshness metadata coverage: reviewed dates present, missing, and stale, freshness dates present, missing, and expired, confidence distribution, and evidence metadata present or missing. These checks only explain review needs. Brigade does not edit memory cards automatically.
+`status` and JSON output summarize freshness metadata coverage: reviewed dates present, missing, and stale, freshness dates present, missing, and expired, confidence distribution, and evidence metadata present or missing. These checks only explain review needs. `status` and `scan` do not edit memory cards. Automatic edits come only from tending, described below.
 
-`status` also reports a read-only `archive_candidates` view derived from the saved scan payload (no second card-tree walk). A card is a candidate only when it has a parseable `last_reviewed` and `age_days > 2 * stale_after_days` (exactly 2x TTL is not a candidate). Missing, invalid, or future reviewed dates are unassessable and are never inferred from mtime or Git history. Each candidate includes age, last-reviewed, freshness context, and evidence pointers. The view sets `read_only`, `approval_required`, and `would_archive=false`; there is no `--apply` path and status never archives or writes state.
+`status` reports `archive_candidates` schema 2 from the latest tend result, without walking the card tree. It reports use-and-subject retirement candidates, `approval_required=false` and whether tending is enabled. Status itself never writes or archives cards.
 
 ## Card identity
 
@@ -292,13 +292,19 @@ Each match's `score` is a non-negative float rounded to 4 decimals. Higher ranks
 
 `brigade memory care backfill` handles the bulk version of the same repair for setups whose cards predate the freshness convention. It finds cards with frontmatter but no reviewed or freshness dates, derives `last_reviewed` from each card file's last git commit date (the last time anyone touched the fact, or file mtime outside git, labeled as the lower-confidence source), and proposes `fresh_until` as the reviewed date plus the configured stale window. It also backfills a missing content `fingerprint` (stable hash of normalized card body) so ingest reinforcement can match known facts, and mints a missing stable ID even when care dates and fingerprint are already present. It is dry-run by default and prints the full plan. `--apply` writes the derived values into card frontmatter, never overwrites an existing value, and records a receipt under `.brigade/memory-care/backfills/`. Backfilled dates are honest rather than flattering: an old card lands as stale immediately, which is the point, since the scan then ranks the refresh queue by real age instead of reporting unknowable gaps.
 
-`brigade memory care plan-fixes` reads the latest scan and builds a planning-only view for low-risk metadata repairs such as missing reviewed dates or missing freshness dates. The command never writes card files. Plan items include candidate metadata fields, source fingerprints, blockers, and the next review command. `status` and `plan-fixes` print the top block reasons with counts so a fully blocked plan is diagnosable.
+`brigade memory care plan-fixes` reads the latest scan and reports proposed repairs without changing cards. Add `--apply` to apply the automatic allowlist. The `fixes` tend stage runs before retirement. It runs only through `memory care tend` or `plan-fixes --apply`. `[tend] enabled = false` disables automatic fixes and retains the reviewed-date evidence-review blocker.
 
-A planned fix is blocked when Brigade can name a metadata repair but will not treat it as ready. `requires-current-evidence-review` is an operator decision: `missing-reviewed` stays blocked until someone checks current evidence and sets `last_reviewed`. `requires-operator-freshness-date` applies only when the card also has no reviewed date, so Brigade cannot derive `fresh_until`. Other blockers (`card-file-missing`, `card-frontmatter-missing`, and similar) mean the card is not readable as a metadata-only repair.
+| Fix kind | Disposition | Reason |
+|---|---|---|
+| `missing-freshness` | Applied | Derives `fresh_until` from the recorded review date plus `stale_after_days`. |
+| `missing-reviewed` | Applied | Uses only the card's last commit date, or modification time outside Git. |
+| `orphaned-card` | Reported | Indexes are curated bootstrap documents and must not grow with every card. |
+| `missing-index-link` | Reported | A dead link needs a separate removal decision. |
+| Other kinds | Reported | Evidence, content, ownership and retirement judgments are outside the fix stage. |
 
-When a card already has `last_reviewed` but no `fresh_until`, that freshness plan is unblocked. Brigade derives `fresh_until` as `last_reviewed + stale_after_days`, the same rule as `backfill`. The plan still writes nothing. Run `brigade memory care backfill` (dry-run, then `--apply` after review) to drain that class. To unblock a reviewed-date plan, review the card against current evidence, or promote the memory-care import and set `last_reviewed` through the normal refresh path.
+A missing, unreadable or future review-date source leaves the card unchanged. The journal reason records `git-last-commit` or `file-mtime`. It never claims a review happened today. Missing freshness remains blocked if there is no usable review date. A later scan can derive freshness after a reviewed-date repair.
 
-Safe fix plans are copied into memory-care imports as metadata so the work inbox and daily brief can show that a local plan exists. The plan remains advisory. Follow-up work still goes through task promotion, `backfill --apply` for derived freshness dates, or Memory Handoff review.
+Each changed card has one journal decision with its reason and before-bytes. `brigade memory care undo <decision-id>` restores it only if the card still has the expected bytes. Apply compares the card digest with its plan and refuses protected paths, archive pins, malformed frontmatter and unsafe input. The one-line apply summary gives counts and fixed reason words without card text or absolute paths. Hub publication continues through the existing push path.
 
 ## Refresh Queue
 
@@ -329,7 +335,164 @@ Receipts with malformed fields are ignored rather than honored: only a `reviewed
 
 ## Boundary
 
-Memory care does not run a scheduler, mutate canonical memory, perform remote sync, or promote imports automatically. Card edits stay explicit: routine scan and plan commands never write card files. Only `brigade memory care backfill --apply` may add derived frontmatter, with a receipt. Refreshes stay explicit through reviewed work tasks or the existing Memory Handoff flow. Scheduling those care commands is the operator's job: see the [execution model](execution-model.md). Opt-in `brigade care install` can install target-namespaced systemd user timers on Linux or launchd agents on macOS without Brigade owning a daemon.
+Memory care archives eligible cards automatically and records every change with before-bytes and undo. It never deletes memory. Paths covered by `read_only_paths` and cards with frontmatter `archive: never` are exempt. Content guard, secret and credential scanning, and pre-push checks remain in force. Scheduling care commands is the operator's job: see the [execution model](execution-model.md).
+
+## Tending
+
+`brigade memory care tend` runs five stages in this order: `hub` retries pending hub operations, `fixes` applies the automatic allowlist from [Safe Fix Planning](#safe-fix-planning), `retire` archives eligible cards, `inbox` drains the [review inbox](#review-inbox), and `instructions` reports [instruction budgets](#instruction-budgets) without moving anything. Use `--stage` with one of those names to select a stage, `--dry-run` to preview without writing, and `--json` for structured output. CLI scans do not run automatic care or recover pending decisions. Use explicit `memory care tend` for those operations. `memory care scan --no-tend` remains accepted as a deprecated no-op. Library scans remain read-only.
+
+Workspace `.brigade/memory-care.toml` accepts:
+
+```toml
+[tend]
+enabled = true
+unused_after_days = 120
+deadline_days = 14
+max_archives_per_run = 20
+```
+
+A read ledger records last-read days from search and prompt recall. Retirement requires a ledger at least 120 days old, no read within that window (including available hub read stats), and a past `expires_at` or `expires` date. `fresh_until` alone never means the subject ended. A new or reset ledger archives nothing on use grounds. This stage makes no model calls.
+
+Archive moves `memory/cards/x.md` to `memory/archive/cards/x.md`. Cards outside `memory/` keep their relative path under the archive. Archived cards leave search, recall, scan, proposals, hub push and retrieval evaluation. Writable index files lose only the card's link lines.
+
+`brigade memory care undo <decision-id>` restores the exact bytes and reinserts removed links without replacing unrelated index edits. It refuses when either card path changed after the decision. An occupied original path is never overwritten. The journal lives under `.brigade/memory-care/journal/` with owner-only before-images. In hub sync mode, published cards are retired and restored cards revived. Unavailable hub operations remain pending for retry. Local undo remains available. Hub revision conflicts enter the existing sync conflict path.
+
+To apply an external judgment, use `brigade memory care archive --from-file decisions.jsonl [--limit N]`. Each JSON line contains `card` (a target-relative card path) and a nonblank `reason`. The optional positive limit caps successful archives independently of the steady-state limit. Refused, missing, protected and duplicate cards are reported and skipped. Every accepted row uses the same archive journal and undo.
+
+
+### Review inbox
+
+Successful non-dry-run CLI ingest drains the review inbox. `ingest --no-tend` skips this
+once. `[tend] enabled = false` disables automatic care for the workspace. Ingest now
+takes the care lock and finishes or abandons pending care decisions. Library ingest
+keeps its existing behavior.
+
+| Disposition | Reason codes | Needs evidence-log proof | Action |
+|---|---|---|---|
+| Resolve | `document-content-present`, `document-anchor-present` | No. Read the destination to prove representation | Record already-applied and move to `memory/handoff-inbox/resolved/` |
+| Retry | `expected-sha-stale`, `expected-sha-mismatch`, `card-publication-changed`, `card-publication-busy`, `document-destination-unwritable`, `bootstrap-budget-exceeded` | Use the fresh outcome's per-code flag | Recheck with the original promotion and routing flags, once per run |
+| Retain | Injection, content-scan, contradiction, identity migration, collisions and unsafe destinations | Yes for contradiction candidates, otherwise no | Record a trust or security hold and leave the draft untouched |
+| Hold | Proposal notifications, near matches, invalid or missing fields, unapplied knowledge and unknown codes | Yes for near matches, reinforcement records and unknown codes, otherwise no | Leave untouched with a separate hold count and reason |
+| Expire | No current ingest codes qualify | No current codes | The deadline mechanism remains available for future codes that prove knowledge is represented elsewhere or carry nothing durable |
+
+An unsuccessful retry stays held when it contains unapplied knowledge. A later pull
+request in this plan will add background model judgment for held drafts. Every inspected
+draft gets a reason in the body-free report at `.brigade/memory-care/inbox/latest.json`.
+Reading that report is optional. Oversized destinations stay held. Invalid UTF-8,
+oversized drafts, unsafe paths, tracked review drafts and drafts without an unambiguous
+routing timestamp are skipped and reported. Malformed writer folders are inspected only
+within the target. Quarantine is never read. External writer roots are reported and
+skipped because the local journal cannot undo writes outside its target.
+
+An already-applied draft resolves only after a fresh read proves all proposed content is present in the destination. This proof works on any platform and does not depend on the evidence log. Review holds remain held even when evidence is available.
+
+A draft cited by the evidence log stays at its original path. A journaled row in
+`.brigade/memory-care/inbox-ledger.jsonl` removes it from pending work. If the evidence
+log cannot be read completely, outcomes needing evidence-log proof are held. Independent resolutions retain potentially cited drafts in place through the ledger. Undo restores
+the draft's pending state and any changed card or document. Card replacements require
+unchanged destination bytes. Appended blocks require an unchanged exact match. Machine
+logs stay append-only: undo appends a digest-addressed retraction, and readers omit
+withdrawn rows regardless of row order. Document undo matches its exact block under the
+same short lock used by Brigade document appenders, preserving later blocks. External
+editors do not take this lock, so their concurrent edits cannot be coordinated. A
+document-lock timeout leaves retries waiting. Plain ingest routes its original bytes
+into the review inbox.
+
+Retries prepare the journal and save before-images before writing a destination.
+Recovery uses the same prepare-then-finish protocol as card archives. Evidence, document
+and ledger bytes append after finish, with their path, length and digest recorded in the
+decision. Recovery recognizes a published block to avoid duplicate appends. Reprocessing
+keeps ingest's destination, identity, expected-SHA and injection checks, and
+also honors memory-care read-only paths and archive pins. This drain changes local files
+only. Hub handoff rows remain outside this stage, and an unavailable hub cannot cause a
+hub-side inbox change.
+
+A handoff aimed at a known instruction file goes to that file only while the append
+stays under the file's act-at threshold. Past it, behind a symlink, or when the
+`[instructions]` table cannot be read, the content is appended to a private overflow
+card, `memory/cards/instructions/<file-key>--overflow-<type>.md`, rolling to `-2`, `-3`
+at `max_card_bytes`. Every overflow card is `visibility: private` and `archive: never`.
+Each append is an undoable `card-append` decision, so `brigade memory care undo` removes
+exactly that block and keeps later ones. A replay finds its block in any earlier card of
+that file and type and never writes it twice. Holds from earlier releases that were
+refused for size (`bootstrap-budget-exceeded`) drain the same way on the next run.
+Excluding a file or setting `enabled = false` does not turn this routing off. A handoff
+with an injection signal or an unsafe name is still kept for a person.
+
+The card path is predictable, so the writer trusts a card only when this feature created
+it. Before every append to an existing card it requires one frontmatter block with
+`visibility: private` (read by the same parser the hub push uses), `archive: never`, the
+`moved-instructions` tag and a `source_file`. The `moved-instructions` tag must be an exact member of the `tags` value, not a substring
+of it. A card that fails any of these, or that is too large for the duplicate check to
+read in full, receives nothing: the handoff is held as `overflow-card-untrusted`, with
+the card's path in the reason. That code is a retry code. Each ingest run and each drain
+re-evaluates it, so the draft stays held while the card still fails and is delivered
+with no person involved once the card is repaired or removed. Ingest and the drain write
+`.brigade/memory-care/inbox/blocked-cards.json` (`{"version": 1, "cards": [{"path",
+"problem", "held_drafts"}]}`), one row per card that holds drafts, with its
+workspace-relative path and the count. The file is rewritten every run and empties when
+the card passes. A block
+that cannot fit an empty card, frontmatter included, is kept as `overflow-block-too-large`
+and never written oversize. A configured `max_card_bytes` above the duplicate scan's
+1 MiB read limit is not applied. Retry reads an overflow card with that same limit, so a
+card routing may choose is a card a held draft can be delivered to. The journal decision records both the limit used and the
+requested one. The undo of the append that created a card needs the card's frontmatter
+unchanged, so a later stage that rewrites it (`last_reviewed`, `fresh_until`) makes that
+one undo refuse, and later appends are undone as before.
+
+Every one of these rules is enforced on the exact bytes of the opened destination, under
+the document lock, at the moment of writing, on every path that writes, including
+recovery of a decision that was committed earlier. The writer opens the card read-write
+without following links, and refuses to write when the card is not in the state the
+decision recorded (created or existing), is not one this feature created, no longer has
+the bytes the decision pinned, or would pass `max_card_bytes` with the block. A refused
+recovery is recorded on the decision (`append_refused`), which recovery does not retry,
+and a handoff that was moved aside for the retry goes back to the review inbox. A direct
+append to an instruction file measures the opened file under the lock and goes to the
+overflow card in the same run when the block no longer fits, so two runs cannot both
+decide that a block fits. The file's `(st_dev, st_ino)` is pinned when the route is
+decided and must match at the open, which stops a swapped-in link but still accepts a
+file that was already hard linked. Overflow cards must have a single link.
+
+When the care configuration (`.brigade/memory-care.toml`) cannot be parsed, the card's
+protected paths cannot be read, so nothing is written and the handoff is held as
+`document-destination-unwritable`. That is a retry code: the handoff is retried
+automatically on the next drain once the file parses, and it is never lost. While the
+file does not parse, even a small append to a file far below its act-at goes to this
+hold instead of to the file.
+
+The drain also sweeps redundant before-images of abandoned decisions. A sweep requires
+an exact surviving copy at a recorded path, retains unique or unreadable images and
+restorable decisions, and records each removed path, size, digest and surviving live
+copy without saving another copy. These redundant images are not recoverable through
+undo. Orphan directories without readable decision metadata stay in place and are
+reported.
+
+### Instruction budgets
+
+Always-loaded instruction files (`AGENTS.md`, `USER.md`, `TOOLS.md`, `MEMORY.md` and the other names an agent harness reads at startup, plus the user-level files Codex and the other harnesses load) are measured against one limit each. This release measures and reports. It moves nothing.
+
+**How the limit is chosen.** The limit is the smallest of Brigade's target budget for the file and every cap a loader enforces on it. The target is the per-name budget, else `default_limit_bytes` (20,000). OpenClaw caps come from its own configuration, per agent, with `USER.md` fixed at 4,000. The Codex cap is `project_doc_max_bytes` (32,768 by default) and applies to the project file Codex selects. A character cap is used as the same number of bytes, so a limit is never looser than the harness. When two caps tie, the loader is named. Paths that reach the same file through a symlink or hard link are one row, named by the real file.
+
+**Thresholds and states.** Act-at is 85% of the limit and trim-to is 70%. A file at or under act-at is `within`. Between act-at and the limit it is `over-act-at`: nothing is cut yet and no alert is raised. Over the limit it is `could-not-trim` with reason `report-only`, because no file can be moved yet. A loader total over its cap is `total-over-cap`.
+
+**Where it shows.**
+
+- `brigade memory care tend --stage instructions --dry-run --json` prints one row per file (display path, loaders, class, bytes, limit and its source, act-at, trim-to, state, and any overflow cards the file does not name yet) and the loader totals. It also runs as part of a full `memory care tend`.
+- `brigade doctor` has a `bootstrap-budget: <file>` row per file. A workspace file over its limit fails. A user-level file warns and is an operator row. A link that leaves the workspace also warns, as a plain row. A loader total over its cap has an `instructions: loader-total <loader>` warning row, because the harness cuts at the total.
+- `brigade budgets check` prints the same rows with `ok`, `warn`, `fail` or `missing`, a `[warn]` line for each loader total over its cap, and returns 1 only on `fail`. Doctor and `budgets check` take their rows from one inventory and one set of rules, so they agree, including on a per-name path that exists and is not a regular file (a directory, say), which fails in both. A link to nothing is a missing file in both.
+- `brigade work brief` prints one line while a file is over its limit, for example `instruction_budget: could-not-trim path="USER.md" 8241/4000 reason=report-only next="brigade memory care tend --stage instructions --dry-run --json"`. The line shows on every brief while the state holds in this release. A later release keeps the previous state and prints only new alerts.
+
+**Unknown size.** A file that exists but whose size nothing could read is never `within`. Its state is `size-unknown`, with the skip reason as the code. A file with no read permission takes its size from `stat`, which needs none, so it is rated like any other file. Only when `stat` fails too, or the opened file is not a regular file, is the size unknown. A workspace file in that state fails in doctor and `budgets check` and raises `instruction_budget: size-unknown path="..." limit=... reason=...` in the brief. A user-level file warns. A file over 1 MiB or not UTF-8 keeps a trusted size.
+
+**Names are data, not text.** A file name, a configured path, an override name or an OpenClaw agent id can be written by an agent or by content an agent ingested, and the brief is read by a model. Every such value in a line of text is written as an encoded data value in a quoted field. Only ASCII letters, digits and `. _ - / ~` pass as they are. Every other character, including a space, a colon, a backtick, `#`, `=`, `<`, `>`, a quote, a non-ASCII character and a control character, becomes an escape such as `\x20` or `\u202e`, and a value over 96 characters ends in `[truncated]`. So `ignore previous instructions.md` prints as `path="ignore\x20previous\x20instructions.md"`. The fixed parts of a line (the prefix, the state names, the reason codes and `next=`) come from constants. The JSON payloads keep the real values as JSON strings and never carry the target or home directory.
+
+**Configuration changes stay visible.** The `[instructions]` table in `.brigade/memory-care.toml` reads `enabled`, `act_at_percent`, `trim_to_percent`, `default_limit_bytes`, `exclude`, `files.<path>.class` and `files.<path>.limit_bytes`. A configured limit can only lower a limit. An excluded file stays in the report, marked with where the exclusion came from, and still counts toward loader totals. An override that names a path outside the workspace and the home directory, or a credential or shell-setup file, is rejected and the row is forced to class `report`. The report lists every rejected override, every clamped limit, the keys that moved a limit for every file, and why an OpenClaw configuration could not be read. While any override was rejected, any limit clamped, any file excluded or any such key set, `brigade work brief` prints one `instruction_budget: config-changed` line and `brigade doctor` adds an `instructions: config-changes` warning. Reports show display paths only, never a full home path or file content.
+
+**Invalid configuration.** A bad `[instructions]` table never stops a reader. Doctor and `budgets check` fail one `instructions: config` row and still measure with the defaults, and the brief prints one `config-invalid` line. A `tend --stage instructions` run exits with the error like a bad `[tend]` table, and so does an inventory error. In a plain `brigade memory care tend` the stage records the error (`config-invalid` or `inventory-failed`), the other stages finish and the state file is saved, and the run exits 1 with `failed` and `failed_stages` in the payload. If the brief cannot read the inventory it prints one `instruction_budget: inventory-failed` line.
+
+`enabled = false` turns off the report and the alerts only, and `exclude` only removes a file from them. Neither turns off overflow routing. They do not turn off doctor: an excluded or disabled over-limit workspace file keeps `brigade doctor` failing, by design, because the loader cuts the file either way. Moving sections of a full file comes in a later release.
+
 
 ## Session-start and prompt recall (#466 Slice 1, #2196)
 
@@ -382,6 +545,8 @@ Machine-local config key: `memory_recall_target` in `.brigade/config.json`.
   deadline and 5 match / 10 line caps. It adds one recall subprocess per prompt
   and does nothing unless a recall target is active.
 
+A file that is in the report only because `[instructions.files]` enrolled it is shown in the brief, in doctor and in `budgets check` text by an id such as `configured-file-1a2b3c4d5e6f`. Its name was chosen by whoever wrote the configuration, and a name can read as a sentence even when it holds only path characters. The JSON output carries the same id as `text_name` beside the display path. The brief also prints one `loader-config-unreadable` line when a harness configuration cannot be read, because the limits then fall back to Brigade's own targets and may be looser than the harness's real cap.
+
 ### Operator smoke (before merge)
 
 Use a temp target, never the real home directory:
@@ -405,3 +570,23 @@ python -m brigade work hooks install --target "$target"
 ```
 
 For operator-owned cron, systemd, and CI recipes (and `brigade care`), see [scheduled care](scheduled-care.md).
+
+### Reads protect cards
+
+Automatic retirement needs a positive reason, currently an `expires_at` or
+`expires` date in the past. Being unread never archives a card by itself.
+A recorded read within `unused_after_days` blocks automatic retirement.
+
+Search results, recall at session start and after compaction, explicit card
+reads, local connector reads, replica card reads, and local dispatch memory
+context count as reads. The Claude Code Read hook also records an opened card
+in its owning memory root. Vault search and show count projected notes when
+their identity matches a canonical card in the target memory root. Projection
+maps, notes without an identifiable card, and projections of another root
+cannot be attributed. Card listings and maintenance operations do not count.
+
+Brigade cannot see a file opened by a person or by a tool it does not
+instrument. Hub read counts have budgets and can miss reads. Reads therefore
+only ever protect a card. Missing, incomplete, or too-young read history blocks
+automatic retirement. `memory care archive --from-file` applies an outside
+judgment and does not consult reads.

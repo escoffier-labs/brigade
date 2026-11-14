@@ -15,6 +15,8 @@ from typing import Any
 from .. import fleet_admin_stats_collector
 from ..fleet_claim_release import _print_claim_failure, _release_claim, _workspace_from_run_dir  # noqa: F401
 
+from .removed_commands import REMOVED_IN
+
 DEFAULT_PORT = 3774
 DEFAULT_DB_REL_PATH = Path(".brigade") / "fleet-hub.db"
 
@@ -222,13 +224,13 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     p_grokbot = fleet_sub.add_parser(
         "grokbot",
-        help="Enroll an existing fleet node as one Hub-authoritative Grok Bot listener actor.",
+        help=f"Removed in {REMOVED_IN}.",
     )
     grokbot_sub = p_grokbot.add_subparsers(dest="fleet_grokbot_command", metavar="<grokbot-command>")
     grokbot_sub.required = True
     p_grokbot_enroll = grokbot_sub.add_parser(
         "enroll-actor",
-        help="Enroll one enabled, role-scoped listener actor (admin token).",
+        help=f"Removed in {REMOVED_IN}.",
     )
     p_grokbot_enroll.add_argument("node_id", help="Already-enrolled fleet node id that will hold the actor token.")
     p_grokbot_enroll.add_argument("--queue-owner-node-id", required=True, help="Fleet node id that owns the queue.")
@@ -261,9 +263,6 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .fleet_messages import register as register_messages
 
     register_messages(fleet_sub)
-    from .fleet_keys import register as register_keys
-
-    register_keys(fleet_sub)
 
     p_cloud = fleet_sub.add_parser("cloud", help="Read the fleet hub's sanitized cloud lease snapshot.")
     p_cloud.add_argument("--all", action="store_true", help="Include released and expired cloud leases.")
@@ -727,25 +726,9 @@ def _dispatch_nodes_revoke(args: argparse.Namespace) -> int:
 
 
 def _dispatch_grokbot_enroll_actor(args: argparse.Namespace) -> int:
-    import json as _json
+    from .removed_commands import removed
 
-    from .. import fleet_client, fleet_client_grokbot
-
-    try:
-        payload = fleet_client_grokbot.enroll_actor(
-            node_id=args.node_id,
-            queue_owner_node_id=args.queue_owner_node_id,
-            queue_id=args.queue_id,
-            actor_kind=args.role,
-        )
-    except fleet_client.FleetClientError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    if args.json:
-        print(_json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"enrolled Grok Bot actor: node={payload['node_id']} role={args.role}")
-    return 0
+    return removed("fleet grokbot enroll-actor")
 
 
 def _dispatch_export(args: argparse.Namespace) -> int:

@@ -1,0 +1,2 @@
+- Reconcile queued retirement and revival with current local bytes before replay, and protect cards read through recall, connectors, file-read hooks, replicas, dispatch context, and identifiable vault projections.
+- Block automatic retirement when hub read history is too young, malformed, or incompletely paginated, and retry local read recording once after lock contention.

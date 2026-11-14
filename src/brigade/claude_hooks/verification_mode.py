@@ -178,25 +178,24 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
     return found
 
 
-def verification_in_yolo(command: object, cwd: object, root: Path) -> bool:
-    """True only when every verification in ``command`` is governed by yolo mode.
-
-    ``cwd`` is the tool call's working directory, and ``root`` stands in for it
-    when absent. A verification that runs in a wired repository follows that
-    repository's mode. One whose directory cannot be placed, or that runs
-    outside every wired repository, follows ``root``'s mode, as before #2235.
-    So an enforced workspace stays enforced for a dynamic ``cd``, and a yolo
-    repository is not newly denied for one.
-    """
+def governing_modes(
+    command: object, cwd: object, root: Path, *, harness: str | None = "claude"
+) -> list[tuple[Path, str]]:
+    """Resolve each verifier's governing target, preserving first-seen order."""
     if not isinstance(command, str) or not command.strip():
-        return False
-    root_yolo = work_mode.is_yolo(root)
+        return []
     start = Path(cwd) if isinstance(cwd, str) and cwd else root
-    cwds = verifier_cwds(command, start)
-    if not cwds:
-        return root_yolo
-    for path in cwds:
-        wired = resolve_wired_target(str(path)) if path is not None else None
-        if not (work_mode.is_yolo(wired) if wired is not None else root_yolo):
-            return False
-    return True
+    modes: dict[Path, str] = {}
+    for path in verifier_cwds(command, start):
+        wired = resolve_wired_target(str(path), harness=harness) if path is not None else None
+        target = wired if wired is not None else root
+        modes[target] = work_mode.resolve_mode(target)
+    return list(modes.items())
+
+
+def verification_enforced(command: object, cwd: object, root: Path) -> bool:
+    """Enforce when any verifier belongs to a strict target."""
+    if not isinstance(command, str) or not command.strip():
+        return True
+    modes = governing_modes(command, cwd, root)
+    return any(mode == work_mode.MODE_STRICT for _, mode in modes) if modes else work_mode.is_strict(root)

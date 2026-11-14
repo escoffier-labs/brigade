@@ -61,6 +61,9 @@ class MemoryChecks(Fixture):
         outside.write_text("secret outside")
         (self.cards / "linked.md").symlink_to(outside)
         first = self.call("memory_card", name="big-card")
+        from brigade import memory_card_reads
+
+        self.assertIn("memory/cards/big-card.md", memory_card_reads.load(self.workspace).last_read)
         self.assertEqual(first["sha256"], hashlib.sha256(text.encode()).hexdigest())
         self.assertEqual(first["next_offset"], 30000)
         self.assertEqual(first["content"], text[:30000])

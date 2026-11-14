@@ -31,6 +31,7 @@ from . import (
     scorecard as scorecard_mod,
     verify_trial,
 )
+from .agent_identity import detect_harness, map_receipt_identity
 from .outcome_discovery import (
     _artifact_content_path_at,
     _artifact_id_has_controls,
@@ -404,15 +405,6 @@ def artifact_fingerprint(target: Path, artifact_id: str, kind: str) -> str | Non
 # each new record so cohort-aware scoring (Phase 2) has data to work with. Nothing
 # here changes a score or a ratchet decision.
 
-# Ordered (env var -> harness name) auto-detection. An explicit
-# BRIGADE_CONTEXT_HARNESS override wins; otherwise a known signal implies a name.
-_HARNESS_SIGNALS: tuple[tuple[str, str], ...] = (
-    ("CLAUDECODE", "claude-code"),
-    ("CURSOR_TRACE_ID", "cursor"),
-    ("CODEX_SANDBOX", "codex"),
-    ("CODEX_SANDBOX_NETWORK_DISABLED", "codex"),
-)
-
 # Coarse model-family buckets, matched as substrings in priority order. Low
 # cardinality on purpose: the family is what plausibly flips an exit code, and
 # coarse buckets are what let a capability cohort ever accumulate samples.
@@ -427,20 +419,6 @@ _MODEL_FAMILIES: tuple[tuple[str, str], ...] = (
     ("grok", "xai"),
     ("gemini", "google"),
 )
-
-
-def _detect_harness() -> tuple[str, str]:
-    """Return (harness, source). Best-effort: env override, then known signals."""
-    override = os.environ.get("BRIGADE_CONTEXT_HARNESS", "").strip()
-    if override:
-        return localio.slugify(override, fallback="harness"), "env"
-    for var, name in _HARNESS_SIGNALS:
-        if os.environ.get(var):
-            return name, "auto"
-    generic = os.environ.get("AI_AGENT", "").strip()
-    if generic:
-        return localio.slugify(generic, fallback="harness"), "auto"
-    return "unknown", "unknown"
 
 
 def _detect_model(run_agent: dict[str, Any] | None) -> tuple[str, str]:
@@ -474,7 +452,7 @@ def context_manifest(run_agent: dict[str, Any] | None = None) -> dict[str, Any]:
     """
     from . import __version__
 
-    harness, harness_source = _detect_harness()
+    harness, harness_source = detect_harness()
     model, model_source = _detect_model(run_agent)
     return {
         "brigade_version": __version__,
@@ -2057,6 +2035,8 @@ def capture(
         code_graph_delta = _compact_code_graph_delta(receipt)
         signal = core.signal_value(source, effective_status)
     manifest = context_manifest(run_agent)
+    if source == "verify" and isinstance(receipt.get("agent_identity"), dict):
+        manifest["agent_identity"] = map_receipt_identity(receipt["agent_identity"])
     route = route_manifest(route_run_payload, route_run_json)
     if signal is None:
         signal = core.signal_value(source, effective_status)
@@ -2662,10 +2642,8 @@ def record(
 
 
 def health(target: Path) -> dict:
-    """Surface whether the receipt-only verified-learning loop is actually being fed.
-
-    Scorecard eligibility is projected exclusively from verify receipts. Legacy
-    ``records.jsonl`` rows remain audit-only and are never joined for scoring.
+    """Surface whether the receipt-only verified-learning loop is being fed.
+    Scorecard eligibility uses verify receipts; legacy ledger rows remain audit-only.
     """
     target = target.expanduser().resolve()
     from . import scorecard as scorecard_mod

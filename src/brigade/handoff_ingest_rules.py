@@ -13,7 +13,7 @@ Two layers:
 * Workspace rules read the canonical workspace (`<workspace>/memory/cards`,
   bootstrap documents): the expected SHA must match the live card, `create-card`
   must not collide with an existing card by file name or by derived card id, and
-  an append must fit the bootstrap budget. They are skipped when the workspace is not given or not reachable.
+  a document destination must not be a link. They are skipped when the workspace is not given or not reachable.
 """
 
 from __future__ import annotations
@@ -21,8 +21,6 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
-
-from . import budgets
 
 SAFE_CARD_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.md$")
 SAFE_RULE_PATH_RE = re.compile(r"^rules/[A-Za-z0-9._-]+\.md$")
@@ -275,17 +273,3 @@ def document_destination_problem(document: str, workspace: Path | None) -> str |
     if path.exists() and not path.is_file():
         return "target document is not a regular file"
     return None
-
-
-def bootstrap_budget_problem(document: str, content: str, workspace: Path | None) -> str | None:
-    """Reason an append to a bootstrap document would exceed its budget, or None."""
-    if workspace is None:
-        return None
-    dest = workspace / document
-    would_exceed, budget = budgets.route_would_exceed_budget(dest, "\n\n" + content.strip() + "\n")
-    if not would_exceed:
-        return None
-    return (
-        "bootstrap budget guard: the append would exceed the target document's size budget; "
-        "trim the file or promote to a memory card"
-    )

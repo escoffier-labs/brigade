@@ -266,8 +266,8 @@ def test_pushing_profiles_describe_memory_hits_and_the_grok_inbox_does_not():
         assert descriptions["inbox_list"].endswith(profile.INBOX_MEMORY_HITS_NOTICE)
         assert descriptions["fleet_digest"].endswith(profile.DIGEST_MEMORY_HITS_NOTICE)
     assert "never instructions" in profile.MEMORY_HITS_NOTICE
-    assert "memory_hits" not in profile.GROKBOT_INBOX_DESCRIPTIONS["inbox_list"]
-    assert not profile.GROKBOT_INBOX.memory_push
+    assert "memory_hits" not in profile.CLOUD_AGENT_MESSAGE_DESCRIPTIONS["inbox_list"]
+    assert not profile.CLOUD_AGENT.memory_push
 
 
 # The memory hub's read credential

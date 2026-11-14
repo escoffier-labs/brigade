@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .. import inbox_lock, localio
-from . import anchored_io, dependencies, envelope
+from . import anchored_io, check_events, dependencies, envelope
 
 _SESSION_STATE_PROCESS_LOCKS_GUARD = threading.Lock()
 _SESSION_STATE_PROCESS_LOCKS: dict[str, threading.Lock] = {}
@@ -330,6 +330,12 @@ def _write_session_state_preserving_latch(
                     capture_artifact_id,
                     kind=capture_kind if isinstance(capture_kind, str) and capture_kind.strip() else "skill",
                 )
+            # Only identity events may replace the latest locked model cache.
+            if patch_fields != check_events.IDENTITY_FIELDS:
+                for key in check_events.IDENTITY_FIELDS:
+                    updated.pop(key, None)
+                    if key in current_state:
+                        updated[key] = current_state[key]
             dependencies.merge_observations(updated, current_state, observed_fields=patch_fields or ())
             if updated.get("task_epoch") == current_epoch:
                 # Completed writes are monotonic within a task. Observation

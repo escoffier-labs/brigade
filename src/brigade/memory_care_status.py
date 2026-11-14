@@ -74,29 +74,14 @@ def status(*, target: Path, json_output: bool = False) -> int:
         print(f"top_issue: {top.get('issue_type') or top.get('name')} {top.get('file') or top.get('detail')}")
     archive_value = payload.get("archive_candidates")
     archive = archive_value if isinstance(archive_value, dict) else {}
-    threshold_value = archive.get("threshold")
-    threshold = threshold_value if isinstance(threshold_value, dict) else {}
     print(
         "archive_candidates: "
         f"count={archive.get('candidate_count', 0)} "
-        f"unassessable={archive.get('unassessable_count', 0)} "
-        f"threshold=age_days>{threshold.get('candidate_after_days', 0)} "
-        f"approval_required={archive.get('approval_required', True)} "
+        f"approval_required={archive.get('approval_required', False)} "
         f"would_archive={archive.get('would_archive', False)}"
     )
-    candidates_value = archive.get("candidates")
-    candidates = candidates_value if isinstance(candidates_value, list) else []
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        pointers_value = candidate.get("evidence_pointers")
-        pointers = pointers_value if isinstance(pointers_value, list) else []
-        print(
-            f"  archive_candidate: {candidate.get('file')} "
-            f"age_days={candidate.get('age_days')} "
-            f"last_reviewed={candidate.get('last_reviewed')} "
-            f"evidence={','.join(str(item) for item in pointers) if pointers else '-'}"
-        )
+    for candidate in archive.get("candidates", []):
+        print(f"  archive_candidate: {candidate.get('file')} signal={candidate.get('signal')}")
     recall_value = payload.get("search_recall")
     recall = recall_value if isinstance(recall_value, dict) else {}
     print(

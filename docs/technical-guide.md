@@ -166,31 +166,7 @@ work alongside migration of the three existing GitHub read implementations.
 
 ### Grok Bot local job queue
 
-`brigade run cloud grokbot` creates a private local queue contract. It does not call a live provider, commission Grok Bot, or add a synchronous roster seat. The Brigade Stack package now includes a role-scoped MCP listener for that queue. It runs as its own process while queue authority remains in the selected local Brigade Stack target. See [Grok Bot MCP listener](grokbot-mcp.md) for installation, operations, and Cloudflare boundaries, and [Grok Bot operating guide](grokbot-operating-guide.md) for the pack reference, queue actor authorization, lifecycle semantics, finding delivery, and Bot configuration.
-
-Queue data lives below `.brigade/cloud/grokbot/` with private file permissions. Submit a complete task envelope from a JSON file with `enqueue --spec`; do not put task instructions, verification commands, credentials, headers, environment values, or artifact bodies on the command line. The envelope identifies a bounded role, repository, base ref, owned paths, artifact kind, and timeout. Completion reads a second JSON file with `complete --artifact`; it accepts artifact references only, such as a GitHub draft-PR URL and branch, a branch and commit, or a report path and SHA-256.
-
-Jobs move through `queued`, `claimed`, `running`, `completed`, `failed`, `expired`, and `canceled`. A bot claims work with its own opaque bot and lease IDs plus a bounded lease duration. The same claim can be retried safely, and `renew` extends the current unexpired lease within the job deadline. `cancel` ends queued work immediately or records a cancellation request for a live lease. The lease holder uses `ack-cancel` to finish that cancellation. `expire` never requeues a job; it finalizes a job after its deadline or lease expires.
-
-Only safe projections are printed by `status` and mutation commands. They include job identity, state, timing, task hash, and artifact metadata, but never the envelope's `instructions` or `verification_commands`. The one exception is the authenticated worker MCP claim: after a successful role-matching claim, the worker receives the bounded validated envelope as its execution context so it can execute the task without the instructions being repeated in chat. The CLI `claim` command keeps returning the redacted projection.
-
-```bash
-brigade run cloud grokbot enqueue \
-  --target . \
-  --spec .brigade-inputs/grokbot-task.json \
-  --idempotency-key issue-1130-scout
-
-brigade run cloud grokbot claim \
-  --target . \
-  --job-id grokbot-0123456789abcdef01234567 \
-  --bot-id scout-01 \
-  --lease-id lease-01234567 \
-  --lease-seconds 300
-
-brigade run cloud grokbot status --target . --json
-```
-
-`brigade run cloud grokbot reconcile-reports --target QUEUE --owner OWNER` previews completed Repository Scout report jobs. Under hub authority it lists those jobs from the hub with the operator or feed identity and pairs each with the local artifact and snapshot by `job_id`. `--apply` writes at most `--limit` deterministic Memory Handoff drafts directly into the canonical owner's `memory/handoff-inbox` for review. Preview writes nothing. Report text is never printed. See [Grok Bot MCP listener](grokbot-mcp.md#report-reconciliation).
+Removed in 0.32.0. The local queue and its worker paths no longer ship. `brigade run cloud grokbot enqueue`, `claim`, `status`, `reconcile-reports` and the other queue commands print migration guidance and exit 2. Use `brigade hub connector setup --id cloud-agent` with independent credentials. See [Generic cloud-agent profile](duet-connector.md#generic-cloud-agent-profile).
 
 For a remote T3 controller journal already available locally, configure an alias and a repo-relative journal path in `.brigade/center/agent-activity-sources.json`:
 
@@ -1167,7 +1143,7 @@ Start-of-day commands:
 - `brigade work doctor` checks dogfood config, security config, evidence bundles, Codex CLI, artifact paths, handoff inbox, task acceptance, issue-backed tasks, stale active sessions, ignore coverage, and latest run context.
 - `brigade work hooks install|update|status|uninstall` manages the project-scoped Claude Code work-loop package while preserving foreign settings and hooks. Pass `--scope user` to install the same package into the Claude user home (`$CLAUDE_CONFIG_DIR` or `~/.claude`): a packaged hook script under `hooks/` and managed entries in `settings.json`, with ownership tracked in `brigade/claude-hooks.json`. User-scope `--target <wired-workspace>` pins `hook-run`; omit it for multi-repo mode. Project-scope install refuses the home directory (that path is Claude Code's user settings). The runtime entrypoint is `brigade work hook-run [--target]`; it is called by Claude Code rather than by operators. After two consecutive timeouts against one session target the handler latches off for the rest of the session. The work-loop snapshot fingerprint skips normally-gitignored directories such as model caches, virtualenvs (`.venv`), `__pycache__`, `node_modules`, and generated databases.
 - `brigade work hooks install|update --recall-audience local` opts this host in to private-class memory recall text in local Claude sessions, and `--recall-audience connector` opts it out. Without the opt-in, recall hooks treat every session as a connector audience and withhold private-class card text. The opt-in writes `<BRIGADE_HOME>/claude-hooks/recall-audience.json`, bound to the host name, the machine id (required except on macOS) and the device and inode of the Brigade home. On POSIX the home's parent may be writable by others only with the sticky bit, and the checks and the marker read go through the same directory descriptors, so another user cannot swap the home in between. Opting out writes a connector marker before removing the file, and exits 2 only if local recall may still be on. On Windows, which Brigade checks without reading ACLs, local recall needs the Brigade home inside the user's profile, so a custom `BRIGADE_HOME` outside the profile cannot opt in. The marker prevents accidental local trust on a copied, synced or cloud home, which fails the binding and falls back to connector. It does not defend against a process running as the same user, which can already read the hub token and the local cards. The principal's hub grants are the boundary there. `CLAUDE_CODE_REMOTE` or a `BRIGADE_RECALL_AUDIENCE` value other than `local` always narrows to connector.
-- `brigade work mode show|set engineer|yolo` reads and writes `work.mode` in `.brigade/config.json`, omitted at its `engineer` default. `enforced`, the earlier name for engineer mode, is still read and accepted by `set`, and `brigade init --engineer` switches a yolo install back. `brigade work rails show|on|off|check` reads and writes only a per-user record outside every repository (`work-rails.json` under the Brigade user config directory), keyed by the target's real path with symlinks resolved and case folded on Windows and macOS. Rails are off only for a path that record names. An in-repo `work.rails` value is ignored for enforcement, and doctor and `rails show` warn when one is present. Yolo mode keeps the brief, recall, Fleet Hub delivery, and handoffs on request, and turns off the raw-verification deny, the failed-verification nag, and the Stop receipt gate in the Claude and Grok hooks. A project-scope Claude install carries the same events in both modes. The runtime skips the Stop and failure checks per target, so writes into an engineer-mode child repository from a yolo workspace session still need a receipt. `brigade work mode set` reconciles an existing install. `rails check` exits 3 when rails are off. The `hooks/pre-push` template calls it and skips both scans on 3. Any other result, including an older Brigade, keeps scanning. The hook passes the repository root as the target. See [agent-assisted setup](agent-assisted-setup.md#engineer-mode-yolo-mode-and-safety-rails) for the tradeoff.
+- `brigade work mode show|set strict|observe|off` reads and writes `work.mode` in `.brigade/config.json`. The key is always written, including the unchanged `strict` default. `engineer` and `enforced` alias `strict`. `yolo` aliases `off`. Init accepts `--strict`/`--engineer`, `--observe` and `--off`/`--yolo`, preserving an existing mode when no flag is given. An absent key or unreadable or invalid config resolves to strict. The brief pins a readable untracked keyless canonical config without changing other settings. Legacy configs remain unpinned. doctor reports unpinned configs. Older binaries fall back to engineer enforcement for every canonical name, including `off`. Observe and off skip raw-check denies, failed-check retry notes, Stop receipt gates, dormancy findings and adoption bypass counting. Observe does not record raw checks. Recording requires `brigade work verify run`. Strict retains the previous engineer behavior, including checks in strict children of unenforced workspaces. A check that follows a `cd` in the middle of a command is governed by the directory the command started in. Safety rails remain a separate per-user setting. changing mode never changes their record, guard policies or baselines. See [agent-assisted setup](agent-assisted-setup.md#strict-observe-and-off-modes-and-safety-rails).
 - `brigade work resume` shows the active or latest session, latest dogfood run, extracted next step, and suggested command.
 - `brigade work inbox` groups pending scanner imports by source, kind, priority, age, and acceptance coverage, then suggests plan, promote, dismiss, or run commands.
 - `brigade work backup status` reads local backup health summaries and reports snapshot, check, prune, and restore rehearsal risk without running backup commands.
@@ -2675,3 +2651,62 @@ workspace's replica, but do not create or modify the output folder.
 
 Local edits are replaced on the next run. A future edit-to-proposal workflow
 would integrate with hub proposals and require explicit review.
+
+In observe mode, Claude Code records raw checks from `PostToolUse` and
+`PostToolUseFailure` in private per-user state. Capture is best effort and
+cannot change the hook result. Install the updated managed hooks with
+`brigade work hooks install` to capture `PostModelSwitch` events.
+
+Verify receipts include `agent_identity` with harness, model, their sources,
+and agent type. The explicit `BRIGADE_CONTEXT_MODEL` takes precedence over the
+Claude session cache selected by `BRIGADE_AGENT_SESSION`, then
+`BRIGADE_CLAUDE_SESSION`. Missing identity becomes `unknown`. Outcome capture
+copies this identity to `context.agent_identity`. Capability cohorts remain
+unchanged. Observed checks remain separate from signed verify receipts.
+
+### Observed first-pass checks
+
+`brigade work checks --target .` prints retained first attempts by harness and
+model. Use `--group-by harness` to combine models, `--since 7` for first attempts
+in the last seven days, or `--json` for the versioned JSON object below.
+Relative and absolute targets select the same per-user store.
+
+The label is `observed, not independently verified`. These counts do not measure
+agent quality. Codex has no reported pass rate. Hook capture is available only
+where the harness supports it. Records belong to one machine and one user.
+A record can be dropped under load. Capture and rotation retain a bounded
+history, so the earliest retained attempt may follow an attempt already lost.
+The report reads at most two generations and 10,000 records, through an unlocked
+snapshot that can miss a concurrent rotation. It never writes state, runs a
+process, makes a network request, or changes mode.
+
+A first attempt is the earliest retained record for a harness, session, tool and
+command digest. Later records with that key are retries. Unavailable session
+fingerprints or digests enter `ungrouped`, outside the table. The tree
+fingerprint is unused. The time window applies after first-attempt selection,
+so filtering does not promote a retry. Unknown models keep their own row.
+
+The fixed columns are `harness model n passed failed unknown rate`. Harness-only
+rows use `*` for model. Unknown statuses never enter a rate denominator. Groups
+with only unknowns say `no result reported`. Below `MIN_RESULTS = 5` reported
+results, counts appear with `insufficient results` instead of a percentage.
+Every row includes the unknown count beside the rate. Reader skips, retries and
+ungrouped records appear as counts. An oversized generation contributes one
+skip for its discarded leading fragment.
+
+JSON schema `brigade.work_checks.v1` has these stable fields:
+
+- `schema`, `label`: strings identifying the shape and observation label.
+- `group_by`: `model` (harness and model) or `harness`.
+- `min_results`: integer threshold for displaying a rate, currently 5.
+- `rows`: objects with `harness`, `model`, `samples`, `passed`, `failed`,
+  `unknown`, and `rate`. Model is null for harness-only grouping. Counts are
+  integers. Rate is a fraction from 0 to 1, or null below the threshold.
+- `observed_read`: valid records read before the time filter.
+- `skipped_lines`: reader skips, including unreadable data or generations.
+- `ungrouped`: records in the time window with an unavailable grouping key.
+- `retries`: later attempts in the time window with an available grouping key.
+
+This command includes only observed checks. Signed verify receipts and claim
+comparison are outside this report. Empty text output is one line naming
+`brigade work mode set observe`, with any reader skip count on that line.

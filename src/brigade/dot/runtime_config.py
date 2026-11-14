@@ -15,13 +15,10 @@ from uuid import UUID
 from .contracts import DotError
 from .safe_state import private_directory, private_file, require_local_platform
 
+CLOUD_AGENT_RUNTIME_SCHEMA = "brigade.cloud-agent.runtime.v1"
 RUNTIME_SCHEMA = "brigade.dot.runtime.v1"
 DUET_RUNTIME_SCHEMA = "brigade.duet.runtime.v1"
 DUET_PRINCIPAL = "agent:duet"
-GROKBOT_MEMORY_RUNTIME_SCHEMA = "brigade.grokbot-memory.runtime.v1"
-GROKBOT_MEMORY_PRINCIPAL = "agent:grokbot-memory"
-GROKBOT_INBOX_RUNTIME_SCHEMA = "brigade.grokbot-inbox.runtime.v1"
-GROKBOT_INBOX_PRINCIPAL = "agent:grokbot-inbox"
 # The alias every connector keeps for the conductor, so an agent can start a message to it.
 CONDUCTOR_ALIAS = "conductor"
 # What a connector-computed assignment permits. Nothing else is ever authorized by an inbox message.
@@ -49,6 +46,8 @@ class AuthConfig:
     audience: str
     approved_email: str
     resource: str
+    mode: str = "access"
+    token_file: Path | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -252,12 +251,10 @@ def _boolean(value: object) -> bool:
 
 def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
     """Parse one runtime document. The expected schema comes from the pack, never the document."""
+    if schema == CLOUD_AGENT_RUNTIME_SCHEMA:
+        return _parse_cloud_agent_runtime(payload)
     if schema == DUET_RUNTIME_SCHEMA:
         return _parse_duet_runtime(payload)
-    if schema == GROKBOT_MEMORY_RUNTIME_SCHEMA:
-        return _parse_grokbot_memory_runtime(payload)
-    if schema == GROKBOT_INBOX_RUNTIME_SCHEMA:
-        return _parse_grokbot_inbox_runtime(payload)
     if schema != RUNTIME_SCHEMA:
         raise _invalid()
     root = _object(
@@ -442,68 +439,7 @@ def _parse_duet_runtime(payload: object) -> Runtime:
     )
 
 
-def _parse_grokbot_memory_runtime(payload: object) -> Runtime:
-    """The Grok Bot memory profile reads cards and submits handoffs for review. Nothing here enables more.
-
-    There is no messaging, dispatch, digest, skill or event key. The hub section names a
-    dedicated principal, and that principal's own credential and memory grants are what the
-    profile reads and submits with, so the listener stays isolated from Dot.
-    """
-    root = _object(payload, {"schema", "auth", "paths", "hub"}, optional={"notify_command"})
-    if root["schema"] != GROKBOT_MEMORY_RUNTIME_SCHEMA:
-        raise _invalid()
-    auth = _parse_auth(root["auth"])
-    paths = _parse_hosted_paths(root["paths"])
-    hub = _parse_hub(root["hub"])
-    if hub.principal != GROKBOT_MEMORY_PRINCIPAL:
-        raise _invalid()
-    return Runtime(
-        auth=auth,
-        paths=paths,
-        hub=hub,
-        dispatch_enabled=False,
-        events_enabled=False,
-        digest_pr_repo="",
-        callback_hosts=(),
-        notify_command=_parse_notify(root),
-        owner_authorization=None,
-        messaging_enabled=False,
-        schema=GROKBOT_MEMORY_RUNTIME_SCHEMA,
-        memory_push=False,
-    )
-
-
-def _parse_grokbot_inbox_runtime(payload: object) -> Runtime:
-    """The Grok Bot inbox profile sends and reads hub messages under its own principal.
-
-    There is no dispatch, digest, skill, event or memory key. `hub.recipients` names the aliases the
-    tool accepts, and the hub's send grants (`may_send_to`) for the principal are the allowlist behind them.
-    """
-    root = _object(payload, {"schema", "auth", "paths", "hub", "messaging_enabled"}, optional={"notify_command"})
-    if root["schema"] != GROKBOT_INBOX_RUNTIME_SCHEMA:
-        raise _invalid()
-    auth = _parse_auth(root["auth"])
-    paths = _parse_hosted_paths(root["paths"])
-    hub = _parse_hub(root["hub"])
-    if hub.principal != GROKBOT_INBOX_PRINCIPAL:
-        raise _invalid()
-    return Runtime(
-        auth=auth,
-        paths=paths,
-        hub=hub,
-        dispatch_enabled=False,
-        events_enabled=False,
-        digest_pr_repo="",
-        callback_hosts=(),
-        notify_command=_parse_notify(root),
-        owner_authorization=None,
-        messaging_enabled=_boolean(root["messaging_enabled"]),
-        schema=GROKBOT_INBOX_RUNTIME_SCHEMA,
-        memory_push=False,
-    )
-
-
-def load_runtime(path: Path, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
+def load_runtime(path: Path, *, schema: str = RUNTIME_SCHEMA, planned_token: bool = False) -> Runtime:
     require_local_platform()
     directory = descriptor = None
     try:
@@ -526,6 +462,10 @@ def load_runtime(path: Path, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
             os.close(descriptor)
         if directory is not None:
             os.close(directory)
+    if planned_token and schema == CLOUD_AGENT_RUNTIME_SCHEMA:
+        from .cloud_runtime import parse_cloud_runtime
+
+        return parse_cloud_runtime(payload, planned_token=True)
     return parse_runtime(payload, schema=schema)
 
 
@@ -590,3 +530,9 @@ def runtime_template(schema: str = RUNTIME_SCHEMA) -> dict[str, object]:
         owner_authorization={"version": "1", "text": "Owner-authorized bounded work on the configured repositories."},
     )
     return document
+
+
+def _parse_cloud_agent_runtime(payload: object) -> Runtime:
+    from .cloud_runtime import parse_cloud_runtime
+
+    return parse_cloud_runtime(payload)

@@ -100,6 +100,16 @@ def _store_cards(store: MemoryStore) -> list[Path]:
     return [path for path in memory_cmd._iter_cards(store.root, store.config) if _inside(path, store.root)]
 
 
+def _record_reads(store: MemoryStore, keys: list[str]) -> None:
+    """Count a successful retrieval as use, so memory care never retires a card an agent just read."""
+    try:
+        from .memory_card_reads import record
+
+        record(store.root.expanduser().resolve(), [key for key in keys if key])
+    except Exception:  # noqa: BLE001 - a read ledger problem must never fail a memory tool
+        return
+
+
 def _read_in_store(store: MemoryStore, rel: str) -> str | None:
     candidate = (store.root / rel).resolve()
     if not candidate.is_relative_to(store.root.resolve()):
@@ -259,6 +269,8 @@ class MemoryTools:
                 continue
             text = _read_in_store(store, rel)
             if text is not None:
+                posix = _posix(rel)
+                _record_reads(store, [posix, memory_cmd.card_identity_from_text(text, posix)])
                 return text, store.origin
         return None, None
 
@@ -350,7 +362,16 @@ class MemoryTools:
             match = {**memory_cmd.card_search_match(fields, score), "path": _posix(fields["rel"])}
             ranked.append((rank, {**match, "origin": store.origin, "ref": card_ref(store.origin, match["path"])}))
         ranked.sort(key=lambda item: (-item[1]["score"], item[0], item[1]["path"]))
-        return [match for _, match in ranked[:SEARCH_LIMIT]], False
+        shown = [match for _, match in ranked[:SEARCH_LIMIT]]
+        stores = {store.origin: store for store in self.resolution().stores}
+        for origin, store in stores.items():
+            keys: list[str] = []
+            for match in shown:
+                if match["origin"] == origin:
+                    keys += [match["path"], str(match.get("card_id") or ""), *map(str, match.get("card_aliases") or [])]
+            if keys:
+                _record_reads(store, keys)
+        return shown, False
 
     def _memory_status(self, arguments: dict[str, Any]) -> ToolResult:
         res = self.resolution()

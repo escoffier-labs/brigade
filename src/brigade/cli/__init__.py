@@ -150,6 +150,11 @@ def _peel_passthrough_engine_args(argv: list[str]) -> tuple[list[str], list[str]
 
 def main(argv=None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    from .removed_commands import compatibility
+
+    retired = compatibility(raw_argv)
+    if retired is not None:
+        return retired
     # Usage is not a verification run. Resolve --help/-h before any pre-parse
     # atomic-capture policy so the flag list stays discoverable.
     if raw_argv[:1] == ["work"] and _family_module("work").work_verify_run_help_requested(raw_argv):

@@ -40,7 +40,10 @@ class Card:
 def configuration(target: Path) -> memory_cmd.MemoryCareConfig:
     """Validate every configured path before using the care reader."""
     io.read_bytes(target / memory_cmd.CONFIG_REL_PATH, absent=True)
-    care = memory_cmd._config_or_default(target)
+    try:
+        care = memory_cmd._config_or_default(target)
+    except memory_cmd.UnsafeCardRoot as exc:
+        raise UnsafeState("reflect state overlaps a canonical card root") from exc
     care = replace(care, card_roots=tuple(root.rstrip("/") for root in care.card_roots))
     state = target / ".brigade/memory/reflect"
     for root in care.card_roots:

@@ -197,7 +197,7 @@ def _stub_codex_cloud_inventory(monkeypatch, request):
     )
 
 
-_AGENT_CLI_BINARIES = frozenset({"codex", "claude", "cursor-agent", "opencode", "gemini", "agy", "grok"})
+_AGENT_CLI_BINARIES = frozenset({"codex", "claude", "cursor-agent", "agent", "opencode", "gemini", "agy", "grok"})
 
 # Process managers that start a long-lived daemon on first use. With HOME pointed
 # at a per-session temp dir, every real ``pm2 jlist`` started a new PM2 God
@@ -271,6 +271,10 @@ def _isolate_user_brigade_dir(_isolation_temp_root, monkeypatch):
     # Codex otherwise prefers an inherited operator config over synthetic HOME.
     # Individual tests may opt back in with their own synthetic CODEX_HOME.
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    # The same for OpenClaw: an inherited operator config path or state dir would
+    # point instruction-cap discovery at the real OpenClaw install.
+    monkeypatch.delenv("OPENCLAW_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("OPENCLAW_STATE_DIR", raising=False)
     monkeypatch.setenv("BRIGADE_USER_DIR", str(user_dir))
     monkeypatch.setenv("BRIGADE_HOME", str(user_dir))
 
@@ -420,49 +424,3 @@ def dot_private_dir(tmp_path):
     finally:
         if base != tmp_path:
             shutil.rmtree(base, ignore_errors=True)
-
-
-@pytest.fixture
-def t3_ledger_storage(monkeypatch):
-    """Exercise real SQLite transitions without claiming POSIX filesystem security on NT."""
-    if sys.platform == "win32":
-        from brigade.grokbot_t3 import ledger
-
-        monkeypatch.setattr(ledger, "_prepare_storage", lambda path: path.parent.mkdir(parents=True, exist_ok=True))
-
-
-@pytest.fixture
-def t3_owner_reads(monkeypatch):
-    """Isolate owner-file authorization from parsing and orchestration unit tests on NT."""
-    if sys.platform == "win32":
-        from brigade.grokbot_t3 import runtime_config, watch
-
-        def read(path, *, max_bytes):
-            with path.open("rb") as stream:
-                return stream.read(max_bytes + 1)
-
-        monkeypatch.setattr(runtime_config, "read_owner_file", read)
-        monkeypatch.setattr(watch, "read_owner_file", read)
-
-
-@pytest.fixture
-def t3_watch_log(monkeypatch):
-    """Keep watcher delivery and retry assertions independent of POSIX log opens."""
-    if sys.platform == "win32":
-        import json
-        from brigade.grokbot_t3 import watch
-
-        def append(path, record):
-            with path.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
-
-        monkeypatch.setattr(watch, "_append_log", append)
-
-
-@pytest.fixture
-def t3_platform_admission(monkeypatch):
-    """Control-flow unit tests supply storage doubles instead of testing platform admission."""
-    if sys.platform == "win32":
-        from brigade.grokbot_t3 import runtime_config
-
-        monkeypatch.setattr(runtime_config, "require_posix_storage", lambda: None)

@@ -34,9 +34,9 @@ duplicate worker launch.
 
 Relevant source contracts are `src/brigade/fleet_client.py`,
 `src/brigade/worklore_ownership.py`, `docs/worklore-ownership.md` and
-`docs/phase-agent-mesh.md`. The mesh plan already owns teammate messaging,
-invitation, grants and cryptographic identity. Do not introduce a competing
-invitation system here.
+`docs/phase-hub-contract.md`. Client-side message encryption no longer ships.
+The hub key directory and sealed storage remain until the next contract version.
+Teammate messaging and invitation still need their own acceptance evidence.
 
 OpenClaw's [team setup](https://docs.openclaw.ai/start/teams) and
 [multi-user model](https://docs.openclaw.ai/concepts/multi-user) inform the

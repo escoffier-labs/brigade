@@ -1,0 +1,26 @@
+usage: brigade run cloud grokbot serve [-h] [--target TARGET]
+                                       (--instance {operator,repository-scout,implementation-worker} | --pack {operations-relay,dot,duet})
+                                       [--bind BIND] [--allow-host ALLOW_HOST]
+                                       [--allow-origin ALLOW_ORIGIN]
+                                       [--bearer-file BEARER_FILE | --bearer-env BEARER_ENV]
+                                       [--client-id CLIENT_ID]
+
+options:
+  -h, --help            show this help message and exit
+  --target TARGET
+  --instance {operator,repository-scout,implementation-worker}
+  --pack {operations-relay,dot,duet}
+  --bind BIND           Listener host:port. Defaults to the role or pack
+                        loopback.
+  --allow-host ALLOW_HOST
+                        Explicit allowed Host value.
+  --allow-origin ALLOW_ORIGIN
+                        Explicit allowed Origin value.
+  --bearer-file BEARER_FILE
+                        Protected file containing the listener bearer.
+  --bearer-env BEARER_ENV
+                        Environment variable name containing the listener
+                        bearer.
+  --client-id CLIENT_ID
+                        Optional lowercase deployment identifier (1-64
+                        characters); must match the hub credential node ID.

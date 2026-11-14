@@ -23,15 +23,13 @@ checkout. A relative `$TMPDIR` is refused outright, because it would resolve
 against the working directory. The temp base itself is refused too, because a
 state root there would chmod the shared scratch tree.
 
-Two deliberate exceptions to "nothing under the checkout":
+Evidence is the exception to "nothing under the checkout":
 
   * evidence. The default evidence root is `<checkout>/.brigade/verification-evidence`,
     which is inside this checkout - gitignored, and the point is that `cleanup`
     cannot reach it. The default and `--evidence-root` are both guarded like
     `--root`, symlink check included, and `--label` must be a simple
     `[A-Za-z0-9._-]` name so it cannot steer the directory anywhere.
-  * `grokbot-feed --manifest`. That path is a caller's own manifest, read for
-    validation only, and is the one flag outside the target contract.
 
 Only paths this helper recorded are ever removed.
 
@@ -66,33 +64,6 @@ DEFAULT_HARNESSES = "claude,codex"
 DEFAULT_PROBE = "python3 --version"
 DEFAULT_TIMEOUT = 300
 LABEL_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
-
-# Non-secret placeholder. The pack config check only proves the reference
-# resolves; nothing authenticates with this value.
-BEARER_ENV_NAME = "VERIFY_BRIGADE_PACK_BEARER"
-BEARER_PLACEHOLDER = "not-a-real-bearer-verify-brigade"
-
-FEED_SAMPLE = {
-    "schema": "brigade.grokbot.feed.v1",
-    "approved": True,
-    "label": "verify-brigade sample feed",
-    "entries": [
-        {
-            "idempotency_key": "verify-brigade-sample-001",
-            "spec": {
-                "label": "sample implementation worker job",
-                "role": "implementation-worker",
-                "repository": "example-org/example-repo",
-                "base_ref": "main",
-                "ownership_paths": ["docs"],
-                "instructions": "Sample instructions used only for feed validation.",
-                "verification_commands": ["python3 --version"],
-                "artifact": {"kind": "branch"},
-                "timeout_seconds": 600,
-            },
-        }
-    ],
-}
 
 # Guard parity fixture. Every trigger token is split into fragments so this
 # tracked file never holds a contiguous match for the content-guard job; the
@@ -760,244 +731,6 @@ def cmd_work_verify(args: argparse.Namespace) -> int:
     )
 
 
-def pack_env(args: argparse.Namespace) -> dict[str, str]:
-    if args.bearer_env == BEARER_ENV_NAME and BEARER_ENV_NAME not in os.environ:
-        return {BEARER_ENV_NAME: BEARER_PLACEHOLDER}
-    return {}
-
-
-def cmd_pack_setup(args: argparse.Namespace) -> int:
-    """Preview (default) or apply non-secret pack instance config."""
-    root = state_root(args)
-    target = guard_target(Path(args.target), root)
-    apply = args.apply and not args.dry_run
-    argv = brigade_args(args) + [
-        "run",
-        "cloud",
-        "grokbot",
-        "pack",
-        "setup",
-        "--target",
-        str(target),
-        "--id",
-        args.id,
-        "--bearer-env",
-        args.bearer_env,
-        "--json",
-    ]
-    if apply:
-        argv.append("--apply")
-    record = run(argv, root=root, name="pack-setup", timeout=args.timeout)
-    payload = record["json"] if isinstance(record["json"], dict) else {}
-    ok = record["returncode"] == 0
-    return emit(
-        {
-            "action": "grokbot-pack-setup",
-            "ok": ok,
-            "target": str(target),
-            "pack_id": args.id,
-            "applied": bool(payload.get("apply")),
-            "dry_run": bool(args.dry_run),
-            "bind": payload.get("bind"),
-            "writes": payload.get("writes"),
-            "setup": slim(record),
-        },
-        0 if ok else 3,
-    )
-
-
-def cmd_pack_doctor(args: argparse.Namespace) -> int:
-    """Sanitized pack diagnostics. Without a listener, `endpoint` fails."""
-    root = state_root(args)
-    target = guard_target(Path(args.target), root)
-    record = run(
-        brigade_args(args)
-        + ["run", "cloud", "grokbot", "pack", "doctor", "--target", str(target), "--id", args.id, "--json"],
-        root=root,
-        name="pack-doctor",
-        env_extra=pack_env(args),
-        timeout=args.timeout,
-    )
-    payload = record["json"] if isinstance(record["json"], dict) else {}
-    checks = payload.get("checks") if isinstance(payload.get("checks"), list) else []
-    by_name = {check.get("check"): check.get("status") for check in checks if isinstance(check, dict)}
-    # A failing `endpoint` check is the expected reading with no listener up, so
-    # it does not sink the drive. Any other failing check does: a broken pack
-    # config must not read green at the top level.
-    failed = sorted(name for name, status in by_name.items() if name != "endpoint" and status == "fail")
-    ok = bool(checks) and not failed
-    return emit(
-        {
-            "action": "grokbot-pack-doctor",
-            "ok": ok,
-            "target": str(target),
-            "pack_id": args.id,
-            "checks": checks,
-            "failed_checks": failed,
-            "config_resolved": by_name.get("config") == "ok",
-            "listener_running": by_name.get("endpoint") == "ok",
-            "doctor": slim(record),
-        },
-        0 if ok else 3,
-    )
-
-
-def cmd_pack_canary(args: argparse.Namespace) -> int:
-    """Bounded non-mutating auth + inventory check against the pack listener."""
-    root = state_root(args)
-    target = guard_target(Path(args.target), root)
-    record = run(
-        brigade_args(args)
-        + ["run", "cloud", "grokbot", "pack", "canary", "--target", str(target), "--id", args.id, "--json"],
-        root=root,
-        name="pack-canary",
-        env_extra=pack_env(args),
-        timeout=args.timeout,
-    )
-    payload = record["json"] if isinstance(record["json"], dict) else {}
-    reason = payload.get("reason")
-    listener_running = bool(payload.get("ok"))
-    # `reason: health` with no listener bound is the proof the command ran:
-    # it resolved config, dialed the bind, and reported the miss.
-    understood = listener_running or reason in {"health", "config", "dependency"}
-    return emit(
-        {
-            "action": "grokbot-pack-canary",
-            "ok": understood,
-            "target": str(target),
-            "pack_id": args.id,
-            "listener_running": listener_running,
-            "reason": reason,
-            "expected_without_listener": reason == "health",
-            "canary": slim(record),
-        },
-        0 if understood else 3,
-    )
-
-
-def cmd_pack_remove(args: argparse.Namespace) -> int:
-    """Preview (default) or apply removal of pack config this run wrote."""
-    root = state_root(args)
-    target = guard_target(Path(args.target), root)
-    apply = args.apply and not args.dry_run
-    argv = brigade_args(args) + [
-        "run",
-        "cloud",
-        "grokbot",
-        "pack",
-        "remove",
-        "--target",
-        str(target),
-        "--id",
-        args.id,
-        "--json",
-    ]
-    if apply:
-        argv.append("--apply")
-    record = run(argv, root=root, name="pack-remove", timeout=args.timeout)
-    payload = record["json"] if isinstance(record["json"], dict) else {}
-    ok = record["returncode"] == 0
-    return emit(
-        {
-            "action": "grokbot-pack-remove",
-            "ok": ok,
-            "target": str(target),
-            "pack_id": args.id,
-            "applied": bool(payload.get("apply")),
-            "dry_run": bool(args.dry_run),
-            "paths": payload.get("paths"),
-            "remove": slim(record),
-        },
-        0 if ok else 3,
-    )
-
-
-def cmd_feed(args: argparse.Namespace) -> int:
-    """Validate an approved feed manifest. Validation only; never enqueues."""
-    root = state_root(args)
-    target = guard_target(Path(args.target), root)
-    if args.sample:
-        manifest = root / "sample-feed-manifest.json"
-        if not args.dry_run:
-            manifest.write_text(json.dumps(FEED_SAMPLE, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            manifest.chmod(0o600)
-    else:
-        if not args.manifest:
-            raise HelperError("pass --manifest PATH or --sample")
-        manifest = Path(args.manifest).expanduser().resolve()
-    argv = brigade_args(args) + [
-        "run",
-        "cloud",
-        "grokbot",
-        "feed",
-        "--target",
-        str(target),
-        "--manifest",
-        str(manifest),
-        "--limit",
-        str(args.limit),
-        "--json",
-    ]
-    if args.dry_run:
-        return emit(
-            {
-                "action": "grokbot-feed",
-                "ok": True,
-                "dry_run": True,
-                "target": str(target),
-                "manifest": str(manifest),
-                "sample": bool(args.sample),
-                "would_write_manifest": bool(args.sample),
-                "would_run": argv,
-            }
-        )
-    record = run(argv, root=root, name="feed", timeout=args.timeout)
-    payload = record["json"] if isinstance(record["json"], dict) else {}
-    ok = record["returncode"] == 0
-    return emit(
-        {
-            "action": "grokbot-feed",
-            "ok": ok,
-            "dry_run": False,
-            "target": str(target),
-            "manifest": str(manifest),
-            "sample": bool(args.sample),
-            "valid": payload.get("valid"),
-            "known": payload.get("known"),
-            "limit": payload.get("limit"),
-            "feed": slim(record),
-        },
-        0 if ok else 3,
-    )
-
-
-def cmd_status(args: argparse.Namespace) -> int:
-    """Safe Grok Bot job projections. Needs hub authority; reports why not."""
-    root = state_root(args)
-    target = guard_target(Path(args.target), root)
-    record = run(
-        brigade_args(args) + ["run", "cloud", "grokbot", "status", "--target", str(target), "--json"],
-        root=root,
-        name="grokbot-status",
-        timeout=args.timeout,
-    )
-    payload = record["json"] if isinstance(record["json"], dict) else {}
-    message = (record["stdout"] + record["stderr"]).strip()
-    reason = message.removeprefix("error:").strip() if message.startswith("error:") else None
-    ok = record["returncode"] == 0
-    return emit(
-        {
-            "action": "grokbot-status",
-            "ok": ok,
-            "target": str(target),
-            "reason": reason,
-            "jobs": payload.get("jobs"),
-            "status": slim(record),
-        },
-        0 if ok else 3,
-    )
-
-
 def cmd_handoff_lint(args: argparse.Namespace) -> int:
     """Lint the handoff inbox of the temp target."""
     root = state_root(args)
@@ -1577,7 +1310,7 @@ def cmd_evidence(args: argparse.Namespace) -> int:
         copied.append(str(destination.relative_to(evidence)))
 
     if target is not None:
-        for relative in ("work/verify-runs", "grokbot", "work/sessions"):
+        for relative in ("work/verify-runs", "work/sessions"):
             source = target / ".brigade" / relative
             if not source.exists():
                 continue
@@ -1712,11 +1445,6 @@ def build_parser() -> argparse.ArgumentParser:
     def add_dry_run(command: argparse.ArgumentParser, help: str) -> None:
         command.add_argument("--dry-run", action="store_true", help=help)
 
-    def add_pack(command: argparse.ArgumentParser) -> None:
-        add_target(command)
-        command.add_argument("--id", required=True, help="Connector pack id, e.g. implementation-worker.")
-        command.add_argument("--bearer-env", default=BEARER_ENV_NAME, help="Env var holding the pack bearer.")
-
     p = sub.add_parser("doctor", help="Read-only: is this rig worth driving?")
     p.set_defaults(func=cmd_doctor)
 
@@ -1745,38 +1473,6 @@ def build_parser() -> argparse.ArgumentParser:
     add_dry_run(p, "Report the command without running a verification.")
     p.set_defaults(func=cmd_work_verify)
 
-    p = sub.add_parser("grokbot-pack-setup", help="Preview or apply pack instance config.")
-    add_pack(p)
-    p.add_argument("--apply", action="store_true", help="Write config. Default is preview only.")
-    add_dry_run(p, "Force preview even with --apply.")
-    p.set_defaults(func=cmd_pack_setup)
-
-    p = sub.add_parser("grokbot-pack-doctor", help="Sanitized pack diagnostics.")
-    add_pack(p)
-    p.set_defaults(func=cmd_pack_doctor)
-
-    p = sub.add_parser("grokbot-pack-canary", help="Bounded non-mutating pack auth and inventory check.")
-    add_pack(p)
-    p.set_defaults(func=cmd_pack_canary)
-
-    p = sub.add_parser("grokbot-pack-remove", help="Preview or apply removal of pack config.")
-    add_pack(p)
-    p.add_argument("--apply", action="store_true", help="Delete the files. Default is preview only.")
-    add_dry_run(p, "Force preview even with --apply.")
-    p.set_defaults(func=cmd_pack_remove)
-
-    p = sub.add_parser("grokbot-feed", help="Validate an approved feed manifest (never enqueues).")
-    add_target(p)
-    p.add_argument("--manifest", default=None, help="Path to an approved private feed manifest.")
-    p.add_argument("--sample", action="store_true", help="Write and validate a bundled sample manifest.")
-    p.add_argument("--limit", type=int, default=1)
-    add_dry_run(p, "Report the command without writing the sample manifest.")
-    p.set_defaults(func=cmd_feed)
-
-    p = sub.add_parser("grokbot-status", help="Safe Grok Bot job projections.")
-    add_target(p)
-    p.set_defaults(func=cmd_status)
-
     p = sub.add_parser("handoff-lint", help="Lint the handoff inbox of the temp target.")
     add_target(p)
     p.add_argument("--content-guard", action="store_true", help="Add the leak and injection scan.")
@@ -1795,6 +1491,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     try:  # a lone copy of this helper, without its sibling modules, has no storage-parity
         load_sibling("storage_parity").add_parser(sub, sys.modules[__name__], add_dry_run)
+    except ImportError:
+        pass
+
+    try:  # Copies used for path-guard probes may omit sibling drives.
+        load_sibling("hub_connector").add_parser(sub, sys.modules[__name__])
     except ImportError:
         pass
 

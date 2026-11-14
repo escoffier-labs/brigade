@@ -1,5 +1,12 @@
 # Grok Bot inbox connector pack
 
+> This profile is retired. Use `brigade hub connector setup --id cloud-agent`
+> with independent credentials. Enable messaging in its runtime only when needed.
+> Stop installed units with `systemctl --user disable --now brigade-grokbot-inbox.service brigade-grokbot-inbox-watch.service brigade-grokbot-inbox-watch.timer`.
+> Preview unit-only cleanup with `brigade hub connector remove --id grokbot-inbox --unit-dir <unit-directory>`. Add `--apply` to remove them. The legacy `run cloud grokbot pack remove` route also accepts `--unit-dir`.
+> Existing configuration, runtime, state and token files are retained.
+
+
 The `grokbot-inbox` pack gives Grok Bot a Fleet Hub inbox and a bounded way to
 send messages. It runs the Dot connector code under its own profile, shares
 Dot's origin verification, wire schemas and state handling, and shares none of

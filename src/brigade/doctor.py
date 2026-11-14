@@ -15,7 +15,6 @@ if TYPE_CHECKING:
     from . import run_journal
 
 from .budgets import (
-    BOOTSTRAP_BUDGETS,
     MEMORY_CARE_SCAN_STALE_DAYS,
 )
 from . import config, engine_paths, localio
@@ -111,6 +110,10 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
         from .doctor_instruction_chain import check_codex_instruction_chain
 
         checks.append(check_codex_instruction_chain(ctx.target))
+    # After the Codex chain estimate, so the chain reads the user config first.
+    from .doctor_instruction_budget import check_instruction_budgets
+
+    checks.extend(check_instruction_budgets(ctx.target))
     checks.extend(_check_orphan_inboxes(ctx.target, ctx.harnesses))
     checks.append(_check_recovery_checkpoints(ctx.target))
     checks.append(_check_unreconciled_run_lock(ctx.target))
@@ -128,10 +131,10 @@ _OUTCOME_LOOP_HALF_FED_NAME = "outcome loop: half-fed"
 
 def _check_outcome_loop(ctx: DoctorContext) -> List[CheckResult]:
     """First-class dormancy findings for the verify/outcome work loop (#734)."""
-    from .work_mode import is_yolo
+    from .work_mode import is_strict
 
-    # Yolo mode opts out of receipts; an idle ledger there is the chosen state (#2233).
-    if ctx.selection is None or is_yolo(ctx.target):
+    # Unenforced modes opt out of receipts; an idle ledger there is the chosen state (#2233).
+    if ctx.selection is None or not is_strict(ctx.target):
         return []
     from . import outcome_cmd
 
@@ -825,8 +828,8 @@ def _check_claude_work_loop(target: Path) -> CheckResult | None:
     if payload is None:
         return None
     state = payload["state"]
-    clean_yolo = state == "yolo" and not payload.get("issues")
-    status = FAIL if state == "error" else OK if state == "enforced" or clean_yolo else WARN
+    clean_unenforced = state in {"off", "observe"} and not payload.get("issues")
+    status = FAIL if state == "error" else OK if state == "enforced" or clean_unenforced else WARN
     detail = str(payload["detail"])
     hooks = payload.get("hooks") or {}
     hook_error = hooks.get("error")
@@ -1159,7 +1162,6 @@ def _check_workspace_files(target: Path) -> List[CheckResult]:
             results.append((OK, f"bootstrap: {name}", str(path)))
         else:
             results.append((WARN, f"bootstrap: {name}", f"not present at {path}"))
-    results.extend(_check_bootstrap_budgets(target))
     return results
 
 
@@ -1240,34 +1242,6 @@ def _repo_relative_skill_install_dir(adapter: dict, skill_id: str) -> Path | Non
     if path.is_absolute() or not rel.startswith("."):
         return None
     return path
-
-
-def _check_bootstrap_budgets(target: Path) -> List[CheckResult]:
-    results: List[CheckResult] = []
-    for name, limit in BOOTSTRAP_BUDGETS.items():
-        path = target / name
-        if not path.exists():
-            continue
-        if not path.is_file():
-            results.append((FAIL, f"bootstrap-budget: {name}", f"not a file: {path}"))
-            continue
-        try:
-            size = path.stat().st_size
-        except OSError as exc:
-            results.append((FAIL, f"bootstrap-budget: {name}", f"unreadable: {exc}"))
-            continue
-        detail = f"{size}/{limit} bytes"
-        if size > limit:
-            results.append(
-                (
-                    FAIL,
-                    f"bootstrap-budget: {name}",
-                    f"{detail}; over hard limit, split durable context into memory/cards before agents load it",
-                )
-            )
-        else:
-            results.append((OK, f"bootstrap-budget: {name}", detail))
-    return results
 
 
 def _check_handoff_inboxes(target: Path, sel, selected_harnesses: List[str]) -> List[CheckResult]:

@@ -26,7 +26,8 @@ ADOPTION_STATES = (
     "active",
     "bypassed",
     "stale",
-    "yolo",
+    "off",
+    "observe",
 )
 ALERT_STATES = ("bypassed", "stale", "unwired")
 
@@ -237,9 +238,9 @@ def _claude_use(target: Path, *, window_start: datetime) -> dict[str, Any]:
     }
 
 
-def _yolo_use(use: dict[str, Any]) -> dict[str, Any]:
-    """Yolo sessions opted out of receipts: report them, never as bypassed (#2233)."""
-    sessions = [{**item, "status": "yolo", "missing": []} for item in use["sessions"]]
+def _unenforced_use(use: dict[str, Any], status: str) -> dict[str, Any]:
+    """Unenforced sessions opt out of receipts: report them, never as bypassed (#2233)."""
+    sessions = [{**item, "status": status, "missing": []} for item in use["sessions"]]
     return {**use, "compliant_session_count": 0, "bypassed_session_count": 0, "sessions": sessions}
 
 
@@ -274,16 +275,16 @@ def _claude_row(entry: constants.RepoEntry, *, window_start: datetime) -> dict[s
             issues.append(issue)
         use = _empty_use()
         classified_state = "error"
-    # Verification is off by choice in yolo mode, so sessions without receipts are
+    # Verification is off by choice in unenforced modes, so sessions without receipts are
     # never counted as bypassed, whatever the wiring state below reports.
-    if work_mode.is_yolo(target):
-        use = _yolo_use(use)
+    if not work_mode.is_strict(target):
+        use = _unenforced_use(use, work_mode.resolve_mode(target))
     if classified_state == "error":
         state = "partial"
     elif any(value == "stale" for value in wiring.values()):
         state = "stale"
-    elif classified_state == "yolo":
-        state = "yolo"
+    elif classified_state in {"off", "observe"}:
+        state = classified_state
     elif classified_state == "advisory-only":
         state = "advisory-only"
     elif classified_state == "partial":

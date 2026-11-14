@@ -38,7 +38,6 @@ What that paragraph does *not* claim:
   `--root`, symlink check included: a link planted at either is refused, not
   followed. `--label` names the directory under that root, so it must be a
   simple `[A-Za-z0-9._-]` name of 1-64 characters - no separators, no `..`.
-- `grokbot-feed --manifest` is the one flag outside the target contract. It is
   a caller-supplied path, read for validation only and never written, so an
   operator can validate a real private feed manifest from wherever it lives.
   Everything the drive *writes* still lands in the target or the state root.
@@ -51,15 +50,12 @@ a fresh target to drive it against.
 ```bash
 # fresh checkout (this repo). Quote the extras so the shell does not glob them.
 python3 -m venv .venv
-.venv/bin/pip install -e ".[dev,grokbot]"
+.venv/bin/pip install -e ".[dev,connector]"
 ```
 
-Observed on this checkout: that install printed
-`Successfully installed ... brigade-cli-0.27.0 ... mcp-2.1.1 ...`, and
-`.venv/bin/brigade --version` then printed `brigade 0.27.0`. The `grokbot`
-extra pulls the optional `mcp` package (`pyproject.toml`:
-`grokbot = ["mcp>=2,<3"]`). The `[dev]` extra alone is enough for pytest /
-ruff / mypy; add `grokbot` when the change touches the listener.
+The `connector` extra installs the optional MCP and JWT dependencies. The
+`grokbot` extra resolves to the same dependencies for the one-release removal
+window. The `[dev]` extra supplies pytest, ruff and mypy.
 
 Create the target:
 
@@ -151,19 +147,6 @@ $C doctor-target --target "$TARGET"
 # work verification receipts (returns the receipt id and status)
 $C work-verify --target "$TARGET" --capture verify-brigade
 
-# Grok Bot connector pack lifecycle (implementation-worker is the worker pack)
-# PAUSED: pack doctor goes through the Fleet Hub on a host with a hub URL
-$C grokbot-pack-setup  --target "$TARGET" --id implementation-worker
-$C grokbot-pack-setup  --target "$TARGET" --id implementation-worker --apply
-$C grokbot-pack-doctor --target "$TARGET" --id implementation-worker
-$C grokbot-pack-canary --target "$TARGET" --id implementation-worker
-$C grokbot-pack-remove --target "$TARGET" --id implementation-worker
-
-# feed manifest validation and queue projection
-# PAUSED: grokbot status goes through the Fleet Hub on a host with a hub URL
-$C grokbot-feed   --target "$TARGET" --sample
-$C grokbot-status --target "$TARGET"
-
 # handoff inbox lint
 # PAUSED: the handoff format may change with hub memory v2
 $C handoff-lint --target "$TARGET" --content-guard
@@ -243,16 +226,9 @@ Proof standards for this repo:
   the function; a passing unit test is not a proof that the command works.
 - Capture the action and the resulting state. A `work-verify` proof is the
   command record **and** the receipt directory it names.
-- Verify the side effect on disk, not just stdout. `grokbot-pack-setup --apply`
-  claims it wrote `.brigade/grokbot/packs/<id>.json`; look at the file.
-- Preview modes here are genuinely non-mutating, but check rather than trust:
-  `grokbot-pack-setup` without `--apply` and `grokbot-pack-remove` without
-  `--apply` print a `writes`/`paths` list and touch nothing, and
-  `grokbot-feed` validates without enqueueing. Confirm by diffing
-  `$TARGET/.brigade/` before and after.
-- No mocks. Every command above hits the real CLI. The one boundary that is
-  genuinely absent is a running Grok Bot listener, and the skill reads its
-  absence as data rather than faking it.
+- Verify side effects on disk as well as command output. Compare the target
+  files before and after preview commands.
+- Every controller command above drives the CLI against the temporary target.
 
 Checkout `work verify` receipts live at
 `.brigade/work/verify-runs/<run-id>/receipt.json`. Cite the `run_id` in the
@@ -302,7 +278,6 @@ on this checkout.
 | run | `brigade run` | `tests/test_run_cli.py`, `tests/test_run_lifecycle.py`, `tests/test_run_events.py`, `tests/test_run_control.py`, `tests/test_run_resume.py`, `tests/test_run_receipts.py` (34 `tests/test_run_*.py` / `tests/test_runs_*.py` files) |
 | work verify | `brigade work verify` | `tests/test_work_cmd_verification.py`, `tests/test_work_cmd_verify_ranking.py`, `tests/test_verify_trial.py`, `tests/test_verification_contract.py`, `tests/test_verify_brigade_skill.py` |
 | fleet | `brigade fleet` | `tests/test_fleet_claims.py`, `tests/test_fleet_claim_release.py`, `tests/test_fleet_nodes.py`, `tests/test_fleet_sync.py`, `tests/test_fleet_cloud.py`, `tests/test_fleet_command_deck.py` (58 `tests/test_fleet_*.py` files), `tests/test_verify_brigade_hub_contract.py`, `tests/test_verify_brigade_storage_parity.py` |
-| grokbot listener | `brigade run cloud grokbot` (`serve`, `setup`, `doctor`, `canary`, queue verbs) | `tests/test_grokbot_ops.py`, `tests/test_grokbot_jobs.py`, `tests/test_grokbot_mcp.py`, `tests/test_grokbot_feed.py`, `tests/test_grokbot_packs.py` |
 | guard | `brigade guard` / `brigade scrub` | `tests/guard/test_cli.py`, `tests/guard/test_engine.py`, `tests/guard/test_rules.py`, `tests/test_scrub.py`, `tests/test_runguard.py`, `tests/test_verify_brigade_guard_parity.py` |
 
 Doctor and status for the checkout itself: `tests/test_doctor.py`,
@@ -317,9 +292,7 @@ prints one JSON object per call.
 registry/skills/verify-brigade/control-brigade.py --help
 ```
 
-Subcommands: `doctor`, `new-target`, `init`, `doctor-target`, `work-verify`,
-`grokbot-pack-setup`, `grokbot-pack-doctor`, `grokbot-pack-canary`,
-`grokbot-pack-remove`, `grokbot-feed`, `grokbot-status`, `handoff-lint`,
+Subcommands: `doctor`, `new-target`, `init`, `doctor-target`, `work-verify`, `handoff-lint`,
 `guard-parity`, `hub-contract`, `storage-parity`, `audit`, `evidence`, `cleanup`.
 
 Global flags: `--brigade "<command>"` to drive a different Brigade build (for
@@ -330,9 +303,8 @@ not `$TMPDIR` itself), `--timeout <s>` per call.
 Every subcommand that writes accepts `--dry-run`, which reports the command it
 skipped and touches nothing outside the helper's own private state root (which
 every subcommand resolves and creates first): `new-target`, `init`, `work-verify`,
-`grokbot-feed --sample`, `guard-parity`, `hub-contract`, `storage-parity`, `evidence`, `cleanup`, and
-`grokbot-pack-setup`/`grokbot-pack-remove` (there it forces preview even with
-`--apply`). The dry-run envelope carries `"dry_run": true` and a `would_run`,
+`guard-parity`, `hub-contract`, `storage-parity`, `evidence`, and `cleanup`.
+The dry-run envelope carries `"dry_run": true` and a `would_run`,
 `would_remove`, or `would_copy` list; `hub-contract` with the default `contract`
 profile instead reports `would_launch` (the hub argv, or `null` for `--hub-url`),
 `would_create` (the hub's state directory, or `null`), and `lifecycle.would_launch`
@@ -428,3 +400,8 @@ has `"status": "completed"`, a `run_id` shaped
 and the identity tuple `baseline_commit` / `tree_fingerprint` /
 `changes_patch_sha256`. Failures still write a receipt (`"status": "failed"`);
 that is the ledger signal, not a missing file.
+
+Connector discovery and setup preview: see [hub-connector.md](features/hub-connector.md).
+Run `$C hub-connector --target "$TARGET"` on Linux for an offline preview.
+
+Connector lifecycle: `brigade hub connector`. Use the independent `cloud-agent` profile and optional `connector` install extra. Verify with `tests/test_cloud_agent_profile.py` and `tests/test_dot_transport.py`.

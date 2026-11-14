@@ -11,13 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from brigade import dispatch_memory, fleet_client_grokbot, grokbot_jobs
+from brigade.grokbot_job_validation import GrokbotJobError, validate_memory_refs
+from brigade import dispatch_memory
 from brigade import memory_hub_client as hubc
 from brigade.aboyeur import briefs
 from brigade.dot import contracts
-from brigade.grokbot_t3.tools import DISPATCH_HEADER
-from tests.test_grokbot_jobs import NOW, _spec
-from tests.test_grokbot_t3_tools import FakeRunner
 from tests.test_fleet_work_prepared_handoff_cli import hub  # noqa: F401 - the Worklore handoff fixture
 from tests.test_memory_hooks import _write_brigade_config
 
@@ -47,12 +45,6 @@ def _isolated(monkeypatch, tmp_path_factory):
 
 
 BOT_TOKEN = "fixture-bot-token"
-
-
-@pytest.fixture
-def bot(monkeypatch):
-    """This host has the Grok Bot memory principal's credential."""
-    monkeypatch.setattr(dispatch_memory, "grokbot_memory_authority", lambda: ("https://hub.invalid", BOT_TOKEN))
 
 
 def _workspace(tmp_path: Path) -> Path:
@@ -246,22 +238,6 @@ def test_four_kib_cap_drops_trailing_items(tmp_path):
     _assert_bounded(packet)
 
 
-def test_no_card_body_text_in_any_packet(tmp_path, hub_memory, bot):
-    target = _workspace(tmp_path)
-    _card(target, "deploy-notes", "Deploy notes for the hub", summary="How the hub deploy runs")
-
-    local = dispatch_memory.build(target, "hub deploy", audience=LOCAL)
-    hub_memory([_hub_match("hub-notes")])
-    connector = dispatch_memory.build(target, "hub deploy")
-    refs = dispatch_memory.job_refs(target, "hub deploy")
-
-    assert local is not None and connector is not None
-    for packet in (local, connector):
-        assert BODY_MARKER not in packet.block and BODY_MARKER not in json.dumps(packet.context)
-    assert BODY_MARKER not in json.dumps(refs)
-    assert local.context["items"][0]["summary"] == "How the hub deploy runs"
-
-
 # Read instructions
 
 
@@ -324,87 +300,7 @@ def test_a_connector_never_sees_a_local_card(tmp_path, hub_memory):
             _assert_hub_read_works(item)
 
 
-def test_grokbot_refs_name_hub_cards_its_memory_profile_can_read(tmp_path, hub_memory, bot):
-    target = _workspace(tmp_path)
-    _card(target, "queue-notes-local", "Private queue module notes", summary="Queue foundation design")
-    assert dispatch_memory.job_refs(target, "queue module") == []  # local cards only: no references
-
-    hub_memory([_hub_match("queue-notes")])
-    refs = dispatch_memory.job_refs(target, "queue module")
-
-    assert refs == [{"scope": "fleet", "card_id": "queue-notes", "hash": "a" * 12}]
-    for ref in refs:
-        assert contracts.card_name(ref["card_id"]) == ref["card_id"]
-        assert contracts.memory_scope(ref["scope"]) == ref["scope"]
-
-
 # Grok Bot jobs
-
-
-def test_grokbot_payload_has_no_task_text_and_only_references_in_metadata(tmp_path, monkeypatch, hub_memory, bot):
-    target = _workspace(tmp_path)
-    _card(target, "queue-local", "Private queue module notes", summary="Queue foundation design")
-    hub_memory([_hub_match("queue-notes", summary="Queue foundation design")])
-    spec = {**_spec(), "instructions": "Build the private queue module. TASK_TEXT_MARKER_91"}
-    sent: list[dict[str, object]] = []
-
-    def enqueue(**fields):
-        sent.append(fields)
-        job = {"job_id": fields["job_id"], "state": "queued"}
-        return fleet_client_grokbot.GrokbotHubDecision(True, "ok", job=job)
-
-    monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda _target: True)
-    monkeypatch.setattr(fleet_client_grokbot, "enqueue", enqueue)
-
-    with_refs = dispatch_memory.with_job_refs(target, spec)
-    handle = grokbot_jobs.enqueue(target, with_refs, "s25-refs", now=NOW)
-
-    refs = with_refs["memory_refs"]
-    assert refs == [{"scope": "fleet", "card_id": "queue-notes", "hash": "a" * 12}]
-    # The hub payload is metadata only: no task text, no card text, no references.
-    payload = json.dumps(sent[0], sort_keys=True)
-    assert "TASK_TEXT_MARKER_91" not in payload and "queue module" not in payload
-    assert "memory_refs" not in sent[0] and "Queue foundation" not in payload
-    # A reference never changes the job's identity.
-    assert sent[0]["task_digest"] == grokbot_jobs._task_hash(spec).removeprefix("sha256:")
-    stored = grokbot_jobs._load_task_snapshot(target, handle["job_id"])
-    assert stored["memory_refs"] == refs
-    assert all(set(ref) == {"scope", "card_id", "hash"} for ref in stored["memory_refs"])
-
-
-def test_local_queue_claim_returns_references_only(tmp_path, hub_memory, bot):
-    target = _workspace(tmp_path)
-    fake = hub_memory([_hub_match("queue-notes", summary="Queue foundation design")])
-    spec = dispatch_memory.with_job_refs(target, {**_spec(), "instructions": "Build the hub deploy queue."})
-    handle = grokbot_jobs.enqueue(target, spec, "s25-local", now=NOW)
-
-    claimed = grokbot_jobs.claim_execution_context(target, handle["job_id"], "bot-a", "lease-a", 600, now=NOW)
-
-    context = claimed["execution_context"]
-    assert (
-        context["memory_refs"]
-        == spec["memory_refs"]
-        == [{"scope": "fleet", "card_id": "queue-notes", "hash": "a" * 12}]
-    )
-    assert "Queue foundation" not in json.dumps(context["memory_refs"])
-    # Replaying the same entry after the card changed stays idempotent.
-    fake.matches = [_hub_match("queue-notes", digest=HASH_B)]
-    fake.heads = {("fleet", "queue-notes"): _head("queue-notes", digest=HASH_B)}
-    replayed = dispatch_memory.with_job_refs(target, {**_spec(), "instructions": "Build the hub deploy queue."})
-    assert replayed["memory_refs"][0]["hash"] == "b" * 12
-    replay = grokbot_jobs.enqueue(target, replayed, "s25-local", now=NOW)
-    assert replay["idempotent"] is True and replay["job_id"] == handle["job_id"]
-
-
-def test_invalid_memory_refs_are_refused():
-    for refs in (
-        [{"scope": "fleet", "card_id": "x", "hash": "a" * 12, "title": "card text"}],
-        [{"scope": "fleet", "card_id": "x", "hash": "nothex"}],
-        [{"scope": "local", "card_id": "x", "hash": "a" * 12}],
-        [{"scope": "fleet", "card_id": f"c{i}", "hash": "a" * 12} for i in range(6)],
-    ):
-        with pytest.raises(grokbot_jobs.GrokbotJobError, match="invalid-memory-refs"):
-            grokbot_jobs._validate_spec({**_spec(), "memory_refs": refs})
 
 
 # Audience
@@ -460,14 +356,6 @@ def test_a_local_block_sent_to_another_machine_becomes_its_connector_twin(tmp_pa
     _assert_private_withheld(dispatch_memory.for_remote(f"Header\n{local}\nDo the work."))
 
 
-def test_private_card_never_becomes_a_grokbot_reference(tmp_path, hub_memory, bot):
-    target = _private_hub(tmp_path, hub_memory)
-
-    refs = dispatch_memory.job_refs(target, "hub deploy")
-
-    assert [ref["card_id"] for ref in refs] == ["deploy-notes"]
-
-
 def test_a_host_with_a_valid_looking_marker_still_gets_connector(tmp_path, hub_memory):
     target = _private_hub(tmp_path, hub_memory)
     _write_valid_looking_marker()
@@ -494,40 +382,6 @@ def _write_valid_looking_marker() -> None:
 
 
 # Hub memory: trust filter and head revalidation
-
-
-def test_dispatch_searches_as_push_and_counts_no_reads(tmp_path, hub_memory, bot):
-    target = _workspace(tmp_path)
-    fake = hub_memory([_hub_match("deploy-notes"), _hub_match("runbook", score=0.5)])
-
-    packet = dispatch_memory.build(target, "hub deploy")
-    adapter = dispatch_memory.connector_text(target, "hub deploy")
-    refs = dispatch_memory.job_refs(target, "hub deploy")
-    brief = briefs.with_memory_context(briefs.EvidenceBrief(attached=False), target, "hub deploy")
-
-    assert packet is not None and adapter and refs and brief.attached
-    searches = [body for body in fake.bodies if body["action"] == "search"]
-    cards = [body for body in fake.bodies if body["action"] == "card"]
-    assert len(searches) == 4 and all(body["query_source"] == "push" for body in searches)
-    assert cards and all(body["offset"] == 1 and body["push"] is True for body in cards)
-    assert fake.read_days == {} and fake.read_totals == {}
-
-
-def test_a_node_written_unreviewed_card_the_hub_returns_is_still_dropped(tmp_path, bot):
-    target = _workspace(tmp_path)
-    # The hub's push filter admits an unreviewed head to the credential that wrote it,
-    # and dispatch searches under this node's credential.
-    mine = {**_hub_match("node-unreviewed", trust="agent-unreviewed", score=9.0), "writer": "node-a"}
-    heads = {
-        ("fleet", "node-unreviewed"): {**_head("node-unreviewed", trust="agent-unreviewed"), "writer": "node-a"},
-        ("fleet", "reviewed-card"): _head("reviewed-card"),
-    }
-    fake = FakeHub([mine, _hub_match("reviewed-card")], heads)
-
-    assert _hub_ids(target, fake) == ["reviewed-card"]
-    assert dispatch_memory.job_refs(target, "hub deploy", settings=SETTINGS, transport=fake) == [
-        {"scope": "fleet", "card_id": "reviewed-card", "hash": "a" * 12}
-    ]
 
 
 def test_unreviewed_card_from_another_principal_is_dropped(tmp_path):
@@ -719,48 +573,13 @@ def test_a_worker_that_finishes_late_publishes_nothing(tmp_path, monkeypatch):
         assert not dispatch_memory._TWINS
 
 
-def test_no_block_leaves_every_dispatch_packet_unchanged(tmp_path, monkeypatch, make_tools):
+def test_no_block_leaves_shared_dispatch_packet_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatch_memory, "build", lambda *args, **kwargs: None)
     evidence = briefs.EvidenceBrief(attached=True, text="## evidence", bytes=11)
     assert briefs.with_memory_context(evidence, tmp_path, "task") is evidence
-    tools, runner = make_tools(memory=lambda prompt: dispatch_memory.connector_text(tmp_path, prompt))
-    tools.call_tool("t3_submit", {"repository": "brigade", "prompt": "Do it.", "title": "T", "caller": "Builder"})
-    assert runner.submits[0]["prompt"] == DISPATCH_HEADER.format(caller="Builder") + "Do it."
 
 
 # Packet builders
-
-
-@pytest.fixture
-def make_tools(tmp_path, t3_ledger_storage):
-    from brigade.grokbot_t3 import runtime_config as rc
-    from brigade.grokbot_t3.ledger import Ledger
-    from brigade.grokbot_t3.tools import T3DispatchTools
-    from tests.test_grokbot_t3_runtime import runtime_payload
-
-    def _make(**overrides):
-        memory = overrides.pop("memory", None)
-        runtime = rc.parse_runtime(runtime_payload(tmp_path / "t3", **overrides))
-        runner = FakeRunner()
-        tools = T3DispatchTools(runtime=runtime, runner=runner, ledger=Ledger(runtime.ledger_path), memory=memory)
-        return tools, runner
-
-    return _make
-
-
-def test_grokbot_t3_adapter_appends_a_connector_block(tmp_path, make_tools, hub_memory):
-    target = _private_hub(tmp_path, hub_memory)
-    tools, runner = make_tools(memory=lambda prompt: dispatch_memory.connector_text(target, prompt))
-
-    tools.call_tool(
-        "t3_submit", {"repository": "brigade", "prompt": "Fix the hub deploy.", "title": "T", "caller": "Bot"}
-    )
-
-    prompt = runner.submits[0]["prompt"]
-    assert prompt.startswith(DISPATCH_HEADER.format(caller="Bot") + "Fix the hub deploy.")
-    assert dispatch_memory.HEADING in prompt and "card_id: deploy-notes" in prompt
-    assert BODY_MARKER not in prompt
-    _assert_private_withheld(prompt)
 
 
 def test_aboyeur_prompts_carry_a_connector_block_even_on_a_local_capable_host(tmp_path, monkeypatch, hub_memory):
@@ -964,24 +783,29 @@ def token_hub(monkeypatch):
     return fake
 
 
-def test_grokbot_refs_follow_the_bot_principal_grants(tmp_path, token_hub, bot):
+def test_invalid_memory_refs_are_refused():
+    for refs in (
+        [{"scope": "fleet", "card_id": "x", "hash": "a" * 12, "title": "card text"}],
+        [{"scope": "fleet", "card_id": "x", "hash": "nothex"}],
+        [{"scope": "local", "card_id": "x", "hash": "a" * 12}],
+        [{"scope": "fleet", "card_id": f"c{i}", "hash": "a" * 12} for i in range(6)],
+    ):
+        with pytest.raises(GrokbotJobError, match="invalid-memory-refs"):
+            validate_memory_refs(refs)
+
+
+def test_no_card_body_text_in_any_packet(tmp_path, hub_memory):
     target = _workspace(tmp_path)
-    node_view = dispatch_memory.build(target, "hub deploy")
-    assert node_view is not None and "repo:private/app" in {i.get("scope") for i in node_view.context["items"]}
-    token_hub.tokens.clear()
+    _card(target, "deploy-notes", "Deploy notes for the hub", summary="How the hub deploy runs")
 
-    refs = dispatch_memory.job_refs(target, "hub deploy")
+    local = dispatch_memory.build(target, "hub deploy", audience=LOCAL)
+    hub_memory([_hub_match("hub-notes")])
+    connector = dispatch_memory.build(target, "hub deploy")
 
-    assert refs == [{"scope": "fleet", "card_id": "deploy-notes", "hash": "a" * 12}]
-    assert token_hub.tokens and set(token_hub.tokens) == {BOT_TOKEN}
-    searches = [body for body in token_hub.bodies if body["action"] == "search"]
-    assert searches[-1]["query_source"] == "push"
+    assert local is not None and connector is not None
+    for packet in (local, connector):
+        assert BODY_MARKER not in packet.block and BODY_MARKER not in json.dumps(packet.context)
+    assert local.context["items"][0]["summary"] == "How the hub deploy runs"
 
 
-def test_no_bot_credential_means_no_refs(tmp_path, token_hub):
-    target = _workspace(tmp_path)
-
-    assert dispatch_memory.grokbot_memory_authority() is None
-    assert dispatch_memory.job_refs(target, "hub deploy") == []
-    assert dispatch_memory.with_job_refs(target, {**_spec(), "instructions": "hub deploy"}).get("memory_refs") is None
-    assert token_hub.tokens == []  # no hub request at all, under any credential
+# Read instructions

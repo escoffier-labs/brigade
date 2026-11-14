@@ -281,6 +281,8 @@ def _execute(plan: Plan, *, target: Path, inject: FailureInjector | None = None)
     _assert_no_overlap(target, {spec.destination for spec in plan.mutations}, exclude=plan.operation_id)
     op_dir = operation_dir(target, plan.operation_id)
     if op_dir.exists():
+        if _read_journal(op_dir).get("status") == "superseded":
+            raise ProjectionError("cannot reuse a superseded operation id")
         shutil.rmtree(op_dir)
     op_dir.mkdir(parents=True)
     try:
@@ -314,7 +316,7 @@ def _recover(operation_id: str, *, target: Path, force: bool = False) -> Receipt
     status = str(journal.get("status") or "")
     if status == "committed":
         return _receipt_from_file(op_dir)
-    if status == "restored":
+    if status in {"restored", "superseded"}:
         return _receipt_from_file(op_dir)
     mutations = _mutations_from_journal(journal)
     for spec in mutations:
@@ -343,6 +345,30 @@ def _recover(operation_id: str, *, target: Path, force: bool = False) -> Receipt
         receipt = _build_receipt(plan_from_journal(journal, mutations), terminal_state="restored", validator_results=())
         _persist_receipt(op_dir, receipt, journal_update={**journal, "status": "restored", "committed_indexes": []})
         return receipt
+
+
+def supersede(operation_id: str, *, target: Path) -> Receipt:
+    """Retire an unfinished operation without touching destinations or before-images.
+
+    Callers must hold a lock that excludes the operation's writer.
+    The caller owns reconciliation of the partial result. Recovery, including
+    forced recovery, must never replay a superseded operation.
+    """
+    target = target.expanduser().resolve()
+    op_dir = operation_dir(target, operation_id)
+    journal = _read_journal(op_dir)
+    status = str(journal.get("status") or "")
+    if status == "superseded":
+        return _receipt_from_file(op_dir)
+    if status not in UNFINISHED_STATUSES:
+        raise ProjectionError("only unfinished operations can be superseded")
+    receipt = _build_receipt(
+        plan_from_journal(journal, _mutations_from_journal(journal)),
+        terminal_state="superseded",
+        validator_results=(),
+    )
+    _persist_receipt(op_dir, receipt, journal_update={**journal, "status": "superseded"}, keep_before=True)
+    return receipt
 
 
 def unfinished_operations(target: Path) -> list[OperationSummary]:

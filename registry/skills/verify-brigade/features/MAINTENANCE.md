@@ -157,6 +157,7 @@ extras               no feature file yet
 fleet *              stand-in only: tests/test_fleet_*.py; only `fleet serve` is driven (hub-contract.md, storage-parity.md)
 friction             no feature file yet; extras surface
 governance           no feature file yet
+hub connector *      only list and setup preview are driven (hub-connector.md)
 handoff-template     no feature file yet
 harness              no feature file yet
 ingest               no feature file yet
@@ -198,7 +199,10 @@ workflow             no feature file yet; extras surface
 guard *              only guard scan and guard redact are driven (guard-parity)
 handoff *            only handoff lint has a feature, and it is paused
 run approve          no feature file yet
-run cloud *          only the grokbot pack, feed, and status verbs have features, and they are paused
+run cloud            provider adapters and removal tombstones have no dedicated drive feature
+work checks          report tests cover observations. No standalone drive yet
 work *               only work verify run is driven
 work verify *        plan, runs, and show are not driven; work-verify runs only work verify run
 ```
+
+Connector lifecycle: `brigade hub connector`. Verify with `tests/test_cloud_agent_profile.py` and `tests/test_dot_transport.py`.

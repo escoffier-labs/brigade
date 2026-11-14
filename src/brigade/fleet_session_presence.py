@@ -562,6 +562,11 @@ def run_presence_hook(
 ) -> int:
     """Publish or end one interactive session. Always exits 0 for adapter safety."""
     try:
+        if harness == "codex" and stdin and context == "codex-observe":
+            from .observe_harness_hooks import run_codex_hook
+
+            run_codex_hook(pin=target)
+            return 0
         if harness == "antigravity" and stdin:
             from .antigravity_presence import run_hook
 

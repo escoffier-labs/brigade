@@ -15,7 +15,8 @@ def test_config_schema_has_no_model_or_key_fields(tmp_target: Path):
         Config(version=1, selection=Selection(depth="repo", harnesses=["claude"], owner="claude")),
     )
     payload = json.loads((tmp_target / WORKSPACE_DIRNAME / "config.json").read_text())
-    assert set(payload) == {"version", "depth", "harnesses", "owner", "includes"}
+    assert set(payload) == {"version", "depth", "harnesses", "owner", "includes", "work"}
+    assert payload["work"] == {"mode": "strict"}
     for forbidden in ("model", "provider", "api_key", "apiKey", "token"):
         assert forbidden not in payload
 

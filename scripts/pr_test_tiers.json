@@ -58,7 +58,6 @@
     "tests/test_center_dashboard.py",
     "tests/test_claim_loss_review.py",
     "tests/test_journal_export.py",
-    "tests/test_grokbot_t3_tools.py",
     "tests/test_worklore_ownership.py",
     "tests/test_control_crosswalk.py",
     "tests/test_run_journal.py",

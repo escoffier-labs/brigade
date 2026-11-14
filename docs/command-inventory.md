@@ -30,18 +30,19 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 12 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 101 command path(s)
+- `brigade fleet`: 98 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade governance`: 1 command path(s)
 - `brigade guard`: 1 command path(s)
 - `brigade handoff`: 17 command path(s)
 - `brigade handoff-template`: 1 command path(s)
 - `brigade harness`: 5 command path(s)
+- `brigade hub`: 9 command path(s)
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
 - `brigade mcp`: 14 command path(s)
-- `brigade memory`: 55 command path(s)
+- `brigade memory`: 58 command path(s)
 - `brigade model`: 12 command path(s)
 - `brigade node`: 1 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
@@ -74,7 +75,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade untrusted` (extras): 2 command path(s)
 - `brigade update`: 1 command path(s)
 - `brigade version`: 1 command path(s)
-- `brigade work`: 162 command path(s)
+- `brigade work`: 163 command path(s)
 - `brigade workflow` (extras): 3 command path(s)
 
 ## Commands
@@ -222,9 +223,6 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet export`
 - `brigade fleet flush`
 - `brigade fleet grokbot enroll-actor`
-- `brigade fleet keys init`
-- `brigade fleet keys rotate`
-- `brigade fleet keys show`
 - `brigade fleet mcp`
 - `brigade fleet mcp report`
 - `brigade fleet models admit`
@@ -327,6 +325,15 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade harness install`
 - `brigade harness sync`
 - `brigade harness uninstall`
+- `brigade hub connector canary`
+- `brigade hub connector doctor`
+- `brigade hub connector install-service`
+- `brigade hub connector list`
+- `brigade hub connector remove`
+- `brigade hub connector serve`
+- `brigade hub connector setup`
+- `brigade hub connector show`
+- `brigade hub connector update`
 - `brigade ingest`
 - `brigade init`
 - `brigade learn closeout` (extras)
@@ -357,6 +364,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade mcp sync`
 - `brigade mcp verify`
 - `brigade memory anchor`
+- `brigade memory care archive`
 - `brigade memory care backfill`
 - `brigade memory care closeout`
 - `brigade memory care doctor`
@@ -366,6 +374,8 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory care plan-fixes`
 - `brigade memory care scan`
 - `brigade memory care status`
+- `brigade memory care tend`
+- `brigade memory care undo`
 - `brigade memory care uninstall`
 - `brigade memory compact`
 - `brigade memory embed-worker`
@@ -817,6 +827,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade work backup status`
 - `brigade work bootstrap`
 - `brigade work brief`
+- `brigade work checks`
 - `brigade work claim`
 - `brigade work closeout`
 - `brigade work dispatch`

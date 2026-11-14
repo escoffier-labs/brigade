@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from ... import dogfood_cmd, localio
+from ... import dogfood_cmd, localio, memory_care_instructions
 from ...config import load_config
 from ...install import apply_gitignore
 from .. import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
@@ -344,7 +344,11 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     del handoff_drafts_full
     from ... import brief_sections, work_mode
 
+    pin_errors: list[str] = []
+    work_mode.pin_explicit_mode(target, errors=pin_errors)
     work = work_mode.summary(target)
+    if pin_errors:
+        work["pin_error"] = pin_errors[0]
     return {
         "target": str(target),
         "session_close": {
@@ -412,6 +416,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
             "autofix_plan": memory_health.get("autofix_plan"),
         },
         "scheduled_care": care_cmd.repeated_failure_summary(target),
+        "instruction_budget": memory_care_instructions.brief_payload(target),
         "security_health": {
             "config_path": security_health["config_path"],
             "valid": security_health["valid"],
@@ -670,6 +675,8 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
 
     for line in brief_sections.render_brief_session_close_lines(mode=payload["work_mode"]["mode"]):
         print(line)
+    if "pin_error" in payload["work_mode"]:
+        print(f"work_mode_pin: {payload['work_mode']['pin_error']}")
     if payload["work_mode"]["rails"] == "off":
         print("safety_rails: off (pre-push content guard and secret scanning are skipped)")
     update = payload.get("update")
@@ -1017,6 +1024,11 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             if not isinstance(rec, dict):
                 continue
             print(f"care_repeated_failure: {rec.get('id')} consecutive={rec.get('consecutive_failures')}")
+
+    raw_instruction_budget = payload.get("instruction_budget")
+    instruction_budget: dict[str, Any] = raw_instruction_budget if isinstance(raw_instruction_budget, dict) else {}
+    for line in instruction_budget.get("alerts") or []:
+        print(line)
 
     raw_security_health = payload.get("security_health")
     security_health: dict[str, Any] = raw_security_health if isinstance(raw_security_health, dict) else {}
