@@ -71,7 +71,7 @@ def _work_settings_with_source(target: Path) -> tuple[dict[str, Any], Path | Non
         try:
             if not path.is_file():
                 continue
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             return {}, path
         # Match load_config: a config with an unsupported version is invalid, so its
@@ -264,7 +264,7 @@ def repo_rails_setting(target: Path) -> Path | None:
     """A config file inside ``target`` that sets ``work.rails``, which Brigade ignores."""
     for path in _config_candidates(target):
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
         work = data.get("work") if isinstance(data, dict) else None
@@ -401,7 +401,7 @@ def doctor_checks(target: Path) -> list[tuple[str, str, str]]:
     readable = True
     if path is not None:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
             readable = isinstance(data, dict) and data.get("version") in SUPPORTED_VERSIONS
         except (OSError, ValueError):
             readable = False

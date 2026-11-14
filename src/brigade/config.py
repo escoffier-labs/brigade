@@ -114,7 +114,7 @@ def legacy_config_keys(target: Path) -> list[tuple[str, str, bool]]:
     """
     path = _existing_config_path(target)
     try:
-        data = json.loads(path.read_text()) if path is not None else None
+        data = json.loads(path.read_text(encoding="utf-8-sig")) if path is not None else None
     except (OSError, ValueError):
         return []
     if isinstance(data, dict) and LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY in data:
@@ -251,7 +251,9 @@ def load_config(target: Path) -> Optional[Config]:
     path = _existing_config_path(target)
     if path is None:
         return None
-    data = json.loads(path.read_text())
+    # utf-8-sig, as work_mode and the instruction inventory read it: a leading byte-order mark
+    # (some Windows editors add one) is dropped instead of failing every command.
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     version = data.get("version")
     if version not in SUPPORTED_VERSIONS:
         raise ValueError(f"unsupported config version: {version!r} (supported: {SUPPORTED_VERSIONS})")

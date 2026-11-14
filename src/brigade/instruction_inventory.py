@@ -334,8 +334,8 @@ def _repository_depth(target: Path) -> bool:
         if read.data is None:
             return False
         try:
-            data = json.loads(read.data)
-        except (ValueError, RecursionError):
+            data = json.loads(read.data.decode("utf-8-sig"))  # as config.load_config reads it
+        except (ValueError, RecursionError):  # UnicodeDecodeError is a ValueError
             return False
         return (
             isinstance(data, dict)

@@ -850,3 +850,11 @@ def test_two_overrides_for_one_file_give_the_strictest_class_and_smallest_limit(
         seen.add((row.file_class, row.limit, row.requested_limit_bytes))
     # Rule: the result never depends on which entry is read first.
     assert seen == {("policy", 1_000, 1_000)}
+
+
+def test_a_byte_order_mark_does_not_hide_repository_depth(tmp_path):
+    # As config.load_config reads it: a leading UTF-8 byte-order mark is dropped.
+    ws, home, env = field_workspace(tmp_path)
+    (ws / ".brigade").mkdir()
+    (ws / ".brigade" / "config.json").write_bytes(b'\xef\xbb\xbf{"version": 1, "depth": "repo"}')
+    assert discover(ws, InstructionsConfig(), home=home, environ=env).repository_depth is True
