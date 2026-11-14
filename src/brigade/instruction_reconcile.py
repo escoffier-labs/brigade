@@ -16,7 +16,15 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from .instruction_sections import PointerSpan, parse, pointer_spans, whole_section_count, whole_section_spans
+from .instruction_sections import (
+    FILE_KEY,
+    POINTER_LINE,
+    PointerSpan,
+    parse,
+    pointer_spans,
+    whole_section_count,
+    whole_section_spans,
+)
 
 
 @dataclass(frozen=True)
@@ -90,8 +98,45 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _card_pattern(file_key: str) -> re.Pattern[str]:
+def _card_pattern(file_key: str) -> re.Pattern[str] | None:
+    """The card paths this file's records may name, or None when `file_key` is not a safe key."""
+    if FILE_KEY.fullmatch(file_key) is None:
+        return None
     return re.compile(rf"memory/cards/instructions/{re.escape(file_key)}--[a-z0-9-]+\.md")
+
+
+def _bound(line: bytes, kind: bytes, card_rel: str, decision_id: str) -> bool:
+    """`line` (with its one newline) is a `kind` pointer line that names `card_rel` and `decision_id`."""
+    found = POINTER_LINE.fullmatch(line[:-1]) if line.endswith(b"\n") else None
+    return (
+        found is not None
+        and found["kind"] == kind
+        and found["path"] == card_rel.encode()
+        and found["undo"] == decision_id.encode()
+    )
+
+
+def _trusted(
+    file_key: str, runs: Sequence[RecordedRun], pointers: Sequence[RecordedPointer]
+) -> tuple[list[RecordedRun], list[RecordedPointer]]:
+    """The records recovery may use. A record is used only when its card is under this file's key and its
+    recorded pointer line is of the right kind and names that card and decision, so a record can never act on
+    another record's pointer. The rest are foreign and counted in `ignored`."""
+    pattern = _card_pattern(file_key)
+    if pattern is None:
+        return [], []
+    good_runs = [
+        run
+        for run in runs
+        if pattern.fullmatch(run.card_rel) and _bound(run.pointer, b"Moved to", run.card_rel, run.decision_id)
+    ]
+    good_pointers = [
+        pointer
+        for pointer in pointers
+        if pattern.fullmatch(pointer.card_rel)
+        and _bound(pointer.data, b"Overflow in", pointer.card_rel, pointer.decision_id)
+    ]
+    return good_runs, good_pointers
 
 
 def _find(file: bytes, spans: Sequence[PointerSpan], pointer: bytes) -> list[PointerSpan]:
@@ -165,9 +210,7 @@ def reconcile(
 ) -> Reconciled:
     """What a pass repairs before it plans anything: cards no pointer names whose text is back in the file,
     pointers whose card is gone, and overflow pointers whose card is gone."""
-    pattern = _card_pattern(file_key)
-    good_runs = [run for run in runs if pattern.fullmatch(run.card_rel)]
-    good_pointers = [pointer for pointer in pointers if pattern.fullmatch(pointer.card_rel)]
+    good_runs, good_pointers = _trusted(file_key, runs, pointers)
     ignored = len(runs) - len(good_runs) + len(pointers) - len(good_pointers)
     doc = parse(file)
     if doc.problem is not None:
@@ -259,9 +302,7 @@ def plan_restore(
     """The undo of one decision, planned from the live file and cards. It refuses, naming the card, rather than
     guess when a pointer or card was edited. A file whose markers do not balance cannot show where a block
     ends, so it refuses with `pointer-in-block` and no card."""
-    pattern = _card_pattern(file_key)
-    good_runs = [run for run in runs if pattern.fullmatch(run.card_rel)]
-    good_pointers = [pointer for pointer in pointers if pattern.fullmatch(pointer.card_rel)]
+    good_runs, good_pointers = _trusted(file_key, runs, pointers)
     spans = pointer_spans(file)
     found_pointers = [(pointer, _find(file, spans, pointer.data)) for pointer in good_pointers]
     if not good_runs and not any(found for _, found in found_pointers):

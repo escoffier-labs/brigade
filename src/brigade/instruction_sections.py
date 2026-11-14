@@ -13,10 +13,14 @@ from dataclasses import dataclass
 from datetime import date
 
 KEEP = "<!-- brigade:keep -->"
+# The one grammar for a file key: lowercase ASCII and `-`, at most 64 characters, no dot or slash. Inventory keys
+# (`instruction_inventory.file_key`) always match, so anything else in a record or a path is foreign.
+FILE_KEY = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 KEEP_UNTIL = re.compile(rb"<!-- brigade:keep until=(\d{4}-\d{2}-\d{2}) -->")
+# The named groups let a recovery record be bound to the line it recorded (`kind`, `path` and `undo`).
 POINTER_LINE = re.compile(
-    rb"- (?:Moved to|Overflow in) memory \d{4}-\d{2}-\d{2}: memory/cards/instructions/[a-z0-9-]+\.md"
-    rb" \(undo: [0-9]{8}T[0-9]{6}Z-[a-z]+-[0-9a-f]{8}\)"
+    rb"- (?P<kind>Moved to|Overflow in) memory \d{4}-\d{2}-\d{2}: (?P<path>memory/cards/instructions/[a-z0-9-]+\.md)"
+    rb" \(undo: (?P<undo>[0-9]{8}T[0-9]{6}Z-[a-z]+-[0-9a-f]{8})\)"
 )
 
 _KEEP = KEEP.encode("ascii")
