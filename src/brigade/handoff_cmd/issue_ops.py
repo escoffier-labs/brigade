@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .. import scrub
+from .. import instruction_overflow, scrub
 from ..budgets import HANDOFF_BACKLOG_STALE_SECONDS
 from ..config import load_config as load_brigade_config
 from ..handoff_content import normalize_suggested_card_content
@@ -21,7 +21,6 @@ from ..handoff_ingest_rules import (
     EXPECTED_SHA_SECTION,
     SAFE_SPECIAL_TARGETS,
     CardIdIndex,
-    bootstrap_budget_problem,
     card_frontmatter_problems,
     card_state_problems,
     document_destination_problem,
@@ -594,12 +593,16 @@ def _lint_no_card_action(
     elif any(line.startswith("## ") for line in suggested_document.splitlines()):
         errors.append("Suggested document content must not contain level-2 markdown headings")
     elif ingest_routes and target_document and _valid_document_target(target_document.splitlines()[0].strip()):
-        destination_problem = document_destination_problem(target_document.splitlines()[0].strip(), workspace)
-        budget_problem = bootstrap_budget_problem(
-            target_document.splitlines()[0].strip(), suggested_document, workspace
+        document = target_document.splitlines()[0].strip()
+        # Ingest sends a known instruction file's capped or linked append to its overflow card, so
+        # lint reports a card problem, and the destination problem only when ingest cannot route it.
+        kind = instruction_overflow.handoff_type({"type": _section_value(sections, "Type") or ""})
+        overflow = (
+            None if workspace is None else instruction_overflow.route(workspace, document, suggested_document, kind)
         )
-        if destination_problem or budget_problem:
-            errors.append(destination_problem or str(budget_problem))
+        problem = overflow.card_problem if overflow is not None else document_destination_problem(document, workspace)
+        if problem:
+            errors.append(problem)
 
     for prohibited in ("Target card", EXPECTED_SHA_SECTION, "Suggested card content"):
         if prohibited in sections:

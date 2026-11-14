@@ -25,7 +25,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List
 
-from . import dirfd, handoff_worktrees
+from . import dirfd, handoff_worktrees, instruction_overflow
 from .card_fingerprint import (
     CardMatch,
     ensure_card_id_frontmatter,
@@ -41,7 +41,6 @@ from .handoff_ingest_rules import (
     EXPECTED_SHA_SECTION,
     SHA256_RE,
     CardIdIndex,
-    bootstrap_budget_problem,
     card_frontmatter_structure_problems,
     card_id_collision_problem,
     document_destination_problem,
@@ -51,6 +50,8 @@ from .handoff_ingest_rules import (
     sha256_hex,
     sha_matches,
 )
+from .bounded_read import read_regular_file
+from .instruction_inventory import INSPECTION_CEILING
 from .selection import WRITER_INBOXES
 from .untrusted import scan_untrusted
 
@@ -289,6 +290,8 @@ def ingest_into(
     # Read the cards' ids once for the whole run. Each promoted card is added to it,
     # so two handoffs in one run cannot both claim an id.
     card_ids = CardIdIndex(owner)
+    # Discovery reads several files and resolves every instruction path: once per run, not per handoff.
+    routing = instruction_overflow.RouteContext(owner)
     for handoffs_dir in handoff_dirs:
         processed_dir = handoffs_dir / "processed"
         try:
@@ -329,6 +332,7 @@ def ingest_into(
                     promote_cards=promote_cards,
                     route_documents=route_documents,
                     card_ids=card_ids,
+                    routing=routing,
                 )
                 action = _execute(
                     outcome,
@@ -393,13 +397,15 @@ def parse(path: Path, data: bytes | None = None) -> Dict[str, str]:
 
 @dataclass
 class Outcome:
-    kind: str  # promoted | reinforced | routed | inboxed | skipped
+    kind: str  # promoted | reinforced | routed | routed-card | inboxed | skipped
     dest: Path | None = None
     reason: str = ""
     match: CardMatch | None = None
     # Stable reason code. `reason` can quote handoff fields and is never
     # written to logs, reports or review receipts; `code` is.
     code: str = ""
+    # Set for `routed-card`: the overflow card the append goes to and why.
+    overflow: instruction_overflow.OverflowRoute | None = None
 
 
 def _normalize_for_dedupe(text: str) -> str:
@@ -423,6 +429,7 @@ def decide(
     promote_cards: bool,
     route_documents: bool,
     card_ids: CardIdIndex | None = None,
+    routing: instruction_overflow.RouteContext | None = None,
 ) -> Outcome:
     if "memory proposal notification" in sections:
         return Outcome(
@@ -534,8 +541,13 @@ def decide(
             return Outcome("inboxed", code="missing-target-document", reason="no-card handoff missing target document")
         if not safe_document_target(document):
             return Outcome("inboxed", code="unsafe-target-document", reason="target document not in safe list")
+        # Read-only: a known instruction file past its act-at, behind a link, or with an unreadable
+        # `[instructions]` table sends the append to its overflow card instead of a person.
+        overflow = instruction_overflow.route(
+            target, document, content, instruction_overflow.handoff_type(sections), context=routing
+        )
         destination_problem = document_destination_problem(document, target)
-        if destination_problem:
+        if destination_problem and overflow is None:
             return Outcome("inboxed", code="document-destination-unsafe", reason=destination_problem)
         if not content.strip():
             return Outcome("inboxed", code="empty-document-content", reason="empty document content")
@@ -547,35 +559,47 @@ def decide(
             )
         dest = target / document
         # Dedupe: never re-append content that is already present in the target.
-        # Without this, a re-routed handoff duplicates its content on every run.
-        existing = dest.read_text(encoding="utf-8") if dest.is_file() else ""
-        normalized_existing = _normalize_for_dedupe(existing)
+        # Without this, a re-routed handoff duplicates its content on every run. A routed
+        # append also looks in every overflow card of the file and type, so a block already
+        # published to card 1 is found when card 2 would be chosen.
+        if overflow is None:
+            existing = dest.read_text(encoding="utf-8") if dest.is_file() else ""
+            held = [existing]
+        else:
+            # The file may be reached through a link: read it bounded and never write to it.
+            read = read_regular_file(dest, max_bytes=INSPECTION_CEILING)
+            existing = read.data.decode("utf-8", "replace") if read.data is not None else ""
+            held = [existing, *instruction_overflow.existing_card_text(target, overflow)]
         normalized_suggested = _normalize_for_dedupe(content)
-        if normalized_suggested and normalized_suggested in normalized_existing:
+        if normalized_suggested and any(normalized_suggested in _normalize_for_dedupe(text) for text in held):
             return Outcome(
                 "inboxed",
                 code="document-content-present",
                 reason="document content already present in the target document",
             )
         anchor = _first_meaningful_line(content)
-        if anchor and anchor in existing:
+        if anchor and any(anchor in text for text in held):
             return Outcome(
                 "inboxed",
                 code="document-anchor-present",
                 reason="document anchor already present in the target document",
             )
-        # Bootstrap files load into the session prefix every turn and silently
-        # truncate past ~12k chars. Refuse an append that would push the file
-        # over its budget; route to the inbox so a human trims or re-homes it.
-        budget_problem = bootstrap_budget_problem(document, content, target)
-        if budget_problem:
-            return Outcome("inboxed", code="bootstrap-budget-exceeded", reason=budget_problem)
         sig = scan_untrusted(content)
         if sig.flagged:
             return Outcome(
                 "inboxed",
                 code="document-injection-signal",
                 reason=f"injection signal in document content ({sig.count} marker(s))",
+            )
+        if overflow is not None:
+            if overflow.card_problem:
+                return Outcome("inboxed", code="document-destination-unsafe", reason=overflow.card_problem)
+            return Outcome(
+                "routed-card",
+                code="document-routed-to-card",
+                dest=target / overflow.card_rel,
+                reason="append goes to the file's private overflow card",
+                overflow=overflow,
             )
         return Outcome("routed", code="document-appended", dest=dest)
 
@@ -938,6 +962,21 @@ def _execute(
             log_match(target, outcome.match, _archive(handoff_path, processed_dir, snapshot_sha))
         return Action("reinforced", summary)
 
+    if outcome.kind == "routed-card":
+        return _execute_routed_card(
+            outcome,
+            handoff_path,
+            target,
+            sections,
+            inbox_dir,
+            processed_dir,
+            dry_run,
+            snapshot,
+            card_ids,
+            promote_cards,
+            route_documents,
+        )
+
     if outcome.kind == "routed":
         dest = outcome.dest  # type: ignore[assignment]
         assert dest is not None
@@ -945,7 +984,7 @@ def _execute(
         summary = _summary("append", name, outcome.code)
         if not dry_run:
             try:
-                _append_document_nofollow(target, dest, "\n\n" + content + "\n")
+                _append_document_nofollow(target, dest, instruction_overflow.append_block(content).decode("utf-8"))
             except OSError:
                 return _execute(
                     Outcome(
@@ -991,6 +1030,68 @@ def _execute(
         return Action("inboxed", summary)
 
     return Action("skipped", _summary("skip", name, outcome.code))
+
+
+def _execute_routed_card(
+    outcome: Outcome,
+    handoff_path: Path,
+    target: Path,
+    sections: Dict[str, str],
+    inbox_dir: Path,
+    processed_dir: Path,
+    dry_run: bool,
+    snapshot: bytes | None,
+    card_ids: CardIdIndex | None,
+    promote_cards: bool | None,
+    route_documents: bool | None,
+) -> Action:
+    """Append the handoff's content to its file's overflow card through the journal."""
+    from .inbox_lock import InboxLockTimeout
+    from .memory_care_journal import JournalConflict
+    from .memory_inbox_append import commit_card_append
+
+    overflow = outcome.overflow
+    assert overflow is not None and outcome.dest is not None
+    name = handoff_path.name
+    snapshot_sha = hashlib.sha256(snapshot).hexdigest() if snapshot is not None else None
+    summary = _summary("card-append", name, outcome.code)
+    if dry_run:
+        return Action("routed", summary)
+    content = sections.get("suggested document content", "")
+    kind = instruction_overflow.handoff_type(sections)
+    try:
+        block, header_bytes = instruction_overflow.card_block(target, overflow, content, kind, today=date.today())
+        # The document lock comes first, as retry and revert take it, then the journal.
+        with _document_lock(target):
+            commit_card_append(
+                target, overflow.card_rel, block, header_bytes=header_bytes, reason="ingest:document-routed-to-card"
+            )
+    except (OSError, InboxLockTimeout, JournalConflict, ValueError):
+        return _execute(
+            Outcome(
+                "inboxed",
+                code="document-destination-unwritable",
+                reason="overflow card is linked, protected or unwritable; requires review",
+            ),
+            handoff_path,
+            target,
+            sections,
+            inbox_dir,
+            processed_dir,
+            dry_run,
+            snapshot,
+            promote_cards=promote_cards,
+            route_documents=route_documents,
+        )
+    if card_ids is not None:
+        try:
+            card_ids.register(overflow.card_rel, (target / overflow.card_rel).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            pass  # the id index only guards later promotions in this run
+    # Outside the try: an archive failure after publication is an io-error and the handoff
+    # stays, so the duplicate check finds the block in the card on the next run.
+    _archive(handoff_path, processed_dir, snapshot_sha)
+    return Action("routed", summary)
 
 
 def _frontmatter(text: str) -> tuple[dict[str, str], bool]:

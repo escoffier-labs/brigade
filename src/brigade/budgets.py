@@ -84,23 +84,6 @@ def is_bootstrap_target(rel_path: str) -> bool:
     return Path(rel_path).name in BOOTSTRAP_BUDGETS
 
 
-def route_would_exceed_budget(dest: Path, addition: str) -> tuple[bool, int | None]:
-    """Whether appending `addition` to a bootstrap file would exceed its budget.
-
-    Returns (would_exceed, budget). Non-bootstrap targets (e.g. .learnings/*)
-    are never guarded: (False, None).
-    """
-    budget = BOOTSTRAP_BUDGETS.get(dest.name)
-    if budget is None:
-        return False, None
-    try:
-        existing = dest.stat().st_size if dest.is_file() else 0
-    except OSError:
-        existing = 0
-    projected = existing + len(addition.encode("utf-8"))
-    return projected > budget, budget
-
-
 def threshold(limit: int, percent: int) -> int:
     """`percent` of `limit` in whole bytes, rounded down."""
     return limit * percent // 100

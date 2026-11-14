@@ -489,6 +489,13 @@ def _index_links(target: Path, config: MemoryCareConfig) -> set[str]:
     return links
 
 
+def _moved_instructions(meta: dict[str, Any]) -> bool:
+    """True for an overflow card: content moved out of an instruction file is not a citation target."""
+    tags = meta.get("tags")
+    items = tags if isinstance(tags, (list, tuple)) else re.split(r"[\s,\[\]]+", str(tags or ""))
+    return "moved-instructions" in {str(item).strip().strip("'\"") for item in items}
+
+
 def _frontmatter_value(meta: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         value = meta.get(key)
@@ -777,7 +784,9 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         row["evidence_ref_count"] = len(evidence_refs)
         row["missing_evidence_ref_count"] = len(missing_evidence_refs)
         card_rows.append(row)
-        if "undersourced" in enabled and (weak_confidence or missing_evidence):
+        # Overflow cards are written by ingest from handoff content and carry no evidence block or index link.
+        moved = _moved_instructions(meta)
+        if "undersourced" in enabled and not moved and (weak_confidence or missing_evidence):
             evidence = []
             if weak_confidence:
                 evidence.append(f"confidence={confidence}")
@@ -821,7 +830,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
                     action="Split the card into smaller atomic topics and update MEMORY.md links.",
                 )
             )
-        if "orphaned-card" in enabled and linked and rel not in linked_existing:
+        if "orphaned-card" in enabled and not moved and linked and rel not in linked_existing:
             issues.append(
                 _issue(
                     target=target,

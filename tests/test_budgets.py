@@ -21,18 +21,6 @@ def test_per_file_budgets_stay_within_ceiling():
         assert budget <= budgets.BOOTSTRAP_HARD_LIMIT_CEILING, name
 
 
-def test_route_would_exceed_budget_guards_only_bootstrap(tmp_path: Path):
-    tools = tmp_path / "TOOLS.md"
-    tools.write_text("x" * (budgets.BOOTSTRAP_BUDGETS["TOOLS.md"] - 5))
-    exceed, budget = budgets.route_would_exceed_budget(tools, "more content")
-    assert exceed is True and budget == budgets.BOOTSTRAP_BUDGETS["TOOLS.md"]
-
-    learnings = tmp_path / "LEARNINGS.md"
-    learnings.write_text("y" * 50_000)
-    exceed, budget = budgets.route_would_exceed_budget(learnings, "more")
-    assert exceed is False and budget is None
-
-
 def test_budgets_show_json_reports_canonical_values(capsys):
     assert budgets_cmd.show(json_output=True) == 0
     import json

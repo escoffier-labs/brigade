@@ -195,18 +195,11 @@ def _fill_user_md(ws: Path) -> None:
     (ws / "USER.md").write_text("x" * (budgets.BOOTSTRAP_BUDGETS["USER.md"] - 10), encoding="utf-8")
 
 
-def test_lint_rejects_an_append_over_the_bootstrap_budget(tmp_path: Path):
+def test_lint_and_draft_accept_an_append_past_act_at_to_a_known_file(tmp_path: Path):
+    # rule: lint and draft accept what ingest routes to an overflow card
     _fill_user_md(tmp_path)
-    result = linting.lint_text(_doc_handoff_text("USER.md", "y" * 200), workspace=tmp_path)
-    assert any("bootstrap budget guard" in error for error in result.errors)
-
-
-def test_draft_refuses_an_append_over_the_bootstrap_budget(tmp_path: Path):
-    _fill_user_md(tmp_path)
-    with pytest.raises(drafts.HandoffDraftRefused) as refused:
-        _draft(tmp_path, action="no-card", target_document="USER.md", content="y" * 200)
-    assert "bootstrap budget guard" in refused.value.problems[0]
-    assert _no_files(tmp_path)
+    assert not linting.lint_text(_doc_handoff_text("USER.md", "y" * 200), workspace=tmp_path).errors
+    assert _draft(tmp_path, action="no-card", target_document="USER.md", content="y" * 200)["path"]
 
 
 def test_draft_allows_a_small_append_to_a_bootstrap_document(tmp_path: Path):
@@ -494,23 +487,23 @@ def _escape_setup(tmp_path: Path) -> tuple[Path, Path]:
     return ws, outside
 
 
-def test_lint_and_draft_reject_a_symlinked_document_destination(tmp_path: Path):
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+def test_lint_and_draft_accept_a_symlinked_known_instruction_file(tmp_path: Path):
+    # rule: a symlinked known instruction file routes to its card, so lint no longer refuses it
     ws, outside = _escape_setup(tmp_path)
     (outside / "target.md").write_text("outside\n", encoding="utf-8")
     (ws / "USER.md").symlink_to(outside / "target.md")
-    result = linting.lint_text(_doc_handoff_text("USER.md"), workspace=ws)
-    assert any("contains a symlink" in error for error in result.errors)
-    with pytest.raises(drafts.HandoffDraftRefused) as refused:
-        drafts.build_draft(
-            target=ws,
-            title="T",
-            summary="S.",
-            action="no-card",
-            target_document="USER.md",
-            content="x",
-            inbox=str(ws / "in"),
-        )
-    assert "contains a symlink" in refused.value.problems[0]
+    assert not linting.lint_text(_doc_handoff_text("USER.md"), workspace=ws).errors
+    drafts.build_draft(
+        target=ws,
+        title="T",
+        summary="S.",
+        action="no-card",
+        target_document="USER.md",
+        content="x",
+        inbox=str(ws / "in"),
+    )
+    assert (outside / "target.md").read_text(encoding="utf-8") == "outside\n"
 
 
 def test_lint_rejects_a_symlinked_ancestor_and_a_dangling_link(tmp_path: Path):
@@ -524,7 +517,9 @@ def test_lint_rejects_a_symlinked_ancestor_and_a_dangling_link(tmp_path: Path):
     )
 
 
-def test_ingest_decide_sends_a_symlinked_document_to_review(tmp_path: Path):
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+def test_ingest_decide_routes_a_symlinked_known_file_to_its_card(tmp_path: Path):
+    # rule: the card takes the append and the linked file is never written through
     ws, outside = _escape_setup(tmp_path)
     (outside / "target.md").write_text("outside\n", encoding="utf-8")
     (ws / "USER.md").symlink_to(outside / "target.md")
@@ -537,7 +532,9 @@ def test_ingest_decide_sends_a_symlinked_document_to_review(tmp_path: Path):
         "suggested document content": "A note.",
     }
     outcome = ingest_mod.decide(sections, ws, promote_cards=True, route_documents=True)
-    assert outcome.kind == "inboxed" and "symlink" in outcome.reason
+    assert outcome.overflow is not None
+    assert (outcome.kind, outcome.overflow.reason) == ("routed-card", "symlinked")
+    assert outcome.dest == ws / "memory/cards/instructions/user-md--overflow-workflow.md"
     assert (outside / "target.md").read_text(encoding="utf-8") == "outside\n"
 
 
@@ -863,6 +860,10 @@ def test_refusal_reasons_leave_out_fence_languages_card_names_and_targets(tmp_pa
             "suggested document content": "y" * 200,
         },
     }
+    # rule: an append past act-at is routed, and its reason still quotes nothing from the handoff
+    budget = ingest_mod.decide(cases.pop("budget"), ws, promote_cards=True, route_documents=True)
+    assert (budget.kind, budget.code) == ("routed-card", "document-routed-to-card")
+    assert secret not in budget.reason
     for name, sections in cases.items():
         outcome = ingest_mod.decide(sections, ws, promote_cards=True, route_documents=True)
         assert outcome.kind == "inboxed", name
@@ -878,8 +879,9 @@ def test_refusal_reasons_leave_out_fence_languages_card_names_and_targets(tmp_pa
     assert stale.errors and not any(secret in e for e in stale.errors)
     exists = linting.lint_text(_handoff_text("create-card", card=f"{secret}.md"), workspace=ws)
     assert exists.errors and not any(secret in e for e in exists.errors)
+    # rule: lint accepts an append past act-at, so there is no budget message to keep content-free
     over = linting.lint_text(_doc_handoff_text("USER.md", "y" * 200), workspace=ws)
-    assert any("bootstrap budget guard" in e for e in over.errors) and not any("USER.md" in e for e in over.errors)
+    assert not over.errors
     with pytest.raises(drafts.HandoffDraftRefused) as refused:
         _draft(tmp_path, action="update-card", target_card=f"{secret}-missing.md", content=UPDATED)
     assert secret not in " ".join(refused.value.problems)
