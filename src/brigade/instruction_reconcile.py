@@ -9,10 +9,9 @@ whole parsed sections.
 
 from __future__ import annotations
 
-from collections import Counter
-
 import hashlib
 import re
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -191,7 +190,9 @@ def _shift(applied: Sequence[_Edit], offset: int) -> int:
 def _held(after: bytes, ranges: Sequence[tuple[int, int]]) -> tuple[str, ...]:
     digests: dict[str, None] = {}
     for unit in parse(after).units:
-        if any(start <= unit.start and unit.end <= end for start, end in ranges):
+        # Any overlap, not only containment: a heading added above a pointer can make the restored text part of
+        # a larger unit, and that unit must be held too, or the next pass moves it straight back out.
+        if any(unit.start < end and start < unit.end for start, end in ranges):
             digests[unit.sha256] = None
     return tuple(digests)
 
@@ -226,7 +227,7 @@ def reconcile(
     for run in good_runs:
         rel = run.card_rel
         found = _find(file, spans, run.pointer)
-        if found and run.pointer in repeated:
+        if run.pointer in repeated and any(not span.in_block for span in found):
             kept.append((rel, "pointer-duplicated"))
             continue
         card = cards.get(rel)
@@ -255,7 +256,7 @@ def reconcile(
         found = _find(file, spans, pointer.data)
         if cards.get(pointer.card_rel) is not None or not found:
             continue
-        if pointer.data in repeated:  # found is non-empty here
+        if pointer.data in repeated and any(not span.in_block for span in found):
             kept.append((pointer.card_rel, "pointer-duplicated"))
             continue
         outside = [span for span in found if not span.in_block]  # a copy inside a block is inert (clarification b)
@@ -314,7 +315,7 @@ def plan_restore(
     for record_rel, data in [(run.card_rel, run.pointer) for run in good_runs] + [
         (pointer.card_rel, pointer.data) for pointer in good_pointers
     ]:
-        if data in repeated and _find(file, spans, data):
+        if data in repeated and any(not span.in_block for span in _find(file, spans, data)):
             return Refusal("pointer-duplicated", record_rel)
     for pointer, found in found_pointers:
         outside = [span for span in found if not span.in_block]

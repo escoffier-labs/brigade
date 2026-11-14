@@ -501,3 +501,27 @@ def test_a_pointer_without_its_newline_or_with_two_is_foreign():
         forged = dataclasses.replace(run, pointer=pointer)
         result = _reconcile(moved.after, moved, {run.card_rel: None}, runs=(forged,))
         assert (result.after, result.restored, result.ignored) == (moved.after, (), 1)
+
+
+def test_restore_holds_a_unit_that_grew_around_the_restored_text():  # review of #2567, row W21
+    child = b"### Child\nchild text\n"
+    rel = DIR + f"{KEY}--child.md"
+    line = pointer_line(rel, today=TODAY, decision_id=ID)
+    run = RecordedRun(ID, rel, line, child, hashlib.sha256(child).hexdigest())
+    card = card_bytes(
+        file_key=KEY,
+        slug="child",
+        section=child,
+        source_name="USER.md",
+        decision_id=ID,
+        today=TODAY,
+        fresh_until=None,
+        card_id=CARD_ID,
+    )
+    # A level-two heading was added just above the pointer after the move.
+    file = b"# T\n## New parent\n" + line + b"\n## B\nb\n"
+    result = plan_restore(file, (run,), (), {rel: card}, file_key=KEY)
+    assert isinstance(result, Restore)
+    assert result.after == b"# T\n## New parent\n" + child + b"## B\nb\n"
+    parent = next(unit for unit in parse(result.after).units if unit.heading == b"## New parent")
+    assert parent.sha256 in result.held
