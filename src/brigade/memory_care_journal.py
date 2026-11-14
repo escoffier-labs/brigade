@@ -643,9 +643,15 @@ def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
         if row["repair"]:
             _repair_indexes(target, decision_id)
         if row["append"]:
+            from .ingest import AppendRefused
             from .memory_inbox_append import publish
 
-            publish(target, decision_id)
+            try:
+                publish(target, decision_id)
+            except AppendRefused as exc:
+                # Recorded on the decision and the handoff is back in the review inbox: not a recovery failure.
+                resolved.append({"decision_id": decision_id, "phase": "append-refused", "reason": exc.reason})
+                continue
         if row["prepared"]:
             finish_prepared(target, decision_id)
             final = _payload(target, decision_id)

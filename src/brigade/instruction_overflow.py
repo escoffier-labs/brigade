@@ -46,6 +46,7 @@ HANDOFF_TYPES = (
     "project-context",
 )
 CARDS_REL = "memory/cards/instructions"
+MARKER_TAG = "moved-instructions"
 # An overflow chain that long is not a care problem a handoff should be written into.
 _MAX_CARDS = 1000
 
@@ -302,6 +303,63 @@ def _untrusted_card(target: Path, rel: str) -> str | None:
     return card_trust_problem(text)
 
 
+class WriteProblem(NamedTuple):
+    """Why bytes must not be appended to a card now: an ingest outcome code, the reason, and whether the card is full."""
+
+    code: str
+    reason: str
+    full: bool = False
+
+
+def write_problem(current: bytes | None, block: bytes, *, created: bool, card_limit: int | None) -> WriteProblem | None:
+    """Whether `block` may be appended to a card whose exact bytes are `current` (None: no card).
+
+    The one rule every writer applies to the bytes it is about to append to, under the document
+    lock, at the moment of writing: the card is in the state the decision recorded, it is one this
+    feature created, and the append keeps it within `card_limit`.
+    """
+    if (current is None) != created:
+        return WriteProblem("document-destination-unwritable", "the overflow card changed since the block was built")
+    if current is None:
+        problem = card_trust_problem(block.decode("utf-8", "replace"))
+        if problem:
+            return WriteProblem("overflow-card-untrusted", f"the new card would not read back as private: {problem}")
+    else:
+        problem = untrusted_bytes(current)
+        if problem:
+            return WriteProblem("overflow-card-untrusted", f"the card is not one this feature created: {problem}")
+    if card_limit is not None and len(current or b"") + len(block) > card_limit:
+        return WriteProblem("document-destination-unwritable", "the overflow card has no room for the block", True)
+    return None
+
+
+class DirectPin(NamedTuple):
+    """What a direct append to a document must find when it opens it, decided under the document lock."""
+
+    act_at: int | None  # the file may not pass this many bytes; None for a file that is not a known instruction file
+    identity: tuple[int, int] | None  # (st_dev, st_ino) of the file now, None when it does not exist
+
+
+def direct_pin(
+    target: Path,
+    document: str,
+    *,
+    home: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+    context: RouteContext | None = None,
+) -> DirectPin:
+    """The pin for a direct append to `document`. Call it holding the document lock, right before the write."""
+    inventory, _ = context.load() if context is not None else _discover(target, home, environ)
+    file = find(inventory, document)
+    try:
+        info = os.lstat(target / document)
+    except (OSError, ValueError):
+        identity = None
+    else:
+        identity = (info.st_dev, info.st_ino)
+    return DirectPin(file.act_at if file is not None else None, identity)
+
+
 def untrusted_bytes(data: bytes) -> str | None:
     """`card_trust_problem` for the bytes a writer is about to append to: the last check before the write."""
     try:
@@ -319,6 +377,17 @@ def _frontmatter_lines(text: str) -> tuple[list[str], list[str]] | None:
     if end is None:
         return None
     return lines[1:end], lines[end + 1 :]
+
+
+def _tags(values: list[str]) -> set[str]:
+    """Exact tag members of every `tags:` line, in the list form (`[a, b]`) or the string form (`a, b`)."""
+    found: set[str] = set()
+    for value in values:
+        value = value.strip()
+        if value.startswith("[") and value.endswith("]"):
+            value = value[1:-1]
+        found.update(tag.strip().strip("'\"") for tag in value.split(","))
+    return found
 
 
 def _is_field(line: str) -> bool:
@@ -348,7 +417,7 @@ def card_trust_problem(text: str) -> str | None:
         return "it does not have exactly one `visibility: private` line"
     if fields.get("archive") != ["never"]:
         return "it is not marked `archive: never`"
-    if not any("moved-instructions" in value for value in fields.get("tags", [])):
+    if MARKER_TAG not in _tags(fields.get("tags", [])):
         return "it lacks the `moved-instructions` tag"
     if not any(value for value in fields.get("source_file", [])):
         return "it lacks `source_file`"

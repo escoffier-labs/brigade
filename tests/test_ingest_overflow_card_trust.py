@@ -345,7 +345,9 @@ def test_a_hard_link_swapped_in_before_the_open_never_redirects_a_card_append(tm
     assert _ingest(ws) == 0
     assert outside.read_bytes() == b"outside file, not a card\n"
     (draft,) = _drafts(ws)
-    assert "document-destination-unwritable" in draft.read_text()
+    # A new card is refused when the open finds it already there; an existing card swapped for a link to a
+    # file that is not a card is a card this feature did not create.
+    assert ("overflow-card-untrusted" if existing else "document-destination-unwritable") in draft.read_text()
 
 
 @POSIX_ONLY
@@ -369,6 +371,10 @@ def test_a_hard_link_swapped_in_before_the_open_never_redirects_a_direct_append(
     with pytest.raises(OSError):
         ingest._append_document_nofollow(ws, ws / "USER.md", "\n\nnote\n")
     assert outside.read_bytes() == b"outside file\n"
+    # The swap above left USER.md linked to the outside file. A file that is already hard linked is a
+    # supported case (below), so start the full run from a single-link file.
+    (ws / "USER.md").unlink()
+    sized(ws / "USER.md", 100)
     assert _ingest(ws) == 0  # the same swap through a full run
     assert outside.read_bytes() == b"outside file\n"
 
@@ -528,13 +534,14 @@ def test_a_card_title_and_source_name_prefer_the_workspace_path(tmp_path):
         assert picked == ("USER.md" if "USER.md" in paths else file.display)
 
 
-def test_codes_for_the_new_holds_are_classified_for_a_person():
+def test_codes_for_the_new_holds_are_classified():
+    header = "<!-- routed from a.md\n     reason: x\n     routed-at: 20261101T000000Z -->\n"
+    # A block that fits no card needs a person; a card that fails the trust check is re-evaluated every drain.
+    assert "overflow-block-too-large" in drain.HUMAN_CODES and "overflow-card-untrusted" in drain.RETRY_CODES
     for code in ("overflow-card-untrusted", "overflow-block-too-large"):
-        assert code in drain.HUMAN_CODES and drain.NEEDS_EVIDENCE_PROOF[code] is False
-        assert (
-            drain.classify(code, "<!-- routed from a.md\n     reason: x\n     routed-at: 20261101T000000Z -->\n")
-            == "human"
-        )
+        assert drain.NEEDS_EVIDENCE_PROOF[code] is False
+    assert drain.classify("overflow-block-too-large", header) == "human"
+    assert drain.classify("overflow-card-untrusted", header) == "retry"
 
 
 def test_config_is_read_through_the_care_configuration_the_ingest_uses(tmp_path):

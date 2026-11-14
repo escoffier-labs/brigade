@@ -14,6 +14,10 @@ from . import memory_care_journal as journal
 DOCUMENT_WRITERS = frozenset({"document", "card-append"})
 
 
+class CardFull(journal.JournalConflict):
+    """The overflow card cannot take the block within its limit as it is now. Nothing was committed."""
+
+
 def plan_append(path: str, data: bytes, writer: str, **fields: Any) -> dict[str, Any]:
     return dict(
         path=path,
@@ -26,12 +30,20 @@ def plan_append(path: str, data: bytes, writer: str, **fields: Any) -> dict[str,
 
 
 def publish(target: Path, decision_id: str) -> None:
-    """Recover a finished decision's appends, recognizing already published bytes."""
+    """Recover a finished decision's appends, recognizing already published bytes.
+
+    Every append to a document is validated on the exact bytes of the opened destination, under the
+    document lock, at the moment of writing (`ingest.AppendExpect`), so recovery of a decision that
+    was committed earlier cannot write into a destination that is no longer what it recorded. A
+    refused append is recorded on the decision (`append_refused`), which recovery does not retry, and
+    the handoff it carried goes back to the review inbox.
+    """
     from . import ingest, memory_evidence_log
 
     payload = journal._payload(target, decision_id)
     if (
         payload.get("appends_complete")
+        or payload.get("append_refused")
         or payload.get("phase") not in ("committed", "undone")
         or payload.get("undone_by")
     ):
@@ -44,7 +56,16 @@ def publish(target: Path, decision_id: str) -> None:
         data = base64.b64decode(item["data"])
         path = journal.safe_path(target, item["path"])
         # The stored timestamp or decision-specific ledger row identifies this append.
-        if _contains(target, item["path"], data):
+        try:
+            present = _contains(target, item["path"], data)
+        except ValueError as exc:
+            if item["writer"] != "card-append":
+                raise
+            present = False
+            unsafe: str | None = f"the card is not a single-link regular file ({exc})"
+        else:
+            unsafe = None
+        if present:
             continue
         if item["writer"] in DOCUMENT_WRITERS and journal.read_only_pattern(item["path"], read_only):
             # Protected since the decision finished: leave the append pending until it is lifted.
@@ -57,11 +78,76 @@ def publish(target: Path, decision_id: str) -> None:
 
             append(target, item["path"], data)
         else:
-            ingest._append_document_nofollow(target, path, data.decode("utf-8"))
+            try:
+                if unsafe is not None:
+                    raise ingest.AppendRefused("overflow-card-untrusted", unsafe)
+                expect = _expectation(payload, item, data)
+                if expect is None:
+                    ingest._append_document_nofollow(target, path, data.decode("utf-8"))
+                else:
+                    ingest._append_document_nofollow(target, path, data.decode("utf-8"), expect=expect)
+            except ingest.AppendRefused as exc:
+                _refuse(target, decision_id, payload, exc)
+                raise
         if not _contains(target, item["path"], data):
             raise journal.JournalConflict("append bytes differ from recorded block")
     if payload.get("appends") and not blocked:
         journal.annotate(target, decision_id, appends_complete=True)
+
+
+def _expectation(payload: dict[str, Any], item: dict[str, Any], data: bytes) -> Any:
+    """What the opened destination must be for this recorded append, or None for an older record."""
+    from . import ingest
+
+    if item["writer"] == "card-append":
+        path = item["path"]
+        guard = payload.get("append_guards", {}).get(path)
+        created = bool(item.get("created", True))
+        limit = payload.get("card_limit")
+
+        def check(current: bytes | None) -> instruction_overflow.WriteProblem | None:
+            # The same rule commit applied, on the bytes now: trust, state, size, and the exact guard digest.
+            found = instruction_overflow.write_problem(current, data, created=created, card_limit=limit)
+            if found is None and guard is not None and journal.kernel.content_digest(current) != guard:
+                return instruction_overflow.WriteProblem(
+                    "document-destination-unwritable", "the overflow card changed since the decision was committed"
+                )
+            return found
+
+        return ingest.AppendExpect(created=created, check=check)
+    identity = item.get("identity")
+    if item["writer"] == "document" and (identity or item.get("act_at") is not None):
+        return ingest.AppendExpect(
+            created=bool(item.get("created", True)),
+            identity=tuple(identity) if identity else None,
+            max_size=item.get("act_at"),
+        )
+    return None
+
+
+def _refuse(target: Path, decision_id: str, payload: dict[str, Any], exc: Any) -> None:
+    """Record that this decision's append was refused, and give the handoff back to the review inbox."""
+    journal.annotate(target, decision_id, append_refused=f"{exc.code}: {exc.reason}")
+    draft = next((item["draft"] for item in payload.get("appends", []) if item.get("draft")), None)
+    if draft is None:
+        return  # ingest holds its own handoff when this error reaches it
+    from .memory_inbox_io import append
+
+    decision = journal.load(target, decision_id)
+    if draft in decision.paths and journal.current(target, draft) is None:
+        original = journal.before_bytes(target, decision, draft)
+        if original is not None:
+            journal.commit_phased(
+                target,
+                kind="inbox",
+                reason=f"append-refused:{exc.code}",
+                card_id=None,
+                changes=[journal.Change(draft, None, original)],
+                prepared_paths=[draft],
+                hub={},
+            )
+    for row in retractions(payload):
+        append(target, row["path"], base64.b64decode(row["data"]))
 
 
 def undo_changes(target: Path, payload: dict[str, Any]) -> list[journal.Change]:
@@ -134,12 +220,17 @@ def commit_card_append(
     if (before is None) != (header_bytes > 0):
         # The block was built for a card that was missing (or present) and the card is not as it was then.
         raise journal.JournalConflict("overflow card changed since the block was built")
+    if card_limit is not None and len(before or b"") + len(block) > card_limit:
+        # Routing chose this card by a size it measured earlier: these are the bytes the append would land on.
+        raise CardFull("overflow card has no room for the block")
     metadata: dict[str, Any] = {
         "appends": [plan_append(card_rel, block, "card-append", created=before is None, header_bytes=header_bytes)],
         "append_guards": {card_rel: journal.kernel.content_digest(before)},
     }
+    if card_limit is not None:
+        metadata["card_limit"] = card_limit
     if limit_requested is not None:
-        metadata["card_limit"], metadata["card_limit_requested"] = card_limit, limit_requested
+        metadata["card_limit_requested"] = limit_requested
     decision = journal.commit_phased(
         owner,
         kind="inbox",

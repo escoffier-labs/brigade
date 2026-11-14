@@ -422,15 +422,37 @@ with an injection signal or an unsafe name is still kept for a person.
 The card path is predictable, so the writer trusts a card only when this feature created
 it. Before every append to an existing card it requires one frontmatter block with
 `visibility: private` (read by the same parser the hub push uses), `archive: never`, the
-`moved-instructions` tag and a `source_file`. A card that fails any of these, or that is
-too large for the duplicate check to read in full, receives nothing: the handoff is kept
-for a person as `overflow-card-untrusted`, with the card's path in the reason. A block
+`moved-instructions` tag and a `source_file`. The `moved-instructions` tag must be an exact member of the `tags` value, not a substring
+of it. A card that fails any of these, or that is too large for the duplicate check to
+read in full, receives nothing: the handoff is held as `overflow-card-untrusted`, with
+the card's path in the reason. That code is a retry code. Each ingest run and each drain
+re-evaluates it, so the draft stays held while the card still fails and is delivered
+with no person involved once the card is repaired or removed. Ingest and the drain write
+`.brigade/memory-care/inbox/blocked-cards.json` (`{"version": 1, "cards": [{"path",
+"problem", "held_drafts"}]}`), one row per card that holds drafts, with its
+workspace-relative path and the count. The file is rewritten every run and empties when
+the card passes. A block
 that cannot fit an empty card, frontmatter included, is kept as `overflow-block-too-large`
 and never written oversize. A configured `max_card_bytes` above the duplicate scan's
-1 MiB read limit is not applied. The journal decision records both the limit used and the
+1 MiB read limit is not applied. Retry reads an overflow card with that same limit, so a
+card routing may choose is a card a held draft can be delivered to. The journal decision records both the limit used and the
 requested one. The undo of the append that created a card needs the card's frontmatter
 unchanged, so a later stage that rewrites it (`last_reviewed`, `fresh_until`) makes that
 one undo refuse, and later appends are undone as before.
+
+Every one of these rules is enforced on the exact bytes of the opened destination, under
+the document lock, at the moment of writing, on every path that writes, including
+recovery of a decision that was committed earlier. The writer opens the card read-write
+without following links, and refuses to write when the card is not in the state the
+decision recorded (created or existing), is not one this feature created, no longer has
+the bytes the decision pinned, or would pass `max_card_bytes` with the block. A refused
+recovery is recorded on the decision (`append_refused`), which recovery does not retry,
+and a handoff that was moved aside for the retry goes back to the review inbox. A direct
+append to an instruction file measures the opened file under the lock and goes to the
+overflow card in the same run when the block no longer fits, so two runs cannot both
+decide that a block fits. The file's `(st_dev, st_ino)` is pinned when the route is
+decided and must match at the open, which stops a swapped-in link but still accepts a
+file that was already hard linked. Overflow cards must have a single link.
 
 When the care configuration (`.brigade/memory-care.toml`) cannot be parsed, the card's
 protected paths cannot be read, so nothing is written and the handoff is held as

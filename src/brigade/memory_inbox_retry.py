@@ -78,13 +78,25 @@ def reprocess(
                 stack.enter_context(ingest._document_lock(owner))
             except InboxLockTimeout:
                 return ingest.Action("inboxed", "document-publication-busy")
+        if outcome.kind in ("routed", "routed-card") and not dry_run:
+            # decide() ran before the document lock: decide again holding it, so a file another run filled
+            # since goes to its card, and a card that filled or changed is chosen again.
+            outcome = ingest.decide(
+                sections,
+                target=owner,
+                promote_cards=flags[0],
+                route_documents=flags[1],
+                card_ids=card_ids,
+                routing=routing,
+            )
+            if outcome.kind not in ("routed", "routed-card") or outcome.dest is None:
+                return ingest.Action("inboxed", outcome.code)
         if outcome.kind == "routed-card":
             overflow = outcome.overflow
             assert overflow is not None
             content = sections["suggested document content"]
             card_type = instruction_overflow.handoff_type(sections)
             if not dry_run:
-                # decide() ran before the document lock: read the cards as they are under it.
                 overflow = instruction_overflow.refresh(owner, overflow, content, card_type)
                 problem = overflow.hold()
                 if problem is not None:
@@ -93,9 +105,15 @@ def reprocess(
                     return ingest.Action("inboxed", "document-content-present")
                 outcome.overflow, outcome.dest = overflow, owner / overflow.card_rel
         dest = outcome.dest
+        assert dest is not None  # decide() was run again under the lock above
         dest_rel = dest.relative_to(owner).as_posix()
         try:
-            before = read(owner, dest_rel)
+            # An overflow card may be as large as routing allows, which is more than a draft may be.
+            before = (
+                read(owner, dest_rel, limit=instruction_overflow.INSPECTION_CEILING)
+                if outcome.kind == "routed-card"
+                else read(owner, dest_rel)
+            )
         except ValueError:
             return ingest.Action("inboxed", "destination-unreadable-or-oversized")
         # Every overflow card is pinned `archive: never` and the writer only appends to it. The bytes read
@@ -157,36 +175,58 @@ def reprocess(
             )
             if (before is None) != (header > 0):
                 return ingest.Action("inboxed", "document-publication-busy")  # the card changed under us
-            appends.append(plan_append(dest_rel, block, "card-append", created=before is None, header_bytes=header))
+            if len(before or b"") + len(block) > outcome.overflow.card_limit:
+                return ingest.Action("inboxed", "document-publication-busy")  # the card filled under us
+            appends.append(
+                plan_append(dest_rel, block, "card-append", created=before is None, header_bytes=header, draft=rel)
+            )
             after = before or b""
         else:
             block = instruction_overflow.append_block(sections["suggested document content"])
-            appends.append(plan_append(dest_rel, block, "document", created=before is None))
+            # Held with the lock: the identity and the limit the sink must find when it opens the file.
+            pin = instruction_overflow.direct_pin(owner, dest_rel, context=routing)
+            appends.append(
+                plan_append(
+                    dest_rel,
+                    block,
+                    "document",
+                    created=before is None,
+                    draft=rel,
+                    identity=list(pin.identity) if pin.identity else None,
+                    act_at=pin.act_at,
+                )
+            )
             after = before or b""
         if outcome.kind not in ("routed", "routed-card"):
             changes.insert(0, journal.Change(dest_rel, before, after))
         else:
             # Guard the observed destination until finish without replacing it.
             metadata["append_guards"] = {dest_rel: journal.kernel.content_digest(before)}
-            if outcome.overflow is not None and outcome.overflow.limit_requested is not None:
+            if outcome.overflow is not None:
                 metadata["card_limit"] = outcome.overflow.card_limit
-                metadata["card_limit_requested"] = outcome.overflow.limit_requested
+                if outcome.overflow.limit_requested is not None:
+                    metadata["card_limit_requested"] = outcome.overflow.limit_requested
         # A card append counts as a routed action, so every caller that counts routed ones counts it unchanged.
         kind = "routed" if outcome.kind == "routed-card" else outcome.kind
         if dry_run:
             return ingest.Action(kind, outcome.code, dest_rel)
         if ingest._is_tracked(draft, ingest._git_tracked_files(draft.parent)):
             raise ingest.TrackedHandoffError("tracked review draft")
-        decision = journal.commit_phased(
-            owner,
-            kind="inbox",
-            reason=f"retry:{outcome.code}",
-            card_id=None,
-            changes=changes,
-            prepared_paths=[] if cited else [next(c.path for c in changes if c.before is None)],
-            hub={},
-            metadata=metadata,
-        )
+        try:
+            decision = journal.commit_phased(
+                owner,
+                kind="inbox",
+                reason=f"retry:{outcome.code}",
+                card_id=None,
+                changes=changes,
+                prepared_paths=[] if cited else [next(c.path for c in changes if c.before is None)],
+                hub={},
+                metadata=metadata,
+            )
+        except ingest.AppendRefused as exc:
+            # The destination was not what this retry decided against when the write came. Nothing was written
+            # and the draft is back in the review inbox: the next drain decides again.
+            return ingest.Action("inboxed", exc.code)
         if journal._payload(owner, decision.decision_id).get("phase") != "committed":
             raise journal.JournalConflict("retry abandoned")
         if outcome.kind in ("promoted", "reinforced") and card_ids is not None:

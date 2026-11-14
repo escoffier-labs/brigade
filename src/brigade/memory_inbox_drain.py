@@ -29,8 +29,8 @@ HUMAN_CODES = frozenset(
         "document-destination-unsafe",
         "unsafe-target-document",
         "unsafe-card-name",
-        # The overflow card is not one this feature created, or the block cannot fit any card.
-        "overflow-card-untrusted",
+        # The block cannot fit any card. (A card that is not one this feature created is a retry code:
+        # the drain re-evaluates it every run and delivers the draft once the card passes.)
         "overflow-block-too-large",
     }
 )
@@ -46,6 +46,7 @@ RETRY_CODES = frozenset(
         "card-publication-busy",
         "document-destination-unwritable",
         "bootstrap-budget-exceeded",
+        "overflow-card-untrusted",
     }
 )
 
@@ -121,7 +122,7 @@ def retry_flags(code: str, text: str) -> tuple[bool, bool] | None:
     if "retry-flags:" in header:
         return None
     # An old budget hold was an append to a document, so it retries with routing on and promotion off.
-    routes = ("document-destination-unwritable", "bootstrap-budget-exceeded")
+    routes = ("document-destination-unwritable", "bootstrap-budget-exceeded", "overflow-card-untrusted")
     if code in RETRY_CODES - set(routes):
         return True, False
     if code in routes or code in RESOLVE_CODES:
@@ -389,7 +390,10 @@ def drain(
             result["decisions"].append({"path": rel, "reason": f"skipped:{type(exc).__name__}"})
     result["sweep"] = sweep(target, dry_run=dry_run)
     if not dry_run:
+        from . import instruction_overflow_blocked
         from .memory_hub_store import write_json
+
+        result["blocked_cards"] = instruction_overflow_blocked.refresh(target, routing=routing)
 
         write_json(journal.safe_path(target, ".brigade/memory-care/inbox/latest.json"), result)
     return result
