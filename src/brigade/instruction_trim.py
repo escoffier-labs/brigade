@@ -6,6 +6,8 @@ the date, the decision id and every set the plan depends on (see the slice 2 pla
 
 from __future__ import annotations
 
+import functools
+
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -31,7 +33,7 @@ SLUG_MAX = 48
 POINTER_MAX = 240
 CARD_DIR = "memory/cards/instructions/"
 # Reasons that mean the file is left exactly as it was.
-_UNCHANGED = frozenset({"within", "unbalanced-markers", "not-utf8", "pinned-heading-missing"})
+_UNCHANGED = frozenset({"within", "unbalanced-markers", "not-utf8", "pinned-heading-missing", "unsafe-key"})
 _REASONS = _UNCHANGED | {None, "nothing-movable", "still-over-after-moves"}
 _NON_SLUG = re.compile(r"[^a-z0-9]+")
 # Card frontmatter values. A card name is a slug of at most 48 characters plus a `-<n>` name number, and the
@@ -39,7 +41,7 @@ _NON_SLUG = re.compile(r"[^a-z0-9]+")
 # trailing newline through.
 _CARD_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
 _CARD_SLUG_MAX = SLUG_MAX + 4
-_DECISION_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[a-z]+-[0-9a-f]{8}")
+_DECISION_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[a-z]{1,24}-[0-9a-f]{8}")
 _FRESH_UNTIL = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _CARD_ID = re.compile(r"card-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
@@ -216,6 +218,8 @@ def plan_append(
 
     if doc.problem is not None:
         return unchanged(doc.problem)
+    if FILE_KEY.fullmatch(file_key) is None:
+        return unchanged("unsafe-key")  # no card can be named for it, so the file is left alone
     wanted = frozenset(pin.encode("utf-8").rstrip() for pin in config_pins)
     if wanted - {heading.rstrip() for heading in heading_lines(data)}:
         return unchanged("pinned-heading-missing")
@@ -232,7 +236,7 @@ def plan_append(
     runs: tuple[Run, ...] = ()
     unused = False
     if moving:
-        cap = max_card_bytes - CARD_OVERHEAD
+        cap = max_card_bytes - card_overhead()
         candidates: list[int] = []
         for index in order_units(doc):
             unit = doc.units[index]
@@ -324,13 +328,30 @@ def card_bytes(
 
     _check_card_values(file_key=file_key, slug=slug, decision_id=decision_id, fresh_until=fresh_until, card_id=card_id)
 
+    return (
+        _frontmatter(
+            file_key=file_key,
+            slug=slug,
+            source_value=encode_value(source_name),
+            today=today,
+            decision_id=decision_id,
+            fresh_until=fresh_until,
+            card_id=card_id,
+        )
+        + section
+    )
+
+
+def _frontmatter(
+    *, file_key: str, slug: str, source_value: str, today: date, decision_id: str, fresh_until: str | None, card_id: str
+) -> bytes:
     lines = [
         "---",
         f"title: {file_key}--{slug}",
         "category: instructions",
         f"tags: [moved-instructions, {file_key}, moved]",
         "visibility: private",
-        f"source_file: {encode_value(source_name)}",
+        f"source_file: {source_value}",
         "archive: never",
         f"moved_on: {today.isoformat()}",
         f"moved_by: {decision_id}",
@@ -339,7 +360,32 @@ def card_bytes(
     if fresh_until is not None:
         lines.append(f"fresh_until: {fresh_until}")
     lines += [f"id: {card_id}", "---"]
-    return ("\n".join(lines) + "\n").encode("utf-8") + section
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _largest_frontmatter() -> int:
+    """The longest frontmatter `card_bytes` can write: every value at its grammar's maximum. `encode_value`
+    caps the source name at `VALUE_MAX` characters, all ASCII."""
+    from .memory_care_instructions import VALUE_MAX
+
+    return len(
+        _frontmatter(
+            file_key="k" * 64,
+            slug="s" * _CARD_SLUG_MAX,
+            source_value="v" * VALUE_MAX,
+            today=date(2026, 12, 31),
+            decision_id="20261231T235959Z-" + "k" * 24 + "-ffffffff",
+            fresh_until="2026-12-31",
+            card_id="card-00000000-0000-4000-8000-000000000000",
+        )
+    )
+
+
+@functools.cache
+def card_overhead() -> int:
+    """Bytes a card's frontmatter can take: the plan's `CARD_OVERHEAD`, or the longest valid frontmatter when
+    that is larger, so a card never ends over `max_card_bytes`."""
+    return max(CARD_OVERHEAD, _largest_frontmatter())
 
 
 def _pinned_unit(unit: Unit, today: date, wanted: frozenset[bytes]) -> bool:
@@ -437,7 +483,9 @@ def check(
     size_ok = plan.reason in _REASONS and not (
         plan.reason in _UNCHANGED and (after != before or plan.runs or plan.added)
     )
-    if after != before and len(after) > limits.limit:
+    # A plan may leave a file far over the limit still over it (partial progress), but never grow a file
+    # that is over the limit.
+    if after != before and len(after) > limits.limit and len(after) >= len(before):
         size_ok = False
     if not size_ok:
         failed.append("size")

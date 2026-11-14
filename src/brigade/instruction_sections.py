@@ -13,8 +13,10 @@ from dataclasses import dataclass
 from datetime import date
 
 KEEP = "<!-- brigade:keep -->"
-# The one grammar for a file key: lowercase ASCII and `-`, at most 64 characters, no dot or slash. Inventory keys
-# (`instruction_inventory.file_key`) always match, so anything else in a record or a path is foreign.
+# The one grammar for a file key: lowercase ASCII and `-`, at most 64 characters, no dot or slash, and no `-` at
+# either end. Anything else in a record or a path is foreign. Inventory keys can miss it (a long nested path, or a
+# stem with no ASCII letters): the planner then returns `unsafe-key` and leaves the file alone, and the stage cuts
+# long keys to 64 characters before it calls the planner.
 FILE_KEY = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 KEEP_UNTIL = re.compile(rb"<!-- brigade:keep until=(\d{4}-\d{2}-\d{2}) -->")
 # The named groups let a recovery record be bound to the line it recorded (`kind`, `path` and `undo`).

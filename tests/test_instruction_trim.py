@@ -14,6 +14,7 @@ from brigade.instruction_trim import (
     AddedPointer,
     Limits,
     card_bytes,
+    card_overhead,
     card_rel,
     check,
     order_units,
@@ -498,8 +499,13 @@ def test_a_changed_file_over_the_limit_fails_the_size_check():  # review of #256
     assert check(plan, cards, config_pins=(), today=TODAY, limits=LIMITS) == []
     exact = dataclasses.replace(LIMITS, limit=len(plan.after))
     assert check(plan, cards, config_pins=(), today=TODAY, limits=exact) == []
+    # Over a tighter limit but smaller than before: partial progress, which check allows.
     tight = dataclasses.replace(LIMITS, limit=len(plan.after) - 1)
-    assert check(plan, cards, config_pins=(), today=TODAY, limits=tight) == ["size"]
+    assert len(plan.after) < len(plan.before)
+    assert check(plan, cards, config_pins=(), today=TODAY, limits=tight) == []
+    # A plan that grows a file that ends over the limit fails.
+    grown = dataclasses.replace(plan, before=plan.after[: len(plan.after) - 200])
+    assert "size" in check(grown, cards, config_pins=(), today=TODAY, limits=tight)
 
 
 def test_an_unchanged_file_over_the_limit_is_not_a_size_failure():
@@ -507,3 +513,44 @@ def test_an_unchanged_file_over_the_limit_is_not_a_size_failure():
     plan = _plan(data)
     assert (plan.reason, plan.after) == ("nothing-movable", data) and len(data) > LIMITS.limit
     assert check(plan, {}, config_pins=(), today=TODAY, limits=LIMITS) == []
+
+
+def test_partial_progress_on_a_file_far_over_the_limit_passes_check():  # review of #2567
+    data = b"# T\n\n" + b"".join(b"## S%d\n" % n + b"word " * 300 + b"\n" for n in range(8))
+    plan = _plan(data, max_moves=2)
+    assert plan.reason == "still-over-after-moves" and plan.runs
+    assert LIMITS.limit < len(plan.after) < len(plan.before)
+    assert check(plan, _cards(plan), config_pins=(), today=TODAY, limits=LIMITS) == []
+
+
+@pytest.mark.parametrize("key", ["", "-md", "md-", "x" * 65, "User-md", "a.b"])
+def test_unsafe_key_leaves_the_file_alone(key):  # review of #2567: inventory keys can miss FILE_KEY
+    data = b"# T\n\n" + b"".join(b"## S%d\n" % n + b"word " * 300 + b"\n" for n in range(4))
+    plan = _plan(data, file_key=key, overflow=())
+    assert (plan.reason, plan.after, plan.runs, plan.added) == ("unsafe-key", data, (), ())
+    assert check(plan, {}, config_pins=(), today=TODAY, limits=LIMITS) == []
+
+
+def test_card_overhead_covers_the_largest_valid_frontmatter():  # review of #2567, Codex
+    assert card_overhead() >= 512
+    section = b"## S\n" + b"x" * (12_000 - card_overhead() - 6) + b"\n"
+    card = card_bytes(
+        file_key="k" * 64,
+        slug="s" * 52,
+        section=section,
+        source_name="workspace/" + "very-long-directory-name/" * 20 + "AGENTS.md",
+        decision_id="20261114T061500Z-" + "k" * 24 + "-1a2b3c4d",
+        today=TODAY,
+        fresh_until="2026-12-31",
+        card_id=CARD_ID,
+    )
+    assert len(card) <= 12_000
+
+
+def test_planner_reserves_the_largest_frontmatter():  # review of #2567, Codex
+    # A section that fits under the old 512-byte reserve but not under the real maximum is not moved.
+    body = b"## Big\n" + b"x" * (2_000 - card_overhead() + 20) + b"\n"
+    data = b"# T\n\n" + body
+    tiny = Limits(limit=1_000, act_at=800, trim_to=600)
+    plan = _plan(data, limits=tiny, max_card_bytes=2_000)
+    assert plan.runs == () and (0, "too-large-for-card") in plan.skipped
