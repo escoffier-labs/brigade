@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import json
 import math
-import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import harness_profiles as hp
+from .bounded_read import read_regular_file
 from .codex_user_config import read_user_base_cap
 
 CONFIG_MAX_BYTES = 1024 * 1024
@@ -79,26 +79,19 @@ def _reject_constant(name: str) -> Any:
     raise ValueError(f"not strict JSON: {name}")
 
 
+_READ_REASONS = {
+    "missing": "config-missing",
+    "too-large": "config-too-large",
+}
+
+
 def _read_config(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    read = read_regular_file(path, max_bytes=CONFIG_MAX_BYTES, require_stable=True)
+    if read.data is None:
+        # not-regular, unreadable and changed all read as an unreadable file.
+        return None, _READ_REASONS.get(read.reason or "", "config-unreadable")
     try:
-        info = path.stat()
-    except FileNotFoundError:
-        return None, "config-missing"
-    except OSError:
-        return None, "config-unreadable"
-    if not stat.S_ISREG(info.st_mode):
-        return None, "config-unreadable"
-    if info.st_size > CONFIG_MAX_BYTES:
-        return None, "config-too-large"
-    try:
-        with path.open("rb") as handle:
-            raw = handle.read(CONFIG_MAX_BYTES + 1)
-    except OSError:
-        return None, "config-unreadable"
-    if len(raw) > CONFIG_MAX_BYTES:
-        return None, "config-too-large"
-    try:
-        data = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+        data = json.loads(read.data.decode("utf-8"), parse_constant=_reject_constant)
     except (ValueError, RecursionError):
         return None, "config-not-strict-json"
     if not isinstance(data, dict):
@@ -130,12 +123,17 @@ def _agents(config: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str
         return {}, {}, "config-key-invalid"
     agents: dict[str, dict[str, Any]] = {}
     for agent_id, value in entries.items():
-        if isinstance(value, dict):
+        if agent_id and isinstance(value, dict):
             agents[str(agent_id)] = dict(value)
     for item in listed:
-        if isinstance(item, dict) and isinstance(item.get("id"), str):
-            agents[item["id"]] = {**agents.get(item["id"], {}), **item}
+        agent_id = item.get("id") if isinstance(item, dict) else None
+        if isinstance(agent_id, str) and agent_id:
+            # An entry in `list` wins over the same id in `entries`, key by key.
+            agents[agent_id] = {**agents.get(agent_id, {}), **item}
     if not agents:
+        if entries or listed:
+            # Agents are written, but none has a usable id: not the implicit main.
+            return {}, {}, "config-key-invalid"
         agents["main"] = {}
     return agents, defaults, None
 
@@ -147,8 +145,12 @@ def _workspace_candidates(
     *,
     home: Path,
     state: Path,
-) -> list[Path]:
-    """Real paths an agent's workspace may resolve to. A bad value matches nothing."""
+) -> tuple[list[Path], bool]:
+    """Real paths an agent's workspace may resolve to, and whether a value was unusable.
+
+    A workspace value that is not a string, is empty, or is still relative after
+    `~` expansion matches nothing and is reported as invalid.
+    """
 
     def absolute(value: object) -> Path | None:
         if not isinstance(value, str) or not value:
@@ -158,11 +160,11 @@ def _workspace_candidates(
 
     if "workspace" in agent:
         own = absolute(agent["workspace"])
-        return [own] if own is not None else []
-    default = absolute(defaults.get("workspace")) if "workspace" in defaults else None
+        return ([own], False) if own is not None else ([], True)
     if "workspace" in defaults:
-        return [default, default / agent_id] if default is not None else []
-    return [state / f"workspace-{agent_id}", state / "workspace"]
+        default = absolute(defaults["workspace"])
+        return ([default, default / agent_id], False) if default is not None else ([], True)
+    return [state / f"workspace-{agent_id}", state / "workspace"], False
 
 
 def _resolved(path: Path) -> Path:
@@ -191,12 +193,12 @@ def _level_cap(
 
 
 def _install_state_matches(target: Path, home: Path) -> bool:
+    read = read_regular_file(openclaw_install_state_path(home), max_bytes=CONFIG_MAX_BYTES, require_stable=True)
+    if read.data is None:
+        return False
     try:
-        raw = openclaw_install_state_path(home).read_bytes()[: CONFIG_MAX_BYTES + 1]
-        if len(raw) > CONFIG_MAX_BYTES:
-            return False
-        data = json.loads(raw.decode("utf-8"))
-    except (OSError, ValueError, RecursionError):
+        data = json.loads(read.data.decode("utf-8"))
+    except (ValueError, RecursionError):
         return False
     workspace = data.get("workspace") if isinstance(data, dict) else None
     if not isinstance(workspace, str) or not workspace:
@@ -205,18 +207,30 @@ def _install_state_matches(target: Path, home: Path) -> bool:
     return path.is_absolute() and _resolved(path) == _resolved(target)
 
 
+def _unknown_agent(reason: str) -> OpenClawLoaders:
+    """OpenClaw is known to load this workspace, but no cap can be named for it."""
+    unknown = LoaderCap(UNKNOWN_AGENT, LABEL_AGENT_MAX, None, reason)
+    unknown_total = LoaderCap(UNKNOWN_AGENT, LABEL_AGENT_TOTAL, None, reason)
+    return OpenClawLoaders((unknown,), (unknown_total,), reason)
+
+
 def openclaw_loaders(target: Path, *, home: Path, environ: Mapping[str, str]) -> OpenClawLoaders:
     config, reason = _read_config(openclaw_config_path(home, environ))
     if config is not None:
         agents, defaults, reason = _agents(config)
         if reason is None:
-            return _matched(target, agents, defaults, home=home, state=openclaw_state_dir(home, environ))
-    # Whole-config failure: the install-state file still says whether OpenClaw
-    # loads this workspace, so say so without inventing a cap.
+            found = _matched(target, agents, defaults, home=home, state=openclaw_state_dir(home, environ))
+            if found.per_file:
+                return found
+            # The configuration parses but names no agent for this workspace. The
+            # install-state file still says whether OpenClaw loads it, so say so
+            # without inventing a cap.
+            if _install_state_matches(target, home):
+                return _unknown_agent(found.reason or "config-workspace-unmatched")
+            return found
+    # Whole-config failure: same fallback.
     if reason is not None and _install_state_matches(target, home):
-        unknown = LoaderCap(UNKNOWN_AGENT, LABEL_AGENT_MAX, None, reason)
-        unknown_total = LoaderCap(UNKNOWN_AGENT, LABEL_AGENT_TOTAL, None, reason)
-        return OpenClawLoaders((unknown,), (unknown_total,), reason)
+        return _unknown_agent(reason)
     return OpenClawLoaders((), (), reason)
 
 
@@ -231,9 +245,11 @@ def _matched(
     real_target = _resolved(target)
     per_file: list[LoaderCap] = []
     totals: list[LoaderCap] = []
+    invalid_workspace = False
     for agent_id in sorted(agents):
         agent = agents[agent_id]
-        candidates = _workspace_candidates(agent_id, agent, defaults, home=home, state=state)
+        candidates, invalid = _workspace_candidates(agent_id, agent, defaults, home=home, state=state)
+        invalid_workspace = invalid_workspace or invalid
         if real_target not in {_resolved(path) for path in candidates}:
             continue
         loader = f"openclaw:{agent_id}"
@@ -257,7 +273,9 @@ def _matched(
                 loader,
             )
         )
-    return OpenClawLoaders(tuple(per_file), tuple(totals), None)
+    # With no match, an unusable workspace value may have been this one.
+    reason = "config-workspace-invalid" if invalid_workspace and not per_file else None
+    return OpenClawLoaders(tuple(per_file), tuple(totals), reason)
 
 
 def user_md_caps(loaders: OpenClawLoaders) -> tuple[LoaderCap, ...]:
@@ -270,7 +288,8 @@ def user_md_caps(loaders: OpenClawLoaders) -> tuple[LoaderCap, ...]:
 def codex_project_cap(*, home: Path, environ: Mapping[str, str]) -> LoaderCap:
     base = read_user_base_cap(home=home, environ=environ)
     if base.value is None:
-        return LoaderCap(CODEX_LOADER, LABEL_CODEX, None, base.reason)
+        # The Codex reader names reasons with underscores; every other code here uses hyphens.
+        return LoaderCap(CODEX_LOADER, LABEL_CODEX, None, (base.reason or "config-unreadable").replace("_", "-"))
     if base.value == 0:
         # A cap of 0 would make every limit 0.
         return LoaderCap(CODEX_LOADER, LABEL_CODEX, None, "config-key-invalid")

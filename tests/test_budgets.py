@@ -68,3 +68,9 @@ def test_limit_for_takes_the_smallest_cap_and_names_it():
     assert budgets.limit_for(20_000, "target:default", []) == (20_000, "target:default")
     # A tie goes to the loader, since a harness enforces it.
     assert budgets.limit_for(4000, "target:config", caps[1:]) == (4000, "loader:openclaw:user-md-fixed-cap")
+
+
+def test_limit_for_breaks_a_tie_between_loader_caps_by_the_smaller_label():
+    tied = [("loader:b", 4000), ("loader:a", 4000)]
+    assert budgets.limit_for(20_000, "target:default", tied) == (4000, "loader:a")
+    assert budgets.limit_for(20_000, "target:default", tied[::-1]) == (4000, "loader:a")

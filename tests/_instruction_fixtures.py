@@ -6,8 +6,12 @@ real home directory or start a subprocess.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import signal
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -134,3 +138,26 @@ def write_handoff(ws: Path, name: str, text: str) -> Path:
     path = inbox / name
     path.write_text(text, encoding="utf-8")
     return path
+
+
+HAS_FIFO = hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM")
+
+
+class ReadBlocked(BaseException):
+    """Not an ``Exception``, so no ``except OSError`` in the code under test can swallow it."""
+
+
+@contextlib.contextmanager
+def deadline(seconds: int = 10) -> Iterator[None]:
+    """Fail the test instead of hanging when a read blocks (POSIX only)."""
+
+    def fire(_signum: int, _frame: object) -> None:
+        raise ReadBlocked("a read blocked on a non-regular file")
+
+    previous = signal.signal(signal.SIGALRM, fire)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
