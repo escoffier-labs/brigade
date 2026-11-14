@@ -1,0 +1,2 @@
+- A handoff aimed at a known instruction file (`USER.md`, `TOOLS.md`) now lands in a private overflow card under `memory/cards/instructions/` when the append would pass the file's act-at threshold or the file is reached through a symlink, instead of being held for a person. Each append is a journaled decision that `brigade memory care undo` reverses exactly.
+- Review drafts held for a full instruction file (`bootstrap-budget-exceeded`) drain into the same overflow card on the next drain, and `handoff lint` and `handoff draft` no longer refuse those appends.

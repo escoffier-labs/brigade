@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from . import ingest, memory_archive, memory_cmd
+from . import ingest, instruction_overflow, memory_archive, memory_cmd
 from . import memory_care_journal as journal
 from .memory_inbox_io import read
 
@@ -19,6 +19,7 @@ def reprocess(
     card_ids: ingest.CardIdIndex | None = None,
     today: date | None = None,
     dry_run: bool = False,
+    routing: instruction_overflow.RouteContext | None = None,
 ) -> ingest.Action:
     from .inbox_lock import held_file_lock
     from .memory_inbox_drain import (
@@ -59,26 +60,45 @@ def reprocess(
         lock.parent.mkdir(parents=True, exist_ok=True)
     with ExitStack() as stack, nullcontext() if dry_run else held_file_lock(lock, deadline_seconds=1):
         outcome = ingest.decide(
-            sections, target=owner, promote_cards=flags[0], route_documents=flags[1], card_ids=card_ids
+            sections,
+            target=owner,
+            promote_cards=flags[0],
+            route_documents=flags[1],
+            card_ids=card_ids,
+            routing=routing,
         )
         if (warnings or unsupported) and NEEDS_EVIDENCE_PROOF.get(outcome.code, True):
             return ingest.Action("inboxed", "evidence-unavailable")
-        if outcome.kind not in ("promoted", "reinforced", "routed") or outcome.dest is None:
+        if outcome.kind not in ("promoted", "reinforced", "routed", "routed-card") or outcome.dest is None:
             return ingest.Action("inboxed", outcome.code)
-        if outcome.kind == "routed" and not dry_run:
+        if outcome.kind in ("routed", "routed-card") and not dry_run:
             from .inbox_lock import InboxLockTimeout
 
             try:
                 stack.enter_context(ingest._document_lock(owner))
             except InboxLockTimeout:
                 return ingest.Action("inboxed", "document-publication-busy")
+        if outcome.kind == "routed-card":
+            overflow = outcome.overflow
+            assert overflow is not None
+            content = sections["suggested document content"]
+            card_type = instruction_overflow.handoff_type(sections)
+            if not dry_run:
+                # decide() ran before the document lock: read the cards as they are under it.
+                overflow = instruction_overflow.refresh(owner, overflow, content, card_type)
+                if overflow.card_problem:
+                    return ingest.Action("inboxed", "document-destination-unsafe")
+                if instruction_overflow.contains_block(owner, overflow, content):
+                    return ingest.Action("inboxed", "document-content-present")
+                outcome.overflow, outcome.dest = overflow, owner / overflow.card_rel
         dest = outcome.dest
         dest_rel = dest.relative_to(owner).as_posix()
         try:
             before = read(owner, dest_rel)
         except ValueError:
             return ingest.Action("inboxed", "destination-unreadable-or-oversized")
-        if before is not None:
+        # Every overflow card is pinned `archive: never` and the writer only appends to it.
+        if before is not None and outcome.kind != "routed-card":
             refusal = memory_archive.frontmatter_refusal(before.decode("utf-8"))
             if refusal:
                 raise ValueError(refusal)
@@ -122,17 +142,32 @@ def reprocess(
                     )
                     row = (Path(staging) / LOG_PATH).read_bytes()
                     appends.append(plan_append(LOG_PATH, row, "evidence"))
+        elif outcome.kind == "routed-card":
+            assert outcome.overflow is not None
+            block, header = instruction_overflow.card_block(
+                owner,
+                outcome.overflow,
+                sections["suggested document content"],
+                instruction_overflow.handoff_type(sections),
+                today=today or datetime.now(timezone.utc).date(),
+            )
+            if (before is None) != (header > 0):
+                return ingest.Action("inboxed", "document-publication-busy")  # the card changed under us
+            appends.append(plan_append(dest_rel, block, "card-append", created=before is None, header_bytes=header))
+            after = before or b""
         else:
-            block = ("\n\n" + sections["suggested document content"].strip() + "\n").encode()
+            block = instruction_overflow.append_block(sections["suggested document content"])
             appends.append(plan_append(dest_rel, block, "document", created=before is None))
             after = before or b""
-        if outcome.kind != "routed":
+        if outcome.kind not in ("routed", "routed-card"):
             changes.insert(0, journal.Change(dest_rel, before, after))
         else:
             # Guard the observed destination until finish without replacing it.
             metadata["append_guards"] = {dest_rel: journal.kernel.content_digest(before)}
+        # A card append counts as a routed action, so every caller that counts routed ones counts it unchanged.
+        kind = "routed" if outcome.kind == "routed-card" else outcome.kind
         if dry_run:
-            return ingest.Action(outcome.kind, outcome.code, dest_rel)
+            return ingest.Action(kind, outcome.code, dest_rel)
         if ingest._is_tracked(draft, ingest._git_tracked_files(draft.parent)):
             raise ingest.TrackedHandoffError("tracked review draft")
         decision = journal.commit_phased(
@@ -149,4 +184,6 @@ def reprocess(
             raise journal.JournalConflict("retry abandoned")
         if outcome.kind in ("promoted", "reinforced") and card_ids is not None:
             card_ids.register(dest_rel, after.decode("utf-8"))
-        return ingest.Action(outcome.kind, decision.decision_id, dest_rel)
+        elif outcome.kind == "routed-card" and card_ids is not None:
+            card_ids.register(dest_rel, (owner / dest_rel).read_text(encoding="utf-8"))
+        return ingest.Action(kind, decision.decision_id, dest_rel)

@@ -1059,13 +1059,23 @@ def _execute_routed_card(
         return Action("routed", summary)
     content = sections.get("suggested document content", "")
     kind = instruction_overflow.handoff_type(sections)
+    duplicate = False
     try:
-        block, header_bytes = instruction_overflow.card_block(target, overflow, content, kind, today=date.today())
         # The document lock comes first, as retry and revert take it, then the journal.
         with _document_lock(target):
-            commit_card_append(
-                target, overflow.card_rel, block, header_bytes=header_bytes, reason="ingest:document-routed-to-card"
-            )
+            # decide() ran without the lock: read the cards again, so the block matches the card now
+            # and a concurrent run that already published this content is not written over.
+            overflow = instruction_overflow.refresh(target, overflow, content, kind)
+            if overflow.card_problem:
+                raise OSError(overflow.card_problem)
+            duplicate = instruction_overflow.contains_block(target, overflow, content)
+            if not duplicate:
+                block, header_bytes = instruction_overflow.card_block(
+                    target, overflow, content, kind, today=date.today()
+                )
+                commit_card_append(
+                    target, overflow.card_rel, block, header_bytes=header_bytes, reason="ingest:document-routed-to-card"
+                )
     except (OSError, InboxLockTimeout, JournalConflict, ValueError):
         return _execute(
             Outcome(
@@ -1073,6 +1083,19 @@ def _execute_routed_card(
                 code="document-destination-unwritable",
                 reason="overflow card is linked, protected or unwritable; requires review",
             ),
+            handoff_path,
+            target,
+            sections,
+            inbox_dir,
+            processed_dir,
+            dry_run,
+            snapshot,
+            promote_cards=promote_cards,
+            route_documents=route_documents,
+        )
+    if duplicate:
+        return _execute(
+            Outcome("inboxed", code="document-content-present", reason="content already in an overflow card"),
             handoff_path,
             target,
             sections,

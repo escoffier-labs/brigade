@@ -198,6 +198,27 @@ def _with_card(target: Path, file: InstructionFile, reason: str, kind: str, extr
     return OverflowRoute(file, chosen or f"{CARDS_REL}/{card_name(file.key, kind, 1)}", reason, problem, tuple(cards))
 
 
+def refresh(target: Path, overflow: OverflowRoute, content: str, handoff_type: str) -> OverflowRoute:
+    """The same route with its cards read again. Writers call it holding the document lock.
+
+    `route` ran before the lock, so a card may have been created or filled since. The block
+    a writer builds must match the card as it is when the write happens.
+    """
+    return _with_card(target, overflow.file, overflow.reason, handoff_type, len(append_block(content)))
+
+
+def contains_block(target: Path, overflow: OverflowRoute, content: str) -> bool:
+    """Whether the content is already in an overflow card of the file and type (a replay)."""
+    needle = _squash(content)
+    return bool(needle) and any(needle in _squash(text) for text in existing_card_text(target, overflow))
+
+
+def _squash(text: str) -> str:
+    """Collapse whitespace and drop blank lines, as ingest's duplicate check does."""
+    lines = (" ".join(line.split()) for line in text.splitlines())
+    return "\n".join(line for line in lines if line)
+
+
 def existing_card_text(target: Path, overflow: OverflowRoute) -> list[str]:
     """Text of every existing overflow card for the file and type, for the duplicate check.
 

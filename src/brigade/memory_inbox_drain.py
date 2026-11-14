@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import ingest, memory_content_scan, memory_evidence_log, untrusted
+from . import ingest, instruction_overflow, memory_content_scan, memory_evidence_log, untrusted
 from . import memory_care_journal as journal
 from .memory_inbox_io import MAX_DRAFT_BYTES as MAX_DRAFT_BYTES, read
 
@@ -42,6 +42,7 @@ RETRY_CODES = frozenset(
         "card-publication-changed",
         "card-publication-busy",
         "document-destination-unwritable",
+        "bootstrap-budget-exceeded",
     }
 )
 
@@ -55,7 +56,6 @@ HOLD_CODES = frozenset(
         "unknown-sections",
         "expected-sha-invalid",
         "missing-action",
-        "bootstrap-budget-exceeded",
         "document-has-headings",
         "missing-target-document",
         "empty-document-content",
@@ -63,6 +63,7 @@ HOLD_CODES = frozenset(
         "card-promoted",
         "card-reinforced",
         "document-appended",
+        "document-routed-to-card",
     }
 )
 EXPIRE_CODES: frozenset[str] = frozenset()  # No ingest code proves that unapplied knowledge is disposable.
@@ -90,6 +91,7 @@ NEEDS_EVIDENCE_PROOF: dict[str, bool] = {
     "document-destination-unwritable": False,
     "document-has-headings": False,
     "document-injection-signal": False,
+    "document-routed-to-card": False,
     "empty-document-content": False,
     "expected-sha-invalid": False,
     "expected-sha-mismatch": False,
@@ -113,9 +115,11 @@ def retry_flags(code: str, text: str) -> tuple[bool, bool] | None:
         return match[1] == "true", match[2] == "true"
     if "retry-flags:" in header:
         return None
-    if code in RETRY_CODES - {"document-destination-unwritable"}:
+    # An old budget hold was an append to a document, so it retries with routing on and promotion off.
+    routes = ("document-destination-unwritable", "bootstrap-budget-exceeded")
+    if code in RETRY_CODES - set(routes):
         return True, False
-    if code == "document-destination-unwritable" or code in RESOLVE_CODES:
+    if code in routes or code in RESOLVE_CODES:
         return False, True
     return None
 
@@ -176,14 +180,25 @@ def evidence_uncertain(target: Path, warnings: int, unsupported: bool) -> bool:
 
 
 def destination_proven(
-    target: Path, path: Path, data: bytes, code: str, text: str, card_ids: ingest.CardIdIndex
+    target: Path,
+    path: Path,
+    data: bytes,
+    code: str,
+    text: str,
+    card_ids: ingest.CardIdIndex,
+    routing: instruction_overflow.RouteContext | None = None,
 ) -> bool:
     flags = retry_flags(code, text)
     if flags is None:
         return False
     try:
         outcome = ingest.decide(
-            ingest.parse(path, data), target=target, promote_cards=flags[0], route_documents=flags[1], card_ids=card_ids
+            ingest.parse(path, data),
+            target=target,
+            promote_cards=flags[0],
+            route_documents=flags[1],
+            card_ids=card_ids,
+            routing=routing,
         )
         return outcome.code == "document-content-present"
     except (ValueError, OSError):
@@ -287,6 +302,7 @@ def drain(
         result["error"] = str(exc)
         return result
     card_ids = ingest.CardIdIndex(target)
+    routing = instruction_overflow.RouteContext(target)  # discovery once per drain, not per draft
     for path in paths:
         rel = path.relative_to(target).as_posix()
         reason = ""
@@ -312,13 +328,13 @@ def drain(
             elif disposition == "retry":
                 from .memory_inbox_retry import reprocess
 
-                action = reprocess(target, path, card_ids=card_ids, today=today, dry_run=dry_run)
+                action = reprocess(target, path, card_ids=card_ids, today=today, dry_run=dry_run, routing=routing)
                 if action.kind in ("promoted", "reinforced", "routed"):
                     result["retried"] += 1
                     reason = f"retry-applied:{action.destination}"
                     decision = action.summary
                 elif action.summary in RESOLVE_CODES:
-                    if destination_proven(target, path, data, code, text, card_ids):
+                    if destination_proven(target, path, data, code, text, card_ids, routing):
                         reason = "already-applied"
                         if not dry_run:
                             decision = _record(target, rel, data, reason, cited=keep, expired=False).decision_id
@@ -350,7 +366,7 @@ def drain(
                     else:
                         result["waiting"] += 1
                         reason = f"retry-unresolved:{action.summary}"
-            elif disposition == "resolve" and not destination_proven(target, path, data, code, text, card_ids):
+            elif disposition == "resolve" and not destination_proven(target, path, data, code, text, card_ids, routing):
                 result["held"] += 1
                 reason = "hold:destination-proof-unavailable"
             elif disposition == "resolve" or expired:

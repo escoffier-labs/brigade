@@ -370,7 +370,7 @@ keeps its existing behavior.
 | Disposition | Reason codes | Needs evidence-log proof | Action |
 |---|---|---|---|
 | Resolve | `document-content-present`, `document-anchor-present` | No. Read the destination to prove representation | Record already-applied and move to `memory/handoff-inbox/resolved/` |
-| Retry | `expected-sha-stale`, `expected-sha-mismatch`, `card-publication-changed`, `card-publication-busy`, `document-destination-unwritable` | Use the fresh outcome's per-code flag | Recheck with the original promotion and routing flags, once per run |
+| Retry | `expected-sha-stale`, `expected-sha-mismatch`, `card-publication-changed`, `card-publication-busy`, `document-destination-unwritable`, `bootstrap-budget-exceeded` | Use the fresh outcome's per-code flag | Recheck with the original promotion and routing flags, once per run |
 | Retain | Injection, content-scan, contradiction, identity migration, collisions and unsafe destinations | Yes for contradiction candidates, otherwise no | Record a trust or security hold and leave the draft untouched |
 | Hold | Proposal notifications, near matches, invalid or missing fields, unapplied knowledge and unknown codes | Yes for near matches, reinforcement records and unknown codes, otherwise no | Leave untouched with a separate hold count and reason |
 | Expire | No current ingest codes qualify | No current codes | The deadline mechanism remains available for future codes that prove knowledge is represented elsewhere or carry nothing durable |
@@ -402,10 +402,22 @@ Retries prepare the journal and save before-images before writing a destination.
 Recovery uses the same prepare-then-finish protocol as card archives. Evidence, document
 and ledger bytes append after finish, with their path, length and digest recorded in the
 decision. Recovery recognizes a published block to avoid duplicate appends. Reprocessing
-keeps ingest's destination, identity, expected-SHA, injection and budget checks, and
+keeps ingest's destination, identity, expected-SHA and injection checks, and
 also honors memory-care read-only paths and archive pins. This drain changes local files
 only. Hub handoff rows remain outside this stage, and an unavailable hub cannot cause a
 hub-side inbox change.
+
+A handoff aimed at a known instruction file goes to that file only while the append
+stays under the file's act-at threshold. Past it, behind a symlink, or when the
+`[instructions]` table cannot be read, the content is appended to a private overflow
+card, `memory/cards/instructions/<file-key>--overflow-<type>.md`, rolling to `-2`, `-3`
+at `max_card_bytes`. Every overflow card is `visibility: private` and `archive: never`.
+Each append is an undoable `card-append` decision, so `brigade memory care undo` removes
+exactly that block and keeps later ones. A replay finds its block in any earlier card of
+that file and type and never writes it twice. Holds from earlier releases that were
+refused for size (`bootstrap-budget-exceeded`) drain the same way on the next run.
+Excluding a file or setting `enabled = false` does not turn this routing off. A handoff
+with an injection signal or an unsafe name is still kept for a person.
 
 The drain also sweeps redundant before-images of abandoned decisions. A sweep requires
 an exact surviving copy at a recorded path, retains unique or unreadable images and

@@ -456,3 +456,65 @@ def test_document_lock_is_taken_before_the_journal(tmp_path, monkeypatch):
     monkeypatch.setattr(journal, "commit_phased", commit)
     assert _ingest(ws) == 0
     assert order.index("document-lock") < order.index("journal")
+
+
+def test_cached_inventory_still_sees_the_size_after_an_earlier_append(tmp_path, monkeypatch):
+    # One ingest run reads the inventory once, so the second handoff must measure the file as the first left it.
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    sized(ws / "USER.md", 3300)  # act-at is 3400
+    first, second = "a" * 60, "b" * 60  # each adds 64 bytes: 3364 fits, 3428 does not
+    write_handoff(ws, "2026-11-13-1.md", handoff_text("USER.md", first, type_="preference"))
+    write_handoff(ws, "2026-11-13-2.md", handoff_text("USER.md", second, type_="preference"))
+    assert ingest.run(target=ws, promote_cards=True, route_documents=True) == 0
+    assert (ws / "USER.md").read_text().endswith(first + "\n")
+    assert (ws / CARDS_REL / "user-md--overflow-preference.md").read_text().endswith(second + "\n")
+
+
+def test_a_card_created_between_decide_and_write_gets_a_plain_block(tmp_path, monkeypatch):
+    # decide() runs without the lock. If another writer made the card since, appending a second
+    # frontmatter into the middle of it would corrupt the card.
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    handoff = write_handoff(ws, "2026-11-13-pref.md", handoff_text("USER.md", NOTE, type_="preference"))
+    sections = ingest.parse(handoff)
+    outcome = _decide(ws, sections)
+    assert outcome.kind == "routed-card" and outcome.overflow.cards == ()
+    card = sized(ws / CARDS_REL / "user-md--overflow-preference.md", 80, head="---\ntitle: t\n---\n")
+    action = ingest._execute(
+        outcome,
+        handoff,
+        ws,
+        sections,
+        ws / "memory" / "handoff-inbox",
+        handoff.parent / "processed",
+        False,
+        snapshot=handoff.read_bytes(),
+    )
+    assert action.kind == "routed"
+    text = card.read_text()
+    assert text.count("---\n") == 2 and text.endswith("\n" + NOTE + "\n")
+
+
+def test_content_published_by_a_concurrent_run_is_not_written_twice(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    handoff = write_handoff(ws, "2026-11-13-pref.md", handoff_text("USER.md", NOTE, type_="preference"))
+    sections = ingest.parse(handoff)
+    outcome = _decide(ws, sections)
+    card = sized(ws / CARDS_REL / "user-md--overflow-preference.md", 80, head="---\ntitle: t\n---\n")
+    with card.open("a", encoding="utf-8") as handle:
+        handle.write("\n\n" + NOTE + "\n")  # the other run published it after our decide()
+    size = card.stat().st_size
+    action = ingest._execute(
+        outcome,
+        handoff,
+        ws,
+        sections,
+        ws / "memory" / "handoff-inbox",
+        handoff.parent / "processed",
+        False,
+        snapshot=handoff.read_bytes(),
+    )
+    assert action.kind == "inboxed" and "document-content-present" in action.summary
+    assert card.stat().st_size == size
