@@ -60,7 +60,7 @@ class SectionDocument:
     units: tuple[Unit, ...]  # in file order
     fixed_end: int  # end of the text before the first unit
     problem: str | None  # "not-utf8" | "unbalanced-markers" | None
-    eof_in_fence: bool  # the file ends inside an unclosed fence (row W30)
+    eof_in_fence: bool  # the file ends inside an unclosed fence or HTML comment (row W30)
 
 
 @dataclass(frozen=True)
@@ -128,6 +128,7 @@ def _scan(data: bytes) -> _Scan:
     stack: list[tuple[str, bytes]] = []
     unbalanced = False
     fence: tuple[int, int] | None = None  # (character, length)
+    comment = False  # inside a multi-line HTML comment
     offset = 0
     raw_lines = data.splitlines(keepends=True)
     # Frontmatter is fixed text: a `#` comment in it is not a heading, and nothing in it ever moves.
@@ -139,6 +140,14 @@ def _scan(data: bytes) -> _Scan:
             kind = "pointer" if POINTER_LINE.fullmatch(text) else "other"  # a pointer here is in a block: inert
             lines.append(_Line(offset, offset + len(raw), text, kind, True, False))
             offset += len(raw)
+            continue
+        if comment:
+            # Inside a multi-line HTML comment nothing is a heading, marker or fence, so its text can never be
+            # a section boundary and its `-->` never moves without its `<!--`.
+            kind = "pointer" if POINTER_LINE.fullmatch(text) else "other"
+            lines.append(_Line(offset, offset + len(raw), text, kind, True, bool(stack)))
+            offset += len(raw)
+            comment = b"-->" not in clean
             continue
         in_block = fence is not None or bool(stack)
         in_managed = bool(stack)
@@ -176,9 +185,19 @@ def _scan(data: bytes) -> _Scan:
                     kind = "heading"
         if kind == "other" and POINTER_LINE.fullmatch(text):
             kind = "pointer"
+        if fence is None and kind != "marker" and _opens_comment(clean):
+            comment = True
+            in_block = in_block or kind != "heading"
         lines.append(_Line(offset, offset + len(raw), text, kind, in_block, in_managed))
         offset += len(raw)
-    return _Scan(tuple(lines), unbalanced or bool(stack), fence is not None)
+    # A file that ends inside an open fence or HTML comment: anything appended there would be hidden (row W30).
+    return _Scan(tuple(lines), unbalanced or bool(stack), fence is not None or comment)
+
+
+def _opens_comment(clean: bytes) -> bool:
+    """Whether the line opens an HTML comment it does not close (its last `<!--` has no `-->` after it)."""
+    start = clean.rfind(b"<!--")
+    return start != -1 and b"-->" not in clean[start + 4 :]
 
 
 def _level(line: _Line) -> int:

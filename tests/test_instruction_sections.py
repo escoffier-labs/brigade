@@ -227,3 +227,24 @@ def test_frontmatter_is_fixed_text():  # review of #2567: a `#` comment in YAML 
     assert [span.in_block for span in pointer_spans(data)] == [True]  # a pointer-shaped line in it is inert
     # A lone `---` with no closing line is a thematic break, not frontmatter.
     assert [u.heading for u in parse(b"---\n## A\nbody\n").units] == [b"## A"]
+
+
+def test_multiline_html_comment_is_never_a_section_boundary():  # review of #2567
+    data = b"# T\n\n<!--\n## Draft\nold text\n-->\n## Live\nbody\n"
+    doc = parse(data)
+    assert [u.heading for u in doc.units] == [b"## Live"]
+    assert b"<!--" in data[: doc.fixed_end] and b"-->" in data[: doc.fixed_end]
+    # Inline and one-line comments change nothing.
+    assert [u.heading for u in parse(b"# T\n## A <!-- note -->\nx\n## B\ny\n").units] == [
+        b"## A <!-- note -->",
+        b"## B",
+    ]
+    # A comment opened inside a unit stays inside it, delimiters included.
+    data = b"# T\n## A\ntext <!--\n## Hidden\n-->\n## B\ny\n"
+    doc = parse(data)
+    assert [u.heading for u in doc.units] == [b"## A", b"## B"]
+    first = data[doc.units[0].start : doc.units[0].end]
+    assert b"<!--" in first and b"-->" in first
+    # An unclosed comment at the end hides what follows: no heading after it, and appended text would be hidden.
+    open_end = parse(b"# T\n## A\nx\n<!--\n## B\ny\n")
+    assert [u.heading for u in open_end.units] == [b"## A"] and open_end.eof_in_fence is True
