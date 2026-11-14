@@ -7,7 +7,7 @@ now skip `hub-rust` when no hub path changed. A trusted selector, loaded from
 ## Before
 
 - `hub-rust` calls the reusable `.github/workflows/hub.yml`: `hub (Rust stable)`,
-  `hub (Rust 1.85.0)` and `hub (linux-arm64)`. (Since 2026-11-13 the 1.85.0
+  `hub (Rust 1.85.0)` and `hub (linux-arm64)`. (Since 2026-11-14 the 1.85.0
   job only compiles outside the nightly; see "The 1.85.0 toolchain".)
 - In `ci.yml`, the `changes` job skipped `dorny/paths-filter` for `merge_group`
   and forced every component output, `hub` included, to `'true'`.
@@ -160,11 +160,28 @@ What this gives up: a fault that compiles on 1.85.0 but behaves differently
 there at run time is found by the next nightly, not before merge. The nightly
 opens or updates the `hub-nightly` tracking issue when it fails.
 
-Measured before, from three pull request runs on 2026-11-13 (43405767266,
-43134200771, 43372269078): the 1.85.0 job took 13.9 to 15.5 minutes, of which
-`cargo test` was 4.9 to 5.7 and the Python integration steps 8.2 to 8.8. The
-after numbers go in the pull request that makes this change and in the Results
-log of `docs/phase-adaptive-ci.md`.
+Measured before, from three pull request runs on 2026-11-12 and 2026-11-13
+(43134200771, 43372269078, 43405767266): the 1.85.0 job took 839 to 932
+seconds (14.0 to 15.5 minutes), of which
+`cargo test` was 4.9 to 5.7 and the Python integration steps 8.2 to 8.8.
+
+Measured after, merged 2026-11-14 00:15Z
+([#2541](https://github.com/escoffier-labs/brigade/pull/2541)): `hub (Rust
+1.85.0 compile)` took 70 and 107 seconds on the pull request's two runs
+(43529599524, 43528927970) and 144 and 134 seconds on the first two merge
+groups that ran the hub (43531431336, 43532725642). Run 43528927970 shows as
+cancelled because a later push replaced it; its compile job had already
+finished. All durations here are job start to job end from the Actions jobs
+API.
+
+The saving is runner time, about 13 minutes per run that selects the hub
+(mean 891 seconds before, 114 after). Wall time barely moves. `hub (Rust
+stable)` took 752 and 753 seconds on those two merge groups, and it was
+already the longer hub job in two of the three before runs (877 against 839
+seconds, 1017 against 903). In the third, 43134200771, the 1.85.0 job was the
+longer one (932 against 756), so a run like that now finishes about 3 minutes
+sooner. The first nightly with `msrv_full: true` had not run when this was
+written.
 
 ## Coverage of the path list
 

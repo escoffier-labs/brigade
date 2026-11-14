@@ -441,7 +441,8 @@ the per-run job list of the same capture (not in the committed aggregates).
   for the same diff is not ruled out directly.
 
 The hub suite itself is the larger lever. In three pull request runs on
-2026-11-13 the `hub (Rust 1.85.0)` job took 13.9 to 15.5 minutes and repeated
+2026-11-12 and 2026-11-13 the `hub (Rust 1.85.0)` job took 14.0 to 15.5
+minutes and repeated
 what `hub (Rust stable)` runs: `cargo test` (4.9 to 5.7 minutes) and the
 Python integration steps (8.2 to 8.8 minutes). Workstream 6 replaces it with
 a compile on 1.85.0 outside the nightly.
@@ -469,7 +470,7 @@ log. Add the PR link and move the status when a lane lands or stops.
 | 3 | `hub-rust` path filtering in the merge queue | merged 2026-11-09 16:55Z ([#2436](https://github.com/escoffier-labs/brigade/pull/2436)), live, measured 2026-11-13 (see After window) | [`docs/adaptive-ci/hub-merge-queue.md`](adaptive-ci/hub-merge-queue.md) |
 | 4 | Linux pull request test selection in shadow mode | merged 2026-11-09 17:47Z ([#2435](https://github.com/escoffier-labs/brigade/pull/2435)), collecting observations, skips nothing | [`docs/adaptive-ci/shadow-selection.md`](adaptive-ci/shadow-selection.md) |
 | 5 | Merge-group docs classifier loaded from trusted `main` (found while building lane 3) | merged 2026-11-09 17:41Z ([#2441](https://github.com/escoffier-labs/brigade/pull/2441)) | [`docs/adaptive-ci/docs-classifier-trust.md`](adaptive-ci/docs-classifier-trust.md) |
-| 6 | `hub-rust` compiles on 1.85.0 instead of repeating the suite there; the nightly keeps the full run | open | [`docs/adaptive-ci/hub-merge-queue.md`](adaptive-ci/hub-merge-queue.md#the-1850-toolchain) |
+| 6 | `hub-rust` compiles on 1.85.0 instead of repeating the suite there; the nightly keeps the full run | merged 2026-11-14 00:15Z ([#2541](https://github.com/escoffier-labs/brigade/pull/2541)), first four runs measured (see Results log) | [`docs/adaptive-ci/hub-merge-queue.md`](adaptive-ci/hub-merge-queue.md#the-1850-toolchain) |
 
 The baseline and `scripts/ci_timing_report.py` merged 2026-11-09 19:14Z
 ([#2439](https://github.com/escoffier-labs/brigade/pull/2439)).
@@ -625,6 +626,7 @@ for wall and runner time, seconds for a job family.
 | 2026-11-13 | `hub-rust` selection in the merge queue | [#2436](https://github.com/escoffier-labs/brigade/pull/2436) | `merge_group` successful runs with `hub-rust` | 20 of 20 (100%) | 32 of 46 (70%) | 20 / 46 |
 | 2026-11-13 | `hub-rust` selection in the merge queue | [#2436](https://github.com/escoffier-labs/brigade/pull/2436) | `merge_group` successful wall median; runner median; runner mean | 14.9; 123.6; 124.3 | 14.1; 127.2; 116.6 | 20 / 46 |
 | 2026-11-13 | Campaign window, all changes | #2435 to #2441, #2459 | failed `merge_group` runs; their runner minutes | 9 of 29; 1,181.7 | 3 of 49; 340.1 | 29 / 49 |
+| 2026-11-14 | `hub-rust` compiles on 1.85.0 outside the nightly | [#2541](https://github.com/escoffier-labs/brigade/pull/2541) | 1.85.0 hub job duration, seconds, min to max; before is `hub (Rust 1.85.0)` on 3 `pull_request` runs, after is `hub (Rust 1.85.0 compile)` on 2 `pull_request` runs and 2 `merge_group` runs | 839 to 932 | 70 to 144 | 3 / 4 |
 
 ## Prior art
 
