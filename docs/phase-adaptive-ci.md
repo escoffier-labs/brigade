@@ -441,7 +441,8 @@ the per-run job list of the same capture (not in the committed aggregates).
   for the same diff is not ruled out directly.
 
 The hub suite itself is the larger lever. In three pull request runs on
-2026-11-13 the `hub (Rust 1.85.0)` job took 13.9 to 15.5 minutes and repeated
+2026-11-12 and 2026-11-13 the `hub (Rust 1.85.0)` job took 14.0 to 15.5
+minutes and repeated
 what `hub (Rust stable)` runs: `cargo test` (4.9 to 5.7 minutes) and the
 Python integration steps (8.2 to 8.8 minutes). Workstream 6 replaces it with
 a compile on 1.85.0 outside the nightly.
@@ -625,7 +626,7 @@ for wall and runner time, seconds for a job family.
 | 2026-11-13 | `hub-rust` selection in the merge queue | [#2436](https://github.com/escoffier-labs/brigade/pull/2436) | `merge_group` successful runs with `hub-rust` | 20 of 20 (100%) | 32 of 46 (70%) | 20 / 46 |
 | 2026-11-13 | `hub-rust` selection in the merge queue | [#2436](https://github.com/escoffier-labs/brigade/pull/2436) | `merge_group` successful wall median; runner median; runner mean | 14.9; 123.6; 124.3 | 14.1; 127.2; 116.6 | 20 / 46 |
 | 2026-11-13 | Campaign window, all changes | #2435 to #2441, #2459 | failed `merge_group` runs; their runner minutes | 9 of 29; 1,181.7 | 3 of 49; 340.1 | 29 / 49 |
-| 2026-11-14 | `hub-rust` compiles on 1.85.0 outside the nightly | [#2541](https://github.com/escoffier-labs/brigade/pull/2541) | 1.85.0 hub job duration, seconds, min to max; before is `hub (Rust 1.85.0)`, after is `hub (Rust 1.85.0 compile)` | 834 to 930 | 70 to 144 | 3 / 4 |
+| 2026-11-14 | `hub-rust` compiles on 1.85.0 outside the nightly | [#2541](https://github.com/escoffier-labs/brigade/pull/2541) | 1.85.0 hub job duration, seconds, min to max; before is `hub (Rust 1.85.0)` on 3 `pull_request` runs, after is `hub (Rust 1.85.0 compile)` on 2 `pull_request` runs and 2 `merge_group` runs | 839 to 932 | 70 to 144 | 3 / 4 |
 
 ## Prior art
 
