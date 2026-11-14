@@ -346,12 +346,13 @@ def _frontmatter(
 ) -> bytes:
     lines = [
         "---",
-        # Quoted, so a key such as `yes` or `null` stays a string under every YAML loader.
-        f'title: "{file_key}--{slug}"',
+        # Single-quoted: a key such as `yes` or `null` stays a string under every YAML loader, and YAML processes
+        # no escapes in single quotes, so encoded values stay visibly encoded. No value can hold a `'`.
+        f"title: '{file_key}--{slug}'",
         "category: instructions",
-        f'tags: [moved-instructions, "{file_key}", moved]',
+        f"tags: [moved-instructions, '{file_key}', moved]",
         "visibility: private",
-        f'source_file: "{source_value}"',
+        f"source_file: '{source_value}'",
         "archive: never",
         f"moved_on: {today.isoformat()}",
         f"moved_by: {decision_id}",
