@@ -1,1 +1,0 @@
-- Remove the single-operator `wazuh-triage`, `n8n-operator`, and `backup-steward` Grok Bot packs. No replacement. Before upgrading, stop each installed unit and uninstall it with `brigade run cloud grokbot pack remove --id <pack-id> --target <target> --out <unit-directory> --apply`. The remove command deletes owned config and unit files but does not stop services.

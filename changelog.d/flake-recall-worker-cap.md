@@ -1,1 +1,0 @@
-- Test only: the abandoned recall worker cap test waits for the last worker to reach the hub before counting searches, so a slow thread start on a loaded runner no longer reads 3 of 4.
