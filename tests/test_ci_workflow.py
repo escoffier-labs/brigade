@@ -944,7 +944,14 @@ def test_ci_workflow_test_shards_asserts_grokbot_mcp_tests_run_without_skips():
     step = _workflow_step_section(text, "test-shards", "Assert connector MCP tests run without skips")
 
     assert "if: matrix.python == '3.12' && matrix.shard == 0\n" in step
-    assert "tests/test_cloud_agent_profile.py tests/test_dot_transport.py" in step
+    # Every test file guarded by requires_connector_extra runs here, so a missing extra cannot hide a skip.
+    assert (
+        "tests/test_cloud_agent_profile.py tests/test_dot_transport.py tests/test_cloud_agent_parity.py tests/test_connector_fix3.py tests/test_connector_registry.py tests/test_steward_connector_parity.py"
+        in step
+    )
+    tests = (p for p in (ROOT / "tests").glob("test_*.py") if p.name != Path(__file__).name)
+    guarded = sorted(p.name for p in tests if "@requires_connector_extra" in p.read_text(encoding="utf-8"))
+    assert guarded and all(f"tests/{name}" in step for name in guarded)
     assert "pytest_exit=$?" in step
     assert "[ $pytest_exit -ne 0 ]" in step
     assert "grep -q 'skipped'" in step
