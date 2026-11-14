@@ -93,8 +93,10 @@ def test_without_o_nonblock_a_path_swapped_for_a_directory_after_the_stat_is_ref
     swapped.mkdir()
     _swap_after_first_stat(monkeypatch, swapped, decoy)
     got = read_regular_file(swapped, max_bytes=10)
-    # The descriptor check after the open still refuses what the early stat let through.
-    assert (got.data, got.reason) == (None, "not-regular")
+    # What the early stat let through is still refused. POSIX opens a directory and the descriptor
+    # check rejects it. Windows refuses to open one at all, which reads as unreadable.
+    expected = "unreadable" if os.name == "nt" else "not-regular"
+    assert (got.data, got.reason) == (None, expected)
 
 
 @pytest.mark.skipif(not HAS_FIFO, reason="POSIX FIFOs")
