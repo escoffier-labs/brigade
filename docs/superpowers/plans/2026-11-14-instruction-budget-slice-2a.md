@@ -153,9 +153,11 @@ Kind `fix`: the test fails until this plan's change exists. Kind `guard`: existi
 | P21 | `state.json` caches a card and decision pair the record does not support | No pointer, the pair is dropped | Cached pairs re-checked each pass | fix | M `test_false_cached_pair_gets_no_pointer` |
 | P22 | `state.json` records a reason outside the stage's codes | The brief prints `awaiting-pass` | `RECORDED_REASONS` | fix | M `test_unknown_recorded_reason_is_never_printed` |
 | P23 | `reconcile` keeps a run as `lost` (P14: pointer still in the file) | The pass stops for that file: action `reported`, reason `lost`, no move. The row carries `lost_decisions` (the original decision ids), the state row records it, and the brief prints a `could-not-trim` line with reason `lost` until the run is resolved | `tend_file` step 2, `RECORDED_REASONS` | fix | M `test_lost_run_stops_the_pass_and_is_reported` (P14's fixture through `tend_file`: no new decision, `lost_decisions` names the move, brief line has reason `lost`. Then delete the pointer line and assert the next pass is not terminal) |
-| P24 | An agent deletes a pointer line (W16), later deletes its card | The run is `removed_by_edit`, the decision is completed and reported once by id, and later passes tend the file as usual | `reconcile` | fix | R `test_pointer_then_card_deleted_completes_the_run`, M `test_removed_by_edit_does_not_block_the_file` |
+| P24 | An agent deletes a pointer line (W16), later deletes its card | The run is `removed_by_edit`, the decision is completed and reported once by id, and later passes tend the file as usual | `reconcile`, step 2 annotation | fix | R `test_pointer_then_card_deleted_completes_the_run`, M `test_removed_by_edit_does_not_block_the_file` (a third pass does not report the decision again. A forged `instructions_completed` on a move whose pointer is live is ignored) |
 | P25 | A `card-append` decision is committed but its publish was refused (`append_refused`) or is still pending | No overflow pointer is added | `committed_overflow_cards` | fix | M `test_refused_or_pending_append_gets_no_pointer` |
 | P26 | An overflow card is deleted without an undo | No overflow pointer is added, so reconcile never drops and re-adds one | `committed_overflow_cards` | fix | M `test_deleted_overflow_card_gets_no_pointer_twice` (two passes 20 hours apart, the file is rewritten at most once) |
+| P27 | A move that added an overflow pointer has all its sections back (cards deleted), then its overflow card is deleted | That move stays open while its overflow pointer is live. The next pass drops the dangling overflow pointer | `reconcile` completion rule | fix | R `test_move_with_live_overflow_pointer_is_not_completed`, M `test_overflow_pointer_dropped_after_sections_came_back` |
+| P28 | Two inbox handoffs go to the same overflow card, then two move passes 20 hours apart | One overflow pointer, no `checks-failed`, the card is not listed in `pending_pointers` | `committed_overflow_cards` creator rule, card-path match | fix | M `test_one_overflow_card_gets_one_pointer` |
 | S1 | Heading text into a card path | `slug` keeps `[a-z0-9-]`, at most 48, `section-` before `overflow`, `section` when empty | `slug` | fix | T `test_slug_is_bounded_ascii` |
 | S2 | Heading text into card frontmatter | Never. Title is `<file-key>--<slug>` | `card_bytes` | fix | T `test_card_frontmatter_holds_no_heading_text` |
 | S3 | Heading text into a pointer line | Only inside the slug of the path | `pointer_line` | fix | T `test_pointer_line_is_fixed_text_date_path_and_id` |
@@ -174,9 +176,9 @@ Kind `fix`: the test fails until this plan's change exists. Kind `guard`: existi
 | S16 | An agent edits `pin_headings` | The brief's `config-changed` line shows `pin_headings-<count>`. A section with an in-file keep marker stays when config drops its pin | `config_notes`, marker | fix | M `test_pin_headings_count_shows_in_the_config_change_line`, M `test_marker_keeps_a_section_when_config_drops_its_pin` |
 | S17 | A secret section that carries a `content-guard: allow` tag | Still not moved | `ScanOptions(honor_allow_comments=False)` | fix | T `test_allow_tag_does_not_let_a_secret_move` |
 | S18 | A card's text present in the file only inside a larger section, or inside a fence | The card is kept and its decision is not completed | Whole parsed section match | fix | R `test_card_text_inside_a_larger_section_keeps_the_card` |
-| S19 | A comment line that is not a Brigade marker, such as `<!-- END of notes -->` or a lowercase `<!-- begin draft -->` | Body text: the file parses and is tended | Task 1 marker rule | fix | R `test_other_comment_lines_are_body_text` |
+| S19 | Comment lines and the marker rule: `<!-- END of notes -->`, a lowercase `<!-- begin draft -->`, or a marker inside a longer line are body text. Any whole-line `<!-- NAME:START -->` (other tools' blocks such as a routing or banlist block are protected) still pairs, so a lone whole-line `<!-- foo:start -->` makes the file `unbalanced-markers` | The file parses, or is left alone when unbalanced | Task 1 marker rule | fix | S `test_marker_rule_body_text_and_unbalanced` |
 
-83 rows. Every row names a test. Twelve rows are guards: W2, W7, W12, W18, C1, C3, C5, C7, C9, P2, S6 and S11. Every other row fails without its change.
+91 rows. Every row names a test. Twelve rows are guards: W2, W7, W12, W18, C1, C3, C5, C7, C9, P2, S6 and S11. Every other row fails without its change.
 
 ### Design rows, mapped
 
@@ -320,7 +322,8 @@ class Reconciled:
     remove_cards: tuple[str, ...]
     restored: tuple[str, ...]        # cards whose pointer went back to text
     dropped: tuple[str, ...]         # overflow cards whose pointer was removed
-    completed: tuple[str, ...]       # decision ids with no pointer left and every section in the file
+    completed: tuple[str, ...]       # decision ids with no run or overflow pointer left, every run back or removed_by_edit
+    removed_by_edit: tuple[str, ...] # cards whose pointer and card were both deleted after the move (P24)
     kept: tuple[tuple[str, str], ...]   # (card, "card-changed" | "pointer-duplicated" | "pointer-in-block"
                                         #  | "pointer-missing" | "lost")
     ignored: int                     # recorded runs and pointers outside memory/cards/instructions/<file_key>--*
@@ -464,6 +467,8 @@ Rules the parser pins:
 
 ```python
 from brigade.instruction_sections import KEEP, PointerSpan, parse, pointer_spans, whole_section_count
+
+# S19: test_marker_rule_body_text_and_unbalanced (see the matrix row)
 
 POINTER = (b"- Moved to memory 2026-11-14: memory/cards/instructions/user-md--a.md"
            b" (undo: 20261114T061500Z-instructions-1a2b3c4d)\n")
@@ -730,7 +735,7 @@ Rules:
   - `n == 1`: when the card is missing and the span is not `in_block`, replace the span with `section` and list it in `restored`, but only when `section` hashes to `section_sha256`. Otherwise keep it as `lost`, or as `pointer-in-block`.
   - `n > 1`: keep as `pointer-duplicated`.
   - Each recorded overflow pointer whose card is missing and whose bytes occur once, outside any block, is removed and listed in `dropped`.
-  - A decision is `completed` when none of its run pointers occurs and each of its runs either has its section present as a whole section or is in `removed_by_edit`. A decision completed with any run in `removed_by_edit` is reported once, as a count and its decision id, in the pass that completes it.
+  - A decision is `completed` when none of its run pointers and none of its recorded overflow pointers occurs, and each of its runs either has its section present as a whole section or is in `removed_by_edit`. A move whose overflow pointer is still live stays loaded, so a later deletion or undo of that overflow card can still drop the pointer (row P27). A decision completed with any run in `removed_by_edit` is reported once, as a count and its decision id, in the pass that completes it.
   - Two cards with the same body are both removed when that body is present once: the text stays in the file either way.
   - Replacements are applied from the end of the file to the start, so offsets stay valid.
 - `plan_restore` for one decision: no runs and no overflow pointer present gives `nothing-to-restore`. Each run is then in one of three states. Its pointer occurs once: it is restored, which needs the span outside any block (else `pointer-in-block`) and its card present (else `card-missing`) with a body digest equal to `section_sha256` (else `card-changed`), so the bytes put back always hash to the digest recorded at move time. Its pointer is absent and its section is present as a whole section: it is already back, and its card is removed when the body still matches, else kept. Anything else refuses with `pointer-missing` or `pointer-duplicated`. When every run is already back and no card is left to remove, the answer is `already-restored`. When every run is already back and some cards are left, the result has `after == file` and lists only those cards (row W27). The result swaps each pointer span for the card body, removes each recorded overflow pointer that occurs once outside any block, removes the cards named above, and fills `held` with the `sha256` of every unit of `parse(after)` whose span lies inside a span it put back or a section it found already back, one digest per unit (row W21), and `held_cards` with each overflow card whose pointer it removed.
@@ -857,7 +862,9 @@ def records(target: Path, file: InstructionFile, file_rel: str, *, today: date) 
 def committed_overflow_cards(target: Path, file_key: str, *, today: date) -> tuple[tuple[str, str], ...]
     # (decision id, card path), checked against each decision record on every call. A pair is listed only when
     # the decision's payload has `appends_complete` and no `append_refused`, and the card is a regular file with
-    # one link whose text passes `instruction_overflow.card_trust_problem` (rows P25, P26)
+    # one link whose text passes `instruction_overflow.card_trust_problem` (rows P25, P26). At most one pair per card
+    # path: only the decision whose `appends` entry for that card has `created: true` (an overflow card is filled by
+    # many card-append decisions, and only its creator is named, row P28)
 def tend_file(target: Path, file: InstructionFile, config: InstructionsConfig, *, today: date,
               dry_run: bool) -> dict[str, Any]
 def recorded_reasons(target: Path) -> dict[str, dict[str, Any]]      # the state file, {} when unreadable
@@ -866,7 +873,7 @@ def recorded_reasons(target: Path) -> dict[str, dict[str, Any]]      # the state
 - `tendable` is `None` only when: class `append`, level `workspace` or `config`, not excluded, not repository depth, `exists`, `size_known`, no `skip_reason`, real path inside the target, `os.stat(real).st_nlink == 1`, and no `read_only_paths` pattern matches the real file's target-relative path or any alias in `file.paths` that is target-relative (row W28: `commit_phased` checks only the real path).
 - `records` reads the journal directly, not through `journal.entries`, which skips abandoned decisions (`src/brigade/memory_care_journal.py:240`). It lists every folder under the journal whose name holds `-instructions-` or `-undo-`, reads each `decision.json` through `journal._payload`, and keeps those whose `instructions.file` equals `file_rel` (the real file's target-relative POSIX path, the path every change names, row P8) and whose `instructions.file_key` equals `file.key`. It reads status `committed` and `abandoned` records:
   - runs and pointers from `role: move` decisions that are not completed. A committed move contributes all its runs. An abandoned move contributes only runs whose card exists or whose pointer occurs in the file, so an abandoned move that never wrote anything adds no `lost` noise. `section` is `before/0.bin[start:end]`.
-  - completed: the ids in committed `role: reconcile` records' `completed`, and every move whose `undone_by` names an undo that is not abandoned.
+  - completed: the ids in committed `role: reconcile` records' `completed`, every move whose `undone_by` names an undo that is not abandoned, and every move whose payload carries `instructions_completed` (written by step 2) while none of its run or overflow pointers occurs in the file. The annotation is honoured only after that re-check, so a forged one cannot hide a pointer that is still live.
   - `held` and `held_cards`: from `role: restore` records, committed or abandoned (an abandoned restore may already have put text back), whose `until` is on or after `today`.
   - `last_rewrite`: the newest `created_at` of a move, a restore, or a reconcile that changed the file, committed or abandoned.
   - Each record is checked before use: card paths match `memory/cards/instructions/<re.escape(file.key)>--[a-z0-9-]+\.md`, each pointer decodes from base64 to one `POINTER_LINE` line naming that record's own decision id, and offsets lie inside the before-image. A record that fails is skipped and counted in `ignored`. `reconcile` and `plan_restore` enforce the same limits again (Task 3).
@@ -879,10 +886,10 @@ def recorded_reasons(target: Path) -> dict[str, dict[str, Any]]      # the state
   After each `commit_phased`, `tend_file` reads `journal._payload(target, d.decision_id)["phase"]`. `abandoned` gives action `deferred`, reason `changed-during-commit`, no `decision_id` in the row and none in `state.json` (row W3). `commit_phased` does not raise when `finish` meets drift, so this read is the only signal.
 - `tend_file` order, all under the document lock (except in dry run and observe):
   1. Check the real file's target-relative path with `journal.safe_path`. A link anywhere on it gives `deferred` `file-unsafe` before anything is read. Then read it with `read_regular_file(..., require_stable=True)` and load `records`.
-  2. `reconcile`. When any run is kept as `lost` (its pointer is still in the file, its card is missing and its before-image fails its digest), the pass is terminal for that file before anything else: action `reported`, reason `lost`, `lost_decisions` set to the affected original decision ids, nothing committed and no move planned (row P23). A damaged move must stay visible, not be hidden behind a later move. It resolves when an agent deletes that pointer line: the run then counts as `removed_by_edit` (row P24) and the next pass tends the file again. Otherwise, a result that only removes cards commits at once. A result that changes the file commits unless the file is inside the quiet window. When it commits, the pass makes no moves in that file and reports action `reconciled`.
+  2. `reconcile`. When any run is kept as `lost` (its pointer is still in the file, its card is missing and its before-image fails its digest), the pass is terminal for that file before anything else: action `reported`, reason `lost`, `lost_decisions` set to the affected original decision ids, nothing committed and no move planned (row P23). A damaged move must stay visible, not be hidden behind a later move. It resolves when an agent deletes that pointer line: the run then counts as `removed_by_edit` (row P24) and the next pass tends the file again. Otherwise, a result whose only effect is a non-empty `completed` (no card to remove, no file change, as in P24) is persisted with `journal.annotate(target, <move id>, instructions_completed=<today>)` on each completed move, at once and outside the quiet window and the spacing, since it writes only under `.brigade/`. The pass then goes on to step 3. A result that only removes cards commits at once. A result that changes the file commits unless the file is inside the quiet window. When it commits, the pass makes no moves in that file and reports action `reconciled`.
   3. Defer `recently-edited` inside `quiet_minutes` of the file's mtime, and `recently-rewritten` inside `min_hours_between_rewrites` of `last_rewrite`, both measured from `_now()`.
   4. Refuse `card-folder-unsafe` when `memory/cards/instructions` or any parent below the target is a symlink or not a folder.
-  5. `plan_append` with `taken` from one listing of the card folder, `held`, `file.pin_headings`, and the overflow cards from `committed_overflow_cards`, less `held_cards`, whose pointer bytes the file does not hold.
+  5. `plan_append` with `taken` from one listing of the card folder, `held`, `file.pin_headings`, and the overflow cards from `committed_overflow_cards`, less `held_cards`, that no `POINTER_LINE` in the file already names. The match is by card path, never by whole pointer bytes, because a pointer holds the date and the id of the move that wrote it (row P28). `pending_pointers` uses the same card-path rule.
   6. `card_bytes` for each run, with `card_identity.mint_card_id()` (`src/brigade/card_identity.py:41`) as `card_id` and `derived_fresh_until` (`src/brigade/memory_care_plan.py:26`), then `check`. A failed check gives `checks-failed` and writes nothing.
   7. Commit the move, then read its phase.
   8. Write the state file row.
@@ -1087,7 +1094,7 @@ The same amendments are written into the design document in this pull request, m
 ## Self-review
 
 1. **Coverage of the conductor's decisions.** 1: Follow-ups. 2: Task 2. 3: Task 7, with the `fail_fast` contradiction. 4: Task 2 and Task 5, plus the rollout section. 5: Tasks 4 and 6, with all three contradictions and where the guarantees do not hold. 6: Tasks 3 and 5, with the archive contradiction. 7: Tasks 2, 5 and 7. 8: Task 5. 9: Task 5.
-2. **Matrix.** 83 rows, every one names a test, and every test name in the matrix appears in a task. Twelve rows are guards, labelled in the Kind column.
+2. **Matrix.** 91 rows, every one names a test, and every test name in the matrix appears in a task. Twelve rows are guards, labelled in the Kind column.
 3. **Pure functions.** `parse`, `plan_append`, `check`, `reconcile` and `plan_restore` take bytes and plain values. No test of them touches the filesystem.
 4. **Numbers.** Every acceptance number is computed in "Acceptance fixture" from the pointer formula and the section table.
 5. **Citations.** Every `path:line` was read on `origin/overhaul` at `470d14aea`, and read again for the revisions below. Revision 4 re-checked them on `main` at `acbc78d01`: only `memory_care_tend.py` moved (one line, all its citations updated).
@@ -1129,3 +1136,4 @@ One line per change, with the input it answers.
 - A `lost` result stops the pass for that file and is reported with the original decision ids, so a damaged move cannot hide behind a later one (security review of revision 1, new row P23).
 - W25's test proves the `pending` path itself: it checks `pending` and `full_scan_on` after the first pass and makes the full-scan branch fail on the second (security review of revision 1).
 - Revision 4 (second code review): `lost` stops the pass only while its pointer is in the file, and deleting that pointer resolves it. A pointer and card both deleted after a move is `removed_by_edit` and completes the run (P24). `committed_overflow_cards` checks the append finished and the card is present and trusted, so a refused append or a deleted overflow card cannot cause a pointer loop (P25, P26). Undo accepts an abandoned move. Markers are limited to Brigade's own patterns and `NAME:START`/`NAME:END` (S19). PRs target `main`, `VERIFY fragments` is defined, and the `tend` citations follow `main`.
+- Revision 5 (third code review): a move completes only when its overflow pointers are gone too (P27). A no-change completion is persisted by annotating the move, honoured only after re-checking that no pointer is live (P24). `committed_overflow_cards` names only the decision that created a card, and "already pointed at" is matched by card path (P28). S19 moves to the parser tests and pins the broad `NAME:START` rule, which protects other tools' blocks. `Reconciled` gains `removed_by_edit`.
