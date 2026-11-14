@@ -88,7 +88,7 @@ import json
 import sys
 
 try:
-    with open(sys.argv[1], encoding="utf-8") as config_file:
+    with open(sys.argv[1], encoding="utf-8-sig") as config_file:
         config = json.load(config_file)
 except (OSError, TypeError, ValueError):
     raise SystemExit(1)
@@ -130,7 +130,7 @@ import json
 import sys
 
 try:
-    with open(sys.argv[1], encoding="utf-8") as config_file:
+    with open(sys.argv[1], encoding="utf-8-sig") as config_file:
         config = json.load(config_file)
     # An unsupported config version is invalid, so it resolves to strict.
     work = config.get("work") if config.get("version") == 1 else None

@@ -1,0 +1,1 @@
+- `.brigade/config.json` saved with a leading UTF-8 byte-order mark (as some Windows editors write it) no longer breaks every command. The config loader, work mode, the instruction inventory and the Grok work hook now read it the same way.

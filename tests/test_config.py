@@ -384,3 +384,17 @@ def test_code_graph_delta_timeout_errors_name_the_key_in_use(tmp_path):
         load_config(tmp_path)
     with pytest.raises(ValueError, match="--code-graph-timeout must be a positive number"):
         config.resolve_code_graph_delta_timeout(tmp_path, 0)
+
+
+def test_a_byte_order_mark_does_not_break_the_config(tmp_path):
+    # Some Windows editors save JSON with a leading UTF-8 byte-order mark.
+    from brigade import config
+
+    legacy = config.LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY
+    path = config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    body = {"version": 1, "depth": "repo", "harnesses": ["claude"], "owner": "claude", "includes": [], legacy: 5}
+    path.write_bytes(b"\xef\xbb\xbf" + json.dumps(body).encode())
+    loaded = load_config(tmp_path)
+    assert loaded is not None and loaded.selection.depth == "repo"
+    assert config.legacy_config_keys(tmp_path) == [(legacy, config.CODE_GRAPH_DELTA_TIMEOUT_KEY, False)]
