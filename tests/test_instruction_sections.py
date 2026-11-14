@@ -291,3 +291,15 @@ def test_a_comment_closes_at_its_first_end_marker():  # review of #2567
     # Backticks mean nothing inside a comment: its first `-->` closes it, even between backticks.
     data = b"# T\nintro\n<!-- a\nb <!-- `c --> d` e\n## Live\nbody\n"
     assert [u.heading for u in parse(data).units] == [b"## Live"]
+
+
+@pytest.mark.parametrize("tag", [b"pre", b"PRE", b"script", b"style", b"textarea"])
+def test_raw_html_blocks_are_never_section_boundaries(tag):  # review of #2567
+    data = b"# T\nintro\n<" + tag + b">\n## Example\nsample\n</" + tag + b">\n## Live\nbody\n"
+    doc = parse(data)
+    assert [u.heading for u in doc.units] == [b"## Live"]
+    assert b"</" + tag + b">" in data[: doc.fixed_end]
+    # A one-line block opens nothing, and a block left open at the end hides what follows.
+    assert [u.heading for u in parse(b"# T\n<" + tag + b">x</" + tag + b">\n## A\nb\n").units] == [b"## A"]
+    open_end = parse(b"# T\n## A\nx\n<" + tag + b">\n## B\ny\n")
+    assert [u.heading for u in open_end.units] == [b"## A"] and open_end.eof_in_fence is True

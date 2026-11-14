@@ -34,6 +34,8 @@ _KEEP = KEEP.encode("ascii")
 _HEADING = re.compile(rb" {0,3}(#{1,6})(?:[ \t]|$)")
 # A fence opens and closes with at most three spaces of indentation. Four spaces or a tab is indented code.
 _FENCE_OPEN = re.compile(rb" {0,3}(`{3,}|~{3,})(.*)")
+# CommonMark HTML block type 1: raw text that runs to the line holding its end tag.
+_RAW_OPEN = re.compile(rb" {0,3}<(pre|script|style|textarea)(?:[ \t>]|$)", re.IGNORECASE)
 _COMMENT = re.compile(rb"<!--((?:(?!-->).)*)-->")
 _COLON_MARKER = re.compile(rb"(\S+):(start|end)", re.IGNORECASE)
 _BRIGADE_BEGIN = re.compile(rb"BEGIN BRIGADE\s+([A-Za-z][A-Za-z0-9_-]*)(?:\s.*)?")
@@ -133,6 +135,7 @@ def _scan(data: bytes) -> _Scan:
     unbalanced = False
     fence: tuple[int, int] | None = None  # (character, length)
     comment = False  # inside a multi-line HTML comment
+    raw_tag: bytes | None = None  # inside an HTML block such as <pre>, until its end tag
     offset = 0
     raw_lines = data.splitlines(keepends=True)
     # Frontmatter is fixed text: a `#` comment in it is not a heading, and nothing in it ever moves.
@@ -154,6 +157,15 @@ def _scan(data: bytes) -> _Scan:
             close = clean.find(b"-->")  # HTML ends a comment at its first `-->`
             comment = close == -1 or _opens_comment(clean[close + 3 :])  # `b --> <!-- c` closes and reopens
             continue
+        if raw_tag is not None:
+            # Inside a raw HTML block (`<pre>`, `<script>`, `<style>`, `<textarea>`) nothing is a heading,
+            # marker or fence, so its end tag never moves without its start tag.
+            kind = "pointer" if POINTER_LINE.fullmatch(text) else "other"
+            lines.append(_Line(offset, offset + len(raw), text, kind, True, bool(stack)))
+            offset += len(raw)
+            if b"</" + raw_tag in clean.lower():
+                raw_tag = None
+            continue
         in_block = fence is not None or bool(stack)
         in_managed = bool(stack)
         kind = "other"
@@ -161,6 +173,11 @@ def _scan(data: bytes) -> _Scan:
             closing = rb" {0,3}" + re.escape(bytes([fence[0]])) + (rb"{%d,}[ \t]*" % fence[1])
             if re.fullmatch(closing, clean):
                 fence = None
+        elif (raw_open := _RAW_OPEN.match(clean)) is not None:
+            tag = raw_open.group(1).lower()
+            if b"</" + tag not in clean.lower()[raw_open.end() :]:
+                raw_tag = tag
+            in_block = True
         else:
             opening = _FENCE_OPEN.fullmatch(clean)
             if opening is not None and not (opening.group(1)[:1] == b"`" and b"`" in opening.group(2)):
@@ -196,7 +213,7 @@ def _scan(data: bytes) -> _Scan:
         lines.append(_Line(offset, offset + len(raw), text, kind, in_block, in_managed))
         offset += len(raw)
     # A file that ends inside an open fence or HTML comment: anything appended there would be hidden (row W30).
-    return _Scan(tuple(lines), unbalanced or bool(stack), fence is not None or comment)
+    return _Scan(tuple(lines), unbalanced or bool(stack), fence is not None or comment or raw_tag is not None)
 
 
 _CODE_SPAN = re.compile(rb"(`+)(?:(?!\1).)*?\1")
