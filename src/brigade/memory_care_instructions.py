@@ -162,8 +162,8 @@ def config_changes(inventory: Inventory) -> dict[str, Any]:
     }
 
 
-def config_change_line(inventory: Inventory) -> str | None:
-    """One short line while any override was rejected, any limit clamped, any file excluded or any config key moved a limit."""
+def config_change_summary(inventory: Inventory) -> str | None:
+    """Counts and key names while any override was rejected, any limit clamped, any file excluded or any config key moved a limit."""
     changes = config_changes(inventory)
     if not (
         changes["overrides_rejected"]
@@ -174,10 +174,19 @@ def config_change_line(inventory: Inventory) -> str | None:
         return None
     notes = ",".join(changes["config_notes"]) or "none"
     return (
-        f"instruction_budget: config-changed overrides-rejected={changes['overrides_rejected']} "
-        f"limits-clamped={changes['limits_clamped']} excluded={changes['files_excluded']} "
-        f"config={safe_text(notes)} {_NEXT}"
+        f"overrides-rejected={changes['overrides_rejected']} limits-clamped={changes['limits_clamped']} "
+        f"excluded={changes['files_excluded']} config={safe_text(notes)}"
     )
+
+
+def config_change_line(inventory: Inventory) -> str | None:
+    """The one short brief line for `config_change_summary`, or None when nothing changed."""
+    summary = config_change_summary(inventory)
+    return None if summary is None else f"instruction_budget: config-changed {summary} {_NEXT}"
+
+
+# Reasons that are the normal state for a target with no OpenClaw agent: no line for them.
+QUIET_LOADER_REASONS = frozenset({"config-missing", "config-workspace-unmatched"})
 
 
 def file_alert_lines(inventory: Inventory) -> list[str]:

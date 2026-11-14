@@ -1,0 +1,4 @@
+- `brigade memory care tend --stage instructions` reports every always-loaded instruction file with its single limit, act-at, trim-to and state, and runs as part of a full `memory care tend`. It moves nothing.
+- `brigade doctor` rows `bootstrap-budget: <file>` now use that limit, including user-level files, which warn instead of failing. The old "over hard limit" text is now "over limit".
+- `brigade budgets check` reads the same inventory and gains a `warn` status between act-at and the limit, plus `limit_source`, `act_at_bytes`, `trim_to_bytes`, `loaders` and `state` for each file.
+- `brigade work brief` prints an `instruction_budget:` line for a file over its limit, and one `config-changed` line while an override was rejected, a limit clamped or a file excluded.

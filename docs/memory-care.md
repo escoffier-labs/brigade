@@ -414,6 +414,27 @@ copy without saving another copy. These redundant images are not recoverable thr
 undo. Orphan directories without readable decision metadata stay in place and are
 reported.
 
+### Instruction budgets
+
+Always-loaded instruction files (`AGENTS.md`, `USER.md`, `TOOLS.md`, `MEMORY.md` and the other names an agent harness reads at startup, plus the user-level files Codex and the other harnesses load) are measured against one limit each. This release measures and reports. It moves nothing.
+
+**How the limit is chosen.** The limit is the smallest of Brigade's target budget for the file and every cap a loader enforces on it. The target is the per-name budget, else `default_limit_bytes` (20,000). OpenClaw caps come from its own configuration, per agent, with `USER.md` fixed at 4,000. The Codex cap is `project_doc_max_bytes` (32,768 by default) and applies to the project file Codex selects. A character cap is used as the same number of bytes, so a limit is never looser than the harness. When two caps tie, the loader is named. Paths that reach the same file through a symlink or hard link are one row, named by the real file.
+
+**Thresholds and states.** Act-at is 85% of the limit and trim-to is 70%. A file at or under act-at is `within`. Between act-at and the limit it is `over-act-at`: nothing is cut yet and no alert is raised. Over the limit it is `could-not-trim` with reason `report-only`, because no file can be moved yet. A loader total over its cap is `total-over-cap`.
+
+**Where it shows.**
+
+- `brigade memory care tend --stage instructions --dry-run --json` prints one row per file (display path, loaders, class, bytes, limit and its source, act-at, trim-to, state, and any overflow cards the file does not name yet) and the loader totals. It also runs as part of a full `memory care tend`.
+- `brigade doctor` has a `bootstrap-budget: <file>` row per file. A workspace file over its limit fails. A user-level file, or a link that leaves the workspace, only warns.
+- `brigade budgets check` prints the same rows with `ok`, `warn`, `fail` or `missing`, and returns 1 only on `fail`.
+- `brigade work brief` prints one line while a file is over its limit, for example `instruction_budget: could-not-trim USER.md 8241/4000 reason=report-only next="brigade memory care tend --stage instructions --dry-run --json"`. The line shows on every brief while the state holds in this release. A later release keeps the previous state and prints only new alerts.
+
+**Configuration changes stay visible.** The `[instructions]` table in `.brigade/memory-care.toml` reads `enabled`, `act_at_percent`, `trim_to_percent`, `default_limit_bytes`, `exclude`, `files.<path>.class` and `files.<path>.limit_bytes`. A configured limit can only lower a limit. An excluded file stays in the report, marked with where the exclusion came from, and still counts toward loader totals. An override that names a path outside the workspace and the home directory, or a credential or shell-setup file, is rejected and the row is forced to class `report`. The report lists every rejected override, every clamped limit, the keys that moved a limit for every file, and why an OpenClaw configuration could not be read. While any override was rejected, any limit clamped, any file excluded or any such key set, `brigade work brief` prints one `instruction_budget: config-changed` line and `brigade doctor` adds an `instructions: config-changes` warning. Reports show display paths only, never a full home path or file content.
+
+**Invalid configuration.** A bad `[instructions]` table never stops a reader. Doctor and `budgets check` fail one `instructions: config` row and still measure with the defaults, the brief prints one `config-invalid` line, and a `tend --stage instructions` run exits with the error like a bad `[tend]` table. In a full `tend` run the stage records the error and the other stages finish.
+
+`enabled = false` turns off the report and the alerts only, and `exclude` only removes a file from them. Neither turns off overflow routing. Moving sections of a full file comes in a later release.
+
 
 ## Session-start and prompt recall (#466 Slice 1, #2196)
 
