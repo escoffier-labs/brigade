@@ -197,10 +197,15 @@ def _scan(data: bytes) -> _Scan:
     return _Scan(tuple(lines), unbalanced or bool(stack), fence is not None or comment)
 
 
+_CODE_SPAN = re.compile(rb"(`+)(?:(?!\1).)*?\1")
+
+
 def _opens_comment(clean: bytes) -> bool:
-    """Whether the line opens an HTML comment it does not close (its last `<!--` has no `-->` after it)."""
-    start = clean.rfind(b"<!--")
-    return start != -1 and b"-->" not in clean[start + 4 :]
+    """Whether the line opens an HTML comment it does not close (its last `<!--` has no `-->` after it).
+    Inline code spans and an escaped `\\<` are not markup, so a `<!--` inside them opens nothing."""
+    text = _CODE_SPAN.sub(b"", clean).replace(b"\\<", b"")
+    start = text.rfind(b"<!--")
+    return start != -1 and b"-->" not in text[start + 4 :]
 
 
 def _level(line: _Line) -> int:

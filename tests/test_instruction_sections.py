@@ -268,3 +268,13 @@ def test_tab_and_indented_atx_headings_are_headings(heading):  # review of #2567
     holder = next(unit for unit in doc.units if unit.start <= marker < unit.end)
     assert holder.pin == "marker"  # the keep marker under that heading pins the unit that holds it
     assert heading in heading_lines(data)
+
+
+@pytest.mark.parametrize(
+    "prose", [b"Use `<!--` to open a comment.", b"Use ``<!--`` to open one.", b"Write \\<!-- by hand."]
+)
+def test_inline_code_or_escaped_comment_openers_open_nothing(prose):  # review of #2567: pins still hold
+    data = b"# T\n## A\n" + prose + b"\n## Pinned\n" + KEEP.encode() + b"\nkept\n"
+    doc = parse(data)
+    assert [u.heading for u in doc.units] == [b"## A", b"## Pinned"]
+    assert doc.units[1].pin == "marker"

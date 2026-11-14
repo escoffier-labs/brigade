@@ -148,6 +148,15 @@ def _swap_end(file: bytes, span: PointerSpan) -> int:
     return span.end + 1 if file[span.end : span.end + 1] == b"\n" else span.end
 
 
+def _put_back(file: bytes, span: PointerSpan, body: bytes) -> _Edit:
+    """The edit that swaps a pointer for its section. A section moved from the end of a file with no final
+    newline gets one back only when text now follows it, so it never runs into that text, while a restore
+    at the end of the file stays byte for byte."""
+    end = _swap_end(file, span)
+    text = body if body.endswith(b"\n") or end >= len(file) else body + b"\n"
+    return _Edit(span.start, end, text)
+
+
 def _repeated(runs: Sequence[RecordedRun], pointers: Sequence[RecordedPointer]) -> set[bytes]:
     """Pointer bytes that more than one record claims. When such a pointer is in the file, each record would
     find the same span and two edits on one range would corrupt the result, so those records are refused or
@@ -250,7 +259,7 @@ def reconcile(
             elif _sha(run.section) != run.section_sha256:
                 kept.append((rel, "lost"))
             else:
-                edits.append(_Edit(found[0].start, _swap_end(file, found[0]), run.section))
+                edits.append(_put_back(file, found[0], run.section))
                 restored.append(rel)
     for pointer in good_pointers:
         found = _find(file, spans, pointer.data)
@@ -341,7 +350,7 @@ def plan_restore(
                 return Refusal("card-missing", rel)
             if body is None or _sha(body) != run.section_sha256:
                 return Refusal("card-changed", rel)
-            edit = _Edit(found[0].start, _swap_end(file, found[0]), body)
+            edit = _put_back(file, found[0], body)
             edits.append(edit)
             put_back.append(edit)
             remove.append(rel)

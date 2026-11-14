@@ -567,3 +567,39 @@ def test_editing_inside_a_widened_hold_releases_it():  # review of #2567: a hold
     assert (0, "held") in held_plan.skipped and all(0 not in run.units for run in held_plan.runs)
     edited = result.after.replace(b"### Sibling\n", b"### Sibling\nEdited after the undo.\n")
     assert all(index != 0 for index, reason in plan(edited).skipped if reason == "held")
+
+
+def _tail_move():
+    tail = b"## Tail\nword"  # moved from the end of a file with no final newline
+    rel = DIR + f"{KEY}--tail.md"
+    line = pointer_line(rel, today=TODAY, decision_id=ID)
+    run = RecordedRun(ID, rel, line, tail, hashlib.sha256(tail).hexdigest())
+    card = card_bytes(
+        file_key=KEY,
+        slug="tail",
+        section=tail,
+        source_name="USER.md",
+        decision_id=ID,
+        today=TODAY,
+        fresh_until=None,
+        card_id=CARD_ID,
+    )
+    head = b"# T\n## A\na\n"
+    return head, tail, line, run, rel, card
+
+
+def test_restore_of_an_unterminated_tail_keeps_a_line_boundary():  # review of #2567
+    head, tail, line, run, rel, card = _tail_move()
+    later = b"## Later\nlater text\n"
+    result = plan_restore(head + line + b"\n" + later, (run,), (), {rel: card}, file_key=KEY)
+    assert isinstance(result, Restore) and result.after == head + tail + b"\n" + later
+    # Still at the end of the file: byte for byte, no newline added.
+    at_end = plan_restore(head + line + b"\n", (run,), (), {rel: card}, file_key=KEY)
+    assert isinstance(at_end, Restore) and at_end.after == head + tail
+
+
+def test_reconcile_of_an_unterminated_tail_keeps_a_line_boundary():  # review of #2567
+    head, tail, line, run, rel, _card = _tail_move()
+    later = b"## Later\nlater text\n"
+    result = reconcile(head + line + b"\n" + later, (run,), (), {rel: None}, file_key=KEY)
+    assert result.restored == (rel,) and result.after == head + tail + b"\n" + later
