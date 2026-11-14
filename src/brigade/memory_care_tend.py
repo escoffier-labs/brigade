@@ -14,7 +14,7 @@ from typing import Any, Sequence
 from . import memory_archive, memory_care_hub, memory_care_journal as journal, memory_care_retire, memory_cmd
 from . import memory_hub_store as store
 
-STAGES = ("hub", "fixes", "retire", "inbox")
+STAGES = ("hub", "fixes", "retire", "inbox", "instructions")
 STATE_REL = ".brigade/memory-care/tend/latest.json"
 
 
@@ -73,6 +73,26 @@ def run(
                 today=today or memory_cmd._today(),
                 deadline_days=tend.deadline_days,
                 dry_run=dry_run,
+            )
+        elif stage == "instructions":
+            from . import memory_care_instructions as instructions
+            from .instruction_inventory import load_instructions_config
+
+            try:
+                config = load_instructions_config(target)
+            except ValueError as exc:
+                if stages is not None:
+                    raise  # asked for by name: fail like a bad [tend] table
+                # Part of the default run: report it, so the other stages still finish and save.
+                payload["stages"][stage] = {
+                    "enabled": True,
+                    "error": "config-invalid",
+                    "detail": instructions.safe_text(str(exc), home=Path.home(), target=target),
+                    "alerts": [instructions.invalid_config_line(exc, target=target)],
+                }
+                continue
+            payload["stages"][stage] = instructions.apply(
+                target, config, today=today or memory_cmd._today(), dry_run=dry_run
             )
         else:
             payload["stages"][stage] = memory_care_retire.apply(
