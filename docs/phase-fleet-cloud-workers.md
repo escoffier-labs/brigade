@@ -143,16 +143,18 @@ credentials, hook framework configuration and non-regular files. Git commands
 use absolute tool paths, sanitized control variables, disabled filters,
 textconv, signing and fsmonitor, and an isolated hooks directory containing only the
 operator-installed content-guard pre-push guard. For `https://github.com`,
-`land` accepts `!gh auth git-credential` in the operator's global Git config,
-or `!/path/to/helper auth git-credential` when that absolute path resolves to
-the trusted `gh` executable. It also accepts one custom helper written as a
-bare absolute path such as `/path/to/helper`, with no leading `!` and no
-arguments. The custom helper must be a regular executable file owned by root
-or the operator. The file and every ancestor directory must be owned by root
-or the operator and must not be writable by group or others. Any other form refuses
-with `unsafe-git-config`. The usual fixes are to write a custom helper as a
-bare absolute path and to remove group and other write permission from its
-directories.
+`land` accepts `gh auth git-credential` in the operator's global Git config,
+with or without a leading `!`, or `/path/to/helper auth git-credential` when
+that absolute path resolves to the trusted `gh` executable. It also accepts one
+custom helper written as a bare absolute path such as `/path/to/helper`, with
+no leading `!` and no arguments, that does not resolve inside the target
+repository, its worktrees or the landing directory. Either helper must resolve
+to a regular executable file owned by root or the operator. For a custom
+helper, the resolved file and every ancestor directory must also be owned by
+root or the operator and must not be writable by group or others. Any other
+form refuses with `unsafe-git-config`. The usual fixes are to write a custom
+helper as a bare absolute path, to remove group and other write permission from
+its directories, and to keep it out of shared directories such as `/tmp`.
 Editors, pagers, SSH commands, merge drivers and configured filter commands are
 neutralized. That guard must be configured
 in an absolute global `core.hooksPath` outside the target repository.
