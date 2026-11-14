@@ -1,6 +1,7 @@
 # Instruction budget care: design
 
-Date: 2026-11-13. Status: draft, revised twice after review. Part of Stage A
+Date: 2026-11-13. Status: draft, revised twice after review. Amended for
+slice 2 on 2026-11-14 (see "Decisions of 2026-11-14"). Part of Stage A
 ("memory tends itself") in
 `docs/superpowers/specs/2026-11-12-brigade-stack-trim-design.md`.
 
@@ -42,6 +43,101 @@ person involved:
 Nothing is reworded. A model may help choose sections when one is configured
 and the quota cap allows it. Without a model, the same pass runs on fixed
 rules.
+
+## Decisions of 2026-11-14
+
+A second-opinion review of this design against the real code found that the
+`append` rule below, applied to the owner's `USER.md` as it is today, moves
+every level-2 section out, core preferences included. The conductor accepted a
+reshape of slice 2. Each item below is **(decided 2026-11-14)** and overrides
+the text it names. The implementation plan for the first pull request is
+`docs/superpowers/plans/2026-11-14-instruction-budget-slice-2a.md`.
+
+1. Slice 2 is three pull requests. A: `append`-class workspace files whose
+   real file is inside the target. B: the `policy` class with opening pins,
+   tiers and the brief notice, for the workspace `AGENTS.md` only. C: `tend`
+   in the daily runbook, on its own.
+2. `append` sections move in this order: units that are mostly links, then the
+   rest from the bottom up. Pinned units, the text before the first unit and
+   pointers never move. No append provenance row is read.
+3. The stage runs from the ingest sweep's stage tuple
+   (`src/brigade/cli/ingest.py:40`). The 20-hour spacing between rewrites of
+   one file makes the 30-minute cadence safe. The sweep passes
+   `fail_fast=False`, so a bad `[instructions]` table never stops the inbox
+   drain.
+4. `pin_headings` for a file both pins the named sections and, while a named
+   heading is missing from the file, stops every move in it
+   (`pinned-heading-missing`). The owner's `## Voice & Communication` and
+   `## Preferences (core)` are pinned on that machine by an agent, by marker
+   and by `pin_headings`, before the release is installed. No heading is
+   written into product code.
+5. Undo of an `instructions` decision plans from live state: each pointer must
+   occur once and each card body must match the digest the move recorded. It
+   commits through `commit_phased` as kind `undo` with the file as the
+   prepared path. No undo pin line is written, so an unchanged file comes back
+   byte for byte. Sections put back are held by digest for `undo_pin_days`.
+   `commit_phased` takes a preallocated decision id, because each pointer
+   names its own decision.
+6. One pure `reconcile` function runs at the start of each pass. A moved card
+   that no pointer names, whose body is unchanged and still in the file, is
+   removed. A pointer whose card is missing goes back to its section from the
+   before-image. It replaces the `care-<id>-repair` card plan, the drift rule
+   for an undo's `finish`, and the read before abandoning an undo. Recovery's
+   document-lock match also accepts kind `instructions`.
+7. Card titles are `<file-key>--<slug>`, where the slug keeps `[a-z0-9-]`
+   only. The `append` pointer carries the card path and no title. The brief
+   prints counts, reason codes and decision ids only. Every value from a file
+   that reaches agent-read text goes through `encode_value`.
+8. Pointers are added only for cards a committed decision created, never for
+   a file that matches a name pattern.
+9. File states stay as slice 1 has them: `within`, `over-act-at`,
+   `could-not-trim` only over the limit, `size-unknown`. What a pass did is a
+   separate `action` field. A pinned file between act-at and the limit raises
+   no alert.
+10. Moved `append` cards carry `archive: never`, so the retire stage never
+    archives one and no pointer is removed after an archive.
+11. Subsections move alone only from PR B on.
+
+A security review of the slice 2 PR A plan and a second opinion on it led to
+these further decisions, also **(decided 2026-11-14)**:
+
+12. **Threat model.** The attacker is untrusted text that passes through
+    Brigade: handoff text, section text, headings, file names and
+    configuration values. An actor that can write arbitrary bytes under
+    `.brigade/` can already edit the instruction file and the cards directly,
+    so `.brigade/` is not a boundary for this feature. Recovery (`reconcile`
+    and `restore`) may write only the tended file, may remove only cards under
+    `memory/cards/instructions/<file-key>--*`, may remove a card only when its
+    bytes are present in the file as whole parsed sections, and may restore
+    text only when it hashes to the section digest recorded at move time. A
+    forged journal record then gains nothing over a direct write, and tests
+    pin that with forged records.
+13. Slugs stay in pointer lines and card names, because the heading is already
+    in the same always-loaded file. The stage JSON, doctor and budgets output,
+    the brief and `state.json` carry decision ids and counts, never card paths
+    or slugs. File keys are capped at 64 characters.
+14. Every section a restore or reconcile puts back is checked against the
+    section digest recorded at move time. On a mismatch the pointer stays and
+    the run is reported with a fixed reason (`lost`).
+15. Card removal and completion match whole parsed sections, never a
+    substring.
+16. Restore writes only into the recorded file and refuses a pointer that sits
+    inside a fence or a managed block. A pointer moved elsewhere in the same
+    file is still followed.
+17. `pin_headings` joins the configuration-change reporting the brief already
+    has, as a count. The in-file keep marker still protects a section when
+    configuration drops its pin. There is no acknowledgement gate. Skipping
+    one pass when the pin set shrinks is a follow-up issue.
+18. `state.json` is a cache, never an authority. Each cached overflow card is
+    re-checked against its decision record on every pass, and a missing,
+    unreadable or impossible cursor means a full scan. A recorded reason is
+    printed only when it is one of the stage's own codes.
+19. Restore holds each parsed unit it puts back by that unit's own digest, so
+    a multi-section card's sections do not move again before the hold ends.
+20. A tended file that becomes a symlink after `prepare` makes `finish`
+    abandon the decision, so recovery and the inbox drain never block on it.
+21. Unbounded growth of moved cards with `archive: never` is a follow-up
+    issue.
 
 ## One care pass for one file
 
@@ -550,7 +646,8 @@ Pins:
   heading it restores, 30 days ahead. The pin sits in the file, so an agent
   sees it and can delete it, and it survives a heading rename or a body edit.
   The planner ignores an expired pin, and the next rewrite of that file
-  removes it.
+  removes it. **Decided 2026-11-14:** undo writes no pin line. Restored sections are held by
+  digest instead (item 5).
 
 Any agent can add a pin. A pin costs one short line.
 
@@ -580,7 +677,8 @@ times its pointer's size. Smaller sections cost nearly as much as they save.
 - `append` files: sections Brigade appended come first, oldest first, known
   from a provenance row ingest writes on each append from now on (digest of
   the appended bytes, date, handoff type). Then other sections from the bottom
-  of the file up, since appends land at the end.
+  of the file up, since appends land at the end. **Decided 2026-11-14:** links first, then
+  bottom-up, with no provenance row (item 2).
 - `policy` files move the least risky text first, in three tiers, and within
   each tier from the end of the file toward the start:
   1. Sections that are mainly links: more than half of their non-blank body
@@ -648,6 +746,8 @@ cards tagged `moved-instructions`: their source is the decision named in
 
 - `append` class, one line per card, at the place of its first section:
   `- Moved to memory 2026-11-13: [Hub setup notes, 3 sections](memory/cards/instructions/user-md--hub-setup.md) (undo: <id>)`
+  **Decided 2026-11-14:** the line is `- Moved to memory <date>: <card path> (undo: <id>)`,
+  with no title (item 7).
 - `policy` class, for each moved section, its original heading line, then one
   line:
   `Full text moved verbatim to memory/cards/instructions/codex-agents-md--burn-queue.md. Read it before acting on this topic. (undo: <id>)`
@@ -657,7 +757,8 @@ cards tagged `moved-instructions`: their source is the decision named in
   card and, for policy, sits under its own heading.
 - When the retire stage later archives a moved `append` card, the next
   instructions pass removes its pointer as part of its one rewrite of that
-  file, whether or not the file is over act-at.
+  file, whether or not the file is over act-at. **Decided 2026-11-14:** moved `append` cards
+  carry `archive: never`, so this does not happen (item 10).
 - Each overflow card gets one pointer line at the very end of its file, in the
   `append` form, added by the first care pass after the card is created.
   Later appends to the same card need no new pointer. `policy` cards carry `archive: never`, because the rule still applies.
@@ -747,7 +848,8 @@ together.
   pass would plan the same names and fail at `changed before preparation`
   every day. Each pass runs the same repair for any abandoned `instructions`
   decision whose cards are still present, so cards from an older crash clear
-  too, and the slug rule above is the second guard.
+  too, and the slug rule above is the second guard. **Decided 2026-11-14:** `reconcile`
+  replaces the repair plan (item 6).
 - **A dangling pointer can still happen**, by a hand deletion or between a
   retire archive and the next instructions pass. Every pointer names its
   card's path, and the card's `moved_by` decision keeps the before-bytes, so
@@ -794,7 +896,10 @@ together.
   crash inside `finish` leaves a record that reads committed, neither check
   fires, kernel recovery puts the record back to prepared, and the pending
   loop (`src/brigade/memory_care_journal.py:641-646`) rewrites the file with
-  no document lock.
+  no document lock. **Decided 2026-11-14:** the smaller form ships. The
+  operation match accepts kind `instructions` beside `undo`, and moves,
+  reconciles and restores set the existing `document_undo` flag, so no new
+  `document_lock` key is read (item 6).
 - **Concurrency with agents.** Other agents' edits take no lock. The plan
   carries the digest the pass measured, and the kernel refuses if the file
   changed (`src/brigade/projection/kernel.py:279`). A refused file is retried
@@ -837,7 +942,8 @@ together.
     `prepare` (`src/brigade/projection/kernel.py:322-328`): the file is read
     for the decision's pointers before the undo is abandoned, so a restore
     that reached disk without its commit record is not mistaken for one that
-    never ran.
+    never ran. **Decided 2026-11-14:** `reconcile` completes such an undo on the next pass from
+    the bytes alone, and `finish_prepared` is unchanged (item 6).
 
 Undo cases:
 
@@ -1026,7 +1132,8 @@ about 140 bytes each took their place: 8,241 - 5,945 + 420 = 2,716.
           "target_budget": 8000,
           "act_at": 3400,
           "trim_to": 2800,
-          "state": "moved",
+          "state": "over-act-at",
+          "action": "moved",
           "planner": "fixed-rules",
           "planner_reason": "seat-unset",
           "decision_id": "20261113T061500Z-instructions-1a2b3c4d",
@@ -1046,7 +1153,8 @@ about 140 bytes each took their place: 8,241 - 5,945 + 420 = 2,716.
 ```
 
 The `state` value is one of `within`, `deferred`, `moved`, `could-not-trim`,
-`reported`. A `deferred` file carries `deferred_reason`: `recently-rewritten`,
+`reported`. **Decided 2026-11-14:** `state` keeps the slice 1 values and these become
+`action` values (item 9). A `deferred` file carries `deferred_reason`: `recently-rewritten`,
 `recently-edited`, `changed-during-commit` (the decision was abandoned and is
 also in tend's `recovery` list), `document-lock-busy` or
 `other-writer-unfinished`. A file whose real path cannot be written, such as an
@@ -1093,6 +1201,8 @@ job failure and uses the existing repeated-failure route.
   owns both.
 - The ingest routing change is part of `brigade ingest`, which the ingest sweep
   already runs every 30 minutes.
+- **Decided 2026-11-14:** the `instructions` stage runs from the ingest sweep in PR A, and
+  the runbook step lands alone in PR C (items 1 and 3).
 - `[instructions] mode = "observe"` turns the stage into a report for a target
   that needs it. Nothing sets it by default.
 
@@ -1125,7 +1235,7 @@ ships, slice 2 below carries it.
    runs every tend stage, so it also starts scheduled runs of the hub, fixes
    and retire stages, which no schedule runs today (ingest runs the inbox stage
    only). Its pull request says so, and its first-pass report covers all four
-   stages.
+   stages. **Decided 2026-11-14:** split into PRs A, B and C (item 1).
 3. **User-level and shared files.** The journal's external path type and its
    checks, the per-real-file lock in the profile installer, ownership by
    install state, and `@path` imports.
@@ -1255,7 +1365,8 @@ Each has a recommended answer, so implementation does not wait.
    finding 2.
 5. **May the retire stage archive moved `append` cards?** Recommended: yes,
    with the pointer removed on the next instructions pass. `policy` cards stay
-   pinned.
+   pinned. **Decided 2026-11-14:** no. Moved `append` cards carry `archive: never` too
+   (item 10).
 6. **Adding `tend` to the daily runbook also schedules the hub, fixes and
    retire stages.** Settled after review: slice 2 does it and says so (see
    Rollout).
